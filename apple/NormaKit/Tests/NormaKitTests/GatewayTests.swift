@@ -131,7 +131,13 @@ final class GatewayTests: XCTestCase {
         let attachLine2 = try await waitForSent(daemonTransport, count: 3)[2]
         XCTAssertEqual(decodeLine(attachLine2)["method"] as? String, "session.attach")
         let attachId2 = decodeLine(attachLine2)["id"] as! Int
-        daemonTransport.feed(#"{"jsonrpc":"2.0","id":\#(attachId2),"result":{"ok":true,"lastSeq":5}}"#)
+        // Real-daemon-faithful script (SP2a review follow-up 1): hub.attach ALWAYS appends a fresh
+        // `harness_attached` for the attach itself and returns ITS seq — so a caught-up cursor
+        // still sees raw return (6) > fromSeq (5), with nothing but noise in the replay. (The old
+        // `lastSeq:5` == fromSeq shape is, under honest semantics, an impossible/ahead cursor and
+        // now correctly demands a snapshot — see GatewayGateTests.testR1.)
+        daemonTransport.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"harness_attached","seq":6,"sessionId":"s1","ts":0,"clientName":"iphone-gateway"}}"#)
+        daemonTransport.feed(#"{"jsonrpc":"2.0","id":\#(attachId2),"result":{"ok":true,"lastSeq":6}}"#)
 
         let outbound2 = try await waitForOutbound(conn2, count: 1)
         let ack2 = try decodeEnvelope(outbound2[0])

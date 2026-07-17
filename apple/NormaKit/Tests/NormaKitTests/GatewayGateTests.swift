@@ -382,6 +382,84 @@ final class GatewayGateTests: XCTestCase {
         XCTAssertTrue(conn.isClosed)
     }
 
+    // MARK: - Review follow-up 1: cursor-ahead must yield .snapshotRequired (not a false .upToDate)
+
+    func testR1_CursorFarAheadYieldsSnapshotRequired() async throws {
+        let daemon = try await RealDaemon.start()
+        defer { daemon.stop() }
+        let seed = try await seedTwoMessages(socketPath: daemon.socketPath, harnessToken: daemon.harnessToken)
+
+        let listener = LoopbackListener()
+        let gateway = realGateway(socketPath: daemon.socketPath, remoteToken: daemon.remoteToken, listener: listener)
+        let runTask = Task { await gateway.run() }
+        defer { runTask.cancel() }
+
+        // A cursor FAR beyond the session's real high-water (content tops out at seed.seqM2): an
+        // impossible/corrupt cursor. Reporting .upToDate(1000) here would wedge the phone — every
+        // real live event (seq << 1000) would be silently dropped as stale. The snapshot verdict
+        // exists precisely to break that state.
+        let conn = ScriptedRemoteConn()
+        listener.simulateConnection(conn)
+        conn.enqueueInbound(try helloFrame(clientInstanceID: "phone-ahead", resumes: [
+            StreamResume(sessionID: seed.sid, streamID: seed.sid, lastAppliedSeq: 1000)
+        ]))
+
+        let out = try await waitForOutbound(conn, count: 1)
+        let ack = try decodeEnvelope(out[0])
+        XCTAssertEqual(ack.kind, .helloAck)
+        let hello = try JSONDecoder().decode(ServerHello.self, from: ack.payload)
+        XCTAssertEqual(hello.verdicts, [.snapshotRequired(sessionID: seed.sid, reason: "cursor-ahead", oldestAvailableSeq: 0)],
+                       "a cursor beyond the daemon's real high-water must demand a snapshot, never report upToDate")
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(conn.outbound.count, 1, "nothing to replay for an ahead cursor — only the helloAck")
+    }
+
+    // MARK: - Review follow-up 2: replay and live must never interleave under a suspending send
+
+    func testR2_HelloAckReplayLiveStrictOrderUnderSuspendingSend() async throws {
+        let daemon = try await RealDaemon.start()
+        defer { daemon.stop() }
+        let socketPath = daemon.socketPath
+
+        let live = NormaClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: daemon.harnessToken, clientName: "live")
+        try await live.connect(role: "harness")
+        let sid = try await live.request("session.dispatch", params: .object([:]))["sessionId"]!.stringValue!
+        let afterAttach = try await live.attach(sessionId: sid, fromSeq: 0)
+        let seqM1 = try await live.send(sessionId: sid, text: "m1")
+        let seqM2 = try await live.send(sessionId: sid, text: "m2")
+
+        let listener = LoopbackListener()
+        let gateway = realGateway(socketPath: socketPath, remoteToken: daemon.remoteToken, listener: listener)
+        let runTask = Task { await gateway.run() }
+        defer { runTask.cancel() }
+
+        // `blockSendsFrom(1)` makes send() genuinely SUSPEND the gateway actor on its first
+        // phone-bound frame (the helloAck) — modeling a real async transport whose send awaits.
+        // While it is parked, the pump routes a fresh live event. Without hold-and-drain the live
+        // frame's send interleaves AHEAD of the still-unflushed lower-seq replay: wire order
+        // [helloAck, live, m1, m2]. The phone must instead see helloAck → replay → live.
+        let conn = ScriptedRemoteConn()
+        conn.blockSendsFrom(1)
+        listener.simulateConnection(conn)
+        conn.enqueueInbound(try helloFrame(clientInstanceID: "phone-order", resumes: [
+            StreamResume(sessionID: sid, streamID: sid, lastAppliedSeq: afterAttach)
+        ]))
+        _ = try await waitForOutbound(conn, count: 1) // parked on the helloAck send
+
+        let seqLive = try await live.send(sessionId: sid, text: "m3-live")
+        try await Task.sleep(nanoseconds: 300_000_000) // let the pump route it while the gate holds
+        conn.releaseSends()
+
+        _ = try await waitForOutboundContainingSeq(conn, seq: seqLive)
+        let out = conn.outbound
+        XCTAssertEqual(out.count, 4, "exactly helloAck + m1 + m2 + live")
+        XCTAssertEqual(try decodeEnvelope(out[0]).kind, .helloAck)
+        XCTAssertEqual(try decodeEnvelope(out[1]).seq, seqM1, "replay must precede the live event")
+        XCTAssertEqual(try decodeEnvelope(out[2]).seq, seqM2)
+        XCTAssertEqual(try decodeEnvelope(out[3]).seq, seqLive, "the live event drains strictly AFTER the replay flush")
+        await live.close()
+    }
+
     // MARK: - G7: the Swift remote allowlist is EXACTLY the nine names (cross-language tripwire)
 
     func testG7_RemoteAllowlistIsExactlyTheNineNames() {

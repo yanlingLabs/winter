@@ -136,13 +136,20 @@ public actor Gateway {
         session.currentConn = conn
         startPumpIfNeeded(session)
 
-        // SP2a gates G1/G2/G3 — the handshake is now three ordered phases with NO event frame
-        // emitted until after the ack:
-        //   1. attach + collect each resume's replay, compute the HONEST (content-only) verdict,
-        //      and BUFFER the filtered replay events — nothing is sent to the phone yet.
-        //   2. register the (last) resumed session as live BEFORE any send, so a daemon event that
-        //      lands mid-handshake is live-forwarded rather than dropped in the switchover gap (G2).
+        // SP2a gates G1/G2/G3 (+ review follow-up 2) — the handshake is four ordered phases with
+        // NO event frame emitted until after the ack, and NO live frame until the replay flushed:
+        //   1. HOLD live forwarding for the whole handshake: on a real async transport every
+        //      `conn.send` suspends this actor, so an unheld live forward could land BETWEEN the
+        //      helloAck and the still-unflushed lower-seq replay (out-of-order wire delivery) —
+        //      and on a reconnect `liveSessionID` is already set before the ack is even built.
+        //      Held events queue on `session.heldLive` (see `routeDaemonEvent`) instead of racing.
+        //   2. attach + collect each resume's replay, compute the HONEST (content-only) verdict,
+        //      and BUFFER the filtered replay events; register the (last) resumed session as live
+        //      so mid-handshake daemon events are captured (G2) — queued, per phase 1.
         //   3. send `helloAck`/`ServerHello` FIRST (G3), THEN flush the buffered replay frames.
+        //   4. drain the held live queue (already in seq order — single pump) and lift the hold:
+        //      replay and live can never interleave, in that order: ack → replay → live.
+        session.holdLiveEvents = true
         var verdicts: [ResumeVerdict] = []
         var pendingReplay: [SessionEvent] = []
         for resume in clientHello.resumes {
@@ -164,6 +171,7 @@ public actor Gateway {
         for event in pendingReplay {
             await sendEventFrame(conn, event: event)
         }
+        await drainHeldLive(session: session, conn: conn, generation: myGeneration)
 
         while let frame = await iter.next() {
             await handleLiveFrame(frame, conn: conn, session: session)
@@ -258,7 +266,32 @@ public actor Gateway {
         // SP2a gate G1: the same harness-noise filter that guards replay guards live forwarding —
         // the phone never sees a `harness_attached`/`harness_detached` frame.
         guard !isHarnessNoise(e) else { return }
+        // Review follow-up 2: a handshake (or live re-attach) is mid-flush — queue instead of
+        // sending, so this live frame can never interleave ahead of lower-seq replay frames on a
+        // suspending transport. Drained, in order, by `drainHeldLive` once the flush completes.
+        if session.holdLiveEvents {
+            session.heldLive.append(e)
+            return
+        }
         await sendEventFrame(conn, event: e)
+    }
+
+    /// Review follow-up 2 (the drain half — see `handle`'s phase comment): sends the live events
+    /// queued while the hold was up, then lifts the hold. The single pump appends in seq order, so
+    /// FIFO drain IS seq order. The loop re-checks emptiness after every (suspending) send and the
+    /// flag flips synchronously after the LAST check — no `await` between — so no event can slip
+    /// past both the queue and the flag. `generation`: if a newer connection for this phone took
+    /// over mid-drain, stop and leave the hold + queue to THAT handshake's own drain — never lift
+    /// a hold someone else now owns (its sends belong on the newer conn anyway).
+    private func drainHeldLive(session: PhoneSession, conn: RemoteConn, generation: Int) async {
+        while session.connGeneration == generation, !session.heldLive.isEmpty {
+            let e = session.heldLive.removeFirst()
+            guard e.sessionId == session.liveSessionID else { continue } // resumed a different session mid-queue
+            await sendEventFrame(conn, event: e)
+        }
+        if session.connGeneration == generation {
+            session.holdLiveEvents = false
+        }
     }
 
     /// Attaches the daemon client to `resume.sessionID` at `resume.lastAppliedSeq`, collects the
@@ -292,15 +325,26 @@ public actor Gateway {
             return (.snapshotRequired(sessionID: resume.sessionID, reason: "attach failed: \(error)", oldestAvailableSeq: 0), resume.lastAppliedSeq, [])
         }
 
-        // Collect whenever the daemon's raw return moved past the client's cursor — which, against
-        // the real daemon, is ALWAYS (the attach's own `harness_attached` bumps it). We must SEE
+        // Collect whenever the daemon's raw return moved past the client's cursor — which, for any
+        // LEGITIMATE cursor, is always (the attach's own `harness_attached` bumps it). We must SEE
         // the batch to compute the content-only watermark, even when the client turns out to be
         // caught up (the batch then holds nothing but the terminal `harness_attached`).
         var batch: [SessionEvent] = []
         if rawHighWatermark > resume.lastAppliedSeq {
             batch = await awaitReplayBatch(session: session, sessionID: resume.sessionID, generation: myGeneration, target: rawHighWatermark)
         } else {
-            session.waiter = nil // nothing the daemon will stream
+            // Cursor-ahead (SP2a review follow-up 1): `rawHighWatermark` is the seq of the
+            // `harness_attached` the attach JUST appended — strictly newer than any event the
+            // phone could have legitimately applied, so every legitimate cursor sits BELOW it and
+            // takes the branch above. A cursor at/beyond it is impossible/corrupt (e.g. a phone
+            // that outlived a session wipe). Reporting `.upToDate(fromSeq)` here — the pre-review
+            // behavior — would wedge the phone: every real live event (whose seq is far lower)
+            // would be silently dropped as stale. The daemon's newest possible CONTENT is
+            // `raw - 1`, so feed ResumePlanner exactly that: its cursor-ahead branch
+            // (`fromSeq > highWatermark`) fires and demands the snapshot that breaks the wedge.
+            session.waiter = nil
+            let verdict = ResumePlanner.verdict(fromSeq: resume.lastAppliedSeq, highWatermark: rawHighWatermark - 1, sessionID: resume.sessionID)
+            return (verdict, rawHighWatermark - 1, [])
         }
 
         let content = batch.filter { !isHarnessNoise($0) }
@@ -373,6 +417,16 @@ public actor Gateway {
             await sendGatewayError(conn, id: .null, sessionID: envelope.sessionID, message: "rate limit exceeded")
             return
         }
+        // SP2a gate G4b: the outer-frame decode above bounds the ENVELOPE's depth, but the inner
+        // JSON-RPC payload rode as a base64 string there — validate ITS nesting BEFORE
+        // `parseRpcRequest` (the recursive decoder this tripwire protects), so a nesting-bomb
+        // payload is refused before it can stress the parser, let alone reach the daemon.
+        do {
+            try WireFrame.validateJSONDepth(envelope.payload, maxDepth: 32)
+        } catch {
+            await sendGatewayError(conn, id: .null, sessionID: envelope.sessionID, message: "payload nesting too deep")
+            return
+        }
         guard let rpc = parseRpcRequest(envelope.payload) else {
             await sendGatewayError(conn, id: .null, sessionID: envelope.sessionID, message: "malformed JSON-RPC payload")
             return
@@ -383,15 +437,6 @@ public actor Gateway {
             await sendGatewayError(conn, id: rpc.id, sessionID: envelope.sessionID, message: "remote role may not call \(rpc.method)")
             return
         }
-        // SP2a gate G4b: the outer-frame decode above bounds the ENVELOPE's depth, but the inner
-        // JSON-RPC payload rode as a base64 string there — validate ITS nesting before forwarding,
-        // so a deep-nesting-bomb payload is refused rather than tunneled to the daemon.
-        do {
-            try WireFrame.validateJSONDepth(envelope.payload, maxDepth: 32)
-        } catch {
-            await sendGatewayError(conn, id: rpc.id, sessionID: envelope.sessionID, message: "payload nesting too deep")
-            return
-        }
 
         // `session.attach` is special-cased to go through the SAME resume/replay machinery as a
         // hello-time `ClientHello.resumes` entry, rather than a bare passthrough — a live
@@ -400,15 +445,22 @@ public actor Gateway {
         if rpc.method == "session.attach", let sessionId = rpc.params?["sessionId"]?.stringValue {
             let fromSeq = rpc.params?["fromSeq"]?.intValue ?? 0
             let resume = StreamResume(sessionID: sessionId, streamID: sessionId, lastAppliedSeq: fromSeq)
+            // Same hold-and-drain as the handshake (review follow-up 2): a live event landing
+            // while the replay flush below suspends on send must queue behind it, not interleave.
+            let myGeneration = session.connGeneration
+            session.holdLiveEvents = true
             let (_, contentHighWatermark, buffered) = await attachAndReplay(session: session, resume: resume)
             // Register live-forwarding BEFORE flushing the replay (G2), then answer with the
             // content-only `lastSeq` (G1) — the phone's cursor tracks what it actually received,
-            // not the raw attach return that counts the filtered `harness_attached`.
+            // not the raw attach return that counts the filtered `harness_attached`. Order is
+            // replay → response → drained live: monotonic for the phone's cursor (replay ≤ lastSeq
+            // in the response ≤ every drained live seq).
             session.liveSessionID = sessionId
             for event in buffered {
                 await sendEventFrame(conn, event: event)
             }
             await sendRpcResult(conn, id: rpc.id, sessionID: envelope.sessionID, streamID: envelope.streamID, result: .object(["lastSeq": .number(Double(contentHighWatermark))]))
+            await drainHeldLive(session: session, conn: conn, generation: myGeneration)
             return
         }
 
@@ -522,6 +574,16 @@ private final class PhoneSession: @unchecked Sendable {
     /// out" apart from "a NEWER handshake for the same sessionID is now in flight" and never
     /// clobbers the latter.
     var waiterGeneration = 0
+
+    /// Review follow-up 2 (replay/live ordering): while `true`, `routeDaemonEvent` QUEUES
+    /// live-forwardable events on `heldLive` instead of sending — raised for the span of a
+    /// handshake (or live re-attach) so a live frame can never interleave ahead of lower-seq
+    /// replay frames when a real async transport's `send` suspends the actor. Lowered by
+    /// `Gateway.drainHeldLive` once the replay flush completes and the queue is drained.
+    var holdLiveEvents = false
+    /// The events queued while `holdLiveEvents` was up — appended by the single pump, so already
+    /// in seq order; drained FIFO after the replay flush.
+    var heldLive: [SessionEvent] = []
 
     /// Started lazily on first connect and never restarted — the sole consumer of
     /// `daemonClient.events` for this phone's entire lifetime.
