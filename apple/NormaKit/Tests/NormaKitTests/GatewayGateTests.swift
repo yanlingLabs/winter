@@ -51,6 +51,15 @@ final class GatewayGateTests: XCTestCase {
         return conn.outbound
     }
 
+    func waitForClosed(_ conn: ScriptedRemoteConn, timeout: TimeInterval = 3) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if conn.isClosed { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("timed out waiting for conn to close")
+    }
+
     func waitForOutboundContainingSeq(_ conn: ScriptedRemoteConn, seq: Int, timeout: TimeInterval = 4) async throws -> [Data] {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -347,14 +356,14 @@ final class GatewayGateTests: XCTestCase {
         await gateway.revoke(clientInstanceID: "phone-rev")
         XCTAssertEqual(pump?.isCancelled, true, "revoke must cancel the pumpTask (G5)")
 
-        // A subsequent frame on the SAME conn is refused — and never reaches the (closed) daemon client.
-        conn.enqueueInbound(try rpcRequestFrame(id: 1, method: "session.list", params: nil))
-        let out = try await waitForOutbound(conn, count: 2)
-        XCTAssertEqual(try decodeEnvelope(out[1]).kind, .error)
-        let body = try JSONDecoder().decode(JSONValue.self, from: try decodeEnvelope(out[1]).payload)
-        XCTAssertEqual(body["error"]?["message"]?.stringValue, "pairing revoked")
+        // Task 4 fix: revoke must also drop the phone's transport connection outright — not just
+        // start refusing its future frames (the real-iroh E2E's scenario F is what caught this: a
+        // revoked phone's connection must actually disconnect). The `session.revoked` guard in
+        // `handleLiveFrame` remains as defense-in-depth for a frame already in flight when revoke
+        // lands, but once the conn is closed no further frame can arrive on it at all.
+        try await waitForClosed(conn)
         try await Task.sleep(nanoseconds: 150_000_000)
-        XCTAssertEqual(daemonTransport.sent.count, baselineSent, "a revoked phone's frame must not reach the daemon")
+        XCTAssertEqual(daemonTransport.sent.count, baselineSent, "a revoked phone must not reach the daemon again")
 
         // A reconnect by the SAME phone is refused at the handshake and the conn is closed.
         let conn2 = ScriptedRemoteConn()

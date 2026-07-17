@@ -216,8 +216,30 @@ public final class IrohConn: RemoteConn, @unchecked Sendable {
         guard first else { return }
         readTask.cancel()
         inboundCont.finish()
-        // Explicit application-close (code 0) on the retained connection.
-        try? connection.close(errorCode: 0, reason: Data())
+        // Task 4 fix (found by the E2E's scenario F): `Connection.close(errorCode:reason:)` is an
+        // ABRUPT reset, not a graceful shutdown — calling it right after a `send()` (e.g. a
+        // "pairing revoked" error frame written just before closing a revoked/rejected phone) can
+        // race ahead of that write's actual delivery and silently drop it. Confirmed empirically:
+        // scenario F's phone consistently observed a bare close, never the preceding error frame,
+        // before this fix (deterministic, not a flake — reproduced 5/5). `writer.finish()` chains
+        // onto the SAME serialized write queue as `send(_:)`, so it waits for any already-queued
+        // write to actually flush before gracefully finishing the stream; only THEN is the
+        // connection torn down. Fire-and-forget (this method stays synchronous, matching
+        // `RemoteConn.close()`'s contract) — mirrors `IrohListener.stop()`'s own async-cleanup idiom.
+        let writer = self.writer
+        let connection = self.connection
+        Task {
+            await writer.finish()
+            // `finish()` returning only means the local send-stream FIN was queued with iroh's
+            // internal QUIC driver, not that it (or any data just ahead of it) has actually been
+            // flushed onto the wire and observed by the peer — an immediate `close()` right after
+            // can still race ahead of that flush (empirically: `finish()` alone cut the drop rate
+            // but did not eliminate it). A short grace delay gives the driver's background task a
+            // real chance to run and push the bytes out over the (loopback-fast) transport before
+            // the abrupt connection-level reset.
+            try? await Task.sleep(for: .milliseconds(100))
+            try? connection.close(errorCode: 0, reason: Data())
+        }
     }
 
     /// De-frames the QUIC byte stream into whole `LengthPrefix` frames, yielding each to
@@ -260,6 +282,20 @@ private actor SendSerializer {
         let current = Task { [send] in
             _ = try? await prev?.value // wait for the previous write to fully flush
             try await send.writeAll(buf: bytes)
+        }
+        tail = current
+        _ = try? await current.value
+    }
+
+    /// Gracefully finishes the underlying send stream, chained onto the SAME queue as `write(_:)`
+    /// — so a write already queued (or in flight) when `close()` calls this is guaranteed to
+    /// actually reach the peer before the stream signals "no more data" (Task 4 fix — see
+    /// `IrohConn.close()`'s own doc comment for the bug this closes).
+    func finish() async {
+        let prev = tail
+        let current = Task { [send] in
+            _ = try? await prev?.value
+            try await send.finish()
         }
         tail = current
         _ = try? await current.value

@@ -157,6 +157,7 @@ public actor Gateway {
             verdicts.append(verdict)
             pendingReplay.append(contentsOf: buffered)
         }
+        signalAttachResolvedForTesting()
         // Only the LAST resumed session is truly live-forwardable (one daemon connection, one
         // attach at a time — see `PhoneSession.liveSessionID`). Set once, after the loop, so an
         // earlier resume's session can never leak a live frame ahead of the ack.
@@ -199,16 +200,26 @@ public actor Gateway {
     // MARK: - Revocation (SP2a gate G5)
 
     /// Tears down a paired phone's gateway footprint: cancels its persistent daemon-event pump,
-    /// closes its daemon `NormaClient` (releasing the `remote` connection), drops its
-    /// `PhoneSession`, and records the `clientInstanceID` as revoked so both any in-flight live
-    /// loop AND a future reconnect are refused. Idempotent; safe to call for an unknown id (the
-    /// id is still marked revoked, pre-empting a first connection).
+    /// closes its daemon `NormaClient` (releasing the `remote` connection), CLOSES its current
+    /// transport connection (if any — SP2a Task 4 E2E fix, see below), drops its `PhoneSession`,
+    /// and records the `clientInstanceID` as revoked so both any in-flight live loop AND a future
+    /// reconnect are refused. Idempotent; safe to call for an unknown id (the id is still marked
+    /// revoked, pre-empting a first connection).
+    ///
+    /// **Task 4 fix:** the original SP2a Task 2 implementation never closed `session.currentConn`
+    /// — a revoked phone's transport connection stayed open indefinitely; only its FUTURE frames
+    /// got a "pairing revoked" error (via `handleLiveFrame`'s `session.revoked` guard, kept below as
+    /// defense-in-depth for a frame already in flight when this runs). Only visible against a real
+    /// transport (`ScriptedRemoteConn`'s `isClosed` was never asserted for the conn revoke() itself
+    /// was called on, only for a POST-revoke reconnect attempt) — the E2E's scenario F (real iroh)
+    /// caught it: a real phone's connection must actually drop, not just get ignored going forward.
     public func revoke(clientInstanceID: String) async {
         revoked.insert(clientInstanceID)
         guard let session = sessions[clientInstanceID] else { return }
         session.revoked = true
         session.pumpTask?.cancel()
         await session.daemonClient.close()
+        session.currentConn?.close()
         session.currentConn = nil
         sessions[clientInstanceID] = nil
     }
@@ -217,6 +228,32 @@ public actor Gateway {
     /// `revoke` removes the session so a test can assert it ends up cancelled.
     func pumpTaskForTesting(_ clientInstanceID: String) -> Task<Void, Never>? {
         sessions[clientInstanceID]?.pumpTask
+    }
+
+    /// Test-only synchronization hook (`@testable`, SP2a Task 4's E2E): resumed once the
+    /// handshake's (or live re-attach's) `attachAndReplay` calls have all resolved — i.e., the
+    /// daemon-side attach is now registered and the CONTENT verdict is fixed, but the
+    /// ack/replay/drain flush hasn't happened yet. A test that awaits this before firing a
+    /// concurrent live event is guaranteed that event lands strictly INSIDE the hold-and-drain
+    /// window (review-follow-up-2's fix), landing precisely in the gap between attach resolving
+    /// and the flush completing — proving the fix over the REAL async transport instead of
+    /// guessing at wall-clock timing (confirmed necessary empirically: firing a concurrent send at
+    /// dial-time, or even right as the hold flag raises, still let the gateway's own attach call
+    /// win the race often enough to land as ordinary replay rather than a genuinely live event —
+    /// see `IrohE2ETests`' scenario C for the full account).
+    private var attachResolvedContinuations: [CheckedContinuation<Void, Never>] = []
+
+    func waitForNextAttachResolvedForTesting() async {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            attachResolvedContinuations.append(cont)
+        }
+    }
+
+    private func signalAttachResolvedForTesting() {
+        guard !attachResolvedContinuations.isEmpty else { return }
+        let toResume = attachResolvedContinuations
+        attachResolvedContinuations = []
+        for c in toResume { c.resume() }
     }
 
     /// A `harness_attached`/`harness_detached` event is connection-lifecycle NOISE, never phone
@@ -450,6 +487,7 @@ public actor Gateway {
             let myGeneration = session.connGeneration
             session.holdLiveEvents = true
             let (_, contentHighWatermark, buffered) = await attachAndReplay(session: session, resume: resume)
+            signalAttachResolvedForTesting()
             // Register live-forwarding BEFORE flushing the replay (G2), then answer with the
             // content-only `lastSeq` (G1) — the phone's cursor tracks what it actually received,
             // not the raw attach return that counts the filtered `harness_attached`. Order is
