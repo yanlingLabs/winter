@@ -505,7 +505,13 @@ describe("memory.* RPCs (T2) — file-backed (memory.enabled: true, default)", (
     // in-flight (still-files-mode) write landing at `target` and staying there, which a shared-name
     // retry loop could mistake for "never switched" or leave as stray cross-contamination once it
     // eventually DOES land in the legacy store under that same name.
-    const deadline = Date.now() + 5000;
+    // Generous deadline (was 5000ms): the reload rides a REAL fs.watch → 150ms debounce → apply
+    // pipeline, all on the event loop. Under heavy concurrent-suite CPU load that loop starves and
+    // the pipeline legitimately overruns a 5s budget (~1-in-3 flake at merge-gate load). 30s gives
+    // ample headroom while preserving correctness — a genuinely broken hot-reload never lands and
+    // still fails this assertion, just later. (Root-caused: shrinking this below the 150ms debounce
+    // deterministically reproduces the exact `landedInLegacyStore` failure.)
+    const deadline = Date.now() + 30_000;
     let landedInLegacyStore = false;
     let i = 0;
     while (Date.now() < deadline && !landedInLegacyStore) {
