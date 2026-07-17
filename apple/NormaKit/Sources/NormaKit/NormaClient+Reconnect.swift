@@ -26,7 +26,7 @@ extension NormaClient {
             // deliberate close that nothing ever closes.
             if deliberatelyClosed { return }
             do {
-                try await connect() // fresh transport from the factory + hello
+                try await connect(role: currentRole) // fresh transport from the factory + hello, SAME role as before
                 if let sid = attachedSessionId {
                     do {
                         _ = try await attach(sessionId: sid, fromSeq: lastSeq) // resync: replay > lastSeq

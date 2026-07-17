@@ -22,6 +22,13 @@ public actor NormaClient {
     // an unexpected transport drop (the latter triggers reconnectLoop, the former must not).
     var everConnected = false
     var deliberatelyClosed = false
+    // Remote Gateway Task 5: the hello `role` this client authenticates as ("harness" by default,
+    // "remote" for the gateway's daemon-facing bridge client). Not `private`: NormaClient+
+    // Reconnect.swift's reconnectLoop() must re-send the SAME role on every reconnect attempt —
+    // reconnecting with the default would silently downgrade a `remote` connection back to
+    // `harness` (wrong principal, and the daemon's REMOTE_ALLOWED_METHODS gate would then admit
+    // methods it shouldn't).
+    var currentRole = "harness"
     // Task 9 review fix 1: guards startReconnect() against re-entrancy — a transport drop that
     // lands WHILE a reconnectLoop is already running (e.g. the replacement transport itself drops
     // mid-handshake) must not spawn a second concurrent loop. reconnectLoop() clears this on every
@@ -71,7 +78,14 @@ public actor NormaClient {
     /// CONTRACT: a successful return IS the "connected" signal — no `.connection(.connected)`
     /// event is yielded for the INITIAL connect (AsyncStream pre-iterator buffering would make
     /// it the first value every consumer sees). Reconnects DO yield `.connection` states.
-    public func connect() async throws {
+    ///
+    /// `role` (Remote Gateway Task 5): defaults to `"harness"` so every existing caller is
+    /// unaffected; the gateway's daemon-facing bridge client calls `connect(role: "remote")` to
+    /// authenticate as the least-privileged phone principal (Task 1's REMOTE_ALLOWED_METHODS
+    /// gate). Stored in `currentRole` so a later automatic reconnect (Task 9) re-sends the SAME
+    /// role rather than silently reverting to the default.
+    public func connect(role: String = "harness") async throws {
+        currentRole = role
         let t = makeTransport()
         transport = t
         decoder = LineDecoder()
@@ -79,7 +93,7 @@ public actor NormaClient {
         startPump(t)
         _ = try await request("protocol.hello", params: .object([
             "protocolVersion": .number(Double(Self.protocolVersion)),
-            "role": .string("harness"),
+            "role": .string(role),
             "token": .string(token),
             "clientName": .string(clientName),
         ]))
@@ -187,12 +201,20 @@ public actor NormaClient {
         for (_, cont) in waiting { cont.resume(throwing: error) }
     }
 
-    public func request(_ method: String, params: JSONValue?) async throws -> JSONValue {
+    /// `commandId` (Remote Gateway Task 5): an optional top-level sibling of `id`/`method`/
+    /// `params` (NOT nested inside `params`) — the daemon's remote-role idempotency gate (Task 2)
+    /// keys its per-connection dedup cache on this. Defaulted to `nil` so every existing call
+    /// site (harness/local — never generates one) is unaffected; only the gateway's live-loop
+    /// passthrough (forwarding a phone's `rpcRequest` payload verbatim) ever supplies one, and it
+    /// forwards whatever the phone sent UNCHANGED — the gateway is a transparent relay for
+    /// `commandId`, the daemon is the one that dedups (see Gateway.swift's own header comment).
+    public func request(_ method: String, params: JSONValue?, commandId: String? = nil) async throws -> JSONValue {
         guard let t = transport else { throw RpcError(code: -1, message: "not connected") }
         let id = nextId
         nextId += 1
         var obj: [String: JSONValue] = ["jsonrpc": .string("2.0"), "id": .number(Double(id)), "method": .string(method)]
         if let params { obj["params"] = params }
+        if let commandId { obj["commandId"] = .string(commandId) }
         let data = try JSONEncoder().encode(JSONValue.object(obj))
         // timeout watchdog: resumes the continuation with an error if the response never lands
         let timeout = requestTimeout

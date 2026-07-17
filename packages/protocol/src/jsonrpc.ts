@@ -11,6 +11,12 @@ export const RpcRequest = z.object({
   id: RpcId,
   method: z.string(),
   params: z.unknown().optional(),
+  // Remote Gateway SP1 Task 2: an optional client-generated idempotency key, a top-level sibling
+  // of id/method/params (NOT inside params, so no per-method schema change). A flaky mobile link
+  // means a phone may resend a request whose ack was lost — the daemon dedups remote mutating
+  // RPCs per-connection by this key (see server.ts's data() pump). Ignored by every existing path
+  // that doesn't read it; harness/plugin/local callers never send it.
+  commandId: z.string().optional(),
 });
 export type RpcRequest = z.infer<typeof RpcRequest>;
 
