@@ -59,6 +59,19 @@ final class IrohSpikeTests: XCTestCase {
 
         // B's accept loop runs concurrently with A's dial below (`async let` starts it
         // immediately; we `await` the result once both sides have exchanged frames).
+        //
+        // NOTE: B's `Connection`/`BiStream` are returned here (not just the bytes) and
+        // kept alive with `withExtendedLifetime` below until the whole exchange is
+        // verified done. Earlier, letting `runAcceptSide` release them as soon as it
+        // returned (right after writing "pong") was a genuine, reproducible race: ARC
+        // could deallocate B's `Connection` — which drops the underlying Rust QUIC
+        // connection and (per iroh's Drop behavior) sends an application-close —
+        // before A's `readFrame` had actually finished consuming the "pong" bytes,
+        // intermittently surfacing as `ConnectionLost(ApplicationClosed(..code 0..))`
+        // on A's side. See task-0-report.md for the full write-up; this is a real
+        // finding for whoever builds SP2a's production transport, not a test-only
+        // quirk: Rust-FFI-backed connection/stream objects must be kept alive for
+        // their full intended lifetime, not just until their last syntactic use.
         async let bResult = Self.runAcceptSide(b)
 
         // A dials B directly by its EndpointAddr (id + bound address) on the shared ALPN.
@@ -72,7 +85,7 @@ final class IrohSpikeTests: XCTestCase {
         let pong = try await Self.readFrame(biA.recv(), buffer: &bufferA)
         XCTAssertEqual(pong, Self.pongBytes)
 
-        let (remoteIDOnB, pingSeenByB) = try await bResult
+        let (remoteIDOnB, pingSeenByB, bConn, bBi) = try await bResult
         XCTAssertEqual(pingSeenByB, Self.pingBytes)
         XCTAssertEqual(
             remoteIDOnB, a.id().toBytes(),
@@ -80,13 +93,18 @@ final class IrohSpikeTests: XCTestCase {
         )
 
         try connA.close(errorCode: 0, reason: Data())
+        withExtendedLifetime((connA, biA, bConn, bBi)) {}
     }
 
     /// B's side: accept the inbound connection, accept its bidirectional stream,
     /// LengthPrefix-unwrap the ping, reply with a wrapped pong, and return what it saw
-    /// (the ping bytes) plus the authenticated remote EndpointID bytes read off the
-    /// accepted `Connection` — the exact thing the STOP-RULE hinges on.
-    private static func runAcceptSide(_ b: Endpoint) async throws -> (remoteID: Data, ping: Data) {
+    /// (the ping bytes), the authenticated remote EndpointID bytes read off the
+    /// accepted `Connection` (the thing the STOP-RULE hinges on), and the `Connection`
+    /// / `BiStream` objects themselves so the caller can keep them alive past this
+    /// function's return (see the note above `bResult`).
+    private static func runAcceptSide(
+        _ b: Endpoint
+    ) async throws -> (remoteID: Data, ping: Data, conn: Connection, bi: BiStream) {
         guard let incoming = await b.acceptNext() else {
             throw SpikeError.noIncomingConnection
         }
@@ -100,7 +118,7 @@ final class IrohSpikeTests: XCTestCase {
         try await bi.send().writeAll(buf: LengthPrefix.wrap(pongBytes))
 
         let remoteID = conn.remoteId().toBytes()
-        return (remoteID, ping)
+        return (remoteID, ping, conn, bi)
     }
 
     /// Reads `NormaProtocol.LengthPrefix`-framed bytes off `recv`, accumulating raw reads
