@@ -87,7 +87,12 @@ export { CORE_VERSION } from "./version";
 
 export interface RunningDaemon {
   socketPath: string;
-  tokens: { harness: string; admin: string };
+  // `remote` (SP2a Task 1): ensureTokens() already mints/returns it (auth/tokens.ts's
+  // TOKEN_NAMES table, Remote Gateway SP1 Task 1) and the `tokens` object below is that SAME
+  // result passed through verbatim — this widens the TYPE to match what's already there, no
+  // runtime change. Lets a Swift test harness (RealDaemon.swift) that spawns this via a `bun -e`
+  // fixture print `d.tokens.remote` without a separate FileSecretStore read.
+  tokens: { harness: string; admin: string; remote: string };
   stop(): void;
 }
 
