@@ -2,12 +2,17 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { Role } from "@norma/protocol";
 import type { SecretStore } from "./secret-store";
 
-export const TOKEN_NAMES = { harness: "harness-token", admin: "admin-token" } as const;
+// Remote Gateway SP1 Task 1: `remote` is the least-privileged phone-gateway principal — its token
+// is minted/persisted through this SAME table-driven loop as harness/admin (Keychain in
+// production via KeychainSecretStore, a 0600 file under the test NORMA_HOME via FileSecretStore),
+// so a local gateway process can read `remote-token` back out exactly the way the harness reads
+// `harness-token` today. No separate issuance path — deliberately.
+export const TOKEN_NAMES = { harness: "harness-token", admin: "admin-token", remote: "remote-token" } as const;
 
 export class TokenAuthority {
   constructor(private readonly store: SecretStore) {}
 
-  async ensureTokens(): Promise<{ harness: string; admin: string }> {
+  async ensureTokens(): Promise<{ harness: string; admin: string; remote: string }> {
     const out: Record<string, string> = {};
     for (const [role, name] of Object.entries(TOKEN_NAMES)) {
       let v = await this.store.get(name);
@@ -17,7 +22,7 @@ export class TokenAuthority {
       }
       out[role] = v;
     }
-    return out as { harness: string; admin: string };
+    return out as { harness: string; admin: string; remote: string };
   }
 
   async verify(role: Role, token: string): Promise<boolean> {

@@ -6,7 +6,7 @@ export const PROTOCOL_VERSION = 0;
 /** An absolute directory path that is not the filesystem root (guards against a whole-fs writable fence). */
 export const AbsoluteDirPath = z.string().startsWith("/").refine((p) => p !== "/", { message: "path must not be the filesystem root '/'" });
 
-export const Role = z.enum(["harness", "plugin", "admin"]);
+export const Role = z.enum(["harness", "plugin", "admin", "remote"]);
 export type Role = z.infer<typeof Role>;
 
 export const ApprovalPolicy = z.enum(["ask", "auto", "plan"]);

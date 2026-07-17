@@ -237,6 +237,15 @@ const PLUGIN_ALLOWED_METHODS = new Set<string>([
   METHODS.hardwareRequest,
 ]);
 
+// Remote (iPhone) principal — the LEAST-privileged role. The gateway connects as `remote`
+// deliberately so a gateway bug can't relay a privileged method. Additive: a new remote-facing
+// method requires a deliberate edit here (SP1 spec §6).
+const REMOTE_ALLOWED_METHODS = new Set<string>([
+  METHODS.hello, METHODS.sessionList, METHODS.sessionAttach, METHODS.sessionSend,
+  METHODS.sessionDispatch, METHODS.approvalRespond, METHODS.askUserRespond,
+  METHODS.sessionInterrupt, METHODS.engineActivity,
+]);
+
 /** Maps a failed `PluginSupervisor.invoke()` result to the message a `throw new Error(...)` in
  *  `tool.register`'s bridged `run()` turns into an isError tool_result (ToolRegistry.execute's
  *  catch path) — see that handler below. */
@@ -555,6 +564,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     // Role→method allowlist gate — BEFORE dispatch, ahead of the switch below (Task 2 contract).
     if (socket.data.authedRole === "plugin" && !PLUGIN_ALLOWED_METHODS.has(method)) {
       throw new RpcFailure(ERR.UNAUTHORIZED, `plugin role may not call ${method}`);
+    }
+    // Remote Gateway SP1 Task 1: same table-driven gate, for the least-privileged `remote` role.
+    if (socket.data.authedRole === "remote" && !REMOTE_ALLOWED_METHODS.has(method)) {
+      throw new RpcFailure(ERR.UNAUTHORIZED, `remote role may not call ${method}`);
     }
 
     switch (method) {
