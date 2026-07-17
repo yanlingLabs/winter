@@ -105,6 +105,42 @@ public enum WireFrame {
         return envelope
     }
 
+    /// Validates that a STANDALONE JSON document `bytes` (e.g. the inner JSON-RPC payload the
+    /// gateway is about to relay to the daemon) nests no deeper than `maxDepth`. `decode` above
+    /// already bounds the OUTER envelope frame's depth, but the base64 `payload` rides there as a
+    /// single JSON string — so the inner document's own nesting is unchecked until this call
+    /// (SP2a gate G4b: a phone must not tunnel a nesting-bomb payload through the gateway to the
+    /// daemon). Depth-only (no duplicate-key bookkeeping): the daemon re-validates shape itself;
+    /// this is the gateway's cheap pre-forward tripwire. Throws `WireError.tooDeep`.
+    public static func validateJSONDepth(_ bytes: Data, maxDepth: Int = 32) throws {
+        var depth = 0
+        var inString = false
+        var escapeNext = false
+        for byte in bytes {
+            if inString {
+                if escapeNext {
+                    escapeNext = false
+                } else if byte == UInt8(ascii: "\\") {
+                    escapeNext = true
+                } else if byte == UInt8(ascii: "\"") {
+                    inString = false
+                }
+                continue
+            }
+            switch byte {
+            case UInt8(ascii: "\""):
+                inString = true
+            case UInt8(ascii: "{"), UInt8(ascii: "["):
+                depth += 1
+                if depth > maxDepth { throw WireError.tooDeep }
+            case UInt8(ascii: "}"), UInt8(ascii: "]"):
+                depth -= 1
+            default:
+                break
+            }
+        }
+    }
+
     /// One focused helper: a single left-to-right byte scan that (a) counts bracket depth
     /// (`{`/`[` both count, `}`/`]` both uncount) for `maxDepth`, and (b) tracks, per currently
     /// open OBJECT, the set of keys seen so far — a string immediately followed by `:` is a key;

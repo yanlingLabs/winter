@@ -105,16 +105,17 @@ final class GatewayTests: XCTestCase {
         }
         daemonTransport.feed(#"{"jsonrpc":"2.0","id":\#(attachId),"result":{"ok":true,"lastSeq":5}}"#)
 
+        // SP2a G3: helloAck is now the FIRST phone-bound frame; the replay events follow it.
         let outbound1 = try await waitForOutbound(conn1, count: 4)
-        let ev3 = try decodeEnvelope(outbound1[0])
-        let ev4 = try decodeEnvelope(outbound1[1])
-        let ev5 = try decodeEnvelope(outbound1[2])
+        let ack1 = try decodeEnvelope(outbound1[0])
+        XCTAssertEqual(ack1.kind, .helloAck)
+        let ev3 = try decodeEnvelope(outbound1[1])
+        let ev4 = try decodeEnvelope(outbound1[2])
+        let ev5 = try decodeEnvelope(outbound1[3])
         XCTAssertEqual(ev3.kind, .event)
         XCTAssertEqual(ev3.seq, 3)
         XCTAssertEqual(ev4.seq, 4)
         XCTAssertEqual(ev5.seq, 5)
-        let ack1 = try decodeEnvelope(outbound1[3])
-        XCTAssertEqual(ack1.kind, .helloAck)
         let serverHello1 = try JSONDecoder().decode(ServerHello.self, from: ack1.payload)
         XCTAssertEqual(serverHello1.verdicts, [.replayBegin(sessionID: "s1", fromSeq: 2, highWatermark: 5)])
 
@@ -298,14 +299,15 @@ final class GatewayTests: XCTestCase {
         daemonTransport.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"user_message","seq":3,"sessionId":"s1","ts":0,"threadId":"main","text":"m3","clientName":"harness"}}"#)
         daemonTransport.feed(#"{"jsonrpc":"2.0","id":\#(attachId2),"result":{"ok":true,"lastSeq":3}}"#)
 
+        // SP2a G3: helloAck first, then the replayed gap (seq 2, 3).
         let outbound2 = try await waitForOutbound(conn2, count: 3)
-        let gap1 = try decodeEnvelope(outbound2[0])
-        let gap2 = try decodeEnvelope(outbound2[1])
+        let ack2 = try decodeEnvelope(outbound2[0])
+        XCTAssertEqual(ack2.kind, .helloAck)
+        let gap1 = try decodeEnvelope(outbound2[1])
+        let gap2 = try decodeEnvelope(outbound2[2])
         XCTAssertEqual(gap1.kind, .event)
         XCTAssertEqual(gap1.seq, 2)
         XCTAssertEqual(gap2.seq, 3)
-        let ack2 = try decodeEnvelope(outbound2[2])
-        XCTAssertEqual(ack2.kind, .helloAck)
         let serverHello2 = try JSONDecoder().decode(ServerHello.self, from: ack2.payload)
         XCTAssertEqual(serverHello2.verdicts, [.replayBegin(sessionID: "s1", fromSeq: 1, highWatermark: 3)])
         // No duplicate of seq 1 anywhere in conn2's outbound.

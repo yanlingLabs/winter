@@ -246,7 +246,11 @@ const PLUGIN_ALLOWED_METHODS = new Set<string>([
 // Remote (iPhone) principal — the LEAST-privileged role. The gateway connects as `remote`
 // deliberately so a gateway bug can't relay a privileged method. Additive: a new remote-facing
 // method requires a deliberate edit here (SP1 spec §6).
-const REMOTE_ALLOWED_METHODS = new Set<string>([
+// Exported (SP2a gate G7) so the cross-language allowlist-parity test can pin this exact runtime
+// Set against the Swift gateway's mirror (`Gateway.remoteAllowedMethods`) — a drift tripwire: an
+// edit to one side that isn't matched on the other fails the parity test rather than silently
+// letting the two allowlists diverge.
+export const REMOTE_ALLOWED_METHODS = new Set<string>([
   METHODS.hello, METHODS.sessionList, METHODS.sessionAttach, METHODS.sessionSend,
   METHODS.sessionDispatch, METHODS.approvalRespond, METHODS.askUserRespond,
   METHODS.sessionInterrupt, METHODS.engineActivity,
