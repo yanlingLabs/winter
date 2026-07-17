@@ -34,7 +34,10 @@ export class SessionTitler {
     this.store = deps.store;
     this.hub = deps.hub;
     this.model = deps.model ?? deps.provider.model;
-    this.timeoutMs = deps.timeoutMs ?? Number(process.env.NORMA_TITLE_TIMEOUT_MS ?? 15000);
+    // A junk env value must fall back to the default, not become NaN — setTimeout(fn, NaN) fires
+    // immediately (dreamer.ts's constructor guards the same footgun the same way).
+    const n = Number(process.env.NORMA_TITLE_TIMEOUT_MS);
+    this.timeoutMs = deps.timeoutMs ?? (Number.isFinite(n) && n > 0 ? n : 15000);
   }
 
   /** Fire-and-forget safe: NEVER throws (all failures logged + swallowed); at most one title per
@@ -68,6 +71,11 @@ export class SessionTitler {
   private async oneShot(content: string): Promise<string> {
     const turnInput: TurnInputItem[] = [{ type: "message", role: "user", content }];
 
+    // Carried-over review fix (mirrors dreamer.ts's runCycle): without a signal, a Promise.race
+    // timeout only makes THIS call stop waiting — the detached streamTurn generator keeps draining
+    // under a hung provider, leaking a connection. `ac` ties the provider call's lifetime to the
+    // race: aborted in the SAME finally that clears the timer, whichever side of the race wins.
+    const ac = new AbortController();
     const run = (async () => {
       let text = "";
       for await (const ev of this.provider.provider.streamTurn({
@@ -75,6 +83,7 @@ export class SessionTitler {
         instructions: TITLE_INSTRUCTION,
         input: turnInput,
         tools: [],
+        signal: ac.signal,
       })) {
         if (ev.type === "text_delta") text += ev.delta;
         else if (ev.type === "done" && ev.stopReason === "aborted") throw new Error("title generation aborted");
@@ -90,6 +99,7 @@ export class SessionTitler {
       return await Promise.race([run, timeout]);
     } finally {
       clearTimeout(timer!);
+      ac.abort();
     }
   }
 }
