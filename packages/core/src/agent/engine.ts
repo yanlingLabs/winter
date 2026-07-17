@@ -1302,6 +1302,10 @@ export class AgentEngine {
       cwd,
       loadedSkills: [...(this.loadedSkills.get(sessionId) ?? [])],
       basePromptOverride: isDispatch ? DISPATCH_SYSTEM_PROMPT : undefined,
+      // Dreaming (Phase 7b): dispatch sessions load the shared `_assistant` memory bucket INSTEAD
+      // of the cwd-resolved project MEMDIR (ContextAssembler's memoryBucket branch) — every other
+      // caller keeps today's "project" behavior byte-for-byte.
+      memoryBucket: isDispatch ? "assistant" : "project",
     });
     // NOTE (correctness-critical): `loaded` MUST be THE ONE LIVE SET for this session — never a
     // snapshot/copy. It's read here to build specs()/deferredIndex() for round 0, and the SAME

@@ -9,7 +9,7 @@ import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
 import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom } from "./settings";
-import { memoryDirFor, globalMemoryDirFor } from "./agent/memory-dir";
+import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
 import { createProvider } from "./providers/manager";
 import type { Provider } from "./providers/types";
@@ -207,7 +207,15 @@ export async function startDaemon(opts: {
   const memoryGlobalDirOf = (): string => globalMemoryDirFor({ normaHome, directory: settings?.memory?.directory });
   const assembler = new ContextAssembler({
     normaHome, trust: trustStore, skills: skillStore,
-    memory: { enabled: memoryEnabledHot, dirFor: memoryDirOf },
+    memory: {
+      enabled: memoryEnabledHot,
+      dirFor: memoryDirOf,
+      // Dreaming (Phase 7b): the reserved `_assistant` bucket — deliberately NOT run through
+      // `settings?.memory?.directory` (unlike `memoryDirOf`/`memoryGlobalDirOf` above): honoring
+      // the relocation override would collapse this bucket into the project bucket and leak dream
+      // memories into code sessions (see assistantMemoryDirFor's own doc comment).
+      assistantDir: () => assistantMemoryDirFor({ normaHome }),
+    },
   });
   // T2 (design doc "migration importer"): one-time-per-fact, idempotent best-effort import of
   // Phase 5b's MemoryStore facts into MEMDIR files, run at boot whenever memory.enabled's

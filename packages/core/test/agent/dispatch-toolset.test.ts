@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "../../src/sessions/store";
@@ -29,6 +29,7 @@ import { TrustStore } from "../../src/agent/trust";
 import { SkillStore } from "../../src/agent/skills";
 import { Compactor } from "../../src/agent/compactor";
 import { DISPATCH_ALLOW_TOOLS } from "../../src/agent/dispatch-prompt";
+import { assistantMemoryDirFor } from "../../src/agent/memory-dir";
 import type { ProviderEvent } from "../../src/providers/types";
 
 // Full-surface registry: every tool a code session sees, INCLUDING the six that must never be
@@ -64,7 +65,18 @@ function setup(script: ProviderEvent[][], opts: { mode?: "code" | "dispatch" } =
   const broker = new ApprovalBroker();
   const provider = new FakeProvider(script);
   const dirs = new SessionDirectories(() => [cwd]);
-  const assembler = new ContextAssembler({ normaHome: assemblerHome, trust: assemblerTrust, skills });
+  // Dreaming (Phase 7b, Task 1): wired unconditionally (not opt-in) so test 5 below can seed
+  // `assemblerHome`'s `_assistant` bucket and exercise the engine's REAL memoryBucket threading —
+  // this is inert for the other tests in this file (assemblerHome starts empty, so `dirFor`'s
+  // project bucket has no MEMORY.md and the assistant bucket is untouched unless a test seeds it).
+  const assembler = new ContextAssembler({
+    normaHome: assemblerHome, trust: assemblerTrust, skills,
+    memory: {
+      enabled: () => true,
+      dirFor: () => join(assemblerHome, "projects", "code-proj", "memory"),
+      assistantDir: () => assistantMemoryDirFor({ normaHome: assemblerHome }),
+    },
+  });
   const compactor = new Compactor({ provider: { provider, model: "fake-1" }, store, hub });
   const engine = new AgentEngine({
     store, hub, registry, broker,
@@ -73,7 +85,7 @@ function setup(script: ProviderEvent[][], opts: { mode?: "code" | "dispatch" } =
     dirs, assembler, compactor,
   });
   const sessionId = store.createSession("global", { cwd, approvalPolicy: "auto", mode: opts.mode });
-  return { engine, store, sessionId, provider, cwd };
+  return { engine, store, sessionId, provider, cwd, assemblerHome };
 }
 
 const done = (reason: "end_turn" | "tool_calls"): ProviderEvent => ({ type: "done", stopReason: reason });
@@ -124,5 +136,29 @@ describe("dispatch mode: toolset + system prompt", () => {
     const instructions = provider.requests[0]?.instructions ?? "";
     expect(instructions).toContain("file tool paths are relative to it");
     expect(instructions).not.toContain("Dispatch mode");
+  });
+
+  test("dispatch turn loads the _assistant memory index; a code turn (same harness) loads neither it nor its protocol", async () => {
+    const dispatchHarness = setup([text("ok")], { mode: "dispatch" });
+    mkdirSync(assistantMemoryDirFor({ normaHome: dispatchHarness.assemblerHome }), { recursive: true });
+    writeFileSync(
+      join(assistantMemoryDirFor({ normaHome: dispatchHarness.assemblerHome }), "MEMORY.md"),
+      "- [alex](alex.md) — builds Norma\n",
+    );
+    await dispatchHarness.engine.runTurn(dispatchHarness.sessionId);
+    const dispatchInstructions = dispatchHarness.provider.requests[0]?.instructions ?? "";
+    expect(dispatchInstructions).toContain("Assistant memory index");
+    expect(dispatchInstructions).toContain("alex");
+
+    const codeHarness = setup([text("ok")], { mode: "code" });
+    mkdirSync(assistantMemoryDirFor({ normaHome: codeHarness.assemblerHome }), { recursive: true });
+    writeFileSync(
+      join(assistantMemoryDirFor({ normaHome: codeHarness.assemblerHome }), "MEMORY.md"),
+      "- [alex](alex.md) — builds Norma\n",
+    );
+    await codeHarness.engine.runTurn(codeHarness.sessionId);
+    const codeInstructions = codeHarness.provider.requests[0]?.instructions ?? "";
+    expect(codeInstructions).not.toContain("Assistant memory index");
+    expect(codeInstructions).not.toContain("alex");
   });
 });

@@ -135,3 +135,13 @@ export function globalMemoryDirFor(opts: MemoryDirOptions): string {
   if (override) return override;
   return join(opts.normaHome, "projects", "_global", "memory");
 }
+
+/** Dreaming (Phase 7b): the shared assistant-memory bucket — `~/.norma/projects/_assistant/memory`.
+ *  Reserved key like `_global` (sanitizeProjectKey can never emit a leading underscore). Loaded
+ *  ONLY by assistant-mode sessions (dispatch now; chat/cowork later) via ContextAssembler's
+ *  memoryBucket branch — never by cwd resolution, so code sessions structurally cannot see it.
+ *  DELIBERATELY ignores the `memory.directory` relocation override: honoring it would collapse
+ *  this bucket into the project bucket and leak dream memories into code sessions. */
+export function assistantMemoryDirFor(opts: { normaHome: string }): string {
+  return join(opts.normaHome, "projects", "_assistant", "memory");
+}
