@@ -43,6 +43,57 @@ describe("dream-ops: validateOps", () => {
     expect(overwrite.ok).toBe(true);
   });
 
+  test("MAX_FILES is enforced on the batch's net effect, order-independently", () => {
+    const existing = Array.from({ length: 64 }, (_, i) => `existing-${i}.md`);
+
+    // (a) write-then-delete: net 64 files — must pass even though the write transiently hits 65.
+    const writeFirst = validateOps(
+      [{ op: "write", file: "new-name.md", content: "hi" }, { op: "delete", file: "existing-0.md" }],
+      existing,
+    );
+    expect(writeFirst.ok).toBe(true);
+
+    // (b) delete-then-write: same net effect, must also pass.
+    const deleteFirst = validateOps(
+      [{ op: "delete", file: "existing-0.md" }, { op: "write", file: "new-name.md", content: "hi" }],
+      existing,
+    );
+    expect(deleteFirst.ok).toBe(true);
+
+    // (c) net +1 (two new writes, one delete) -> error mentioning 64, in either order.
+    const netPlusOne = [
+      [{ op: "write", file: "a-new.md", content: "hi" }, { op: "write", file: "b-new.md", content: "hi" }, { op: "delete", file: "existing-0.md" }],
+      [{ op: "delete", file: "existing-0.md" }, { op: "write", file: "a-new.md", content: "hi" }, { op: "write", file: "b-new.md", content: "hi" }],
+    ];
+    for (const batch of netPlusOne) {
+      const res = validateOps(batch, existing);
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error).toContain("64");
+    }
+  });
+
+  test("multiple tombstones in one call all validate", () => {
+    const res = validateOps(
+      [{ op: "tombstone", text: "first" }, { op: "tombstone", text: "second" }, { op: "tombstone", text: "third" }],
+      [],
+    );
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.ops).toHaveLength(3);
+  });
+
+  test("delete-then-write of the same file in one call validates (net unchanged)", () => {
+    const existing = Array.from({ length: 64 }, (_, i) => `existing-${i}.md`);
+    const res = validateOps(
+      [{ op: "delete", file: "existing-0.md" }, { op: "write", file: "existing-0.md", content: "reborn" }],
+      existing,
+    );
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.ops).toEqual([
+      { op: "delete", file: "existing-0.md" },
+      { op: "write", file: "existing-0.md", content: "reborn" },
+    ]);
+  });
+
   test("reserved files are rejected", () => {
     for (const file of ["MEMORY.md", "tombstones.md", "dream-state.json"]) {
       expect(RESERVED_FILES.has(file)).toBe(true);

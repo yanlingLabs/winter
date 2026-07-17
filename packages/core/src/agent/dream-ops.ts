@@ -39,13 +39,17 @@ export function validateOps(raw: unknown, existingFiles: string[]): { ok: true; 
       if (typeof o.content !== "string" || !o.content.trim()) return { ok: false, error: `op ${i}: write needs non-empty content` };
       if (Buffer.byteLength(o.content, "utf8") > MAX_FILE_BYTES) return { ok: false, error: `op ${i}: content exceeds ${MAX_FILE_BYTES} bytes` };
       files.add(o.file);
-      if (files.size > MAX_FILES) return { ok: false, error: `bucket would exceed ${MAX_FILES} files` };
       ops.push({ op: "write", file: o.file, content: o.content });
     } else {
       files.delete(o.file);
       ops.push({ op: "delete", file: o.file });
     }
   }
+  // The MAX_FILES cap is judged on the batch's NET effect, after every op is folded into the
+  // set — a per-op incremental check would be order-dependent (write-then-delete rejected at
+  // the cap while the equivalent delete-then-write passes), and consolidation batches
+  // naturally write the merged file before deleting its sources.
+  if (files.size > MAX_FILES) return { ok: false, error: `bucket would exceed ${MAX_FILES} files` };
   return { ok: true, ops };
 }
 
