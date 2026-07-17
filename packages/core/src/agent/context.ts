@@ -94,12 +94,14 @@ function memoryProtocol(memDir: string): string {
 export interface MemoryContextConfig {
   enabled(): boolean;
   dirFor(cwd: string): string;
-  /** Dreaming (Phase 7b): the _assistant bucket path — see assistantMemoryDirFor. Optional (unlike
-   *  `enabled`/`dirFor`) so every pre-Dreaming caller/test that builds a `MemoryContextConfig`
-   *  without it (only the "project" bucket ever existed for them) keeps compiling untouched — only
-   *  `assemble({ memoryBucket: "assistant" })` callers (daemon.ts's real wiring; dispatch turns)
-   *  need it supplied. */
-  assistantDir?(): string;
+  /** Dreaming (Phase 7b): the _assistant bucket path — see assistantMemoryDirFor. REQUIRED (like
+   *  `enabled`/`dirFor`), deliberately NOT optional: the assistant branch in `assemble()` fires
+   *  INSTEAD of the project/legacy fallbacks (if/else-if chain), so an assistant-mode caller
+   *  (chat/cowork later) that forgot to wire this would silently degrade to total memory silence.
+   *  Requiring it turns that dormant edge into a compile error at the construction site. Callers
+   *  that never pass `memoryBucket: "assistant"` still supply it (a stub path is fine — it's only
+   *  read inside the assistant branch). */
+  assistantDir(): string;
 }
 
 export class ContextAssembler {
@@ -169,10 +171,10 @@ export class ContextAssembler {
       // Dreaming (Phase 7b): assistant-mode sessions load the shared dream bucket INSTEAD of the
       // cwd MEMDIR, and get NO memory-protocol block — they have no write tools; memories come
       // from dream cycles, and their base prompt already says so.
-      const memDir = this.memory.assistantDir?.();
-      const idx = memDir ? readMemory(join(memDir, "MEMORY.md"), MEMDIR_INDEX_MAX_LINES, MEMDIR_INDEX_MAX_BYTES) : null;
+      const indexPath = join(this.memory.assistantDir(), "MEMORY.md");
+      const idx = readMemory(indexPath, MEMDIR_INDEX_MAX_LINES, MEMDIR_INDEX_MAX_BYTES);
       if (idx) {
-        sections.push(`<system-reminder>\nAssistant memory index (auto-loaded from ${join(memDir!, "MEMORY.md")}; capped at the first ${MEMDIR_INDEX_MAX_LINES} lines / ${Math.round(MEMDIR_INDEX_MAX_BYTES / 1024)}KB):\n${neutralizeReminderTags(idx)}\n</system-reminder>`);
+        sections.push(`<system-reminder>\nAssistant memory index (auto-loaded from ${indexPath}; capped at the first ${MEMDIR_INDEX_MAX_LINES} lines / ${Math.round(MEMDIR_INDEX_MAX_BYTES / 1024)}KB):\n${neutralizeReminderTags(idx)}\n</system-reminder>`);
       }
     } else if (this.memory && cwd && this.memory.enabled()) {
       const memDir = this.memory.dirFor(cwd);
