@@ -54,6 +54,7 @@ import { AgentStore } from "./agent/agents";
 import { SubagentManager } from "./agent/subagents";
 import { BackgroundAgentRegistry } from "./agent/bg-agent-registry";
 import { AgentEngine, SYSTEM_PROMPT } from "./agent/engine";
+import { Dreamer } from "./agent/dreamer";
 import { deriveModelAliases } from "./agent/model-aliases";
 import { BashReviewer } from "./agent/reviewer";
 import { SessionTitler } from "./agent/titles";
@@ -326,6 +327,12 @@ export async function startDaemon(opts: {
   quota ??= new QuotaManager();
 
   let engine: AgentEngine | null = null;
+  // Dreaming (Phase 7b): constructed AFTER `engine` (its `activeTurnCount` thunk closes over it —
+  // see the construction site inside `if (agentProvider)` below), and only there — a no-provider
+  // daemon has no dispatch turns to dream about. Declared here (function scope, outside the gate)
+  // so `stop()` past the gate's close can still stop() it regardless of agentProvider, same
+  // "declared null/undefined above, assigned inside the gate" shape as `mcp`/`lspManager` below.
+  let dreamer: Dreamer | undefined;
   let mcp: McpManager | null = null;
   let lspManager: LspManager | null = null;
   // hot-settings T5b: reassigned inside the `if (agentProvider)` gate below (built only when the
@@ -779,6 +786,20 @@ export async function startDaemon(opts: {
     });
     dispatchChildren.start();
 
+    // Dreaming (Phase 7b): background memory synthesis for the dispatch session. Hardcoded
+    // model/cadence per spec; memory.enabled (hot) is the only switch. Constructed here, AFTER
+    // `engine` is assigned above, since `activeTurnCount` closes over it (an idle read at tick
+    // time, not a boot-time snapshot — `engine` is already its final value by this point in the
+    // gate, same as `dispatchChildren`'s own runTurn/isRunning/interrupt closures just above).
+    dreamer = new Dreamer({
+      provider: agentProvider,
+      store,
+      dir: () => assistantMemoryDirFor({ normaHome }),
+      enabled: memoryEnabledHot,
+      activeTurnCount: () => engine?.activeTurnCount() ?? 1, // no engine yet -> treat as busy
+    });
+    dreamer.start();
+
     // hot-settings T5b (final task of the hot-settings track): compose T2's live getters (already
     // reading `settings` above), T3's SettingsWatcher, and T4's makeApply diff-applier into one
     // running watcher — the payoff that makes flipping computerUse.enabled/lsp.enabled/any other
@@ -946,6 +967,7 @@ export async function startDaemon(opts: {
       server.stop(); mcp?.stopAll(); lspManager?.killAllNow(); void lspManager?.stopAll(); pluginSupervisor.stopAll(); bgRegistry.killAll();
       settingsWatcher?.stop(); // closes the fs.watch handle on settings.json — no leaked watcher past shutdown
       routineScheduler.stop(); routineStore.close(); // no orphan tick timer past drain
+      dreamer?.stop(); // no orphan dream tick timer past shutdown (unref'd already, but never left running)
       store.close(); lock.release();
     },
   };

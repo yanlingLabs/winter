@@ -44,7 +44,10 @@ export class Dreamer {
   private readonly timeoutMs: number;
   constructor(private readonly deps: DreamerDeps) {
     this.now = deps.now ?? Date.now;
-    this.timeoutMs = deps.timeoutMs ?? Number(process.env.NORMA_DREAM_TIMEOUT_MS ?? 120_000);
+    // A junk env value must fall back to the default, not become NaN — setTimeout(fn, NaN) fires
+    // immediately (lsp/client.ts's envNum guards the same footgun the same way).
+    const n = Number(process.env.NORMA_DREAM_TIMEOUT_MS);
+    this.timeoutMs = deps.timeoutMs ?? (Number.isFinite(n) && n > 0 ? n : 120_000);
   }
 
   private statePath(): string { return join(this.deps.dir(), "dream-state.json"); }
@@ -103,10 +106,15 @@ export class Dreamer {
     const content = `Today's date: ${today}\n\n## Current memory files\n${memories}\n\n## Tombstones (never re-learn)\n${tombstones}\n\n## Transcript window (events ${state.watermarkSeq + 1}..${upTo})\n${transcript}`;
     const input: TurnInputItem[] = [{ type: "message", role: "user", content }];
 
+    // Carried-over review fix (Task 3): without a signal, a Promise.race timeout only makes THIS
+    // call stop waiting — the detached streamTurn generator keeps draining under a hung provider,
+    // leaking a connection every tick. `ac` ties the provider call's lifetime to the race: aborted
+    // in the SAME finally that clears the timer, whichever side of the race wins.
+    const ac = new AbortController();
     let text = "";
     const run = (async () => {
       for await (const ev of this.deps.provider.provider.streamTurn({
-        model: DREAM_MODEL, reasoningEffort: DREAM_EFFORT, instructions: DREAM_INSTRUCTION, input, tools: [],
+        model: DREAM_MODEL, reasoningEffort: DREAM_EFFORT, instructions: DREAM_INSTRUCTION, input, tools: [], signal: ac.signal,
       })) {
         if (ev.type === "text_delta") text += ev.delta;
         else if (ev.type === "error") throw new Error(`provider error: ${ev.message}`);
@@ -115,7 +123,7 @@ export class Dreamer {
     })();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error("dream timed out")), this.timeoutMs); });
-    try { await Promise.race([run, timeout]); } finally { clearTimeout(timer); }
+    try { await Promise.race([run, timeout]); } finally { clearTimeout(timer); ac.abort(); }
 
     const m = text.match(/\{[\s\S]*\}/); // reviewer.ts's greedy-brace idiom
     if (!m) throw new Error(`dream returned no JSON: ${text.slice(0, 120)}`);
