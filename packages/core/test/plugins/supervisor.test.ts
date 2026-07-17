@@ -966,10 +966,25 @@ describe("PID file lifecycle", () => {
     });
     const p = fakePlugin();
     supervisor.startAll([p]);
-    await sleep(70);
-    expect(spawned.length).toBeGreaterThanOrEqual(2);
     const pidPath = join(dir, "plugins", `${p.id}.pid`);
-    expect(JSON.parse(readFileSync(pidPath, "utf8")).pid).toBe(spawned[spawned.length - 1]!.proc.pid);
+    // The fake plugin crash-loops; the supervisor REMOVES the pid file on crash and re-writes it on
+    // each restart, so the old fixed `sleep(70)` + immediate read could land in the removal→rewrite
+    // gap (ENOENT) or mid-rewrite (torn read) under heavy concurrent-suite load. Poll until the pid
+    // file holds a RESTART pid (a spawn AFTER the first) — proving "re-written with a new pid on
+    // restart" — tolerating ENOENT/torn reads.
+    const deadline = Date.now() + 5000;
+    let sawRestartPid = false;
+    while (Date.now() < deadline && !sawRestartPid) {
+      if (existsSync(pidPath)) {
+        try {
+          const { pid } = JSON.parse(readFileSync(pidPath, "utf8")) as { pid: number };
+          if (spawned.slice(1).some((s) => s.proc.pid === pid)) sawRestartPid = true;
+        } catch { /* mid-rewrite torn read — retry */ }
+      }
+      if (!sawRestartPid) await sleep(10);
+    }
+    expect(spawned.length).toBeGreaterThanOrEqual(2);
+    expect(sawRestartPid).toBe(true);
   });
 });
 

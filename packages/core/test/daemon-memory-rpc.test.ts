@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, existsSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, existsSync, writeFileSync, readFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@norma/protocol";
@@ -498,20 +498,30 @@ describe("memory.* RPCs (T2) — file-backed (memory.enabled: true, default)", (
     const target = globalMemoryDirFor({ normaHome: home });
     expect(existsSync(join(target, "a.md"))).toBe(true);
 
-    writeFileSync(join(home, "settings.json"), JSON.stringify({ memory: { enabled: false } }));
+    // ATOMIC write (temp + rename): the live SettingsWatcher reads settings.json on its fs.watch
+    // callback, and a plain writeFileSync truncates-then-writes, so under load the watcher can read
+    // a HALF-WRITTEN file → "JSON Parse error" → keep-last-good → the single flip below NEVER takes
+    // effect → the poll runs until the test times out. A rename is atomic on POSIX: the watcher sees
+    // either the old or the fully-written new file, never a torn one (this is exactly how the
+    // production daemon writes settings). This was the true flake trigger, confirmed in the failing
+    // run's log ("settings reload failed, keeping previous: JSON Parse error: Expected '}'").
+    const settingsPath = join(home, "settings.json");
+    const flipToLegacy = () => {
+      writeFileSync(`${settingsPath}.tmp`, JSON.stringify({ memory: { enabled: false } }));
+      renameSync(`${settingsPath}.tmp`, settingsPath);
+    };
+    flipToLegacy();
+    let lastFlip = Date.now();
 
     // Polls with a FRESH name each attempt (debounced fs.watch, ~150ms default, so the reload
     // isn't necessarily visible on the very next call) — a repeated name would risk an early
     // in-flight (still-files-mode) write landing at `target` and staying there, which a shared-name
     // retry loop could mistake for "never switched" or leave as stray cross-contamination once it
     // eventually DOES land in the legacy store under that same name.
-    // Generous deadline (was 5000ms): the reload rides a REAL fs.watch → 150ms debounce → apply
-    // pipeline, all on the event loop. Under heavy concurrent-suite CPU load that loop starves and
-    // the pipeline legitimately overruns a 5s budget (~1-in-3 flake at merge-gate load). 30s gives
-    // ample headroom while preserving correctness — a genuinely broken hot-reload never lands and
-    // still fails this assertion, just later. (Root-caused: shrinking this below the 150ms debounce
-    // deterministically reproduces the exact `landedInLegacyStore` failure.)
-    const deadline = Date.now() + 30_000;
+    // Internal deadline (20s) sits BELOW the test's explicit bun timeout (30s, 3rd arg) so a
+    // genuinely-broken reload fails this ASSERTION cleanly ("Expected true, Received false") rather
+    // than bun aborting the test at its 5000ms DEFAULT.
+    const deadline = Date.now() + 20_000;
     let landedInLegacyStore = false;
     let i = 0;
     while (Date.now() < deadline && !landedInLegacyStore) {
@@ -522,6 +532,11 @@ describe("memory.* RPCs (T2) — file-backed (memory.enabled: true, default)", (
         landedInLegacyStore = true;
         expect(existsSync(join(target, `${probe}.md`))).toBe(false); // never ALSO written to files
       } else {
+        // Re-nudge a possibly-DROPPED fs.watch event — macOS fs.watch can miss a single event under
+        // heavy concurrent-suite load, and the debounce then never fires (confirmed: a run failed at
+        // the 20s deadline with the reload never landing). Re-write no faster than ~1s so the 150ms
+        // debounce isn't perpetually reset. Atomic (temp+rename) so it's never a torn read.
+        if (Date.now() - lastFlip > 1000) { flipToLegacy(); lastFlip = Date.now(); }
         await new Promise((r) => setTimeout(r, 50));
       }
     }
@@ -529,5 +544,6 @@ describe("memory.* RPCs (T2) — file-backed (memory.enabled: true, default)", (
 
     expect(daemon).toBe(daemonRef);
     c.close();
-  });
+  }, 30_000); // explicit bun test timeout (default is 5000ms) — the real fs.watch reload can exceed
+  // 5s under heavy concurrent-suite load; without this, bun aborts the test before the poll finishes.
 });
