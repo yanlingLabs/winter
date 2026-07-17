@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Server-side seam for the remote (iPhone) transport that `Gateway` (Gateway.swift) terminates.
 /// SP2 implements this concretely over iroh (a QUIC-like P2P library); kept as a bare protocol
@@ -19,6 +20,11 @@ public protocol RemoteListener: Sendable {
 /// length-prefix framing, only whole `WireEnvelope` frames.
 public protocol RemoteConn: Sendable {
     var inbound: AsyncStream<Data> { get }
+    /// Stable identity of the remote peer on the other end (SP2's iroh listener supplies the
+    /// verified node id; the scripted test double returns a fixed stub). Load-bearing for SP2a's
+    /// revocation path — the gateway keys per-phone state on `ClientHello.clientInstanceID`, but a
+    /// listener-level identity is what a future transport-level ban would gate on.
+    var peerID: String { get }
     func send(_ frame: Data) async
     func close()
 }
@@ -55,15 +61,30 @@ public final class ScriptedRemoteConn: RemoteConn, @unchecked Sendable {
     public let inbound: AsyncStream<Data>
     private let inboundCont: AsyncStream<Data>.Continuation
 
-    private let lock = NSLock()
-    private var _outbound: [Data] = []
-    private var _closed = false
-    private var sentAttempts = 0
-    private var dropNextSend = false
-    private var dupNextSend = false
-    private var disconnectAfterN: Int?
+    /// All mutable state behind ONE Swift-6 `OSAllocatedUnfairLock` (SP2a gate G6, replacing the
+    /// prior `NSLock`) — the lock guards only synchronous critical sections; any suspension (the
+    /// send-gate below) happens strictly OUTSIDE `withLock`, honoring the "no lock held across an
+    /// await" rule the gateway actor's isolation depends on.
+    private struct State {
+        var outbound: [Data] = []
+        var closed = false
+        var sentAttempts = 0
+        var dropNextSend = false
+        var dupNextSend = false
+        var disconnectAfterN: Int?
+        /// Send-gate (SP2a gate G2 test infra): the 1-based index from which `send` suspends until
+        /// `releaseSends()`, plus the continuations parked there. Lets a test freeze the gateway
+        /// mid-handshake (blocked on its first phone-bound frame) so a daemon event delivered in
+        /// that window deterministically exercises the switchover path.
+        var gateFrom: Int?
+        var parked: [CheckedContinuation<Void, Never>] = []
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
-    public init() {
+    public let peerID: String
+
+    public init(peerID: String = "peer-stub") {
+        self.peerID = peerID
         var c: AsyncStream<Data>.Continuation!
         inbound = AsyncStream { c = $0 }
         inboundCont = c
@@ -71,8 +92,8 @@ public final class ScriptedRemoteConn: RemoteConn, @unchecked Sendable {
 
     /// Every frame actually delivered to the "phone" (post fault-injection) — what a real phone
     /// would have received, in order.
-    public var outbound: [Data] { lock.lock(); defer { lock.unlock() }; return _outbound }
-    public var isClosed: Bool { lock.lock(); defer { lock.unlock() }; return _closed }
+    public var outbound: [Data] { state.withLock { $0.outbound } }
+    public var isClosed: Bool { state.withLock { $0.closed } }
 
     // MARK: - Script API (test → gateway direction)
 
@@ -86,42 +107,79 @@ public final class ScriptedRemoteConn: RemoteConn, @unchecked Sendable {
 
     /// The next frame the gateway tries to send is silently dropped — never recorded in
     /// `outbound` — simulating a flaky link losing a packet.
-    public func injectDrop() { lock.lock(); dropNextSend = true; lock.unlock() }
+    public func injectDrop() { state.withLock { $0.dropNextSend = true } }
 
     /// The next frame the gateway sends is delivered TWICE — simulating a retransmit duplicate.
-    public func injectDup() { lock.lock(); dupNextSend = true; lock.unlock() }
+    public func injectDup() { state.withLock { $0.dupNextSend = true } }
 
     /// After the Nth `send()` attempt (counting drops), the connection auto-closes — simulating
     /// the link dying mid-stream.
-    public func disconnectAfter(_ n: Int) { lock.lock(); disconnectAfterN = n; lock.unlock() }
+    public func disconnectAfter(_ n: Int) { state.withLock { $0.disconnectAfterN = n } }
+
+    /// From the `n`-th `send()` onward (1-based), suspend inside `send` until `releaseSends()`.
+    /// The frame is still RECORDED in `outbound` before parking, so a test can observe that the
+    /// gateway reached the send while it stays blocked. See `State.gateFrom`.
+    public func blockSendsFrom(_ n: Int) { state.withLock { $0.gateFrom = n } }
+
+    /// Releases every parked `send` and lifts the gate, so subsequent sends pass through freely.
+    public func releaseSends() {
+        let toResume: [CheckedContinuation<Void, Never>] = state.withLock {
+            $0.gateFrom = nil
+            let parked = $0.parked
+            $0.parked = []
+            return parked
+        }
+        for c in toResume { c.resume() }
+    }
 
     public func send(_ frame: Data) async {
-        lock.lock()
-        guard !_closed else { lock.unlock(); return }
-        sentAttempts += 1
-        if dropNextSend {
-            dropNextSend = false
-        } else {
-            _outbound.append(frame)
-            if dupNextSend {
-                dupNextSend = false
-                _outbound.append(frame)
+        enum Outcome { case dropped, closedAlready, delivered(shouldBlock: Bool, shouldClose: Bool) }
+        let outcome: Outcome = state.withLock { s in
+            guard !s.closed else { return .closedAlready }
+            s.sentAttempts += 1
+            if s.dropNextSend {
+                s.dropNextSend = false
+                // A dropped frame is neither recorded nor gated, but still counts toward
+                // disconnectAfterN (parity with the pre-refactor behavior).
+            } else {
+                s.outbound.append(frame)
+                if s.dupNextSend {
+                    s.dupNextSend = false
+                    s.outbound.append(frame)
+                }
+            }
+            var shouldClose = false
+            if let n = s.disconnectAfterN, s.sentAttempts >= n {
+                s.disconnectAfterN = nil
+                shouldClose = true
+            }
+            let shouldBlock = s.gateFrom.map { s.sentAttempts >= $0 } ?? false
+            return .delivered(shouldBlock: shouldBlock, shouldClose: shouldClose)
+        }
+
+        guard case .delivered(let shouldBlock, let shouldClose) = outcome else { return }
+
+        if shouldBlock {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                // Re-check under the lock: a release that raced ahead of this park would otherwise
+                // strand the continuation forever.
+                let releaseNow = state.withLock { s -> Bool in
+                    if s.gateFrom == nil { return true }
+                    s.parked.append(cont)
+                    return false
+                }
+                if releaseNow { cont.resume() }
             }
         }
-        var shouldClose = false
-        if let n = disconnectAfterN, sentAttempts >= n {
-            disconnectAfterN = nil
-            shouldClose = true
-        }
-        lock.unlock()
         if shouldClose { close() }
     }
 
     public func close() {
-        lock.lock()
-        guard !_closed else { lock.unlock(); return }
-        _closed = true
-        lock.unlock()
-        inboundCont.finish()
+        let didClose: Bool = state.withLock { s in
+            guard !s.closed else { return false }
+            s.closed = true
+            return true
+        }
+        if didClose { inboundCont.finish() }
     }
 }

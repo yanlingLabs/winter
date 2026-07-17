@@ -189,3 +189,6 @@ subcommands, and the server-side `advisor` tool). Notes:
   proper app identity — rather than CC's undocumented hosted delivery, plus a headless `osascript`
   fallback when nobody's attached at all (CC's hosted Remote Control phone delivery is out of
   scope for Norma).
+- Update (SP2a): Norma's own remote transport — a Mac-side `Gateway` fronted by a real iroh P2P
+  listener, proven end-to-end (real daemon + real iroh) in `IrohE2ETests.swift` — is now live code,
+  though dev/test-only until SP2b's pairing ceremony ships.
