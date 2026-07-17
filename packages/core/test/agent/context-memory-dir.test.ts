@@ -27,7 +27,7 @@ describe("ContextAssembler + MEMDIR (T1)", () => {
     const memDir = join(home, "projects", "some-key", "memory"); // never created
     const a = new ContextAssembler({
       normaHome: home, trust, skills,
-      memory: { enabled: () => true, dirFor: () => memDir },
+      memory: { enabled: () => true, dirFor: () => memDir, assistantDir: () => join(home, "projects", "_assistant", "memory") },
     });
     const out = a.assemble({ cwd });
     expect(out).toContain("## Memory");
@@ -45,7 +45,7 @@ describe("ContextAssembler + MEMDIR (T1)", () => {
     writeFileSync(join(memDir, "MEMORY.md"), "- [coffee-pref](coffee-pref.md) — Likes oat milk lattes\n");
     const a = new ContextAssembler({
       normaHome: home, trust, skills,
-      memory: { enabled: () => true, dirFor: () => memDir },
+      memory: { enabled: () => true, dirFor: () => memDir, assistantDir: () => join(home, "projects", "_assistant", "memory") },
     });
     const out = a.assemble({ cwd });
     expect(out).toContain("<system-reminder>");
@@ -62,7 +62,7 @@ describe("ContextAssembler + MEMDIR (T1)", () => {
     writeFileSync(join(memDir, "MEMORY.md"), Array.from({ length: 201 }, (_, i) => `line${i}`).join("\n"));
     const a = new ContextAssembler({
       normaHome: home, trust, skills,
-      memory: { enabled: () => true, dirFor: () => memDir },
+      memory: { enabled: () => true, dirFor: () => memDir, assistantDir: () => join(home, "projects", "_assistant", "memory") },
     });
     const out = a.assemble({ cwd });
     expect(out).toContain("line0");
@@ -80,7 +80,7 @@ describe("ContextAssembler + MEMDIR (T1)", () => {
     writeFileSync(join(memDir, "MEMORY.md"), Array.from({ length: 30 }, () => "y".repeat(900)).join("\n"));
     const a = new ContextAssembler({
       normaHome: home, trust, skills,
-      memory: { enabled: () => true, dirFor: () => memDir },
+      memory: { enabled: () => true, dirFor: () => memDir, assistantDir: () => join(home, "projects", "_assistant", "memory") },
     });
     const out = a.assemble({ cwd });
     expect(out).toContain("[…truncated]");
@@ -98,7 +98,7 @@ describe("ContextAssembler + MEMDIR (T1)", () => {
     const cwd = realDir();
     const a = new ContextAssembler({
       normaHome: home, trust, skills,
-      memory: { enabled: () => false, dirFor: () => join(home, "projects", "x", "memory") },
+      memory: { enabled: () => false, dirFor: () => join(home, "projects", "x", "memory"), assistantDir: () => join(home, "projects", "_assistant", "memory") },
     });
     const out = a.assemble({ cwd });
     expect(out).toContain("LEGACY_USER_MEMORY_FACT"); // legacy path ran
@@ -109,7 +109,7 @@ describe("ContextAssembler + MEMDIR (T1)", () => {
     const { home, trust, skills } = setup();
     const a = new ContextAssembler({
       normaHome: home, trust, skills,
-      memory: { enabled: () => true, dirFor: () => join(home, "projects", "x", "memory") },
+      memory: { enabled: () => true, dirFor: () => join(home, "projects", "x", "memory"), assistantDir: () => join(home, "projects", "_assistant", "memory") },
     });
     const out = a.assemble({ cwd: null });
     expect(out).not.toContain("NO dedicated memory tools");
@@ -122,7 +122,7 @@ describe("ContextAssembler + MEMDIR (T1)", () => {
     let enabled = true;
     const a = new ContextAssembler({
       normaHome: home, trust, skills,
-      memory: { enabled: () => enabled, dirFor: () => memDir },
+      memory: { enabled: () => enabled, dirFor: () => memDir, assistantDir: () => join(home, "projects", "_assistant", "memory") },
     });
     expect(a.assemble({ cwd })).toContain("NO dedicated memory tools");
     enabled = false;

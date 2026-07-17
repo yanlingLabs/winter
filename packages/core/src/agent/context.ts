@@ -94,6 +94,14 @@ function memoryProtocol(memDir: string): string {
 export interface MemoryContextConfig {
   enabled(): boolean;
   dirFor(cwd: string): string;
+  /** Dreaming (Phase 7b): the _assistant bucket path — see assistantMemoryDirFor. REQUIRED (like
+   *  `enabled`/`dirFor`), deliberately NOT optional: the assistant branch in `assemble()` fires
+   *  INSTEAD of the project/legacy fallbacks (if/else-if chain), so an assistant-mode caller
+   *  (chat/cowork later) that forgot to wire this would silently degrade to total memory silence.
+   *  Requiring it turns that dormant edge into a compile error at the construction site. Callers
+   *  that never pass `memoryBucket: "assistant"` still supply it (a stub path is fine — it's only
+   *  read inside the assistant branch). */
+  assistantDir(): string;
 }
 
 export class ContextAssembler {
@@ -123,7 +131,7 @@ export class ContextAssembler {
     };
   }
 
-  assemble(input: { cwd: string | null; loadedSkills?: string[]; basePromptOverride?: string }): string {
+  assemble(input: { cwd: string | null; loadedSkills?: string[]; basePromptOverride?: string; memoryBucket?: "project" | "assistant" }): string {
     const cwd = input.cwd;
     const trusted = cwd ? this.trust.isTrusted(cwd) : false;
     // Dispatch mode (Phase 7, spec §7): the coordinator gets its OWN base prompt — swapped in
@@ -147,15 +155,28 @@ export class ContextAssembler {
       if (projInstr) sections.push(`## Project instructions (NORMA.md)\n${projInstr}`);
     }
 
-    // File-based memory (MEMDIR, T1): supersedes the tool-based phase-5b memory below WHENEVER
-    // (a) a `memory` config was supplied (daemon.ts always supplies one in production — only
-    // tests that don't care about memory omit it) AND (b) it's enabled AND (c) there's a cwd to
-    // derive a project dir from (no cwd → no project to key off; same "nothing to inject" outcome
-    // the legacy branch reaches for its own project-scoped half when `cwd` is null). Absent config
-    // (deliberately no `else memory.enabled() === false` special case — see MemoryContextConfig's
-    // own doc comment) or a null cwd falls through to the UNCHANGED legacy branch, so every
+    // File-based memory (MEMDIR, T1; bucket switch added by Dreaming Phase 7b): supersedes the
+    // tool-based phase-5b memory below WHENEVER a `memory` config was supplied (daemon.ts always
+    // supplies one in production — only tests that don't care about memory omit it) AND it's
+    // enabled. Two live buckets share that gate: `memoryBucket: "assistant"` (dispatch/assistant
+    // sessions — the shared `_assistant` dream bucket, keyed off nothing but `memory` itself, no
+    // cwd needed) takes priority when requested; otherwise the ORIGINAL project bucket applies
+    // whenever there's also a cwd to derive a project dir from (no cwd → no project to key off,
+    // same "nothing to inject" outcome the legacy branch reaches for its own project-scoped half
+    // when `cwd` is null). Absent config (deliberately no `else memory.enabled() === false`
+    // special case — see MemoryContextConfig's own doc comment), disabled memory, or (for the
+    // project bucket) a null cwd all fall through to the UNCHANGED legacy branch, so every
     // existing caller/test keeps its exact prior behavior.
-    if (this.memory && cwd && this.memory.enabled()) {
+    if (this.memory && this.memory.enabled() && input.memoryBucket === "assistant") {
+      // Dreaming (Phase 7b): assistant-mode sessions load the shared dream bucket INSTEAD of the
+      // cwd MEMDIR, and get NO memory-protocol block — they have no write tools; memories come
+      // from dream cycles, and their base prompt already says so.
+      const indexPath = join(this.memory.assistantDir(), "MEMORY.md");
+      const idx = readMemory(indexPath, MEMDIR_INDEX_MAX_LINES, MEMDIR_INDEX_MAX_BYTES);
+      if (idx) {
+        sections.push(`<system-reminder>\nAssistant memory index (auto-loaded from ${indexPath}; capped at the first ${MEMDIR_INDEX_MAX_LINES} lines / ${Math.round(MEMDIR_INDEX_MAX_BYTES / 1024)}KB):\n${neutralizeReminderTags(idx)}\n</system-reminder>`);
+      }
+    } else if (this.memory && cwd && this.memory.enabled()) {
       const memDir = this.memory.dirFor(cwd);
       sections.push(memoryProtocol(memDir));
       const idx = readMemory(join(memDir, "MEMORY.md"), MEMDIR_INDEX_MAX_LINES, MEMDIR_INDEX_MAX_BYTES);
