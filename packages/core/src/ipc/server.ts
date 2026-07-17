@@ -71,6 +71,12 @@ interface ConnState {
   // this connection authenticated as); null for every other role. Consumed by Task 3/4's
   // supervisor wiring (notifyRegistered/tool bridge) to correlate a connection to its plugin.
   pluginId: string | null;
+  // Remote Gateway SP1 Task 2: per-connection idempotency cache for `authedRole === "remote"`
+  // callers only (see the data() pump). Insertion-ordered so the oldest entry is always
+  // `.keys().next().value` — a cheap LRU-by-insertion once capped at 256 entries. Caches
+  // SUCCESSFUL results only (a thrown RpcFailure is never stored), so a retry after a transient
+  // failure still re-attempts.
+  seenCommands: Map<string, unknown>;
 }
 
 export interface IpcServerOptions {
@@ -465,6 +471,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           helloTimer: setTimeout(() => socket.end(), helloTimeoutMs),
           writer: new ConnWriter(socket as unknown as WritableSocket),
           pluginId: null,
+          seenCommands: new Map(),
         };
       },
       drain(socket) {
@@ -516,7 +523,26 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             }
             if (incoming.kind !== "request") continue; // Phase 0: ignore client notifications
             id = incoming.msg.id;
-            const result = await handle(socket, incoming.msg.method, incoming.msg.params);
+            // Remote Gateway SP1 Task 2: a flaky mobile link means a phone may resend a request
+            // whose ack was lost — dedup remote mutating RPCs per-connection by `commandId`. A
+            // repeat returns the CACHED result and does NOT re-dispatch. Remote-only; harness/
+            // plugin/local callers (no commandId, or role !== "remote") are unaffected. Errors are
+            // NOT cached (only the success path below reaches the `.set`), so a retry after a
+            // transient failure re-attempts.
+            const commandId = socket.data.authedRole === "remote" ? incoming.msg.commandId : undefined;
+            let result: unknown;
+            if (commandId && socket.data.seenCommands.has(commandId)) {
+              result = socket.data.seenCommands.get(commandId); // replay: no re-dispatch
+            } else {
+              result = await handle(socket, incoming.msg.method, incoming.msg.params);
+              if (commandId) {
+                socket.data.seenCommands.set(commandId, result);
+                if (socket.data.seenCommands.size > 256) {
+                  const oldest = socket.data.seenCommands.keys().next().value as string;
+                  socket.data.seenCommands.delete(oldest);
+                }
+              }
+            }
             socket.data.writer.enqueue(encodeLine({ jsonrpc: "2.0", id, result }));
           } catch (err) {
             const e = err as Partial<RpcFailure>;
