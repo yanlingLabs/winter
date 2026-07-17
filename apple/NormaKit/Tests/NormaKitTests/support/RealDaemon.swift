@@ -86,8 +86,11 @@ struct RealDaemon {
     }
 
     /// Spawns the daemon on a temp `NORMA_HOME` and waits (asynchronously) for its ready line.
-    /// Throws if the fixture exits early or doesn't come up within the deadline.
-    static func start() async throws -> RealDaemon {
+    /// Throws if the fixture exits early or doesn't come up within the deadline. On ANY such throw
+    /// it terminates the subprocess and removes the temp home + scratch files itself (the returned
+    /// `RealDaemon`'s `stop()` is otherwise the only cleanup path). `fixtureOverride` is test-only —
+    /// it lets a cleanup-on-failure test inject a fixture that exits early / prints garbage.
+    static func start(fixtureOverride: String? = nil) async throws -> RealDaemon {
         // Rooted at `/tmp`, NOT `NSTemporaryDirectory()`: on macOS the latter resolves to a long
         // per-process path (`/var/folders/xx/.../T/`), and `home + "/run/core.sock"` then blows
         // past `sockaddr_un`'s ~104-byte `sun_path` limit. The daemon itself boots fine either way
@@ -112,7 +115,7 @@ struct RealDaemon {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["bun", "-e", fixture]
+        process.arguments = ["bun", "-e", fixtureOverride ?? Self.fixture]
         process.currentDirectoryURL = cliPackageDir
         var env = ProcessInfo.processInfo.environment
         env["NORMA_HOME"] = home
@@ -122,11 +125,30 @@ struct RealDaemon {
 
         try process.run()
 
-        let line = try await waitForFirstLine(process: process, stdoutPath: stdoutPath, stderrPath: stderrPath)
-        guard let data = line.data(using: .utf8) else {
-            throw RealDaemonError.badOutput(line: line)
+        // Once the process is running, any failure BEFORE we return a RealDaemon (whose stop() is
+        // the only cleanup path) must tear down the subprocess + temp home itself — otherwise a
+        // slow/hung boot (.timedOut), a crashed fixture (.processExitedEarly), or a garbage line
+        // leaks a zombie bun process and a stale /tmp/norma-sp2a-<uuid> for the rest of the session.
+        func cleanupPartial() {
+            if process.isRunning { process.terminate(); process.waitUntilExit() }
+            try? FileManager.default.removeItem(atPath: home)
+            try? FileManager.default.removeItem(atPath: stdoutPath)
+            try? FileManager.default.removeItem(atPath: stderrPath)
         }
-        let out = try JSONDecoder().decode(FixtureOutput.self, from: data)
+
+        let out: FixtureOutput
+        do {
+            let line = try await waitForFirstLine(process: process, stdoutPath: stdoutPath, stderrPath: stderrPath)
+            guard let data = line.data(using: .utf8) else { throw RealDaemonError.badOutput(line: line) }
+            do {
+                out = try JSONDecoder().decode(FixtureOutput.self, from: data)
+            } catch {
+                throw RealDaemonError.badOutput(line: line) // malformed line → friendly error, not a raw DecodingError
+            }
+        } catch {
+            cleanupPartial()
+            throw error
+        }
 
         return RealDaemon(
             socketPath: out.socketPath,
@@ -216,5 +238,24 @@ final class RealDaemonTests: XCTestCase {
 
         daemon.stop() // idempotent alongside the `defer` above
         XCTAssertFalse(FileManager.default.fileExists(atPath: daemon.socketPath), "stop() should remove the socket")
+    }
+
+    /// A fixture that prints garbage (not the expected JSON) must make `start()` THROW `badOutput`
+    /// AND clean up after itself — no leaked subprocess, no stale `/tmp/norma-sp2a-<uuid>` home.
+    func testStartCleansUpOnBadOutput() async throws {
+        func normaTempDirCount() -> Int {
+            let items = (try? FileManager.default.contentsOfDirectory(atPath: "/tmp")) ?? []
+            return items.filter { $0.hasPrefix("norma-sp2a-") }.count
+        }
+        let before = normaTempDirCount()
+
+        do {
+            _ = try await RealDaemon.start(fixtureOverride: "process.stdout.write('not-json\\n');")
+            XCTFail("start() should have thrown on garbage fixture output")
+        } catch let RealDaemonError.badOutput(line) {
+            XCTAssertEqual(line, "not-json")
+        }
+        // Cleanup removes the temp home it created → count returns to baseline (no leak).
+        XCTAssertEqual(normaTempDirCount(), before, "start() must remove its temp home on failure")
     }
 }
