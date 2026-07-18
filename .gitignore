@@ -35,3 +35,4 @@ docs/superpowers/
 # iroh-ffi prebuilt XCFramework (~133MB unpacked) — too large to commit;
 # fetched via apple/NormaKit/vendor/fetch-iroh.sh (checksum-pinned there).
 apple/NormaKit/vendor/IrohLib.xcframework/
+.build/
