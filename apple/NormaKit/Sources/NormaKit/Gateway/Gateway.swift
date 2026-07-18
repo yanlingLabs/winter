@@ -254,7 +254,27 @@ public actor Gateway {
             guard sessions.count >= Self.maxSessions else { break }
             stale.pumpTask?.cancel()
             await stale.daemonClient.close()
+            // T4 review fix 3: `close()` suspended this actor — the SAME `clientInstanceID` may
+            // have reconnected in that window, in which case `handle` already stored a FRESH
+            // `PhoneSession` under this key. Blindly nil-ing the key here would drop that
+            // brand-new, possibly-live session on the floor. Only remove the entry if it is still
+            // THIS (stale) object; when superseded, skip — the stale object is already torn down
+            // (pump cancelled, daemon client closed — harmless, it held only disconnected state)
+            // and the newcomer is left untouched.
+            guard sessions[stale.clientInstanceID] === stale else { continue }
             sessions[stale.clientInstanceID] = nil
+            // T4 review fix 2: prune the evicted id from `peerToClients` too — without this, a
+            // churning paired device (fresh `clientInstanceID` per reinstall/reconnect, same
+            // peerID) grows its peer's set without bound even though eviction keeps `sessions`
+            // itself capped. Drop the whole key once its set empties so the map stays bounded by
+            // LIVE state, not ever-seen ids. Revocation-correctness is unaffected:
+            // `revoke(peerID:)` only needs the ids that still have gateway state to tear down —
+            // an evicted id has none, and its future reconnect is re-gated by the router/
+            // directory check, not by this map.
+            for (peer, var clients) in peerToClients where clients.contains(stale.clientInstanceID) {
+                clients.remove(stale.clientInstanceID)
+                peerToClients[peer] = clients.isEmpty ? nil : clients
+            }
         }
     }
 
@@ -310,6 +330,13 @@ public actor Gateway {
     /// `revoke` removes the session so a test can assert it ends up cancelled.
     func pumpTaskForTesting(_ clientInstanceID: String) -> Task<Void, Never>? {
         sessions[clientInstanceID]?.pumpTask
+    }
+
+    /// Test-only inspection hook (`@testable`, T4 review fix 2): the `clientInstanceID`s currently
+    /// mapped for a peer — the eviction test asserts this stays bounded (pruned in lockstep with
+    /// `sessions`) for a churning device instead of growing with every ever-seen id.
+    func peerClientsForTesting(_ peerID: String) -> Set<String> {
+        peerToClients[peerID] ?? []
     }
 
     /// Test-only synchronization hook (`@testable`, SP2a Task 4's E2E): resumed once the

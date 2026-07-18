@@ -80,6 +80,14 @@ final class PairingE2ETests: XCTestCase {
         guard let irohListener = listenerBox.value else {
             throw PairingE2EError("makeListener never ran — RemoteHost.start() didn't bind a listener")
         }
+        // T4 review fix 4: pin the derivation. `RemoteHost.macEndpointID` is computed from the
+        // identity secret (`SecretKey.fromBytes(...).public()`) rather than read off the bound
+        // listener — assert, against the REAL listener, that the two can never silently diverge
+        // (e.g. a future iroh release changing how an endpoint's id derives from its secret key).
+        XCTAssertEqual(
+            host.macEndpointID, irohListener.endpointID.description,
+            "RemoteHost's derived macEndpointID must equal the bound iroh listener's actual endpoint id"
+        )
         return TestSetup(host: host, irohListener: irohListener)
     }
 
@@ -215,7 +223,7 @@ final class PairingE2ETests: XCTestCase {
         let listResp = try await phone.expectFrame()
         XCTAssertEqual(listResp.kind, .rpcResponse)
 
-        await setup.host.revoke(phoneEndpointID: phoneEndpointID)
+        try await setup.host.revoke(phoneEndpointID: phoneEndpointID)
 
         // The live connection must actually drop (Gateway.revoke(peerID:)'s own fan-out).
         let closedResult = try await phone.readNext(timeout: 10)
@@ -256,7 +264,7 @@ final class PairingE2ETests: XCTestCase {
         let firstAccept = try await pairPhone(setup: setup, secret: secret)
         XCTAssertEqual(firstAccept.epoch, 1)
 
-        await setup.host.revoke(phoneEndpointID: phoneEndpointID)
+        try await setup.host.revoke(phoneEndpointID: phoneEndpointID)
 
         // Re-pair the SAME phone — `PairingStore.add` (via `PairingManager.confirm`) bumps the
         // epoch past whatever a future revoke last remembered, so this MUST come back as 2.

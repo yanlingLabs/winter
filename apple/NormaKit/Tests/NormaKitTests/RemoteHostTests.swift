@@ -1,4 +1,5 @@
 import XCTest
+import os
 import NormaProtocol
 @testable import NormaKit
 
@@ -122,7 +123,7 @@ final class RemoteHostTests: XCTestCase {
         let runningMacID = await host.macEndpointID
         XCTAssertNotNil(runningMacID)
 
-        await host.revoke(phoneEndpointID: "peer-1")
+        try await host.revoke(phoneEndpointID: "peer-1")
         let devices = await host.pairedDevices()
         XCTAssertTrue(devices.isEmpty, "revoke must empty the paired-device list")
         let stillRunningMacID = await host.macEndpointID
@@ -131,5 +132,65 @@ final class RemoteHostTests: XCTestCase {
         await host.stopIfIdle()
         let macIDAfterStop = await host.macEndpointID
         XCTAssertNil(macIDAfterStop, "now that the store is empty, the NEXT stopIfIdle must actually stop")
+    }
+
+    /// T4 review fix 5: a failed STORE revoke must throw and must NOT half-revoke — the gateway is
+    /// left untouched (the device is still authorized while its record survives; see
+    /// `RemoteHost.revoke`'s own doc comment). Store failure is induced the same way
+    /// `PairingManagerTests`' failing-persist test does: a read-only parent directory makes
+    /// `PairingStore.persist()`'s temp-file creation fail (and the store rolls back in-memory).
+    func test_revoke_storePersistFailure_throwsAndDeviceStaysPaired() async throws {
+        let storeDir = tempStoreDir()
+        try await seedOneDevice(storeDir: storeDir, peerID: "peer-1")
+        let host = await makeHost(storeDir: storeDir)
+        try await host.startIfNeeded()
+        let runningMacID = await host.macEndpointID
+        XCTAssertNotNil(runningMacID)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: storeDir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: storeDir.path) }
+
+        do {
+            try await host.revoke(phoneEndpointID: "peer-1")
+            XCTFail("revoke must rethrow the store's persist failure")
+        } catch {
+            // expected — any persist error propagates
+        }
+        let devices = await host.pairedDevices()
+        XCTAssertEqual(devices.map(\.phoneEndpointID), ["peer-1"],
+                       "a failed revoke must leave the device fully paired (the store rolled back)")
+    }
+
+    // MARK: - Re-entrancy: overlapping start calls bind exactly ONE listener (T4 review fix 1)
+
+    /// Two overlapping `openPairingWindow()` calls (the exact shape of the reviewed race:
+    /// app-launch `startIfNeeded()` vs. a user opening the QR sheet — both funnel into `start()`):
+    /// both suspend past the `listener == nil` gate (at `store.all()`), so without the in-flight
+    /// `startTask` guard BOTH would proceed to bind a listener from the same secret, leaking the
+    /// first gateway/runTask. The counting factory proves exactly one listener is ever created.
+    func test_concurrentStartCalls_bindExactlyOneListener() async throws {
+        let listenerCount = OSAllocatedUnfairLock(initialState: 0)
+        let config = RemoteHost.Config(
+            storeDir: tempStoreDir(), socketPath: "/tmp/norma-remote-host-tests-unused.sock",
+            hostLabel: "Test Mac", relayConfig: makeRelayConfig(), relayURLs: []
+        )
+        let host = await RemoteHost(
+            config: config,
+            secretStore: InMemoryEndpointSecretStore(),
+            makeListener: {
+                listenerCount.withLock { $0 += 1 }
+                return LoopbackListener()
+            },
+            makeDaemonFactory: { NormaClient(makeTransport: { ScriptedTransport() }, token: "test-token", clientName: "iphone-gateway") }
+        )
+
+        async let first: QRPayload = host.openPairingWindow()
+        async let second: QRPayload = host.openPairingWindow()
+        let (qr1, qr2) = try await (first, second)
+
+        XCTAssertEqual(listenerCount.withLock { $0 }, 1, "overlapping start calls must share ONE in-flight start — never bind a second listener")
+        XCTAssertEqual(qr1.macEndpointID, qr2.macEndpointID, "both callers see the same (single) host identity")
+        let macID = await host.macEndpointID
+        XCTAssertNotNil(macID)
     }
 }

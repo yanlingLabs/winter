@@ -547,4 +547,43 @@ final class GatewayGateTests: XCTestCase {
         let phone32Pump = await gateway.pumpTaskForTesting("phone-32")
         XCTAssertNotNil(phone32Pump, "the newly-added session must exist")
     }
+
+    /// T4 review fix 2: `peerToClients` must be pruned in lockstep with eviction. One paired device
+    /// (every `ScriptedRemoteConn()` defaults to peerID "peer-stub") churns 40 distinct
+    /// `clientInstanceID`s — e.g. repeated app reinstalls — each connecting, handshaking, hanging
+    /// up. Eviction keeps `sessions` capped at 32; before the fix, `peerToClients["peer-stub"]`
+    /// still grew to all 40 ever-seen ids. Post-fix it must track LIVE sessions exactly: every id
+    /// in the set has a session, every session's id is in the set, and the count is bounded by the
+    /// cap — never the churn total.
+    func testEviction_PeerToClientsPrunedInLockstep_BoundedForChurningPeer() async throws {
+        let daemon = try await RealDaemon.start()
+        defer { daemon.stop() }
+        let listener = LoopbackListener()
+        let gateway = realGateway(socketPath: daemon.socketPath, remoteToken: daemon.remoteToken, listener: listener)
+        let runTask = Task { await gateway.run() }
+        defer { runTask.cancel() }
+
+        for i in 0..<40 {
+            let conn = ScriptedRemoteConn()
+            listener.simulateConnection(conn)
+            conn.enqueueInbound(try helloFrame(clientInstanceID: "churn-\(i)", resumes: []))
+            _ = try await waitForOutbound(conn, count: 1) // helloAck
+            conn.endInbound() // hang up — evictable once `handle`'s loop notices
+        }
+        // Settle grace window (this file's established idiom): let the trailing disconnects'
+        // async `currentConn = nil` cleanup land before taking the final snapshot.
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let clients = await gateway.peerClientsForTesting("peer-stub")
+        XCTAssertLessThanOrEqual(clients.count, 32, "peerToClients must stay bounded by the session cap, never grow with every ever-seen id")
+        XCTAssertGreaterThan(clients.count, 0, "sanity: the live sessions' ids are still mapped")
+
+        // The set must equal the LIVE session set exactly — membership both ways.
+        for i in 0..<40 {
+            let id = "churn-\(i)"
+            let hasSession = await gateway.pumpTaskForTesting(id) != nil
+            XCTAssertEqual(clients.contains(id), hasSession,
+                           "\(id): peerToClients membership must track its session's existence exactly (session: \(hasSession))")
+        }
+    }
 }

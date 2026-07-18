@@ -81,6 +81,14 @@ public final class RemoteHost {
     private var gateway: Gateway?
     private var runTask: Task<Void, Never>?
     private var pairingWindowRequested = false
+    /// In-flight `start()` guard (T4 review fix 1). `startIfNeeded`'s `listener == nil` gate alone
+    /// is NOT re-entrancy-safe: this class is `@MainActor`, but `startIfNeeded` suspends (at
+    /// `store.all()` and throughout `start()`) BEFORE `listener` is assigned — so two overlapping
+    /// callers (e.g. app-launch `startIfNeeded()` racing a user's `openPairingWindow()`) could both
+    /// pass the gate and bind TWO `IrohListener`s from the SAME secret, leaking the first
+    /// gateway/runTask forever. Instead the first caller creates ONE start task and every
+    /// overlapping caller awaits that same task; cleared on completion and in `stop()`.
+    private var startTask: Task<Void, Error>?
 
     public private(set) var pairingManager: PairingManager?
     /// This Mac's iroh identity string — `nil` until `startIfNeeded()` has actually started the
@@ -119,12 +127,32 @@ public final class RemoteHost {
 
     /// Starts the whole stack (listener -> router -> gateway) if it isn't already running AND
     /// there's a reason to: at least one paired device, or a pairing window has been requested.
-    /// A no-op if already running, or if neither condition holds.
+    /// A no-op if already running, or if neither condition holds. Re-entrancy-safe: overlapping
+    /// callers all await the SAME in-flight start (see `startTask`'s own doc comment on why the
+    /// bare `listener == nil` check isn't enough).
     public func startIfNeeded() async throws {
         guard listener == nil else { return }
+        if let inFlight = startTask {
+            return try await inFlight.value
+        }
         let deviceCount = await store.all().count
         guard deviceCount > 0 || pairingWindowRequested else { return }
-        try await start()
+        // Re-check both gates after the suspension above: an overlapping caller may have created
+        // (or even completed) a start while `store.all()` was awaited.
+        guard listener == nil else { return }
+        if let inFlight = startTask {
+            return try await inFlight.value
+        }
+        // `Task { @MainActor ... }` (not a detached task): `start()` is MainActor-isolated, and the
+        // task handle must be visible to overlapping callers BEFORE start's first suspension —
+        // assigning `startTask` synchronously right here (no `await` between the checks above and
+        // this line) is what closes the double-start window.
+        let task = Task { @MainActor in
+            try await self.start()
+        }
+        startTask = task
+        defer { startTask = nil }
+        try await task.value
     }
 
     /// Stops the whole stack if it's running AND there's no more reason to keep it up: zero paired
@@ -200,6 +228,11 @@ public final class RemoteHost {
         pairingManager = nil
         macEndpointID = nil
         runTask = nil
+        // Belt-and-braces alongside `startIfNeeded`'s own `defer` — a stale in-flight handle must
+        // never outlive a stop (a later `startIfNeeded` should start FRESH, not await a start
+        // whose product was just torn down).
+        startTask?.cancel()
+        startTask = nil
     }
 
     // MARK: - Pairing window
@@ -230,8 +263,17 @@ public final class RemoteHost {
     /// own doc comment). A no-op (both calls are themselves idempotent) if `phoneEndpointID` isn't
     /// currently paired. Does NOT itself call `stopIfIdle()` — same reasoning as
     /// `closePairingWindow`.
-    public func revoke(phoneEndpointID: String) async {
-        _ = try? await store.revoke(phoneEndpointID: phoneEndpointID)
+    ///
+    /// Throws if the store revoke fails to persist (T4 review fix 5 — `PairingStore.revoke`'s own
+    /// contract: a revocation the caller was told happened must actually be durable, and it rolls
+    /// its in-memory state back on a persist failure). On that throw the gateway is deliberately
+    /// NOT touched: the device is then STILL AUTHORIZED (its store record survives, the router
+    /// would re-admit its very next reconnect), so tearing down its live session would only
+    /// half-revoke — the phone drops, reconnects, and is right back in, while the UI shows an
+    /// error. Propagating BEFORE any gateway side effect keeps the failure atomic: either the
+    /// device is fully revoked (store + gateway), or observably not revoked at all.
+    public func revoke(phoneEndpointID: String) async throws {
+        try await store.revoke(phoneEndpointID: phoneEndpointID)
         await gateway?.revoke(peerID: phoneEndpointID)
     }
 
