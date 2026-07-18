@@ -244,4 +244,59 @@ final class PairingSheetModelTests: XCTestCase {
             "a stale 'expired' arriving while already confirming a NEWER request must be ignored, not kill the live prompt"
         )
     }
+
+    /// T5 review (Important): closing the sheet in `.showingQR` — the MOST common path (open,
+    /// look, close) — must genuinely stop the background tasks. Without `stop()` the countdown
+    /// keeps ticking and auto-`beginPairing()`-ing against a manager the coordinator may already
+    /// be tearing down: the tasks retain the model for the duration of their in-flight
+    /// `consumeEvents()`/`runCountdown()` calls, so `[weak self]` on the closures alone never
+    /// ends them.
+    @MainActor
+    func testStop_CancelsTasksAndCountdownNeverRegeneratesAgain() async {
+        let h = makeHarness(offerTTL: 5)
+        await h.model.begin()
+        guard case .showingQR = h.model.state else {
+            return XCTFail("expected showingQR")
+        }
+        XCTAssertEqual(h.beginCount.value, 1)
+
+        h.model.stop()
+        XCTAssertTrue(h.model.isStoppedForTesting, "stop() must cancel+drop both tasks and latch stopped")
+
+        // Advance the injected clock PAST expiry and deliver a tick — a live countdown would
+        // auto-regenerate here (exactly what testCountdownHitsZero_AutoRegenerates proves); a
+        // stopped one must not.
+        h.clock.value += 5
+        await h.ticker.tick()
+        await drain()
+
+        XCTAssertEqual(h.beginCount.value, 1, "no further beginPairing calls may ever happen after stop()")
+    }
+
+    /// T5 review (minor): the `.failed` screen's "New QR" button — a manual `regenerate()` from
+    /// `.failed` must mint a genuinely fresh offer and land back in `.showingQR`.
+    @MainActor
+    func testRegenerateFromFailed_ReturnsToShowingQRWithFreshPayload() async {
+        let h = makeHarness()
+        await h.model.begin()
+        guard case .showingQR(let firstPayload, _) = h.model.state else {
+            return XCTFail("expected showingQR")
+        }
+        h.eventsContinuation.yield(.requestReceived(words: ["a", "b", "c", "d"], requestedLabel: ""))
+        await waitUntil {
+            if case .confirming = h.model.state { return true }
+            return false
+        }
+        h.eventsContinuation.yield(.failed(reason: "denied"))
+        await waitUntil { h.model.state == .failed("denied — open a fresh QR") }
+
+        await h.model.regenerate()
+
+        guard case .showingQR(let freshPayload, let secondsLeft) = h.model.state else {
+            return XCTFail("expected showingQR after regenerate, got \(h.model.state)")
+        }
+        XCTAssertNotEqual(freshPayload, firstPayload, "the New QR button must mint a genuinely fresh payload")
+        XCTAssertEqual(secondsLeft, 300, "the fresh offer's countdown must restart from its own TTL")
+        XCTAssertEqual(h.beginCount.value, 2)
+    }
 }

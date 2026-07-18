@@ -1,4 +1,5 @@
 import Foundation
+import os
 import IrohLib
 import NormaKit
 import NormaProtocol
@@ -56,6 +57,33 @@ struct FakePhoneError: Error, CustomStringConvertible {
     var description: String { message }
 }
 
+/// Runs `op` with a hard wall-clock bound — a per-file copy of the same first-wins-race helper
+/// `PhonePairingClient.swift`/`IrohE2ETests.swift` carry (this codebase's convention: uniffi's
+/// generated async calls ignore Swift task cancellation, so a plain structured timeout would hang
+/// right along with a stuck call; on timeout the hung op task is abandoned and this process exits
+/// shortly after anyway).
+func withTimeout<T>(_ seconds: Double, _ context: String = "", _ op: @escaping @Sendable () async throws -> T) async throws -> T {
+    let resumed = OSAllocatedUnfairLock(initialState: false)
+    let result: Result<T, Error> = await withCheckedContinuation { cont in
+        let timer = Task {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            if resumed.withLock({ let was = $0; $0 = true; return !was }) {
+                cont.resume(returning: .failure(FakePhoneError(message: "timed out: \(context)")))
+            }
+        }
+        Task {
+            let r: Result<T, Error>
+            do { r = .success(try await op()) } catch { r = .failure(error) }
+            timer.cancel()
+            if resumed.withLock({ let was = $0; $0 = true; return !was }) {
+                cont.resume(returning: r)
+            }
+        }
+    }
+    return try result.get()
+}
+
 // MARK: - NDJSON event printing (the `--attach` stream)
 
 private struct NDJSONLine: Encodable {
@@ -106,11 +134,20 @@ Task {
         let macAddr = try EndpointAddr(
             id: EndpointId.fromString(s: qr.macEndpointID), relayUrl: nil, addresses: []
         )
-        let conn = try await dialer.connect(addr: macAddr, alpn: Data(qr.alpn.utf8))
-        guard conn.remoteId().description == qr.macEndpointID else {
-            throw FakePhoneError(message: "mac identity mismatch on attach reconnect")
+        // Bounded (T5 review, minor): uniffi's generated async calls ignore Swift task
+        // cancellation, so an unreachable Mac would otherwise hang this dial forever — same
+        // first-wins `withTimeout` idiom the ceremony dial inside `PhonePairingClient.pair`
+        // already uses.
+        let (conn, bi): (Connection, BiStream) = try await withTimeout(20, "attach reconnect dial") {
+            let conn = try await dialer.connect(addr: macAddr, alpn: Data(qr.alpn.utf8))
+            guard conn.remoteId().description == qr.macEndpointID else {
+                try? conn.close(errorCode: 0, reason: Data())
+                throw FakePhoneError(message: "mac identity mismatch on attach reconnect")
+            }
+            let bi = try await conn.openBi()
+            return (conn, bi)
         }
-        let bi = try await conn.openBi()
+        _ = conn // retained for the connection's whole lifetime (IrohConn's own LIFETIME note)
         let send = bi.send()
         let recv = bi.recv()
         var buffer = Data()

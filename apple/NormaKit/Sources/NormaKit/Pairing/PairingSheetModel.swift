@@ -35,6 +35,10 @@ public final class PairingSheetModel: ObservableObject {
     private var expiresAt: Int = 0
     private var eventTask: Task<Void, Never>?
     private var countdownTask: Task<Void, Never>?
+    /// Latched by `stop()` — guards every restart path (`startFreshOffer`) so a teardown that
+    /// races an in-flight countdown tick / `begin()` can never resurrect a fresh offer (and with
+    /// it a new countdown task) after the sheet is gone.
+    private var stopped = false
 
     public init(
         events: AsyncStream<PairingUIEvent>,
@@ -70,6 +74,28 @@ public final class PairingSheetModel: ObservableObject {
         await startFreshOffer()
     }
 
+    /// Tears the model down when the sheet closes: cancels + drops BOTH background tasks and
+    /// latches `stopped` so no restart path can resurrect them. The window controller's owner
+    /// (`AppDelegate`'s `onClosed`) MUST call this — `deinit` can't be relied on for it (it runs
+    /// off the MainActor, and the very tasks being cancelled here retain `self` for the duration
+    /// of their in-flight `self?.consumeEvents()`/`self?.runCountdown()` calls — `[weak self]` on
+    /// the closure only helps until that call starts — so without an explicit `stop()` the
+    /// countdown would keep ticking, and auto-`beginPairing()`-ing against a manager the
+    /// coordinator may be tearing down, forever).
+    public func stop() {
+        stopped = true
+        eventTask?.cancel()
+        eventTask = nil
+        countdownTask?.cancel()
+        countdownTask = nil
+    }
+
+    /// Test-only inspection hook (internal, reachable via `@testable import`): `stop()` has run —
+    /// both tasks cancelled+dropped, all restart paths latched shut.
+    var isStoppedForTesting: Bool {
+        stopped && eventTask == nil && countdownTask == nil
+    }
+
     public func confirmTapped(label: String) async {
         guard case .confirming = state else { return }
         await confirmCeremony(label)
@@ -83,10 +109,15 @@ public final class PairingSheetModel: ObservableObject {
     // MARK: - Offer lifecycle
 
     private func startFreshOffer() async {
+        guard !stopped else { return } // a stopped sheet must never mint a fresh offer/countdown
         countdownTask?.cancel()
         countdownTask = nil
         do {
             let qr = try await beginPairing()
+            // Re-check after the suspension above: a `stop()` that landed while `beginPairing`
+            // was awaited must win — assigning a fresh countdown task here would resurrect
+            // exactly the leak `stop()` exists to close.
+            guard !stopped else { return }
             expiresAt = qr.expiresAt
             state = .showingQR(payload: qr.encodeBase64URL(), secondsLeft: max(0, expiresAt - now()))
             countdownTask = Task { [weak self] in await self?.runCountdown() }

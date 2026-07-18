@@ -356,6 +356,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 )
                 controller.onClosed = { [weak self] _ in
                     self?.pairingSheetWindow = nil
+                    // Teardown order matters (T5 review, Important): `model.stop()` FIRST —
+                    // cancels the model's event/countdown background tasks, without which a
+                    // closed sheet's countdown would keep ticking (and auto-`beginPairing()`-ing
+                    // against a manager the coordinator may be tearing down) forever; the tasks
+                    // retain the model for the duration of their in-flight calls, so nothing
+                    // about window/model deallocation would stop them. THEN `pairingSheetClosed()`
+                    // (whose `closePairingWindow()` also ends the manager's live offer via
+                    // `endPairing()`) lets the whole stack tear itself down if idle.
+                    model.stop()
                     Task { await coordinator.pairingSheetClosed() }
                 }
                 self.pairingSheetWindow = controller
