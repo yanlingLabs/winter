@@ -157,7 +157,9 @@ public actor Gateway {
             verdicts.append(verdict)
             pendingReplay.append(contentsOf: buffered)
         }
+        #if DEBUG
         signalAttachResolvedForTesting()
+        #endif
         // Only the LAST resumed session is truly live-forwardable (one daemon connection, one
         // attach at a time — see `PhoneSession.liveSessionID`). Set once, after the loop, so an
         // earlier resume's session can never leak a live frame ahead of the ack.
@@ -224,6 +226,12 @@ public actor Gateway {
         sessions[clientInstanceID] = nil
     }
 
+    // SP2b Task 1: every hook below exists solely for `@testable` test-target observation/
+    // synchronization — none is ever called from production code (the two call sites that DO
+    // feed one, in `handle`/`handleLiveFrame`, are themselves `#if DEBUG`-gated). `#if DEBUG`
+    // keeps them out of a Release build of the app entirely, matching `swift test`'s own debug
+    // configuration (so tests keep seeing them unchanged).
+    #if DEBUG
     /// Test-only inspection hook (`@testable`): the live pump `Task` for a phone, captured BEFORE
     /// `revoke` removes the session so a test can assert it ends up cancelled.
     func pumpTaskForTesting(_ clientInstanceID: String) -> Task<Void, Never>? {
@@ -255,6 +263,7 @@ public actor Gateway {
         attachResolvedContinuations = []
         for c in toResume { c.resume() }
     }
+    #endif
 
     /// A `harness_attached`/`harness_detached` event is connection-lifecycle NOISE, never phone
     /// content (SP2a gate G1) — the gateway filters it out of both replay and live forwarding, and
@@ -487,7 +496,9 @@ public actor Gateway {
             let myGeneration = session.connGeneration
             session.holdLiveEvents = true
             let (_, contentHighWatermark, buffered) = await attachAndReplay(session: session, resume: resume)
+            #if DEBUG
             signalAttachResolvedForTesting()
+            #endif
             // Register live-forwarding BEFORE flushing the replay (G2), then answer with the
             // content-only `lastSeq` (G1) — the phone's cursor tracks what it actually received,
             // not the raw attach return that counts the filtered `harness_attached`. Order is
