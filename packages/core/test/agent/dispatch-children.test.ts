@@ -49,7 +49,7 @@ describe("DispatchChildren (Task 5): status derivation", () => {
     const childId = registry.spawnChild({ dispatchSessionId: dispatchId, dir: "/tmp/a", prompt: "do work", title: "Task A" });
     registry.start(); // subscribe the observer (daemon boot precedent — start() wires hub.addObserver)
 
-    hub.append(childId, { type: "approval_requested", sessionId: childId, threadId: "main", callId: "c1", toolName: "bash", summary: "run rm" });
+    hub.append(childId, { type: "approval_requested", sessionId: childId, threadId: "main", callId: "c1", toolName: "bash", summary: "run rm", issuedAt: 1781270000000, expiresAt: 1781270300000 });
     expect(registry.statusOf(childId)).toBe("awaiting_approval");
 
     hub.append(childId, { type: "approval_resolved", sessionId: childId, threadId: "main", callId: "c1", approved: true, by: "user" });
@@ -236,7 +236,7 @@ describe("DispatchChildren (Task 9): notifyUnattended", () => {
     registry.start();
     const childId = registry.spawnChild({ dispatchSessionId: dispatchId, dir: "/tmp/a", prompt: "do work", title: "Task A" });
 
-    hub.append(childId, { type: "approval_requested", sessionId: childId, threadId: "main", callId: "c1", toolName: "bash", summary: "run rm" });
+    hub.append(childId, { type: "approval_requested", sessionId: childId, threadId: "main", callId: "c1", toolName: "bash", summary: "run rm", issuedAt: 1781270000000, expiresAt: 1781270300000 });
 
     const n = readDispatch(store, dispatchId).find((e) => e.type === "notification_requested");
     expect(n).toMatchObject({ title: "Task A", message: "needs your input" });
@@ -281,7 +281,7 @@ describe("DispatchChildren (Task 9): notifyUnattended", () => {
     hub.attach({ clientName: "watcher", deliver: () => true }, dispatchId, 0);
 
     // Approval seam.
-    hub.append(childId, { type: "approval_requested", sessionId: childId, threadId: "main", callId: "c1", toolName: "bash", summary: "run rm" });
+    hub.append(childId, { type: "approval_requested", sessionId: childId, threadId: "main", callId: "c1", toolName: "bash", summary: "run rm", issuedAt: 1781270000000, expiresAt: 1781270300000 });
     expect(readDispatch(store, dispatchId).find((e) => e.type === "notification_requested")).toBeUndefined();
     hub.append(childId, { type: "approval_resolved", sessionId: childId, threadId: "main", callId: "c1", approved: true, by: "user" });
 
@@ -406,7 +406,7 @@ describe("DispatchChildren (whole-branch fix wave): bounded roster — prune ter
     const dispatchId = store.createSession("global", { mode: "dispatch" });
     registry.start();
     const childId = registry.spawnChild({ dispatchSessionId: dispatchId, dir: "/tmp/a", prompt: "do work", title: "Task A" });
-    hub.append(childId, { type: "approval_requested", sessionId: childId, threadId: "main", callId: "c1", toolName: "bash", summary: "run rm" });
+    hub.append(childId, { type: "approval_requested", sessionId: childId, threadId: "main", callId: "c1", toolName: "bash", summary: "run rm", issuedAt: 1781270000000, expiresAt: 1781270300000 });
 
     registry.onTurnEnd(dispatchId);
 

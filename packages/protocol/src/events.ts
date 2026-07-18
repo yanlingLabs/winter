@@ -71,6 +71,12 @@ export const ToolResultEvent = ThreadBase.extend({
 export const ReasoningItemEvent = ThreadBase.extend({ type: z.literal("reasoning_item"), itemJson: z.string().min(1) });
 export const ApprovalRequestedEvent = ThreadBase.extend({
   type: z.literal("approval_requested"), callId: z.string().min(1), toolName: z.string().min(1), summary: z.string(),
+  // SP3 T4b: the approval's issue/expiry timestamps (epoch ms). REQUIRED — the daemon always knows
+  // the deadline at emit time, so every real approval_requested carries them (the fixture does too).
+  // `expiresAt` is the broker's fail-closed timeout deadline (issuedAt + timeoutMs); a phone renders
+  // "expires in Ns" and derives `.expired` from it without waiting for approval_resolved{by:"timeout"}.
+  // Same value the parallel `approval.list` (methods.ts) surfaces for a pending approval.
+  issuedAt: z.number().int(), expiresAt: z.number().int(),
   // Phase 5e T1 (reviewer maturity, spec §"reviewerReason? on approval_requested"): populated when
   // this escalation came from the safety reviewer (engine.ts's review hook) — the reviewer's own
   // sentence, sanitized+capped at EMISSION (engine side), so clients can render it distinctly from

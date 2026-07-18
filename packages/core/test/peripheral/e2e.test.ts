@@ -128,10 +128,12 @@ function buildLeasePolicy(deps: {
     if (approvalPolicy === "auto") return "granted";
 
     const callId = `lease_${randomBytes(6).toString("hex")}`;
+    const issuedAt = Date.now();
+    const expiresAt = issuedAt + 5 * 60_000;
     const waiting = deps.approvals.wait(sessionId, callId, 5 * 60_000);
     const event: NewSessionEvent = {
       type: "approval_requested", sessionId, threadId: "main", callId,
-      toolName: "peripheral.lease", summary: `Session ${sessionId} requests ${cls}`,
+      toolName: "peripheral.lease", summary: `Session ${sessionId} requests ${cls}`, issuedAt, expiresAt,
     };
     deps.hub.append(sessionId, event);
     const res = await waiting;

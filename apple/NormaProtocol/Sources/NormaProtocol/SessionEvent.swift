@@ -128,6 +128,12 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let callId: String
         public let toolName: String
         public let summary: String
+        /// SP3 T4b: the approval's issue/expiry timestamps (epoch ms), REQUIRED — the daemon always
+        /// knows the deadline at emit time. `expiresAt` is the broker's fail-closed timeout deadline;
+        /// a phone renders "expires in Ns" and derives `.expired` from it (the SAME value the
+        /// `approval.list` pending entry carries), without waiting for `approval_resolved{by:"timeout"}`.
+        public let issuedAt: Int
+        public let expiresAt: Int
         /// Phase 5e T1: populated when this escalation came from the safety reviewer — the
         /// reviewer's own sentence, distinct from `summary`. Optional/additive — decode only,
         /// absent for ask-policy/reviewer-less escalations and older-shaped payloads.

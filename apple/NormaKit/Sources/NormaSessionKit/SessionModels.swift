@@ -36,21 +36,32 @@ public enum ApprovalState: Sendable, Equatable {
     case resolvedElsewhere
 }
 
-/// A phone → host approval answer. `commandID` is the idempotency key (stable across retries); the
-/// wire carries it as the top-level `commandId` the daemon dedups on. `expectedVersion` is the
-/// optimistic-concurrency guard the host uses to detect a stale answer (SP3 remote-approval
-/// contract; maps to `.expired` when the host rejects it).
+/// A phone → host approval answer, in the daemon's REAL `approval.respond` shape (SP3 T4b): the
+/// wire params are `{sessionId, callId, approved}` and the reply is `{ok, alreadyResolved}`.
+///
+/// `callID` is the approval identity AND the compare-and-set token — an approval's callId never
+/// mutates or is reused, so the daemon's `ApprovalBroker.resolve()` returning `alreadyResolved:true`
+/// for an already-settled callId IS the report's "second answer → AlreadyResolved" semantics. There
+/// is deliberately NO numeric `expectedVersion` field: callId + `alreadyResolved` subsumes it.
+///
+/// `commandID` is the idempotency key (stable across retries); the wire carries it as the top-level
+/// `commandId` the daemon dedups on. `expiresAt` (epoch ms, from the `approval_requested` event or
+/// an `approval.list` entry) lets the client derive `.expired` from its own clock BEFORE sending —
+/// past the deadline, the host has already failed the approval closed (`by:"timeout"`). Optional:
+/// `nil` means "never treat as locally expired" (always send and let the host answer).
 public struct ApprovalAnswer: Sendable, Equatable {
-    public let approvalID: String
-    public let expectedVersion: Int
-    public let decision: String
+    public let sessionID: String
+    public let callID: String
+    public let approved: Bool
     public let commandID: String
+    public let expiresAt: Int?
 
-    public init(approvalID: String, expectedVersion: Int, decision: String, commandID: String) {
-        self.approvalID = approvalID
-        self.expectedVersion = expectedVersion
-        self.decision = decision
+    public init(sessionID: String, callID: String, approved: Bool, commandID: String, expiresAt: Int? = nil) {
+        self.sessionID = sessionID
+        self.callID = callID
+        self.approved = approved
         self.commandID = commandID
+        self.expiresAt = expiresAt
     }
 }
 

@@ -84,6 +84,23 @@ export const ApprovalRespondParams = z.object({
 });
 export const ApprovalRespondResult = z.object({ ok: z.literal(true), alreadyResolved: z.boolean() });
 
+/** SP3 T4b: queryable pending-approval STATE (the report's approval contract — pending approvals
+ *  age out of the event stream, so a reconnecting phone can't reconstruct them from replay alone).
+ *  Mirrors `ApprovalBroker.list()` (core/src/agent/approvals.ts) field-for-field. `callId` IS the
+ *  approval identity + compare-and-set token for the subsequent `approval.respond` — there is NO
+ *  numeric `version` field (callId + `approval.respond`'s `alreadyResolved` subsumes the report's
+ *  `expectedVersion`, see that broker's doc comment). `expiresAt` (epoch ms) is the fail-closed
+ *  deadline, so a phone renders "expires in Ns" and derives `.expired` without the resolve event. */
+export const ApprovalListParams = z.object({ sessionId: z.string().min(1) });
+export const PendingApprovalSchema = z.object({
+  callId: z.string().min(1),
+  toolName: z.string(),
+  summary: z.string(),
+  issuedAt: z.number().int(),
+  expiresAt: z.number().int(),
+});
+export const ApprovalListResult = z.object({ pending: z.array(PendingApprovalSchema) });
+
 export const SessionAddDirParams = z.object({
   sessionId: z.string(),
   path: z.string().min(1),
@@ -775,6 +792,7 @@ export const METHODS = {
   sessionSend: "session.send",
   sessionDispatch: "session.dispatch",
   approvalRespond: "approval.respond",
+  approvalList: "approval.list",
   sessionAddDir: "session.addDir",
   sessionSetCwd: "session.setCwd",
   trustDir: "daemon.trustDir",

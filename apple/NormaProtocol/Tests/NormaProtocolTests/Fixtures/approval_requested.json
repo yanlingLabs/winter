@@ -6,5 +6,7 @@
   "type": "approval_requested",
   "callId": "call_2",
   "toolName": "write",
-  "summary": "write a.txt"
+  "summary": "write a.txt",
+  "issuedAt": 1781270000000,
+  "expiresAt": 1781270300000
 }

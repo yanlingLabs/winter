@@ -49,11 +49,11 @@ public actor NormaSessionClient {
     /// (the hard privacy rule for this module).
     private static let logger = Logger(subsystem: "com.norma.sessionkit", category: "NormaSessionClient")
 
-    /// Method name for the pending-approval query. NOTE (T5/T8 wire contract): this is an SP3
-    /// addition — it is NOT yet in the gateway's `remoteAllowedMethods` nor implemented by the
-    /// daemon. `pendingApprovals()` deliberately QUERIES this rather than reconstructing pending
-    /// state from replayed events; T5 (real-daemon conformance) must add the method to the gateway
-    /// allowlist + daemon (or fold the pending set into the `session.attach` response).
+    /// Method name for the pending-approval query. SP3 T4b implemented this on the daemon side:
+    /// `approval.list {sessionId} → {pending: [{callId, toolName, summary, issuedAt, expiresAt}]}`
+    /// is on the gateway's `remoteAllowedMethods` and handled by `ApprovalBroker.list()`.
+    /// `pendingApprovals(sessionID:)` QUERIES this live state rather than reconstructing pending
+    /// approvals from replayed events (which age out of the retained log).
     public static let approvalListMethod = "approval.list"
 
     // MARK: - Public streams
@@ -253,35 +253,46 @@ public actor NormaSessionClient {
         try await rpcCall(method: method, params: params, commandID: idgen())
     }
 
-    /// Answers a remote approval, mapping the host's reply to `ApprovalState`. NEVER returns before
-    /// the host acks (it awaits the correlated `rpcResponse`). `.hostAccepted` when the answer
-    /// counted (`alreadyResolved: false`), `.resolvedElsewhere` when it was already resolved
-    /// (`alreadyResolved: true`), `.expired` when the host reports it lapsed (result carries
-    /// `expired: true`). Reuses `a.commandID` as the idempotency key so a retried answer is deduped.
+    /// Answers a remote approval in the daemon's REAL `approval.respond` shape (SP3 T4b):
+    /// `{sessionId, callId, approved}` → `{ok, alreadyResolved}`. Maps the reply to `ApprovalState`:
+    /// `.hostAccepted` when the answer counted (`alreadyResolved: false`), `.resolvedElsewhere` when
+    /// it was already resolved by someone/something else (`alreadyResolved: true`). Reuses
+    /// `a.commandID` as the idempotency key so a retried answer is deduped by the daemon.
     ///
-    /// NOTE (T5 wire contract): the SP3 remote-approval shape sent here (`approvalId` /
-    /// `expectedVersion` / `decision`, per this task's brief) is a superset of the CURRENT daemon's
-    /// `approval.respond` (`sessionId` / `callId` / `approved` → `{ok, alreadyResolved}`) — the
-    /// optimistic-concurrency `expectedVersion` and the `expired` verdict are new. T5 (real-daemon
-    /// conformance) reconciles the gateway-side translation; the `alreadyResolved` mapping already
-    /// matches the daemon's `ApprovalBroker.resolve` return.
+    /// `.expired` is a phone-DERIVED state, not a daemon reply code: if the approval's `expiresAt`
+    /// is already in the past on the client clock, the host will have failed it closed
+    /// (`by:"timeout"`), so we short-circuit to `.expired` WITHOUT sending. (Racing that check: if we
+    /// send anyway and the host reports `alreadyResolved`, that surfaces as `.resolvedElsewhere` —
+    /// acceptable per the T4b brief.) The UI derives `.expired` for a card it is watching the same
+    /// way, or from an observed `approval_resolved {by:"timeout"}` event on the stream.
+    ///
+    /// When it does send, this NEVER returns before the host acks (it awaits the correlated
+    /// `rpcResponse`).
     public func answerApproval(_ a: ApprovalAnswer) async throws -> ApprovalState {
+        if let expiresAt = a.expiresAt, Date().timeIntervalSince1970 * 1000 >= Double(expiresAt) {
+            return .expired
+        }
         let params = SessionEvent.JSONValue.object([
-            "approvalId": .string(a.approvalID),
-            "expectedVersion": .number(Double(a.expectedVersion)),
-            "decision": .string(a.decision),
+            "sessionId": .string(a.sessionID),
+            "callId": .string(a.callID),
+            "approved": .bool(a.approved),
         ])
         let result = try await rpcCall(method: "approval.respond", params: params, commandID: a.commandID)
-        if result["expired"]?.boolValue == true { return .expired }
         if result["alreadyResolved"]?.boolValue == true { return .resolvedElsewhere }
         return .hostAccepted
     }
 
-    /// Queries the host's currently-pending approvals (live STATE, not reconstructed from events).
-    /// See `approvalListMethod` for the T5 wire-contract note.
-    public func pendingApprovals() async throws -> [SessionEvent.JSONValue] {
-        let result = try await rpcCall(method: Self.approvalListMethod, params: .object([:]), commandID: idgen())
-        return result["approvals"]?.arrayValue ?? []
+    /// Queries the host's currently-pending approvals for a session (live STATE, not reconstructed
+    /// from events — pending approvals age out of the retained log). Returns the `pending` array from
+    /// `approval.list {sessionId}`; each element is `{callId, toolName, summary, issuedAt, expiresAt}`
+    /// (read `["expiresAt"]?.intValue` for the deadline, e.g. to render "expires in Ns"). See
+    /// `approvalListMethod`.
+    public func pendingApprovals(sessionID: String) async throws -> [SessionEvent.JSONValue] {
+        let result = try await rpcCall(
+            method: Self.approvalListMethod,
+            params: .object(["sessionId": .string(sessionID)]),
+            commandID: idgen())
+        return result["pending"]?.arrayValue ?? []
     }
 
     /// Registers the response continuation BEFORE the async send, so a fast reply is never lost, then

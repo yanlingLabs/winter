@@ -1742,6 +1742,55 @@ describe("daemon IPC", () => {
     provider.close(); watcher.close(); reqA.close(); reqB.close();
   });
 
+  // SP3 T4b: approval.list — queryable pending-approval STATE (a phone that missed the
+  // approval_requested event in its replay window queries the live pending set). The remote role
+  // is allowlisted for it (REMOTE_ALLOWED_METHODS grew 9→10); a non-allowlisted method stays
+  // role-rejected. Drives a real pending broker entry via the peripheral.lease-under-ask path
+  // (same recipe as the ask-policy lease test above), then queries and resolves it.
+  test("approval.list returns the broker's pending approvals for a session (with expiresAt); a remote-role call is allowed, off-list methods stay rejected; resolving clears it", async () => {
+    await boot();
+    const provider = await TestClient.connect(daemon.socketPath);
+    await provider.hello(harnessToken, "approval-list-provider");
+    await provider.request(METHODS.peripheralAdvertise, { classes: [{ class: "noop", tccGranted: true }] });
+
+    const leaser = await TestClient.connect(daemon.socketPath);
+    await leaser.hello(harnessToken, "approval-list-leaser");
+    const { result: created } = await leaser.request(METHODS.sessionCreate, { scope: "global", approvalPolicy: "ask" });
+    await leaser.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
+
+    // Park a lease under ask → registers a pending broker entry + emits the approval_requested card.
+    const leasePromise = leaser.request(METHODS.peripheralLease, { sessionId: created.sessionId, class: "noop" });
+    const ask = await leaser.waitForNotification((n) =>
+      n.method === METHODS.event && n.params.type === "approval_requested" && n.params.toolName === "peripheral.lease");
+    expect(ask.params.expiresAt).toBeGreaterThan(ask.params.issuedAt);
+
+    // A least-privileged remote connection may call approval.list (it's on REMOTE_ALLOWED_METHODS).
+    const remote = await TestClient.connect(daemon.socketPath);
+    await remote.hello(daemon.tokens.remote, "approval-list-phone", "remote");
+    const listed = await remote.request(METHODS.approvalList, { sessionId: created.sessionId });
+    expect(listed.result.pending).toEqual([{
+      callId: ask.params.callId, toolName: "peripheral.lease",
+      summary: `Session ${created.sessionId} requests noop`,
+      issuedAt: ask.params.issuedAt, expiresAt: ask.params.expiresAt,
+    }]);
+    // A different session has nothing pending.
+    const other = await remote.request(METHODS.approvalList, { sessionId: "s_none" });
+    expect(other.result.pending).toEqual([]);
+
+    // But an off-list method from the SAME remote connection is still role-rejected before dispatch.
+    const offList = await remote.request(METHODS.sessionCreate, { scope: "global" });
+    expect(offList.error.code).toBe(ERR.UNAUTHORIZED);
+    expect(offList.error.message).toMatch(/remote role may not call/);
+
+    // Resolving the approval removes it from the pending set.
+    await leaser.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: ask.params.callId, approved: true });
+    await leasePromise;
+    const afterResolve = await remote.request(METHODS.approvalList, { sessionId: created.sessionId });
+    expect(afterResolve.result.pending).toEqual([]);
+
+    provider.close(); leaser.close(); remote.close();
+  });
+
   test("peripheral.lease under plan policy is denied immediately (no approval card)", async () => {
     await boot();
     const provider = await TestClient.connect(daemon.socketPath);

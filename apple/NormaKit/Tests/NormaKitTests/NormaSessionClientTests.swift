@@ -387,22 +387,37 @@ final class NormaSessionClientTests: XCTestCase {
         )
     }
 
-    func testAnswerApprovalExpired() async throws {
-        try await assertApproval(
-            result: .object(["expired": .bool(true)]),
-            expected: .expired
-        )
+    /// `.expired` is phone-DERIVED (SP3 T4b): an answer whose `expiresAt` is already in the past on
+    /// the client clock short-circuits to `.expired` WITHOUT ever sending `approval.respond` (the
+    /// host has already failed it closed with `by:"timeout"`). Assert both the state AND that no
+    /// approval.respond frame reached the wire.
+    func testAnswerApprovalExpiredIsDerivedWithoutSending() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+
+        let pastDeadline = Int(Date().timeIntervalSince1970 * 1000) - 60_000
+        let answer = ApprovalAnswer(sessionID: "s", callID: "c1", approved: true, commandID: "cmd-appr", expiresAt: pastDeadline)
+        let state = try await client.answerApproval(answer)
+        XCTAssertEqual(state, .expired)
+
+        // Only the hello frame ever went out — no approval.respond was sent.
+        let out = try await waitOutbound(conn, count: 1)
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(decodeOutbound(out[0]).kind, .hello)
     }
 
     /// Drives one approval round-trip and asserts BOTH the mapped state AND that `answerApproval`
     /// never returns before the host acks (the result box stays empty until the reply is enqueued).
+    /// The answer's `expiresAt` is nil (not locally expired), so it actually sends and blocks.
     private func assertApproval(result: SessionEvent.JSONValue, expected: ApprovalState) async throws {
         let conn = ScriptedRemoteConn()
         let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
         conn.enqueueInbound(helloAckFrame(verdicts: []))
         _ = try await client.handshake(resumes: [])
 
-        let answer = ApprovalAnswer(approvalID: "appr-1", expectedVersion: 2, decision: "approve", commandID: "cmd-appr")
+        let answer = ApprovalAnswer(sessionID: "s", callID: "appr-1", approved: true, commandID: "cmd-appr", expiresAt: nil)
         let box = Sink<ApprovalState>()
         let task = Task { box.append(try await client.answerApproval(answer)) }
 
@@ -411,8 +426,9 @@ final class NormaSessionClientTests: XCTestCase {
         let payload = outboundPayload(req)
         XCTAssertEqual(payload["method"]?.stringValue, "approval.respond")
         XCTAssertEqual(payload["commandId"]?.stringValue, "cmd-appr")
-        XCTAssertEqual(payload["params"]?["approvalId"]?.stringValue, "appr-1")
-        XCTAssertEqual(payload["params"]?["expectedVersion"]?.intValue, 2)
+        XCTAssertEqual(payload["params"]?["sessionId"]?.stringValue, "s")
+        XCTAssertEqual(payload["params"]?["callId"]?.stringValue, "appr-1")
+        XCTAssertEqual(payload["params"]?["approved"]?.boolValue, true)
 
         // Never returns before the host acks: no state yet.
         XCTAssertTrue(box.items.isEmpty, "answerApproval must not return before the host reply")
@@ -429,19 +445,26 @@ final class NormaSessionClientTests: XCTestCase {
         conn.enqueueInbound(helloAckFrame(verdicts: []))
         _ = try await client.handshake(resumes: [])
 
-        let task = Task { try await client.pendingApprovals() }
+        let task = Task { try await client.pendingApprovals(sessionID: "s") }
         let out = try await waitOutbound(conn, count: 2)
         let req = decodeOutbound(out[1])
         XCTAssertEqual(outboundPayload(req)["method"]?.stringValue, NormaSessionClient.approvalListMethod)
+        // The sessionId scopes the query.
+        XCTAssertEqual(outboundPayload(req)["params"]?["sessionId"]?.stringValue, "s")
         let id = outboundPayload(req)["id"]!.intValue!
 
-        let approvals = SessionEvent.JSONValue.array([
-            .object(["approvalId": .string("a1")]),
-            .object(["approvalId": .string("a2")]),
+        // Real approval.list shape: { pending: [{ callId, toolName, summary, issuedAt, expiresAt }] }.
+        let pending = SessionEvent.JSONValue.array([
+            .object(["callId": .string("c1"), "toolName": .string("write"), "summary": .string("write a.txt"),
+                     "issuedAt": .number(1000), "expiresAt": .number(6000)]),
+            .object(["callId": .string("c2"), "toolName": .string("bash"), "summary": .string("run ls"),
+                     "issuedAt": .number(2000), "expiresAt": .number(7000)]),
         ])
-        conn.enqueueInbound(rpcResponseFrame(id: id, result: .object(["approvals": approvals])))
+        conn.enqueueInbound(rpcResponseFrame(id: id, result: .object(["pending": pending])))
         let got = try await task.value
         XCTAssertEqual(got.count, 2)
-        XCTAssertEqual(got.first?["approvalId"]?.stringValue, "a1")
+        XCTAssertEqual(got.first?["callId"]?.stringValue, "c1")
+        // expiresAt decodes so a caller can render "expires in Ns".
+        XCTAssertEqual(got.first?["expiresAt"]?.intValue, 6000)
     }
 }

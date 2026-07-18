@@ -64,7 +64,7 @@ describe("Task 6: dispatch relay — mirror-in", () => {
 
     hub.append(childId, {
       type: "approval_requested", sessionId: childId, threadId: "main",
-      callId: "c1", toolName: "bash", summary: "rm -rf x",
+      callId: "c1", toolName: "bash", summary: "rm -rf x", issuedAt: 1781270000000, expiresAt: 1781270300000,
     });
 
     const mirrored = readDispatch(store, dispatchId).find((e) => e.type === "approval_requested");
@@ -100,7 +100,7 @@ describe("Task 6: dispatch relay — mirror-back", () => {
 
     hub.append(childId, {
       type: "approval_requested", sessionId: childId, threadId: "main",
-      callId: "c1", toolName: "bash", summary: "rm -rf x",
+      callId: "c1", toolName: "bash", summary: "rm -rf x", issuedAt: 1781270000000, expiresAt: 1781270300000,
     });
     hub.append(childId, { type: "approval_resolved", sessionId: childId, threadId: "main", callId: "c1", approved: true, by: "orb" });
 
@@ -140,7 +140,7 @@ describe("Task 6: dispatch relay — no loops", () => {
 
     hub.append(childId, {
       type: "approval_requested", sessionId: childId, threadId: "main",
-      callId: "c1", toolName: "bash", summary: "rm -rf x",
+      callId: "c1", toolName: "bash", summary: "rm -rf x", issuedAt: 1781270000000, expiresAt: 1781270300000,
     });
 
     // Appending the mirror (sessionId=dispatchId) itself passes back through the SAME observer
@@ -157,7 +157,7 @@ describe("Task 6: dispatch relay — no loops", () => {
 
     hub.append(dispatchId, {
       type: "approval_requested", sessionId: dispatchId, threadId: "main",
-      callId: "own1", toolName: "bash", summary: "dispatch session's own tool call",
+      callId: "own1", toolName: "bash", summary: "dispatch session's own tool call", issuedAt: 1781270000000, expiresAt: 1781270300000,
     });
 
     const approvals = readDispatch(store, dispatchId).filter((e) => e.type === "approval_requested");
@@ -233,7 +233,7 @@ describe("Task 6: engine timeout windows — approvals", () => {
     ], { origin: "dispatch-child", approvalTimeoutMs: 45_000 });
     const waitSpy = spyOn(broker, "wait").mockResolvedValue({ approved: true, by: "test" });
     await engine.runTurn(sessionId);
-    expect(waitSpy).toHaveBeenCalledWith(sessionId, "c1", 600_000);
+    expect(waitSpy).toHaveBeenCalledWith(sessionId, "c1", 600_000, expect.anything());
   });
 
   test("non-child session: requestApproval waits cfg.approvalTimeoutMs when configured", async () => {
@@ -243,7 +243,7 @@ describe("Task 6: engine timeout windows — approvals", () => {
     ], { approvalTimeoutMs: 45_000 });
     const waitSpy = spyOn(broker, "wait").mockResolvedValue({ approved: true, by: "test" });
     await engine.runTurn(sessionId);
-    expect(waitSpy).toHaveBeenCalledWith(sessionId, "c1", 45_000);
+    expect(waitSpy).toHaveBeenCalledWith(sessionId, "c1", 45_000, expect.anything());
   });
 
   test("non-child session: requestApproval falls back to the 5-minute default when cfg.approvalTimeoutMs is unset", async () => {
@@ -253,7 +253,7 @@ describe("Task 6: engine timeout windows — approvals", () => {
     ]);
     const waitSpy = spyOn(broker, "wait").mockResolvedValue({ approved: true, by: "test" });
     await engine.runTurn(sessionId);
-    expect(waitSpy).toHaveBeenCalledWith(sessionId, "c1", 300_000);
+    expect(waitSpy).toHaveBeenCalledWith(sessionId, "c1", 300_000, expect.anything());
   });
 });
 
@@ -299,7 +299,7 @@ describe("Task 6/whole-branch fix: reviewer-escalation timeout window", () => {
     });
     const waitSpy = spyOn(broker, "wait").mockResolvedValue({ approved: true, by: "test" });
     await engine.runTurn(sessionId);
-    expect(waitSpy).toHaveBeenCalledWith(sessionId, "c1", 600_000);
+    expect(waitSpy).toHaveBeenCalledWith(sessionId, "c1", 600_000, expect.anything());
   });
 
   test("non-child session: reviewer-escalation approval still waits 60_000ms (env unset) — unchanged behavior", async () => {
@@ -310,7 +310,7 @@ describe("Task 6/whole-branch fix: reviewer-escalation timeout window", () => {
     });
     const waitSpy = spyOn(broker, "wait").mockResolvedValue({ approved: true, by: "test" });
     await engine.runTurn(sessionId);
-    expect(waitSpy).toHaveBeenCalledWith(sessionId, "c1", 60_000);
+    expect(waitSpy).toHaveBeenCalledWith(sessionId, "c1", 60_000, expect.anything());
   });
 
   test("dispatch-child session: denial message states the REAL window (600s), not the hardcoded 60s", async () => {

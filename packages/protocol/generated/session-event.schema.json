@@ -445,6 +445,16 @@
         "summary": {
           "type": "string"
         },
+        "issuedAt": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "expiresAt": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
         "reviewerReason": {
           "type": "string"
         },
@@ -460,7 +470,9 @@
         "type",
         "callId",
         "toolName",
-        "summary"
+        "summary",
+        "issuedAt",
+        "expiresAt"
       ],
       "additionalProperties": false
     },

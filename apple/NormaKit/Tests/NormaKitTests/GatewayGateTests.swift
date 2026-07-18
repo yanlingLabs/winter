@@ -17,7 +17,7 @@ import NormaSessionKit
 ///   G4b inner-payload JSON depth ceiling (≤32), enforced before forwarding
 ///   G5  `revoke(_:)` — pump cancelled, daemon client closed, future frames + reconnect refused
 ///   G6  `ScriptedRemoteConn` on `OSAllocatedUnfairLock` + `RemoteConn.peerID`
-///   G7  the remote allowlist is EXACTLY the nine names (Swift half of the cross-language tripwire)
+///   G7  the remote allowlist is EXACTLY the ten names (Swift half of the cross-language tripwire)
 final class GatewayGateTests: XCTestCase {
 
     // MARK: - Shared helpers (per-file copies, matching this codebase's test-double convention)
@@ -494,17 +494,17 @@ final class GatewayGateTests: XCTestCase {
         await live.close()
     }
 
-    // MARK: - G7: the Swift remote allowlist is EXACTLY the nine names (cross-language tripwire)
+    // MARK: - G7: the Swift remote allowlist is EXACTLY the ten names (cross-language tripwire)
 
-    func testG7_RemoteAllowlistIsExactlyTheNineNames() {
+    func testG7_RemoteAllowlistIsExactlyTheTenNames() {
         let expected: Set<String> = [
             "protocol.hello", "session.list", "session.attach", "session.send",
             "session.dispatch", "approval.respond", "ask_user.respond",
-            "session.interrupt", "engine.activity",
+            "session.interrupt", "engine.activity", "approval.list",
         ]
-        XCTAssertEqual(Gateway.remoteAllowedMethods.count, 9)
+        XCTAssertEqual(Gateway.remoteAllowedMethods.count, 10)
         XCTAssertEqual(Gateway.remoteAllowedMethods, expected,
-                       "Swift remote allowlist drifted from the nine — mirror packages/core/src/ipc/server.ts's REMOTE_ALLOWED_METHODS")
+                       "Swift remote allowlist drifted from the ten — mirror packages/core/src/ipc/server.ts's REMOTE_ALLOWED_METHODS")
     }
 
     // MARK: - Eviction: session-map cap (32) bounds phone churn (SP2b Task 4)

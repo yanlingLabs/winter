@@ -45,7 +45,7 @@ describe("SessionEvent discriminated union", () => {
       { ...t, type: "assistant_message", text: "done!" },
       { ...t, type: "tool_call", callId: "c1", name: "read", argsJson: "{}" },
       { ...t, type: "tool_result", callId: "c1", output: "contents", isError: false },
-      { ...t, type: "approval_requested", callId: "c2", toolName: "write", summary: "write hello.txt (24 bytes)" },
+      { ...t, type: "approval_requested", callId: "c2", toolName: "write", summary: "write hello.txt (24 bytes)", issuedAt: 1781270000000, expiresAt: 1781270300000 },
       { ...t, type: "approval_resolved", callId: "c2", approved: true, by: "cli-p" },
       { ...t, type: "turn_completed", stopReason: "end_turn", inputTokens: 100, outputTokens: 20 },
       { ...t, type: "agent_error", message: "not signed in" },
@@ -423,10 +423,11 @@ describe("SessionEvent discriminated union", () => {
     const t = { ...base, threadId: "main" };
     const withReason = {
       ...t, type: "approval_requested", callId: "c3", toolName: "bash", summary: "run rm -rf /tmp/scratch",
+      issuedAt: 1781270000000, expiresAt: 1781270300000,
       reviewerReason: "recursive delete outside the session cwd",
     } as const;
     expect(SessionEvent.parse(withReason)).toEqual(withReason);
-    const withoutReason = SessionEvent.parse({ ...t, type: "approval_requested", callId: "c3", toolName: "bash", summary: "run rm -rf /tmp/scratch" });
+    const withoutReason = SessionEvent.parse({ ...t, type: "approval_requested", callId: "c3", toolName: "bash", summary: "run rm -rf /tmp/scratch", issuedAt: 1781270000000, expiresAt: 1781270300000 });
     expect(withoutReason.type).toBe("approval_requested");
     expect((withoutReason as { reviewerReason?: string }).reviewerReason).toBeUndefined();
   });
