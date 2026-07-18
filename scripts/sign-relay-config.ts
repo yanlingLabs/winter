@@ -139,6 +139,17 @@ function readSeedFromKeychain(): Buffer {
   return Buffer.from(b64, "base64");
 }
 
+function keychainItemExists(): boolean {
+  try {
+    execFileSync("security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT], {
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function storeSeedInKeychain(seed: Buffer): void {
   execFileSync("security", [
     "add-generic-password",
@@ -148,7 +159,10 @@ function storeSeedInKeychain(seed: Buffer): void {
     KEYCHAIN_ACCOUNT,
     "-w",
     seed.toString("base64"),
-    "-U", // update in place if it already exists, rather than erroring
+    "-U", // update in place if it already exists -- belt-and-braces only; `--generate`'s own
+    // `keychainItemExists()` check (SP2b Task 6 fix) is what actually stops a second run from
+    // overwriting a live production key, since this flag alone does NOT refuse (see that check's
+    // own comment for why relying on `-U` to fail was a bug, not a feature, for this key).
   ]);
 }
 
@@ -192,6 +206,22 @@ function main(): void {
   const args = process.argv.slice(2);
 
   if (args.includes("--generate")) {
+    // SP2b Task 6 fix: this docstring (and the task-6-brief.md that quotes it) has always
+    // described `--generate` as refusing if the item exists -- but until this fix, nothing here
+    // actually checked: `storeSeedInKeychain` used `security add-generic-password -U`, which
+    // updates-in-place rather than erroring, so a second `--generate` would have silently
+    // replaced the production key with a fresh random one (invalidating every previously-signed
+    // config and every phone that already trusts the old public key). Caught while verifying this
+    // script ahead of generating the real production key.
+    if (keychainItemExists()) {
+      console.error(
+        `Keychain item "${KEYCHAIN_SERVICE}/${KEYCHAIN_ACCOUNT}" already exists -- refusing to ` +
+          `overwrite the signing key. Delete it first with \`security delete-generic-password -s ${KEYCHAIN_SERVICE} -a ${KEYCHAIN_ACCOUNT}\` ` +
+          `if you really mean to rotate it (this invalidates every previously-signed config and ` +
+          `every client that trusts the old public key).`
+      );
+      process.exit(1);
+    }
     const seed = generateRawSeed();
     storeSeedInKeychain(seed);
     const privateKey = privateKeyFromRawSeed(seed);

@@ -85,6 +85,7 @@ public enum PhonePairingClient {
         bindAddr: String?,
         secret: Data,
         addrOverride: EndpointAddr?,
+        relayURLs: [String] = [],
         onWords: @escaping @Sendable ([String]) -> Void
     ) async throws -> (accepted: PairAccepted, words: [String], endpointSecret: Data) {
         let phoneEndpointID = try SecretKey.fromBytes(bytes: secret).public().description
@@ -100,17 +101,19 @@ public enum PhonePairingClient {
         let proof = PairingCrypto.proof(pairSecret: qr.pairSecret, transcript: transcript)
         let words = PairingCrypto.sasWords(pairSecret: qr.pairSecret, transcript: transcript)
 
-        // Direct connections only — deliberately NOT derived from `qr.relayConfig.config.relays`.
-        // `RemoteHost.Config.relayURLs`'s own doc comment is the reason why: a verified
-        // `SignedRelayConfig`'s `config.relays` and "what THIS Mac's own listener actually dials
-        // through" are allowed to differ — it's cargo for a future, real relay fleet (SP2b T6),
-        // not necessarily a live, dialable relay today. Empirically confirmed while wiring this
-        // up (`PairingE2ETests`'s own QR fixture carries a placeholder, non-existent relay
-        // hostname purely to exercise the QR's field encoding): actually binding THIS phone's
-        // dialer through `RelayMode.customFromUrls(qr.relayConfig.config.relays)` hangs trying to
-        // reach it. Matches the Mac's own listener today (`relayURLs: []` everywhere until T6).
+        // Direct connections only by default — deliberately NOT derived from
+        // `qr.relayConfig.config.relays`. `RemoteHost.Config.relayURLs`'s own doc comment is the
+        // reason why: a verified `SignedRelayConfig`'s `config.relays` and "what THIS Mac's own
+        // listener actually dials through" are allowed to differ. Empirically confirmed while
+        // wiring this up (`PairingE2ETests`'s own QR fixture carries a placeholder, non-existent
+        // relay hostname purely to exercise the QR's field encoding): actually binding a dialer
+        // through `RelayMode.customFromUrls` against an unreachable relay hangs trying to reach
+        // it. `relayURLs` (SP2b Task 6, default `[]` — every existing caller is unaffected) is the
+        // test-only seam `IrohRelayE2ETests` uses to force a relay-mode dialer against the real
+        // production relay fleet instead.
         let dialer = try await Endpoint.bind(options: EndpointOptions(
-            preset: presetN0(), bindAddr: bindAddr, secretKey: secret, relayMode: .disabled()
+            preset: presetN0(), bindAddr: bindAddr, secretKey: secret,
+            relayMode: relayURLs.isEmpty ? .disabled() : try RelayMode.customFromUrls(urls: relayURLs)
         ))
 
         let macAddr = try addrOverride ?? EndpointAddr(

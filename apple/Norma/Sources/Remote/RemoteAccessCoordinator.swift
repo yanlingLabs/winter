@@ -1,4 +1,5 @@
 import Foundation
+import os
 import NormaKit
 import NormaProtocol
 
@@ -20,18 +21,54 @@ final class RemoteAccessCoordinator {
         case pairingUnavailable
     }
 
-    private lazy var host: RemoteHost = RemoteHost(config: RemoteHost.Config(
-        storeDir: URL(fileURLWithPath: NormaPaths.homeDirectory()).appendingPathComponent("remote", isDirectory: true),
-        socketPath: NormaPaths.socketPath(),
-        hostLabel: Host.current().localizedName ?? "Mac",
-        // No production relay fleet exists yet — SP2b T6 wires the real signed config (a
-        // `RelayConfigStore.accept`-verified bundle). Until then this is inert cargo the QR
-        // carries for the phone's benefit only: `relays: []` means a scanning phone attempts a
-        // DIRECT connection only, exactly like this Mac's own listener below (`relayURLs: []`).
+    private static let log = Logger(subsystem: "com.norma.app", category: "relay-config")
+
+    /// The safe, pre-Task-6 default: direct connections only, exactly as if no relay fleet
+    /// existed — used both when the bundled resource is entirely absent (e.g. a Debug build,
+    /// which never embeds it) and as the fallback for any verification failure below.
+    private static let directOnlyFallback: (relayConfig: SignedRelayConfig, relayURLs: [String]) = (
         relayConfig: SignedRelayConfig(config: RelayConfig(version: 1, relays: []), sig: Data()),
-        // SP2b T6 wires the production signed config — direct connections only until then.
         relayURLs: []
-    ))
+    )
+
+    /// Loads the bundled, production-signed relay config (SP2b Task 6 — `apple/Norma/Resources/
+    /// relay-config.signed.json`, embedded via `project.yml`'s `Resources` source path) and
+    /// verifies it against `RelayConfigTrust.productionPublicKey` (`RelayConfigStore.accept`,
+    /// NormaProtocol) BEFORE trusting a single byte of it. On ANY failure — resource missing,
+    /// unreadable, malformed JSON, or a signature that doesn't verify — this fatal-logs and falls
+    /// back to `directOnlyFallback`: the app keeps working, just without relay fallback for
+    /// phones that can't reach this Mac directly. NEVER half-trusts a config that fails
+    /// verification (mirrors `RelayConfigStore.accept`'s own all-or-nothing contract).
+    private static func loadVerifiedRelayConfig() -> (relayConfig: SignedRelayConfig, relayURLs: [String]) {
+        guard let url = Bundle.main.url(forResource: "relay-config.signed", withExtension: "json") else {
+            log.fault("relay-config.signed.json not found in the app bundle — falling back to direct-only relays")
+            return directOnlyFallback
+        }
+        guard let data = try? Data(contentsOf: url) else {
+            log.fault("could not read bundled relay-config.signed.json — falling back to direct-only relays")
+            return directOnlyFallback
+        }
+        guard let signed = try? JSONDecoder().decode(SignedRelayConfig.self, from: data) else {
+            log.fault("bundled relay-config.signed.json failed to decode — falling back to direct-only relays")
+            return directOnlyFallback
+        }
+        guard RelayConfigStore.accept(signed, current: nil, publicKey: RelayConfigTrust.productionPublicKey) != nil else {
+            log.fault("bundled relay-config.signed.json failed signature verification — falling back to direct-only relays")
+            return directOnlyFallback
+        }
+        return (relayConfig: signed, relayURLs: signed.config.relays)
+    }
+
+    private lazy var host: RemoteHost = {
+        let relay = Self.loadVerifiedRelayConfig()
+        return RemoteHost(config: RemoteHost.Config(
+            storeDir: URL(fileURLWithPath: NormaPaths.homeDirectory()).appendingPathComponent("remote", isDirectory: true),
+            socketPath: NormaPaths.socketPath(),
+            hostLabel: Host.current().localizedName ?? "Mac",
+            relayConfig: relay.relayConfig,
+            relayURLs: relay.relayURLs
+        ))
+    }()
 
     /// Force-starts the stack (even at zero paired devices — that's the whole point of opening a
     /// pairing window) and returns a fresh `PairingSheetModel` bound to the resulting ceremony.

@@ -1,0 +1,11 @@
+{
+  "config": {
+    "version": 1,
+    "relays": [
+      "https://relay-1.yanlinglabs.com./",
+      "https://relay-2.yanlinglabs.com./"
+    ]
+  },
+  "sig": "Y4MMUzqPaXhn8Pzhsm5CL5Bh4pk1SwSNUA9iKyiE3HX5fcBbj5pJAPrhhT88GNOfqgXIeJKhUrmpDy6JsegLBw==",
+  "publicKey": "BVlZ2wxJtDMWXo+9O8SE/6F9/+ggV5yhE0mL+EuSb5Y="
+}

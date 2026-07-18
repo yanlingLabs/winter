@@ -20,9 +20,49 @@ func out(_ s: String) {
 
 // MARK: - Arg parsing (no dependency — mirrors `norma-probe`'s own hand-rolled `ProbeArgs` posture)
 
-let usage = "usage: norma-fake-phone pair --qr <base64url|-> [--attach]"
+let usage = """
+usage: norma-fake-phone pair --qr <base64url|-> [--attach]
+       norma-fake-phone probe-relay --url <relay-url>
+"""
 
 let rawArgs = Array(CommandLine.arguments.dropFirst())
+
+// SP2b Task 6: hidden `probe-relay` subcommand -- `health-check.ts`/`bench.ts`'s REAL iroh
+// connectivity check (as opposed to a bare HTTPS GET, which only proves the relay's web server
+// answers, not that it actually accepts iroh QUIC clients). Binds a throwaway endpoint with
+// ONLY the given relay configured (no direct addressing at all — `RelayMode.customFromUrls`,
+// the exact same shape `IrohListener`/production dialers use), waits for
+// `Endpoint.online()` ("resolves once the endpoint has a usable home relay" — IrohLib's own doc
+// comment on that method), then prints `ok` and exits 0. Ten-ish lines per the task brief;
+// deliberately NOT wired into the `pair` ceremony above — a fresh, disposable identity per probe.
+if rawArgs.first == "probe-relay" {
+    guard rawArgs.count == 3, rawArgs[1] == "--url" else {
+        out(usage)
+        exit(2)
+    }
+    let relayURL = rawArgs[2]
+    let probeSemaphore = DispatchSemaphore(value: 0)
+    Task {
+        defer { probeSemaphore.signal() }
+        do {
+            let endpoint = try await Endpoint.bind(options: EndpointOptions(
+                preset: presetN0(),
+                secretKey: SecretKey.generate().toBytes(),
+                relayMode: try RelayMode.customFromUrls(urls: [relayURL])
+            ))
+            try await withTimeout(20, "probe-relay online") {
+                await endpoint.online()
+            }
+            out("ok")
+        } catch {
+            out("error: \(error)")
+            exit(1)
+        }
+    }
+    probeSemaphore.wait()
+    exit(0)
+}
+
 guard rawArgs.first == "pair" else { out(usage); exit(2) }
 
 var qrArg: String?
