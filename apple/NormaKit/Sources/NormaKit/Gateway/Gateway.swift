@@ -247,34 +247,53 @@ public actor Gateway {
     /// phone's next connection just gets a fresh `PhoneSession`, same as any other new phone.
     private func evictIfNeeded() async {
         guard sessions.count >= Self.maxSessions else { return }
-        let evictable = sessions.values
+        let candidates = sessions.values
             .filter { $0.currentConn == nil }
             .sorted { $0.lastActiveAt < $1.lastActiveAt }
-        for stale in evictable {
+        for stale in candidates {
             guard sessions.count >= Self.maxSessions else { break }
-            stale.pumpTask?.cancel()
-            await stale.daemonClient.close()
-            // T4 review fix 3: `close()` suspended this actor — the SAME `clientInstanceID` may
-            // have reconnected in that window, in which case `handle` already stored a FRESH
-            // `PhoneSession` under this key. Blindly nil-ing the key here would drop that
-            // brand-new, possibly-live session on the floor. Only remove the entry if it is still
-            // THIS (stale) object; when superseded, skip — the stale object is already torn down
-            // (pump cancelled, daemon client closed — harmless, it held only disconnected state)
-            // and the newcomer is left untouched.
-            guard sessions[stale.clientInstanceID] === stale else { continue }
+            // T4 review-2 fix 1 (hazard b): the `candidates` snapshot — including its
+            // `currentConn == nil` filter — was taken ONCE, before any suspension, but every
+            // earlier iteration's `close()` await lets `handle` interleave: a LATER candidate can
+            // have acquired a live connection since the snapshot. Re-check at the top of each
+            // iteration — a session with a live conn must never be evicted, no matter what the
+            // stale snapshot says.
+            guard stale.currentConn == nil else { continue }
+            // T4 review-2 fix 1 (hazard a): every synchronous mutation (map removal, peer-map
+            // prune, pump cancel) happens BEFORE the suspending `close()` below. Removing the
+            // entry FIRST means a same-id reconnect landing during the close-await MISSES the
+            // cache in `phoneSession(for:)` and mints a fresh, fully-functional session (new
+            // daemon client, new pump). The pre-fix order (close, THEN remove) left the stale
+            // entry findable mid-close: `phoneSession(for:)` cache-HIT it, `handle` set
+            // `currentConn` on it, skipped the daemon reconnect (`connected` still true), and the
+            // phone got a helloAck on a dead session — cancelled pump, closing daemon client —
+            // which eviction's resume then removed DESPITE the now-live connection. (The previous
+            // `sessions[key] === stale` guard here protected against a fresh session under the
+            // key — an interleave that can never happen while the stale entry is still cached.)
             sessions[stale.clientInstanceID] = nil
-            // T4 review fix 2: prune the evicted id from `peerToClients` too — without this, a
-            // churning paired device (fresh `clientInstanceID` per reinstall/reconnect, same
-            // peerID) grows its peer's set without bound even though eviction keeps `sessions`
-            // itself capped. Drop the whole key once its set empties so the map stays bounded by
-            // LIVE state, not ever-seen ids. Revocation-correctness is unaffected:
-            // `revoke(peerID:)` only needs the ids that still have gateway state to tear down —
-            // an evicted id has none, and its future reconnect is re-gated by the router/
-            // directory check, not by this map.
+            // T4 review fix 2: prune the evicted id from `peerToClients` in the SAME synchronous
+            // section — without this, a churning paired device (fresh `clientInstanceID` per
+            // reinstall/reconnect, same peerID) grows its peer's set without bound even though
+            // eviction keeps `sessions` itself capped. Drop the whole key once its set empties so
+            // the map stays bounded by LIVE state, not ever-seen ids. Revocation-correctness is
+            // unaffected: `revoke(peerID:)` only needs the ids that still have gateway state to
+            // tear down — an evicted id has none, and its future reconnect is re-gated by the
+            // router/directory check, not by this map.
             for (peer, var clients) in peerToClients where clients.contains(stale.clientInstanceID) {
                 clients.remove(stale.clientInstanceID)
                 peerToClients[peer] = clients.isEmpty ? nil : clients
             }
+            stale.pumpTask?.cancel()
+            #if DEBUG
+            // Test-only synchronization hook (see `setEvictionGateForTesting`): parking here holds
+            // eviction exactly inside the suspension window the re-entrancy test races a same-id
+            // reconnect into — the candidate is already removed/pruned, its daemon client not yet
+            // closed, precisely `close()`'s own suspension point.
+            if let gate = evictionGateForTesting {
+                await gate(stale.clientInstanceID)
+            }
+            #endif
+            await stale.daemonClient.close()
         }
     }
 
@@ -296,6 +315,17 @@ public actor Gateway {
     /// caught it: a real phone's connection must actually drop, not just get ignored going forward.
     public func revoke(clientInstanceID: String) async {
         revoked.insert(clientInstanceID)
+        // T4 review-2 fix 3: prune this id from `peerToClients` — the last path that could leave
+        // a dead id mapped, breaking the bounded-by-live-state invariant eviction now maintains.
+        // Done in the synchronous section BEFORE the close-await below (and before the
+        // no-session early return — a direct revoke of an id whose session is already gone must
+        // still unmap it). No re-add race: `handle` checks `revoked` BEFORE its `peerToClients`
+        // insert, and the `revoked.insert` above is already visible. `revoke(peerID:)` removing
+        // the whole key first just makes this loop a no-op for that peer.
+        for (peer, var clients) in peerToClients where clients.contains(clientInstanceID) {
+            clients.remove(clientInstanceID)
+            peerToClients[peer] = clients.isEmpty ? nil : clients
+        }
         guard let session = sessions[clientInstanceID] else { return }
         session.revoked = true
         session.pumpTask?.cancel()
@@ -337,6 +367,18 @@ public actor Gateway {
     /// `sessions`) for a churning device instead of growing with every ever-seen id.
     func peerClientsForTesting(_ peerID: String) -> Set<String> {
         peerToClients[peerID] ?? []
+    }
+
+    /// Test-only synchronization hook (`@testable`, T4 review-2 fix 1): awaited by `evictIfNeeded`
+    /// for each evicted candidate AFTER its synchronous removal (session entry gone, peer map
+    /// pruned, pump cancelled) and BEFORE its daemon client's `close()` — a test-controlled park
+    /// here is a deterministic stand-in for `close()`'s own suspension, letting the re-entrancy
+    /// test drive a same-id reconnect (and a live-conn acquisition by a later candidate) into
+    /// exactly that window with no sleeps. Never set in production code.
+    private var evictionGateForTesting: (@Sendable (String) async -> Void)?
+
+    func setEvictionGateForTesting(_ gate: (@Sendable (String) async -> Void)?) {
+        evictionGateForTesting = gate
     }
 
     /// Test-only synchronization hook (`@testable`, SP2a Task 4's E2E): resumed once the

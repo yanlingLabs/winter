@@ -158,6 +158,12 @@ public final class RemoteHost {
     /// Stops the whole stack if it's running AND there's no more reason to keep it up: zero paired
     /// devices AND no pairing window requested. A no-op otherwise (including if already stopped).
     public func stopIfIdle() async {
+        // T4 review-2 fix 2: a start may still be mid-flight (`listener` not yet assigned) —
+        // without settling it first, the `listener != nil` guard below would no-op and this
+        // idleness signal would be silently LOST: the stack finishes starting moments later with
+        // nobody left to stop it. Await the in-flight start (error discarded — a FAILED start
+        // left nothing running to stop anyway), then evaluate idleness against the settled state.
+        _ = try? await startTask?.value
         guard listener != nil else { return }
         let deviceCount = await store.all().count
         guard deviceCount == 0, !pairingWindowRequested else { return }

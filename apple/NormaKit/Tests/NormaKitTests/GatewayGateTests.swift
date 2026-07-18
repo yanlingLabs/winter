@@ -1,4 +1,5 @@
 import XCTest
+import os
 import NormaProtocol
 @testable import NormaKit
 
@@ -375,6 +376,11 @@ final class GatewayGateTests: XCTestCase {
         try await Task.sleep(nanoseconds: 150_000_000)
         XCTAssertEqual(daemonTransport.sent.count, baselineSent, "a revoked phone must not reach the daemon again")
 
+        // T4 review-2 fix 3: a direct per-client revoke must ALSO prune `peerToClients` (the last
+        // path that could leave a dead id mapped, breaking the bounded-by-live-state invariant).
+        let peerClients = await gateway.peerClientsForTesting("peer-stub")
+        XCTAssertFalse(peerClients.contains("phone-rev"), "revoke(clientInstanceID:) must prune the id from peerToClients")
+
         // A reconnect by the SAME phone is refused at the handshake and the conn is closed.
         let conn2 = ScriptedRemoteConn()
         listener.simulateConnection(conn2)
@@ -585,5 +591,159 @@ final class GatewayGateTests: XCTestCase {
             XCTAssertEqual(clients.contains(id), hasSession,
                            "\(id): peerToClients membership must track its session's existence exactly (session: \(hasSession))")
         }
+    }
+
+    // MARK: - Eviction re-entrancy (T4 review-2 fix 1): the close-await window
+
+    /// Parks the FIRST eviction inside `evictIfNeeded`'s close-await window (via the gateway's
+    /// `#if DEBUG` eviction gate — a deterministic stand-in for `close()`'s own suspension) and
+    /// passes every later one through. Continuation-based both ways — no sleeps: the test awaits
+    /// `waitUntilParked()` to know eviction is genuinely inside the window, and eviction awaits
+    /// the test's `release()`. Same `OSAllocatedUnfairLock` + resume-outside-the-lock conventions
+    /// as `ScriptedRemoteConn`.
+    private final class EvictionGate: @unchecked Sendable {
+        private struct State {
+            var firstEvictedID: String?
+            var fired = false
+            var parkedWaiter: CheckedContinuation<String, Never>?
+            var release: CheckedContinuation<Void, Never>?
+            var released = false
+        }
+        private let state = OSAllocatedUnfairLock(initialState: State())
+
+        /// The gateway-side half — install as the eviction gate.
+        func onEvict(_ id: String) async {
+            let (shouldPark, waiter): (Bool, CheckedContinuation<String, Never>?) = state.withLock { s in
+                guard !s.fired else { return (false, nil) }
+                s.fired = true
+                s.firstEvictedID = id
+                let w = s.parkedWaiter
+                s.parkedWaiter = nil
+                return (true, w)
+            }
+            waiter?.resume(returning: id)
+            guard shouldPark else { return }
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                let releaseNow: Bool = state.withLock { s in
+                    if s.released { return true }
+                    s.release = cont
+                    return false
+                }
+                if releaseNow { cont.resume() }
+            }
+        }
+
+        /// The test-side half — resolves (with the evicted id) once the first eviction is parked.
+        func waitUntilParked() async -> String {
+            await withCheckedContinuation { (cont: CheckedContinuation<String, Never>) in
+                let already: String? = state.withLock { s in
+                    if s.fired { return s.firstEvictedID }
+                    s.parkedWaiter = cont
+                    return nil
+                }
+                if let already { cont.resume(returning: already) }
+            }
+        }
+
+        func release() {
+            let cont: CheckedContinuation<Void, Never>? = state.withLock { s in
+                s.released = true
+                let c = s.release
+                s.release = nil
+                return c
+            }
+            cont?.resume()
+        }
+    }
+
+    /// T4 review-2 fix 1, both hazards, raced deterministically into the close-await window:
+    ///   (a) a same-id reconnect landing WHILE its session is being evicted must mint a FRESH,
+    ///       fully-functional session (helloAck AND a live daemon round trip AND an alive pump) —
+    ///       pre-fix (entry removed only AFTER the close-await) the reconnect cache-hit the
+    ///       half-torn-down object: cancelled pump, closing daemon client, then eviction's resume
+    ///       removed the entry despite the now-live conn;
+    ///   (b) a LATER eviction candidate that acquires a live connection while an earlier
+    ///       iteration is suspended must be SKIPPED (the snapshot's `currentConn == nil` filter is
+    ///       stale by then) — a live-conn session is never evicted.
+    func testEviction_SameIDReconnectDuringCloseGetsFunctionalSession_LiveConnNeverEvicted() async throws {
+        let daemon = try await RealDaemon.start()
+        defer { daemon.stop() }
+        let listener = LoopbackListener()
+        let gateway = realGateway(socketPath: daemon.socketPath, remoteToken: daemon.remoteToken, listener: listener)
+        let runTask = Task { await gateway.run() }
+        defer { runTask.cancel() }
+
+        // Fill to cap with 32 disconnected sessions — phone-0 oldest, phone-1 second-oldest.
+        for i in 0..<32 {
+            let conn = ScriptedRemoteConn()
+            listener.simulateConnection(conn)
+            conn.enqueueInbound(try helloFrame(clientInstanceID: "phone-\(i)", resumes: []))
+            _ = try await waitForOutbound(conn, count: 1) // helloAck
+            conn.endInbound()
+        }
+        // Settle grace window (this file's established idiom): a PRECONDITION — let every
+        // disconnect's async `currentConn = nil` land so all 32 are genuinely evictable before
+        // the race below starts. The race itself is entirely continuation-based, no sleeps.
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let gate = EvictionGate()
+        await gateway.setEvictionGateForTesting { id in await gate.onEvict(id) }
+
+        // A NEW phone id trips eviction; its own handshake stays parked inside the gate with it.
+        let trigger = ScriptedRemoteConn()
+        listener.simulateConnection(trigger)
+        trigger.enqueueInbound(try helloFrame(clientInstanceID: "phone-new", resumes: []))
+
+        // Eviction is now provably inside the close-await window: phone-0's entry is REMOVED
+        // (and peer map pruned, pump cancelled) but its daemon client is not yet closed.
+        let parkedID = await gate.waitUntilParked()
+        XCTAssertEqual(parkedID, "phone-0", "the oldest disconnected candidate is evicted first")
+
+        // Hazard (a): phone-0 reconnects INSIDE the window → cache miss → a fresh session.
+        let phone0Reconn = ScriptedRemoteConn()
+        listener.simulateConnection(phone0Reconn)
+        phone0Reconn.enqueueInbound(try helloFrame(clientInstanceID: "phone-0", resumes: []))
+        let out0 = try await waitForOutbound(phone0Reconn, count: 1)
+        XCTAssertEqual(try decodeEnvelope(out0[0]).kind, .helloAck)
+        // FUNCTIONAL, not just acked: a live rpc must round-trip against the real daemon — the
+        // pre-fix stale ride fails exactly here (its daemon client is the one being closed).
+        phone0Reconn.enqueueInbound(try rpcRequestFrame(id: 1, method: "session.list", params: nil))
+        let out0b = try await waitForOutbound(phone0Reconn, count: 2)
+        let listResp = try decodeEnvelope(out0b[1])
+        XCTAssertEqual(listResp.kind, .rpcResponse)
+        let listBody = try JSONDecoder().decode(JSONValue.self, from: listResp.payload)
+        XCTAssertNil(listBody["error"], "the reconnect's session must reach the daemon — a stale ride's closing client errors here")
+        let pump0 = await gateway.pumpTaskForTesting("phone-0")
+        XCTAssertNotNil(pump0, "the fresh session must have a pump")
+        XCTAssertEqual(pump0?.isCancelled, false, "…an ALIVE one, not the evicted session's cancelled pump")
+
+        // Hazard (b): phone-1 — still in the (stale) candidates snapshot — acquires a live conn
+        // while eviction is parked. When eviction resumes it must SKIP phone-1, not evict it.
+        let phone1Reconn = ScriptedRemoteConn()
+        listener.simulateConnection(phone1Reconn)
+        phone1Reconn.enqueueInbound(try helloFrame(clientInstanceID: "phone-1", resumes: []))
+        _ = try await waitForOutbound(phone1Reconn, count: 1) // helloAck riding its intact session
+
+        gate.release()
+
+        // Eviction resumes: closes phone-0's stale client, skips phone-1 (live conn), evicts the
+        // next disconnected candidate (phone-2) to get back under cap, and phone-new's own
+        // handshake completes. Condition-based waits only.
+        let outTrigger = try await waitForOutbound(trigger, count: 1)
+        XCTAssertEqual(try decodeEnvelope(outTrigger[0]).kind, .helloAck, "the triggering phone's handshake completes after eviction")
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline {
+            if await gateway.pumpTaskForTesting("phone-2") == nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let phone2Pump = await gateway.pumpTaskForTesting("phone-2")
+        XCTAssertNil(phone2Pump, "with phone-1 skipped, the next disconnected candidate (phone-2) is evicted instead")
+
+        let pump1 = await gateway.pumpTaskForTesting("phone-1")
+        XCTAssertNotNil(pump1, "a candidate that went live mid-eviction must never be evicted")
+        XCTAssertEqual(pump1?.isCancelled, false)
+        XCTAssertFalse(phone1Reconn.isClosed, "…and its live connection is untouched")
+
+        await gateway.setEvictionGateForTesting(nil)
     }
 }
