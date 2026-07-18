@@ -345,11 +345,12 @@ final class GatewayGateTests: XCTestCase {
     func testG5_RevokeCancelsPumpAndRefusesFramesAndReconnect() async throws {
         let daemonTransport = ScriptedTransport()
         let listener = LoopbackListener()
+        let directory = InMemoryDirectory(peerID: "peer-stub")
         let gateway = Gateway(
             listener: listener,
             daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
             hostID: "host-test",
-            directory: InMemoryDirectory(peerID: "peer-stub")
+            directory: directory
         )
         let runTask = Task { await gateway.run() }
         defer { runTask.cancel() }
@@ -364,6 +365,13 @@ final class GatewayGateTests: XCTestCase {
         let pump = await gateway.pumpTaskForTesting("phone-rev")
         XCTAssertNotNil(pump, "the phone's daemon-event pump should be running before revoke")
 
+        // Production revocation order (`RemoteHost.revoke`): the STORE record goes first, then the
+        // gateway fan-out — mirrored here so the post-revoke reconnect below exercises the real
+        // enforcement point. Since the SP2b whole-branch review fix, the directory miss (not the
+        // gateway's `revoked` set) is what keeps a revoked phone out at the handshake: a member
+        // presenting the current epoch deliberately CLEARS its stale `revoked` entry (re-pair
+        // re-admission), so a gateway-level revoke alone no longer outlasts a still-valid record.
+        directory.remove("peer-stub")
         await gateway.revoke(clientInstanceID: "phone-rev")
         XCTAssertEqual(pump?.isCancelled, true, "revoke must cancel the pumpTask (G5)")
 
@@ -381,14 +389,14 @@ final class GatewayGateTests: XCTestCase {
         let peerClients = await gateway.peerClientsForTesting("peer-stub")
         XCTAssertFalse(peerClients.contains("phone-rev"), "revoke(clientInstanceID:) must prune the id from peerToClients")
 
-        // A reconnect by the SAME phone is refused at the handshake and the conn is closed.
+        // A reconnect by the SAME phone is refused at the handshake (as `not_paired` — the
+        // membership gate, the revoked phone's record being gone) and the conn is closed.
         let conn2 = ScriptedRemoteConn()
         listener.simulateConnection(conn2)
         conn2.enqueueInbound(try helloFrame(clientInstanceID: "phone-rev", resumes: []))
         let out2 = try await waitForOutbound(conn2, count: 1)
-        XCTAssertEqual(try decodeEnvelope(out2[0]).kind, .error)
-        let body2 = try JSONDecoder().decode(JSONValue.self, from: try decodeEnvelope(out2[0]).payload)
-        XCTAssertEqual(body2["error"]?["message"]?.stringValue, "pairing revoked")
+        let rejected2 = try JSONDecoder().decode(PairRejected.self, from: out2[0])
+        XCTAssertEqual(rejected2.code, "not_paired", "a revoked phone's reconnect is refused at the membership gate")
         let closeDeadline = Date().addingTimeInterval(2)
         while Date() < closeDeadline, !conn2.isClosed { try await Task.sleep(nanoseconds: 10_000_000) }
         XCTAssertTrue(conn2.isClosed, "a revoked phone's reconnect must be closed")
@@ -745,5 +753,73 @@ final class GatewayGateTests: XCTestCase {
         XCTAssertFalse(phone1Reconn.isClosed, "…and its live connection is untouched")
 
         await gateway.setEvictionGateForTesting(nil)
+    }
+
+    // MARK: - Re-pair after revoke (SP2b whole-branch review): stale revocation must not outlive it
+
+    /// SP2b whole-branch review (Important): the `revoked` set never cleared, so a revoked-then-
+    /// RE-PAIRED phone reconnecting with its stable `clientInstanceID` was refused "pairing
+    /// revoked" forever — despite being a current directory member presenting the current epoch —
+    /// until an app reinstall minted a new id. (Reachable in production because the gateway
+    /// survives a revoke whenever ANOTHER device is still paired — `RemoteHost.stopIfIdle` won't
+    /// tear it down — so the set outlives the re-pair ceremony.) Fail-closed, but silently breaks
+    /// re-pair for the multi-device case.
+    ///
+    /// Contract proven here, both directions:
+    ///   - a revoked peer that was NOT re-added to the directory stays refused (`not_paired` at
+    ///     the membership gate — SP2a gate G5's production shape, NOT weakened);
+    ///   - a revoked peer that WAS re-paired (directory record back, epoch bumped) and presents
+    ///     the CURRENT epoch is re-admitted under the SAME `clientInstanceID`.
+    func testRepair_RevokedThenRepairedPeerSameClientInstanceID_IsAdmitted_UnrepairedStaysRefused() async throws {
+        let daemon = try await RealDaemon.start()
+        defer { daemon.stop() }
+        let directory = InMemoryDirectory(peerID: "peer-X", epoch: 1)
+        let listener = LoopbackListener()
+        let gateway = Gateway(
+            listener: listener,
+            daemonFactory: { NormaClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway") },
+            hostID: "host-test",
+            directory: directory
+        )
+        let runTask = Task { await gateway.run() }
+        defer { runTask.cancel() }
+
+        // Initial handshake: member @epoch1, stable clientInstanceID "X".
+        let conn1 = ScriptedRemoteConn(peerID: "peer-X")
+        listener.simulateConnection(conn1)
+        conn1.enqueueInbound(try helloFrame(clientInstanceID: "X", resumes: [], epoch: 1))
+        let out1 = try await waitForOutbound(conn1, count: 1)
+        XCTAssertEqual(try decodeEnvelope(out1[0]).kind, .helloAck)
+
+        // Revoke, production order (RemoteHost.revoke): store record removed FIRST, then the
+        // gateway fan-out tears down the live footprint.
+        directory.remove("peer-X")
+        await gateway.revoke(peerID: "peer-X")
+        try await waitForClosed(conn1)
+
+        // STILL revoked (no re-pair): the reconnect dies at the membership gate as not_paired —
+        // the directory miss, not the `revoked` set, is what keeps a revoked phone out.
+        let conn2 = ScriptedRemoteConn(peerID: "peer-X")
+        listener.simulateConnection(conn2)
+        conn2.enqueueInbound(try helloFrame(clientInstanceID: "X", resumes: [], epoch: 1))
+        let out2 = try await waitForOutbound(conn2, count: 1)
+        let rejected = try JSONDecoder().decode(PairRejected.self, from: out2[0])
+        XCTAssertEqual(rejected.code, "not_paired", "a revoked, not-re-paired phone is refused at the membership gate")
+        try await waitForClosed(conn2)
+
+        // RE-PAIR: the ceremony's `store.add` puts the record back with the epoch BUMPED (what
+        // `PairingManager.confirm` does after a revoke) — simulated directly on the directory.
+        directory.set(PairRecord(phoneEndpointID: "peer-X", label: "re-paired", createdAt: 0, caps: ["sessions"], pairingEpoch: 2, lastSeenAt: 0))
+
+        // The re-paired phone reconnects: SAME clientInstanceID "X", CURRENT epoch 2 → must be
+        // ADMITTED (ServerHello), not refused "pairing revoked" by the stale set.
+        let conn3 = ScriptedRemoteConn(peerID: "peer-X")
+        listener.simulateConnection(conn3)
+        conn3.enqueueInbound(try helloFrame(clientInstanceID: "X", resumes: [], epoch: 2))
+        let out3 = try await waitForOutbound(conn3, count: 1)
+        let env3 = try decodeEnvelope(out3[0], epoch: 2)
+        XCTAssertEqual(env3.kind, .helloAck, "a re-paired member presenting the CURRENT epoch must be re-admitted — a stale revocation must not outlive the re-pair")
+        let serverHello = try JSONDecoder().decode(ServerHello.self, from: env3.payload)
+        XCTAssertEqual(serverHello.hostID, "host-test")
     }
 }

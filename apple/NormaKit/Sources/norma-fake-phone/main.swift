@@ -211,6 +211,10 @@ Task {
             }
         }
 
+        // CAVEAT: the FIXED clientInstanceID means two concurrently-running fake phones collide in
+        // the gateway's per-client state (`sessions`/`revoked` are keyed by this id) — one at a
+        // time only. It's also what made the SP2b whole-branch review's revoke-then-re-pair
+        // lockout reproducible pre-SP3 (a real phone's id is equally stable across re-pairs).
         let hello = ClientHello(
             protocolVersions: [1], appBuild: "norma-fake-phone",
             clientInstanceID: "norma-fake-phone", pairingEpoch: accepted.epoch, resumes: []

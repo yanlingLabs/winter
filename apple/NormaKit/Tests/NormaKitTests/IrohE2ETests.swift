@@ -401,7 +401,7 @@ final class IrohE2ETests: XCTestCase {
     func testScenarioF_RevokeDropsConnAndCancelsPump() async throws {
         let daemon = try await RealDaemon.start()
         defer { daemon.stop() }
-        let (secret, _, directory) = try singlePhoneDirectory()
+        let (secret, peerID, directory) = try singlePhoneDirectory()
         let (listener, gateway, runTask) = try await startGatewayOverIroh(daemon: daemon, directory: directory)
         defer { runTask.cancel(); listener.stop() }
 
@@ -414,6 +414,11 @@ final class IrohE2ETests: XCTestCase {
         let pump = await gateway.pumpTaskForTesting("phone-f")
         XCTAssertNotNil(pump, "the phone's daemon-event pump should be running before revoke")
 
+        // Production revocation order (`RemoteHost.revoke`): the STORE record goes first, then
+        // the gateway fan-out — since the SP2b whole-branch review fix the directory miss (not
+        // the gateway's `revoked` set, which a re-paired member's next valid hello deliberately
+        // clears) is what refuses a revoked phone's reconnect.
+        directory.remove(peerID)
         await gateway.revoke(clientInstanceID: "phone-f")
         XCTAssertEqual(pump?.isCancelled, true, "revoke must cancel the pumpTask")
 
@@ -426,13 +431,15 @@ final class IrohE2ETests: XCTestCase {
             return XCTFail("revoke must drop the phone's connection, got \(result)")
         }
 
-        // A reconnect by the SAME clientInstanceID is refused at the handshake and closed too.
+        // A reconnect by the SAME clientInstanceID is refused at the handshake — as a raw JSON
+        // `not_paired` from the membership gate (the record is gone; there's no epoch left to
+        // wrap a WireEnvelope error in) — and closed too.
         let phone2 = try await PhoneConn.dial(listener: listener, secret: secret)
         defer { phone2.closeConnection(); phone2.closeDialer() }
         try await phone2.sendHello(clientInstanceID: "phone-f", resumes: [])
-        let rejection = try await phone2.expectFrame()
-        XCTAssertEqual(rejection.kind, .error)
-        XCTAssertEqual(try decodeBody(rejection)["error"]?["message"]?.stringValue, "pairing revoked")
+        let rejectedData = try await phone2.expectRawFrame()
+        let rejected = try JSONDecoder().decode(PairRejected.self, from: rejectedData)
+        XCTAssertEqual(rejected.code, "not_paired", "a revoked phone's reconnect is refused at the membership gate")
         let closed2 = try await phone2.readNext(timeout: 10)
         guard case .closed = closed2 else {
             return XCTFail("a revoked phone's reconnect must be closed, got \(closed2)")

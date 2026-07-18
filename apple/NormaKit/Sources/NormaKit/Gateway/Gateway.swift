@@ -137,7 +137,24 @@ public actor Gateway {
             return
         }
 
-        // SP2a gate G5: a revoked phone may not re-establish — refuse the handshake outright.
+        // SP2b whole-branch review fix: a stale revocation must not outlive a RE-PAIR. Reaching
+        // this line means the peer IS a current directory member (the guard at the top of this
+        // method) AND its hello carried the CURRENT epoch (`WireFrame.decode(expectedEpoch:)`
+        // above) — that phone is re-authorized by definition, so clear any leftover `revoked`
+        // entry for its (stable) `clientInstanceID`. Without this, the set — which lives as long
+        // as the gateway, and the gateway outlives a revoke whenever ANOTHER device is still
+        // paired (`RemoteHost.stopIfIdle` won't tear it down) — locked a revoked-then-re-paired
+        // phone out forever: valid record, valid epoch, same clientInstanceID → "pairing revoked"
+        // until an app reinstall minted a new id. SP2a gate G5 is NOT weakened: a still-revoked
+        // (not-re-paired) phone has NO directory record and is refused as `not_paired` at the
+        // router/membership gate before ever reaching here. The per-connection `session.revoked`
+        // guard in `handleLiveFrame` (frames already in flight on a just-revoked conn) is a
+        // separate, still-correct mechanism and stays untouched.
+        revoked.remove(clientHello.clientInstanceID)
+
+        // SP2a gate G5's handshake guard — post-fix a conn that got this far is never still
+        // marked revoked (membership + current epoch just cleared it above); kept as a safety net
+        // for future paths rather than as the live enforcement point (that's the membership gate).
         guard !revoked.contains(clientHello.clientInstanceID) else {
             await sendGatewayError(conn, epoch: epoch, id: .null, sessionID: nil, message: "pairing revoked")
             conn.close()
