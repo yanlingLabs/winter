@@ -78,11 +78,18 @@ final class GatewayGateTests: XCTestCase {
     }
 
     /// A gateway whose daemon-facing bridge client speaks to a REAL daemon's socket as `remote`.
-    func realGateway(socketPath: String, remoteToken: String, listener: LoopbackListener) -> Gateway {
-        Gateway(
+    /// `memberPeerIDs` seeds an `InMemoryDirectory` at epoch 1 (SP2b Task 4 — `PairingStub` is
+    /// gone; every test peer must now be a real allowlist member) — defaults to the lone
+    /// `"peer-stub"` every `ScriptedRemoteConn()` default constructs.
+    func realGateway(socketPath: String, remoteToken: String, listener: LoopbackListener, memberPeerIDs: [String] = ["peer-stub"]) -> Gateway {
+        let directory = InMemoryDirectory(records: memberPeerIDs.map {
+            PairRecord(phoneEndpointID: $0, label: "test", createdAt: 0, caps: ["sessions"], pairingEpoch: 1, lastSeenAt: 0)
+        })
+        return Gateway(
             listener: listener,
             daemonFactory: { NormaClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: remoteToken, clientName: "iphone-gateway") },
-            pairing: Gateway.PairingStub()
+            hostID: "host-test",
+            directory: directory
         )
     }
 
@@ -120,7 +127,7 @@ final class GatewayGateTests: XCTestCase {
         let seed = try await seedTwoMessages(socketPath: socketPath, harnessToken: daemon.harnessToken)
 
         let listener = LoopbackListener()
-        let gateway = realGateway(socketPath: socketPath, remoteToken: remoteToken, listener: listener)
+        let gateway = realGateway(socketPath: socketPath, remoteToken: remoteToken, listener: listener, memberPeerIDs: ["peer-A", "peer-B"])
         let runTask = Task { await gateway.run() }
         defer { runTask.cancel() }
 
@@ -251,7 +258,8 @@ final class GatewayGateTests: XCTestCase {
         let gateway = Gateway(
             listener: listener,
             daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
-            pairing: Gateway.PairingStub(),
+            hostID: "host-test",
+            directory: InMemoryDirectory(peerID: "peer-stub"),
             rateLimit: (perSec: 1000, burst: 2),
             now: { 1000.0 }
         )
@@ -302,7 +310,8 @@ final class GatewayGateTests: XCTestCase {
         let gateway = Gateway(
             listener: listener,
             daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
-            pairing: Gateway.PairingStub()
+            hostID: "host-test",
+            directory: InMemoryDirectory(peerID: "peer-stub")
         )
         let runTask = Task { await gateway.run() }
         defer { runTask.cancel() }
@@ -338,7 +347,8 @@ final class GatewayGateTests: XCTestCase {
         let gateway = Gateway(
             listener: listener,
             daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
-            pairing: Gateway.PairingStub()
+            hostID: "host-test",
+            directory: InMemoryDirectory(peerID: "peer-stub")
         )
         let runTask = Task { await gateway.run() }
         defer { runTask.cancel() }
@@ -480,5 +490,61 @@ final class GatewayGateTests: XCTestCase {
         XCTAssertEqual(Gateway.remoteAllowedMethods.count, 9)
         XCTAssertEqual(Gateway.remoteAllowedMethods, expected,
                        "Swift remote allowlist drifted from the nine — mirror packages/core/src/ipc/server.ts's REMOTE_ALLOWED_METHODS")
+    }
+
+    // MARK: - Eviction: session-map cap (32) bounds phone churn (SP2b Task 4)
+
+    /// 31 phones connect then hang up (evictable — no `currentConn`), a 32nd stays connected, and
+    /// a 33rd trips the cap: the OLDEST disconnected session (phone-0) must be evicted (pump
+    /// cancelled, entry gone) while the still-connected one and the newly-added one both survive.
+    func testEviction_OldestDisconnectedSessionEvicted_ConnectedSessionSurvives() async throws {
+        let daemon = try await RealDaemon.start()
+        defer { daemon.stop() }
+        let listener = LoopbackListener()
+        let gateway = realGateway(socketPath: daemon.socketPath, remoteToken: daemon.remoteToken, listener: listener)
+        let runTask = Task { await gateway.run() }
+        defer { runTask.cancel() }
+
+        for i in 0..<31 {
+            let conn = ScriptedRemoteConn()
+            listener.simulateConnection(conn)
+            conn.enqueueInbound(try helloFrame(clientInstanceID: "phone-\(i)", resumes: []))
+            _ = try await waitForOutbound(conn, count: 1) // helloAck
+            conn.endInbound() // hang up — becomes evictable once `handle`'s loop notices
+        }
+        let firstPump = await gateway.pumpTaskForTesting("phone-0")
+        XCTAssertNotNil(firstPump, "phone-0's session/pump must exist before eviction")
+
+        // A phone that STAYS connected — must survive eviction even though it joins the map at
+        // the same "already near cap" moment as the disconnected ones.
+        let survivorConn = ScriptedRemoteConn()
+        listener.simulateConnection(survivorConn)
+        survivorConn.enqueueInbound(try helloFrame(clientInstanceID: "phone-survivor", resumes: []))
+        _ = try await waitForOutbound(survivorConn, count: 1)
+        // sessions.count is now 32 (phone-0..30 disconnected + phone-survivor connected).
+
+        // Settle grace window (matches this file's own idiom elsewhere): let the 31 disconnects'
+        // async `currentConn = nil` cleanup actually land before tripping eviction with the 33rd
+        // connection — this is a precondition settle, not the eviction assertion itself (that's
+        // the condition-based poll below).
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let conn32 = ScriptedRemoteConn()
+        listener.simulateConnection(conn32)
+        conn32.enqueueInbound(try helloFrame(clientInstanceID: "phone-32", resumes: []))
+        _ = try await waitForOutbound(conn32, count: 1)
+
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, firstPump?.isCancelled != true {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(firstPump?.isCancelled, true, "the oldest disconnected session must be evicted once the cap is hit")
+        let phone0PumpAfter = await gateway.pumpTaskForTesting("phone-0")
+        XCTAssertNil(phone0PumpAfter, "phone-0's session entry must be gone after eviction")
+
+        let survivorPump = await gateway.pumpTaskForTesting("phone-survivor")
+        XCTAssertNotNil(survivorPump, "a still-connected session must never be evicted")
+        let phone32Pump = await gateway.pumpTaskForTesting("phone-32")
+        XCTAssertNotNil(phone32Pump, "the newly-added session must exist")
     }
 }

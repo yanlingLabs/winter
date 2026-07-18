@@ -182,3 +182,9 @@ public actor PairingStore {
         }
     }
 }
+
+/// SP2b Task 4: `PairingStore` IS the production `PairingDirectory` — `record(forPeer:)` already
+/// has the exact signature the protocol wants (see `PairingRouter.swift`'s own doc comment on why
+/// an actor's plain, non-`async`-spelled method can satisfy an `async` protocol requirement). No
+/// wrapper needed.
+extension PairingStore: PairingDirectory {}

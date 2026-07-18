@@ -218,6 +218,17 @@ private final class TaskBag: @unchecked Sendable {
 /// retained for the connection's whole life — dropping the Swift wrapper drops the
 /// underlying Rust QUIC connection and sends an implicit application-close, which would
 /// tear the link down mid-flight. They are held as `let`s here for exactly that reason.
+///
+/// SEND-BEFORE-RECEIVE (SP2b Task 4 finding, confirmed empirically): on the ACCEPTING side of a
+/// freshly-opened bidi stream, `send(_:)` does not reliably flush until the OPENING side (the
+/// phone) has transmitted at least one byte on that stream — a `send()` attempted first, before
+/// the phone has sent anything at all, can hang indefinitely (reproduced via a throwaway
+/// diagnostic in `IrohListenerTests` during this task; not something NormaKit's Swift code
+/// controls). Every response path in this codebase already reads the phone's first frame before
+/// ever sending back (`Gateway.handle`, `PairingManager.handleConnection`,
+/// `PairingRouter`'s `sendNotPairedRejection`) for the wire protocol's own "phone always speaks
+/// first" convention — which happens to ALSO be what makes this safe. Any FUTURE code on this
+/// type that wants to speak before reading anything must account for this.
 public final class IrohConn: RemoteConn, @unchecked Sendable {
     /// The authenticated remote EndpointID string (`Connection.remoteId()`), not a stub.
     public let peerID: String
