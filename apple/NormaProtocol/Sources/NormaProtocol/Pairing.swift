@@ -25,9 +25,10 @@ public enum PairingCrypto {
     /// Builds the canonical-CBOR transcript both sides of a pairing ceremony hash and sign over.
     /// Every field either side could disagree about — protocol version, the pairing ID, both
     /// endpoint IDs, the phone's install nonce, and the requested capabilities — is bound in,
-    /// so a MITM can't quietly substitute its own endpoint ID or capability list. Key order in
-    /// this call is written pre-sorted purely for readability; `CanonicalCBOR.encode` sorts
-    /// unconditionally regardless of the order given here.
+    /// so a MITM can't quietly substitute its own endpoint ID or capability list. Keys are
+    /// listed alphabetically here purely for readability; `CanonicalCBOR.encode` sorts
+    /// unconditionally by ENCODED key bytes (RFC 8949 — length-first for text keys), so the
+    /// wire order is `v, caps, pairID, macEndpointID, phoneEndpointID, phoneInstallNonce`.
     public static func transcript(
         v: Int,
         pairID: Data,
@@ -54,6 +55,19 @@ public enum PairingCrypto {
         let key = SymmetricKey(data: pairSecret)
         let mac = HMAC<SHA256>.authenticationCode(for: proofDomain + transcript, using: key)
         return Data(mac)
+    }
+
+    /// Constant-time check of a received `proof` against the locally-recomputed one — the ONLY
+    /// way the Mac side (Task 3's PairingManager) should compare proofs. `Data == Data` is an
+    /// early-exit memcmp whose timing leaks how many leading bytes matched; CryptoKit's
+    /// `isValidAuthenticationCode` compares in constant time.
+    public static func verifyProof(pairSecret: Data, transcript: Data, proof: Data) -> Bool {
+        let key = SymmetricKey(data: pairSecret)
+        return HMAC<SHA256>.isValidAuthenticationCode(
+            proof,
+            authenticating: proofDomain + transcript,
+            using: key
+        )
     }
 
     /// A 4-word Short Authentication String either side can render for a human to compare
@@ -159,7 +173,11 @@ public struct QRPayload: Equatable {
             guard case .text(let relay) = entry else { throw PairingError.badPayload }
             relays.append(relay)
         }
-        return SignedRelayConfig(config: RelayConfig(version: Int(versionU), relays: relays), sig: sig)
+        // `Int(exactly:)`, not `Int(_:)` — a uint ≥ 2^63 is fully-valid canonical CBOR, and a
+        // trapping conversion would let a crafted payload crash the process instead of being
+        // rejected like any other malformed field.
+        guard let version = Int(exactly: versionU) else { throw PairingError.badPayload }
+        return SignedRelayConfig(config: RelayConfig(version: version, relays: relays), sig: sig)
     }
 
     /// Base64url, no padding — the alphabet QR-code text payloads and URL query strings both
@@ -206,13 +224,19 @@ public struct QRPayload: Equatable {
             throw PairingError.badPayload
         }
         guard pairID.count == 16, pairSecret.count == 32 else { throw PairingError.badPayload }
+        // `Int(exactly:)`, not `Int(_:)` — a uint ≥ 2^63 is fully-valid canonical CBOR, and a
+        // trapping conversion would let a crafted QR code crash the process instead of being
+        // rejected like any other malformed field.
+        guard let v = Int(exactly: vU), let expiresAt = Int(exactly: expiresAtU) else {
+            throw PairingError.badPayload
+        }
 
         let relayConfig = try decodeRelayConfig(relayConfigCBOR)
         return QRPayload(
-            v: Int(vU),
+            v: v,
             pairID: pairID,
             pairSecret: pairSecret,
-            expiresAt: Int(expiresAtU),
+            expiresAt: expiresAt,
             macEndpointID: macEndpointID,
             relayConfig: relayConfig,
             alpn: alpn,

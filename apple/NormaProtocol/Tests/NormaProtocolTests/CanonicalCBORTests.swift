@@ -19,8 +19,20 @@ struct CanonicalCBORTests {
 
     @Test func mapKeysAreSortedBytewise() {
         let m = CBORValue.map([("b", .uint(2)), ("a", .uint(1)), ("aa", .uint(3))])
-        // canonical order: "a" (0x61) < "aa" (0x61 61 — longer) — bytewise lexicographic on ENCODED keys
-        #expect(CanonicalCBOR.encode(m) == Data([0xA3, 0x61, 0x61, 0x01, 0x62, 0x61, 0x61, 0x03, 0x61, 0x62, 0x02]))
+        // RFC 8949 §4.2.1: bytewise lexicographic on the ENCODED key bytes (header included).
+        // "a" = 61 61, "b" = 61 62, "aa" = 62 61 61 → order a, b, aa (length-first for text
+        // keys, since the header byte embeds the length).
+        #expect(CanonicalCBOR.encode(m) == Data([0xA3, 0x61, 0x61, 0x01, 0x61, 0x62, 0x02, 0x62, 0x61, 0x61, 0x03]))
+    }
+
+    @Test func mapKeySortIsLengthFirst() {
+        // The clearest divergence from a raw-content sort: 'z' > 'a' as content, but
+        // "z" (61 7A) < "aa" (62 61 61) on encoded bytes — the shorter key sorts first.
+        let m = CBORValue.map([("aa", .uint(1)), ("z", .uint(2))])
+        let encoded = CanonicalCBOR.encode(m)
+        #expect(encoded == Data([0xA2, 0x61, 0x7A, 0x02, 0x62, 0x61, 0x61, 0x01]))
+        // And the decoder accepts exactly this order (round trip preserves it).
+        #expect(try! CanonicalCBOR.decode(encoded) == .map([("z", .uint(2)), ("aa", .uint(1))]))
     }
 
     @Test func roundTripsAndRejectsGarbage() throws {
@@ -50,9 +62,13 @@ struct CanonicalCBORTests {
     }
 
     @Test func rejectsUnsortedMapKeys() {
-        // {"b": 1, "a": 2} — keys present but out of canonical order.
+        // {"b": 1, "a": 2} — same-length keys out of content order.
         let bytes = Data([0xA2, 0x61, 0x62, 0x01, 0x61, 0x61, 0x02])
         #expect(throws: CBORError.self) { try CanonicalCBOR.decode(bytes) }
+        // {"aa": 3, "b": 1} — sorted under a (wrong) raw-content rule, but NOT under the
+        // RFC's encoded-bytes rule ("b" = 61 62 must precede "aa" = 62 61 61).
+        let rawSortedOnly = Data([0xA2, 0x62, 0x61, 0x61, 0x03, 0x61, 0x62, 0x01])
+        #expect(throws: CBORError.self) { try CanonicalCBOR.decode(rawSortedOnly) }
     }
 
     @Test func rejectsNegativeInts() {
@@ -87,5 +103,37 @@ struct CanonicalCBORTests {
         // promptly rather than attempting to preallocate billions of elements first.
         let bytes = Data([0x9A, 0xFF, 0xFF, 0xFF, 0xFE])
         #expect(throws: CBORError.self) { try CanonicalCBOR.decode(bytes) }
+    }
+
+    /// One byte of 0x81 (1-element array) per nesting level, wrapping a `uint 0` — `levels`
+    /// array levels put the innermost scalar at depth `levels + 1`.
+    private func nestedArrays(_ levels: Int) -> Data {
+        Data(repeating: 0x81, count: levels) + Data([0x00])
+    }
+
+    @Test func acceptsNestingAtDepthLimit() throws {
+        // 31 array levels → innermost uint at depth 32 == CanonicalCBOR.maxDepth. Accepted.
+        let decoded = try CanonicalCBOR.decode(nestedArrays(CanonicalCBOR.maxDepth - 1))
+        var value = decoded
+        var levels = 0
+        while case .array(let items) = value {
+            #expect(items.count == 1)
+            value = items[0]
+            levels += 1
+        }
+        #expect(levels == CanonicalCBOR.maxDepth - 1)
+        #expect(value == .uint(0))
+    }
+
+    @Test func rejectsNestingBeyondDepthLimit() {
+        // 32 array levels → innermost uint at depth 33 → .tooDeep.
+        #expect(throws: CBORError.tooDeep) {
+            try CanonicalCBOR.decode(nestedArrays(CanonicalCBOR.maxDepth))
+        }
+        // And the motivating attack: a ~1KB chain of array heads must throw (bounded
+        // recursion), not exhaust the stack.
+        #expect(throws: CBORError.tooDeep) {
+            try CanonicalCBOR.decode(nestedArrays(1000))
+        }
     }
 }

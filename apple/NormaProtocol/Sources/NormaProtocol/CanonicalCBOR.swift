@@ -37,22 +37,30 @@ extension CBORValue: Equatable {
 /// package's restricted sense — either it uses a feature outside the supported subset
 /// (`.unsupported`), it's syntactically valid CBOR but not in the RFC 8949 §4.2.1 core
 /// deterministic encoding (`.nonCanonical` — non-shortest-form lengths, unsorted or duplicate
-/// map keys), or there are bytes left over after a complete value was decoded
-/// (`.trailingBytes`).
+/// map keys), there are bytes left over after a complete value was decoded (`.trailingBytes`),
+/// or nesting exceeds the decoder's depth cap (`.tooDeep`).
 public enum CBORError: Error, Equatable {
     case unsupported
     case nonCanonical
     case trailingBytes
     case truncated
+    case tooDeep
 }
 
 /// RFC 8949 §4.2.1 core deterministic ("canonical") CBOR encoding, restricted to the six
 /// `CBORValue` cases. Canonical form means: definite lengths only, shortest-form length
-/// encoding (no non-minimal integers), and map entries sorted bytewise ascending by their raw
-/// UTF-8 key bytes with no duplicates (see the `.map` case below for why that's *raw* key
-/// bytes, not the CBOR-encoded-with-header bytes). `encode` always produces this form;
-/// `decode` rejects anything that isn't already in it.
+/// encoding (no non-minimal integers), and map entries sorted bytewise ascending by their
+/// *encoded* key bytes (header included, per the RFC) with no duplicates. For text keys the
+/// header byte embeds the length, so shorter keys always sort before longer ones regardless of
+/// content — e.g. "a" < "b" < "aa", and "z" < "aa". `encode` always produces this form;
+/// `decode` rejects anything that isn't already in it, and additionally caps nesting depth at
+/// `maxDepth` (matching the gateway's JSON depth cap) so a small blob of nested array heads
+/// can't exhaust the recursion stack.
 public enum CanonicalCBOR {
+
+    /// Maximum nesting depth `decode` accepts — the top-level value is depth 1, each
+    /// array/map level below it adds 1. Chosen to match `WireFrame`'s JSON `maxDepth` (32).
+    public static let maxDepth = 32
 
     // MARK: - Encode
 
@@ -76,22 +84,22 @@ public enum CanonicalCBOR {
             }
             return out
         case .map(let entries):
-            // Sort bytewise-ascending on the raw UTF-8 key bytes (shorter-is-prefix sorts
-            // first, otherwise the first differing byte decides) — e.g. "a" < "aa" < "b".
-            // All map keys are text strings by construction (`CBORValue.map`'s type), so this
-            // is exactly RFC 8949's "bytewise lexicographic order" with no cross-type tie-break
-            // to worry about.
+            // RFC 8949 §4.2.1: sort bytewise-ascending on the ENCODED key bytes (header
+            // included). For definite-length text keys the header byte embeds the length,
+            // so this is length-first: "a" (61 61) < "b" (61 62) < "aa" (62 61 61), and
+            // "z" (61 7A) < "aa" (62 61 61) even though 'z' > 'a' as content.
             precondition(
                 Set(entries.map(\.0)).count == entries.count,
                 "CanonicalCBOR.encode(map:): duplicate key"
             )
-            let sorted = entries.sorted { lhs, rhs in
-                lexicographicallyLess(Data(lhs.0.utf8), Data(rhs.0.utf8))
+            let withEncodedKeys = entries.map { (encodedKey: encode(.text($0.0)), value: $0.1) }
+            let sorted = withEncodedKeys.sorted { lhs, rhs in
+                lexicographicallyLess(lhs.encodedKey, rhs.encodedKey)
             }
             var out = encodeHead(majorType: 5, length: UInt64(sorted.count))
-            for (key, value) in sorted {
-                out.append(encode(.text(key)))
-                out.append(encode(value))
+            for entry in sorted {
+                out.append(entry.encodedKey)
+                out.append(encode(entry.value))
             }
             return out
         case .bool(let b):
@@ -144,7 +152,7 @@ public enum CanonicalCBOR {
 
     public static func decode(_ d: Data) throws -> CBORValue {
         var cursor = Cursor(data: d)
-        let value = try decodeValue(&cursor)
+        let value = try decodeValue(&cursor, depth: 1)
         guard cursor.offset == d.endIndex else { throw CBORError.trailingBytes }
         return value
     }
@@ -224,7 +232,12 @@ public enum CanonicalCBOR {
         }
     }
 
-    private static func decodeValue(_ c: inout Cursor) throws -> CBORValue {
+    private static func decodeValue(_ c: inout Cursor, depth: Int) throws -> CBORValue {
+        // Recursion guard: each array/map level recurses once, so a few KB of 0x81 (1-element
+        // array) heads would otherwise walk the stack off a cliff. ≤ `maxDepth` accepted,
+        // deeper rejected — the top-level value is depth 1.
+        guard depth <= maxDepth else { throw CBORError.tooDeep }
+
         // Peek the initial byte to special-case major type 7 (bool) without misreading its
         // "additional info" as a length.
         let peekOffset = c.offset
@@ -261,7 +274,7 @@ public enum CanonicalCBOR {
             // however many bytes are actually present.
             var items: [CBORValue] = []
             for _ in 0..<length {
-                items.append(try decodeValue(&c))
+                items.append(try decodeValue(&c, depth: depth + 1))
             }
             return .array(items)
         case 5:
@@ -269,14 +282,13 @@ public enum CanonicalCBOR {
             var entries: [(String, CBORValue)] = []
             var previousKeyBytes: Data?
             for _ in 0..<length {
-                guard case .text(let key) = try decodeValue(&c) else {
+                guard case .text(let key) = try decodeValue(&c, depth: depth + 1) else {
                     throw CBORError.unsupported // non-text-string map key
                 }
-                // Canonical order compares the raw UTF-8 key bytes (see the matching note in
-                // `encode`'s `.map` case) — NOT the CBOR-encoded bytes (which would bake the
-                // length into the leading byte and give a different order for keys of
-                // different lengths).
-                let keyBytes = Data(key.utf8)
+                // Canonical order compares the ENCODED key bytes (header included) — the same
+                // RFC 8949 rule `encode`'s `.map` case sorts by, so decode accepts exactly
+                // what encode produces and nothing else.
+                let keyBytes = encode(.text(key))
                 if let previous = previousKeyBytes {
                     guard lexicographicallyLess(previous, keyBytes) else {
                         // Not strictly ascending — either unsorted or a duplicate.
@@ -284,7 +296,7 @@ public enum CanonicalCBOR {
                     }
                 }
                 previousKeyBytes = keyBytes
-                let value = try decodeValue(&c)
+                let value = try decodeValue(&c, depth: depth + 1)
                 entries.append((key, value))
             }
             return .map(entries)

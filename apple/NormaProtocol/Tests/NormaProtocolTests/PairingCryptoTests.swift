@@ -17,10 +17,13 @@ struct PairingCryptoTests {
         let t2 = PairingCrypto.transcript(v: 1, pairID: tPairID, macEndpointID: "mac1",
             phoneEndpointID: "phone1", phoneInstallNonce: tNonce, caps: ["sessions"])
         #expect(t1 == t2)
-        // decodes as a canonical CBOR map with exactly the 6 sorted keys
+        // decodes as a canonical CBOR map with exactly the 6 keys, in RFC 8949 encoded-key
+        // order — length-first for text keys, since the header byte embeds the length:
+        // "v"(1) 0x61 < "caps"(4) 0x64 < "pairID"(6) 0x66 < "macEndpointID"(13) 0x6D
+        // < "phoneEndpointID"(15) 0x6F < "phoneInstallNonce"(17) 0x71.
         let decoded = try! CanonicalCBOR.decode(t1)
         guard case .map(let entries) = decoded else { Issue.record("not a map"); return }
-        #expect(entries.map(\.0) == ["caps", "macEndpointID", "pairID", "phoneEndpointID", "phoneInstallNonce", "v"])
+        #expect(entries.map(\.0) == ["v", "caps", "pairID", "macEndpointID", "phoneEndpointID", "phoneInstallNonce"])
     }
 
     @Test func proofBindsEveryField() {
@@ -74,34 +77,81 @@ struct PairingCryptoTests {
         #expect(p1 == p2)
     }
 
-    @Test func qrPayloadDecodeRejectsBadFieldLengths() {
-        // pairID must be 16 bytes, pairSecret 32 — a hand-built CBOR map with a short pairID
-        // must be rejected rather than silently accepted.
-        let cfg = SignedRelayConfig(config: RelayConfig(version: 1, relays: []), sig: Data(repeating: 7, count: 64))
-        let badPairID = Data(repeating: 0xA1, count: 4) // wrong length
+    /// Hand-builds a QR payload's CBOR map (canonically encoded, so only the FIELD values are
+    /// hostile, not the CBOR framing) and returns it base64url'd — for feeding
+    /// `QRPayload.decode` inputs its own encoder would refuse to produce.
+    private func handBuiltQR(
+        pairID: Data? = nil,
+        expiresAt: UInt64 = 1_800_000_000,
+        v: UInt64 = 1,
+        relayVersion: UInt64 = 1
+    ) -> String {
         let relayMap = CBORValue.map([
             ("config", .map([
-                ("relays", .array(cfg.config.relays.map { .text($0) })),
-                ("version", .uint(UInt64(cfg.config.version))),
+                ("relays", .array([])),
+                ("version", .uint(relayVersion)),
             ])),
-            ("sig", .bytes(cfg.sig)),
+            ("sig", .bytes(Data(repeating: 7, count: 64))),
         ])
         let map = CBORValue.map([
             ("alpn", .text("computer.norma.rpc/1")),
-            ("expiresAt", .uint(1_800_000_000)),
+            ("expiresAt", .uint(expiresAt)),
             ("hostLabel", .text("Alex's Mac")),
             ("macEndpointID", .text("mac1")),
-            ("pairID", .bytes(badPairID)),
+            ("pairID", .bytes(pairID ?? tPairID)),
             ("pairSecret", .bytes(tSecret)),
             ("relayConfig", relayMap),
-            ("v", .uint(1)),
+            ("v", .uint(v)),
         ])
-        let bytes = CanonicalCBOR.encode(map)
-        let b64 = bytes.base64EncodedString()
+        return CanonicalCBOR.encode(map)
+            .base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+
+    @Test func qrPayloadDecodeRejectsBadFieldLengths() {
+        // pairID must be 16 bytes, pairSecret 32 — a hand-built CBOR map with a short pairID
+        // must be rejected rather than silently accepted.
+        let b64 = handBuiltQR(pairID: Data(repeating: 0xA1, count: 4))
         #expect(throws: Error.self) { try QRPayload.decode(base64URL: b64) }
+    }
+
+    @Test func qrPayloadDecodeRejectsOversizedUintsWithoutTrapping() {
+        // A uint ≥ 2^63 is fully-valid canonical CBOR but doesn't fit `Int` — decode must
+        // THROW `.badPayload`, never trap (crash) on the conversion. One case per field.
+        #expect(throws: PairingError.badPayload) {
+            try QRPayload.decode(base64URL: handBuiltQR(expiresAt: UInt64.max))
+        }
+        #expect(throws: PairingError.badPayload) {
+            try QRPayload.decode(base64URL: handBuiltQR(v: UInt64.max))
+        }
+    }
+
+    @Test func qrPayloadDecodeRejectsOversizedRelayVersionWithoutTrapping() {
+        // Same trap-hazard for the nested relayConfig.config.version (decoded in
+        // `decodeRelayConfig`) — 2^63 exactly is the smallest value that doesn't fit `Int`.
+        #expect(throws: PairingError.badPayload) {
+            try QRPayload.decode(base64URL: handBuiltQR(relayVersion: UInt64(1) << 63))
+        }
+    }
+
+    @Test func verifyProofAcceptsGenuineAndRejectsForged() {
+        let t = PairingCrypto.transcript(v: 1, pairID: tPairID, macEndpointID: "mac1",
+            phoneEndpointID: "phone1", phoneInstallNonce: tNonce, caps: ["sessions"])
+        let genuine = PairingCrypto.proof(pairSecret: tSecret, transcript: t)
+        // positive: the exact proof verifies
+        #expect(PairingCrypto.verifyProof(pairSecret: tSecret, transcript: t, proof: genuine))
+        // negative: a single flipped bit fails
+        var forged = genuine
+        forged[0] ^= 0x01
+        #expect(!PairingCrypto.verifyProof(pairSecret: tSecret, transcript: t, proof: forged))
+        // negative: right proof, wrong transcript fails
+        let tEvil = PairingCrypto.transcript(v: 1, pairID: tPairID, macEndpointID: "mac1",
+            phoneEndpointID: "EVIL", phoneInstallNonce: tNonce, caps: ["sessions"])
+        #expect(!PairingCrypto.verifyProof(pairSecret: tSecret, transcript: tEvil, proof: genuine))
+        // negative: empty/truncated proof fails rather than crashing
+        #expect(!PairingCrypto.verifyProof(pairSecret: tSecret, transcript: t, proof: Data()))
     }
 
     @Test func pairRequestAndAcceptedAndRejectedAreCodable() throws {

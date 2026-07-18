@@ -39,8 +39,8 @@ const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "he
 // Canonical CBOR (RFC 8949 core deterministic encoding) -- encode-only, and only the subset a
 // `{relays: [string], version: number}` map needs: uint, text string, array, map. Mirrors
 // `CanonicalCBOR.swift`'s `encode` exactly, including its map-key sort rule: bytewise
-// lexicographic order of the RAW key bytes (not the CBOR-encoded-with-header bytes -- those
-// diverge for keys of different lengths, since the header's low bits encode the length).
+// lexicographic order of the ENCODED key bytes (header included, per RFC 8949 section 4.2.1) --
+// which is length-first for text keys, since the header byte embeds the length.
 // ---------------------------------------------------------------------------
 type CBORValue =
   | { kind: "uint"; value: number }
@@ -77,11 +77,13 @@ function encodeCBOR(v: CBORValue): Buffer {
     case "map": {
       const keys = v.value.map(([k]) => k);
       if (new Set(keys).size !== keys.length) throw new Error("canonical CBOR: duplicate map key");
-      const sorted = [...v.value].sort((a, b) =>
-        Buffer.compare(Buffer.from(a[0], "utf8"), Buffer.from(b[0], "utf8"))
-      );
-      const parts = sorted.flatMap(([k, val]) => [encodeCBOR({ kind: "text", value: k }), encodeCBOR(val)]);
-      return Buffer.concat([encodeHead(5, sorted.length), ...parts]);
+      const withEncodedKeys = v.value.map(([k, val]) => ({
+        encodedKey: encodeCBOR({ kind: "text", value: k }),
+        val,
+      }));
+      withEncodedKeys.sort((a, b) => Buffer.compare(a.encodedKey, b.encodedKey));
+      const parts = withEncodedKeys.flatMap((e) => [e.encodedKey, encodeCBOR(e.val)]);
+      return Buffer.concat([encodeHead(5, withEncodedKeys.length), ...parts]);
     }
   }
 }
