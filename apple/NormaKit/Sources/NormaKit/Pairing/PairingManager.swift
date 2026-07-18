@@ -13,9 +13,11 @@ public enum PairingUIEvent: Sendable, Equatable {
     case requestReceived(words: [String], requestedLabel: String)
     case completed(record: PairRecord)
     /// `reason` is one of `"expired"`, `"denied"`, `"timeout"`, `"bad_proof"`, `"rate_limited"`,
-    /// or `"cap_reached"` (the store is already at its 10-device cap when `confirm` tries to
-    /// persist — not one of the brief's enumerated reasons, but a real failure `confirm` can hit;
-    /// documented here rather than silently swallowed).
+    /// `"cap_reached"` (the store is already at its 10-device cap when `confirm` tries to
+    /// persist), or `"internal_error"` (the store's persist failed for any OTHER reason — nothing
+    /// was persisted; terminal). `"expired"` also fires when a fresh `beginPairing()` supersedes
+    /// a still-pending confirm — the orphaned phone gets the same rejection code (deliberately no
+    /// separate "superseded" reason; the event surface stays minimal).
     case failed(reason: String)
 }
 
@@ -152,9 +154,22 @@ public actor PairingManager {
 
     /// Starts a fresh pairing offer, retiring any prior one (a new QR sheet always supersedes an
     /// old one — only one can be on screen). Returns the payload to render as a QR code.
+    ///
+    /// A still-pending confirm is not just dropped: its phone is waiting on a retained conn, and
+    /// silently abandoning it would leave that conn open until the phone's own timeout. The
+    /// pending state is cleared synchronously HERE (so the new offer can never race the old
+    /// ceremony), then the orphaned conn is rejected+closed in a spawned task (this method is
+    /// synchronous per the public API) — with `.failed("expired")` emitted only AFTER the reject
+    /// lands, so an event observer has a deterministic "old conn is dealt with" signal.
     public func beginPairing() -> QRPayload {
-        pending?.timeoutTask?.cancel()
-        pending = nil
+        if let orphaned = pending {
+            orphaned.timeoutTask?.cancel()
+            pending = nil
+            Task { [eventsContinuation] in
+                await self.reject(orphaned.conn, code: "expired")
+                eventsContinuation.yield(.failed(reason: "expired"))
+            }
+        }
 
         let pairID = PairingManager.systemRandom(16)
         let pairSecret = PairingManager.systemRandom(32)
@@ -249,34 +264,40 @@ public actor PairingManager {
         eventsContinuation.yield(.requestReceived(words: words, requestedLabel: ""))
     }
 
-    /// The human tapped Confirm (having typed `label`): persists the new `PairRecord` at the next
-    /// epoch for this phone, replies `PairAccepted`, and emits `.completed`. A no-op if nothing is
-    /// pending (stale/duplicate UI action).
+    /// The human tapped Confirm (having typed `label`): persists the new `PairRecord` — the
+    /// store assigns the epoch itself, atomically inside its own `add` call, so no interleaved
+    /// revoke can slip between "pick the epoch" and "persist the record" — then replies
+    /// `PairAccepted` and emits `.completed`. A no-op if nothing is pending (stale/duplicate UI
+    /// action).
     public func confirm(label: String) async {
         guard let p = pending else { return }
         p.timeoutTask?.cancel()
         pending = nil
+        // Terminal path either way from here — drop the consumed offer NOW so the pairSecret
+        // doesn't linger in memory past the ceremony's end.
+        offer = nil
 
-        let now = clock()
-        let epoch = await store.nextEpoch(forPeer: p.phoneEndpointID)
-        let record = PairRecord(
-            phoneEndpointID: p.phoneEndpointID, label: label, createdAt: now,
-            caps: p.caps, pairingEpoch: epoch, lastSeenAt: now
-        )
+        let record: PairRecord
         do {
-            try await store.add(record)
-        } catch {
-            // Either the store is at its 10-device cap, or some other persistence failure
-            // occurred (`PairingStore.add` rolls back its in-memory state on a failed write
-            // either way) — nothing was persisted, so tell the phone pairing didn't complete.
+            record = try await store.add(
+                phoneEndpointID: p.phoneEndpointID, label: label, caps: p.caps, at: clock()
+            )
+        } catch PairingStoreError.capReached {
             await reject(p.conn, code: "cap_reached")
             eventsContinuation.yield(.failed(reason: "cap_reached"))
+            return
+        } catch {
+            // Any non-cap persistence failure (the store rolled back its in-memory state, so
+            // nothing is live) — a distinct code, NOT "cap_reached": the phone/UI must not tell
+            // the user to un-pair a device when the disk write simply failed.
+            await reject(p.conn, code: "internal_error")
+            eventsContinuation.yield(.failed(reason: "internal_error"))
             return
         }
 
         let accepted = PairAccepted(
             type: "pair_accepted", pairID: p.pairID, macEndpointID: macEndpointID,
-            phoneEndpointID: p.phoneEndpointID, epoch: epoch, grantedCaps: p.caps,
+            phoneEndpointID: p.phoneEndpointID, epoch: record.pairingEpoch, grantedCaps: p.caps,
             protoVersion: 1, sessionNonce: rng(16)
         )
         if let payload = try? JSONEncoder().encode(accepted) {
@@ -290,9 +311,18 @@ public actor PairingManager {
         guard let p = pending else { return }
         p.timeoutTask?.cancel()
         pending = nil
+        offer = nil // terminal: drop the consumed offer's pairSecret with it
         await reject(p.conn, code: "denied")
         eventsContinuation.yield(.failed(reason: "denied"))
     }
+
+    #if DEBUG
+    /// Test-only inspection hook (`@testable`, matching `Gateway`'s own `#if DEBUG` hook
+    /// convention): whether an `Offer` — and therefore a `pairSecret` — is still held in memory.
+    /// Terminal-path tests assert this goes `false` (the secret must not linger past the
+    /// ceremony's end); never called from production code.
+    var hasLiveOfferForTesting: Bool { offer != nil }
+    #endif
 
     // MARK: - Confirm-timeout watchdog
 
@@ -308,6 +338,7 @@ public actor PairingManager {
             guard let p = pending, p.pairID == pairID else { return }
             if clock() >= deadline {
                 pending = nil
+                offer = nil // terminal: drop the consumed offer's pairSecret with it
                 await reject(p.conn, code: "timeout")
                 eventsContinuation.yield(.failed(reason: "timeout"))
                 return

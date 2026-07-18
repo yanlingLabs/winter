@@ -102,6 +102,10 @@ final class PairingManagerTests: XCTestCase {
         XCTAssertEqual(accepted.epoch, 1)
         XCTAssertEqual(accepted.grantedCaps, ["sessions"])
         XCTAssertEqual(accepted.phoneEndpointID, "phone-endpoint-1")
+
+        // Terminal path: the offer (and its pairSecret) must not linger past the ceremony.
+        let liveOffer = await manager.hasLiveOfferForTesting
+        XCTAssertFalse(liveOffer)
     }
 
     // MARK: - Expired QR
@@ -183,7 +187,10 @@ final class PairingManagerTests: XCTestCase {
             }
         }
 
-        // Offer is dead: even a CORRECT proof against the same pairID is now refused.
+        // Offer is dead — the secret dropped with it — and even a CORRECT proof against the same
+        // pairID is now refused.
+        let liveOffer = await manager.hasLiveOfferForTesting
+        XCTAssertFalse(liveOffer)
         let goodConn = ScriptedRemoteConn(peerID: "post-kill")
         goodConn.enqueueInbound(try JSONEncoder().encode(phonePairRequest(qr: qr)))
         await manager.handleConnection(goodConn)
@@ -215,6 +222,9 @@ final class PairingManagerTests: XCTestCase {
 
         let all = await store.all()
         XCTAssertTrue(all.isEmpty)
+        // Terminal path: the offer (and its pairSecret) must not linger past the ceremony.
+        let liveOffer = await manager.hasLiveOfferForTesting
+        XCTAssertFalse(liveOffer)
     }
 
     // MARK: - Timeout
@@ -241,6 +251,9 @@ final class PairingManagerTests: XCTestCase {
 
         let all = await store.all()
         XCTAssertTrue(all.isEmpty)
+        // Terminal path: the offer (and its pairSecret) must not linger past the ceremony.
+        let liveOffer = await manager.hasLiveOfferForTesting
+        XCTAssertFalse(liveOffer)
     }
 
     // MARK: - Re-pair after revoke -> epoch bump
@@ -261,7 +274,7 @@ final class PairingManagerTests: XCTestCase {
         guard case .completed(let firstRecord) = await events.next() else { return XCTFail("expected completed") }
         XCTAssertEqual(firstRecord.pairingEpoch, 1)
 
-        await store.revoke(phoneEndpointID: "phone-endpoint-1")
+        try await store.revoke(phoneEndpointID: "phone-endpoint-1")
 
         // Re-pair the SAME phone -> epoch must bump to 2.
         let qr2 = await manager.beginPairing()
@@ -275,6 +288,109 @@ final class PairingManagerTests: XCTestCase {
 
         let accepted = try JSONDecoder().decode(PairAccepted.self, from: conn2.outbound[0])
         XCTAssertEqual(accepted.epoch, 2)
+    }
+
+    // MARK: - Supersession (fix 1: beginPairing during a pending confirm)
+
+    func test_beginPairingDuringPendingConfirm_rejectsOrphanedConn_newOfferWorks() async throws {
+        let store = PairingStore(fileURL: tempStoreURL())
+        let clock = TestClock()
+        let manager = makeManager(store: store, clock: { clock.now })
+        var events = manager.events.makeAsyncIterator()
+
+        // First ceremony reaches pending-confirm...
+        let qr1 = await manager.beginPairing()
+        let oldConn = ScriptedRemoteConn(peerID: "orphaned")
+        oldConn.enqueueInbound(try JSONEncoder().encode(phonePairRequest(qr: qr1)))
+        await manager.handleConnection(oldConn)
+        guard case .requestReceived = await events.next() else { return XCTFail("expected requestReceived") }
+
+        // ...then the user opens a fresh QR sheet. The orphaned phone must be told, not left
+        // hanging: PairRejected("expired") then close, with `.failed("expired")` emitted AFTER
+        // the reject lands (that ordering is the test's synchronization point).
+        let qr2 = await manager.beginPairing()
+        guard case .failed(let reason) = await events.next() else { return XCTFail("expected failed") }
+        XCTAssertEqual(reason, "expired")
+        XCTAssertTrue(oldConn.isClosed)
+        let rejected = try JSONDecoder().decode(PairRejected.self, from: oldConn.outbound[0])
+        XCTAssertEqual(rejected.code, "expired")
+
+        // The NEW offer works end-to-end.
+        let newConn = ScriptedRemoteConn(peerID: "fresh")
+        newConn.enqueueInbound(try JSONEncoder().encode(phonePairRequest(qr: qr2)))
+        await manager.handleConnection(newConn)
+        guard case .requestReceived = await events.next() else { return XCTFail("expected requestReceived on new offer") }
+        await manager.confirm(label: "iPhone")
+        guard case .completed(let record) = await events.next() else { return XCTFail("expected completed") }
+        XCTAssertEqual(record.pairingEpoch, 1)
+        let accepted = try JSONDecoder().decode(PairAccepted.self, from: newConn.outbound[0])
+        XCTAssertEqual(accepted.epoch, 1)
+    }
+
+    // MARK: - Confirm-time store failures (fix 2: cap_reached vs internal_error)
+
+    func test_confirmAtDeviceCap_rejectsCapReached() async throws {
+        let store = PairingStore(fileURL: tempStoreURL())
+        // Fill the store to its 10-device cap directly.
+        for i in 0..<10 {
+            try await store.add(phoneEndpointID: "filler-\(i)", label: "Phone \(i)", caps: ["sessions"], at: 1_000)
+        }
+
+        let clock = TestClock()
+        let manager = makeManager(store: store, clock: { clock.now })
+        var events = manager.events.makeAsyncIterator()
+
+        let qr = await manager.beginPairing()
+        let conn = ScriptedRemoteConn()
+        conn.enqueueInbound(try JSONEncoder().encode(phonePairRequest(qr: qr, phoneEndpointID: "phone-endpoint-11")))
+        await manager.handleConnection(conn)
+        guard case .requestReceived = await events.next() else { return XCTFail("expected requestReceived") }
+
+        await manager.confirm(label: "one too many")
+
+        guard case .failed(let reason) = await events.next() else { return XCTFail("expected failed") }
+        XCTAssertEqual(reason, "cap_reached")
+        XCTAssertTrue(conn.isClosed)
+        let rejected = try JSONDecoder().decode(PairRejected.self, from: conn.outbound[0])
+        XCTAssertEqual(rejected.code, "cap_reached")
+        let notPersisted = await store.record(forPeer: "phone-endpoint-11")
+        XCTAssertNil(notPersisted)
+        let liveOffer = await manager.hasLiveOfferForTesting
+        XCTAssertFalse(liveOffer)
+    }
+
+    func test_confirmWithFailingPersist_rejectsInternalError_notCapReached() async throws {
+        // A store whose persist always fails: fileURL's parent is a read-only dir, so the
+        // temp-file creation inside `persist()` fails with a non-capReached error.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("norma-pairing-manager-ro-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path) }
+        let store = PairingStore(fileURL: dir.appendingPathComponent("paired-devices.json"))
+
+        let clock = TestClock()
+        let manager = makeManager(store: store, clock: { clock.now })
+        var events = manager.events.makeAsyncIterator()
+
+        let qr = await manager.beginPairing()
+        let conn = ScriptedRemoteConn()
+        conn.enqueueInbound(try JSONEncoder().encode(phonePairRequest(qr: qr)))
+        await manager.handleConnection(conn)
+        guard case .requestReceived = await events.next() else { return XCTFail("expected requestReceived") }
+
+        await manager.confirm(label: "iPhone")
+
+        guard case .failed(let reason) = await events.next() else { return XCTFail("expected failed") }
+        XCTAssertEqual(reason, "internal_error")
+        XCTAssertTrue(conn.isClosed)
+        let rejected = try JSONDecoder().decode(PairRejected.self, from: conn.outbound[0])
+        XCTAssertEqual(rejected.code, "internal_error")
+        // Nothing persisted — the store rolled back its in-memory state too.
+        let all = await store.all()
+        XCTAssertTrue(all.isEmpty)
+        let liveOffer = await manager.hasLiveOfferForTesting
+        XCTAssertFalse(liveOffer)
     }
 
     // MARK: - MacIdentity (folded in per brief step 4)

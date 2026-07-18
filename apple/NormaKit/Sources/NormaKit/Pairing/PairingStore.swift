@@ -28,9 +28,9 @@ public struct PairRecord: Codable, Equatable, Sendable {
 }
 
 public enum PairingStoreError: Error, Equatable {
-    /// Thrown by `add(_:)` when the store already holds 10 records for a phone NOT already among
-    /// them — the paired-device cap. Adding a record for an already-paired phone (a re-pair / a
-    /// metadata update) never hits this, since it doesn't grow the count.
+    /// Thrown by `add` when the store already holds 10 records for a phone NOT already among
+    /// them — the paired-device cap. Adding a record for an already-paired phone (a re-pair)
+    /// never hits this, since it doesn't grow the count.
     case capReached
 }
 
@@ -79,44 +79,74 @@ public actor PairingStore {
         records[peer]
     }
 
-    /// Adds (or replaces, for a re-pair of an already-known phone) a record. Only a genuinely NEW
-    /// phone counts against the cap — re-adding an existing `phoneEndpointID` (e.g. refreshing
-    /// its epoch/label) never grows the allowlist, so it can never trip `capReached`.
-    public func add(_ record: PairRecord) throws {
-        if records[record.phoneEndpointID] == nil, records.count >= Self.capacity {
+    /// Adds (or replaces, for a re-pair of an already-known phone) a record, assigning the
+    /// pairing epoch ITSELF — the epoch read and the record write happen inside one actor call,
+    /// so no interleaved `revoke`/`add` for the same peer can ever slip between "pick the epoch"
+    /// and "persist the record" (the race the original two-call `nextEpoch` + `add(_:)` API
+    /// allowed a caller to create). Returns the persisted record; callers read the assigned
+    /// epoch off it.
+    ///
+    /// Only a genuinely NEW phone counts against the cap — re-adding an existing
+    /// `phoneEndpointID` (a re-pair) never grows the allowlist, so it can never trip `capReached`.
+    @discardableResult
+    public func add(phoneEndpointID: String, label: String, caps: [String], at now: Int) throws -> PairRecord {
+        if records[phoneEndpointID] == nil, records.count >= Self.capacity {
             throw PairingStoreError.capReached
         }
-        let previous = records[record.phoneEndpointID]
-        records[record.phoneEndpointID] = record
+        let record = PairRecord(
+            phoneEndpointID: phoneEndpointID, label: label, createdAt: now,
+            caps: caps, pairingEpoch: nextEpoch(forPeer: phoneEndpointID), lastSeenAt: now
+        )
+        let previousRecord = records[phoneEndpointID]
+        let previousEpochMemory = epochMemory[phoneEndpointID]
+        records[phoneEndpointID] = record
         do {
             try persist()
         } catch {
             // Keep in-memory state consistent with what's actually on disk — a caller that
             // catches this (e.g. `PairingManager.confirm`) must not be told the record is live
-            // when the write that was supposed to make it durable failed.
-            records[record.phoneEndpointID] = previous
+            // when the write that was supposed to make it durable failed. `epochMemory` is
+            // restored too so the rollback is total, even though `add` itself never mutates it
+            // today (the epoch it assigns is READ from memory, not written back — a re-pair
+            // without an intervening revoke deliberately reuses the same epoch).
+            records[phoneEndpointID] = previousRecord
+            epochMemory[phoneEndpointID] = previousEpochMemory
             throw error
         }
+        return record
     }
 
     /// Removes the phone's record (freeing its cap slot) and bumps its remembered epoch so a
-    /// future re-pair can never reuse the revoked epoch. Returns the epoch a future re-pair
-    /// should use (also persisted into `epochMemory`), or `nil` if the phone had no record.
+    /// future re-pair can never reuse the revoked epoch. Returns the epoch a future re-pair will
+    /// be assigned (persisted into `epochMemory`), or `nil` if the phone had no record. Throws on
+    /// persist failure, rolling back BOTH in-memory mutations — a revocation the caller was told
+    /// happened must actually be durable (it's a security decision), unlike `touch` below.
     @discardableResult
-    public func revoke(phoneEndpointID: String) -> Int? {
+    public func revoke(phoneEndpointID: String) throws -> Int? {
         guard let removed = records.removeValue(forKey: phoneEndpointID) else { return nil }
         let next = removed.pairingEpoch + 1
+        let previousEpochMemory = epochMemory[phoneEndpointID]
         epochMemory[phoneEndpointID] = next
-        try? persist()
+        do {
+            try persist()
+        } catch {
+            records[phoneEndpointID] = removed
+            epochMemory[phoneEndpointID] = previousEpochMemory
+            throw error
+        }
         return next
     }
 
-    /// The epoch a fresh pairing for `peer` should use: the remembered post-revoke epoch, or `1`
-    /// for a phone that's never been paired (or paired but never revoked).
-    public func nextEpoch(forPeer peer: String) -> Int {
+    /// The epoch a fresh pairing for `peer` would be assigned: the remembered post-revoke epoch,
+    /// or `1` for a phone that's never been paired (or paired but never revoked). Internal — the
+    /// only production consumer is `add` itself (which reads it inside the same actor call);
+    /// tests reach it via `@testable` to assert the persisted epoch memory.
+    func nextEpoch(forPeer peer: String) -> Int {
         epochMemory[peer] ?? 1
     }
 
+    /// Deliberately stays `try?` (unlike `add`/`revoke`): `lastSeenAt` is benign display
+    /// metadata — a transient persist failure must not fail the caller's connection handling.
     public func touch(peer: String, at timestamp: Int) {
         guard records[peer] != nil else { return }
         records[peer]?.lastSeenAt = timestamp
