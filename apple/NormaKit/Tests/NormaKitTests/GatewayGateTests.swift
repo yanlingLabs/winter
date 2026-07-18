@@ -1,6 +1,7 @@
 import XCTest
 import os
 import NormaProtocol
+import NormaSessionKit
 @testable import NormaKit
 
 /// SP2a Task 2: the eight review gates SP1's whole-branch review flagged as only surfacing against

@@ -1,6 +1,7 @@
 import XCTest
 import os
 import NormaProtocol
+import NormaSessionKit
 @testable import NormaKit
 
 /// SP2b Task 4: `RemoteHost` (RemoteHost.swift) is the composition root — these tests exercise ONLY

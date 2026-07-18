@@ -1,5 +1,6 @@
 import Foundation
 import NormaProtocol
+import NormaSessionKit
 
 /// Remote Gateway sub-project, Task 5 (the capstone): terminate a remote (phone) transport,
 /// validate envelopes, bridge to the daemon as the least-privileged `remote` principal, and

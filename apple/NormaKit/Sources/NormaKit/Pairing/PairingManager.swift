@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import Security
 import NormaProtocol
+import NormaSessionKit
 
 /// What the Mac's pairing UI (the menu-bar app's QR sheet) reacts to. `PairingManager` is the
 /// sole producer; the app never touches ceremony state directly.

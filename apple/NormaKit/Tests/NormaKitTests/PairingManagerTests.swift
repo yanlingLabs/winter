@@ -1,6 +1,7 @@
 import XCTest
 import os
 import NormaProtocol
+import NormaSessionKit
 @testable import NormaKit
 
 /// SP2b Task 3: `PairingManager` is the ceremony engine driving `beginPairing` ->

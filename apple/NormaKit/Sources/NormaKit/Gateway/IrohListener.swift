@@ -1,6 +1,7 @@
 import Foundation
 import os
 import NormaProtocol
+import NormaSessionKit
 import IrohLib
 
 /// The real iroh transport behind SP1's `RemoteListener` seam: the Mac binds an iroh

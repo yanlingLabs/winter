@@ -1,6 +1,7 @@
 import Foundation
 import IrohLib
 import NormaProtocol
+import NormaSessionKit
 
 /// Errors `RemoteHost` itself can throw — distinct from whatever `IrohListener.start`/
 /// `MacIdentity.loadOrCreate`/`KeychainToken.readRemoteToken` throw (those propagate unchanged).

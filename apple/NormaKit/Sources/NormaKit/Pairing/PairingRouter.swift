@@ -1,5 +1,6 @@
 import Foundation
 import NormaProtocol
+import NormaSessionKit
 
 /// The gateway-side allowlist lookup `Gateway` and `PairingRouter` both consume — one paired-phone
 /// record per authenticated peer, or `nil` if the peer isn't (or is no longer) paired. `PairingStore`
