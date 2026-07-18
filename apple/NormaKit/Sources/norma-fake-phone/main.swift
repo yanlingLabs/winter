@@ -3,6 +3,7 @@ import os
 import IrohLib
 import NormaKit
 import NormaProtocol
+import NormaSessionKit
 
 /// SP2b Task 5: the dev fake-phone CLI — closes the pairing loop end-to-end (scan a QR, run the
 /// ceremony, optionally attach and stream) without any iOS code. `PhonePairingClient` (this

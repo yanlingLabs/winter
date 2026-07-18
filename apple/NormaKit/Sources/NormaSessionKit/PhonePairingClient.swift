@@ -1,5 +1,6 @@
 import Foundation
 import os
+import Security
 import IrohLib
 import NormaProtocol
 
@@ -63,6 +64,22 @@ public enum PhonePairingClient {
     /// v1 only ever requests this capability (mirrors `PairingManager.sessionCaps`).
     private static let sessionCaps = ["sessions"]
 
+    /// Real random bytes via `SecRandomCopyBytes` — a per-package copy of NormaKit's
+    /// `PairingManager.systemRandom` (SP3 Task 2: this file moved from NormaKit into
+    /// NormaSessionKit, which NormaKit itself depends on — the reverse dependency the original
+    /// `PairingManager.systemRandom($0)` call would have required is not possible, so this
+    /// duplicates the same three-line `SecRandomCopyBytes` body instead of sharing it. Mirrors
+    /// `MacIdentity.swift`'s own identical duplication of this exact snippet, for the same reason:
+    /// this codebase's established convention for this trivial a helper is a per-file copy over a
+    /// shared dependency).
+    private static func systemRandom(_ count: Int) -> Data {
+        var bytes = Data(count: count)
+        _ = bytes.withUnsafeMutableBytes { buf in
+            SecRandomCopyBytes(kSecRandomDefault, count, buf.baseAddress!)
+        }
+        return bytes
+    }
+
     public static func pair(
         qr: QRPayload,
         bindAddr: String? = nil,
@@ -89,7 +106,7 @@ public enum PhonePairingClient {
         onWords: @escaping @Sendable ([String]) -> Void
     ) async throws -> (accepted: PairAccepted, words: [String], endpointSecret: Data) {
         let phoneEndpointID = try SecretKey.fromBytes(bytes: secret).public().description
-        let phoneInstallNonce = PairingManager.systemRandom(16)
+        let phoneInstallNonce = Self.systemRandom(16)
 
         // Pure crypto — no I/O, no networking — computed BEFORE dialing anything, exactly like a
         // real phone would: both the proof it's about to present and the SAS it's about to show

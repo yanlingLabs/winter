@@ -39,8 +39,10 @@ let package = Package(
         .target(name: "NormaKit", dependencies: ["NormaProtocol", "IrohLib", "NormaSessionKit"]),
         .executableTarget(name: "norma-probe", dependencies: ["NormaKit", "NormaProtocol"]),
         // SP2b Task 5: the dev/fake-phone CLI — closes the pairing loop end-to-end without any
-        // iOS code (`PhonePairingClient` is the reusable phone-side ceremony it drives).
-        .executableTarget(name: "norma-fake-phone", dependencies: ["NormaKit", "NormaProtocol", "IrohLib"]),
+        // iOS code (`PhonePairingClient` is the reusable phone-side ceremony it drives). SP3 Task 2:
+        // `PhonePairingClient` moved into `NormaSessionKit`, so this target now depends on it
+        // directly too (the CLI's own hand-rolled attach dial is untouched — that's SP3 Task 5).
+        .executableTarget(name: "norma-fake-phone", dependencies: ["NormaKit", "NormaProtocol", "NormaSessionKit", "IrohLib"]),
         .testTarget(name: "NormaKitTests", dependencies: ["NormaKit", "IrohLib", "NormaSessionKit"]),
     ]
 )

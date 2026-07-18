@@ -3,6 +3,7 @@ import os
 import NormaProtocol
 import IrohLib
 @testable import NormaKit
+@testable import NormaSessionKit
 
 /// SP2b Task 5, Step 1: proves `PhonePairingClient` runs the FULL ceremony correctly against a
 /// real `PairingManager` over a real (loopback) iroh listener — the phone side now goes through
