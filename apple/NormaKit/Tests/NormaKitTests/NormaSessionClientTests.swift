@@ -372,6 +372,37 @@ final class NormaSessionClientTests: XCTestCase {
         XCTAssertNotEqual(id1, id2, "distinct JSON-RPC ids so both can be in flight, but the same commandId")
     }
 
+    /// SP3 T4b review fix (Important #2): a caller-provided `commandID` is used VERBATIM (idgen is
+    /// never consulted) and stays identical across a simulated retry — T9's prompt resend depends
+    /// on this for daemon-side dedup. The idgen here is a decoy: if `send` minted its own id, the
+    /// frames would carry "cmd-idgen" and the assertions would catch it.
+    func testSendUsesCallerProvidedCommandIdVerbatimAcrossRetries() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore(), idgen: { "cmd-idgen" })
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+
+        // First attempt.
+        let t1 = Task { try await client.send(method: "session.send", params: .object(["text": .string("hi")]), commandID: "cmd-caller") }
+        let afterReq1 = try await waitOutbound(conn, count: 2) // [hello, req1]
+        let req1 = decodeOutbound(afterReq1[1])
+        let id1 = outboundPayload(req1)["id"]!.intValue!
+        conn.enqueueInbound(rpcResponseFrame(id: id1, result: .object(["ok": .bool(true)])))
+        _ = try await t1.value
+
+        // Simulated retry of the SAME logical command: same caller-owned commandID.
+        let t2 = Task { try await client.send(method: "session.send", params: .object(["text": .string("hi")]), commandID: "cmd-caller") }
+        let afterReq2 = try await waitOutbound(conn, count: 3) // [hello, req1, req2]
+        let req2 = decodeOutbound(afterReq2[2])
+        let id2 = outboundPayload(req2)["id"]!.intValue!
+        conn.enqueueInbound(rpcResponseFrame(id: id2, result: .object(["ok": .bool(true)])))
+        _ = try await t2.value
+
+        XCTAssertEqual(outboundPayload(req1)["commandId"]?.stringValue, "cmd-caller", "caller id used verbatim, not idgen's")
+        XCTAssertEqual(outboundPayload(req2)["commandId"]?.stringValue, "cmd-caller", "retry reuses the SAME caller id")
+        XCTAssertNotEqual(id1, id2, "fresh JSON-RPC id per attempt; only the commandId is stable")
+    }
+
     func testAnswerApprovalHostAccepted() async throws {
         try await assertApproval(
             result: .object(["ok": .bool(true), "alreadyResolved": .bool(false)]),

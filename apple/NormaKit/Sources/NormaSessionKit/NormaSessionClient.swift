@@ -249,11 +249,15 @@ public actor NormaSessionClient {
 
     // MARK: - Requests (idempotent)
 
-    /// A mutating request carrying a fresh idempotency `commandId` (top-level, for the daemon's
-    /// dedup). With a fixed `idgen`, a retried call reuses the same `commandId` — the daemon returns
-    /// the original result rather than re-executing.
-    public func send(method: String, params: SessionEvent.JSONValue) async throws -> SessionEvent.JSONValue {
-        try await rpcCall(method: method, params: params, commandID: idgen())
+    /// A mutating request carrying an idempotency `commandId` (top-level, for the daemon's dedup).
+    ///
+    /// `commandID` (SP3 T4b review fix, Important #2): a caller that RETRIES a send (T9's prompt
+    /// resend) must reuse ONE stable id across attempts so the daemon dedups instead of
+    /// re-executing — pass it explicitly and it is used verbatim across every retry. Omitted
+    /// (`nil`), a fresh id is minted via `idgen()` — the pre-existing behavior for one-shot sends.
+    /// (`answerApproval` already takes its caller-owned `ApprovalAnswer.commandID` — unchanged.)
+    public func send(method: String, params: SessionEvent.JSONValue, commandID: String? = nil) async throws -> SessionEvent.JSONValue {
+        try await rpcCall(method: method, params: params, commandID: commandID ?? idgen())
     }
 
     /// Answers a remote approval in the daemon's REAL `approval.respond` shape (SP3 T4b):

@@ -470,9 +470,7 @@
         "type",
         "callId",
         "toolName",
-        "summary",
-        "issuedAt",
-        "expiresAt"
+        "summary"
       ],
       "additionalProperties": false
     },
