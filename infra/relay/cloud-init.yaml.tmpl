@@ -29,6 +29,18 @@ users:
     create_home: true
 
 write_files:
+  # Explicitly enable the unattended-upgrades periodic timers (task-6 review fix): installing the
+  # package only provides the machinery -- whether it actually RUNS is controlled by this file,
+  # which on Ubuntu images normally comes from an interactive debconf step / image default a
+  # non-interactive cloud boot shouldn't rely on. Written explicitly so security patching is a
+  # pinned fact of this config, not an inherited image behavior.
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root:root
+    permissions: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
   - path: /etc/iroh-relay/config.toml
     owner: root:root
     permissions: "0644"

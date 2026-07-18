@@ -34,6 +34,12 @@ import IrohLib
 /// NORMA_RELAY_E2E=1 swift test --filter IrohRelayE2ETests
 /// NORMA_RELAY_E2E=1 NORMA_RELAY_E2E_URL="https://relay-2.yanlinglabs.com./" swift test --filter IrohRelayE2ETests
 /// ```
+///
+/// **Proves relay ENGAGEMENT, not relay EXCLUSIVITY** — see "Relay engagement, not relay
+/// exclusivity" in the header comment above for exactly what is and isn't ruled out (short
+/// version: iroh's own opportunistic same-machine direct-upgrade can't be disabled in
+/// iroh-ffi v1.1.0, so the assertion is "the selected path IS a relay path when checked",
+/// polled promptly after connect).
 final class IrohRelayE2ETests: XCTestCase {
 
     private static let defaultRelayURL = "https://relay-1.yanlinglabs.com./"
@@ -156,6 +162,11 @@ final class IrohRelayE2ETests: XCTestCase {
 
     // MARK: - The scenario
 
+    /// Full ceremony -> attach -> stream -> revoke-mid-stream, all with relay-forced endpoints
+    /// (relay-only peer address, no direct candidates). The `awaitRelayPath` assertion proves
+    /// relay ENGAGEMENT (the connection's selected path IS a relay path when polled promptly
+    /// after connect) — NOT relay exclusivity; see the class/header doc comments for the
+    /// same-machine direct-upgrade race this deliberately cannot rule out.
     func testForcedRelay_FullCeremony_AttachStream_RevokeMidStream() async throws {
         let url = relayURL()
         let daemon = try await RealDaemon.start()

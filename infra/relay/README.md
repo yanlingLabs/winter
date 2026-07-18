@@ -34,7 +34,7 @@ them. Everything here is designed to run at **$0** within Oracle's Always-Free t
 | `oci.ts` | draft-cavage HTTP-signature signer for the OCI IaaS API + a thin `ociRequest()` wrapper. Self-verifies every signature locally before sending. |
 | `provision.ts` | Idempotent provisioner: VCN, IGW, dual-stack subnet, security list, 2x instances, Cloudflare DNS. `--dry-run` prints the plan with zero network calls. |
 | `cloud-init.yaml.tmpl` | Rendered per-instance: dedicated `iroh-relay` system user, hardened systemd unit, ufw, unattended-upgrades, sha256-verified binary install. |
-| `relay-config.json` | Unsigned source config (`{version, relays}`) — sign with `scripts/sign-relay-config.ts`. |
+| `relay-config.json` | Unsigned source config (`{version, relays}`) — sign with `scripts/sign-relay-config.ts` (exact invocation below). |
 | `relay-config.signed.json` | Signed output (committed — public data). Identical copy lives at `apple/Norma/Resources/relay-config.signed.json` (the one actually embedded in the app bundle). |
 | `health-check.ts` | DNS (dual-stack) + TLS cert + HTTPS identity + a real iroh connectivity probe, per relay. |
 | `bench.ts` | N-parallel `norma-fake-phone probe-relay` burst against one relay; success rate + p50/p95; optional SSH-captured relay-side memory. |
@@ -49,7 +49,25 @@ bun infra/relay/provision.ts             # live — idempotent, safe to re-run a
 
 Every resource it *creates* is looked up by display name first and reused if already present.
 Security-list/route-table rules are always re-applied as the full desired state (a `PUT`, naturally
-idempotent) rather than diffed.
+idempotent) rather than diffed. **Because that `PUT` replaces the whole rule set**, the desired
+state must itself include the ICMP path-MTU-discovery rules Oracle's default list normally carries
+(ICMP type 3 code 4 for IPv4, ICMPv6 type 2 "packet too big") — dropping them black-holes PMTUD
+and shows up as intermittent TLS/SSH stalls on sub-1500-MTU paths. `provision.ts` includes both
+(8 ingress + 2 egress rules total).
+
+## Signing the relay config
+
+The committed `relay-config.signed.json` (both copies) was produced with exactly:
+
+```sh
+bun scripts/sign-relay-config.ts --generate                      # ONCE — refuses if the key already exists
+bun scripts/sign-relay-config.ts infra/relay/relay-config.json   # writes infra/relay/relay-config.signed.json
+cp infra/relay/relay-config.signed.json apple/Norma/Resources/relay-config.signed.json
+```
+
+After changing `relay-config.json` (bump `version` — anti-rollback is strictly-increasing), re-run
+the second and third commands, and update nothing else: the public key in
+`RelayConfigTrust.productionPublicKey` stays the same for the key's whole lifetime.
 
 ## iroh-relay version + config schema (verified against the real v1.0.2 binary during this task)
 
@@ -95,7 +113,9 @@ in the tenancy right now, at $0 within Always-Free VCN limits):
 - VCN `norma-relay-vcn` (`10.0.0.0/16`, IPv6-enabled — Oracle assigned a `/56` GUA prefix).
 - Internet gateway `norma-relay-igw`, wired into the VCN's default route table for BOTH
   `0.0.0.0/0` and `::/0`.
-- Default security list updated with exactly the 6 rules above (SSH/HTTPS/QUIC, v4+v6).
+- Default security list updated with exactly the 8 ingress rules above (SSH/HTTPS/QUIC v4+v6, plus
+  the two ICMP/ICMPv6 PMTUD rules) + 2 allow-all egress — re-applied live after the review fix that
+  added the PMTUD pair; verified by a direct GET of the live list.
 - Public dual-stack subnet `norma-relay-subnet` (`10.0.1.0/24` + a `/64` carved from the VCN's `/56`).
 - Ubuntu 24.04 image lookup (resolved to the current `Canonical-Ubuntu-24.04-2026.04.30-1` image,
   filtered by `shape=VM.Standard.E2.1.Micro`).

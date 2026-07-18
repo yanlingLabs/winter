@@ -14,6 +14,12 @@
  * a few hundred on a stock macOS shell (`launchctl limit maxfiles` default is often 256/unlimited
  * per-process soft limit ~ a few thousand -- verify locally with `ulimit -n` before a big run).
  *
+ * TIMING CAVEAT (task-6 review): each measured duration is whole-process wall clock, so it
+ * INCLUDES the Swift binary's own launch + runtime init overhead (tens of ms per process), not
+ * just the iroh dial-to-online time -- absolute p50/p95 figures overstate pure connect latency.
+ * The numbers remain valid for RELATIVE comparison (relay-1 vs relay-2, before/after an upgrade,
+ * one load level vs another), which is what this bench exists for.
+ *
  * Usage:
  *   bun infra/relay/bench.ts --url https://relay-1.yanlinglabs.com./ [--n 200] [--ssh-host ubuntu@relay-1.yanlinglabs.com]
  */

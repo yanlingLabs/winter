@@ -264,6 +264,26 @@ async function ensureSecurityListRules(cfg: OCIConfig, securityListId: string): 
     // reading the pinned tag's source (iroh-relay/src/defaults.rs). See the top-of-file comment.
     udpRule("0.0.0.0/0", QUIC_ADDR_DISCOVERY_PORT, "iroh-relay QUIC address discovery"),
     udpRule("::/0", QUIC_ADDR_DISCOVERY_PORT, "iroh-relay QUIC address discovery (IPv6)"),
+    // Path-MTU discovery (task-6 review fix): this function PUTs the COMPLETE desired rule set,
+    // which silently dropped Oracle's default-security-list ICMP rules -- without these, a
+    // "fragmentation needed" / "packet too big" signal from a <1500-MTU path never reaches the
+    // VM, and TCP/QUIC sessions black-hole with intermittent TLS/SSH stalls (PMTUD breakage).
+    // ICMP type 3 code 4 (IPv4 "fragmentation needed and DF set") and ICMPv6 type 2 ("packet
+    // too big" -- REQUIRED for IPv6, which has no in-network fragmentation at all).
+    {
+      protocol: "1", // ICMP
+      source: "0.0.0.0/0",
+      isStateless: false,
+      icmpOptions: { type: 3, code: 4 },
+      description: "ICMP path-MTU discovery (fragmentation needed)",
+    },
+    {
+      protocol: "58", // ICMPv6
+      source: "::/0",
+      isStateless: false,
+      icmpOptions: { type: 2 },
+      description: "ICMPv6 path-MTU discovery (packet too big)",
+    },
   ];
   const egress = [
     { protocol: "all", destination: "0.0.0.0/0", isStateless: false, description: "allow all egress (IPv4)" },
