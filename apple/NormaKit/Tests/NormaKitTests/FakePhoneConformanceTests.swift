@@ -17,26 +17,25 @@ import IrohLib
 /// (`ApprovalBroker`/`peripheral.lease`, SP3 T4b's shipped `approval.list`/`approval.respond`
 /// wiring) — never a scripted/fake broker.
 ///
-/// **A genuine finding this harness surfaced (report it, don't hide it).** `Gateway.swift`'s
+/// **A genuine finding this harness surfaced — now FIXED in the client.** `Gateway.swift`'s
 /// `session.attach` (both at hello-time via `ClientHello.resumes` and live via the `session.attach`
 /// RPC) ALWAYS mints its own `harness_attached` bookkeeping event on the daemon (`hub.attach`'s own
 /// `appendAndBroadcast`) — filtered from the wire (SP2a gate G1: "no harness_attached/detached
-/// leak"), but it still CONSUMES a real, persisted seq slot. `NormaSessionClient`'s gap detection
-/// (`applyEvent`) requires each event's seq to be EXACTLY `cursor + 1`; the very next piece of real
-/// content after ANY attach therefore always arrives at `cursor + 2` (or higher, if another harness
-/// client also attaches/detaches the same session meanwhile) and is flagged as a permanent gap —
-/// reproduced here against a REAL daemon+gateway, confirmed via a raw `NormaClient` (harness-role,
-/// whose own dedup is the more lenient `seq <= lastSeq`, immune to this) observing the SAME events
-/// land correctly. This is a genuine, previously-undiscovered integration gap between SP2a's
-/// noise-filtering and T4/T4b's stricter gap contract — neither piece is wrong in isolation, and a
-/// correct fix (either wire-level content-relative renumbering, or a new "skip forward N" signal)
-/// touches the resume/cursor contract broadly enough that it does not belong in this task's
-/// "Mac side genuinely unchanged" / "client shapes final, verbatim" scope. Below: the prompt and
-/// approval legs are each proven to genuinely reach and round-trip through the REAL daemon (via an
-/// independent harness `NormaClient` observer, immune to the issue), the approval leg is driven
-/// through the shipped client's QUERY-based surface (`pendingApprovals`/`answerApproval`, which
-/// never depends on the fragile push-event path), and the resulting gap is itself asserted as
-/// current, honest, reproducible behavior on `client.gaps` — not silently swallowed.
+/// leak"), but it still CONSUMES a real, persisted seq slot. `NormaSessionClient`'s original strict
+/// gap detection (each seq EXACTLY `cursor + 1`) therefore flagged the very next piece of real
+/// content after ANY attach as a permanent false gap (snapshot resume → re-attach → fresh
+/// `harness_attached` → new hole → repeat) — first reproduced here against a REAL daemon+gateway,
+/// confirmed via a raw `NormaClient` (harness-role, whose own dedup is the more lenient
+/// `seq <= lastSeq`, immune to this) observing the SAME events land correctly. The fix aligns the
+/// client with SP2a G1's documented contract ("cursors stay exclusive-> over what the phone
+/// actually received (filtered seq gaps are fine)"): on the single reliable, ordered QUIC
+/// bi-stream a missing seq between two received events is ALWAYS a gateway-filtered event, never
+/// mid-stream loss, so `applyEvent` now APPLIES forward jumps and advances the cursor to the
+/// received seq; real loss/staleness stays a HANDSHAKE concern (`.snapshotRequired`), and
+/// `client.gaps` fires only on liveBuffer overflow. This test now asserts the content events
+/// STREAM CLEANLY through the shipped client (events land, `client.gaps` stays silent) — the real
+/// "attach → see messages" flow, end-to-end — with the independent harness observers retained as
+/// corroboration that the underlying daemon round trips genuinely happened.
 final class FakePhoneConformanceTests: XCTestCase {
 
     // MARK: - Host + ceremony setup (mirrors PairingE2ETests' own pattern)
@@ -171,8 +170,9 @@ final class FakePhoneConformanceTests: XCTestCase {
     }
 
     /// Polls the REAL broker via `approval.list` (`NormaSessionClient.pendingApprovals`) until it
-    /// reports a pending entry — a genuine RPC round trip against `ApprovalBroker.list()`, not a
-    /// wait on the (currently gap-affected — see this file's header comment) push-event path.
+    /// reports a pending entry — a genuine RPC round trip against `ApprovalBroker.list()`, the
+    /// queryable-state surface T4b shipped (pending approvals age out of the retained log, so live
+    /// state — not event reconstruction — is the right source regardless of stream timing).
     private func waitForPendingApproval(_ client: NormaSessionClient, sessionID: String, timeout: TimeInterval = 10) async throws -> SessionEvent.JSONValue {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -209,12 +209,10 @@ final class FakePhoneConformanceTests: XCTestCase {
             clientInstanceID: "norma-fake-phone", clock: { Int(Date().timeIntervalSince1970 * 1000) },
             idgen: { UUID().uuidString }
         )
-        // Drained (not asserted on directly) — see this file's header comment: the FIRST live
-        // content event after any attach currently arrives as a permanent gap on THIS stream (a
-        // documented finding), so the prompt/approval legs below verify delivery via an
-        // independent harness observer instead; `client.gaps` (asserted below) is where that
-        // finding shows up on the shipped client itself.
-        let (_, eventTask) = drain(client.events)
+        // The shipped client's own event feed IS the primary assertion surface now (see this
+        // file's header comment): content events must stream cleanly through it after attach —
+        // filtered-seq forward jumps applied, `client.gaps` silent.
+        let (eventSink, eventTask) = drain(client.events)
         defer { eventTask.cancel() }
         let (gapSink, gapTask) = drain(client.gaps)
         defer { gapTask.cancel() }
@@ -226,12 +224,12 @@ final class FakePhoneConformanceTests: XCTestCase {
 
         // ---- Prompt leg: session.dispatch -> attach -> send, verified two ways ----
         //
-        // 1. An independent harness `NormaClient` ("verifier") also attaches and genuinely
-        //    observes the live `user_message` — proving the REAL daemon/hub/gateway round trip
-        //    (session.dispatch -> session.attach -> session.send) works end-to-end through the
-        //    shipped client's own RPC calls.
-        // 2. `client.gaps` is asserted to fire for this stream — the header comment's documented
-        //    finding, reproduced honestly rather than silently worked around.
+        // 1. The shipped client's OWN `events` stream delivers the live `user_message` cleanly —
+        //    the real "attach → see messages" flow through `NormaSessionClient` itself (the
+        //    header comment's finding, now fixed: the filtered-seq forward jump applies, no gap).
+        // 2. An independent harness `NormaClient` ("verifier") also attaches and genuinely
+        //    observes the same `user_message` — corroborating the REAL daemon/hub/gateway round
+        //    trip (session.dispatch -> session.attach -> session.send) underneath.
         let dispatchResult = try await client.send(method: "session.dispatch", params: .object([:]))
         guard let sid = dispatchResult["sessionId"]?.stringValue else {
             return XCTFail("session.dispatch must return a sessionId")
@@ -256,9 +254,16 @@ final class FakePhoneConformanceTests: XCTestCase {
                 return false
             }
         }
-        try await waitUntil("expected client.gaps to fire for \(sid) — see this file's header comment") {
-            gapSink.items.contains { $0.sessionID == sid }
+        // The shipped client's OWN feed delivers the content cleanly: the user_message arrives on
+        // `client.events` despite the filtered `harness_attached` seq hole in front of it, and no
+        // GapSignal fires — the header comment's finding, fixed.
+        try await waitUntil("expected the shipped client's own events stream to deliver the user_message cleanly (no gap)") {
+            eventSink.items.contains {
+                $0.sessionID == sid && $0.json["type"]?.stringValue == "user_message"
+                    && $0.json["text"]?.stringValue == promptText
+            }
         }
+        XCTAssertTrue(gapSink.items.isEmpty, "no GapSignal on the basic attach→see-messages flow — filtered-seq forward jumps are benign")
 
         // ---- REAL approval leg: a Mac-side peripheral.lease under an "ask" policy, resolved
         // through the phone's OWN pendingApprovals/answerApproval — never a scripted broker. ----
@@ -335,9 +340,16 @@ final class FakePhoneConformanceTests: XCTestCase {
                 return false
             }
         }
-        try await waitUntil("expected client.gaps to also fire for \(approvalSid) — same documented finding") {
-            gapSink.items.contains { $0.sessionID == approvalSid }
+        // Same clean-streaming proof on the re-attached approval session: the approval_requested
+        // content event streams through the shipped client itself, and the gaps channel stays
+        // silent across BOTH legs (it now signals only liveBuffer overflow).
+        try await waitUntil("expected the shipped client's own events stream to deliver approval_requested cleanly (no gap)") {
+            eventSink.items.contains {
+                $0.sessionID == approvalSid && $0.json["type"]?.stringValue == "approval_requested"
+                    && $0.json["callId"]?.stringValue == callID
+            }
         }
+        XCTAssertTrue(gapSink.items.isEmpty, "client.gaps must stay silent across both legs — filtered-seq forward jumps never gap")
 
         await provider.close()
         await requester.close()

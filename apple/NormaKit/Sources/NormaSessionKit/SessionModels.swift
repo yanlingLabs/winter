@@ -65,15 +65,18 @@ public struct ApprovalAnswer: Sendable, Equatable {
     }
 }
 
-/// Surfaced on `NormaSessionClient.gaps` when a stream's incoming seq skips ahead of
-/// `cursor + 1` — the retained-log replay window was overrun and contiguity is broken. The consumer
-/// (T8's iOS Code-mode model) reacts by re-handshaking with a snapshot resume for `(sessionID,
-/// streamID)`. The client stops applying that stream's events until a fresh handshake, so no
-/// out-of-order event is ever yielded past a gap.
+/// Surfaced on `NormaSessionClient.gaps` when a stream's held-live buffer overflows — a replay
+/// batch that can no longer complete, i.e. the client is genuinely too far behind to catch up
+/// in-stream. The consumer (T8's iOS Code-mode model) reacts by re-handshaking with a snapshot
+/// resume for `(sessionID, streamID)`; the client stops applying that stream's events until then.
+/// NOT fired for benign forward seq jumps (T5 conformance fix): the gateway filters harness
+/// bookkeeping events that still consume daemon seqs, so holes between received content seqs are
+/// normal on the reliable, ordered transport — see `NormaSessionClient.applyEvent`'s contract
+/// comment. Real loss/staleness is handled at the handshake via the `.snapshotRequired` verdict.
 public struct GapSignal: Sendable, Equatable {
     public let sessionID: String
     public let streamID: String
-    /// The seq the client next expected (`cursor + 1`).
+    /// The seq the client next expected (`cursor + 1`) at the overflow point — diagnostics.
     public let expectedSeq: Int
     /// The seq that actually arrived (`> expectedSeq`).
     public let receivedSeq: Int

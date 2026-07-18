@@ -67,9 +67,12 @@ public actor NormaSessionClient {
     /// never reassigned, and `AsyncStream` is `Sendable`, so consumers iterate it without `await` —
     /// functionally identical to a get-only `var`, and safer.)
     public nonisolated let events: AsyncStream<SessionEnvelope>
-    /// Resume-signal side channel: a `GapSignal` is yielded when a stream's seq skips past
-    /// `cursor + 1`. The consumer reacts by re-handshaking with a snapshot resume. Kept separate
-    /// from `events` so the event feed stays pure content and multiple streams don't interfere.
+    /// Resume-signal side channel: a `GapSignal` is yielded when a stream's `liveBuffer` overflows
+    /// (a replay batch that can no longer complete — a genuine "too far behind" condition). The
+    /// consumer reacts by re-handshaking with a snapshot resume. NOT fired for benign forward seq
+    /// jumps: the gateway filters harness bookkeeping events that still consume daemon seqs, so
+    /// holes between received content seqs are normal (see `applyEvent`'s contract comment). Kept
+    /// separate from `events` so the event feed stays pure content.
     public nonisolated let gaps: AsyncStream<GapSignal>
     /// Cursor-durability diagnostic channel (T4 review minor 1): a `CursorPersistFailure` is
     /// yielded when `CursorStore.advance` throws AFTER its event was yielded. Safe direction (the
@@ -405,7 +408,9 @@ public actor NormaSessionClient {
         guard !st.gapped, !st.needsSnapshot else { return }
 
         // Replay→live handoff: a live event (past the replay ceiling) arriving mid-replay is held,
-        // not applied — it would otherwise read as a gap against the still-replaying cursor.
+        // not applied — applying it immediately would advance the cursor past the still-pending
+        // replay events, which would then all be dropped as duplicates (replay lost, reordered
+        // delivery). Held events are released in seq order once the batch completes.
         if st.replaying && seq > st.highWatermark {
             // T4 review minor 2b: bound the hold. A replay batch that never completes (the
             // exact-watermark event lost on the wire) would otherwise buffer live events without
@@ -425,45 +430,54 @@ public actor NormaSessionClient {
             return
         }
 
-        applyEvent(session: session, stream: stream, seq: seq, decoded: decode(env, session: session), state: &st)
+        applyEvent(session: session, stream: stream, seq: seq, decoded: decode(env, session: session))
 
         // Replay complete → drain the held live events, in seq order, through the same apply path.
-        if st.replaying, !st.gapped, currentCursor(session, stream) >= st.highWatermark {
+        if st.replaying, currentCursor(session, stream) >= st.highWatermark {
             st.replaying = false
             let buffered = st.liveBuffer.sorted { $0.seq < $1.seq }
             st.liveBuffer = []
             for item in buffered {
-                guard !st.gapped else { break }
-                applyEvent(session: session, stream: stream, seq: item.seq, decoded: item.env, state: &st)
+                applyEvent(session: session, stream: stream, seq: item.seq, decoded: item.env)
             }
         }
     }
 
-    /// The dedup/gap/advance core. `seq <= cursor` → duplicate, ignored. `seq == cursor + 1` → yield
-    /// THEN advance the cursor (durable-apply-then-advance). `seq > cursor + 1` → gap: surface a
-    /// `GapSignal`, mark the stream, apply nothing (no out-of-order yield, no advance).
-    private func applyEvent(session: String, stream: String, seq: Int, decoded: SessionEnvelope, state: inout StreamState) {
+    /// The dedup/advance core. `seq <= cursor` → duplicate/already-applied, dropped. `seq > cursor`
+    /// → yield THEN advance the cursor to `seq` (durable-apply-then-advance), TOLERATING forward
+    /// jumps past `cursor + 1`.
+    ///
+    /// **Why forward jumps are never gaps (T5 conformance fix — aligns with the gateway's
+    /// documented contract).** The gateway filters `harness_attached`/`harness_detached`
+    /// bookkeeping events from the wire (SP2a gate G1), but those events still CONSUME real daemon
+    /// seqs — so received content legitimately has holes (seq 1 then seq 3, because seq 2 was a
+    /// filtered harness event; every attach mints one, so the very first content event after ANY
+    /// attach jumps). And the transport is a single reliable, ordered QUIC bi-stream: every seq the
+    /// phone receives was sent by the gateway in order, so a missing seq between two received
+    /// events is ALWAYS a gateway-filtered event, never mid-stream loss. Real loss/staleness is
+    /// handled at the HANDSHAKE (the `.snapshotRequired` verdict when the cursor is older than
+    /// retention), not in-stream — per SP2a G1's own contract: "cursors stay exclusive-> over what
+    /// the phone actually received (filtered seq gaps are fine)." The earlier strict `cursor + 1`
+    /// rule turned that benign hole into a PERMANENT false gap (snapshot resume → re-attach →
+    /// fresh `harness_attached` → new hole → repeat). The `gaps` stream therefore now fires only
+    /// on `liveBuffer` overflow (a genuine "too far behind, snapshot" signal).
+    private func applyEvent(session: String, stream: String, seq: Int, decoded: SessionEnvelope) {
         let cursor = currentCursor(session, stream)
         if seq <= cursor { return }
-        if seq == cursor + 1 {
-            eventsCont.yield(decoded)
-            do {
-                try cursors.advance(host: hostID, session: session, stream: stream, to: seq)
-            } catch {
-                // T4 review minor 1: a persist failure must never be silent. The direction is safe
-                // (the stale cursor re-delivers this event on the next resume; dedup absorbs it —
-                // never a skip), but a PERSISTENT failure (disk full, bad perms) silently defeats
-                // crash-durability, so surface it on the diagnostic channel + os log. Identifiers
-                // and the error description only — never payload content.
-                Self.logger.warning("cursor persist failed session=\(session, privacy: .public) stream=\(stream, privacy: .public) seq=\(seq) error=\(String(describing: error), privacy: .public)")
-                persistErrorsCont.yield(CursorPersistFailure(
-                    sessionID: session, streamID: stream, seq: seq, message: String(describing: error)
-                ))
-            }
-            return
+        eventsCont.yield(decoded)
+        do {
+            try cursors.advance(host: hostID, session: session, stream: stream, to: seq)
+        } catch {
+            // T4 review minor 1: a persist failure must never be silent. The direction is safe
+            // (the stale cursor re-delivers this event on the next resume; dedup absorbs it —
+            // never a skip), but a PERSISTENT failure (disk full, bad perms) silently defeats
+            // crash-durability, so surface it on the diagnostic channel + os log. Identifiers
+            // and the error description only — never payload content.
+            Self.logger.warning("cursor persist failed session=\(session, privacy: .public) stream=\(stream, privacy: .public) seq=\(seq) error=\(String(describing: error), privacy: .public)")
+            persistErrorsCont.yield(CursorPersistFailure(
+                sessionID: session, streamID: stream, seq: seq, message: String(describing: error)
+            ))
         }
-        gapsCont.yield(GapSignal(sessionID: session, streamID: stream, expectedSeq: cursor + 1, receivedSeq: seq))
-        state.gapped = true
     }
 
     private func currentCursor(_ session: String, _ stream: String) -> Int {

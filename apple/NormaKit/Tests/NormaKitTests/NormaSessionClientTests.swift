@@ -214,7 +214,16 @@ final class NormaSessionClientTests: XCTestCase {
         XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 3)
     }
 
-    func testGapIsSurfacedNotApplied() async throws {
+    /// T5 conformance fix: the gateway filters `harness_attached`/`harness_detached` bookkeeping
+    /// from the wire but those events still CONSUME daemon seqs — so received content legitimately
+    /// has holes (every attach mints one). On the reliable, ordered QUIC bi-stream a missing seq
+    /// between two received events is ALWAYS a gateway-filtered event, never mid-stream loss (real
+    /// staleness is handled at the handshake via `.snapshotRequired`) — SP2a G1's own contract:
+    /// "cursors stay exclusive-> over what the phone actually received (filtered seq gaps are
+    /// fine)." A forward jump must therefore APPLY and advance, never surface a GapSignal — the
+    /// earlier strict `cursor + 1` rule made the basic attach-then-see-messages flow a PERMANENT
+    /// false gap (snapshot resume → re-attach → fresh harness_attached → new hole → repeat).
+    func testForwardJumpFromFilteredSeqIsAppliedNotGapped() async throws {
         let conn = ScriptedRemoteConn()
         let cursors = InMemoryCursorStore()
         let client = makeClient(conn: conn, cursors: cursors)
@@ -222,29 +231,19 @@ final class NormaSessionClientTests: XCTestCase {
         let (gaps, gapTask) = drain(client.gaps)
         defer { evTask.cancel(); gapTask.cancel() }
 
-        conn.enqueueInbound(helloAckFrame(verdicts: [
-            .upToDate(sessionID: "s1", highWatermark: 0),
-            .upToDate(sessionID: "s2", highWatermark: 0),
-        ]))
-        _ = try await client.handshake(resumes: [
-            StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0),
-            StreamResume(sessionID: "s2", streamID: "s2", lastAppliedSeq: 0),
-        ])
+        conn.enqueueInbound(helloAckFrame(verdicts: [.upToDate(sessionID: "s1", highWatermark: 0)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0)])
 
         conn.enqueueInbound(eventFrame(session: "s1", seq: 1))
-        conn.enqueueInbound(eventFrame(session: "s1", seq: 3)) // GAP: skips seq 2
-        conn.enqueueInbound(eventFrame(session: "s2", seq: 1)) // canary on a DIFFERENT stream = FIFO barrier
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 3)) // seq 2 was a filtered harness event
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 6)) // seqs 4-5 filtered too — still benign
 
-        try await waitUntil({ events.items.contains { $0.sessionID == "s2" } }, "canary s2 to arrive")
+        try await waitUntil({ self.seqs(events.items).contains(6) }, "forward-jumped events to apply")
 
-        // s1#3 (the gapped event) was NOT applied; s1#1 and the s2 canary were.
-        XCTAssertEqual(events.items.filter { $0.sessionID == "s1" }.compactMap { $0.seq }, [1])
-        XCTAssertEqual(events.items.filter { $0.sessionID == "s2" }.compactMap { $0.seq }, [1])
-        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 1, "cursor must not pass the gap")
-
-        // The gap is surfaced with the exact expected/received seqs on the resume-signal channel.
-        try await waitUntil({ !gaps.items.isEmpty }, "gap signal")
-        XCTAssertEqual(gaps.items, [GapSignal(sessionID: "s1", streamID: "s1", expectedSeq: 2, receivedSeq: 3)])
+        // Both jumped events applied in order; the cursor tracks the last RECEIVED seq; no gap.
+        XCTAssertEqual(seqs(events.items), [1, 3, 6])
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 6)
+        XCTAssertTrue(gaps.items.isEmpty, "a benign forward jump must never surface a GapSignal")
     }
 
     func testLiveDuringReplayIsDeliveredAfterReplayBatchInOrder() async throws {
