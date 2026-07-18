@@ -97,9 +97,15 @@ final class PairingE2ETests: XCTestCase {
 
     /// Runs one full pairing ceremony against an ALREADY-OPEN pairing window (the caller opened it
     /// via `makeHost`/a prior `host.openPairingWindow()`), for a phone identified by `secret`.
-    /// Leaves the ceremony connection closed and the pairing window closed on return — the caller
-    /// dials a FRESH `PhoneConn` (same `secret`) for anything post-pairing, mirroring a real phone
-    /// hanging up and reconnecting once accepted (brief scenario (a)'s own "phone reconnects").
+    /// SP2b Task 5: the phone side now goes through the REAL `PhonePairingClient` (this package's
+    /// production phone-ceremony implementation) instead of hand-rolled transcript/proof/
+    /// `PairRequest` frames — `addrOverride: setup.irohListener.endpointAddr` is the SAME
+    /// test-only seam `PhonePairingClientTests` uses (production has no relay/discovery wired
+    /// yet — SP2b T6 — so a hermetic test has nothing else to dial through). `PhonePairingClient`
+    /// closes its own ceremony connection before returning (single-use, matches the OLD
+    /// `ceremonyPhone.closeConnection()/closeDialer()` this replaces) — the caller dials a FRESH
+    /// `PhoneConn` (same `secret`) for anything post-pairing, mirroring a real phone hanging up
+    /// and reconnecting once accepted (brief scenario (a)'s own "phone reconnects").
     @MainActor
     private func pairPhone(setup: TestSetup, secret: Data, label: String = "iPhone") async throws -> PairAccepted {
         guard let manager = setup.host.pairingManager else {
@@ -108,35 +114,23 @@ final class PairingE2ETests: XCTestCase {
         let qr = await manager.beginPairing()
         var events = manager.events.makeAsyncIterator()
 
-        let phoneEndpointID = try PhoneConn.peerID(forSecret: secret)
-        let ceremonyPhone = try await PhoneConn.dial(listener: setup.irohListener, secret: secret)
-        let phoneInstallNonce = Data(repeating: 0x11, count: 16)
-        let transcript = PairingCrypto.transcript(
-            v: qr.v, pairID: qr.pairID, macEndpointID: qr.macEndpointID,
-            phoneEndpointID: phoneEndpointID, phoneInstallNonce: phoneInstallNonce, caps: ["sessions"]
+        async let phoneResult = PhonePairingClient.pairInternal(
+            qr: qr, bindAddr: nil, secret: secret, addrOverride: setup.irohListener.endpointAddr,
+            onWords: { _ in }
         )
-        let proof = PairingCrypto.proof(pairSecret: qr.pairSecret, transcript: transcript)
-        let request = PairRequest(
-            type: "pair_request", pairID: qr.pairID, phoneEndpointID: phoneEndpointID,
-            phoneInstallNonce: phoneInstallNonce, caps: ["sessions"], proof: proof
-        )
-        try await ceremonyPhone.sendRaw(try JSONEncoder().encode(request))
 
-        guard case .requestReceived(let words, _) = await events.next() else {
+        guard case .requestReceived(let macWords, _) = await events.next() else {
             throw PairingE2EError("expected requestReceived")
         }
-        let expectedWords = PairingCrypto.sasWords(pairSecret: qr.pairSecret, transcript: transcript)
-        XCTAssertEqual(words, expectedWords, "the SAS words the Mac would show a human must match the phone's own computation")
 
         await manager.confirm(label: label)
         guard case .completed = await events.next() else {
             throw PairingE2EError("expected completed")
         }
 
-        let acceptedData = try await ceremonyPhone.expectRawFrame()
-        let accepted = try JSONDecoder().decode(PairAccepted.self, from: acceptedData)
-        ceremonyPhone.closeConnection()
-        ceremonyPhone.closeDialer()
+        let (accepted, phoneWords, _) = try await phoneResult
+        XCTAssertEqual(phoneWords, macWords, "the SAS words the Mac would show a human must match the phone's own computation")
+
         await setup.host.closePairingWindow()
         return accepted
     }

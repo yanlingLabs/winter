@@ -8,6 +8,7 @@ let package = Package(
     products: [
         .library(name: "NormaKit", targets: ["NormaKit"]),
         .executable(name: "norma-probe", targets: ["norma-probe"]),
+        .executable(name: "norma-fake-phone", targets: ["norma-fake-phone"]),
     ],
     dependencies: [
         .package(path: "../NormaProtocol"),
@@ -32,6 +33,9 @@ let package = Package(
         ),
         .target(name: "NormaKit", dependencies: ["NormaProtocol", "IrohLib"]),
         .executableTarget(name: "norma-probe", dependencies: ["NormaKit", "NormaProtocol"]),
+        // SP2b Task 5: the dev/fake-phone CLI — closes the pairing loop end-to-end without any
+        // iOS code (`PhonePairingClient` is the reusable phone-side ceremony it drives).
+        .executableTarget(name: "norma-fake-phone", dependencies: ["NormaKit", "NormaProtocol", "IrohLib"]),
         .testTarget(name: "NormaKitTests", dependencies: ["NormaKit", "IrohLib"]),
     ]
 )

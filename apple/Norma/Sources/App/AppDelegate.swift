@@ -60,6 +60,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `registerDetachedWindow`'s `onClosed`). `openDashboard()` below is what enforces the
     /// "second invocation focuses the existing window" contract off this single stored ref.
     private(set) var dashboardWindow: DashboardWindowController?
+    /// SP2b T5: owns this Mac's `RemoteHost` (lazily — nothing starts until a pairing window is
+    /// actually requested). Constructed unconditionally in `boot()` (cheap — it does no I/O of
+    /// its own; only touching its `RemoteHost` does), same posture as `peripheralProvider`/
+    /// `helperClient`.
+    private(set) var remoteAccessCoordinator: RemoteAccessCoordinator?
+    /// The pairing sheet's singleton window controller — same one-shot-latch/registry-removal
+    /// convention as `dashboardWindow`: nil until first opened, nil'd again via `onClosed`.
+    private(set) var pairingSheetWindow: PairingSheetWindowController?
+    /// The Paired Devices window's singleton controller — same convention as `pairingSheetWindow`.
+    private(set) var pairedDevicesWindow: PairedDevicesWindowController?
     /// BYOK T2: the one-time first-run disclosure window (spec §3) — `nil` until (at most once,
     /// ever, per install) `boot()`'s real-launch path presents it; nil'd again via `onClosed` (same
     /// one-shot-latch/registry-removal convention as `dashboardWindow`/`detachedWindows` above).
@@ -318,6 +328,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openDashboard(initialPane: .pluginManager)
     }
 
+    /// SP2b T5: the menu bar's "Pair a Device…" entry. A second invocation while the sheet is
+    /// already open just refocuses it (same posture as `openDashboard`'s own guard). Building the
+    /// model requires an `await` (`RemoteHost.openPairingWindow()` may need to bind a fresh iroh
+    /// listener) — the re-check of `pairingSheetWindow` right after that await guards against a
+    /// double-click racing two overlapping builds into two separate windows/ceremonies.
+    func openPairDevice() {
+        if let pairingSheetWindow {
+            pairingSheetWindow.show()
+            return
+        }
+        guard let coordinator = remoteAccessCoordinator else {
+            OrbDebug.log("openPairDevice: no remoteAccessCoordinator — spawn aborted")
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let model = try await coordinator.makePairingSheetModel()
+                guard self.pairingSheetWindow == nil else {
+                    self.pairingSheetWindow?.show()
+                    return
+                }
+                let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+                let controller = PairingSheetWindowController(
+                    model: model, frame: centeredPairingSheetFrame(visibleFrame: visible)
+                )
+                controller.onClosed = { [weak self] _ in
+                    self?.pairingSheetWindow = nil
+                    Task { await coordinator.pairingSheetClosed() }
+                }
+                self.pairingSheetWindow = controller
+                controller.show()
+            } catch {
+                OrbDebug.log("openPairDevice: couldn't start the pairing stack: \(error)")
+            }
+        }
+    }
+
+    /// SP2b T5: the menu bar's "Paired Devices…" entry. `PairedDevicesView` does its own async
+    /// listing (`.task`) once presented, so — unlike `openPairDevice` — the window is constructed
+    /// synchronously; there is no pairing-window/iroh-listener to force-start just to see the list.
+    func openPairedDevices() {
+        if let pairedDevicesWindow {
+            pairedDevicesWindow.show()
+            return
+        }
+        guard let coordinator = remoteAccessCoordinator else {
+            OrbDebug.log("openPairedDevices: no remoteAccessCoordinator — spawn aborted")
+            return
+        }
+        let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let controller = PairedDevicesWindowController(
+            list: { await coordinator.pairedDevices() },
+            revoke: { peer in try await coordinator.revoke(phoneEndpointID: peer) },
+            frame: centeredPairedDevicesFrame(visibleFrame: visible)
+        )
+        controller.onClosed = { [weak self] _ in self?.pairedDevicesWindow = nil }
+        pairedDevicesWindow = controller
+        controller.show()
+    }
+
     @discardableResult
     private func spawnDetachedWindow(feed: SessionFeed, session: SessionModel, frame: NSRect, title: String) -> DetachedWindowController {
         let detached = DetachedWindowController(feed: feed, session: session, frame: frame, title: title.isEmpty ? "Norma" : title)
@@ -433,6 +504,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The real default-on `setEnabled(true)` call is gated below.
         let loginItem = LoginItemController(service: SMLoginItem())
         loginItemController = loginItem
+
+        // SP2b T5: constructing the coordinator does no I/O of its own (its `RemoteHost` is a
+        // `lazy var`, untouched until a pairing window is actually requested) — safe
+        // unconditionally, same posture as `HelperClient()`/`LoginItemController` above.
+        remoteAccessCoordinator = RemoteAccessCoordinator()
 
         model.onPeripheralEvent = { [weak peripheral, weak hardware] event in
             await peripheral?.handle(event)
@@ -664,6 +740,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             openNormaApp: { [weak self] in self?.openStandaloneNormaWindow() },
             openDashboard: { [weak self] in self?.openDashboard() },
             openPluginManager: { [weak self] in self?.openPluginManager() },
+            openPairDevice: { [weak self] in self?.openPairDevice() },
+            openPairedDevices: { [weak self] in self?.openPairedDevices() },
             loginItemController: loginItem,
             panic: { [weak peripheral] in peripheral?.panic() },
             quit: { NSApp.terminate(nil) },

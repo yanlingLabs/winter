@@ -19,6 +19,8 @@ final class MenuBarEntryPointsTests: XCTestCase {
         openNormaApp: @escaping () -> Void = {},
         openDashboard: @escaping () -> Void = {},
         openPluginManager: @escaping () -> Void = {},
+        openPairDevice: @escaping () -> Void = {},
+        openPairedDevices: @escaping () -> Void = {},
         loginItemController: LoginItemController? = nil,
         panic: @escaping () -> Void = {},
         quit: @escaping () -> Void = {},
@@ -35,6 +37,8 @@ final class MenuBarEntryPointsTests: XCTestCase {
             openNormaApp: openNormaApp,
             openDashboard: openDashboard,
             openPluginManager: openPluginManager,
+            openPairDevice: openPairDevice,
+            openPairedDevices: openPairedDevices,
             // A fresh, uniquely-named `UserDefaults` suite per call — never `UserDefaults.standard`,
             // so these menu-shape/closure-firing tests (which don't care about login-item
             // persistence) never leave a stray key behind in the real xctest-host defaults domain.
@@ -101,12 +105,20 @@ final class MenuBarEntryPointsTests: XCTestCase {
         // Phase 4d-iii Task 2: "Manage Plugins…" is adjacent to Dashboard…, same posture as
         // Dashboard… itself being adjacent to Open Norma App — no separator between them either.
         XCTAssertEqual(pluginManagerIdx, dashboardIdx + 1, "Manage Plugins… must be adjacent to Dashboard…, no separator between them")
-        // Lifecycle T4: "Launch Norma at login" sits between Manage Plugins… and the pre-existing
-        // pre-Quit separator — still no separator between Manage Plugins… and it.
+        // SP2b T5: "Pair a Device…"/"Paired Devices…" sit right after Manage Plugins… — same
+        // "adjacent, no separator" posture as every other entry point in this run.
+        guard let pairDeviceIdx = titles.firstIndex(of: "Pair a Device…"),
+              let pairedDevicesIdx = titles.firstIndex(of: "Paired Devices…") else {
+            return XCTFail("expected Pair a Device… and Paired Devices… present, got \(titles)")
+        }
+        XCTAssertEqual(pairDeviceIdx, pluginManagerIdx + 1, "Pair a Device… must be adjacent to Manage Plugins…, no separator between them")
+        XCTAssertEqual(pairedDevicesIdx, pairDeviceIdx + 1, "Paired Devices… must be adjacent to Pair a Device…, no separator between them")
+        // Lifecycle T4: "Launch Norma at login" sits between Paired Devices… and the pre-existing
+        // pre-Quit separator — still no separator between Paired Devices… and it.
         guard let loginItemIdx = titles.firstIndex(of: "Launch Norma at login") else {
             return XCTFail("expected Launch Norma at login present, got \(titles)")
         }
-        XCTAssertEqual(loginItemIdx, pluginManagerIdx + 1, "Launch Norma at login must be adjacent to Manage Plugins…, no separator between them")
+        XCTAssertEqual(loginItemIdx, pairedDevicesIdx + 1, "Launch Norma at login must be adjacent to Paired Devices…, no separator between them")
         // Sparkle T3: "Check for Updates…" sits between "Launch Norma at login" and the
         // pre-existing pre-Quit separator — still no separator between Launch Norma at login and it.
         guard let checkForUpdatesIdx = titles.firstIndex(of: "Check for Updates…") else {
@@ -143,6 +155,32 @@ final class MenuBarEntryPointsTests: XCTestCase {
         XCTAssertEqual(fired, 1)
     }
 
+    func testPairDeviceItemFiresInjectedClosure() {
+        var fired = 0
+        let controller = makeController(openPairDevice: { fired += 1 })
+        controller.install()
+
+        let item = controller.pairDeviceItem
+        XCTAssertNotNil(item.target)
+        XCTAssertNotNil(item.action)
+        NSApp.sendAction(item.action!, to: item.target, from: item)
+
+        XCTAssertEqual(fired, 1)
+    }
+
+    func testPairedDevicesItemFiresInjectedClosure() {
+        var fired = 0
+        let controller = makeController(openPairedDevices: { fired += 1 })
+        controller.install()
+
+        let item = controller.pairedDevicesItem
+        XCTAssertNotNil(item.target)
+        XCTAssertNotNil(item.action)
+        NSApp.sendAction(item.action!, to: item.target, from: item)
+
+        XCTAssertEqual(fired, 1)
+    }
+
     /// Firing "Manage Plugins…" must never fire "Dashboard…" (and vice versa) — same independence
     /// guarantee as `testOpenCliAndOpenNormaAppClosuresAreIndependent`.
     func testDashboardAndPluginManagerClosuresAreIndependent() {
@@ -172,6 +210,8 @@ final class MenuBarEntryPointsTests: XCTestCase {
         XCTAssertEqual(titles.filter { $0 == "Open Norma App" }.count, 1)
         XCTAssertEqual(titles.filter { $0 == "Dashboard…" }.count, 1)
         XCTAssertEqual(titles.filter { $0 == "Manage Plugins…" }.count, 1)
+        XCTAssertEqual(titles.filter { $0 == "Pair a Device…" }.count, 1)
+        XCTAssertEqual(titles.filter { $0 == "Paired Devices…" }.count, 1)
         XCTAssertEqual(titles.filter { $0 == "Launch Norma at login" }.count, 1)
         XCTAssertEqual(titles.filter { $0 == "Check for Updates…" }.count, 1)
     }

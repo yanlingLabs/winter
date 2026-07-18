@@ -9,6 +9,10 @@ final class MenuBarController {
     private let openNormaApp: () -> Void
     private let openDashboard: () -> Void
     private let openPluginManager: () -> Void
+    // SP2b T5: the two Remote-pairing entry points — same decoupled-closure posture as every
+    // other action in this initializer.
+    private let openPairDevice: () -> Void
+    private let openPairedDevices: () -> Void
     private let panicAction: () -> Void
     private let quitApplication: () -> Void
     // Lifecycle T4: arms the ONE true-quit gate (`AppDelegate.reallyQuitting`) — fired BEFORE
@@ -48,6 +52,10 @@ final class MenuBarController {
     // Phase 4d-iii Task 2: "Manage Plugins…" — same 4-touch-point precedent as `dashboardItem`,
     // placed right after it (opens the Dashboard window focused on `.pluginManager`).
     let pluginManagerItem = NSMenuItem(title: "Manage Plugins…", action: #selector(didOpenPluginManager), keyEquivalent: "")
+    // SP2b T5: "Pair a Device…"/"Paired Devices…" — same adjacency/testability posture as
+    // `pluginManagerItem` (4d-iii Task 2's own precedent), placed right after it.
+    let pairDeviceItem = NSMenuItem(title: "Pair a Device…", action: #selector(didOpenPairDevice), keyEquivalent: "")
+    let pairedDevicesItem = NSMenuItem(title: "Paired Devices…", action: #selector(didOpenPairedDevices), keyEquivalent: "")
     // Task 4 (2f): the red "Stop Norma's Control" panic item — mounted/unmounted (not just
     // shown/hidden, unlike `orbItem`'s title-flip via `setOrbVisible`) with the active-lease count.
     // `internal`, same testability posture as `openCliItem`/`openNormaAppItem` above.
@@ -74,6 +82,8 @@ final class MenuBarController {
         openNormaApp: @escaping () -> Void,
         openDashboard: @escaping () -> Void,
         openPluginManager: @escaping () -> Void,
+        openPairDevice: @escaping () -> Void,
+        openPairedDevices: @escaping () -> Void,
         loginItemController: LoginItemController,
         panic: @escaping () -> Void,
         quit: @escaping () -> Void,
@@ -89,6 +99,8 @@ final class MenuBarController {
         self.openNormaApp = openNormaApp
         self.openDashboard = openDashboard
         self.openPluginManager = openPluginManager
+        self.openPairDevice = openPairDevice
+        self.openPairedDevices = openPairedDevices
         self.loginItemController = loginItemController
         self.panicAction = panic
         self.quitApplication = quit
@@ -120,6 +132,10 @@ final class MenuBarController {
         menu.addItem(dashboardItem)
         pluginManagerItem.target = self
         menu.addItem(pluginManagerItem)
+        pairDeviceItem.target = self
+        menu.addItem(pairDeviceItem)
+        pairedDevicesItem.target = self
+        menu.addItem(pairedDevicesItem)
         loginItemItem.target = self
         menu.addItem(loginItemItem)
         checkForUpdatesItem.target = self
@@ -222,6 +238,8 @@ final class MenuBarController {
     @objc private func didOpenNormaApp() { openNormaApp() }
     @objc private func didOpenDashboard() { openDashboard() }
     @objc private func didOpenPluginManager() { openPluginManager() }
+    @objc private func didOpenPairDevice() { openPairDevice() }
+    @objc private func didOpenPairedDevices() { openPairedDevices() }
     @objc private func didPanic() { panicAction() }
     @objc private func didRestartDaemon() { onRestartDaemon() }
     @objc private func didCheckForUpdates() { onCheckForUpdates() }

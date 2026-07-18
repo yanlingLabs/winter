@@ -180,7 +180,16 @@ public actor PairingManager {
         return QRPayload(
             v: 1, pairID: pairID, pairSecret: pairSecret, expiresAt: expiresAt,
             macEndpointID: macEndpointID, relayConfig: relayConfig,
-            alpn: "norma/remote/1", hostLabel: hostLabel
+            // SP2b Task 5 fix: this used to be the disconnected literal `"norma/remote/1"` — a
+            // value nobody ever actually dialed with, since `RemoteHost.start()`'s real
+            // `IrohListener` binds on `IrohListener.defaultALPN` (its own default parameter) and
+            // every prior test's phone stand-in (`PhoneConn.dial`) defaults to the SAME constant
+            // too, sidestepping this field entirely. The gap only surfaced once
+            // `PhonePairingClient` (Task 5) became the first REAL consumer of `qr.alpn` for an
+            // actual dial: a spec-correct phone client using this field verbatim could never
+            // reach a real Mac. Reusing the canonical constant here is the fix — same module, no
+            // import needed.
+            alpn: IrohListener.defaultALPN, hostLabel: hostLabel
         )
     }
 
