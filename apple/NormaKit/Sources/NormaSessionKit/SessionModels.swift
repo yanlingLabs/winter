@@ -75,6 +75,29 @@ public struct GapSignal: Sendable, Equatable {
     }
 }
 
+/// Surfaced on `NormaSessionClient.persistErrors` when a `CursorStore.advance` throws AFTER its
+/// event was yielded (T4 review minor 1). The failure direction is safe — the cursor stays behind,
+/// so the event is re-delivered (and deduped) on the next resume, never skipped — but a PERSISTENT
+/// write failure (disk full, bad perms) would silently defeat crash-durability forever, so it must
+/// be observable. Deliberately NOT a `GapSignal` variant: a gap demands a snapshot resume; a
+/// persist failure demands attention/diagnostics — re-handshaking would not fix the disk. T8
+/// observes this channel and surfaces a health warning.
+public struct CursorPersistFailure: Sendable, Equatable {
+    public let sessionID: String
+    public let streamID: String
+    /// The seq that WAS yielded but whose cursor advance failed.
+    public let seq: Int
+    /// The thrown error's description (identifiers/errno only — never payload/transcript content).
+    public let message: String
+
+    public init(sessionID: String, streamID: String, seq: Int, message: String) {
+        self.sessionID = sessionID
+        self.streamID = streamID
+        self.seq = seq
+        self.message = message
+    }
+}
+
 /// Errors `NormaSessionClient` throws.
 public enum SessionClientError: Error, Equatable {
     /// `handshake` waited past its first-frame read deadline without a `helloAck` (a silent conn).

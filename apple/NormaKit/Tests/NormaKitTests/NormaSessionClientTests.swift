@@ -85,13 +85,27 @@ final class NormaSessionClientTests: XCTestCase {
 
     private func makeClient(
         conn: ScriptedRemoteConn, cursors: CursorStore, firstFrameDeadline: Double = 1,
-        idgen: @escaping @Sendable () -> String = { UUID().uuidString }
+        idgen: @escaping @Sendable () -> String = { UUID().uuidString },
+        liveBufferCap: Int = 10_000
     ) -> NormaSessionClient {
         NormaSessionClient(
             conn: conn, hostID: "mac-host", epoch: epoch, cursors: cursors,
             clientInstanceID: "phone-under-test", clock: { 0 }, idgen: idgen,
-            firstFrameDeadline: firstFrameDeadline
+            firstFrameDeadline: firstFrameDeadline, liveBufferCap: liveBufferCap
         )
+    }
+
+    /// T4-review minor 1's double: reads delegate to a real in-memory store, every `advance`
+    /// throws — a stand-in for a persistently failing `FileCursorStore` (disk full / bad perms).
+    private struct ThrowingAdvanceCursorStore: CursorStore {
+        struct Boom: Error {}
+        let inner = InMemoryCursorStore()
+        func cursor(host: String, session: String, stream: String) -> Int? {
+            inner.cursor(host: host, session: session, stream: stream)
+        }
+        func advance(host: String, session: String, stream: String, to seq: Int) throws {
+            throw Boom()
+        }
     }
 
     private func seqs(_ envs: [SessionEnvelope]) -> [Int] { envs.compactMap { $0.seq } }
@@ -256,6 +270,77 @@ final class NormaSessionClientTests: XCTestCase {
         // A naive impl would gap on seq 4 (4 > cursor+1 while cursor==2); the correct impl never does.
         XCTAssertTrue(gaps.items.isEmpty, "no gap: seq 4 is a held live event, not a replay hole")
         XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 4)
+    }
+
+    // MARK: - T4 review hardening (2 minors on the resume path)
+
+    func testCursorPersistFailureIsSurfacedAfterYieldNotSwallowed() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: ThrowingAdvanceCursorStore())
+        let (events, evTask) = drain(client.events)
+        let (failures, pfTask) = drain(client.persistErrors)
+        defer { evTask.cancel(); pfTask.cancel() }
+
+        conn.enqueueInbound(helloAckFrame(verdicts: [.upToDate(sessionID: "s1", highWatermark: 0)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0)])
+
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 1))
+
+        try await waitUntil({ !failures.items.isEmpty }, "persist failure to surface")
+        // The event was still yielded (persist failure never suppresses delivery)...
+        XCTAssertEqual(seqs(events.items), [1])
+        // ...and the failure carries the stream identity + the failed seq (message is diagnostic).
+        let f = failures.items[0]
+        XCTAssertEqual(f.sessionID, "s1")
+        XCTAssertEqual(f.streamID, "s1")
+        XCTAssertEqual(f.seq, 1)
+        XCTAssertFalse(f.message.isEmpty)
+    }
+
+    func testReplayBeginWithCursorAlreadyAtWatermarkDoesNotStallLiveEvents() async throws {
+        let conn = ScriptedRemoteConn()
+        let cursors = InMemoryCursorStore()
+        // The client already durably applied up to the announced watermark (e.g. the host's verdict
+        // raced a concurrent cursor advance) — no replay event will EVER arrive to complete the batch.
+        try cursors.advance(host: "mac-host", session: "s1", stream: "s1", to: 3)
+        let client = makeClient(conn: conn, cursors: cursors)
+        let (events, evTask) = drain(client.events)
+        let (gaps, gapTask) = drain(client.gaps)
+        defer { evTask.cancel(); gapTask.cancel() }
+
+        conn.enqueueInbound(helloAckFrame(verdicts: [.replayBegin(sessionID: "s1", fromSeq: 0, highWatermark: 3)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 3)])
+
+        // A naive impl enters `replaying` and buffers this forever (silent stall).
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 4))
+
+        try await waitUntil({ self.seqs(events.items).contains(4) }, "live seq 4 to deliver without a replay batch")
+        XCTAssertEqual(seqs(events.items), [4])
+        XCTAssertTrue(gaps.items.isEmpty)
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 4)
+    }
+
+    func testLiveBufferOverflowSurfacesGapInsteadOfGrowingUnbounded() async throws {
+        let conn = ScriptedRemoteConn()
+        let cursors = InMemoryCursorStore()
+        let client = makeClient(conn: conn, cursors: cursors, liveBufferCap: 3)
+        let (events, evTask) = drain(client.events)
+        let (gaps, gapTask) = drain(client.gaps)
+        defer { evTask.cancel(); gapTask.cancel() }
+
+        // Replay window 1..2; seq 2 (the exact-watermark event) never arrives → replay never completes.
+        conn.enqueueInbound(helloAckFrame(verdicts: [.replayBegin(sessionID: "s1", fromSeq: 0, highWatermark: 2)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0)])
+
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 1)) // replay; cursor 1, still replaying
+        for seq in [3, 4, 5] { conn.enqueueInbound(eventFrame(session: "s1", seq: seq)) } // fill the cap
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 6)) // overflow → gap
+
+        try await waitUntil({ !gaps.items.isEmpty }, "overflow gap to surface")
+        XCTAssertEqual(gaps.items, [GapSignal(sessionID: "s1", streamID: "s1", expectedSeq: 2, receivedSeq: 6)])
+        // Only the applied replay event was ever yielded; nothing buffered leaked out of order.
+        XCTAssertEqual(seqs(events.items), [1])
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 1)
     }
 
     // MARK: - Step 6: idempotency (commandId) + approval state machine

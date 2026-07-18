@@ -1,4 +1,5 @@
 import Foundation
+import os
 import NormaProtocol
 
 /// The phone-side session client (SP3 Task 4): the resume / idempotency / approval state machine
@@ -34,9 +35,19 @@ public actor NormaSessionClient {
     /// for tests.
     private let firstFrameDeadline: Double
 
+    /// The `liveBuffer` bound (T4 review minor 2b): live events held during a replay batch that
+    /// never completes (e.g. the exact-watermark event lost on the wire) must not grow without
+    /// limit — on overflow the stream surfaces a gap (forcing a snapshot resume) instead.
+    /// Injectable small for tests; production default 10_000.
+    private let liveBufferCap: Int
+
     /// Informational `ClientHello.appBuild` — a fixed module identifier (the gateway never keys on
     /// it; a real app would thread its build string through).
     private static let appBuild = "NormaSessionKit"
+
+    /// Diagnostics only — identifiers and error descriptions, NEVER payload/transcript content
+    /// (the hard privacy rule for this module).
+    private static let logger = Logger(subsystem: "com.norma.sessionkit", category: "NormaSessionClient")
 
     /// Method name for the pending-approval query. NOTE (T5/T8 wire contract): this is an SP3
     /// addition — it is NOT yet in the gateway's `remoteAllowedMethods` nor implemented by the
@@ -60,9 +71,16 @@ public actor NormaSessionClient {
     /// `cursor + 1`. The consumer reacts by re-handshaking with a snapshot resume. Kept separate
     /// from `events` so the event feed stays pure content and multiple streams don't interfere.
     public nonisolated let gaps: AsyncStream<GapSignal>
+    /// Cursor-durability diagnostic channel (T4 review minor 1): a `CursorPersistFailure` is
+    /// yielded when `CursorStore.advance` throws AFTER its event was yielded. Safe direction (the
+    /// stale cursor re-delivers, never skips) but a persistent write failure must be observable —
+    /// T8 watches this for a health warning. Deliberately separate from `gaps`: a gap demands a
+    /// snapshot resume, a persist failure does not (re-handshaking would not fix a full disk).
+    public nonisolated let persistErrors: AsyncStream<CursorPersistFailure>
 
     private let eventsCont: AsyncStream<SessionEnvelope>.Continuation
     private let gapsCont: AsyncStream<GapSignal>.Continuation
+    private let persistErrorsCont: AsyncStream<CursorPersistFailure>.Continuation
 
     // MARK: - Read-loop-owned mutable state
 
@@ -108,7 +126,8 @@ public actor NormaSessionClient {
         clientInstanceID: String,
         clock: @escaping @Sendable () -> Int,
         idgen: @escaping @Sendable () -> String,
-        firstFrameDeadline: Double = 10
+        firstFrameDeadline: Double = 10,
+        liveBufferCap: Int = 10_000
     ) {
         self.conn = conn
         self.hostID = hostID
@@ -118,6 +137,7 @@ public actor NormaSessionClient {
         self.clock = clock
         self.idgen = idgen
         self.firstFrameDeadline = firstFrameDeadline
+        self.liveBufferCap = liveBufferCap
 
         var ec: AsyncStream<SessionEnvelope>.Continuation!
         self.events = AsyncStream { ec = $0 }
@@ -125,6 +145,9 @@ public actor NormaSessionClient {
         var gc: AsyncStream<GapSignal>.Continuation!
         self.gaps = AsyncStream { gc = $0 }
         self.gapsCont = gc
+        var pc: AsyncStream<CursorPersistFailure>.Continuation!
+        self.persistErrors = AsyncStream { pc = $0 }
+        self.persistErrorsCont = pc
     }
 
     // MARK: - Handshake
@@ -194,7 +217,14 @@ public actor NormaSessionClient {
             switch verdict {
             case .replayBegin(let session, _, let hw):
                 let stream = streamID(for: session)
-                streams[StreamKey(session: session, stream: stream)] = StreamState(replaying: true, highWatermark: hw)
+                // T4 review minor 2a: if the local cursor already sits at/past the announced
+                // watermark, there is NO replay event left that could ever complete the batch —
+                // entering `replaying` would buffer every live event forever (silent stall). Mark
+                // the stream live immediately instead. (Recorded synchronously in the helloAck
+                // handler, strictly before any event frame is processed, so no drain is needed —
+                // the liveBuffer is necessarily empty here.)
+                let cursor = cursors.cursor(host: hostID, session: session, stream: stream) ?? 0
+                streams[StreamKey(session: session, stream: stream)] = StreamState(replaying: cursor < hw, highWatermark: hw)
             case .upToDate(let session, let hw):
                 let stream = streamID(for: session)
                 streams[StreamKey(session: session, stream: stream)] = StreamState(replaying: false, highWatermark: hw)
@@ -320,6 +350,7 @@ public actor NormaSessionClient {
         }
         eventsCont.finish()
         gapsCont.finish()
+        persistErrorsCont.finish()
     }
 
     // MARK: - Response correlation
@@ -365,6 +396,20 @@ public actor NormaSessionClient {
         // Replay→live handoff: a live event (past the replay ceiling) arriving mid-replay is held,
         // not applied — it would otherwise read as a gap against the still-replaying cursor.
         if st.replaying && seq > st.highWatermark {
+            // T4 review minor 2b: bound the hold. A replay batch that never completes (the
+            // exact-watermark event lost on the wire) would otherwise buffer live events without
+            // limit. On overflow, surface a gap — the snapshot resume it forces is exactly the
+            // recovery for a replay that can no longer complete — and drop the buffer.
+            guard st.liveBuffer.count < liveBufferCap else {
+                Self.logger.warning("live buffer overflow session=\(session, privacy: .public) stream=\(stream, privacy: .public) cap=\(self.liveBufferCap)")
+                gapsCont.yield(GapSignal(
+                    sessionID: session, streamID: stream,
+                    expectedSeq: currentCursor(session, stream) + 1, receivedSeq: seq
+                ))
+                st.gapped = true
+                st.liveBuffer = []
+                return
+            }
             st.liveBuffer.append((seq: seq, env: decode(env, session: session)))
             return
         }
@@ -391,7 +436,19 @@ public actor NormaSessionClient {
         if seq <= cursor { return }
         if seq == cursor + 1 {
             eventsCont.yield(decoded)
-            try? cursors.advance(host: hostID, session: session, stream: stream, to: seq)
+            do {
+                try cursors.advance(host: hostID, session: session, stream: stream, to: seq)
+            } catch {
+                // T4 review minor 1: a persist failure must never be silent. The direction is safe
+                // (the stale cursor re-delivers this event on the next resume; dedup absorbs it —
+                // never a skip), but a PERSISTENT failure (disk full, bad perms) silently defeats
+                // crash-durability, so surface it on the diagnostic channel + os log. Identifiers
+                // and the error description only — never payload content.
+                Self.logger.warning("cursor persist failed session=\(session, privacy: .public) stream=\(stream, privacy: .public) seq=\(seq) error=\(String(describing: error), privacy: .public)")
+                persistErrorsCont.yield(CursorPersistFailure(
+                    sessionID: session, streamID: stream, seq: seq, message: String(describing: error)
+                ))
+            }
             return
         }
         gapsCont.yield(GapSignal(sessionID: session, streamID: stream, expectedSeq: cursor + 1, receivedSeq: seq))
