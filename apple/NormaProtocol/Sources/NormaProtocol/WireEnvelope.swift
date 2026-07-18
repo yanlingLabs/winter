@@ -3,7 +3,7 @@ import Foundation
 /// The wire envelope wrapping JSON-RPC bytes between the Mac gateway and the iOS companion.
 /// The daemon never sees this — the gateway (Remote Gateway sub-project, Task 4) unwraps it
 /// before/after talking JSON-RPC to the daemon over the existing local transport.
-public struct WireEnvelope: Codable, Equatable {
+public struct WireEnvelope: Codable, Equatable, Sendable {
     public let v: Int
     public let pairingEpoch: Int
     public let hostID: String
@@ -39,7 +39,7 @@ public struct WireEnvelope: Codable, Equatable {
     }
 }
 
-public enum WireKind: String, Codable {
+public enum WireKind: String, Codable, Sendable {
     case rpcRequest, rpcResponse, event, hello, helloAck, error
 }
 

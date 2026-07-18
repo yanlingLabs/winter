@@ -1,0 +1,362 @@
+import XCTest
+import os
+import NormaProtocol
+import NormaSessionKit
+
+/// SP3 Task 4: the phone-side resume / idempotency / approval state machine. Driven entirely by
+/// `ScriptedRemoteConn` (loss/dup/gap/reorder injectors) + `InMemoryCursorStore` + injected
+/// clock/idgen — no real iroh, no real daemon (that is T5's real-daemon conformance).
+final class NormaSessionClientTests: XCTestCase {
+
+    // MARK: - Frame helpers (server → phone direction)
+
+    private let epoch = 7
+
+    private func serverFrame(
+        kind: WireKind, sessionID: String? = nil, streamID: String? = nil, seq: Int? = nil, payload: Data
+    ) -> Data {
+        let e = WireEnvelope(
+            v: 1, pairingEpoch: epoch, hostID: "mac-host", sessionID: sessionID,
+            streamID: streamID, seq: seq, kind: kind, timestamp: 0, payload: payload
+        )
+        return try! WireFrame.encode(e)
+    }
+
+    private func helloAckFrame(verdicts: [ResumeVerdict]) -> Data {
+        let sh = ServerHello(chosenVersion: 1, hostID: "mac-host", verdicts: verdicts)
+        return serverFrame(kind: .helloAck, payload: try! JSONEncoder().encode(sh))
+    }
+
+    private func eventFrame(session: String, stream: String? = nil, seq: Int) -> Data {
+        let payload = try! JSONEncoder().encode(SessionEvent.JSONValue.object([
+            "sessionId": .string(session), "seq": .number(Double(seq)), "type": .string("assistant_delta"),
+        ]))
+        return serverFrame(kind: .event, sessionID: session, streamID: stream ?? session, seq: seq, payload: payload)
+    }
+
+    private func rpcResponseFrame(id: Int, result: SessionEvent.JSONValue) -> Data {
+        let body = SessionEvent.JSONValue.object([
+            "jsonrpc": .string("2.0"), "id": .number(Double(id)), "result": result,
+        ])
+        return serverFrame(kind: .rpcResponse, payload: try! JSONEncoder().encode(body))
+    }
+
+    // MARK: - Outbound inspection (phone → server direction)
+
+    private func decodeOutbound(_ data: Data) -> WireEnvelope { try! WireFrame.decode(data, expectedEpoch: epoch) }
+    private func outboundPayload(_ env: WireEnvelope) -> SessionEvent.JSONValue {
+        try! JSONDecoder().decode(SessionEvent.JSONValue.self, from: env.payload)
+    }
+
+    private func waitOutbound(_ conn: ScriptedRemoteConn, count: Int, timeout: TimeInterval = 2) async throws -> [Data] {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if conn.outbound.count >= count { return conn.outbound }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTFail("timed out waiting for \(count) outbound frames; got \(conn.outbound.count)")
+        return conn.outbound
+    }
+
+    // MARK: - Stream collectors (event / gap AsyncStreams)
+
+    /// Lock-guarded drain of an `AsyncStream` — the same polling posture `GatewayTests` uses for
+    /// async delivery. Tests assert on `.items` after a `waitUntil` barrier, never on a sleep.
+    private final class Sink<T: Sendable>: @unchecked Sendable {
+        private let lock = OSAllocatedUnfairLock(initialState: [T]())
+        var items: [T] { lock.withLock { $0 } }
+        func append(_ v: T) { lock.withLock { $0.append(v) } }
+    }
+
+    private func drain<T: Sendable>(_ stream: AsyncStream<T>) -> (Sink<T>, Task<Void, Never>) {
+        let sink = Sink<T>()
+        let task = Task { for await v in stream { sink.append(v) } }
+        return (sink, task)
+    }
+
+    private func waitUntil(_ predicate: @escaping () -> Bool, timeout: TimeInterval = 2, _ msg: String) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if predicate() { return }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTFail("timed out: \(msg)")
+    }
+
+    private func makeClient(
+        conn: ScriptedRemoteConn, cursors: CursorStore, firstFrameDeadline: Double = 1,
+        idgen: @escaping @Sendable () -> String = { UUID().uuidString }
+    ) -> NormaSessionClient {
+        NormaSessionClient(
+            conn: conn, hostID: "mac-host", epoch: epoch, cursors: cursors,
+            clientInstanceID: "phone-under-test", clock: { 0 }, idgen: idgen,
+            firstFrameDeadline: firstFrameDeadline
+        )
+    }
+
+    private func seqs(_ envs: [SessionEnvelope]) -> [Int] { envs.compactMap { $0.seq } }
+
+    // MARK: - Step 1: CursorStore
+
+    func testInMemoryCursorRoundTrip() throws {
+        let store = InMemoryCursorStore()
+        XCTAssertNil(store.cursor(host: "h", session: "s", stream: "t"))
+        try store.advance(host: "h", session: "s", stream: "t", to: 5)
+        XCTAssertEqual(store.cursor(host: "h", session: "s", stream: "t"), 5)
+        // Distinct keys don't bleed.
+        XCTAssertNil(store.cursor(host: "h", session: "s", stream: "OTHER"))
+    }
+
+    func testFileCursorPersistsAndReloadsFresh() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("norma-cursors-\(UUID().uuidString)")
+            .appendingPathComponent("cursors.json")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let store = try FileCursorStore(url: url)
+        try store.advance(host: "h", session: "s1", stream: "s1", to: 3)
+        try store.advance(host: "h", session: "s2", stream: "s2", to: 9)
+        XCTAssertEqual(store.cursor(host: "h", session: "s1", stream: "s1"), 3)
+
+        // A FRESH instance reloads the persisted table from disk.
+        let reloaded = try FileCursorStore(url: url)
+        XCTAssertEqual(reloaded.cursor(host: "h", session: "s1", stream: "s1"), 3)
+        XCTAssertEqual(reloaded.cursor(host: "h", session: "s2", stream: "s2"), 9)
+    }
+
+    func testFileCursorIsAtomic0600() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("norma-cursors-\(UUID().uuidString)")
+            .appendingPathComponent("cursors.json")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let store = try FileCursorStore(url: url)
+        try store.advance(host: "h", session: "s", stream: "s", to: 1)
+
+        let perms = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(perms?.int16Value, 0o600)
+        // No leftover temp file beside it (rename consumed it).
+        let siblings = try FileManager.default.contentsOfDirectory(atPath: url.deletingLastPathComponent().path)
+        XCTAssertEqual(siblings.filter { $0.hasSuffix(".tmp") }, [])
+    }
+
+    // MARK: - Step 2/3: handshake + first-frame deadline
+
+    func testHandshakeSendsClientHelloAndReturnsServerHello() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: [.upToDate(sessionID: "s1", highWatermark: 4)]))
+
+        let resumes = [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 4)]
+        let hello = try await client.handshake(resumes: resumes)
+
+        XCTAssertEqual(hello.chosenVersion, 1)
+        XCTAssertEqual(hello.verdicts, [.upToDate(sessionID: "s1", highWatermark: 4)])
+
+        // The outgoing frame is a `.hello` carrying the ClientHello with our epoch + resumes.
+        let out = try await waitOutbound(conn, count: 1)
+        let env = decodeOutbound(out[0])
+        XCTAssertEqual(env.kind, .hello)
+        XCTAssertEqual(env.pairingEpoch, epoch)
+        let ch = try JSONDecoder().decode(ClientHello.self, from: env.payload)
+        XCTAssertEqual(ch.pairingEpoch, epoch)
+        XCTAssertEqual(ch.resumes, resumes)
+    }
+
+    func testHandshakeTimesOutOnSilentConn() async throws {
+        let conn = ScriptedRemoteConn() // never sends helloAck
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore(), firstFrameDeadline: 0.2)
+
+        let start = Date()
+        do {
+            _ = try await client.handshake(resumes: [])
+            XCTFail("handshake should have timed out")
+        } catch {
+            XCTAssertEqual(error as? SessionClientError, .handshakeTimeout)
+        }
+        // Threw promptly (bounded by the deadline), did NOT hang.
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1.5)
+    }
+
+    // MARK: - Step 4/5: events dedup / gap / handoff / cursor-after-apply
+
+    func testExactDuplicateIsIgnored() async throws {
+        let conn = ScriptedRemoteConn()
+        let cursors = InMemoryCursorStore()
+        let client = makeClient(conn: conn, cursors: cursors)
+        let (events, drainTask) = drain(client.events)
+        defer { drainTask.cancel() }
+
+        conn.enqueueInbound(helloAckFrame(verdicts: [.upToDate(sessionID: "s1", highWatermark: 0)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0)])
+
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 1))
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 1)) // exact duplicate
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 2))
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 3)) // barrier: last frame in FIFO order
+
+        try await waitUntil({ self.seqs(events.items).contains(3) }, "seq 3 to arrive")
+        XCTAssertEqual(seqs(events.items), [1, 2, 3], "duplicate seq 1 must not be re-yielded")
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 3)
+    }
+
+    func testGapIsSurfacedNotApplied() async throws {
+        let conn = ScriptedRemoteConn()
+        let cursors = InMemoryCursorStore()
+        let client = makeClient(conn: conn, cursors: cursors)
+        let (events, evTask) = drain(client.events)
+        let (gaps, gapTask) = drain(client.gaps)
+        defer { evTask.cancel(); gapTask.cancel() }
+
+        conn.enqueueInbound(helloAckFrame(verdicts: [
+            .upToDate(sessionID: "s1", highWatermark: 0),
+            .upToDate(sessionID: "s2", highWatermark: 0),
+        ]))
+        _ = try await client.handshake(resumes: [
+            StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0),
+            StreamResume(sessionID: "s2", streamID: "s2", lastAppliedSeq: 0),
+        ])
+
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 1))
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 3)) // GAP: skips seq 2
+        conn.enqueueInbound(eventFrame(session: "s2", seq: 1)) // canary on a DIFFERENT stream = FIFO barrier
+
+        try await waitUntil({ events.items.contains { $0.sessionID == "s2" } }, "canary s2 to arrive")
+
+        // s1#3 (the gapped event) was NOT applied; s1#1 and the s2 canary were.
+        XCTAssertEqual(events.items.filter { $0.sessionID == "s1" }.compactMap { $0.seq }, [1])
+        XCTAssertEqual(events.items.filter { $0.sessionID == "s2" }.compactMap { $0.seq }, [1])
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 1, "cursor must not pass the gap")
+
+        // The gap is surfaced with the exact expected/received seqs on the resume-signal channel.
+        try await waitUntil({ !gaps.items.isEmpty }, "gap signal")
+        XCTAssertEqual(gaps.items, [GapSignal(sessionID: "s1", streamID: "s1", expectedSeq: 2, receivedSeq: 3)])
+    }
+
+    func testLiveDuringReplayIsDeliveredAfterReplayBatchInOrder() async throws {
+        let conn = ScriptedRemoteConn()
+        let cursors = InMemoryCursorStore()
+        let client = makeClient(conn: conn, cursors: cursors)
+        let (events, evTask) = drain(client.events)
+        let (gaps, gapTask) = drain(client.gaps)
+        defer { evTask.cancel(); gapTask.cancel() }
+
+        // Replay window is seq 1..3; a live event (seq 4, > highWatermark) is injected MID-replay.
+        conn.enqueueInbound(helloAckFrame(verdicts: [.replayBegin(sessionID: "s1", fromSeq: 0, highWatermark: 3)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0)])
+
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 1))
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 2))
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 4)) // LIVE, arrives before replay finishes
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 3)) // last replay event → completes the batch
+
+        try await waitUntil({ self.seqs(events.items).contains(4) }, "live seq 4 to drain after replay")
+        // Held live event is delivered AFTER the whole replay batch, in order — no drop, no reorder.
+        XCTAssertEqual(seqs(events.items), [1, 2, 3, 4])
+        // A naive impl would gap on seq 4 (4 > cursor+1 while cursor==2); the correct impl never does.
+        XCTAssertTrue(gaps.items.isEmpty, "no gap: seq 4 is a held live event, not a replay hole")
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 4)
+    }
+
+    // MARK: - Step 6: idempotency (commandId) + approval state machine
+
+    func testSendCarriesStableCommandIdAcrossRetries() async throws {
+        let conn = ScriptedRemoteConn()
+        // Fixed idgen: a retried call reuses the SAME commandId (the daemon dedups on it).
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore(), idgen: { "cmd-fixed" })
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+
+        let t1 = Task { try await client.send(method: "session.send", params: .object(["text": .string("hi")])) }
+        let afterReq1 = try await waitOutbound(conn, count: 2) // [hello, req1]
+        let req1 = decodeOutbound(afterReq1[1])
+        XCTAssertEqual(req1.kind, .rpcRequest)
+        XCTAssertEqual(outboundPayload(req1)["method"]?.stringValue, "session.send")
+        let id1 = outboundPayload(req1)["id"]!.intValue!
+        conn.enqueueInbound(rpcResponseFrame(id: id1, result: .object(["ok": .bool(true)])))
+        _ = try await t1.value
+
+        let t2 = Task { try await client.send(method: "session.send", params: .object(["text": .string("hi")])) }
+        let afterReq2 = try await waitOutbound(conn, count: 3) // [hello, req1, req2]
+        let req2 = decodeOutbound(afterReq2[2])
+        let id2 = outboundPayload(req2)["id"]!.intValue!
+        conn.enqueueInbound(rpcResponseFrame(id: id2, result: .object(["ok": .bool(true)])))
+        _ = try await t2.value
+
+        XCTAssertEqual(outboundPayload(req1)["commandId"]?.stringValue, "cmd-fixed")
+        XCTAssertEqual(outboundPayload(req2)["commandId"]?.stringValue, "cmd-fixed")
+        XCTAssertNotEqual(id1, id2, "distinct JSON-RPC ids so both can be in flight, but the same commandId")
+    }
+
+    func testAnswerApprovalHostAccepted() async throws {
+        try await assertApproval(
+            result: .object(["ok": .bool(true), "alreadyResolved": .bool(false)]),
+            expected: .hostAccepted
+        )
+    }
+
+    func testAnswerApprovalResolvedElsewhere() async throws {
+        try await assertApproval(
+            result: .object(["ok": .bool(true), "alreadyResolved": .bool(true)]),
+            expected: .resolvedElsewhere
+        )
+    }
+
+    func testAnswerApprovalExpired() async throws {
+        try await assertApproval(
+            result: .object(["expired": .bool(true)]),
+            expected: .expired
+        )
+    }
+
+    /// Drives one approval round-trip and asserts BOTH the mapped state AND that `answerApproval`
+    /// never returns before the host acks (the result box stays empty until the reply is enqueued).
+    private func assertApproval(result: SessionEvent.JSONValue, expected: ApprovalState) async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+
+        let answer = ApprovalAnswer(approvalID: "appr-1", expectedVersion: 2, decision: "approve", commandID: "cmd-appr")
+        let box = Sink<ApprovalState>()
+        let task = Task { box.append(try await client.answerApproval(answer)) }
+
+        let out = try await waitOutbound(conn, count: 2) // [hello, approval.respond]
+        let req = decodeOutbound(out[1])
+        let payload = outboundPayload(req)
+        XCTAssertEqual(payload["method"]?.stringValue, "approval.respond")
+        XCTAssertEqual(payload["commandId"]?.stringValue, "cmd-appr")
+        XCTAssertEqual(payload["params"]?["approvalId"]?.stringValue, "appr-1")
+        XCTAssertEqual(payload["params"]?["expectedVersion"]?.intValue, 2)
+
+        // Never returns before the host acks: no state yet.
+        XCTAssertTrue(box.items.isEmpty, "answerApproval must not return before the host reply")
+
+        let id = payload["id"]!.intValue!
+        conn.enqueueInbound(rpcResponseFrame(id: id, result: result))
+        _ = try await task.value
+        XCTAssertEqual(box.items, [expected])
+    }
+
+    func testPendingApprovalsQueriesLiveState() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+
+        let task = Task { try await client.pendingApprovals() }
+        let out = try await waitOutbound(conn, count: 2)
+        let req = decodeOutbound(out[1])
+        XCTAssertEqual(outboundPayload(req)["method"]?.stringValue, NormaSessionClient.approvalListMethod)
+        let id = outboundPayload(req)["id"]!.intValue!
+
+        let approvals = SessionEvent.JSONValue.array([
+            .object(["approvalId": .string("a1")]),
+            .object(["approvalId": .string("a2")]),
+        ])
+        conn.enqueueInbound(rpcResponseFrame(id: id, result: .object(["approvals": approvals])))
+        let got = try await task.value
+        XCTAssertEqual(got.count, 2)
+        XCTAssertEqual(got.first?["approvalId"]?.stringValue, "a1")
+    }
+}
