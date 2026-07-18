@@ -92,17 +92,23 @@ final class OnceFlag: @unchecked Sendable {
 }
 
 public enum NormaPaths {
+    /// Mirror of core's resolveNormaHome(): `$NORMA_HOME` ?? `~/.norma`. The single source of
+    /// truth every other path in this type (and, per SP2b T5, `RemoteAccessCoordinator`'s own
+    /// `storeDir`) derives from — added so a caller needing some OTHER path under the Norma home
+    /// (not socket/settings) can reuse this instead of re-deriving the same env-var-or-default
+    /// logic a third time.
+    public static func homeDirectory() -> String {
+        ProcessInfo.processInfo.environment["NORMA_HOME"]
+            ?? (NSHomeDirectory() + "/.norma")
+    }
+
     /// Mirror of core's resolveNormaHome(): $NORMA_HOME ?? ~/.norma, + /run/core.sock.
     public static func socketPath() -> String {
-        let home = ProcessInfo.processInfo.environment["NORMA_HOME"]
-            ?? (NSHomeDirectory() + "/.norma")
-        return home + "/run/core.sock"
+        homeDirectory() + "/run/core.sock"
     }
 
     /// Mirror of core's resolveNormaHome(): $NORMA_HOME ?? ~/.norma, + /settings.json.
     public static func settingsPath() -> String {
-        let home = ProcessInfo.processInfo.environment["NORMA_HOME"]
-            ?? (NSHomeDirectory() + "/.norma")
-        return home + "/settings.json"
+        homeDirectory() + "/settings.json"
     }
 }

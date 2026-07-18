@@ -24,9 +24,13 @@ final class IrohE2ETests: XCTestCase {
 
     /// Starts a real `IrohListener` (loopback, relay disabled — the same hermetic pattern
     /// `IrohListenerTests` uses) and a `Gateway` whose `daemonFactory` connects to `daemon` as the
-    /// `remote` principal. This is exactly the SP2b-deferred production wiring (see Gateway.swift's
-    /// own construction-seam comment), minus only the real `PairingStore`.
-    private func startGatewayOverIroh(daemon: RealDaemon) async throws -> (listener: IrohListener, gateway: Gateway, runTask: Task<Void, Never>) {
+    /// `remote` principal. This is exactly the production wiring `RemoteHost` assembles (this file
+    /// still tests `Gateway`+`IrohListener` directly, with NO `PairingRouter` in front — the
+    /// full-stack proof of router+manager+gateway together lives in `PairingE2ETests`), except
+    /// `directory` is a scripted `InMemoryDirectory` a caller seeds with whichever phone secrets
+    /// it's about to dial (see `PhoneConn.dial`'s own doc comment on why that has to happen BEFORE
+    /// dialing).
+    private func startGatewayOverIroh(daemon: RealDaemon, directory: any PairingDirectory) async throws -> (listener: IrohListener, gateway: Gateway, runTask: Task<Void, Never>) {
         let listener = try await IrohListener.start(
             secret: SecretKey.generate().toBytes(),
             relayURLs: [],
@@ -37,10 +41,20 @@ final class IrohE2ETests: XCTestCase {
             daemonFactory: {
                 NormaClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway")
             },
-            pairing: Gateway.PairingStub()
+            hostID: "host-e2e",
+            directory: directory
         )
         let runTask = Task { await gateway.run() }
         return (listener, gateway, runTask)
+    }
+
+    /// One phone secret + its pre-derived `peerID`, seeded into a single-member `InMemoryDirectory`
+    /// so the caller can dial with `secret` and know `Gateway.handle`'s membership check will
+    /// already see it as a paired member the instant the connection is accepted.
+    private func singlePhoneDirectory() throws -> (secret: Data, peerID: String, directory: InMemoryDirectory) {
+        let secret = SecretKey.generate().toBytes()
+        let peerID = try PhoneConn.peerID(forSecret: secret)
+        return (secret, peerID, InMemoryDirectory(peerID: peerID))
     }
 
     /// A harness-role `NormaClient` connected to `daemon` — used to seed/verify session state from
@@ -68,10 +82,11 @@ final class IrohE2ETests: XCTestCase {
     func testScenarioA_HelloEmptyResumesThenSessionListWorks() async throws {
         let daemon = try await RealDaemon.start()
         defer { daemon.stop() }
-        let (listener, _, runTask) = try await startGatewayOverIroh(daemon: daemon)
+        let (secret, _, directory) = try singlePhoneDirectory()
+        let (listener, _, runTask) = try await startGatewayOverIroh(daemon: daemon, directory: directory)
         defer { runTask.cancel(); listener.stop() }
 
-        let phone = try await PhoneConn.dial(listener: listener)
+        let phone = try await PhoneConn.dial(listener: listener, secret: secret)
         defer { phone.closeConnection(); phone.closeDialer() }
 
         try await phone.sendHello(clientInstanceID: "phone-a", resumes: [])
@@ -104,10 +119,11 @@ final class IrohE2ETests: XCTestCase {
         }
         await seeder.close()
 
-        let (listener, _, runTask) = try await startGatewayOverIroh(daemon: daemon)
+        let (secret, _, directory) = try singlePhoneDirectory()
+        let (listener, _, runTask) = try await startGatewayOverIroh(daemon: daemon, directory: directory)
         defer { runTask.cancel(); listener.stop() }
 
-        let phone = try await PhoneConn.dial(listener: listener)
+        let phone = try await PhoneConn.dial(listener: listener, secret: secret)
         defer { phone.closeConnection(); phone.closeDialer() }
 
         try await phone.sendHello(clientInstanceID: "phone-b", resumes: [])
@@ -175,10 +191,14 @@ final class IrohE2ETests: XCTestCase {
         let afterAttach = try await live.attach(sessionId: sid, fromSeq: 0)
         let seqM1 = try await live.send(sessionId: sid, text: "seed-m1")
 
-        let (listener, gateway, runTask) = try await startGatewayOverIroh(daemon: daemon)
+        // Same physical phone reconnects later in this scenario — one secret, one directory entry,
+        // reused for BOTH dials (see `PhoneConn.dial`'s own doc comment on why a reconnect must
+        // reuse its identity rather than mint a fresh one).
+        let (secret, _, directory) = try singlePhoneDirectory()
+        let (listener, gateway, runTask) = try await startGatewayOverIroh(daemon: daemon, directory: directory)
         defer { runTask.cancel(); listener.stop() }
 
-        let phone1 = try await PhoneConn.dial(listener: listener)
+        let phone1 = try await PhoneConn.dial(listener: listener, secret: secret)
         defer { phone1.closeConnection(); phone1.closeDialer() }
         try await phone1.sendHello(clientInstanceID: "phone-c", resumes: [
             StreamResume(sessionID: sid, streamID: sid, lastAppliedSeq: afterAttach),
@@ -224,7 +244,7 @@ final class IrohE2ETests: XCTestCase {
             await gateway.waitForNextAttachResolvedForTesting()
             return try await live.send(sessionId: sid, text: "gap-m2")
         }()
-        let phone2 = try await PhoneConn.dial(listener: listener)
+        let phone2 = try await PhoneConn.dial(listener: listener, secret: secret)
         defer { phone2.closeConnection(); phone2.closeDialer() }
         try await phone2.sendHello(clientInstanceID: "phone-c", resumes: [
             StreamResume(sessionID: sid, streamID: sid, lastAppliedSeq: seqM1),
@@ -266,12 +286,13 @@ final class IrohE2ETests: XCTestCase {
     func testScenarioD_IdempotentResendAcrossReconnectYieldsOneDaemonEffect() async throws {
         let daemon = try await RealDaemon.start()
         defer { daemon.stop() }
-        let (listener, _, runTask) = try await startGatewayOverIroh(daemon: daemon)
+        let (secret, _, directory) = try singlePhoneDirectory()
+        let (listener, _, runTask) = try await startGatewayOverIroh(daemon: daemon, directory: directory)
         defer { runTask.cancel(); listener.stop() }
 
         let verifier = try await harnessClient(daemon, name: "verifier")
 
-        let phone1 = try await PhoneConn.dial(listener: listener)
+        let phone1 = try await PhoneConn.dial(listener: listener, secret: secret)
         defer { phone1.closeConnection(); phone1.closeDialer() }
         try await phone1.sendHello(clientInstanceID: "phone-d", resumes: [])
         let helloAck1 = try await phone1.expectFrame()
@@ -306,9 +327,10 @@ final class IrohE2ETests: XCTestCase {
 
         phone1.closeConnection()
 
-        // Reconnect — SAME clientInstanceID, so the gateway reuses the SAME persistent daemon
-        // connection (and therefore the SAME server-side `socket.data.seenCommands` cache entry).
-        let phone2 = try await PhoneConn.dial(listener: listener)
+        // Reconnect — SAME clientInstanceID (and SAME iroh identity/secret), so the gateway reuses
+        // the SAME persistent daemon connection (and therefore the SAME server-side
+        // `socket.data.seenCommands` cache entry).
+        let phone2 = try await PhoneConn.dial(listener: listener, secret: secret)
         defer { phone2.closeConnection(); phone2.closeDialer() }
         try await phone2.sendHello(clientInstanceID: "phone-d", resumes: [
             StreamResume(sessionID: sid, streamID: sid, lastAppliedSeq: m1.seq),
@@ -349,10 +371,11 @@ final class IrohE2ETests: XCTestCase {
     func testScenarioE_OffListMethodRejectedDaemonUnaffected() async throws {
         let daemon = try await RealDaemon.start()
         defer { daemon.stop() }
-        let (listener, _, runTask) = try await startGatewayOverIroh(daemon: daemon)
+        let (secret, _, directory) = try singlePhoneDirectory()
+        let (listener, _, runTask) = try await startGatewayOverIroh(daemon: daemon, directory: directory)
         defer { runTask.cancel(); listener.stop() }
 
-        let phone = try await PhoneConn.dial(listener: listener)
+        let phone = try await PhoneConn.dial(listener: listener, secret: secret)
         defer { phone.closeConnection(); phone.closeDialer() }
 
         try await phone.sendHello(clientInstanceID: "phone-e", resumes: [])
@@ -378,10 +401,11 @@ final class IrohE2ETests: XCTestCase {
     func testScenarioF_RevokeDropsConnAndCancelsPump() async throws {
         let daemon = try await RealDaemon.start()
         defer { daemon.stop() }
-        let (listener, gateway, runTask) = try await startGatewayOverIroh(daemon: daemon)
+        let (secret, peerID, directory) = try singlePhoneDirectory()
+        let (listener, gateway, runTask) = try await startGatewayOverIroh(daemon: daemon, directory: directory)
         defer { runTask.cancel(); listener.stop() }
 
-        let phone1 = try await PhoneConn.dial(listener: listener)
+        let phone1 = try await PhoneConn.dial(listener: listener, secret: secret)
         defer { phone1.closeConnection(); phone1.closeDialer() }
         try await phone1.sendHello(clientInstanceID: "phone-f", resumes: [])
         let fHelloAck = try await phone1.expectFrame()
@@ -390,6 +414,11 @@ final class IrohE2ETests: XCTestCase {
         let pump = await gateway.pumpTaskForTesting("phone-f")
         XCTAssertNotNil(pump, "the phone's daemon-event pump should be running before revoke")
 
+        // Production revocation order (`RemoteHost.revoke`): the STORE record goes first, then
+        // the gateway fan-out — since the SP2b whole-branch review fix the directory miss (not
+        // the gateway's `revoked` set, which a re-paired member's next valid hello deliberately
+        // clears) is what refuses a revoked phone's reconnect.
+        directory.remove(peerID)
         await gateway.revoke(clientInstanceID: "phone-f")
         XCTAssertEqual(pump?.isCancelled, true, "revoke must cancel the pumpTask")
 
@@ -402,13 +431,15 @@ final class IrohE2ETests: XCTestCase {
             return XCTFail("revoke must drop the phone's connection, got \(result)")
         }
 
-        // A reconnect by the SAME clientInstanceID is refused at the handshake and closed too.
-        let phone2 = try await PhoneConn.dial(listener: listener)
+        // A reconnect by the SAME clientInstanceID is refused at the handshake — as a raw JSON
+        // `not_paired` from the membership gate (the record is gone; there's no epoch left to
+        // wrap a WireEnvelope error in) — and closed too.
+        let phone2 = try await PhoneConn.dial(listener: listener, secret: secret)
         defer { phone2.closeConnection(); phone2.closeDialer() }
         try await phone2.sendHello(clientInstanceID: "phone-f", resumes: [])
-        let rejection = try await phone2.expectFrame()
-        XCTAssertEqual(rejection.kind, .error)
-        XCTAssertEqual(try decodeBody(rejection)["error"]?["message"]?.stringValue, "pairing revoked")
+        let rejectedData = try await phone2.expectRawFrame()
+        let rejected = try JSONDecoder().decode(PairRejected.self, from: rejectedData)
+        XCTAssertEqual(rejected.code, "not_paired", "a revoked phone's reconnect is refused at the membership gate")
         let closed2 = try await phone2.readNext(timeout: 10)
         guard case .closed = closed2 else {
             return XCTFail("a revoked phone's reconnect must be closed, got \(closed2)")
@@ -439,17 +470,33 @@ final class PhoneConn: @unchecked Sendable {
     private let epoch: Int
     private var buffer = Data()
 
-    static func dial(listener: IrohListener, alpn: String = IrohListener.defaultALPN, epoch: Int = 1) async throws -> PhoneConn {
+    /// `secret` (SP2b Task 4): defaults to a fresh random identity, but a caller simulating a
+    /// RECONNECT of the same physical phone should pass the SAME secret it used for the first
+    /// dial — a real phone's iroh identity is stable across reconnects (`MacIdentity`'s own
+    /// header comment makes the same point about the Mac side). This is also how a test seeds
+    /// `InMemoryDirectory` with the right `peerID` BEFORE dialing at all: derive it from `secret`
+    /// via `PhoneConn.peerID(forSecret:)` (a pure function, no networking needed), insert that
+    /// into the directory, THEN dial — eliminating the race a post-hoc "read `conn.peerID` off
+    /// the accepted connection and insert it" approach would have against `Gateway.handle`'s own
+    /// membership check, which runs the instant the connection is accepted.
+    static func dial(listener: IrohListener, alpn: String = IrohListener.defaultALPN, epoch: Int = 1, secret: Data = SecretKey.generate().toBytes()) async throws -> PhoneConn {
         try await withTimeout(15, "PhoneConn.dial") {
             let dialer = try await Endpoint.bind(options: EndpointOptions(
                 preset: presetN0(), bindAddr: "127.0.0.1:0",
-                secretKey: SecretKey.generate().toBytes(), relayMode: RelayMode.disabled()
+                secretKey: secret, relayMode: RelayMode.disabled()
             ))
             let alpnData = Data(alpn.utf8)
             let conn = try await dialer.connect(addr: listener.endpointAddr, alpn: alpnData)
             let bi = try await conn.openBi()
             return PhoneConn(dialerEndpoint: dialer, connection: conn, bi: bi, epoch: epoch)
         }
+    }
+
+    /// The `EndpointId` (== `RemoteConn.peerID`) a `secret` will bind to, WITHOUT any networking —
+    /// pure key derivation (`SecretKey.public()`). See `dial`'s own doc comment on why a test
+    /// needs this BEFORE dialing, not after.
+    static func peerID(forSecret secret: Data) throws -> String {
+        try SecretKey.fromBytes(bytes: secret).public().description
     }
 
     private init(dialerEndpoint: Endpoint, connection: Connection, bi: BiStream, epoch: Int) {
@@ -488,6 +535,33 @@ final class PhoneConn: @unchecked Sendable {
             v: 1, pairingEpoch: epoch, hostID: "phone-e2e", sessionID: nil, streamID: nil, seq: nil,
             kind: .rpcRequest, timestamp: 0, payload: payload
         ))
+    }
+
+    /// SP2b Task 4 (`PairingE2ETests`): a pairing-ceremony message (`PairRequest`/`PairAccepted`/
+    /// `PairRejected`) is raw JSON, `LengthPrefix`-framed WITHOUT a `WireEnvelope` wrapper — the
+    /// phone hasn't paired yet, so there's no epoch/hostID to validate one against (mirrors
+    /// `PairingManager.handleConnection`'s own bare `JSONDecoder().decode(PairRequest.self, from:
+    /// frame)`). Shares this type's dial/framing plumbing but skips the `WireEnvelope` layer
+    /// entirely.
+    func sendRaw(_ data: Data) async throws {
+        try await withTimeout(10, "PhoneConn.sendRaw") { [self] in
+            try await sendStream.writeAll(buf: LengthPrefix.wrap(data))
+        }
+    }
+
+    /// The raw counterpart to `expectFrame()` — one whole de-framed (but NOT `WireEnvelope`-decoded)
+    /// JSON document. See `sendRaw`'s own doc comment.
+    func expectRawFrame(timeout: Double = 10) async throws -> Data {
+        try await withTimeout(timeout, "PhoneConn.expectRawFrame") { [self] in
+            while true {
+                if let frame = try LengthPrefix.unwrap(&buffer, maxBytes: 1 << 20) {
+                    return frame
+                }
+                let chunk = try await recvStream.read(sizeLimit: 4096)
+                guard !chunk.isEmpty else { throw PhoneTestError.connectionClosedUnexpectedly }
+                buffer.append(chunk)
+            }
+        }
     }
 
     // MARK: - Inbound

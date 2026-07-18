@@ -20,6 +20,10 @@ targets:
       - path: Sources
       - path: Support/AppIcon.icns
       - path: HelperShared
+      # SP2b Task 6: the production-signed relay config, embedded as a bundle resource and
+      # verified at load (RemoteAccessCoordinator.loadVerifiedRelayConfig) against
+      # NormaKit's RelayConfigTrust.productionPublicKey before a single relay URL is trusted.
+      - path: Resources
     dependencies:
       - package: NormaKit
       - package: NormaProtocol

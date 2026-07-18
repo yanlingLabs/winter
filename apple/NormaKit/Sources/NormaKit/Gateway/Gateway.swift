@@ -20,19 +20,12 @@ import NormaProtocol
 /// do not "optimize" by deduping here.
 ///
 /// **No production listener in SP1:** nothing in this file (or anywhere else in the app) ever
-/// constructs a real `RemoteListener` — only `GatewayTests` builds a `LoopbackListener`. SP2 wires
-/// the real iroh-backed listener + a real `PairingStore` at the exact seam `Gateway.init` takes
-/// today (`listener:`/`pairing:` params) — see the one-line comment there.
+/// constructs a real `RemoteListener` — only `GatewayTests` builds a `LoopbackListener`. SP2a wires
+/// the real iroh-backed listener at the exact seam `Gateway.init` takes (`listener:` param). SP2b
+/// (Task 4) finishes the job: `PairingStub` is gone, `listener:` is always a `PairingRouter`
+/// wrapping the real `IrohListener` in production (`RemoteHost` is the composition root — see
+/// `RemoteHost.swift`), and `directory:` is the real `PairingStore` instead of a fixed constant.
 public actor Gateway {
-    /// Fixed pairing identity for SP1 — SP2 replaces this with a real `PairingStore` (per-phone
-    /// keys, epoch bumped on re-pairing, QR-exchanged hostID). Not a security gap for SP1: no
-    /// production listener exists yet for this stub to protect.
-    public struct PairingStub: Sendable {
-        public let hostID = "host-stub"
-        public let epoch = 1
-        public init() {}
-    }
-
     /// Mirrors the daemon's own `REMOTE_ALLOWED_METHODS` (packages/core/src/ipc/server.ts) as an
     /// independent Swift constant — defense in depth: the gateway rejects an off-list method
     /// BEFORE it ever reaches the daemon, which enforces the identical 9-method allowlist itself.
@@ -42,16 +35,26 @@ public actor Gateway {
         "session.interrupt", "engine.activity",
     ]
 
+    /// Session-map cap (SP2b Task 4) — see `evictIfNeeded()`.
+    private static let maxSessions = 32
+
     private let listener: RemoteListener
     private let daemonFactory: @Sendable () -> NormaClient
-    private let pairing: PairingStub
+    /// This Mac's identity, stamped into every outgoing `WireEnvelope.hostID`/`ServerHello.hostID`
+    /// — one value for the whole gateway (unlike `pairingEpoch`, which is per-phone).
+    private let hostID: String
+    /// The real allowlist (SP2b Task 4 — replaces the SP1/SP2a `PairingStub`): looked up by
+    /// `RemoteConn.peerID` on every handshake AND every live frame, so a mid-session revoke+re-pair
+    /// (which bumps the record's epoch) is enforced from the CURRENT record, never a cached one.
+    private let directory: any PairingDirectory
 
     /// Inbound `rpcRequest` rate-limit budget (SP2a gate G4a), one bucket minted per phone. Default
     /// 50/s sustained with 200 burst — generous for a human-driven phone, a firm ceiling on a
     /// runaway/hostile one. Injectable so tests can shrink the burst to a couple of tokens.
     private let rateLimit: (perSec: Int, burst: Int)
-    /// Injected wall clock feeding each `RateLimiter.allow(now:)` — real time in production, a
-    /// frozen/hand-advanced value in tests so the limiter is exercised deterministically.
+    /// Injected wall clock feeding each `RateLimiter.allow(now:)` (and, SP2b Task 4, each
+    /// `PhoneSession.lastActiveAt` touch) — real time in production, a frozen/hand-advanced value in
+    /// tests so both the limiter and eviction are exercised deterministically.
     private let now: @Sendable () -> TimeInterval
 
     /// Per-phone state, keyed by `ClientHello.clientInstanceID` — see this type's own header
@@ -63,20 +66,30 @@ public actor Gateway {
     /// entry — the set outlives the entry so a pairing revocation stays enforced.
     private var revoked: Set<String> = []
 
-    // SP2 wires the real construction here: `Gateway(listener: IrohListener(...), daemonFactory:
-    // { NormaClient(makeTransport: { UnixSocketTransport(...) }, token: pairingStore.remoteToken,
-    // clientName: "iphone-gateway") }, pairing: pairingStore.current)` — nothing in SP1 calls this
-    // initializer outside of tests.
+    /// SP2b Task 4: every `clientInstanceID` ever seen (at hello time) from a given authenticated
+    /// `RemoteConn.peerID` — lets `revoke(peerID:)` (a `PairingStore`-level revocation, keyed by the
+    /// phone's iroh identity) fan out to every one of THIS gateway's own per-`clientInstanceID`
+    /// sessions that peer ever drove, without the store needing to know anything about
+    /// `clientInstanceID`s at all.
+    private var peerToClients: [String: Set<String>] = [:]
+
+    /// `RemoteHost` (the composition root) constructs the real thing:
+    /// `Gateway(listener: PairingRouter(...), daemonFactory: { NormaClient(makeTransport: {
+    /// UnixSocketTransport(...) }, token: try KeychainToken.readRemoteToken(), clientName:
+    /// "iphone-gateway") }, hostID: macEndpointID, directory: pairingStore)` — nothing else calls
+    /// this initializer outside of tests.
     public init(
         listener: RemoteListener,
         daemonFactory: @escaping @Sendable () -> NormaClient,
-        pairing: PairingStub,
+        hostID: String,
+        directory: any PairingDirectory,
         rateLimit: (perSec: Int, burst: Int) = (perSec: 50, burst: 200),
         now: @escaping @Sendable () -> TimeInterval = { Date().timeIntervalSince1970 }
     ) {
         self.listener = listener
         self.daemonFactory = daemonFactory
-        self.pairing = pairing
+        self.hostID = hostID
+        self.directory = directory
         self.rateLimit = rateLimit
         self.now = now
     }
@@ -90,41 +103,80 @@ public actor Gateway {
     // MARK: - Per-connection handshake + live loop
 
     private func handle(_ conn: RemoteConn) async {
+        // SP2b Task 4 — the real allowlist check, defense-in-depth: `PairingRouter` is the
+        // PRIMARY gate (it never forwards a non-member conn here at all), but this guard means
+        // `Gateway` is safe even if something someday constructs it without a router in front, or
+        // a revoke races the router's own accept-time check. A non-member gets the SAME raw JSON
+        // `PairRejected` a phone would see from the router — it never got far enough to have an
+        // epoch/hostID to validate a `WireEnvelope` against.
+        guard let rec = await directory.record(forPeer: conn.peerID) else {
+            await sendNotPairedRejection(conn)
+            return
+        }
+        let epoch = rec.pairingEpoch
+
         var iter = conn.inbound.makeAsyncIterator()
         guard let firstFrame = await iter.next() else { return } // conn closed before ever sending hello
 
         let helloEnvelope: WireEnvelope
         do {
-            helloEnvelope = try WireFrame.decode(firstFrame, expectedEpoch: pairing.epoch)
+            helloEnvelope = try WireFrame.decode(firstFrame, expectedEpoch: epoch)
         } catch {
-            await sendGatewayError(conn, id: .null, sessionID: nil, message: "invalid hello frame: \(error)")
+            await sendGatewayError(conn, epoch: epoch, id: .null, sessionID: nil, message: "invalid hello frame: \(error)")
             conn.close()
             return
         }
         guard helloEnvelope.kind == .hello else {
-            await sendGatewayError(conn, id: .null, sessionID: nil, message: "expected hello-first frame, got \(helloEnvelope.kind)")
+            await sendGatewayError(conn, epoch: epoch, id: .null, sessionID: nil, message: "expected hello-first frame, got \(helloEnvelope.kind)")
             conn.close()
             return
         }
         guard let clientHello = try? JSONDecoder().decode(ClientHello.self, from: helloEnvelope.payload) else {
-            await sendGatewayError(conn, id: .null, sessionID: nil, message: "malformed ClientHello")
+            await sendGatewayError(conn, epoch: epoch, id: .null, sessionID: nil, message: "malformed ClientHello")
             conn.close()
             return
         }
 
-        // SP2a gate G5: a revoked phone may not re-establish — refuse the handshake outright.
+        // SP2b whole-branch review fix: a stale revocation must not outlive a RE-PAIR. Reaching
+        // this line means the peer IS a current directory member (the guard at the top of this
+        // method) AND its hello carried the CURRENT epoch (`WireFrame.decode(expectedEpoch:)`
+        // above) — that phone is re-authorized by definition, so clear any leftover `revoked`
+        // entry for its (stable) `clientInstanceID`. Without this, the set — which lives as long
+        // as the gateway, and the gateway outlives a revoke whenever ANOTHER device is still
+        // paired (`RemoteHost.stopIfIdle` won't tear it down) — locked a revoked-then-re-paired
+        // phone out forever: valid record, valid epoch, same clientInstanceID → "pairing revoked"
+        // until an app reinstall minted a new id. SP2a gate G5 is NOT weakened: a still-revoked
+        // (not-re-paired) phone has NO directory record and is refused as `not_paired` at the
+        // router/membership gate before ever reaching here. The per-connection `session.revoked`
+        // guard in `handleLiveFrame` (frames already in flight on a just-revoked conn) is a
+        // separate, still-correct mechanism and stays untouched.
+        revoked.remove(clientHello.clientInstanceID)
+
+        // SP2a gate G5's handshake guard — post-fix a conn that got this far is never still
+        // marked revoked (membership + current epoch just cleared it above); kept as a safety net
+        // for future paths rather than as the live enforcement point (that's the membership gate).
         guard !revoked.contains(clientHello.clientInstanceID) else {
-            await sendGatewayError(conn, id: .null, sessionID: nil, message: "pairing revoked")
+            await sendGatewayError(conn, epoch: epoch, id: .null, sessionID: nil, message: "pairing revoked")
             conn.close()
             return
         }
 
-        let session = phoneSession(for: clientHello.clientInstanceID)
+        // SP2b Task 4: record the peer -> clientInstanceID mapping `revoke(peerID:)` fans out
+        // through — done once the hello is known-legitimate (past the revoked check above).
+        peerToClients[conn.peerID, default: []].insert(clientHello.clientInstanceID)
+
+        let session = await phoneSession(for: clientHello.clientInstanceID)
+        // SP2b Task 4: this connection's epoch is now the session's own — every later live frame
+        // (`handleLiveFrame`) and every asynchronously-routed daemon event (`routeDaemonEvent`,
+        // driven by the persistent pump task, entirely outside THIS function's call stack) reads it
+        // from here rather than needing it threaded through as a parameter.
+        session.epoch = epoch
+        session.lastActiveAt = now()
         if !session.connected {
             do {
                 try await session.daemonClient.connect(role: "remote")
             } catch {
-                await sendGatewayError(conn, id: .null, sessionID: nil, message: "daemon connect failed: \(error)")
+                await sendGatewayError(conn, epoch: epoch, id: .null, sessionID: nil, message: "daemon connect failed: \(error)")
                 conn.close()
                 return
             }
@@ -157,7 +209,9 @@ public actor Gateway {
             verdicts.append(verdict)
             pendingReplay.append(contentsOf: buffered)
         }
+        #if DEBUG
         signalAttachResolvedForTesting()
+        #endif
         // Only the LAST resumed session is truly live-forwardable (one daemon connection, one
         // attach at a time — see `PhoneSession.liveSessionID`). Set once, after the loop, so an
         // earlier resume's session can never leak a live frame ahead of the ack.
@@ -165,12 +219,12 @@ public actor Gateway {
             session.liveSessionID = last.sessionID
         }
 
-        let serverHello = ServerHello(chosenVersion: 1, hostID: pairing.hostID, verdicts: verdicts)
+        let serverHello = ServerHello(chosenVersion: 1, hostID: hostID, verdicts: verdicts)
         if let payload = try? JSONEncoder().encode(serverHello) {
-            await send(conn, kind: .helloAck, sessionID: nil, streamID: nil, seq: nil, payload: payload)
+            await send(conn, epoch: session.epoch, kind: .helloAck, sessionID: nil, streamID: nil, seq: nil, payload: payload)
         }
         for event in pendingReplay {
-            await sendEventFrame(conn, event: event)
+            await sendEventFrame(conn, epoch: session.epoch, event: event)
         }
         await drainHeldLive(session: session, conn: conn, generation: myGeneration)
 
@@ -186,8 +240,9 @@ public actor Gateway {
         }
     }
 
-    private func phoneSession(for clientInstanceID: String) -> PhoneSession {
+    private func phoneSession(for clientInstanceID: String) async -> PhoneSession {
         if let existing = sessions[clientInstanceID] { return existing }
+        await evictIfNeeded()
         let fresh = PhoneSession(
             clientInstanceID: clientInstanceID,
             daemonClient: daemonFactory(),
@@ -197,7 +252,69 @@ public actor Gateway {
         return fresh
     }
 
-    // MARK: - Revocation (SP2a gate G5)
+    /// SP2b Task 4: bounds `sessions`' growth from phone churn (e.g. an app reinstall minting a
+    /// fresh `clientInstanceID` for the same physical phone, or a peer that's never actually
+    /// revoked but keeps generating new instance ids). Only runs on a `phoneSession(for:)` cache
+    /// MISS, i.e. right before a new entry would push the map to/past the cap: evicts currently
+    /// disconnected sessions (`currentConn == nil`), oldest `lastActiveAt` first, until the map is
+    /// back under the cap or no more evictable entries remain (a session with a live `currentConn`
+    /// is never evicted, even if that leaves the map above the cap).
+    ///
+    /// Unlike `revoke(_:)`, eviction is NOT a revocation — no `revoked` insert, so an evicted
+    /// phone's next connection just gets a fresh `PhoneSession`, same as any other new phone.
+    private func evictIfNeeded() async {
+        guard sessions.count >= Self.maxSessions else { return }
+        let candidates = sessions.values
+            .filter { $0.currentConn == nil }
+            .sorted { $0.lastActiveAt < $1.lastActiveAt }
+        for stale in candidates {
+            guard sessions.count >= Self.maxSessions else { break }
+            // T4 review-2 fix 1 (hazard b): the `candidates` snapshot — including its
+            // `currentConn == nil` filter — was taken ONCE, before any suspension, but every
+            // earlier iteration's `close()` await lets `handle` interleave: a LATER candidate can
+            // have acquired a live connection since the snapshot. Re-check at the top of each
+            // iteration — a session with a live conn must never be evicted, no matter what the
+            // stale snapshot says.
+            guard stale.currentConn == nil else { continue }
+            // T4 review-2 fix 1 (hazard a): every synchronous mutation (map removal, peer-map
+            // prune, pump cancel) happens BEFORE the suspending `close()` below. Removing the
+            // entry FIRST means a same-id reconnect landing during the close-await MISSES the
+            // cache in `phoneSession(for:)` and mints a fresh, fully-functional session (new
+            // daemon client, new pump). The pre-fix order (close, THEN remove) left the stale
+            // entry findable mid-close: `phoneSession(for:)` cache-HIT it, `handle` set
+            // `currentConn` on it, skipped the daemon reconnect (`connected` still true), and the
+            // phone got a helloAck on a dead session — cancelled pump, closing daemon client —
+            // which eviction's resume then removed DESPITE the now-live connection. (The previous
+            // `sessions[key] === stale` guard here protected against a fresh session under the
+            // key — an interleave that can never happen while the stale entry is still cached.)
+            sessions[stale.clientInstanceID] = nil
+            // T4 review fix 2: prune the evicted id from `peerToClients` in the SAME synchronous
+            // section — without this, a churning paired device (fresh `clientInstanceID` per
+            // reinstall/reconnect, same peerID) grows its peer's set without bound even though
+            // eviction keeps `sessions` itself capped. Drop the whole key once its set empties so
+            // the map stays bounded by LIVE state, not ever-seen ids. Revocation-correctness is
+            // unaffected: `revoke(peerID:)` only needs the ids that still have gateway state to
+            // tear down — an evicted id has none, and its future reconnect is re-gated by the
+            // router/directory check, not by this map.
+            for (peer, var clients) in peerToClients where clients.contains(stale.clientInstanceID) {
+                clients.remove(stale.clientInstanceID)
+                peerToClients[peer] = clients.isEmpty ? nil : clients
+            }
+            stale.pumpTask?.cancel()
+            #if DEBUG
+            // Test-only synchronization hook (see `setEvictionGateForTesting`): parking here holds
+            // eviction exactly inside the suspension window the re-entrancy test races a same-id
+            // reconnect into — the candidate is already removed/pruned, its daemon client not yet
+            // closed, precisely `close()`'s own suspension point.
+            if let gate = evictionGateForTesting {
+                await gate(stale.clientInstanceID)
+            }
+            #endif
+            await stale.daemonClient.close()
+        }
+    }
+
+    // MARK: - Revocation (SP2a gate G5; SP2b Task 4 peer-level fan-out)
 
     /// Tears down a paired phone's gateway footprint: cancels its persistent daemon-event pump,
     /// closes its daemon `NormaClient` (releasing the `remote` connection), CLOSES its current
@@ -215,6 +332,17 @@ public actor Gateway {
     /// caught it: a real phone's connection must actually drop, not just get ignored going forward.
     public func revoke(clientInstanceID: String) async {
         revoked.insert(clientInstanceID)
+        // T4 review-2 fix 3: prune this id from `peerToClients` — the last path that could leave
+        // a dead id mapped, breaking the bounded-by-live-state invariant eviction now maintains.
+        // Done in the synchronous section BEFORE the close-await below (and before the
+        // no-session early return — a direct revoke of an id whose session is already gone must
+        // still unmap it). No re-add race: `handle` checks `revoked` BEFORE its `peerToClients`
+        // insert, and the `revoked.insert` above is already visible. `revoke(peerID:)` removing
+        // the whole key first just makes this loop a no-op for that peer.
+        for (peer, var clients) in peerToClients where clients.contains(clientInstanceID) {
+            clients.remove(clientInstanceID)
+            peerToClients[peer] = clients.isEmpty ? nil : clients
+        }
         guard let session = sessions[clientInstanceID] else { return }
         session.revoked = true
         session.pumpTask?.cancel()
@@ -224,10 +352,50 @@ public actor Gateway {
         sessions[clientInstanceID] = nil
     }
 
+    /// SP2b Task 4: `RemoteHost.revoke(phoneEndpointID:)`'s gateway-side half — a `PairingStore`
+    /// revocation is keyed by the phone's iroh identity (`peerID`), but every OTHER piece of
+    /// gateway state (`sessions`, `revoked`, the daemon-event pump) is keyed by `clientInstanceID`.
+    /// `peerToClients` (recorded at hello time) bridges the two: fan out to
+    /// `revoke(clientInstanceID:)` for every client this peer ever drove, tearing each down exactly
+    /// as a direct per-client revoke would. Idempotent (an unknown/already-clean peerID is a no-op)
+    /// and safe to call even for a peer this gateway never actually saw a hello from — there's
+    /// simply nothing to fan out to.
+    public func revoke(peerID: String) async {
+        let clients = peerToClients.removeValue(forKey: peerID) ?? []
+        for clientInstanceID in clients {
+            await revoke(clientInstanceID: clientInstanceID)
+        }
+    }
+
+    // SP2b Task 1: every hook below exists solely for `@testable` test-target observation/
+    // synchronization — none is ever called from production code (the two call sites that DO
+    // feed one, in `handle`/`handleLiveFrame`, are themselves `#if DEBUG`-gated). `#if DEBUG`
+    // keeps them out of a Release build of the app entirely, matching `swift test`'s own debug
+    // configuration (so tests keep seeing them unchanged).
+    #if DEBUG
     /// Test-only inspection hook (`@testable`): the live pump `Task` for a phone, captured BEFORE
     /// `revoke` removes the session so a test can assert it ends up cancelled.
     func pumpTaskForTesting(_ clientInstanceID: String) -> Task<Void, Never>? {
         sessions[clientInstanceID]?.pumpTask
+    }
+
+    /// Test-only inspection hook (`@testable`, T4 review fix 2): the `clientInstanceID`s currently
+    /// mapped for a peer — the eviction test asserts this stays bounded (pruned in lockstep with
+    /// `sessions`) for a churning device instead of growing with every ever-seen id.
+    func peerClientsForTesting(_ peerID: String) -> Set<String> {
+        peerToClients[peerID] ?? []
+    }
+
+    /// Test-only synchronization hook (`@testable`, T4 review-2 fix 1): awaited by `evictIfNeeded`
+    /// for each evicted candidate AFTER its synchronous removal (session entry gone, peer map
+    /// pruned, pump cancelled) and BEFORE its daemon client's `close()` — a test-controlled park
+    /// here is a deterministic stand-in for `close()`'s own suspension, letting the re-entrancy
+    /// test drive a same-id reconnect (and a live-conn acquisition by a later candidate) into
+    /// exactly that window with no sleeps. Never set in production code.
+    private var evictionGateForTesting: (@Sendable (String) async -> Void)?
+
+    func setEvictionGateForTesting(_ gate: (@Sendable (String) async -> Void)?) {
+        evictionGateForTesting = gate
     }
 
     /// Test-only synchronization hook (`@testable`, SP2a Task 4's E2E): resumed once the
@@ -255,6 +423,7 @@ public actor Gateway {
         attachResolvedContinuations = []
         for c in toResume { c.resume() }
     }
+    #endif
 
     /// A `harness_attached`/`harness_detached` event is connection-lifecycle NOISE, never phone
     /// content (SP2a gate G1) — the gateway filters it out of both replay and live forwarding, and
@@ -310,7 +479,7 @@ public actor Gateway {
             session.heldLive.append(e)
             return
         }
-        await sendEventFrame(conn, event: e)
+        await sendEventFrame(conn, epoch: session.epoch, event: e)
     }
 
     /// Review follow-up 2 (the drain half — see `handle`'s phase comment): sends the live events
@@ -324,7 +493,7 @@ public actor Gateway {
         while session.connGeneration == generation, !session.heldLive.isEmpty {
             let e = session.heldLive.removeFirst()
             guard e.sessionId == session.liveSessionID else { continue } // resumed a different session mid-queue
-            await sendEventFrame(conn, event: e)
+            await sendEventFrame(conn, epoch: session.epoch, event: e)
         }
         if session.connGeneration == generation {
             session.holdLiveEvents = false
@@ -424,34 +593,38 @@ public actor Gateway {
     // MARK: - Live loop (post-handshake)
 
     private func handleLiveFrame(_ frame: Data, conn: RemoteConn, session: PhoneSession) async {
+        session.lastActiveAt = now()
         // SP2a gate G5: once revoked, this conn's in-flight read loop keeps draining frames — every
         // one is refused, none reaches the (now-closed) daemon client.
         guard !session.revoked else {
-            await sendGatewayError(conn, id: .null, sessionID: nil, message: "pairing revoked")
+            await sendGatewayError(conn, epoch: session.epoch, id: .null, sessionID: nil, message: "pairing revoked")
             return
         }
         let envelope: WireEnvelope
         do {
-            envelope = try WireFrame.decode(frame, expectedEpoch: pairing.epoch)
+            // SP2b Task 4: `session.epoch` (fixed for this connection at hello time from the
+            // directory record then current) — see `handle`'s own comment on why this is a stored
+            // session property rather than the OLD global `pairing.epoch` constant.
+            envelope = try WireFrame.decode(frame, expectedEpoch: session.epoch)
         } catch WireError.staleEpoch {
-            await sendGatewayError(conn, id: .null, sessionID: nil, message: "stale pairing epoch")
+            await sendGatewayError(conn, epoch: session.epoch, id: .null, sessionID: nil, message: "stale pairing epoch")
             conn.close()
             return
         } catch {
             // Recoverable: an oversize/malformed/unknown-kind frame gets an error frame, but the
             // connection stays open — the phone can just retry (task brief scenario C).
-            await sendGatewayError(conn, id: .null, sessionID: nil, message: "invalid envelope: \(error)")
+            await sendGatewayError(conn, epoch: session.epoch, id: .null, sessionID: nil, message: "invalid envelope: \(error)")
             return
         }
 
         guard envelope.kind == .rpcRequest else {
-            await sendGatewayError(conn, id: .null, sessionID: envelope.sessionID, message: "expected rpcRequest frame, got \(envelope.kind)")
+            await sendGatewayError(conn, epoch: session.epoch, id: .null, sessionID: envelope.sessionID, message: "expected rpcRequest frame, got \(envelope.kind)")
             return
         }
         // SP2a gate G4a: throttle inbound rpcRequests BEFORE parse/allowlist — a phone flooding
         // past its token bucket gets a gateway error, and the frame never touches the daemon.
         guard session.rateLimiter.allow(now: now()) else {
-            await sendGatewayError(conn, id: .null, sessionID: envelope.sessionID, message: "rate limit exceeded")
+            await sendGatewayError(conn, epoch: session.epoch, id: .null, sessionID: envelope.sessionID, message: "rate limit exceeded")
             return
         }
         // SP2a gate G4b: the outer-frame decode above bounds the ENVELOPE's depth, but the inner
@@ -461,17 +634,17 @@ public actor Gateway {
         do {
             try WireFrame.validateJSONDepth(envelope.payload, maxDepth: 32)
         } catch {
-            await sendGatewayError(conn, id: .null, sessionID: envelope.sessionID, message: "payload nesting too deep")
+            await sendGatewayError(conn, epoch: session.epoch, id: .null, sessionID: envelope.sessionID, message: "payload nesting too deep")
             return
         }
         guard let rpc = parseRpcRequest(envelope.payload) else {
-            await sendGatewayError(conn, id: .null, sessionID: envelope.sessionID, message: "malformed JSON-RPC payload")
+            await sendGatewayError(conn, epoch: session.epoch, id: .null, sessionID: envelope.sessionID, message: "malformed JSON-RPC payload")
             return
         }
         guard Gateway.remoteAllowedMethods.contains(rpc.method) else {
             // Off-list: rejected here, BEFORE the daemon ever sees it (defense in depth — the
             // daemon enforces the identical allowlist independently).
-            await sendGatewayError(conn, id: rpc.id, sessionID: envelope.sessionID, message: "remote role may not call \(rpc.method)")
+            await sendGatewayError(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, message: "remote role may not call \(rpc.method)")
             return
         }
 
@@ -487,7 +660,9 @@ public actor Gateway {
             let myGeneration = session.connGeneration
             session.holdLiveEvents = true
             let (_, contentHighWatermark, buffered) = await attachAndReplay(session: session, resume: resume)
+            #if DEBUG
             signalAttachResolvedForTesting()
+            #endif
             // Register live-forwarding BEFORE flushing the replay (G2), then answer with the
             // content-only `lastSeq` (G1) — the phone's cursor tracks what it actually received,
             // not the raw attach return that counts the filtered `harness_attached`. Order is
@@ -495,9 +670,9 @@ public actor Gateway {
             // in the response ≤ every drained live seq).
             session.liveSessionID = sessionId
             for event in buffered {
-                await sendEventFrame(conn, event: event)
+                await sendEventFrame(conn, epoch: session.epoch, event: event)
             }
-            await sendRpcResult(conn, id: rpc.id, sessionID: envelope.sessionID, streamID: envelope.streamID, result: .object(["lastSeq": .number(Double(contentHighWatermark))]))
+            await sendRpcResult(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, streamID: envelope.streamID, result: .object(["lastSeq": .number(Double(contentHighWatermark))]))
             await drainHeldLive(session: session, conn: conn, generation: myGeneration)
             return
         }
@@ -506,11 +681,11 @@ public actor Gateway {
             // Transparent relay — `rpc.commandId` (if any) passes through untouched; the daemon
             // dedups, the gateway never does (this type's own header comment).
             let result = try await session.daemonClient.request(rpc.method, params: rpc.params, commandId: rpc.commandId)
-            await sendRpcResult(conn, id: rpc.id, sessionID: envelope.sessionID, streamID: envelope.streamID, result: result)
+            await sendRpcResult(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, streamID: envelope.streamID, result: result)
         } catch let e as RpcError {
-            await sendRpcError(conn, id: rpc.id, sessionID: envelope.sessionID, code: e.code, message: e.message)
+            await sendRpcError(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, code: e.code, message: e.message)
         } catch {
-            await sendRpcError(conn, id: rpc.id, sessionID: envelope.sessionID, code: -1, message: "\(error)")
+            await sendRpcError(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, code: -1, message: "\(error)")
         }
     }
 
@@ -533,39 +708,42 @@ public actor Gateway {
 
     private func nowMs() -> Int { Int(Date().timeIntervalSince1970 * 1000) }
 
-    private func send(_ conn: RemoteConn, kind: WireKind, sessionID: String?, streamID: String?, seq: Int?, payload: Data) async {
+    /// `epoch`: SP2b Task 4 — per-connection now (the phone's CURRENT `PairRecord.pairingEpoch`,
+    /// resolved at hello time and cached on its `PhoneSession`), never the old fixed
+    /// `PairingStub.epoch` constant. `hostID` stays the one Gateway-wide constant (`self.hostID`).
+    private func send(_ conn: RemoteConn, epoch: Int, kind: WireKind, sessionID: String?, streamID: String?, seq: Int?, payload: Data) async {
         let envelope = WireEnvelope(
-            v: 1, pairingEpoch: pairing.epoch, hostID: pairing.hostID, sessionID: sessionID,
+            v: 1, pairingEpoch: epoch, hostID: hostID, sessionID: sessionID,
             streamID: streamID, seq: seq, kind: kind, timestamp: nowMs(), payload: payload
         )
         guard let frame = try? WireFrame.encode(envelope) else { return }
         await conn.send(frame)
     }
 
-    private func sendEventFrame(_ conn: RemoteConn, event: SessionEvent) async {
+    private func sendEventFrame(_ conn: RemoteConn, epoch: Int, event: SessionEvent) async {
         guard let payload = try? JSONEncoder().encode(event) else { return }
-        await send(conn, kind: .event, sessionID: event.sessionId, streamID: event.sessionId, seq: event.seq, payload: payload)
+        await send(conn, epoch: epoch, kind: .event, sessionID: event.sessionId, streamID: event.sessionId, seq: event.seq, payload: payload)
     }
 
     /// Gateway-level protocol error (envelope validation failures, hello-first violations, the
     /// allowlist rejection) — distinct from `sendRpcError`, which wraps a genuine daemon RESPONSE
     /// (the request DID reach the daemon and it answered with a JSON-RPC error).
-    private func sendGatewayError(_ conn: RemoteConn, id: JSONValue, sessionID: String?, message: String) async {
+    private func sendGatewayError(_ conn: RemoteConn, epoch: Int, id: JSONValue, sessionID: String?, message: String) async {
         let body = JSONValue.object(["jsonrpc": .string("2.0"), "id": id, "error": .object(["code": .number(-32000), "message": .string(message)])])
         guard let payload = try? JSONEncoder().encode(body) else { return }
-        await send(conn, kind: .error, sessionID: sessionID, streamID: nil, seq: nil, payload: payload)
+        await send(conn, epoch: epoch, kind: .error, sessionID: sessionID, streamID: nil, seq: nil, payload: payload)
     }
 
-    private func sendRpcResult(_ conn: RemoteConn, id: JSONValue, sessionID: String?, streamID: String?, result: JSONValue) async {
+    private func sendRpcResult(_ conn: RemoteConn, epoch: Int, id: JSONValue, sessionID: String?, streamID: String?, result: JSONValue) async {
         let body = JSONValue.object(["jsonrpc": .string("2.0"), "id": id, "result": result])
         guard let payload = try? JSONEncoder().encode(body) else { return }
-        await send(conn, kind: .rpcResponse, sessionID: sessionID, streamID: streamID, seq: nil, payload: payload)
+        await send(conn, epoch: epoch, kind: .rpcResponse, sessionID: sessionID, streamID: streamID, seq: nil, payload: payload)
     }
 
-    private func sendRpcError(_ conn: RemoteConn, id: JSONValue, sessionID: String?, code: Int, message: String) async {
+    private func sendRpcError(_ conn: RemoteConn, epoch: Int, id: JSONValue, sessionID: String?, code: Int, message: String) async {
         let body = JSONValue.object(["jsonrpc": .string("2.0"), "id": id, "error": .object(["code": .number(Double(code)), "message": .string(message)])])
         guard let payload = try? JSONEncoder().encode(body) else { return }
-        await send(conn, kind: .rpcResponse, sessionID: sessionID, streamID: nil, seq: nil, payload: payload)
+        await send(conn, epoch: epoch, kind: .rpcResponse, sessionID: sessionID, streamID: nil, seq: nil, payload: payload)
     }
 }
 
@@ -626,6 +804,18 @@ private final class PhoneSession: @unchecked Sendable {
     /// Started lazily on first connect and never restarted — the sole consumer of
     /// `daemonClient.events` for this phone's entire lifetime.
     var pumpTask: Task<Void, Never>?
+
+    /// SP2b Task 4: this phone's `PairRecord.pairingEpoch` as of its most recent successful
+    /// handshake (`Gateway.handle`) — stamped into every outgoing `WireEnvelope` for this session
+    /// (including ones sent by the daemon-event pump, which runs entirely outside any single
+    /// `handle`/`handleLiveFrame` call) and used to validate every subsequent live frame's own
+    /// epoch. Default `1` is a placeholder overwritten before this session is ever used for I/O —
+    /// `handle` always sets it immediately after `phoneSession(for:)` returns, before any send.
+    var epoch = 1
+    /// SP2b Task 4: wall-clock time (from `Gateway`'s injected `now()`) of the last frame this
+    /// session either received (`handle`'s hello, `handleLiveFrame`) — the eviction cursor
+    /// `evictIfNeeded()` sorts disconnected sessions by, oldest first.
+    var lastActiveAt: TimeInterval = 0
 
     init(clientInstanceID: String, daemonClient: NormaClient, rateLimiter: RateLimiter) {
         self.clientInstanceID = clientInstanceID

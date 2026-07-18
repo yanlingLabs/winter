@@ -1,0 +1,134 @@
+#cloud-config
+# SP2b Task 6 -- Oracle Always-Free relay VM (Ubuntu 24.04). Rendered by provision.ts with
+# {DOMAIN} (e.g. relay-1.yanlinglabs.com), {IROH_RELAY_VERSION}, {IROH_RELAY_SHA256}, and
+# {QUIC_ADDR_DISCOVERY_PORT} substituted before being base64'd into the instance's `user_data`.
+#
+# Runs a single hardened `iroh-relay` (n0-computer/iroh, tag v{IROH_RELAY_VERSION}) behind
+# Let's Encrypt TLS on 443/tcp, plus its QUIC address-discovery listener on
+# {QUIC_ADDR_DISCOVERY_PORT}/udp. No allowlist (`access = "everyone"`) -- the relay is
+# deliberately outside Norma's trust boundary: it only ever relays already end-to-end-encrypted
+# iroh QUIC traffic between pinned endpoint IDs, so anyone reaching it can, at worst, relay their
+# own traffic through it.
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - unattended-upgrades
+  - ufw
+  - curl
+  - ca-certificates
+
+# Dedicated, unprivileged service user -- the systemd unit below grants it ONLY
+# CAP_NET_BIND_SERVICE (to bind :443/:80 without running as root), not full root.
+users:
+  - name: iroh-relay
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/iroh-relay
+    create_home: true
+
+write_files:
+  # Explicitly enable the unattended-upgrades periodic timers (task-6 review fix): installing the
+  # package only provides the machinery -- whether it actually RUNS is controlled by this file,
+  # which on Ubuntu images normally comes from an interactive debconf step / image default a
+  # non-interactive cloud boot shouldn't rely on. Written explicitly so security patching is a
+  # pinned fact of this config, not an inherited image behavior.
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root:root
+    permissions: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+  - path: /etc/iroh-relay/config.toml
+    owner: root:root
+    permissions: "0644"
+    content: |
+      enable_relay = true
+      http_bind_addr = "[::]:80"
+      enable_quic_addr_discovery = true
+      enable_metrics = true
+      metrics_bind_addr = "127.0.0.1:9090"
+      access = "everyone"
+
+      [tls]
+      hostname = "{DOMAIN}"
+      cert_mode = "LetsEncrypt"
+      cert_dir = "/var/lib/iroh-relay/certs"
+      contact = "admin@yanlinglabs.com"
+      https_bind_addr = "[::]:443"
+      # `quic_bind_addr` is a field of [tls], NOT top-level -- confirmed empirically during this
+      # task: a top-level `quic_bind_addr` is silently ignored (this parser doesn't reject unknown
+      # fields), leaving iroh-relay listening on its DEFAULT_RELAY_QUIC_PORT regardless. Pinned
+      # here explicitly rather than relying on that default matching what the firewall opens.
+      quic_bind_addr = "[::]:{QUIC_ADDR_DISCOVERY_PORT}"
+
+  - path: /etc/systemd/system/iroh-relay.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=iroh relay server ({DOMAIN})
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=iroh-relay
+      Group=iroh-relay
+      ExecStart=/usr/local/bin/iroh-relay --config-path=/etc/iroh-relay/config.toml
+      Restart=always
+      RestartSec=2
+      LimitNOFILE=65536
+      AmbientCapabilities=CAP_NET_BIND_SERVICE
+      NoNewPrivileges=true
+      ProtectSystem=strict
+      ReadWritePaths=/var/lib/iroh-relay
+      PrivateTmp=true
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/cron.weekly/relay-health
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      # SP2b Task 6: weekly self-check -- curls the relay's own HTTPS identity page and logs the
+      # result (syslog, tag relay-health) so `journalctl -t relay-health` shows a trail even
+      # though nothing actively alerts on failure yet (health-check.ts is the operator-driven
+      # check for that).
+      set -euo pipefail
+      if curl -fsS --max-time 10 "https://{DOMAIN}/" >/dev/null 2>&1; then
+        logger -t relay-health "OK: https://{DOMAIN}/ reachable"
+      else
+        logger -t relay-health "FAIL: https://{DOMAIN}/ unreachable"
+      fi
+
+runcmd:
+  # --- ufw: default-deny, then only what this relay needs (+22 SSH) ---
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp
+  - ufw allow 443/tcp
+  - ufw allow {QUIC_ADDR_DISCOVERY_PORT}/udp
+  - ufw --force enable
+
+  # --- unattended-upgrades: security patches without a manual restart-and-pray cadence ---
+  - systemctl enable --now unattended-upgrades
+
+  # --- fetch + sha256-verify + install the pinned iroh-relay binary ---
+  - mkdir -p /tmp/iroh-relay-install
+  - curl -fL -o /tmp/iroh-relay-install/iroh-relay.tar.gz "https://github.com/n0-computer/iroh/releases/download/v{IROH_RELAY_VERSION}/iroh-relay-v{IROH_RELAY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+  - echo "{IROH_RELAY_SHA256}  /tmp/iroh-relay-install/iroh-relay.tar.gz" | sha256sum -c -
+  - tar xzf /tmp/iroh-relay-install/iroh-relay.tar.gz -C /tmp/iroh-relay-install
+  - install -o root -g root -m 0755 /tmp/iroh-relay-install/iroh-relay /usr/local/bin/iroh-relay
+  - rm -rf /tmp/iroh-relay-install
+
+  # --- cert/state directory the systemd unit's ReadWritePaths grants iroh-relay write access to ---
+  - mkdir -p /var/lib/iroh-relay/certs
+  - chown -R iroh-relay:iroh-relay /var/lib/iroh-relay
+
+  - systemctl daemon-reload
+  - systemctl enable --now iroh-relay

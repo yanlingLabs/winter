@@ -1,4 +1,5 @@
 import XCTest
+import os
 import NormaProtocol
 @testable import NormaKit
 
@@ -78,11 +79,18 @@ final class GatewayGateTests: XCTestCase {
     }
 
     /// A gateway whose daemon-facing bridge client speaks to a REAL daemon's socket as `remote`.
-    func realGateway(socketPath: String, remoteToken: String, listener: LoopbackListener) -> Gateway {
-        Gateway(
+    /// `memberPeerIDs` seeds an `InMemoryDirectory` at epoch 1 (SP2b Task 4 — `PairingStub` is
+    /// gone; every test peer must now be a real allowlist member) — defaults to the lone
+    /// `"peer-stub"` every `ScriptedRemoteConn()` default constructs.
+    func realGateway(socketPath: String, remoteToken: String, listener: LoopbackListener, memberPeerIDs: [String] = ["peer-stub"]) -> Gateway {
+        let directory = InMemoryDirectory(records: memberPeerIDs.map {
+            PairRecord(phoneEndpointID: $0, label: "test", createdAt: 0, caps: ["sessions"], pairingEpoch: 1, lastSeenAt: 0)
+        })
+        return Gateway(
             listener: listener,
             daemonFactory: { NormaClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: remoteToken, clientName: "iphone-gateway") },
-            pairing: Gateway.PairingStub()
+            hostID: "host-test",
+            directory: directory
         )
     }
 
@@ -120,7 +128,7 @@ final class GatewayGateTests: XCTestCase {
         let seed = try await seedTwoMessages(socketPath: socketPath, harnessToken: daemon.harnessToken)
 
         let listener = LoopbackListener()
-        let gateway = realGateway(socketPath: socketPath, remoteToken: remoteToken, listener: listener)
+        let gateway = realGateway(socketPath: socketPath, remoteToken: remoteToken, listener: listener, memberPeerIDs: ["peer-A", "peer-B"])
         let runTask = Task { await gateway.run() }
         defer { runTask.cancel() }
 
@@ -251,7 +259,8 @@ final class GatewayGateTests: XCTestCase {
         let gateway = Gateway(
             listener: listener,
             daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
-            pairing: Gateway.PairingStub(),
+            hostID: "host-test",
+            directory: InMemoryDirectory(peerID: "peer-stub"),
             rateLimit: (perSec: 1000, burst: 2),
             now: { 1000.0 }
         )
@@ -302,7 +311,8 @@ final class GatewayGateTests: XCTestCase {
         let gateway = Gateway(
             listener: listener,
             daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
-            pairing: Gateway.PairingStub()
+            hostID: "host-test",
+            directory: InMemoryDirectory(peerID: "peer-stub")
         )
         let runTask = Task { await gateway.run() }
         defer { runTask.cancel() }
@@ -335,10 +345,12 @@ final class GatewayGateTests: XCTestCase {
     func testG5_RevokeCancelsPumpAndRefusesFramesAndReconnect() async throws {
         let daemonTransport = ScriptedTransport()
         let listener = LoopbackListener()
+        let directory = InMemoryDirectory(peerID: "peer-stub")
         let gateway = Gateway(
             listener: listener,
             daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
-            pairing: Gateway.PairingStub()
+            hostID: "host-test",
+            directory: directory
         )
         let runTask = Task { await gateway.run() }
         defer { runTask.cancel() }
@@ -353,6 +365,13 @@ final class GatewayGateTests: XCTestCase {
         let pump = await gateway.pumpTaskForTesting("phone-rev")
         XCTAssertNotNil(pump, "the phone's daemon-event pump should be running before revoke")
 
+        // Production revocation order (`RemoteHost.revoke`): the STORE record goes first, then the
+        // gateway fan-out — mirrored here so the post-revoke reconnect below exercises the real
+        // enforcement point. Since the SP2b whole-branch review fix, the directory miss (not the
+        // gateway's `revoked` set) is what keeps a revoked phone out at the handshake: a member
+        // presenting the current epoch deliberately CLEARS its stale `revoked` entry (re-pair
+        // re-admission), so a gateway-level revoke alone no longer outlasts a still-valid record.
+        directory.remove("peer-stub")
         await gateway.revoke(clientInstanceID: "phone-rev")
         XCTAssertEqual(pump?.isCancelled, true, "revoke must cancel the pumpTask (G5)")
 
@@ -365,14 +384,19 @@ final class GatewayGateTests: XCTestCase {
         try await Task.sleep(nanoseconds: 150_000_000)
         XCTAssertEqual(daemonTransport.sent.count, baselineSent, "a revoked phone must not reach the daemon again")
 
-        // A reconnect by the SAME phone is refused at the handshake and the conn is closed.
+        // T4 review-2 fix 3: a direct per-client revoke must ALSO prune `peerToClients` (the last
+        // path that could leave a dead id mapped, breaking the bounded-by-live-state invariant).
+        let peerClients = await gateway.peerClientsForTesting("peer-stub")
+        XCTAssertFalse(peerClients.contains("phone-rev"), "revoke(clientInstanceID:) must prune the id from peerToClients")
+
+        // A reconnect by the SAME phone is refused at the handshake (as `not_paired` — the
+        // membership gate, the revoked phone's record being gone) and the conn is closed.
         let conn2 = ScriptedRemoteConn()
         listener.simulateConnection(conn2)
         conn2.enqueueInbound(try helloFrame(clientInstanceID: "phone-rev", resumes: []))
         let out2 = try await waitForOutbound(conn2, count: 1)
-        XCTAssertEqual(try decodeEnvelope(out2[0]).kind, .error)
-        let body2 = try JSONDecoder().decode(JSONValue.self, from: try decodeEnvelope(out2[0]).payload)
-        XCTAssertEqual(body2["error"]?["message"]?.stringValue, "pairing revoked")
+        let rejected2 = try JSONDecoder().decode(PairRejected.self, from: out2[0])
+        XCTAssertEqual(rejected2.code, "not_paired", "a revoked phone's reconnect is refused at the membership gate")
         let closeDeadline = Date().addingTimeInterval(2)
         while Date() < closeDeadline, !conn2.isClosed { try await Task.sleep(nanoseconds: 10_000_000) }
         XCTAssertTrue(conn2.isClosed, "a revoked phone's reconnect must be closed")
@@ -480,5 +504,322 @@ final class GatewayGateTests: XCTestCase {
         XCTAssertEqual(Gateway.remoteAllowedMethods.count, 9)
         XCTAssertEqual(Gateway.remoteAllowedMethods, expected,
                        "Swift remote allowlist drifted from the nine — mirror packages/core/src/ipc/server.ts's REMOTE_ALLOWED_METHODS")
+    }
+
+    // MARK: - Eviction: session-map cap (32) bounds phone churn (SP2b Task 4)
+
+    /// 31 phones connect then hang up (evictable — no `currentConn`), a 32nd stays connected, and
+    /// a 33rd trips the cap: the OLDEST disconnected session (phone-0) must be evicted (pump
+    /// cancelled, entry gone) while the still-connected one and the newly-added one both survive.
+    func testEviction_OldestDisconnectedSessionEvicted_ConnectedSessionSurvives() async throws {
+        let daemon = try await RealDaemon.start()
+        defer { daemon.stop() }
+        let listener = LoopbackListener()
+        let gateway = realGateway(socketPath: daemon.socketPath, remoteToken: daemon.remoteToken, listener: listener)
+        let runTask = Task { await gateway.run() }
+        defer { runTask.cancel() }
+
+        for i in 0..<31 {
+            let conn = ScriptedRemoteConn()
+            listener.simulateConnection(conn)
+            conn.enqueueInbound(try helloFrame(clientInstanceID: "phone-\(i)", resumes: []))
+            _ = try await waitForOutbound(conn, count: 1) // helloAck
+            conn.endInbound() // hang up — becomes evictable once `handle`'s loop notices
+        }
+        let firstPump = await gateway.pumpTaskForTesting("phone-0")
+        XCTAssertNotNil(firstPump, "phone-0's session/pump must exist before eviction")
+
+        // A phone that STAYS connected — must survive eviction even though it joins the map at
+        // the same "already near cap" moment as the disconnected ones.
+        let survivorConn = ScriptedRemoteConn()
+        listener.simulateConnection(survivorConn)
+        survivorConn.enqueueInbound(try helloFrame(clientInstanceID: "phone-survivor", resumes: []))
+        _ = try await waitForOutbound(survivorConn, count: 1)
+        // sessions.count is now 32 (phone-0..30 disconnected + phone-survivor connected).
+
+        // Settle grace window (matches this file's own idiom elsewhere): let the 31 disconnects'
+        // async `currentConn = nil` cleanup actually land before tripping eviction with the 33rd
+        // connection — this is a precondition settle, not the eviction assertion itself (that's
+        // the condition-based poll below).
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let conn32 = ScriptedRemoteConn()
+        listener.simulateConnection(conn32)
+        conn32.enqueueInbound(try helloFrame(clientInstanceID: "phone-32", resumes: []))
+        _ = try await waitForOutbound(conn32, count: 1)
+
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, firstPump?.isCancelled != true {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(firstPump?.isCancelled, true, "the oldest disconnected session must be evicted once the cap is hit")
+        let phone0PumpAfter = await gateway.pumpTaskForTesting("phone-0")
+        XCTAssertNil(phone0PumpAfter, "phone-0's session entry must be gone after eviction")
+
+        let survivorPump = await gateway.pumpTaskForTesting("phone-survivor")
+        XCTAssertNotNil(survivorPump, "a still-connected session must never be evicted")
+        let phone32Pump = await gateway.pumpTaskForTesting("phone-32")
+        XCTAssertNotNil(phone32Pump, "the newly-added session must exist")
+    }
+
+    /// T4 review fix 2: `peerToClients` must be pruned in lockstep with eviction. One paired device
+    /// (every `ScriptedRemoteConn()` defaults to peerID "peer-stub") churns 40 distinct
+    /// `clientInstanceID`s — e.g. repeated app reinstalls — each connecting, handshaking, hanging
+    /// up. Eviction keeps `sessions` capped at 32; before the fix, `peerToClients["peer-stub"]`
+    /// still grew to all 40 ever-seen ids. Post-fix it must track LIVE sessions exactly: every id
+    /// in the set has a session, every session's id is in the set, and the count is bounded by the
+    /// cap — never the churn total.
+    func testEviction_PeerToClientsPrunedInLockstep_BoundedForChurningPeer() async throws {
+        let daemon = try await RealDaemon.start()
+        defer { daemon.stop() }
+        let listener = LoopbackListener()
+        let gateway = realGateway(socketPath: daemon.socketPath, remoteToken: daemon.remoteToken, listener: listener)
+        let runTask = Task { await gateway.run() }
+        defer { runTask.cancel() }
+
+        for i in 0..<40 {
+            let conn = ScriptedRemoteConn()
+            listener.simulateConnection(conn)
+            conn.enqueueInbound(try helloFrame(clientInstanceID: "churn-\(i)", resumes: []))
+            _ = try await waitForOutbound(conn, count: 1) // helloAck
+            conn.endInbound() // hang up — evictable once `handle`'s loop notices
+        }
+        // Settle grace window (this file's established idiom): let the trailing disconnects'
+        // async `currentConn = nil` cleanup land before taking the final snapshot.
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let clients = await gateway.peerClientsForTesting("peer-stub")
+        XCTAssertLessThanOrEqual(clients.count, 32, "peerToClients must stay bounded by the session cap, never grow with every ever-seen id")
+        XCTAssertGreaterThan(clients.count, 0, "sanity: the live sessions' ids are still mapped")
+
+        // The set must equal the LIVE session set exactly — membership both ways.
+        for i in 0..<40 {
+            let id = "churn-\(i)"
+            let hasSession = await gateway.pumpTaskForTesting(id) != nil
+            XCTAssertEqual(clients.contains(id), hasSession,
+                           "\(id): peerToClients membership must track its session's existence exactly (session: \(hasSession))")
+        }
+    }
+
+    // MARK: - Eviction re-entrancy (T4 review-2 fix 1): the close-await window
+
+    /// Parks the FIRST eviction inside `evictIfNeeded`'s close-await window (via the gateway's
+    /// `#if DEBUG` eviction gate — a deterministic stand-in for `close()`'s own suspension) and
+    /// passes every later one through. Continuation-based both ways — no sleeps: the test awaits
+    /// `waitUntilParked()` to know eviction is genuinely inside the window, and eviction awaits
+    /// the test's `release()`. Same `OSAllocatedUnfairLock` + resume-outside-the-lock conventions
+    /// as `ScriptedRemoteConn`.
+    private final class EvictionGate: @unchecked Sendable {
+        private struct State {
+            var firstEvictedID: String?
+            var fired = false
+            var parkedWaiter: CheckedContinuation<String, Never>?
+            var release: CheckedContinuation<Void, Never>?
+            var released = false
+        }
+        private let state = OSAllocatedUnfairLock(initialState: State())
+
+        /// The gateway-side half — install as the eviction gate.
+        func onEvict(_ id: String) async {
+            let (shouldPark, waiter): (Bool, CheckedContinuation<String, Never>?) = state.withLock { s in
+                guard !s.fired else { return (false, nil) }
+                s.fired = true
+                s.firstEvictedID = id
+                let w = s.parkedWaiter
+                s.parkedWaiter = nil
+                return (true, w)
+            }
+            waiter?.resume(returning: id)
+            guard shouldPark else { return }
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                let releaseNow: Bool = state.withLock { s in
+                    if s.released { return true }
+                    s.release = cont
+                    return false
+                }
+                if releaseNow { cont.resume() }
+            }
+        }
+
+        /// The test-side half — resolves (with the evicted id) once the first eviction is parked.
+        func waitUntilParked() async -> String {
+            await withCheckedContinuation { (cont: CheckedContinuation<String, Never>) in
+                let already: String? = state.withLock { s in
+                    if s.fired { return s.firstEvictedID }
+                    s.parkedWaiter = cont
+                    return nil
+                }
+                if let already { cont.resume(returning: already) }
+            }
+        }
+
+        func release() {
+            let cont: CheckedContinuation<Void, Never>? = state.withLock { s in
+                s.released = true
+                let c = s.release
+                s.release = nil
+                return c
+            }
+            cont?.resume()
+        }
+    }
+
+    /// T4 review-2 fix 1, both hazards, raced deterministically into the close-await window:
+    ///   (a) a same-id reconnect landing WHILE its session is being evicted must mint a FRESH,
+    ///       fully-functional session (helloAck AND a live daemon round trip AND an alive pump) —
+    ///       pre-fix (entry removed only AFTER the close-await) the reconnect cache-hit the
+    ///       half-torn-down object: cancelled pump, closing daemon client, then eviction's resume
+    ///       removed the entry despite the now-live conn;
+    ///   (b) a LATER eviction candidate that acquires a live connection while an earlier
+    ///       iteration is suspended must be SKIPPED (the snapshot's `currentConn == nil` filter is
+    ///       stale by then) — a live-conn session is never evicted.
+    func testEviction_SameIDReconnectDuringCloseGetsFunctionalSession_LiveConnNeverEvicted() async throws {
+        let daemon = try await RealDaemon.start()
+        defer { daemon.stop() }
+        let listener = LoopbackListener()
+        let gateway = realGateway(socketPath: daemon.socketPath, remoteToken: daemon.remoteToken, listener: listener)
+        let runTask = Task { await gateway.run() }
+        defer { runTask.cancel() }
+
+        // Fill to cap with 32 disconnected sessions — phone-0 oldest, phone-1 second-oldest.
+        for i in 0..<32 {
+            let conn = ScriptedRemoteConn()
+            listener.simulateConnection(conn)
+            conn.enqueueInbound(try helloFrame(clientInstanceID: "phone-\(i)", resumes: []))
+            _ = try await waitForOutbound(conn, count: 1) // helloAck
+            conn.endInbound()
+        }
+        // Settle grace window (this file's established idiom): a PRECONDITION — let every
+        // disconnect's async `currentConn = nil` land so all 32 are genuinely evictable before
+        // the race below starts. The race itself is entirely continuation-based, no sleeps.
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let gate = EvictionGate()
+        await gateway.setEvictionGateForTesting { id in await gate.onEvict(id) }
+
+        // A NEW phone id trips eviction; its own handshake stays parked inside the gate with it.
+        let trigger = ScriptedRemoteConn()
+        listener.simulateConnection(trigger)
+        trigger.enqueueInbound(try helloFrame(clientInstanceID: "phone-new", resumes: []))
+
+        // Eviction is now provably inside the close-await window: phone-0's entry is REMOVED
+        // (and peer map pruned, pump cancelled) but its daemon client is not yet closed.
+        let parkedID = await gate.waitUntilParked()
+        XCTAssertEqual(parkedID, "phone-0", "the oldest disconnected candidate is evicted first")
+
+        // Hazard (a): phone-0 reconnects INSIDE the window → cache miss → a fresh session.
+        let phone0Reconn = ScriptedRemoteConn()
+        listener.simulateConnection(phone0Reconn)
+        phone0Reconn.enqueueInbound(try helloFrame(clientInstanceID: "phone-0", resumes: []))
+        let out0 = try await waitForOutbound(phone0Reconn, count: 1)
+        XCTAssertEqual(try decodeEnvelope(out0[0]).kind, .helloAck)
+        // FUNCTIONAL, not just acked: a live rpc must round-trip against the real daemon — the
+        // pre-fix stale ride fails exactly here (its daemon client is the one being closed).
+        phone0Reconn.enqueueInbound(try rpcRequestFrame(id: 1, method: "session.list", params: nil))
+        let out0b = try await waitForOutbound(phone0Reconn, count: 2)
+        let listResp = try decodeEnvelope(out0b[1])
+        XCTAssertEqual(listResp.kind, .rpcResponse)
+        let listBody = try JSONDecoder().decode(JSONValue.self, from: listResp.payload)
+        XCTAssertNil(listBody["error"], "the reconnect's session must reach the daemon — a stale ride's closing client errors here")
+        let pump0 = await gateway.pumpTaskForTesting("phone-0")
+        XCTAssertNotNil(pump0, "the fresh session must have a pump")
+        XCTAssertEqual(pump0?.isCancelled, false, "…an ALIVE one, not the evicted session's cancelled pump")
+
+        // Hazard (b): phone-1 — still in the (stale) candidates snapshot — acquires a live conn
+        // while eviction is parked. When eviction resumes it must SKIP phone-1, not evict it.
+        let phone1Reconn = ScriptedRemoteConn()
+        listener.simulateConnection(phone1Reconn)
+        phone1Reconn.enqueueInbound(try helloFrame(clientInstanceID: "phone-1", resumes: []))
+        _ = try await waitForOutbound(phone1Reconn, count: 1) // helloAck riding its intact session
+
+        gate.release()
+
+        // Eviction resumes: closes phone-0's stale client, skips phone-1 (live conn), evicts the
+        // next disconnected candidate (phone-2) to get back under cap, and phone-new's own
+        // handshake completes. Condition-based waits only.
+        let outTrigger = try await waitForOutbound(trigger, count: 1)
+        XCTAssertEqual(try decodeEnvelope(outTrigger[0]).kind, .helloAck, "the triggering phone's handshake completes after eviction")
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline {
+            if await gateway.pumpTaskForTesting("phone-2") == nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let phone2Pump = await gateway.pumpTaskForTesting("phone-2")
+        XCTAssertNil(phone2Pump, "with phone-1 skipped, the next disconnected candidate (phone-2) is evicted instead")
+
+        let pump1 = await gateway.pumpTaskForTesting("phone-1")
+        XCTAssertNotNil(pump1, "a candidate that went live mid-eviction must never be evicted")
+        XCTAssertEqual(pump1?.isCancelled, false)
+        XCTAssertFalse(phone1Reconn.isClosed, "…and its live connection is untouched")
+
+        await gateway.setEvictionGateForTesting(nil)
+    }
+
+    // MARK: - Re-pair after revoke (SP2b whole-branch review): stale revocation must not outlive it
+
+    /// SP2b whole-branch review (Important): the `revoked` set never cleared, so a revoked-then-
+    /// RE-PAIRED phone reconnecting with its stable `clientInstanceID` was refused "pairing
+    /// revoked" forever — despite being a current directory member presenting the current epoch —
+    /// until an app reinstall minted a new id. (Reachable in production because the gateway
+    /// survives a revoke whenever ANOTHER device is still paired — `RemoteHost.stopIfIdle` won't
+    /// tear it down — so the set outlives the re-pair ceremony.) Fail-closed, but silently breaks
+    /// re-pair for the multi-device case.
+    ///
+    /// Contract proven here, both directions:
+    ///   - a revoked peer that was NOT re-added to the directory stays refused (`not_paired` at
+    ///     the membership gate — SP2a gate G5's production shape, NOT weakened);
+    ///   - a revoked peer that WAS re-paired (directory record back, epoch bumped) and presents
+    ///     the CURRENT epoch is re-admitted under the SAME `clientInstanceID`.
+    func testRepair_RevokedThenRepairedPeerSameClientInstanceID_IsAdmitted_UnrepairedStaysRefused() async throws {
+        let daemon = try await RealDaemon.start()
+        defer { daemon.stop() }
+        let directory = InMemoryDirectory(peerID: "peer-X", epoch: 1)
+        let listener = LoopbackListener()
+        let gateway = Gateway(
+            listener: listener,
+            daemonFactory: { NormaClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway") },
+            hostID: "host-test",
+            directory: directory
+        )
+        let runTask = Task { await gateway.run() }
+        defer { runTask.cancel() }
+
+        // Initial handshake: member @epoch1, stable clientInstanceID "X".
+        let conn1 = ScriptedRemoteConn(peerID: "peer-X")
+        listener.simulateConnection(conn1)
+        conn1.enqueueInbound(try helloFrame(clientInstanceID: "X", resumes: [], epoch: 1))
+        let out1 = try await waitForOutbound(conn1, count: 1)
+        XCTAssertEqual(try decodeEnvelope(out1[0]).kind, .helloAck)
+
+        // Revoke, production order (RemoteHost.revoke): store record removed FIRST, then the
+        // gateway fan-out tears down the live footprint.
+        directory.remove("peer-X")
+        await gateway.revoke(peerID: "peer-X")
+        try await waitForClosed(conn1)
+
+        // STILL revoked (no re-pair): the reconnect dies at the membership gate as not_paired —
+        // the directory miss, not the `revoked` set, is what keeps a revoked phone out.
+        let conn2 = ScriptedRemoteConn(peerID: "peer-X")
+        listener.simulateConnection(conn2)
+        conn2.enqueueInbound(try helloFrame(clientInstanceID: "X", resumes: [], epoch: 1))
+        let out2 = try await waitForOutbound(conn2, count: 1)
+        let rejected = try JSONDecoder().decode(PairRejected.self, from: out2[0])
+        XCTAssertEqual(rejected.code, "not_paired", "a revoked, not-re-paired phone is refused at the membership gate")
+        try await waitForClosed(conn2)
+
+        // RE-PAIR: the ceremony's `store.add` puts the record back with the epoch BUMPED (what
+        // `PairingManager.confirm` does after a revoke) — simulated directly on the directory.
+        directory.set(PairRecord(phoneEndpointID: "peer-X", label: "re-paired", createdAt: 0, caps: ["sessions"], pairingEpoch: 2, lastSeenAt: 0))
+
+        // The re-paired phone reconnects: SAME clientInstanceID "X", CURRENT epoch 2 → must be
+        // ADMITTED (ServerHello), not refused "pairing revoked" by the stale set.
+        let conn3 = ScriptedRemoteConn(peerID: "peer-X")
+        listener.simulateConnection(conn3)
+        conn3.enqueueInbound(try helloFrame(clientInstanceID: "X", resumes: [], epoch: 2))
+        let out3 = try await waitForOutbound(conn3, count: 1)
+        let env3 = try decodeEnvelope(out3[0], epoch: 2)
+        XCTAssertEqual(env3.kind, .helloAck, "a re-paired member presenting the CURRENT epoch must be re-admitted — a stale revocation must not outlive the re-pair")
+        let serverHello = try JSONDecoder().decode(ServerHello.self, from: env3.payload)
+        XCTAssertEqual(serverHello.hostID, "host-test")
     }
 }

@@ -31,6 +31,9 @@ public final class IrohListener: RemoteListener, @unchecked Sendable {
     /// The bound iroh endpoint. Retained for the listener's whole lifetime.
     private let endpoint: Endpoint
     private let acceptTask: Task<Void, Never>
+    /// Tracks the accept loop's per-incoming handshake sub-tasks (SP2b Task 1) so `stop()` can
+    /// structurally cancel every still-running one instead of leaving them to finish unattended.
+    private let acceptSubTasks = TaskBag()
 
     /// Dev/test hook: the address a dialer uses to reach this listener (id + bound
     /// address). Not part of the `RemoteListener` protocol — production discovery goes
@@ -79,17 +82,25 @@ public final class IrohListener: RemoteListener, @unchecked Sendable {
         self.connections = AsyncStream { c = $0 }
         self.cont = c
         let cont = c!
+        let bag = acceptSubTasks
         // The accept loop captures only Sendable values (endpoint, alpn bytes, the
-        // continuation) — never `self` — so it needs no init-completion ordering.
+        // continuation, the task bag) — never `self` — so it needs no init-completion ordering.
         self.acceptTask = Task {
             await IrohListener.acceptLoop(
-                endpoint: endpoint, alpn: alpn, cont: cont, maxFrameBytes: maxFrameBytes
+                endpoint: endpoint, alpn: alpn, cont: cont, maxFrameBytes: maxFrameBytes, bag: bag
             )
         }
     }
 
     public func stop() {
         acceptTask.cancel()
+        // SP2b Task 1: cancel every in-flight per-incoming handshake sub-task too. This can't
+        // interrupt an in-flight uniffi call (no cancellation handler — closing the endpoint
+        // below is what actually unblocks those), but it does make teardown structured: combined
+        // with `accept`'s `Task.isCancelled` guard at the yield site, it prevents a straggler
+        // handshake that finishes AFTER `stop()` from still `cont.yield`ing a `RemoteConn` into a
+        // connections stream that has already been told to finish.
+        acceptSubTasks.cancelAll()
         cont.finish()
         // Close the endpoint off the caller's thread (Endpoint.close is async). Closing is
         // also what actually unblocks the accept loop: `acceptNext()` ignores Swift task
@@ -113,17 +124,23 @@ public final class IrohListener: RemoteListener, @unchecked Sendable {
         endpoint: Endpoint,
         alpn: Data,
         cont: AsyncStream<RemoteConn>.Continuation,
-        maxFrameBytes: Int
+        maxFrameBytes: Int,
+        bag: TaskBag
     ) async {
         while !Task.isCancelled {
             guard let incoming = await endpoint.acceptNext() else { break } // endpoint closed
             // Handshake each incoming on its own task so one slow/hostile peer can't stall
-            // acceptance of the next. The task self-completes after yielding (or dropping).
-            Task {
+            // acceptance of the next. Tracked in `bag` (SP2b Task 1) so `stop()` can cancel any
+            // still-running stragglers structurally; the task removes its own entry once
+            // `accept` returns (or drops), whichever comes first.
+            let id = UUID()
+            let task = Task {
                 await IrohListener.accept(
                     incoming, alpn: alpn, cont: cont, maxFrameBytes: maxFrameBytes
                 )
+                bag.remove(id)
             }
+            bag.insert(id, task: task)
         }
         cont.finish()
     }
@@ -146,11 +163,50 @@ public final class IrohListener: RemoteListener, @unchecked Sendable {
             // allowlist / pairing-epoch check goes at this point.
             let bi = try await conn.acceptBi()
             let peerID = conn.remoteId().description
-            cont.yield(IrohConn(connection: conn, bi: bi, peerID: peerID, maxFrameBytes: maxFrameBytes))
+            // SP2b Task 1: a `stop()` that raced ahead of this handshake finishing must not let
+            // this straggler hand a fresh RemoteConn to a connections stream already told to
+            // finish — dropping `conn`/`bi` here (never wrapped in an `IrohConn`) tears the
+            // just-accepted QUIC connection down via the same ARC-drop mechanism the LIFETIME
+            // note on `IrohConn` documents, which is exactly the desired outcome for a
+            // connection nobody will ever consume.
+            if !Task.isCancelled {
+                cont.yield(IrohConn(connection: conn, bi: bi, peerID: peerID, maxFrameBytes: maxFrameBytes))
+            }
         } catch {
             // Handshake failed, peer went away, or ALPN was refused — drop silently. The
             // dev-stub has no reporting surface; SP2b's pairing layer will observe rejects.
         }
+    }
+}
+
+/// Tracks the accept loop's per-incoming handshake sub-tasks (SP2b Task 1). A small,
+/// self-contained bookkeeping type — separate from `IrohListener` itself — so its lock is never
+/// held across an `await` (SP2a gate G6): every method here is a synchronous critical section.
+private final class TaskBag: @unchecked Sendable {
+    private let tasks = OSAllocatedUnfairLock<[UUID: Task<Void, Never>]>(initialState: [:])
+
+    /// Registers `task` under `id`. `id` is minted by the caller BEFORE the task is created (so
+    /// the task's own body can capture it by value to remove itself) — a task that races ahead
+    /// and calls `remove(id)` before this runs is harmless: removing an absent key is a no-op,
+    /// and the (already-finished) task just sits in the bag until `cancelAll()` sweeps it, where
+    /// cancelling an already-completed task is itself a no-op.
+    func insert(_ id: UUID, task: Task<Void, Never>) {
+        tasks.withLock { $0[id] = task }
+    }
+
+    func remove(_ id: UUID) {
+        _ = tasks.withLock { $0.removeValue(forKey: id) }
+    }
+
+    /// Cancels every currently-tracked task and empties the bag. Safe to call from `stop()`
+    /// concurrently with tasks still removing themselves — the lock serializes both.
+    func cancelAll() {
+        let all = tasks.withLock { t -> [Task<Void, Never>] in
+            let values = Array(t.values)
+            t.removeAll()
+            return values
+        }
+        for task in all { task.cancel() }
     }
 }
 
@@ -162,6 +218,17 @@ public final class IrohListener: RemoteListener, @unchecked Sendable {
 /// retained for the connection's whole life — dropping the Swift wrapper drops the
 /// underlying Rust QUIC connection and sends an implicit application-close, which would
 /// tear the link down mid-flight. They are held as `let`s here for exactly that reason.
+///
+/// SEND-BEFORE-RECEIVE (SP2b Task 4 finding, confirmed empirically): on the ACCEPTING side of a
+/// freshly-opened bidi stream, `send(_:)` does not reliably flush until the OPENING side (the
+/// phone) has transmitted at least one byte on that stream — a `send()` attempted first, before
+/// the phone has sent anything at all, can hang indefinitely (reproduced via a throwaway
+/// diagnostic in `IrohListenerTests` during this task; not something NormaKit's Swift code
+/// controls). Every response path in this codebase already reads the phone's first frame before
+/// ever sending back (`Gateway.handle`, `PairingManager.handleConnection`,
+/// `PairingRouter`'s `sendNotPairedRejection`) for the wire protocol's own "phone always speaks
+/// first" convention — which happens to ALSO be what makes this safe. Any FUTURE code on this
+/// type that wants to speak before reading anything must account for this.
 public final class IrohConn: RemoteConn, @unchecked Sendable {
     /// The authenticated remote EndpointID string (`Connection.remoteId()`), not a stub.
     public let peerID: String
@@ -226,18 +293,22 @@ public final class IrohConn: RemoteConn, @unchecked Sendable {
         // write to actually flush before gracefully finishing the stream; only THEN is the
         // connection torn down. Fire-and-forget (this method stays synchronous, matching
         // `RemoteConn.close()`'s contract) — mirrors `IrohListener.stop()`'s own async-cleanup idiom.
+        //
+        // SP2b Task 1 fix (the SP2a whole-branch review's BINDING gate on this listener): delivery
+        // is now ACKNOWLEDGED, not merely hoped for. `finish()` returning only means the local
+        // send-stream FIN was queued with iroh's internal QUIC driver, not that it (or any data
+        // just ahead of it) has actually reached the peer — a probabilistic grace sleep here
+        // (the pre-fix approach) gives the driver's background task A chance to flush before the
+        // abrupt connection-level reset, but is not a guarantee: on a slower/loaded transport
+        // (real network, not fast loopback) the sleep can still lose the race. `finishAndAwaitAcked`
+        // chains onto the SAME write queue and then awaits `stopped()`, which resolves only once
+        // the peer has genuinely acked the finished stream (bounded by a 2s cap so a dead/hung peer
+        // can't wedge teardown forever) — so `connection.close()` below runs strictly after
+        // ack-or-timeout, never racing ahead of the flush.
         let writer = self.writer
         let connection = self.connection
         Task {
-            await writer.finish()
-            // `finish()` returning only means the local send-stream FIN was queued with iroh's
-            // internal QUIC driver, not that it (or any data just ahead of it) has actually been
-            // flushed onto the wire and observed by the peer — an immediate `close()` right after
-            // can still race ahead of that flush (empirically: `finish()` alone cut the drop rate
-            // but did not eliminate it). A short grace delay gives the driver's background task a
-            // real chance to run and push the bytes out over the (loopback-fast) transport before
-            // the abrupt connection-level reset.
-            try? await Task.sleep(for: .milliseconds(100))
+            await writer.finishAndAwaitAcked(timeout: .seconds(2))
             try? connection.close(errorCode: 0, reason: Data())
         }
     }
@@ -287,11 +358,11 @@ private actor SendSerializer {
         _ = try? await current.value
     }
 
-    /// Gracefully finishes the underlying send stream, chained onto the SAME queue as `write(_:)`
-    /// — so a write already queued (or in flight) when `close()` calls this is guaranteed to
-    /// actually reach the peer before the stream signals "no more data" (Task 4 fix — see
-    /// `IrohConn.close()`'s own doc comment for the bug this closes).
-    func finish() async {
+    /// Chains onto the same write queue: finish the stream, then await the peer's
+    /// acknowledgement (`stopped()` resolves nil once all data is acked / the stream is
+    /// fully finished). Bounded by `timeout` via a first-wins unstructured race —
+    /// uniffi futures ignore Swift cancellation, so no task group.
+    func finishAndAwaitAcked(timeout: Duration) async {
         let prev = tail
         let current = Task { [send] in
             _ = try? await prev?.value
@@ -299,5 +370,15 @@ private actor SendSerializer {
         }
         tail = current
         _ = try? await current.value
+        // Race stopped() against the deadline; first winner resolves the continuation.
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            let state = OSAllocatedUnfairLock(initialState: false)
+            let resume = { if state.withLock({ done -> Bool in
+                guard !done else { return false }; done = true; return true
+            }) { cont.resume() } }
+            let send = self.send
+            Task { _ = try? await send.stopped(); resume() }
+            Task { try? await Task.sleep(for: timeout); resume() }
+        }
     }
 }

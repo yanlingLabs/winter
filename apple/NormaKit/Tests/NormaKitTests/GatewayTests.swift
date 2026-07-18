@@ -18,7 +18,8 @@ final class GatewayTests: XCTestCase {
         Gateway(
             listener: listener,
             daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
-            pairing: Gateway.PairingStub()
+            hostID: "host-test",
+            directory: InMemoryDirectory(peerID: "peer-stub")
         )
     }
 
@@ -205,7 +206,7 @@ final class GatewayTests: XCTestCase {
         XCTAssertEqual(oversizeError.kind, .error)
         XCTAssertFalse(conn.isClosed, "an oversize frame is recoverable — the connection must stay open")
 
-        // Stale epoch: encoded with a DIFFERENT pairingEpoch than the gateway's PairingStub (1).
+        // Stale epoch: encoded with a DIFFERENT pairingEpoch than "peer-stub"'s directory record (1).
         let staleFrame = encodeEnvelope(
             kind: .rpcRequest,
             payload: try JSONEncoder().encode(JSONValue.object(["jsonrpc": .string("2.0"), "id": .number(2), "method": .string("session.list")])),
