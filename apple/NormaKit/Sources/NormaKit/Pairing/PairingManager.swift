@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import Security
 import NormaProtocol
+import NormaSessionKit
 
 /// What the Mac's pairing UI (the menu-bar app's QR sheet) reacts to. `PairingManager` is the
 /// sole producer; the app never touches ceremony state directly.
@@ -166,7 +167,7 @@ public actor PairingManager {
             orphaned.timeoutTask?.cancel()
             pending = nil
             Task { [eventsContinuation] in
-                await self.reject(orphaned.conn, code: "expired")
+                await self.reject(orphaned.conn, code: "expired", pairID: orphaned.pairID)
                 eventsContinuation.yield(.failed(reason: "expired"))
             }
         }
@@ -215,7 +216,8 @@ public actor PairingManager {
         guard let frame = await iterator.next() else { return } // conn closed before sending anything
 
         guard let request = try? JSONDecoder().decode(PairRequest.self, from: frame) else {
-            await reject(conn, code: "bad_request")
+            // No pairID to carry — the frame never decoded far enough to trust one.
+            await reject(conn, code: "bad_request", pairID: nil)
             return
         }
 
@@ -227,13 +229,13 @@ public actor PairingManager {
         else {
             // Covers a missing offer, a pairID for a since-superseded/expired/already-consumed
             // offer, and a rate-limited-dead offer — the phone can't distinguish these anyway.
-            await reject(conn, code: "expired")
+            await reject(conn, code: "expired", pairID: request.pairID)
             eventsContinuation.yield(.failed(reason: "expired"))
             return
         }
 
         guard request.caps == Self.sessionCaps else {
-            await reject(conn, code: "bad_request")
+            await reject(conn, code: "bad_request", pairID: request.pairID)
             return
         }
 
@@ -249,7 +251,7 @@ public actor PairingManager {
             // Mutate BEFORE the first `await` below — the offer's failCount/kill must be visible
             // to any connection that races in while `reject` is suspended sending/closing.
             offer = rateLimited ? nil : currentOffer
-            await reject(conn, code: "bad_proof")
+            await reject(conn, code: "bad_proof", pairID: request.pairID)
             eventsContinuation.yield(.failed(reason: rateLimited ? "rate_limited" : "bad_proof"))
             return
         }
@@ -292,14 +294,14 @@ public actor PairingManager {
                 phoneEndpointID: p.phoneEndpointID, label: label, caps: p.caps, at: clock()
             )
         } catch PairingStoreError.capReached {
-            await reject(p.conn, code: "cap_reached")
+            await reject(p.conn, code: "cap_reached", pairID: p.pairID)
             eventsContinuation.yield(.failed(reason: "cap_reached"))
             return
         } catch {
             // Any non-cap persistence failure (the store rolled back its in-memory state, so
             // nothing is live) — a distinct code, NOT "cap_reached": the phone/UI must not tell
             // the user to un-pair a device when the disk write simply failed.
-            await reject(p.conn, code: "internal_error")
+            await reject(p.conn, code: "internal_error", pairID: p.pairID)
             eventsContinuation.yield(.failed(reason: "internal_error"))
             return
         }
@@ -321,7 +323,7 @@ public actor PairingManager {
         p.timeoutTask?.cancel()
         pending = nil
         offer = nil // terminal: drop the consumed offer's pairSecret with it
-        await reject(p.conn, code: "denied")
+        await reject(p.conn, code: "denied", pairID: p.pairID)
         eventsContinuation.yield(.failed(reason: "denied"))
     }
 
@@ -348,7 +350,7 @@ public actor PairingManager {
             if clock() >= deadline {
                 pending = nil
                 offer = nil // terminal: drop the consumed offer's pairSecret with it
-                await reject(p.conn, code: "timeout")
+                await reject(p.conn, code: "timeout", pairID: p.pairID)
                 eventsContinuation.yield(.failed(reason: "timeout"))
                 return
             }
@@ -357,8 +359,8 @@ public actor PairingManager {
 
     // MARK: - Wire helpers
 
-    private func reject(_ conn: RemoteConn, code: String) async {
-        let message = PairRejected(type: "pair_rejected", code: code)
+    private func reject(_ conn: RemoteConn, code: String, pairID: Data?) async {
+        let message = PairRejected(type: "pair_rejected", code: code, pairID: pairID)
         if let payload = try? JSONEncoder().encode(message) {
             await conn.send(payload)
         }

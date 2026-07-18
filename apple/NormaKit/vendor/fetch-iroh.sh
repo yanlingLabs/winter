@@ -41,3 +41,20 @@ unzip -q "${TMP_DIR}/IrohLib.xcframework.zip" -d "${TMP_DIR}/extract"
 # `IrohLib.xcframework` here to match this repo's Package.swift path.
 mv "${TMP_DIR}/extract/Iroh.xcframework" "${DEST}"
 echo "Unpacked to ${DEST}"
+
+# Informational only: sanity-check that `swift package compute-checksum` runs in this
+# environment and show its shape. This is NOT the checksum that belongs in Package.swift and
+# will NOT match it (or even match itself between separate fetches): `ditto -c -k --keepParent`
+# embeds each file's mtime in the zip, so re-zipping a freshly re-downloaded/re-unpacked
+# xcframework produces different bytes — and a different checksum — every time, even though
+# the xcframework's actual content is identical. The authoritative checksum is the one
+# scripts/publish-iroh-xcframework.ts computes and prints from the exact zip it uploads;
+# that's the only value that should ever go in Package.swift's `.binaryTarget(checksum:)`.
+if command -v swift >/dev/null 2>&1; then
+  REZIP="${TMP_DIR}/republish-preview.zip"
+  ditto -c -k --keepParent "${DEST}" "${REZIP}"
+  SPM_CHECKSUM="$(cd "${SCRIPT_DIR}/.." && swift package compute-checksum "${REZIP}")"
+  echo "SPM checksum preview (will differ from Package.swift's pinned value — see comment above): ${SPM_CHECKSUM}"
+else
+  echo "note: 'swift' not found — skipping SPM checksum preview."
+fi

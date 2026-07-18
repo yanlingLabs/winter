@@ -1,6 +1,7 @@
 import XCTest
 import os
 import NormaProtocol
+import NormaSessionKit
 import IrohLib
 @testable import NormaKit
 

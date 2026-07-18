@@ -132,10 +132,18 @@ function buildLeasePolicy(deps: {
     // ask: register the wait BEFORE emitting approval_requested (the append is synchronous, so a
     // watcher that resolves as soon as it observes the event would otherwise race broker.wait()).
     const callId = `lease_${randomBytes(6).toString("hex")}`;
-    const waiting = deps.approvals.wait(sessionId, callId, deps.timeoutMs ?? 5 * 60_000);
+    const timeoutMs = deps.timeoutMs ?? 5 * 60_000;
+    // issuedAt/expiresAt threaded to BOTH the broker (approval.list) and the event (SP3 T4b) — see
+    // engine.ts's requestApproval for the same one-compute-thread-both pattern.
+    const issuedAt = Date.now();
+    const expiresAt = issuedAt + timeoutMs;
+    const summary = `Session ${sessionId} requests ${cls}`;
+    const waiting = deps.approvals.wait(sessionId, callId, timeoutMs, {
+      toolName: "peripheral.lease", summary, issuedAt, expiresAt,
+    });
     const event: NewSessionEvent = {
       type: "approval_requested", sessionId, threadId: "main", callId,
-      toolName: "peripheral.lease", summary: `Session ${sessionId} requests ${cls}`,
+      toolName: "peripheral.lease", summary, issuedAt, expiresAt,
     };
     try {
       deps.hub.append(sessionId, event);

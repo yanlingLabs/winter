@@ -3,6 +3,7 @@ import os
 import IrohLib
 import NormaKit
 import NormaProtocol
+import NormaSessionKit
 
 /// SP2b Task 5: the dev fake-phone CLI — closes the pairing loop end-to-end (scan a QR, run the
 /// ceremony, optionally attach and stream) without any iOS code. `PhonePairingClient` (this
@@ -125,22 +126,30 @@ func withTimeout<T>(_ seconds: Double, _ context: String = "", _ op: @escaping @
 }
 
 // MARK: - NDJSON event printing (the `--attach` stream)
+//
+// SP3 T5: prints `NormaSessionClient`'s already-decoded `SessionEnvelope`/`SessionEvent.JSONValue`
+// output — the CLI no longer sees a raw `WireEnvelope` at all (that framing is entirely the
+// client's own concern now).
 
 private struct NDJSONLine: Encodable {
     let kind: String
     let seq: Int?
     let sessionID: String?
     let streamID: String?
-    let payload: JSONValue?
+    let payload: SessionEvent.JSONValue
 }
 
-func printFrame(_ envelope: WireEnvelope) {
-    let payload = try? JSONDecoder().decode(JSONValue.self, from: envelope.payload)
+func printEnvelope(_ envelope: SessionEnvelope) {
     let line = NDJSONLine(
         kind: envelope.kind.rawValue, seq: envelope.seq,
-        sessionID: envelope.sessionID, streamID: envelope.streamID, payload: payload
+        sessionID: envelope.sessionID, streamID: envelope.streamID, payload: envelope.json
     )
     guard let data = try? JSONEncoder().encode(line), let text = String(data: data, encoding: .utf8) else { return }
+    out(text)
+}
+
+func printJSON(_ value: SessionEvent.JSONValue) {
+    guard let data = try? JSONEncoder().encode(value), let text = String(data: data, encoding: .utf8) else { return }
     out(text)
 }
 
@@ -159,80 +168,45 @@ Task {
 
         guard attach else { return }
 
-        // ClientHello + WireEnvelope attach dance — duplicated (not imported; test targets can't
-        // be imported from an executable target) from `PairingE2ETests.swift`/`IrohE2ETests.swift`'s
-        // own `PhoneConn` dial/hello/rpcRequest plumbing. Reconnects with the SAME iroh identity
-        // (`endpointSecret`) `pair()` just used — a real phone's identity is stable across
-        // reconnects, and the ceremony connection above is already closed (single-use).
+        // SP3 T5: the reconnect + attach/hello/session.list dance is no longer hand-rolled here —
+        // `IrohDialer.dial` (Task 2) resolves the Mac and opens the bidi stream (it has its own
+        // internal timeout; no `withTimeout` wrapper needed at this call site), and
+        // `NormaSessionClient` (Task 4/4b) drives the ClientHello/resume/idempotency/approval wire
+        // protocol. This is the SAME production client the future iOS app links — this file is
+        // back to being argv parsing + NDJSON printing, nothing more. Reconnects with the SAME
+        // iroh identity (`endpointSecret`) `pair()` just used — a real phone's identity is stable
+        // across reconnects, and the ceremony connection above is already closed (single-use).
         let phoneEndpointID = try SecretKey.fromBytes(bytes: endpointSecret).public().description
-        // Direct connections only — same reasoning as `PhonePairingClient.pair`'s own dial:
-        // `qr.relayConfig.config.relays` is cargo for a future real relay fleet (SP2b T6), not
-        // necessarily live/dialable today, and actually binding through it can hang.
-        let dialer = try await Endpoint.bind(options: EndpointOptions(
-            preset: presetN0(), secretKey: endpointSecret, relayMode: .disabled()
-        ))
-        let macAddr = try EndpointAddr(
-            id: EndpointId.fromString(s: qr.macEndpointID), relayUrl: nil, addresses: []
+        // Direct connections only (`relayURLs: []`) — same reasoning as `PhonePairingClient.pair`'s
+        // own dial: `qr.relayConfig.config.relays` is cargo for a future real relay fleet (SP2b
+        // T6), not necessarily live/dialable today, and actually binding through it can hang.
+        let conn = try await IrohDialer.dial(
+            secret: endpointSecret, macEndpointID: qr.macEndpointID, alpn: qr.alpn, relayURLs: []
         )
-        // Bounded (T5 review, minor): uniffi's generated async calls ignore Swift task
-        // cancellation, so an unreachable Mac would otherwise hang this dial forever — same
-        // first-wins `withTimeout` idiom the ceremony dial inside `PhonePairingClient.pair`
-        // already uses.
-        let (conn, bi): (Connection, BiStream) = try await withTimeout(20, "attach reconnect dial") {
-            let conn = try await dialer.connect(addr: macAddr, alpn: Data(qr.alpn.utf8))
-            guard conn.remoteId().description == qr.macEndpointID else {
-                try? conn.close(errorCode: 0, reason: Data())
-                throw FakePhoneError(message: "mac identity mismatch on attach reconnect")
-            }
-            let bi = try await conn.openBi()
-            return (conn, bi)
-        }
-        _ = conn // retained for the connection's whole lifetime (IrohConn's own LIFETIME note)
-        let send = bi.send()
-        let recv = bi.recv()
-        var buffer = Data()
 
-        func sendEnvelope(kind: WireKind, payload: Data) async throws {
-            let envelope = WireEnvelope(
-                v: 1, pairingEpoch: accepted.epoch, hostID: phoneEndpointID, sessionID: nil,
-                streamID: nil, seq: nil, kind: kind, timestamp: Int(Date().timeIntervalSince1970), payload: payload
-            )
-            try await send.writeAll(buf: LengthPrefix.wrap(try WireFrame.encode(envelope)))
-        }
-
-        func readFrame() async throws -> WireEnvelope {
-            while true {
-                if let frame = try LengthPrefix.unwrap(&buffer, maxBytes: 1 << 20) {
-                    return try WireFrame.decode(frame, expectedEpoch: accepted.epoch)
-                }
-                let chunk = try await recv.read(sizeLimit: 4096)
-                guard !chunk.isEmpty else { throw FakePhoneError(message: "connection closed") }
-                buffer.append(chunk)
-            }
-        }
-
-        // CAVEAT: the FIXED clientInstanceID means two concurrently-running fake phones collide in
-        // the gateway's per-client state (`sessions`/`revoked` are keyed by this id) — one at a
-        // time only. It's also what made the SP2b whole-branch review's revoke-then-re-pair
-        // lockout reproducible pre-SP3 (a real phone's id is equally stable across re-pairs).
-        let hello = ClientHello(
-            protocolVersions: [1], appBuild: "norma-fake-phone",
-            clientInstanceID: "norma-fake-phone", pairingEpoch: accepted.epoch, resumes: []
+        let client = NormaSessionClient(
+            conn: conn, hostID: phoneEndpointID, epoch: accepted.epoch, cursors: InMemoryCursorStore(),
+            // CAVEAT: the FIXED clientInstanceID means two concurrently-running fake phones
+            // collide in the gateway's per-client state (`sessions`/`revoked` are keyed by this
+            // id) — one at a time only. It's also what made the SP2b whole-branch review's
+            // revoke-then-re-pair lockout reproducible pre-SP3 (a real phone's id is equally
+            // stable across re-pairs).
+            clientInstanceID: "norma-fake-phone",
+            clock: { Int(Date().timeIntervalSince1970 * 1000) },
+            idgen: { UUID().uuidString }
         )
-        try await sendEnvelope(kind: .hello, payload: try JSONEncoder().encode(hello))
-        printFrame(try await readFrame()) // helloAck
 
-        let listRequest = JSONValue.object([
-            "jsonrpc": .string("2.0"), "id": .number(1), "method": .string("session.list"),
-        ])
-        try await sendEnvelope(kind: .rpcRequest, payload: try JSONEncoder().encode(listRequest))
-        printFrame(try await readFrame()) // session.list's rpcResponse
+        let serverHello = try await client.handshake(resumes: [])
+        out("helloAck: hostID=\(serverHello.hostID) chosenVersion=\(serverHello.chosenVersion)")
 
-        // Keep streaming whatever arrives next (live push events) as NDJSON, until the
+        let list = try await client.send(method: "session.list", params: .object([:]))
+        printJSON(list)
+
+        // Keep streaming whatever arrives next (replay-then-live push events) as NDJSON, until the
         // connection closes or this process is killed (Ctrl-C) — a dev observation tool, not a
         // one-shot round trip.
-        while true {
-            printFrame(try await readFrame())
+        for await envelope in client.events {
+            printEnvelope(envelope)
         }
     } catch {
         out("error: \(error)")

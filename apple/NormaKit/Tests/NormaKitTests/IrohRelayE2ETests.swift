@@ -3,6 +3,7 @@ import os
 import NormaProtocol
 import IrohLib
 @testable import NormaKit
+@testable import NormaSessionKit
 
 /// SP2b Task 6: forced-relay end-to-end proof against the REAL production relay fleet (Oracle
 /// Always-Free, Frankfurt). Env-gated (`NORMA_RELAY_E2E=1`) — this suite makes REAL network calls

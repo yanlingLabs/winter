@@ -7,5 +7,7 @@
   "callId": "call_31",
   "toolName": "bash",
   "summary": "run rm -rf /tmp/scratch",
+  "issuedAt": 1781270000000,
+  "expiresAt": 1781270300000,
   "reviewerReason": "recursive delete outside the session cwd"
 }

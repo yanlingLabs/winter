@@ -7,5 +7,7 @@
   "callId": "call_40",
   "toolName": "bash",
   "summary": "run rm -rf node_modules",
+  "issuedAt": 1781270000000,
+  "expiresAt": 1781270300000,
   "childSessionId": "s_child000001"
 }

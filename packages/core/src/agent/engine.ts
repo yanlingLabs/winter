@@ -3133,11 +3133,18 @@ export class AgentEngine {
     // `computer` screenshot under `ask` policy still sees the model's vision capability.
     visionCapable?: boolean,
   ): Promise<{ output: string; isError: boolean; deniedByHuman?: boolean }> {
-    const waiting = this.cfg.broker.wait(sessionId, call.callId, opts.timeoutMs);
+    // issuedAt/expiresAt computed ONCE and threaded to BOTH the broker (so approval.list surfaces
+    // the same deadline) and the emitted event — keeping list().expiresAt === event.expiresAt for
+    // the same approval. expiresAt is the broker's fail-closed deadline (SP3 T4b).
+    const issuedAt = Date.now();
+    const expiresAt = issuedAt + opts.timeoutMs;
+    const waiting = this.cfg.broker.wait(sessionId, call.callId, opts.timeoutMs, {
+      toolName: call.name, summary: opts.summary, issuedAt, expiresAt,
+    });
     try {
       this.emit(sessionId, {
         type: "approval_requested", sessionId, threadId, callId: call.callId, toolName: call.name,
-        summary: opts.summary, reviewerReason: opts.reviewerReason,
+        summary: opts.summary, issuedAt, expiresAt, reviewerReason: opts.reviewerReason,
       });
     } catch (err) {
       // emit failed (e.g. disk): resolve the registered waiter now so it doesn't linger until timeout

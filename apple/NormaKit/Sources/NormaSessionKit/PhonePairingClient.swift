@@ -1,5 +1,6 @@
 import Foundation
 import os
+import Security
 import IrohLib
 import NormaProtocol
 
@@ -12,8 +13,14 @@ public enum PhonePairingError: Error, Equatable {
     case macIdentityMismatch
     /// The Mac refused the pairing request. `code` mirrors `PairRejected.code` — one of
     /// `"expired"`, `"bad_request"`, `"bad_proof"`, `"rate_limited"`, `"cap_reached"`,
-    /// `"internal_error"`, `"denied"`, `"timeout"`.
-    case rejected(code: String)
+    /// `"internal_error"`, `"denied"`, `"timeout"`. `pairID` (SP3 T5 carry-in gate) is
+    /// `PairRejected.pairID` passed through verbatim — lets a future iOS UI reducer bind this
+    /// failure to the specific ceremony (QR scan) it belongs to rather than assuming there is
+    /// only ever one in flight. `nil` in the same cases `PairRejected.pairID` itself is nil (see
+    /// that type's own doc comment) — in practice that's only the `"not_paired"` code, which this
+    /// client never otherwise produces (a well-formed `PairRequest` this phone sent always carries
+    /// its own `qr.pairID`, so the Mac's ceremony-path rejections always echo one back).
+    case rejected(code: String, pairID: Data?)
     /// The connection closed before a `PairAccepted`/`PairRejected` frame arrived.
     case noResponse
     /// A frame arrived whose `type` field is neither `"pair_accepted"` nor `"pair_rejected"`.
@@ -63,6 +70,22 @@ public enum PhonePairingClient {
     /// v1 only ever requests this capability (mirrors `PairingManager.sessionCaps`).
     private static let sessionCaps = ["sessions"]
 
+    /// Real random bytes via `SecRandomCopyBytes` — a per-package copy of NormaKit's
+    /// `PairingManager.systemRandom` (SP3 Task 2: this file moved from NormaKit into
+    /// NormaSessionKit, which NormaKit itself depends on — the reverse dependency the original
+    /// `PairingManager.systemRandom($0)` call would have required is not possible, so this
+    /// duplicates the same three-line `SecRandomCopyBytes` body instead of sharing it. Mirrors
+    /// `MacIdentity.swift`'s own identical duplication of this exact snippet, for the same reason:
+    /// this codebase's established convention for this trivial a helper is a per-file copy over a
+    /// shared dependency).
+    private static func systemRandom(_ count: Int) -> Data {
+        var bytes = Data(count: count)
+        _ = bytes.withUnsafeMutableBytes { buf in
+            SecRandomCopyBytes(kSecRandomDefault, count, buf.baseAddress!)
+        }
+        return bytes
+    }
+
     public static func pair(
         qr: QRPayload,
         bindAddr: String? = nil,
@@ -89,7 +112,7 @@ public enum PhonePairingClient {
         onWords: @escaping @Sendable ([String]) -> Void
     ) async throws -> (accepted: PairAccepted, words: [String], endpointSecret: Data) {
         let phoneEndpointID = try SecretKey.fromBytes(bytes: secret).public().description
-        let phoneInstallNonce = PairingManager.systemRandom(16)
+        let phoneInstallNonce = Self.systemRandom(16)
 
         // Pure crypto — no I/O, no networking — computed BEFORE dialing anything, exactly like a
         // real phone would: both the proof it's about to present and the SAS it's about to show
@@ -181,7 +204,7 @@ public enum PhonePairingClient {
             return (accepted: accepted, words: words, endpointSecret: secret)
         case "pair_rejected":
             let rejected = try JSONDecoder().decode(PairRejected.self, from: responseData)
-            throw PhonePairingError.rejected(code: rejected.code)
+            throw PhonePairingError.rejected(code: rejected.code, pairID: rejected.pairID)
         default:
             throw PhonePairingError.malformedResponse
         }

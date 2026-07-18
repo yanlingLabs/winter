@@ -310,12 +310,23 @@ public struct PairAccepted: Codable, Equatable {
 /// Mac -> phone: pairing refused. `code` is one of `"denied"`, `"timeout"`, `"not_paired"`,
 /// `"bad_request"` — a plain `String` here (not an enum) so an older phone build can still
 /// decode a future code it doesn't recognize instead of failing to parse the whole message.
+///
+/// `pairID` (SP3 T5 carry-in gate) disambiguates WHICH ceremony this rejection belongs to, so a
+/// caller juggling more than one in-flight ceremony (or a superseded/stale one, e.g.
+/// `PairingManager.beginPairing()`'s own orphan-reject path) can bind the failure to the right
+/// one instead of guessing from `code` alone. `nil` for the two rejection paths that have no
+/// ceremony context at all: a stranger's `"not_paired"` bounce (`PairingRouter`'s
+/// `sendNotPairedRejection` — the connection never even reached a `PairRequest`) and an
+/// undecodable `"bad_request"` (the pairID inside the malformed frame couldn't be trusted/read
+/// in the first place).
 public struct PairRejected: Codable, Equatable {
     public let type: String
     public let code: String
+    public let pairID: Data?
 
-    public init(type: String, code: String) {
+    public init(type: String, code: String, pairID: Data?) {
         self.type = type
         self.code = code
+        self.pairID = pairID
     }
 }

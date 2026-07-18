@@ -3,6 +3,7 @@ import os
 import NormaProtocol
 import IrohLib
 @testable import NormaKit
+@testable import NormaSessionKit
 
 /// SP2b Task 4 (the capstone): prove the WHOLE stack — `RemoteHost` (the composition root) driving
 /// a real `IrohListener` (loopback, relay disabled) + `PairingRouter` + `PairingManager` + `Gateway`

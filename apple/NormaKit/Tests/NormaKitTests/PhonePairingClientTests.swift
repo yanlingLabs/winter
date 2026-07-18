@@ -3,6 +3,7 @@ import os
 import NormaProtocol
 import IrohLib
 @testable import NormaKit
+@testable import NormaSessionKit
 
 /// SP2b Task 5, Step 1: proves `PhonePairingClient` runs the FULL ceremony correctly against a
 /// real `PairingManager` over a real (loopback) iroh listener — the phone side now goes through
@@ -101,8 +102,12 @@ final class PhonePairingClientTests: XCTestCase {
         do {
             _ = try await phoneResult
             XCTFail("expected PhonePairingClient.pair to throw on denial")
-        } catch PhonePairingError.rejected(let code) {
+        } catch PhonePairingError.rejected(let code, let pairID) {
             XCTAssertEqual(code, "denied")
+            // SP3 T5 carry-in gate: the Mac's rejection echoes back the SAME pairID this
+            // ceremony's own QR carried, so a caller juggling more than one ceremony can bind
+            // this failure to the right one.
+            XCTAssertEqual(pairID, qr.pairID)
         }
     }
 

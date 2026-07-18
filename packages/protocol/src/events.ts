@@ -71,6 +71,17 @@ export const ToolResultEvent = ThreadBase.extend({
 export const ReasoningItemEvent = ThreadBase.extend({ type: z.literal("reasoning_item"), itemJson: z.string().min(1) });
 export const ApprovalRequestedEvent = ThreadBase.extend({
   type: z.literal("approval_requested"), callId: z.string().min(1), toolName: z.string().min(1), summary: z.string(),
+  // SP3 T4b: the approval's issue/expiry timestamps (epoch ms). The daemon ALWAYS emits both on
+  // NEW events (it always knows the deadline at emit time) — but the fields are OPTIONAL, exactly
+  // like reviewerReason/childSessionId below, so OLDER persisted events (pre-T4b session JSONL)
+  // still parse: SessionStore recovery re-parses every line through this schema and a required
+  // field would silently DROP every pre-T4b approval_requested from history (irreversible loss +
+  // seq gaps — Phase-A review CRITICAL). Absent means "unknown expiry" — clients must treat it as
+  // NOT expired, never as expired. `expiresAt` is the broker's fail-closed timeout deadline
+  // (issuedAt + timeoutMs); a phone renders "expires in Ns" and derives `.expired` from it without
+  // waiting for approval_resolved{by:"timeout"} — the same value the parallel `approval.list`
+  // (methods.ts) surfaces, where it is ALWAYS present (a live query, never an old persisted line).
+  issuedAt: z.number().int().optional(), expiresAt: z.number().int().optional(),
   // Phase 5e T1 (reviewer maturity, spec §"reviewerReason? on approval_requested"): populated when
   // this escalation came from the safety reviewer (engine.ts's review hook) — the reviewer's own
   // sentence, sanitized+capped at EMISSION (engine side), so clients can render it distinctly from

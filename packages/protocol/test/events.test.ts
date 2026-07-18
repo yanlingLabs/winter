@@ -45,7 +45,7 @@ describe("SessionEvent discriminated union", () => {
       { ...t, type: "assistant_message", text: "done!" },
       { ...t, type: "tool_call", callId: "c1", name: "read", argsJson: "{}" },
       { ...t, type: "tool_result", callId: "c1", output: "contents", isError: false },
-      { ...t, type: "approval_requested", callId: "c2", toolName: "write", summary: "write hello.txt (24 bytes)" },
+      { ...t, type: "approval_requested", callId: "c2", toolName: "write", summary: "write hello.txt (24 bytes)", issuedAt: 1781270000000, expiresAt: 1781270300000 },
       { ...t, type: "approval_resolved", callId: "c2", approved: true, by: "cli-p" },
       { ...t, type: "turn_completed", stopReason: "end_turn", inputTokens: 100, outputTokens: 20 },
       { ...t, type: "agent_error", message: "not signed in" },
@@ -423,12 +423,31 @@ describe("SessionEvent discriminated union", () => {
     const t = { ...base, threadId: "main" };
     const withReason = {
       ...t, type: "approval_requested", callId: "c3", toolName: "bash", summary: "run rm -rf /tmp/scratch",
+      issuedAt: 1781270000000, expiresAt: 1781270300000,
       reviewerReason: "recursive delete outside the session cwd",
     } as const;
     expect(SessionEvent.parse(withReason)).toEqual(withReason);
-    const withoutReason = SessionEvent.parse({ ...t, type: "approval_requested", callId: "c3", toolName: "bash", summary: "run rm -rf /tmp/scratch" });
+    const withoutReason = SessionEvent.parse({ ...t, type: "approval_requested", callId: "c3", toolName: "bash", summary: "run rm -rf /tmp/scratch", issuedAt: 1781270000000, expiresAt: 1781270300000 });
     expect(withoutReason.type).toBe("approval_requested");
     expect((withoutReason as { reviewerReason?: string }).reviewerReason).toBeUndefined();
+  });
+
+  // SP3 T4b review fix (Phase-A CRITICAL — backward-compat regression proof): issuedAt/expiresAt
+  // are OPTIONAL on approval_requested because existing session JSONL logs contain PRE-T4b events
+  // without them, and SessionStore recovery re-parses every persisted line through this schema — a
+  // required field would make those lines unparseable and silently DROP pre-T4b approval history
+  // (irreversible loss + seq gaps) on the next daemon recovery. This test is the tripwire: the OLD
+  // persisted shape must keep parsing forever. (The daemon still ALWAYS emits both on new events.)
+  test("approval_requested WITHOUT issuedAt/expiresAt (pre-T4b persisted shape) still parses — recovery must never drop old lines", () => {
+    const t = { ...base, threadId: "main" };
+    const oldShape = { ...t, type: "approval_requested", callId: "c9", toolName: "write", summary: "write a.txt" } as const;
+    const parsed = SessionEvent.parse(oldShape); // must not throw
+    expect(parsed.type).toBe("approval_requested");
+    expect((parsed as { issuedAt?: number }).issuedAt).toBeUndefined();
+    expect((parsed as { expiresAt?: number }).expiresAt).toBeUndefined();
+    // And the NEW shape (every fresh daemon emit) round-trips both fields losslessly.
+    const newShape = { ...oldShape, issuedAt: 1781270000000, expiresAt: 1781270300000 };
+    expect(SessionEvent.parse(newShape)).toEqual(newShape);
   });
 });
 

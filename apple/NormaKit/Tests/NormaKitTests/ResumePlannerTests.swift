@@ -1,5 +1,6 @@
 import XCTest
 import NormaProtocol
+import NormaSessionKit
 @testable import NormaKit
 
 final class ResumePlannerTests: XCTestCase {

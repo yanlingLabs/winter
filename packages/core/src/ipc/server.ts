@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
   HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams,
+  ApprovalListParams,
   SessionAddDirParams, SessionSetCwdParams, TrustDirParams,
   BgListParams, BgPeekParams, BgKillParams, BgKillAllParams,
   SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams,
@@ -254,6 +255,8 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   METHODS.hello, METHODS.sessionList, METHODS.sessionAttach, METHODS.sessionSend,
   METHODS.sessionDispatch, METHODS.approvalRespond, METHODS.askUserRespond,
   METHODS.sessionInterrupt, METHODS.engineActivity,
+  // SP3 T4b: the phone queries pending approvals it missed in the replay window (approval.list).
+  METHODS.approvalList,
 ]);
 
 /** Maps a failed `PluginSupervisor.invoke()` result to the message a `throw new Error(...)` in
@@ -753,6 +756,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.approvalRespond: {
         const p = parseParams(ApprovalRespondParams, params);
         return opts.broker?.resolve(p.sessionId, p.callId, p.approved, socket.data.clientName) ?? { ok: true, alreadyResolved: true };
+      }
+      case METHODS.approvalList: {
+        // SP3 T4b: queryable pending-approval state (remote-allowlisted so a phone can render live
+        // approval cards it missed in the replay window). No broker (agent disabled) → no pending.
+        const p = parseParams(ApprovalListParams, params);
+        return { pending: opts.broker?.list(p.sessionId) ?? [] };
       }
       case METHODS.askUserRespond: {
         const p = parseParams(AskUserRespondParams, params);

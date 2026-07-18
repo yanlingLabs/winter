@@ -1,5 +1,6 @@
 import XCTest
 import NormaProtocol
+import NormaSessionKit
 @testable import NormaKit
 
 /// Remote Gateway SP1 Task 5 (the capstone): the `Gateway` actor terminates a remote (phone)

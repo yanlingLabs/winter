@@ -27,11 +27,16 @@ const fixtures: Record<string, unknown> = {
   "assistant_delta": { ...base, threadId: "main", type: "assistant_delta", delta: "wor" },
   "tool_call": { ...base, threadId: "main", type: "tool_call", callId: "call_1", name: "read", argsJson: '{"path":"a.txt"}' },
   "tool_result": { ...base, threadId: "main", type: "tool_result", callId: "call_1", output: "line1\nline2", isError: false },
+  // SP3 T4b review fix (Phase-A CRITICAL): this BASE fixture deliberately carries NO issuedAt/
+  // expiresAt — it is the pre-T4b persisted shape, and Swift round-tripping it proves an OLD
+  // session-JSONL approval_requested still decodes with the fields ABSENT (they are optional).
+  // The two _with_* fixtures below carry both fields (the shape every NEW daemon emit has), same
+  // with/without pattern as approval_requested_with_reviewer_reason.
   "approval_requested": { ...base, threadId: "main", type: "approval_requested", callId: "call_2", toolName: "write", summary: "write a.txt" },
   // Phase 5e T1: reviewerReason is additive/optional on the EXISTING approval_requested shape — a
   // dedicated fixture (distinct from approval_requested.json above) so Swift round-trips one
   // carrying it, mirroring task_with_graph_fields/question_with_preview's with/without pattern.
-  "approval_requested_with_reviewer_reason": { ...base, threadId: "main", type: "approval_requested", callId: "call_31", toolName: "bash", summary: "run rm -rf /tmp/scratch", reviewerReason: "recursive delete outside the session cwd" },
+  "approval_requested_with_reviewer_reason": { ...base, threadId: "main", type: "approval_requested", callId: "call_31", toolName: "bash", summary: "run rm -rf /tmp/scratch", issuedAt: 1781270000000, expiresAt: 1781270300000, reviewerReason: "recursive delete outside the session cwd" },
   "approval_resolved": { ...base, threadId: "main", type: "approval_resolved", callId: "call_2", approved: true, by: "orb" },
   "turn_completed": { ...base, threadId: "main", type: "turn_completed", stopReason: "end_turn", inputTokens: 12, outputTokens: 3 },
   "agent_error": { ...base, threadId: "main", type: "agent_error", message: "provider unavailable" },
@@ -100,7 +105,7 @@ const fixtures: Record<string, unknown> = {
   // Dispatch relay (Phase 7): childSessionId is additive/optional on the four existing
   // approval/question shapes — dedicated with-fixtures so Swift round-trips carriers, mirroring
   // approval_requested_with_reviewer_reason's with/without pattern.
-  "approval_requested_with_child_session": { ...base, threadId: "main", type: "approval_requested", callId: "call_40", toolName: "bash", summary: "run rm -rf node_modules", childSessionId: "s_child000001" },
+  "approval_requested_with_child_session": { ...base, threadId: "main", type: "approval_requested", callId: "call_40", toolName: "bash", summary: "run rm -rf node_modules", issuedAt: 1781270000000, expiresAt: 1781270300000, childSessionId: "s_child000001" },
   "approval_resolved_with_child_session": { ...base, threadId: "main", type: "approval_resolved", callId: "call_40", approved: true, by: "orb", childSessionId: "s_child000001" },
   "question_asked_with_child_session": { ...base, threadId: "main", type: "question_asked", callId: "call_41", questions: [{ question: "Which package manager?", header: "PkgMgr", options: [{ label: "pnpm", description: "workspace default" }, { label: "npm", description: "plain" }], multiSelect: false }], childSessionId: "s_child000001" },
   "question_resolved_with_child_session": { ...base, threadId: "main", type: "question_resolved", callId: "call_41", answers: { "Which package manager?": "pnpm" }, by: "orb", childSessionId: "s_child000001" },

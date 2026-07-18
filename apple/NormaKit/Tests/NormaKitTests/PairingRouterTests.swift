@@ -1,6 +1,7 @@
 import XCTest
 import os
 import NormaProtocol
+import NormaSessionKit
 @testable import NormaKit
 
 /// SP2b Task 4: `PairingRouter` (PairingRouter.swift) is the SOLE membership gate standing in front
