@@ -166,7 +166,7 @@ struct PairingCryptoTests {
         let accData = try JSONEncoder().encode(acc)
         #expect(try JSONDecoder().decode(PairAccepted.self, from: accData) == acc)
 
-        let rej = PairRejected(type: "pair_rejected", code: "denied")
+        let rej = PairRejected(type: "pair_rejected", code: "denied", pairID: tPairID)
         let rejData = try JSONEncoder().encode(rej)
         #expect(try JSONDecoder().decode(PairRejected.self, from: rejData) == rej)
     }

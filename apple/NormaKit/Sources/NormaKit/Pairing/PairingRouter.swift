@@ -110,7 +110,9 @@ public final class PairingRouter: RemoteListener, @unchecked Sendable {
 func sendNotPairedRejection(_ conn: RemoteConn) async {
     var iter = conn.inbound.makeAsyncIterator()
     _ = await iter.next()
-    let message = PairRejected(type: "pair_rejected", code: "not_paired")
+    // No pairID: this connection never reached a ceremony at all (no offer, no PairRequest ever
+    // decoded) — there is nothing to disambiguate.
+    let message = PairRejected(type: "pair_rejected", code: "not_paired", pairID: nil)
     if let payload = try? JSONEncoder().encode(message) {
         await conn.send(payload)
     }

@@ -13,8 +13,14 @@ public enum PhonePairingError: Error, Equatable {
     case macIdentityMismatch
     /// The Mac refused the pairing request. `code` mirrors `PairRejected.code` — one of
     /// `"expired"`, `"bad_request"`, `"bad_proof"`, `"rate_limited"`, `"cap_reached"`,
-    /// `"internal_error"`, `"denied"`, `"timeout"`.
-    case rejected(code: String)
+    /// `"internal_error"`, `"denied"`, `"timeout"`. `pairID` (SP3 T5 carry-in gate) is
+    /// `PairRejected.pairID` passed through verbatim — lets a future iOS UI reducer bind this
+    /// failure to the specific ceremony (QR scan) it belongs to rather than assuming there is
+    /// only ever one in flight. `nil` in the same cases `PairRejected.pairID` itself is nil (see
+    /// that type's own doc comment) — in practice that's only the `"not_paired"` code, which this
+    /// client never otherwise produces (a well-formed `PairRequest` this phone sent always carries
+    /// its own `qr.pairID`, so the Mac's ceremony-path rejections always echo one back).
+    case rejected(code: String, pairID: Data?)
     /// The connection closed before a `PairAccepted`/`PairRejected` frame arrived.
     case noResponse
     /// A frame arrived whose `type` field is neither `"pair_accepted"` nor `"pair_rejected"`.
@@ -198,7 +204,7 @@ public enum PhonePairingClient {
             return (accepted: accepted, words: words, endpointSecret: secret)
         case "pair_rejected":
             let rejected = try JSONDecoder().decode(PairRejected.self, from: responseData)
-            throw PhonePairingError.rejected(code: rejected.code)
+            throw PhonePairingError.rejected(code: rejected.code, pairID: rejected.pairID)
         default:
             throw PhonePairingError.malformedResponse
         }

@@ -131,6 +131,8 @@ final class PairingManagerTests: XCTestCase {
         XCTAssertTrue(conn.isClosed)
         let rejected = try JSONDecoder().decode(PairRejected.self, from: conn.outbound[0])
         XCTAssertEqual(rejected.code, "expired")
+        // SP3 T5 carry-in gate: the rejection echoes back this ceremony's own pairID.
+        XCTAssertEqual(rejected.pairID, qr.pairID)
     }
 
     // MARK: - Reused (second request after consume)
@@ -178,6 +180,7 @@ final class PairingManagerTests: XCTestCase {
             await manager.handleConnection(conn)
             let rejected = try JSONDecoder().decode(PairRejected.self, from: conn.outbound[0])
             XCTAssertEqual(rejected.code, "bad_proof", "attempt \(i) wire code")
+            XCTAssertEqual(rejected.pairID, qr.pairID, "attempt \(i) pairID")
             XCTAssertTrue(conn.isClosed)
 
             guard case .failed(let reason) = await events.next() else { return XCTFail("expected failed at attempt \(i)") }
@@ -197,6 +200,8 @@ final class PairingManagerTests: XCTestCase {
         await manager.handleConnection(goodConn)
         guard case .failed(let reason) = await events.next() else { return XCTFail("expected failed") }
         XCTAssertEqual(reason, "expired")
+        let postKillRejected = try JSONDecoder().decode(PairRejected.self, from: goodConn.outbound[0])
+        XCTAssertEqual(postKillRejected.pairID, qr.pairID)
     }
 
     // MARK: - Deny
@@ -220,6 +225,7 @@ final class PairingManagerTests: XCTestCase {
         XCTAssertTrue(conn.isClosed)
         let rejected = try JSONDecoder().decode(PairRejected.self, from: conn.outbound[0])
         XCTAssertEqual(rejected.code, "denied")
+        XCTAssertEqual(rejected.pairID, qr.pairID)
 
         let all = await store.all()
         XCTAssertTrue(all.isEmpty)
@@ -249,6 +255,7 @@ final class PairingManagerTests: XCTestCase {
         XCTAssertTrue(conn.isClosed)
         let rejected = try JSONDecoder().decode(PairRejected.self, from: conn.outbound[0])
         XCTAssertEqual(rejected.code, "timeout")
+        XCTAssertEqual(rejected.pairID, qr.pairID)
 
         let all = await store.all()
         XCTAssertTrue(all.isEmpty)
@@ -315,6 +322,11 @@ final class PairingManagerTests: XCTestCase {
         XCTAssertTrue(oldConn.isClosed)
         let rejected = try JSONDecoder().decode(PairRejected.self, from: oldConn.outbound[0])
         XCTAssertEqual(rejected.code, "expired")
+        // SP3 T5 carry-in gate: the orphaned rejection must carry the OLD ceremony's pairID
+        // (qr1), never the new offer's (qr2) — this is exactly the disambiguation the gate exists
+        // for: a reducer watching both ceremonies must be able to tell them apart.
+        XCTAssertEqual(rejected.pairID, qr1.pairID)
+        XCTAssertNotEqual(rejected.pairID, qr2.pairID)
 
         // The NEW offer works end-to-end.
         let newConn = ScriptedRemoteConn(peerID: "fresh")
@@ -354,6 +366,7 @@ final class PairingManagerTests: XCTestCase {
         XCTAssertTrue(conn.isClosed)
         let rejected = try JSONDecoder().decode(PairRejected.self, from: conn.outbound[0])
         XCTAssertEqual(rejected.code, "cap_reached")
+        XCTAssertEqual(rejected.pairID, qr.pairID)
         let notPersisted = await store.record(forPeer: "phone-endpoint-11")
         XCTAssertNil(notPersisted)
         let liveOffer = await manager.hasLiveOfferForTesting
@@ -387,6 +400,7 @@ final class PairingManagerTests: XCTestCase {
         XCTAssertTrue(conn.isClosed)
         let rejected = try JSONDecoder().decode(PairRejected.self, from: conn.outbound[0])
         XCTAssertEqual(rejected.code, "internal_error")
+        XCTAssertEqual(rejected.pairID, qr.pairID)
         // Nothing persisted — the store rolled back its in-memory state too.
         let all = await store.all()
         XCTAssertTrue(all.isEmpty)

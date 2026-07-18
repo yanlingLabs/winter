@@ -102,8 +102,12 @@ final class PhonePairingClientTests: XCTestCase {
         do {
             _ = try await phoneResult
             XCTFail("expected PhonePairingClient.pair to throw on denial")
-        } catch PhonePairingError.rejected(let code) {
+        } catch PhonePairingError.rejected(let code, let pairID) {
             XCTAssertEqual(code, "denied")
+            // SP3 T5 carry-in gate: the Mac's rejection echoes back the SAME pairID this
+            // ceremony's own QR carried, so a caller juggling more than one ceremony can bind
+            // this failure to the right one.
+            XCTAssertEqual(pairID, qr.pairID)
         }
     }
 
