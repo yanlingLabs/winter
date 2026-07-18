@@ -14,8 +14,7 @@ Two pieces, from [n0-computer/iroh-ffi](https://github.com/n0-computer/iroh-ffi)
    embedded in its headers declares `module Iroh { ... }` — so Swift code
    imports it as `import Iroh`, not `import IrohLib`. `fetch-iroh.sh` renames
    the unpacked directory to `IrohLib.xcframework` only to match this repo's
-   `Package.swift` path; the module name inside is still `Iroh` (see
-   `Package.swift`'s `.binaryTarget(name: "Iroh", path: "vendor/IrohLib.xcframework")`).
+   `Package.swift` path; the module name inside is still `Iroh`.
 
 2. **`IrohLibSwift/IrohLib.swift`** — the UniFFI-generated Swift bindings file
    (verbatim copy of `IrohLib/Sources/IrohLib/IrohLib.swift` from the iroh-ffi
@@ -66,3 +65,46 @@ version bump, which the remote-package approach would get for free.
 iroh's netwatch/netdev code needs `SystemConfiguration`, `Network`, and (macOS
 only) `CoreWLAN` linked — mirrored from upstream's `IrohLib` target
 `linkerSettings` into the `IrohLib` target in this package's `Package.swift`.
+
+## How `Iroh` (the binaryTarget) is consumed (SP3 Task 3)
+
+`Package.swift`'s `Iroh` binaryTarget is what a REMOTE SPM consumer (the future
+private iOS app, resolving `NormaKit` as a package dependency over the network,
+with no `vendor/` checkout of its own) actually downloads. Two forms exist:
+
+**Default — `url:`/`checksum:` (what's committed):**
+
+```swift
+.binaryTarget(
+    name: "Iroh",
+    url: "https://github.com/yanlingLabs/norma/releases/download/iroh-xcframework-v1.1.0/IrohLib.xcframework.zip",
+    checksum: "56cc44535cb91af503d7f4c6c8548b08467a1daa6ddd6e7aa2cd5a5430f5c765"
+),
+```
+
+This resolves identically for local Mac builds and for a remote consumer:
+`swift build` downloads the asset, verifies it against `checksum:` (SPM's own
+`compute-checksum` format — **not** a raw sha256; a mismatch here is a hard
+resolve error, same failure mode as `fetch-iroh.sh`'s sha256 gate but enforced
+by SPM itself), and unpacks it. No `vendor/fetch-iroh.sh` run is required.
+
+This asset is hosted on this repo's own releases (tag `iroh-xcframework-v1.1.0`
+— a **build-asset tag**, deliberately distinct from the `v#.#.###` product
+release tags the app itself ships under) via `scripts/publish-iroh-xcframework.ts`,
+which re-zips `vendor/IrohLib.xcframework` (`ditto -c -k --keepParent`),
+computes the checksum with `swift package compute-checksum`, and
+`gh release create`/`upload --clobber`s it. Re-run that script (from the repo
+root: `bun scripts/publish-iroh-xcframework.ts`) whenever `IROH_VERSION` in
+`fetch-iroh.sh` bumps, then update both values above from its printed output.
+
+**Alternative — local `path:` (commented out in `Package.swift`), for hacking
+on an unreleased/modified xcframework:**
+
+```swift
+// .binaryTarget(name: "Iroh", path: "vendor/IrohLib.xcframework"),
+```
+
+Swap this in (and comment out the `url:`/`checksum:` form) when iterating on a
+locally-patched `vendor/IrohLib.xcframework` you haven't published yet — e.g.
+testing against an iroh-ffi prerelease. Requires `./fetch-iroh.sh` (or a
+hand-built xcframework at that path) first; don't commit the swap.

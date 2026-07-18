@@ -17,8 +17,17 @@ let package = Package(
     targets: [
         // iroh-ffi v1.1.0's Apple XCFramework: raw C FFI only (module `Iroh`,
         // NOT `IrohLib` despite the release asset's filename — see vendor/README.md).
-        // Fetched by vendor/fetch-iroh.sh; not committed (see .gitignore).
-        .binaryTarget(name: "Iroh", path: "vendor/IrohLib.xcframework"),
+        // Hosted as a checksum'd GitHub release asset (SP3 T3, scripts/publish-iroh-xcframework.ts)
+        // so a REMOTE SPM consumer (the future iOS app) resolves the binary with no local fetch
+        // step; local Mac builds resolve the same asset by checksum. For local hacking on an
+        // unreleased xcframework (fetch-iroh.sh output), swap in the commented `path:` form
+        // below instead — see vendor/README.md.
+        .binaryTarget(
+            name: "Iroh",
+            url: "https://github.com/yanlingLabs/norma/releases/download/iroh-xcframework-v1.1.0/IrohLib.xcframework.zip",
+            checksum: "56cc44535cb91af503d7f4c6c8548b08467a1daa6ddd6e7aa2cd5a5430f5c765"
+        ),
+        // .binaryTarget(name: "Iroh", path: "vendor/IrohLib.xcframework"),
         // The ergonomic Swift API (Endpoint, Connection, BiStream, ...) is a
         // generated Swift *source* file upstream ships alongside the binary,
         // not inside it. Vendored verbatim; see vendor/README.md for why.
