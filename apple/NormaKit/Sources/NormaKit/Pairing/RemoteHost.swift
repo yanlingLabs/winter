@@ -200,8 +200,17 @@ public final class RemoteHost {
         boundListener = try await IrohListener.start(secret: identity.secret, relays: relaySelection)
         #endif
 
+        // SP3.2c: read the listener's HOMED address (SP3.2b already `online()`d it inside
+        // `IrohListener.start`, so `endpointAddr` now carries the relay home + direct candidates)
+        // and hand its relay URL + direct addresses to the pairing manager, which embeds them in
+        // every QR — so a scanning phone dials the FULL `EndpointAddr` and needs NO DNS/pkarr
+        // discovery (which fails on iOS). Only the real `IrohListener` exposes `endpointAddr`; the
+        // `#if DEBUG` scripted test listener (RemoteHostTests, lifecycle-only, never pairs) isn't
+        // an `IrohListener`, so the cast yields nil → nil/[] hints, which decode cleanly.
+        let hostAddr = (boundListener as? IrohListener)?.endpointAddr
         let manager = PairingManager(
-            store: store, macEndpointID: macID, hostLabel: config.hostLabel, relayConfig: config.relayConfig
+            store: store, macEndpointID: macID, hostLabel: config.hostLabel, relayConfig: config.relayConfig,
+            macRelayURL: hostAddr?.relayUrl(), macDirectAddresses: hostAddr?.directAddresses() ?? []
         )
         let router = PairingRouter(base: boundListener, directory: store, manager: manager)
 

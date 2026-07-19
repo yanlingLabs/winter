@@ -45,6 +45,13 @@ public actor PairingManager {
     private let macEndpointID: String
     private let hostLabel: String
     private let relayConfig: SignedRelayConfig
+    /// SP3.2c: this Mac's HOMED relay URL + direct addresses, captured from the started listener's
+    /// `endpointAddr` and embedded verbatim into every QR this manager mints — so a scanning phone
+    /// dials the FULL `EndpointAddr` and needs NO DNS/pkarr discovery (which fails on iOS). `nil` /
+    /// `[]` when relays are disabled (loopback / same-LAN dev). Pure connection hints, NOT part of
+    /// the pairing HMAC transcript.
+    private let macRelayURL: String?
+    private let macDirectAddresses: [String]
     private let clock: @Sendable () -> Int
     private let rng: @Sendable (Int) -> Data
     /// The confirm-timeout watchdog's "wait a bit, then re-check the clock" step — real
@@ -108,12 +115,15 @@ public actor PairingManager {
         macEndpointID: String,
         hostLabel: String,
         relayConfig: SignedRelayConfig,
+        macRelayURL: String? = nil,
+        macDirectAddresses: [String] = [],
         clock: @escaping @Sendable () -> Int = { Int(Date().timeIntervalSince1970) },
         rng: @escaping @Sendable (Int) -> Data = { PairingManager.systemRandom($0) }
     ) {
         self.init(
             store: store, macEndpointID: macEndpointID, hostLabel: hostLabel,
-            relayConfig: relayConfig, clock: clock, rng: rng,
+            relayConfig: relayConfig, macRelayURL: macRelayURL, macDirectAddresses: macDirectAddresses,
+            clock: clock, rng: rng,
             sleepHook: { duration in try? await Task.sleep(for: duration) }
         )
     }
@@ -126,6 +136,8 @@ public actor PairingManager {
         macEndpointID: String,
         hostLabel: String,
         relayConfig: SignedRelayConfig,
+        macRelayURL: String? = nil,
+        macDirectAddresses: [String] = [],
         clock: @escaping @Sendable () -> Int,
         rng: @escaping @Sendable (Int) -> Data,
         sleepHook: @escaping @Sendable (Duration) async -> Void
@@ -134,6 +146,8 @@ public actor PairingManager {
         self.macEndpointID = macEndpointID
         self.hostLabel = hostLabel
         self.relayConfig = relayConfig
+        self.macRelayURL = macRelayURL
+        self.macDirectAddresses = macDirectAddresses
         self.clock = clock
         self.rng = rng
         self.sleepHook = sleepHook
@@ -190,7 +204,9 @@ public actor PairingManager {
             // actual dial: a spec-correct phone client using this field verbatim could never
             // reach a real Mac. Reusing the canonical constant here is the fix — same module, no
             // import needed.
-            alpn: IrohListener.defaultALPN, hostLabel: hostLabel
+            alpn: IrohListener.defaultALPN, hostLabel: hostLabel,
+            // SP3.2c: full-address hints so the phone dials the homed `EndpointAddr` discovery-free.
+            macRelayURL: macRelayURL, macDirectAddresses: macDirectAddresses
         )
     }
 

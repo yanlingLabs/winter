@@ -162,16 +162,30 @@ public enum PhonePairingClient {
             }
         }
 
-        // Bare-`macEndpointID` address (no `relayUrl` hint, no direct addresses) UNLESS a test pins
-        // `addrOverride`. Under `.n0Default` this is deliberate, not a gap: n0's pkarr/DNS discovery
-        // (part of `presetN0()`) resolves the Mac's id to its actual home relay + candidates, so a
-        // hardcoded relay URL here would be both unnecessary and wrong (the Mac's home relay is
-        // whichever n0 fleet member it latency-picked — see `RelaySelection.n0Default`'s doc).
-        let macAddr = try addrOverride ?? EndpointAddr(
-            id: EndpointId.fromString(s: qr.macEndpointID),
-            relayUrl: nil,
-            addresses: []
-        )
+        // Dial address, in priority order:
+        //  1. `addrOverride` — a test pins the listener's own advertised addr (loopback E2E).
+        //  2. SP3.2c: if the QR carries the Mac's HOMED address hints (`macRelayURL` and/or
+        //     `macDirectAddresses`), dial that FULL `EndpointAddr` — relay URL + direct candidates,
+        //     ZERO discovery. This is the fix for iOS, whose network stack fails iroh's pkarr/DNS
+        //     TXT-record lookup, so a bare-node-id dial that depends on discovery never connects.
+        //  3. Fallback: bare `macEndpointID` (no hints — an older/loopback QR), resolved via
+        //     discovery where it works (macOS-to-macOS, same-LAN).
+        let macAddr: EndpointAddr
+        if let addrOverride {
+            macAddr = addrOverride
+        } else if qr.macRelayURL != nil || !qr.macDirectAddresses.isEmpty {
+            macAddr = try EndpointAddr(
+                id: EndpointId.fromString(s: qr.macEndpointID),
+                relayUrl: qr.macRelayURL,
+                addresses: qr.macDirectAddresses
+            )
+        } else {
+            macAddr = try EndpointAddr(
+                id: EndpointId.fromString(s: qr.macEndpointID),
+                relayUrl: nil,
+                addresses: []
+            )
+        }
         let alpnData = Data(qr.alpn.utf8)
         // Bounded — iroh-ffi's generated async calls ignore Swift task cancellation (this
         // codebase's own established, verified finding; every iroh dial/connect call elsewhere

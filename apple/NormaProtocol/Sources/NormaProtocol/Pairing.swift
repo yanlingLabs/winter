@@ -106,6 +106,19 @@ public struct QRPayload: Equatable {
     public let relayConfig: SignedRelayConfig
     public let alpn: String
     public let hostLabel: String
+    /// SP3.2c: the Mac's HOMED relay URL (from `IrohListener.endpointAddr.relayUrl()` after
+    /// `online()`), embedded so the phone can dial the FULL `EndpointAddr` without any DNS/pkarr
+    /// discovery lookup — iOS's network stack fails iroh's pkarr TXT-record resolution (verified
+    /// live: `Service 'dns' failed: Failed to resolve TXT record`), so a bare-node-id dial that
+    /// depends on discovery never connects from a phone. `nil` when relays are disabled (loopback /
+    /// same-LAN dev). NOT part of the pairing HMAC transcript (identity is `macEndpointID`) — a
+    /// pure connection hint, so it needs no crypto/transcript change.
+    public let macRelayURL: String?
+    /// SP3.2c: the Mac's direct (IP/port) candidate addresses (from
+    /// `IrohListener.endpointAddr.directAddresses()`), embedded alongside `macRelayURL` for the
+    /// same discovery-free reason. Empty when none are known/advertised. Same "connection hint,
+    /// not in the transcript" status as `macRelayURL`.
+    public let macDirectAddresses: [String]
 
     public init(
         v: Int,
@@ -115,7 +128,9 @@ public struct QRPayload: Equatable {
         macEndpointID: String,
         relayConfig: SignedRelayConfig,
         alpn: String,
-        hostLabel: String
+        hostLabel: String,
+        macRelayURL: String? = nil,
+        macDirectAddresses: [String] = []
     ) {
         self.v = v
         self.pairID = pairID
@@ -125,19 +140,30 @@ public struct QRPayload: Equatable {
         self.relayConfig = relayConfig
         self.alpn = alpn
         self.hostLabel = hostLabel
+        self.macRelayURL = macRelayURL
+        self.macDirectAddresses = macDirectAddresses
     }
 
     private func toCBOR() -> CBORValue {
-        .map([
+        // `CanonicalCBOR.encode` sorts unconditionally by encoded key bytes (RFC 8949), so the
+        // listing order here is irrelevant to the wire form. `macDirectAddresses` is always
+        // present as an `.array` (empty encodes cleanly as `[]`); `macRelayURL` is OMITTED when
+        // nil (text-or-absent) — an old-shape QR with neither field still decodes (see `decode`).
+        var entries: [(String, CBORValue)] = [
             ("alpn", .text(alpn)),
             ("expiresAt", .uint(UInt64(expiresAt))),
             ("hostLabel", .text(hostLabel)),
+            ("macDirectAddresses", .array(macDirectAddresses.map { .text($0) })),
             ("macEndpointID", .text(macEndpointID)),
             ("pairID", .bytes(pairID)),
             ("pairSecret", .bytes(pairSecret)),
             ("relayConfig", Self.encodeRelayConfig(relayConfig)),
             ("v", .uint(UInt64(v))),
-        ])
+        ]
+        if let macRelayURL {
+            entries.append(("macRelayURL", .text(macRelayURL)))
+        }
+        return .map(entries)
     }
 
     /// Encodes exactly the nested shape the brief specifies:
@@ -231,6 +257,25 @@ public struct QRPayload: Equatable {
             throw PairingError.badPayload
         }
 
+        // SP3.2c connection hints — TOLERANT: absent means an older/loopback QR that predates these
+        // fields, which must still decode (default nil / []). A PRESENT field is decoded strictly
+        // (text / array-of-text), rejecting a genuinely malformed value the same way every other
+        // field above does — consistent with `decodeRelayConfig`'s own array handling.
+        var macRelayURL: String? = nil
+        if let relayURLField = fields["macRelayURL"] {
+            guard case .text(let s) = relayURLField else { throw PairingError.badPayload }
+            macRelayURL = s
+        }
+        var macDirectAddresses: [String] = []
+        if let addressesField = fields["macDirectAddresses"] {
+            guard case .array(let addrCBOR) = addressesField else { throw PairingError.badPayload }
+            macDirectAddresses.reserveCapacity(addrCBOR.count)
+            for entry in addrCBOR {
+                guard case .text(let addr) = entry else { throw PairingError.badPayload }
+                macDirectAddresses.append(addr)
+            }
+        }
+
         let relayConfig = try decodeRelayConfig(relayConfigCBOR)
         return QRPayload(
             v: v,
@@ -240,7 +285,9 @@ public struct QRPayload: Equatable {
             macEndpointID: macEndpointID,
             relayConfig: relayConfig,
             alpn: alpn,
-            hostLabel: hostLabel
+            hostLabel: hostLabel,
+            macRelayURL: macRelayURL,
+            macDirectAddresses: macDirectAddresses
         )
     }
 }
