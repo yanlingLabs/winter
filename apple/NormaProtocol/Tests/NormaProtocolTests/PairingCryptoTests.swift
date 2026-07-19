@@ -59,12 +59,41 @@ struct PairingCryptoTests {
 
     @Test func qrPayloadRoundTripsBase64URL() throws {
         let cfg = SignedRelayConfig(config: RelayConfig(version: 1, relays: ["https://relay-1.yanlinglabs.com."]), sig: Data(repeating: 7, count: 64))
+        // No SP3.2c hints (older/loopback shape): macRelayURL defaults nil, macDirectAddresses [].
         let qr = QRPayload(v: 1, pairID: tPairID, pairSecret: tSecret, expiresAt: 1_800_000_000,
             macEndpointID: "mac1", relayConfig: cfg, alpn: "computer.norma.rpc/1", hostLabel: "Alex's Mac")
         let s = qr.encodeBase64URL()
         #expect(!s.contains("+") && !s.contains("/") && !s.contains("="))
-        #expect(try QRPayload.decode(base64URL: s) == qr)
+        let decoded = try QRPayload.decode(base64URL: s)
+        #expect(decoded == qr)
+        #expect(decoded.macRelayURL == nil)
+        #expect(decoded.macDirectAddresses == [])
         #expect(throws: Error.self) { try QRPayload.decode(base64URL: "!!!") }
+    }
+
+    /// SP3.2c: a QR carrying the Mac's homed relay + direct addresses round-trips those hints.
+    @Test func qrPayloadRoundTripsAddressHints() throws {
+        let cfg = SignedRelayConfig(config: RelayConfig(version: 1, relays: ["https://relay-1.yanlinglabs.com."]), sig: Data(repeating: 7, count: 64))
+        let qr = QRPayload(v: 1, pairID: tPairID, pairSecret: tSecret, expiresAt: 1_800_000_000,
+            macEndpointID: "mac1", relayConfig: cfg, alpn: "computer.norma.rpc/1", hostLabel: "Alex's Mac",
+            macRelayURL: "https://use1-1.relay.iroh.network./",
+            macDirectAddresses: ["192.168.1.9:53421", "[fe80::1]:53421"])
+        let decoded = try QRPayload.decode(base64URL: qr.encodeBase64URL())
+        #expect(decoded == qr)
+        #expect(decoded.macRelayURL == "https://use1-1.relay.iroh.network./")
+        #expect(decoded.macDirectAddresses == ["192.168.1.9:53421", "[fe80::1]:53421"])
+    }
+
+    /// SP3.2c tolerance: a relay URL present but NO direct addresses (empty array) still round-trips.
+    @Test func qrPayloadRoundTripsRelayOnlyNoDirectAddrs() throws {
+        let cfg = SignedRelayConfig(config: RelayConfig(version: 1, relays: []), sig: Data(repeating: 7, count: 64))
+        let qr = QRPayload(v: 1, pairID: tPairID, pairSecret: tSecret, expiresAt: 1_800_000_000,
+            macEndpointID: "mac1", relayConfig: cfg, alpn: "computer.norma.rpc/1", hostLabel: "Alex's Mac",
+            macRelayURL: "https://use1-1.relay.iroh.network./", macDirectAddresses: [])
+        let decoded = try QRPayload.decode(base64URL: qr.encodeBase64URL())
+        #expect(decoded == qr)
+        #expect(decoded.macRelayURL == "https://use1-1.relay.iroh.network./")
+        #expect(decoded.macDirectAddresses == [])
     }
 
     // MARK: - Additional coverage (beyond the brief's literal vectors — same spirit)
