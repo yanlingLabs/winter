@@ -48,8 +48,14 @@ public final class IrohListener: RemoteListener, @unchecked Sendable {
     /// - Parameters:
     ///   - secret: the 32-byte endpoint secret key (identity of this Mac).
     ///   - alpn: the private ALPN to accept on. Defaults to `computer.norma.rpc/1`.
-    ///   - relayURLs: relay servers for NAT traversal. Empty disables relays entirely
-    ///     (in-process / loopback / same-LAN dev use).
+    ///   - relayURLs: LEGACY relay seam — empty disables relays entirely (in-process / loopback /
+    ///     same-LAN dev use), non-empty means custom relays by URL. Superseded by `relays` below;
+    ///     retained so existing call sites (the hermetic loopback suite, the live-gate
+    ///     `IrohRelayE2ETests`) compile unchanged. Ignored whenever `relays` is non-nil.
+    ///   - relays: explicit relay selection (`.disabled` / `.n0Default` / `.custom`). `nil` (the
+    ///     default) falls back to the legacy `relayURLs` behavior above, keeping every existing
+    ///     caller hermetic. Production (`RemoteHost`) passes `.n0Default` so this Mac registers
+    ///     with n0's public relays and becomes reachable from a phone on another network.
     ///   - bindAddr: dev/test hook to pin the bind address (e.g. `"127.0.0.1:0"` for a
     ///     hermetic loopback test — see task-0-report.md on why wildcard bind + `addr()`
     ///     enrichment is non-deterministic in sandboxed environments). `nil` lets iroh
@@ -60,13 +66,12 @@ public final class IrohListener: RemoteListener, @unchecked Sendable {
         secret: Data,
         alpn: String = defaultALPN,
         relayURLs: [String] = [],
+        relays: RelaySelection? = nil,
         bindAddr: String? = nil,
         maxFrameBytes: Int = 1 << 20
     ) async throws -> IrohListener {
         let alpnData = Data(alpn.utf8)
-        let relayMode = relayURLs.isEmpty
-            ? RelayMode.disabled()
-            : try RelayMode.customFromUrls(urls: relayURLs)
+        let relayMode = try RelaySelection.resolve(relays: relays, legacyURLs: relayURLs)
         let endpoint = try await Endpoint.bind(options: EndpointOptions(
             preset: presetN0(),
             bindAddr: bindAddr,

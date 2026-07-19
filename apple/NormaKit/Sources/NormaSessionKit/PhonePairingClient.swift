@@ -86,13 +86,21 @@ public enum PhonePairingClient {
         return bytes
     }
 
+    /// - Parameter relays: explicit relay selection (`.disabled` / `.n0Default` / `.custom`).
+    ///   `nil` (the default) keeps the historical direct-only behavior (relays disabled). The iOS
+    ///   app passes `.n0Default` so the pairing dial reaches a NAT'd Mac on another network: the
+    ///   Mac (bound `.n0Default` too) publishes its home relay via n0's pkarr/DNS discovery
+    ///   (part of `presetN0()`), and the bare-`macEndpointID` dial below — no `relayUrl` hint, no
+    ///   direct addresses — resolves it through that discovery. See `RelaySelection`'s own doc for
+    ///   why a single n0 relay URL must NOT be hardcoded into the dial address.
     public static func pair(
         qr: QRPayload,
         bindAddr: String? = nil,
         secret: Data = SecretKey.generate().toBytes(),
+        relays: RelaySelection? = nil,
         onWords: @escaping @Sendable ([String]) -> Void
     ) async throws -> (accepted: PairAccepted, words: [String], endpointSecret: Data) {
-        try await pairInternal(qr: qr, bindAddr: bindAddr, secret: secret, addrOverride: nil, onWords: onWords)
+        try await pairInternal(qr: qr, bindAddr: bindAddr, secret: secret, addrOverride: nil, relays: relays, onWords: onWords)
     }
 
     /// Test-only seam (reachable via `@testable import` — `internal`, no `#if DEBUG` needed since
@@ -109,6 +117,7 @@ public enum PhonePairingClient {
         secret: Data,
         addrOverride: EndpointAddr?,
         relayURLs: [String] = [],
+        relays: RelaySelection? = nil,
         onWords: @escaping @Sendable ([String]) -> Void
     ) async throws -> (accepted: PairAccepted, words: [String], endpointSecret: Data) {
         let phoneEndpointID = try SecretKey.fromBytes(bytes: secret).public().description
@@ -133,12 +142,18 @@ public enum PhonePairingClient {
         // through `RelayMode.customFromUrls` against an unreachable relay hangs trying to reach
         // it. `relayURLs` (SP2b Task 6, default `[]` — every existing caller is unaffected) is the
         // test-only seam `IrohRelayE2ETests` uses to force a relay-mode dialer against the real
-        // production relay fleet instead.
+        // production relay fleet instead. `relays` (SP3.2) supersedes it: the iOS app passes
+        // `.n0Default` for cross-network reach; `nil` keeps the historical direct-only behavior.
         let dialer = try await Endpoint.bind(options: EndpointOptions(
             preset: presetN0(), bindAddr: bindAddr, secretKey: secret,
-            relayMode: relayURLs.isEmpty ? .disabled() : try RelayMode.customFromUrls(urls: relayURLs)
+            relayMode: try RelaySelection.resolve(relays: relays, legacyURLs: relayURLs)
         ))
 
+        // Bare-`macEndpointID` address (no `relayUrl` hint, no direct addresses) UNLESS a test pins
+        // `addrOverride`. Under `.n0Default` this is deliberate, not a gap: n0's pkarr/DNS discovery
+        // (part of `presetN0()`) resolves the Mac's id to its actual home relay + candidates, so a
+        // hardcoded relay URL here would be both unnecessary and wrong (the Mac's home relay is
+        // whichever n0 fleet member it latency-picked — see `RelaySelection.n0Default`'s doc).
         let macAddr = try addrOverride ?? EndpointAddr(
             id: EndpointId.fromString(s: qr.macEndpointID),
             relayUrl: nil,

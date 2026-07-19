@@ -181,15 +181,23 @@ public final class RemoteHost {
         // protocol.
         let macID = try SecretKey.fromBytes(bytes: identity.secret).public().description
 
+        // INTERIM (SP3.2): register this Mac's listener with n0's public production relay fleet so
+        // a phone on a DIFFERENT network (cellular) can reach this Mac behind home NAT — n0's
+        // relays are the rendezvous, and n0's pkarr/DNS discovery (part of `presetN0()`) publishes
+        // this Mac's home relay for the phone's bare-`macEndpointID` dial to resolve. This is a
+        // stopgap until Norma's own signed Oracle relay config is provisioned (SP2b T6): the moment
+        // `config.relayURLs` carries real Oracle relays, `.custom` takes precedence automatically;
+        // today it's empty, so `.n0Default` is the live cross-network rendezvous.
+        let relaySelection: RelaySelection = config.relayURLs.isEmpty ? .n0Default : .custom(config.relayURLs)
         let boundListener: RemoteListener
         #if DEBUG
         if let makeListener {
             boundListener = try await makeListener()
         } else {
-            boundListener = try await IrohListener.start(secret: identity.secret, relayURLs: config.relayURLs)
+            boundListener = try await IrohListener.start(secret: identity.secret, relays: relaySelection)
         }
         #else
-        boundListener = try await IrohListener.start(secret: identity.secret, relayURLs: config.relayURLs)
+        boundListener = try await IrohListener.start(secret: identity.secret, relays: relaySelection)
         #endif
 
         let manager = PairingManager(

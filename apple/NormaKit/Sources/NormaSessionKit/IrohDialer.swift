@@ -39,8 +39,14 @@ public enum IrohDialer {
     ///     `PhonePairingClient`'s production dial path and the fake-phone's attach reconnect both
     ///     already resolve the Mac.
     ///   - alpn: the private ALPN to dial on (must match what the Mac's `IrohListener` advertises).
-    ///   - relayURLs: relay servers for NAT traversal. Empty disables relays entirely (in-process
-    ///     / loopback / same-LAN dev use) — mirrors `IrohListener.start`'s own `relayURLs` seam.
+    ///   - relayURLs: LEGACY relay seam — empty disables relays (loopback / same-LAN dev),
+    ///     non-empty means custom relays by URL. Superseded by `relays`; retained (now defaulted
+    ///     to `[]`) so existing callers compile unchanged. Ignored whenever `relays` is non-nil.
+    ///   - relays: explicit relay selection (`.disabled` / `.n0Default` / `.custom`). `nil` (the
+    ///     default) falls back to the legacy `relayURLs` behavior. The iOS app passes `.n0Default`
+    ///     to attach across networks: with `.n0Default` the Mac's `EndpointID` is resolved through
+    ///     n0's pkarr/DNS discovery (part of `presetN0()`) to whichever n0 relay the Mac homed to —
+    ///     the bare-id dial below (no `relayUrl` hint) is exactly what discovery needs.
     ///   - connectTimeout: bounds dialing + opening the bidi stream. iroh-ffi's generated async
     ///     calls ignore Swift task cancellation (this codebase's established, repeatedly-verified
     ///     finding — see `PhonePairingClient`/`IrohE2ETests`/`norma-fake-phone`'s own identical
@@ -51,12 +57,13 @@ public enum IrohDialer {
         secret: Data,
         macEndpointID: String,
         alpn: String,
-        relayURLs: [String],
+        relayURLs: [String] = [],
+        relays: RelaySelection? = nil,
         connectTimeout: Duration = .seconds(20)
     ) async throws -> IrohConn {
         try await dialInternal(
             secret: secret, macEndpointID: macEndpointID, alpn: alpn, relayURLs: relayURLs,
-            addrOverride: nil, connectTimeout: connectTimeout
+            relays: relays, addrOverride: nil, connectTimeout: connectTimeout
         )
     }
 
@@ -76,6 +83,7 @@ public enum IrohDialer {
         macEndpointID: String,
         alpn: String,
         relayURLs: [String],
+        relays: RelaySelection? = nil,
         addrOverride: EndpointAddr?,
         bindAddr: String? = nil,
         connectTimeout: Duration = .seconds(20)
@@ -84,7 +92,7 @@ public enum IrohDialer {
             preset: presetN0(),
             bindAddr: bindAddr,
             secretKey: secret,
-            relayMode: relayURLs.isEmpty ? .disabled() : try RelayMode.customFromUrls(urls: relayURLs)
+            relayMode: try RelaySelection.resolve(relays: relays, legacyURLs: relayURLs)
         ))
         let macAddr = try addrOverride ?? EndpointAddr(
             id: EndpointId.fromString(s: macEndpointID), relayUrl: nil, addresses: []
