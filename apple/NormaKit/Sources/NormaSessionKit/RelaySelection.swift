@@ -44,6 +44,32 @@ public enum RelaySelection: Sendable {
         }
     }
 
+    /// Whether this selection actually has relays to home to — i.e. whether the endpoint should
+    /// `await endpoint.online()` after binding (SP3.2b). `Endpoint.online()` "resolves once the
+    /// endpoint has a usable home relay" (IrohLib's own doc): with relays enabled it is what makes
+    /// the endpoint HOME to a relay and publish its NodeAddr to discovery — without it a
+    /// `.n0Default` Mac binds but never registers, so a phone's dial-by-id finds nothing (verified
+    /// live: lsof showed zero relay connections until online() was awaited). With `.disabled`
+    /// there is no relay to home to, so online() would hang — every loopback/hermetic path MUST
+    /// skip it, which is exactly what gating on this flag does. `.custom([])` (an empty custom
+    /// fleet — normally unreachable, since `fromLegacyURLs` maps empty to `.disabled`) is treated
+    /// as not-enabled for the same no-relay-to-home-to reason.
+    public var isEnabled: Bool {
+        switch self {
+        case .disabled: return false
+        case .n0Default: return true
+        case .custom(let urls): return !urls.isEmpty
+        }
+    }
+
+    /// The EFFECTIVE selection from the new explicit `relays` override and the legacy `relayURLs`
+    /// seam: an explicit `relays` wins; `nil` falls back to `fromLegacyURLs(legacyURLs)`. The bind
+    /// sites use this (rather than `resolve`, which collapses straight to a `RelayMode`) because
+    /// SP3.2b needs the selection itself after binding, to decide whether to `online()`.
+    public static func effective(relays: RelaySelection?, legacyURLs: [String]) -> RelaySelection {
+        relays ?? fromLegacyURLs(legacyURLs)
+    }
+
     /// The legacy `relayURLs: [String]` seam expressed as a selection: empty → `.disabled`,
     /// non-empty → `.custom(urls)`. This is the EXACT behavior every existing call site had before
     /// `relays:` was threaded through, so a caller that passes only `relayURLs` (i.e. leaves
@@ -58,6 +84,6 @@ public enum RelaySelection: Sendable {
     /// Unambiguous by construction — `nil` means "unspecified, use the legacy seam," distinct from
     /// an explicit `.disabled`.
     public static func resolve(relays: RelaySelection?, legacyURLs: [String]) throws -> RelayMode {
-        try (relays ?? fromLegacyURLs(legacyURLs)).relayMode()
+        try effective(relays: relays, legacyURLs: legacyURLs).relayMode()
     }
 }

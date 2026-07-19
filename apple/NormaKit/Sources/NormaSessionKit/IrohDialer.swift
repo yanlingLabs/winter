@@ -88,12 +88,24 @@ public enum IrohDialer {
         bindAddr: String? = nil,
         connectTimeout: Duration = .seconds(20)
     ) async throws -> IrohConn {
+        let selection = RelaySelection.effective(relays: relays, legacyURLs: relayURLs)
         let dialer = try await Endpoint.bind(options: EndpointOptions(
             preset: presetN0(),
             bindAddr: bindAddr,
             secretKey: secret,
-            relayMode: try RelaySelection.resolve(relays: relays, legacyURLs: relayURLs)
+            relayMode: try selection.relayMode()
         ))
+        // SP3.2b: with relays ENABLED, home this dialer to a relay BEFORE `connect()` — `bind`
+        // alone never homes/publishes (`Endpoint.online()` "resolves once the endpoint has a
+        // usable home relay"), and a dialer with no home relay can't complete a relay-mediated
+        // hole-punch to a NAT'd Mac. Bounded best-effort (`try?`): if homing is slow, proceed and
+        // let `connect()`'s own timeout decide. NEVER for `.disabled` (`isEnabled == false`,
+        // every hermetic loopback test): no relay to home to → online() would hang.
+        if selection.isEnabled {
+            try? await withTimeout(.seconds(15)) {
+                await dialer.online()
+            }
+        }
         let macAddr = try addrOverride ?? EndpointAddr(
             id: EndpointId.fromString(s: macEndpointID), relayUrl: nil, addresses: []
         )
