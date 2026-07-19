@@ -356,6 +356,59 @@ final class FakePhoneConformanceTests: XCTestCase {
         await verifier.close()
         await approvalVerifier.close()
     }
+
+    /// SP3.1 T1 (the whole point): a REAL revoke, reached through the REAL router/gateway stack, must
+    /// surface on the shipped `NormaSessionClient` as a TYPED `.handshakeRejected` with a re-pair code
+    /// — the signal the iOS app maps to its honest `.revoked` state — NOT a bare `connectionClosed`/
+    /// timeout (which the SP3 whole-branch review found collapsed to `.macUnavailable`, making the
+    /// honest state unreachable from a real revoke). Pre-fix, the router sent a raw-JSON `PairRejected`
+    /// the client couldn't decode → it saw only the close → `.connectionClosed`. This test genuinely
+    /// DISCRIMINATES: it fails on any non-`.handshakeRejected` outcome.
+    ///
+    /// The observed code is `not_paired` (not `revoked`): `RemoteHost.revoke` REMOVES the
+    /// `PairingStore` record, so the reconnect is bounced by the router's membership gate
+    /// (`sendNotPairedRejection`) before it ever reaches the gateway's `revoked`-set — exactly the
+    /// task brief's own note. Either re-pair code is asserted as acceptable.
+    func testRealRevoke_ReconnectSurfacesTypedHandshakeRejection() async throws {
+        let daemon = try await RealDaemon.start()
+        defer { daemon.stop() }
+        let setup = try await makeHost(daemon: daemon)
+
+        let secret = SecretKey.generate().toBytes()
+        let accepted = try await pairPhone(setup: setup, secret: secret)
+        XCTAssertEqual(accepted.epoch, 1)
+        let phoneEndpointID = try SecretKey.fromBytes(bytes: secret).public().description
+
+        // Revoke: removes the PairingStore record AND tears down the gateway footprint (the real
+        // production revoke, `RemoteHost.revoke` → store.revoke + gateway.revoke(peerID:)). The
+        // pairing window is already closed (pairPhone closes it), so the reconnect below hits the
+        // router's not_paired path, not the ceremony.
+        try await setup.host.revoke(phoneEndpointID: phoneEndpointID)
+
+        // Reconnect through the SAME production entry points a real phone uses: IrohDialer.dial ->
+        // NormaSessionClient (identical to the conformance test above), a fresh conn on the same
+        // iroh identity, carrying the accepted epoch.
+        let conn = try await IrohDialer.dialInternal(
+            secret: secret, macEndpointID: setup.macEndpointID, alpn: IrohListener.defaultALPN,
+            relayURLs: [], addrOverride: setup.irohListener.endpointAddr
+        )
+        let client = NormaSessionClient(
+            conn: conn, hostID: phoneEndpointID, epoch: accepted.epoch, cursors: InMemoryCursorStore(),
+            clientInstanceID: "norma-fake-phone", clock: { Int(Date().timeIntervalSince1970 * 1000) },
+            idgen: { UUID().uuidString }, firstFrameDeadline: 15
+        )
+
+        do {
+            _ = try await client.handshake(resumes: [])
+            XCTFail("a revoked phone's handshake must be refused with a typed rejection, not admitted")
+        } catch let error as SessionClientError {
+            guard case .handshakeRejected(let code, _) = error else {
+                return XCTFail("expected .handshakeRejected — got \(error). A bare close/timeout means the honest .revoked state is STILL unreachable from a real revoke (the pre-SP3.1 bug).")
+            }
+            let rePairCodes = [HandshakeRejectionCode.notPaired.rawValue, HandshakeRejectionCode.revoked.rawValue, HandshakeRejectionCode.staleEpoch.rawValue]
+            XCTAssertTrue(rePairCodes.contains(code), "expected a re-pair code (the app maps it to .revoked); got \(code)")
+        }
+    }
 }
 
 private struct FakePhoneConformanceError: Error, CustomStringConvertible {

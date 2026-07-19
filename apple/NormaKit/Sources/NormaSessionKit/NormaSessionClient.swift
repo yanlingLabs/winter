@@ -344,16 +344,30 @@ public actor NormaSessionClient {
     }
 
     private func handleFrame(_ frame: Data) {
-        // A malformed / stale-epoch frame is skipped (the connection stays usable) — the gateway is
-        // the authority on framing; a corrupt inbound frame is not this client's to surface.
-        guard let env = try? WireFrame.decode(frame, expectedEpoch: epoch) else { return }
-        switch env.kind {
-        case .helloAck: handleHelloAck(env)
-        case .event: handleEvent(env)
-        case .rpcResponse: handleRpcResponse(env)
-        case .error: handleErrorFrame(env)
-        case .hello, .rpcRequest: break // phone→host kinds; never inbound
+        // Strict decode is the common path: live/replay/rpc/helloAck frames are all stamped with
+        // OUR epoch. A malformed / stale-epoch frame here is otherwise skipped (the connection stays
+        // usable) — the gateway is the authority on framing; a corrupt inbound frame is not this
+        // client's to surface.
+        if let env = try? WireFrame.decode(frame, expectedEpoch: epoch) {
+            switch env.kind {
+            case .helloAck: handleHelloAck(env)
+            case .event: handleEvent(env)
+            case .rpcResponse: handleRpcResponse(env)
+            case .error: handleErrorFrame(env)
+            case .hello, .rpcRequest: break // phone→host kinds; never inbound
+            }
+            return
         }
+
+        // Strict decode failed. The ONE thing we still act on: a HANDSHAKE-REJECTION `.error` frame
+        // (SP3.1 T1) stamped with the MAC's epoch — which, in the `stale_epoch` case, is exactly WHY
+        // our own epoch didn't match. Decode epoch-lenient, and surface it ONLY while we're still
+        // awaiting the `helloAck` (the handshake window). Every other frame keeps strict-epoch
+        // validation: a stale live/replay/rpc frame is still dropped, unchanged.
+        guard helloWaiter != nil,
+              let env = try? WireFrame.decodeLenient(frame),
+              env.kind == .error else { return }
+        handleHandshakeRejectionFrame(env)
     }
 
     private func handleClose() {
@@ -387,9 +401,21 @@ public actor NormaSessionClient {
         }
     }
 
-    /// A gateway-level `.error` frame (envelope validation / allowlist rejection) — fails the
-    /// correlated in-flight request if it carries a matching id; otherwise ignored.
+    /// A gateway-level `.error` frame. Two distinct meanings, told apart by WHEN it arrives:
+    ///   - During the HANDSHAKE (`helloWaiter` still parked): a structured `HandshakeRejection`
+    ///     refusing the connection (SP3.1 T1) — no rpc request is in flight yet, so an `.error` here
+    ///     can only be the Mac turning the handshake away. Surface it as a typed
+    ///     `.handshakeRejected` (this handles the SAME-epoch refusal frames — `not_paired`/`revoked`/
+    ///     `protocol`/`daemon_unavailable`, stamped with the current record's epoch, which decode
+    ///     STRICTLY and land here; the `stale_epoch` frame decodes leniently via `handleFrame`'s
+    ///     fallback and lands in `handleHandshakeRejectionFrame` directly).
+    ///   - POST-handshake (live loop): an envelope-validation / allowlist rejection of an in-flight
+    ///     request — fail the correlated request if it carries a matching id; otherwise ignore.
     private func handleErrorFrame(_ env: WireEnvelope) {
+        if helloWaiter != nil {
+            handleHandshakeRejectionFrame(env)
+            return
+        }
         guard let body = try? JSONDecoder().decode(SessionEvent.JSONValue.self, from: env.payload),
               let id = body["id"]?.intValue,
               let cont = pending.removeValue(forKey: id) else { return }
@@ -398,6 +424,21 @@ public actor NormaSessionClient {
             code: err?["code"]?.intValue ?? -32000,
             message: err?["message"]?.stringValue ?? "gateway error"
         ))
+    }
+
+    /// Resumes the parked `handshake` with a typed `.handshakeRejected` decoded from the `.error`
+    /// frame's `HandshakeRejection` payload (SP3.1 T1). Guarded so a rejection racing in after the
+    /// deadline fired (or after a `helloAck` already won) is a no-op — same first-wins discipline as
+    /// `handleHelloAck`/`timeoutHelloAck`. A payload that doesn't decode as `HandshakeRejection`
+    /// still counts as a refusal (the Mac sent an `.error` during the handshake) — surfaced with the
+    /// transient `protocol` code rather than silently parking until timeout.
+    private func handleHandshakeRejectionFrame(_ env: WireEnvelope) {
+        guard let w = helloWaiter else { return }
+        helloWaiter = nil
+        let rejection = try? JSONDecoder().decode(HandshakeRejection.self, from: env.payload)
+        let code = rejection?.code ?? HandshakeRejectionCode.protocolError.rawValue
+        let message = rejection?.message ?? "handshake rejected"
+        w.resume(throwing: SessionClientError.handshakeRejected(code: code, message: message))
     }
 
     // MARK: - Event application (dedup / gap / replay→live handoff)

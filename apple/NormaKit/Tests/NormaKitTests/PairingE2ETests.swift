@@ -238,8 +238,14 @@ final class PairingE2ETests: XCTestCase {
         try await reconnect.sendHello(clientInstanceID: "phone-c", resumes: [
             StreamResume(sessionID: "whatever-session", streamID: "whatever-session", lastAppliedSeq: 0),
         ])
-        let rejectedData = try await reconnect.expectRawFrame()
-        let rejected = try JSONDecoder().decode(PairRejected.self, from: rejectedData)
+        // SP3.1 T1: this is a SESSION dialer (it sent a `.hello` WireEnvelope), so the router refuses
+        // it with a WireEnvelope `error` carrying a structured `HandshakeRejection(not_paired)` — the
+        // typed signal a `NormaSessionClient` maps to its honest `.revoked` state (a real
+        // NormaSessionClient reconnect is proven end-to-end in `FakePhoneConformanceTests`). A raw
+        // JSON `PairRejected` (the pre-SP3.1 shape) stays reserved for PAIRING dialers.
+        let rejection = try await reconnect.expectFrame(timeout: 10)
+        XCTAssertEqual(rejection.kind, .error, "a session dialer's post-revoke reconnect gets a WireEnvelope error, not raw JSON")
+        let rejected = try JSONDecoder().decode(HandshakeRejection.self, from: rejection.payload)
         XCTAssertEqual(rejected.code, "not_paired")
         let eof = try await reconnect.readNext(timeout: 10)
         guard case .closed = eof else {

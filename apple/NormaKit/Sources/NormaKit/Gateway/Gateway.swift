@@ -108,9 +108,11 @@ public actor Gateway {
         // SP2b Task 4 — the real allowlist check, defense-in-depth: `PairingRouter` is the
         // PRIMARY gate (it never forwards a non-member conn here at all), but this guard means
         // `Gateway` is safe even if something someday constructs it without a router in front, or
-        // a revoke races the router's own accept-time check. A non-member gets the SAME raw JSON
-        // `PairRejected` a phone would see from the router — it never got far enough to have an
-        // epoch/hostID to validate a `WireEnvelope` against.
+        // a revoke races the router's own accept-time check. A non-member gets the SAME
+        // `sendNotPairedRejection` a phone would see from the router — which peeks the first frame
+        // and gives a SESSION dialer a `WireEnvelope` error carrying `HandshakeRejection(not_paired)`
+        // (a `NormaSessionClient` decodes it into a typed `.handshakeRejected`), a PAIRING dialer the
+        // raw JSON `PairRejected` (SP3.1 Task 1).
         guard let rec = await directory.record(forPeer: conn.peerID) else {
             await sendNotPairedRejection(conn)
             return
@@ -123,18 +125,26 @@ public actor Gateway {
         let helloEnvelope: WireEnvelope
         do {
             helloEnvelope = try WireFrame.decode(firstFrame, expectedEpoch: epoch)
+        } catch WireError.staleEpoch {
+            // The hello carried an OLD epoch — the phone paired, was revoked, and re-paired (which
+            // bumped the record's epoch) while still holding a connection stamped at the old one.
+            // A distinct, machine-readable code so the app can surface "re-pair required" rather
+            // than a transient failure (SP3.1 T1).
+            await sendHandshakeRejection(conn, epoch: epoch, code: .staleEpoch, message: "stale pairing epoch at hello")
+            conn.close()
+            return
         } catch {
-            await sendGatewayError(conn, epoch: epoch, id: .null, sessionID: nil, message: "invalid hello frame: \(error)")
+            await sendHandshakeRejection(conn, epoch: epoch, code: .protocolError, message: "invalid hello frame: \(error)")
             conn.close()
             return
         }
         guard helloEnvelope.kind == .hello else {
-            await sendGatewayError(conn, epoch: epoch, id: .null, sessionID: nil, message: "expected hello-first frame, got \(helloEnvelope.kind)")
+            await sendHandshakeRejection(conn, epoch: epoch, code: .protocolError, message: "expected hello-first frame, got \(helloEnvelope.kind)")
             conn.close()
             return
         }
         guard let clientHello = try? JSONDecoder().decode(ClientHello.self, from: helloEnvelope.payload) else {
-            await sendGatewayError(conn, epoch: epoch, id: .null, sessionID: nil, message: "malformed ClientHello")
+            await sendHandshakeRejection(conn, epoch: epoch, code: .protocolError, message: "malformed ClientHello")
             conn.close()
             return
         }
@@ -158,7 +168,7 @@ public actor Gateway {
         // marked revoked (membership + current epoch just cleared it above); kept as a safety net
         // for future paths rather than as the live enforcement point (that's the membership gate).
         guard !revoked.contains(clientHello.clientInstanceID) else {
-            await sendGatewayError(conn, epoch: epoch, id: .null, sessionID: nil, message: "pairing revoked")
+            await sendHandshakeRejection(conn, epoch: epoch, code: .revoked, message: "pairing revoked")
             conn.close()
             return
         }
@@ -178,7 +188,7 @@ public actor Gateway {
             do {
                 try await session.daemonClient.connect(role: "remote")
             } catch {
-                await sendGatewayError(conn, epoch: epoch, id: .null, sessionID: nil, message: "daemon connect failed: \(error)")
+                await sendHandshakeRejection(conn, epoch: epoch, code: .daemonUnavailable, message: "daemon connect failed: \(error)")
                 conn.close()
                 return
             }
@@ -734,6 +744,22 @@ public actor Gateway {
         let body = JSONValue.object(["jsonrpc": .string("2.0"), "id": id, "error": .object(["code": .number(-32000), "message": .string(message)])])
         guard let payload = try? JSONEncoder().encode(body) else { return }
         await send(conn, epoch: epoch, kind: .error, sessionID: sessionID, streamID: nil, seq: nil, payload: payload)
+    }
+
+    /// SP3.1 Task 1: a HANDSHAKE refusal, carried as a structured `HandshakeRejection` payload inside
+    /// an `.error` frame — distinct from `sendGatewayError`'s JSON-RPC-error body. The difference is
+    /// load-bearing: a `NormaSessionClient` parked on its `helloAck` recognizes THIS payload and
+    /// throws a typed `.handshakeRejected(code:)` (which the app maps to its honest `.revoked`
+    /// state), whereas the id-less `sendGatewayError` frame its handshake never even looked at
+    /// collapsed every refusal to a bare close / `.macUnavailable`. Every refusal site in `handle`
+    /// (the per-connection handshake) uses this; the live-loop `sendGatewayError` sites
+    /// (rate-limit/allowlist/etc., correlated by rpc id) are unchanged — those are genuine rpc
+    /// errors, not handshake refusals. The caller `close()`s AFTER this returns (send-then-close,
+    /// so the frame lands before the close — SP2b T1's deterministic-close guarantee).
+    private func sendHandshakeRejection(_ conn: RemoteConn, epoch: Int, code: HandshakeRejectionCode, message: String) async {
+        let rejection = HandshakeRejection(code: code.rawValue, message: message)
+        guard let payload = try? JSONEncoder().encode(rejection) else { return }
+        await send(conn, epoch: epoch, kind: .error, sessionID: nil, streamID: nil, seq: nil, payload: payload)
     }
 
     private func sendRpcResult(_ conn: RemoteConn, epoch: Int, id: JSONValue, sessionID: String?, streamID: String?, result: JSONValue) async {

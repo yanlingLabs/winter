@@ -431,14 +431,17 @@ final class IrohE2ETests: XCTestCase {
             return XCTFail("revoke must drop the phone's connection, got \(result)")
         }
 
-        // A reconnect by the SAME clientInstanceID is refused at the handshake — as a raw JSON
-        // `not_paired` from the membership gate (the record is gone; there's no epoch left to
-        // wrap a WireEnvelope error in) — and closed too.
+        // A reconnect by the SAME clientInstanceID is refused at the handshake — and closed too.
+        // SP3.1 T1: a SESSION dialer (its first frame is a `.hello` WireEnvelope) now gets a
+        // WireEnvelope `error` carrying a structured `HandshakeRejection(not_paired)` — the epoch it
+        // echoes is the phone's own claimed hello epoch — so a `NormaSessionClient` surfaces a typed
+        // `.handshakeRejected` (→ the app's honest `.revoked`) instead of a bare close.
         let phone2 = try await PhoneConn.dial(listener: listener, secret: secret)
         defer { phone2.closeConnection(); phone2.closeDialer() }
         try await phone2.sendHello(clientInstanceID: "phone-f", resumes: [])
-        let rejectedData = try await phone2.expectRawFrame()
-        let rejected = try JSONDecoder().decode(PairRejected.self, from: rejectedData)
+        let rejection = try await phone2.expectFrame()
+        XCTAssertEqual(rejection.kind, .error, "a session dialer's post-revoke reconnect gets a WireEnvelope error, not raw JSON")
+        let rejected = try JSONDecoder().decode(HandshakeRejection.self, from: rejection.payload)
         XCTAssertEqual(rejected.code, "not_paired", "a revoked phone's reconnect is refused at the membership gate")
         let closed2 = try await phone2.readNext(timeout: 10)
         guard case .closed = closed2 else {

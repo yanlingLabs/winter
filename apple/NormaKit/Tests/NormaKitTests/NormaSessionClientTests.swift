@@ -27,6 +27,20 @@ final class NormaSessionClientTests: XCTestCase {
         return serverFrame(kind: .helloAck, payload: try! JSONEncoder().encode(sh))
     }
 
+    /// A handshake-rejection `.error` frame (SP3.1 T1). `frameEpoch` defaults to the client's own
+    /// epoch (the same-epoch refusals: not_paired/revoked/protocol/daemon_unavailable); pass a
+    /// DIFFERENT value to model the `stale_epoch` case, where the frame is stamped with the Mac's
+    /// (newer) epoch and the client's strict decode would reject it — the client must still surface
+    /// the typed rejection by decoding this ONE frame epoch-lenient.
+    private func rejectionFrame(code: String, message: String = "why", frameEpoch: Int? = nil) -> Data {
+        let e = WireEnvelope(
+            v: 1, pairingEpoch: frameEpoch ?? epoch, hostID: "mac-host", sessionID: nil,
+            streamID: nil, seq: nil, kind: .error, timestamp: 0,
+            payload: try! JSONEncoder().encode(HandshakeRejection(code: code, message: message))
+        )
+        return try! WireFrame.encode(e)
+    }
+
     private func eventFrame(session: String, stream: String? = nil, seq: Int) -> Data {
         let payload = try! JSONEncoder().encode(SessionEvent.JSONValue.object([
             "sessionId": .string(session), "seq": .number(Double(seq)), "type": .string("assistant_delta"),
@@ -190,6 +204,46 @@ final class NormaSessionClientTests: XCTestCase {
         }
         // Threw promptly (bounded by the deadline), did NOT hang.
         XCTAssertLessThan(Date().timeIntervalSince(start), 1.5)
+    }
+
+    /// SP3.1 T1: a same-epoch handshake-rejection `.error` frame (the not_paired/revoked/protocol/
+    /// daemon_unavailable refusals, stamped with the current record's epoch == the client's) makes
+    /// `handshake` throw a typed `.handshakeRejected(code:)` — NOT a bare `connectionClosed` (which
+    /// the app collapses to `.macUnavailable`) and NOT a timeout. This is the reachability the whole
+    /// task exists to restore.
+    func testHandshakeThrowsTypedRejectionOnErrorFrame() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore(), firstFrameDeadline: 1)
+        conn.enqueueInbound(rejectionFrame(code: "revoked", message: "pairing revoked"))
+
+        do {
+            _ = try await client.handshake(resumes: [])
+            XCTFail("handshake should have thrown a typed rejection")
+        } catch {
+            XCTAssertEqual(error as? SessionClientError, .handshakeRejected(code: "revoked", message: "pairing revoked"))
+        }
+    }
+
+    /// SP3.1 T1: the `stale_epoch` case specifically — the rejection frame is stamped with the Mac's
+    /// (newer) epoch, DIFFERENT from the client's, so a strict `WireFrame.decode(expectedEpoch:)`
+    /// would throw `.staleEpoch` and drop the frame (→ timeout). The client must decode THIS one
+    /// error-kind handshake frame epoch-lenient and still surface `.handshakeRejected("stale_epoch")`
+    /// — never a `.staleEpoch`, never a timeout.
+    func testHandshakeThrowsTypedRejectionOnStaleEpochErrorFrameDecodedLeniently() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore(), firstFrameDeadline: 1)
+        // Frame epoch 999 ≠ the client's epoch (7): strict decode would reject it.
+        conn.enqueueInbound(rejectionFrame(code: "stale_epoch", message: "stale pairing epoch", frameEpoch: 999))
+
+        let start = Date()
+        do {
+            _ = try await client.handshake(resumes: [])
+            XCTFail("handshake should have thrown a typed rejection, not decoded-dropped the stale frame")
+        } catch {
+            XCTAssertEqual(error as? SessionClientError, .handshakeRejected(code: "stale_epoch", message: "stale pairing epoch"))
+        }
+        // Surfaced promptly via the lenient decode — did NOT sit until the first-frame deadline.
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.9)
     }
 
     // MARK: - Step 4/5: events dedup / gap / handoff / cursor-after-apply
