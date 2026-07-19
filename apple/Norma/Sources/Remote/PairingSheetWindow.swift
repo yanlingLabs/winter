@@ -27,7 +27,14 @@ func centeredPairingSheetFrame(visibleFrame: CGRect) -> CGRect {
 @MainActor
 final class PairingSheetWindowController: NSObject, NSWindowDelegate {
     private let window: NSWindow
+    private let container = PairingSheetContainer()
     private var didClose = false
+
+    /// The live pairing model, once the (async, relay-homing) stack is up and `attach(model:)` has
+    /// run — `nil` while the panel is still in its "Preparing…" state. A pure passthrough to the
+    /// single source of truth (`container.model`) so the two can't desync; read by the `onClosed`
+    /// teardown to `stop()` it only if it was ever attached (a close during homing has no model).
+    var model: PairingSheetModel? { container.model }
 
     /// Registry-removal hook (mirrors `DashboardWindowController.onClosed`) — fires exactly once.
     var onClosed: ((PairingSheetWindowController) -> Void)?
@@ -37,7 +44,11 @@ final class PairingSheetWindowController: NSObject, NSWindowDelegate {
     /// — kept for parity/consistency with the rest of this app's window controllers).
     var windowForTesting: NSWindow? { window }
 
-    init(model: PairingSheetModel, frame: NSRect) {
+    /// Built model-less so the panel can be shown IMMEDIATELY (in `PairingSheetContainerView`'s
+    /// "Preparing…" state) on the menu click, rather than only after the cold-start relay homing
+    /// inside `RemoteHost.openPairingWindow()` finishes. The caller shows the window, then calls
+    /// `attach(model:)` once the stack is up.
+    init(frame: NSRect) {
         let window = NSPanel(
             contentRect: frame,
             styleMask: [.titled, .closable, .fullSizeContentView],
@@ -45,11 +56,23 @@ final class PairingSheetWindowController: NSObject, NSWindowDelegate {
         )
         window.title = "Pair a Device"
         window.isReleasedWhenClosed = false // this controller owns the window's lifetime
+        // A pairing panel must stay on screen while the user scans the QR on a SEPARATE device. An
+        // NSPanel defaults `hidesOnDeactivate` to true, so the instant this menu-bar accessory app
+        // resigns active (the user looks at their phone) the panel would auto-hide — the QR
+        // "vanishing" mid-scan and only reappearing, already advanced to the 4-word confirm, when
+        // the window is next re-shown. Pin it visible.
+        window.hidesOnDeactivate = false
         self.window = window
         super.init()
         window.delegate = self
-        window.contentView = NSHostingView(rootView: PairingSheetView(model: model))
+        window.contentView = NSHostingView(rootView: PairingSheetContainerView(container: container))
         window.setFrame(frame, display: true)
+    }
+
+    /// Swaps the "Preparing…" placeholder for the live pairing sheet, once
+    /// `RemoteHost.openPairingWindow()` (bind + homing) has produced a model.
+    func attach(model: PairingSheetModel) {
+        container.model = model
     }
 
     func show() {

@@ -15,9 +15,12 @@ import NormaProtocol
 @MainActor
 final class RemoteAccessCoordinator {
     enum CoordinatorError: Error {
-        /// `RemoteHost.openPairingWindow()` succeeded but somehow left `pairingManager` nil —
-        /// per that property's own doc comment this should be unreachable in practice; kept as a
-        /// clear failure mode rather than a force-unwrap.
+        /// `RemoteHost.openPairingWindow()` succeeded but left `pairingManager` nil. Reachable via
+        /// one narrow race: if the user closes the "Preparing…" panel while `openPairingWindow()` is
+        /// suspended in its `await pairingManager.beginPairing()`, the close's `pairingSheetClosed()`
+        /// → `stopIfIdle()` can tear the stack down (nilling `pairingManager`) before the guard below
+        /// reads it. Handled gracefully by `AppDelegate.openPairDevice`'s `catch` (log + close the
+        /// stale panel) — kept as a clear failure mode rather than a force-unwrap.
         case pairingUnavailable
     }
 

@@ -342,35 +342,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             OrbDebug.log("openPairDevice: no remoteAccessCoordinator — spawn aborted")
             return
         }
+        // Present the panel IMMEDIATELY (in its "Preparing…" state) before awaiting the pairing
+        // stack: `RemoteHost.openPairingWindow()` cold-starts an iroh listener and homes it to a
+        // relay, which takes seconds on a hotspot — awaiting that first would leave the user
+        // staring at nothing and re-clicking the menu item. Creating + registering the window
+        // synchronously here also makes any such second click a harmless refocus (the guard above),
+        // instead of racing a second overlapping ceremony into a second window.
+        let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let controller = PairingSheetWindowController(frame: centeredPairingSheetFrame(visibleFrame: visible))
+        controller.onClosed = { [weak self] closed in
+            self?.pairingSheetWindow = nil
+            // Teardown order matters (T5 review, Important): stop the model FIRST — cancels its
+            // event/countdown background tasks, without which a closed sheet's countdown would keep
+            // ticking (and auto-`beginPairing()`-ing against a manager the coordinator may be
+            // tearing down) forever; the tasks retain the model for the duration of their in-flight
+            // calls, so nothing about window/model deallocation would stop them. `closed.model` is
+            // nil if the panel was closed while still "Preparing…" (no model yet) — the build task
+            // below stops that late-arriving model itself. THEN `pairingSheetClosed()` (whose
+            // `closePairingWindow()` also ends the manager's live offer via `endPairing()`) lets the
+            // whole stack tear itself down if idle.
+            closed.model?.stop()
+            Task { await coordinator.pairingSheetClosed() }
+        }
+        self.pairingSheetWindow = controller
+        controller.show()
+
         Task { [weak self] in
             guard let self else { return }
             do {
                 let model = try await coordinator.makePairingSheetModel()
-                guard self.pairingSheetWindow == nil else {
-                    self.pairingSheetWindow?.show()
+                // The user may have closed the "Preparing…" panel while homing was in flight — its
+                // `onClosed` already ran and tore the stack down. Don't resurrect it; just stop the
+                // freshly-built model so its manager/offer doesn't linger.
+                guard self.pairingSheetWindow === controller else {
+                    model.stop()
                     return
                 }
-                let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-                let controller = PairingSheetWindowController(
-                    model: model, frame: centeredPairingSheetFrame(visibleFrame: visible)
-                )
-                controller.onClosed = { [weak self] _ in
-                    self?.pairingSheetWindow = nil
-                    // Teardown order matters (T5 review, Important): `model.stop()` FIRST —
-                    // cancels the model's event/countdown background tasks, without which a
-                    // closed sheet's countdown would keep ticking (and auto-`beginPairing()`-ing
-                    // against a manager the coordinator may be tearing down) forever; the tasks
-                    // retain the model for the duration of their in-flight calls, so nothing
-                    // about window/model deallocation would stop them. THEN `pairingSheetClosed()`
-                    // (whose `closePairingWindow()` also ends the manager's live offer via
-                    // `endPairing()`) lets the whole stack tear itself down if idle.
-                    model.stop()
-                    Task { await coordinator.pairingSheetClosed() }
-                }
-                self.pairingSheetWindow = controller
-                controller.show()
+                controller.attach(model: model)
             } catch {
                 OrbDebug.log("openPairDevice: couldn't start the pairing stack: \(error)")
+                // Homing/bind failed — the panel is stuck "Preparing…". Close it so the normal
+                // teardown runs (its `onClosed` → `pairingSheetClosed()` → `stopIfIdle()`); a
+                // no-op if the user already closed it (the controller's one-shot `didClose` guard).
+                if self.pairingSheetWindow === controller {
+                    controller.close()
+                }
             }
         }
     }
