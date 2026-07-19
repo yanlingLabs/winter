@@ -144,10 +144,23 @@ public enum PhonePairingClient {
         // test-only seam `IrohRelayE2ETests` uses to force a relay-mode dialer against the real
         // production relay fleet instead. `relays` (SP3.2) supersedes it: the iOS app passes
         // `.n0Default` for cross-network reach; `nil` keeps the historical direct-only behavior.
+        let selection = RelaySelection.effective(relays: relays, legacyURLs: relayURLs)
         let dialer = try await Endpoint.bind(options: EndpointOptions(
             preset: presetN0(), bindAddr: bindAddr, secretKey: secret,
-            relayMode: try RelaySelection.resolve(relays: relays, legacyURLs: relayURLs)
+            relayMode: try selection.relayMode()
         ))
+        // SP3.2b: with relays ENABLED, home this phone endpoint to a relay BEFORE dialing the Mac
+        // — `bind` alone never homes/publishes (`Endpoint.online()` "resolves once the endpoint
+        // has a usable home relay"), and the pairing dial to a NAT'd Mac needs a homed endpoint
+        // for the relay-mediated first hop. Bounded best-effort (`try?`): if homing is slow,
+        // proceed and let the dial's own timeout below decide. NEVER for `.disabled`
+        // (`isEnabled == false`, every hermetic loopback test): no relay to home to → online()
+        // would hang.
+        if selection.isEnabled {
+            try? await withTimeout(15, "PhonePairingClient.pair online") {
+                await dialer.online()
+            }
+        }
 
         // Bare-`macEndpointID` address (no `relayUrl` hint, no direct addresses) UNLESS a test pins
         // `addrOverride`. Under `.n0Default` this is deliberate, not a gap: n0's pkarr/DNS discovery

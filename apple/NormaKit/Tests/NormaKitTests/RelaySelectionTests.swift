@@ -1,5 +1,6 @@
 import XCTest
 import IrohLib
+@testable import NormaKit
 @testable import NormaSessionKit
 
 /// SP3.2: `RelaySelection` maps onto iroh's `RelayMode` and resolves the new explicit `relays`
@@ -75,6 +76,44 @@ final class RelaySelectionTests: XCTestCase {
         XCTAssertEqual(
             try RelaySelection.resolve(relays: .disabled, legacyURLs: [url]).description,
             RelayMode.disabled().description
+        )
+    }
+
+    // MARK: - SP3.2b: online()-gating (`isEnabled`)
+
+    func testIsEnabled() {
+        // `.disabled` MUST be not-enabled: it's the flag every bind site gates `online()` on, and
+        // with no relay to home to, online() would hang — the hermetic loopback suite depends on
+        // this being false.
+        XCTAssertFalse(RelaySelection.disabled.isEnabled)
+        XCTAssertTrue(RelaySelection.n0Default.isEnabled)
+        XCTAssertTrue(RelaySelection.custom(["https://relay-1.yanlinglabs.com./"]).isEnabled)
+        // `.custom([])` has no relay to home to either (normally unreachable — `fromLegacyURLs`
+        // maps empty to `.disabled` — but must not hang if constructed directly).
+        XCTAssertFalse(RelaySelection.custom([]).isEnabled)
+        // The legacy fallbacks every existing hermetic call site resolves through:
+        XCTAssertFalse(RelaySelection.effective(relays: nil, legacyURLs: []).isEnabled)
+        XCTAssertTrue(RelaySelection.effective(relays: nil, legacyURLs: ["https://relay-1.yanlinglabs.com./"]).isEnabled)
+        XCTAssertFalse(RelaySelection.effective(relays: .disabled, legacyURLs: ["https://relay-1.yanlinglabs.com./"]).isEnabled)
+    }
+
+    /// SP3.2b regression guard: a relay-disabled loopback listener must start (near-)instantly —
+    /// i.e. `IrohListener.start` must NOT `await endpoint.online()` when relays are `.disabled`.
+    /// If the gating ever regressed, online() would block on a home relay that doesn't exist until
+    /// its 15s bound expired, and this deadline would trip. Hermetic: loopback bind, no relay, no
+    /// network. (The real n0 online() can't be unit-tested in CI — that's the live gate.)
+    func testDisabledListenerStartsWithoutOnline() async throws {
+        let started = Date()
+        let listener = try await IrohListener.start(
+            secret: SecretKey.generate().toBytes(),
+            relays: .disabled,
+            bindAddr: "127.0.0.1:0"
+        )
+        defer { listener.stop() }
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertLessThan(
+            elapsed, 5.0,
+            "relay-disabled loopback start took \(elapsed)s — online() must be skipped for .disabled (its bound alone is 15s)"
         )
     }
 }

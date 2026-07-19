@@ -71,14 +71,28 @@ public final class IrohListener: RemoteListener, @unchecked Sendable {
         maxFrameBytes: Int = 1 << 20
     ) async throws -> IrohListener {
         let alpnData = Data(alpn.utf8)
-        let relayMode = try RelaySelection.resolve(relays: relays, legacyURLs: relayURLs)
+        let selection = RelaySelection.effective(relays: relays, legacyURLs: relayURLs)
         let endpoint = try await Endpoint.bind(options: EndpointOptions(
             preset: presetN0(),
             bindAddr: bindAddr,
             secretKey: secret,
             alpns: [alpnData],
-            relayMode: relayMode
+            relayMode: try selection.relayMode()
         ))
+        // SP3.2b: with relays ENABLED, `bind` alone is not enough — the endpoint never homes to a
+        // relay or publishes its NodeAddr to discovery until `online()` is awaited ("resolves once
+        // the endpoint has a usable home relay" — IrohLib's own doc; verified live: a `.n0Default`
+        // Mac held ZERO relay connections until this was added, so a phone's dial-by-id found
+        // nothing in n0 discovery and pairing failed). This is the CRITICAL site: the Mac must be
+        // homed + published BEFORE the QR is shown. Bounded best-effort (`try?`): a flaky uplink
+        // must degrade to "maybe reachable later," never hang or fail the whole start. NEVER run
+        // for `.disabled` (`isEnabled == false`, every hermetic loopback test): with no relay to
+        // home to, online() would hang until the timeout.
+        if selection.isEnabled {
+            try? await withTimeout(15, "IrohListener.start online") {
+                await endpoint.online()
+            }
+        }
         return IrohListener(endpoint: endpoint, alpn: alpnData, maxFrameBytes: maxFrameBytes)
     }
 
@@ -214,4 +228,36 @@ private final class TaskBag: @unchecked Sendable {
         }
         for task in all { task.cancel() }
     }
+}
+
+private struct IrohListenerTimeoutError: Error, CustomStringConvertible {
+    let context: String
+    var description: String { "timed out: \(context)" }
+}
+
+/// Runs `op` with a hard wall-clock bound (SP3.2b, for the bounded `online()` above). A per-file
+/// copy of this codebase's established first-wins-race timeout idiom (see `PhonePairingClient.swift`'s
+/// own copy for the fullest explanation): iroh-ffi's generated async calls ignore Swift task
+/// cancellation, so this races two UNSTRUCTURED tasks — never a `withThrowingTaskGroup`, which
+/// awaits every child on scope exit and would hang right along with a stuck one.
+private func withTimeout<T>(_ seconds: Double, _ context: String = "", _ op: @escaping @Sendable () async throws -> T) async throws -> T {
+    let resumed = OSAllocatedUnfairLock(initialState: false)
+    let result: Result<T, Error> = await withCheckedContinuation { cont in
+        let timer = Task {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            if resumed.withLock({ let was = $0; $0 = true; return !was }) {
+                cont.resume(returning: .failure(IrohListenerTimeoutError(context: context)))
+            }
+        }
+        Task {
+            let r: Result<T, Error>
+            do { r = .success(try await op()) } catch { r = .failure(error) }
+            timer.cancel()
+            if resumed.withLock({ let was = $0; $0 = true; return !was }) {
+                cont.resume(returning: r)
+            }
+        }
+    }
+    return try result.get()
 }
