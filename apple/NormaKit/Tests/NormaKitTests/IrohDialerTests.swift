@@ -97,6 +97,63 @@ final class IrohDialerTests: XCTestCase {
         }
     }
 
+    /// SP3.3: the explicit-address attach path — passing `macRelayURL`/`macDirectAddresses` (NOT
+    /// `addrOverride`) must build a working `EndpointAddr` and connect, discovery-free. This is the
+    /// exact production shape the iOS app uses on reconnect (it has no `addrOverride`, only the
+    /// Mac's stored `PairedHostRecord` address). Reconstructs the loopback listener's OWN address
+    /// from its parts (`relayUrl()` is nil for a relay-disabled loopback listener;
+    /// `directAddresses()` is its pinned `127.0.0.1:port`) and feeds them through the new params —
+    /// so a successful round-trip proves branch 2 built the same reachable addr `addrOverride`
+    /// would have, without touching iroh's DNS/pkarr discovery at all. Fully hermetic (loopback,
+    /// relay disabled, no network), same rationale as the tests above.
+    func testDialWithExplicitMacAddressesConnectsWithoutDiscovery() async throws {
+        try await withTimeout(20) {
+            let listener = try await IrohListener.start(
+                secret: SecretKey.generate().toBytes(),
+                relayURLs: [],
+                bindAddr: "127.0.0.1:0"
+            )
+            defer { listener.stop() }
+
+            let listenerAddr = listener.endpointAddr
+            let directAddresses = listenerAddr.directAddresses()
+            XCTAssertFalse(
+                directAddresses.isEmpty,
+                "a bindAddr-pinned loopback listener must advertise at least one direct address to dial explicitly"
+            )
+
+            // No `addrOverride` — the NEW params must carry the address instead (production shape).
+            let dialerConn = try await IrohDialer.dialInternal(
+                secret: SecretKey.generate().toBytes(),
+                macEndpointID: listener.endpointID.description,
+                alpn: IrohListener.defaultALPN,
+                relayURLs: [],
+                macRelayURL: listenerAddr.relayUrl(),
+                macDirectAddresses: directAddresses,
+                addrOverride: nil,
+                bindAddr: "127.0.0.1:0"
+            )
+
+            XCTAssertEqual(
+                dialerConn.peerID, listener.endpointID.description,
+                "the explicit-address dial must reach the authenticated Mac EndpointID"
+            )
+
+            // Prove it's a live, usable conn (phone speaks first — `IrohConn`'s SEND-BEFORE-RECEIVE).
+            let phoneToServer = Data("explicit-addr-frame".utf8)
+            await dialerConn.send(phoneToServer)
+            var connIter = listener.connections.makeAsyncIterator()
+            guard let serverConn = await connIter.next() else {
+                XCTFail("listener emitted no RemoteConn for the explicit-address dialer")
+                return
+            }
+            defer { dialerConn.close(); serverConn.close() }
+            var serverInboundIter = serverConn.inbound.makeAsyncIterator()
+            let receivedByServer = await serverInboundIter.next()
+            XCTAssertEqual(receivedByServer, phoneToServer, "the frame must round-trip over the explicit-address conn")
+        }
+    }
+
     /// A phone that dials a `macEndpointID` other than the one it actually reaches must refuse to
     /// proceed — same rule `PhonePairingClient.pairInternal` already enforces, now also enforced
     /// by the reusable dialer every future caller (including a future `norma-fake-phone`

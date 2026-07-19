@@ -34,11 +34,20 @@ public enum IrohDialer {
     ///
     /// - Parameters:
     ///   - secret: the phone's own 32-byte endpoint secret key (its stable identity).
-    ///   - macEndpointID: the Mac's authenticated `EndpointID`, as a string — resolved via iroh's
-    ///     own endpoint discovery (no direct address is passed), the same way
-    ///     `PhonePairingClient`'s production dial path and the fake-phone's attach reconnect both
-    ///     already resolve the Mac.
+    ///   - macEndpointID: the Mac's authenticated `EndpointID`, as a string. Resolved via iroh's
+    ///     own endpoint discovery when NO explicit address is supplied — but the iOS app now
+    ///     supplies `macRelayURL`/`macDirectAddresses` (below), because iOS's network stack fails
+    ///     iroh's pkarr/DNS TXT-record lookup, so a discovery-only dial-by-id never connects there.
     ///   - alpn: the private ALPN to dial on (must match what the Mac's `IrohListener` advertises).
+    ///   - macRelayURL: SP3.3 — the Mac's HOMED relay URL, as stored in the phone's
+    ///     `PairedHostRecord` at pairing time (it came over in the QR, SP3.2c). When this or
+    ///     `macDirectAddresses` is non-empty, the dial targets the FULL `EndpointAddr`
+    ///     (`id + relayUrl + addresses`) with ZERO discovery — the fix that makes Code-mode ATTACH
+    ///     work on iOS. `nil` (default) preserves the bare-node-id/discovery path for callers that
+    ///     don't have a stored address (e.g. same-LAN dev).
+    ///   - macDirectAddresses: SP3.3 — the Mac's direct (IP/port) candidate addresses, same
+    ///     `PairedHostRecord` origin and same discovery-free effect as `macRelayURL`. `[]` (default)
+    ///     keeps the discovery path.
     ///   - relayURLs: LEGACY relay seam — empty disables relays (loopback / same-LAN dev),
     ///     non-empty means custom relays by URL. Superseded by `relays`; retained (now defaulted
     ///     to `[]`) so existing callers compile unchanged. Ignored whenever `relays` is non-nil.
@@ -59,11 +68,14 @@ public enum IrohDialer {
         alpn: String,
         relayURLs: [String] = [],
         relays: RelaySelection? = nil,
+        macRelayURL: String? = nil,
+        macDirectAddresses: [String] = [],
         connectTimeout: Duration = .seconds(20)
     ) async throws -> IrohConn {
         try await dialInternal(
             secret: secret, macEndpointID: macEndpointID, alpn: alpn, relayURLs: relayURLs,
-            relays: relays, addrOverride: nil, connectTimeout: connectTimeout
+            relays: relays, macRelayURL: macRelayURL, macDirectAddresses: macDirectAddresses,
+            addrOverride: nil, connectTimeout: connectTimeout
         )
     }
 
@@ -84,6 +96,8 @@ public enum IrohDialer {
         alpn: String,
         relayURLs: [String],
         relays: RelaySelection? = nil,
+        macRelayURL: String? = nil,
+        macDirectAddresses: [String] = [],
         addrOverride: EndpointAddr?,
         bindAddr: String? = nil,
         connectTimeout: Duration = .seconds(20)
@@ -106,9 +120,30 @@ public enum IrohDialer {
                 await dialer.online()
             }
         }
-        let macAddr = try addrOverride ?? EndpointAddr(
-            id: EndpointId.fromString(s: macEndpointID), relayUrl: nil, addresses: []
-        )
+        // Dial address, in priority order (EXACTLY mirroring `PhonePairingClient.pairInternal`'s
+        // SP3.2c construction — attach must resolve the Mac the same discovery-free way pairing
+        // now does):
+        //  1. `addrOverride` — a test pins the listener's own advertised addr (loopback E2E).
+        //  2. SP3.3: if `macRelayURL`/`macDirectAddresses` are supplied (the app passes the Mac's
+        //     stored `PairedHostRecord` address), dial that FULL `EndpointAddr` — relay URL +
+        //     direct candidates, ZERO discovery. This is the fix for iOS, whose network stack
+        //     fails iroh's pkarr/DNS TXT-record lookup, so a bare-node-id dial never connects.
+        //  3. Fallback: bare `macEndpointID` (no stored address), resolved via discovery where it
+        //     works (macOS-to-macOS, same-LAN).
+        let macAddr: EndpointAddr
+        if let addrOverride {
+            macAddr = addrOverride
+        } else if macRelayURL != nil || !macDirectAddresses.isEmpty {
+            macAddr = try EndpointAddr(
+                id: EndpointId.fromString(s: macEndpointID),
+                relayUrl: macRelayURL,
+                addresses: macDirectAddresses
+            )
+        } else {
+            macAddr = try EndpointAddr(
+                id: EndpointId.fromString(s: macEndpointID), relayUrl: nil, addresses: []
+            )
+        }
         let alpnData = Data(alpn.utf8)
         let (conn, bi): (Connection, BiStream) = try await withTimeout(connectTimeout) {
             let conn = try await dialer.connect(addr: macAddr, alpn: alpnData)
