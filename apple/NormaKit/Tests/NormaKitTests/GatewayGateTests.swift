@@ -396,7 +396,13 @@ final class GatewayGateTests: XCTestCase {
         listener.simulateConnection(conn2)
         conn2.enqueueInbound(try helloFrame(clientInstanceID: "phone-rev", resumes: []))
         let out2 = try await waitForOutbound(conn2, count: 1)
-        let rejected2 = try JSONDecoder().decode(PairRejected.self, from: out2[0])
+        // SP3.1 T1: a SESSION dialer (its first frame is a `.hello` WireEnvelope) reconnecting after
+        // revoke now gets a WireEnvelope `error` carrying a structured `HandshakeRejection`, not the
+        // raw-JSON `PairRejected` a pairing dialer sees — so a `NormaSessionClient` can surface the
+        // typed `.handshakeRejected(not_paired)` (→ the app's honest `.revoked`) instead of a bare close.
+        let rejectionEnv2 = try decodeEnvelope(out2[0])
+        XCTAssertEqual(rejectionEnv2.kind, .error)
+        let rejected2 = try JSONDecoder().decode(HandshakeRejection.self, from: rejectionEnv2.payload)
         XCTAssertEqual(rejected2.code, "not_paired", "a revoked phone's reconnect is refused at the membership gate")
         let closeDeadline = Date().addingTimeInterval(2)
         while Date() < closeDeadline, !conn2.isClosed { try await Task.sleep(nanoseconds: 10_000_000) }
@@ -804,7 +810,11 @@ final class GatewayGateTests: XCTestCase {
         listener.simulateConnection(conn2)
         conn2.enqueueInbound(try helloFrame(clientInstanceID: "X", resumes: [], epoch: 1))
         let out2 = try await waitForOutbound(conn2, count: 1)
-        let rejected = try JSONDecoder().decode(PairRejected.self, from: out2[0])
+        // SP3.1 T1: a session dialer's not_paired refusal is now a WireEnvelope `error` carrying a
+        // structured `HandshakeRejection` (see the reconnect assertion in `testG5_...`).
+        let rejectionEnv = try decodeEnvelope(out2[0])
+        XCTAssertEqual(rejectionEnv.kind, .error)
+        let rejected = try JSONDecoder().decode(HandshakeRejection.self, from: rejectionEnv.payload)
         XCTAssertEqual(rejected.code, "not_paired", "a revoked, not-re-paired phone is refused at the membership gate")
         try await waitForClosed(conn2)
 

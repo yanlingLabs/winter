@@ -118,6 +118,13 @@ public enum SessionClientError: Error, Equatable {
     case handshakeTimeout
     /// The first frame back was not a `helloAck`, or its `ServerHello` payload was undecodable.
     case handshakeFailed(String)
+    /// The Mac REFUSED the handshake with a structured `HandshakeRejection` (SP3.1 T1) — the host
+    /// is reachable and answered, it just won't admit this connection. `code` is a
+    /// `HandshakeRejectionCode` raw value: `not_paired`/`revoked`/`stale_epoch` mean "re-pair
+    /// required" (the app's honest `.revoked` state), `daemon_unavailable`/`protocol` are transient.
+    /// Distinct from `connectionClosed`/`handshakeTimeout`, which the app collapses to
+    /// `.macUnavailable` — a real revoke was previously unreachable as anything but those.
+    case handshakeRejected(code: String, message: String)
     /// The connection closed (inbound stream ended) with a request still awaiting its response.
     case connectionClosed
     /// The host answered a request with a JSON-RPC error.

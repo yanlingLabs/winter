@@ -72,6 +72,26 @@ public enum WireFrame {
         maxDepth: Int = 32,
         expectedEpoch: Int
     ) throws -> WireEnvelope {
+        let envelope = try decodeStructural(frame, maxBytes: maxBytes, maxDepth: maxDepth)
+
+        // Structural decode succeeded — NOW distinguish "wrong epoch" from "malformed" per the
+        // brief's contract (callers need to tell these apart).
+        guard envelope.pairingEpoch == expectedEpoch else {
+            throw WireError.staleEpoch
+        }
+
+        return envelope
+    }
+
+    /// Every validation `decode` performs EXCEPT the `expectedEpoch` guard — the strict `decode`
+    /// above layers that guard on top. Split out (rather than inlined) so the epoch-lenient
+    /// `decodeLenient` below can reuse the identical shape/version/kind/structural checks without
+    /// duplicating them, and WITHOUT any caller being able to weaken strict `decode`'s epoch check.
+    private static func decodeStructural(
+        _ frame: Data,
+        maxBytes: Int,
+        maxDepth: Int
+    ) throws -> WireEnvelope {
         guard frame.count <= maxBytes else { throw WireError.oversize }
         guard String(data: frame, encoding: .utf8) != nil else { throw WireError.invalidUTF8 }
 
@@ -89,20 +109,31 @@ public enum WireFrame {
             throw WireError.unknownKind
         }
 
-        let envelope: WireEnvelope
         do {
-            envelope = try JSONDecoder().decode(WireEnvelope.self, from: frame)
+            return try JSONDecoder().decode(WireEnvelope.self, from: frame)
         } catch {
             throw WireError.malformed
         }
+    }
 
-        // Structural decode succeeded — NOW distinguish "wrong epoch" from "malformed" per the
-        // brief's contract (callers need to tell these apart).
-        guard envelope.pairingEpoch == expectedEpoch else {
-            throw WireError.staleEpoch
-        }
-
-        return envelope
+    /// Decodes a frame with EVERY structural check strict `decode` applies (size, UTF-8, nesting
+    /// depth, duplicate keys, version, kind) but WITHOUT validating `pairingEpoch` against an
+    /// expected value — so a frame stamped with a DIFFERENT epoch still decodes instead of throwing
+    /// `.staleEpoch`.
+    ///
+    /// **Deliberately narrow.** This exists for exactly two epoch-blind call sites: (1) the pairing
+    /// router peeking a first frame's `kind` to tell a session dialer (a `.hello` `WireEnvelope`)
+    /// from a pairing dialer (raw-JSON `PairRequest`), and (2) `NormaSessionClient` recognizing an
+    /// `.error`-kind HANDSHAKE-REJECTION frame — whose whole point (`stale_epoch`) is that the
+    /// client's own epoch is the wrong one to validate against. Every other path — live/replay/rpc
+    /// frames — MUST keep using strict `decode(_:expectedEpoch:)`; do not reach for this to sidestep
+    /// an epoch mismatch anywhere else.
+    public static func decodeLenient(
+        _ frame: Data,
+        maxBytes: Int = 1 << 20,
+        maxDepth: Int = 32
+    ) throws -> WireEnvelope {
+        try decodeStructural(frame, maxBytes: maxBytes, maxDepth: maxDepth)
     }
 
     /// Validates that a STANDALONE JSON document `bytes` (e.g. the inner JSON-RPC payload the

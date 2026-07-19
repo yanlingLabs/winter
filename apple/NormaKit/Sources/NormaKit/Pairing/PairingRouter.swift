@@ -90,11 +90,25 @@ public final class PairingRouter: RemoteListener, @unchecked Sendable {
 }
 
 /// Shared by `PairingRouter` (the primary gate) and `Gateway` (defense-in-depth only — see
-/// `Gateway.handle(_:)`'s own directory-membership guard): the wire shape a not-(or no-longer-)
-/// paired phone sees is the SAME raw JSON `PairRejected` a failed pairing ceremony uses
-/// (`PairingManager.reject(_:code:)`), never a `WireEnvelope`-wrapped gateway error — a phone that
-/// hasn't completed pairing has no epoch/hostID to validate a `WireEnvelope` against in the first
-/// place.
+/// `Gateway.handle(_:)`'s own directory-membership guard): rejects a not-(or no-longer-)paired
+/// phone, in the wire shape THAT phone can actually decode.
+///
+/// **Dual-path (SP3.1 Task 1).** The reply shape depends on what KIND of dialer this is, told apart
+/// by peeking the first frame:
+///   - A SESSION dialer (a `NormaSessionClient` reconnecting after a revoke) speaks the
+///     `WireEnvelope` protocol — its first frame is a `kind: .hello` envelope. It gets a
+///     `WireEnvelope` `error` frame carrying a structured `HandshakeRejection(code: "not_paired")`,
+///     which its handshake decodes into a typed `.handshakeRejected` (→ the app's honest `.revoked`
+///     state). Before this it got the raw JSON below, which it can't decode → dropped → the refusal
+///     collapsed to a bare close / `.macUnavailable`, making the honest state UNREACHABLE from a
+///     real revoke. The echoed epoch is the phone's own claimed `pairingEpoch` (the router has no
+///     record to consult — that's WHY it's rejecting), so the phone's own strict decode accepts it;
+///     `NormaSessionClient` also decodes this one frame epoch-lenient regardless.
+///   - A PAIRING dialer (`PhonePairingClient` mid-ceremony) sends a raw-JSON `PairRequest` — no
+///     `WireEnvelope` wrapper (it hasn't paired, so it has no epoch to wrap one in). It gets the
+///     SAME raw JSON `PairRejected` a failed ceremony uses (`PairingManager.reject(_:code:)`),
+///     UNCHANGED — the pairing ceremony wire is untouched. This is also the fallback for any dialer
+///     whose first frame isn't a decodable `.hello` envelope.
 ///
 /// Reads (and discards) ONE inbound frame before sending anything — confirmed empirically
 /// (`IrohListenerTests`' throwaway diagnostic during this task): a freshly-ACCEPTED iroh bidi
@@ -103,14 +117,35 @@ public final class PairingRouter: RemoteListener, @unchecked Sendable {
 /// codebase (`Gateway.handle`, `PairingManager.handleConnection`) already reads the phone's
 /// first frame before ever sending back, both because the wire protocol has the phone always
 /// speak first AND (it turns out) because doing so is what makes a same-connection reply
-/// deliverable at all over real iroh. This path is the one exception that didn't, until now —
-/// the frame's CONTENT is irrelevant (a rejection doesn't depend on what a non-member sent,
-/// only that it sent something); a phone that never sends anything at all simply never gets a
+/// deliverable at all over real iroh. A phone that never sends anything at all simply never gets a
 /// response, same as every other read-first path here.
 func sendNotPairedRejection(_ conn: RemoteConn) async {
     var iter = conn.inbound.makeAsyncIterator()
-    _ = await iter.next()
-    // No pairID: this connection never reached a ceremony at all (no offer, no PairRequest ever
+    let firstFrame = await iter.next()
+
+    // Peek the first frame epoch-lenient: a SESSION dialer's is a decodable `.hello` `WireEnvelope`;
+    // a PAIRING dialer's raw-JSON `PairRequest` (no `v`/`kind`) fails this decode and falls through
+    // to the raw path below. Epoch-lenient because the router has no record to know the phone's
+    // epoch — the KIND is all this decision needs.
+    if let firstFrame,
+       let hello = try? WireFrame.decodeLenient(firstFrame),
+       hello.kind == .hello {
+        let rejection = HandshakeRejection(code: HandshakeRejectionCode.notPaired.rawValue, message: "not paired")
+        if let payload = try? JSONEncoder().encode(rejection) {
+            let envelope = WireEnvelope(
+                v: 1, pairingEpoch: hello.pairingEpoch, hostID: "", sessionID: nil, streamID: nil,
+                seq: nil, kind: .error, timestamp: Int(Date().timeIntervalSince1970 * 1000), payload: payload
+            )
+            if let frame = try? WireFrame.encode(envelope) {
+                await conn.send(frame)
+            }
+        }
+        conn.close()
+        return
+    }
+
+    // Pairing dialer (or an undecodable first frame): the UNCHANGED raw-JSON ceremony reply. No
+    // pairID: this connection never reached a ceremony at all (no offer, no PairRequest ever
     // decoded) — there is nothing to disambiguate.
     let message = PairRejected(type: "pair_rejected", code: "not_paired", pairID: nil)
     if let payload = try? JSONEncoder().encode(message) {
