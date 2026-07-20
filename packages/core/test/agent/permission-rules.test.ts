@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, utimesS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PermissionRules, RuleAppendError, parseRule, ruleMatches } from "../../src/agent/permission-rules";
-import { hasShellHazards } from "../../src/agent/shell-scan";
+import { hasShellHazards, splitPipeline } from "../../src/agent/shell-scan";
 import { Settings } from "../../src/settings";
 
 // SP-approvals Task 1: the CC-grammar allow-rules store (project + global, hot, append API).
@@ -132,6 +132,67 @@ describe("hasShellHazards", () => {
     expect(hasShellHazards('echo "a;b|c&d"')).toBe(false);
     expect(hasShellHazards("echo 'a;b|c'")).toBe(false);
     expect(hasShellHazards('git commit -m "wip; ready"')).toBe(false);
+  });
+});
+
+describe("splitPipeline (SP-approvals T2 — readOnlyBash's pipeline splitter)", () => {
+  test("a single command with no pipe is returned as its own one-element segment list", () => {
+    expect(splitPipeline("ls -la")).toEqual(["ls -la"]);
+    expect(splitPipeline("git status")).toEqual(["git status"]);
+  });
+
+  test("splits a read-only pipeline into its `|`-delimited segments (quotes/whitespace around each `|` left intact)", () => {
+    expect(splitPipeline("head -50 x | tail -10")).toEqual(["head -50 x ", " tail -10"]);
+    expect(splitPipeline("sort f | uniq -c | head")).toEqual(["sort f ", " uniq -c ", " head"]);
+  });
+
+  test("a quoted `|` stays inert — it is never a split point", () => {
+    expect(splitPipeline('grep "a|b" f')).toEqual(['grep "a|b" f']);
+    expect(splitPipeline("echo 'a|b|c'")).toEqual(["echo 'a|b|c'"]);
+  });
+
+  test("`;` is not a pipeline — returns null (opaque to this splitter, not just to the segments)", () => {
+    expect(splitPipeline("cat f; rm f")).toBeNull();
+    expect(splitPipeline("git push ; rm -rf /")).toBeNull();
+  });
+
+  test("`&&` and `||` return null — even `||`, which is built from two `|` characters", () => {
+    expect(splitPipeline("ls && rm f")).toBeNull();
+    expect(splitPipeline("git push || rm -rf /")).toBeNull();
+  });
+
+  test("a bare/trailing `&` (backgrounding) returns null", () => {
+    expect(splitPipeline("ls &")).toBeNull();
+    expect(splitPipeline("git push &")).toBeNull();
+  });
+
+  test("a literal newline returns null", () => {
+    expect(splitPipeline("ls\npwd")).toBeNull();
+  });
+
+  test("redirects (incl. append, fd-prefixed, heredoc) return null", () => {
+    expect(splitPipeline("cat > f")).toBeNull();
+    expect(splitPipeline("cat >> f")).toBeNull();
+    expect(splitPipeline("ls 2>err")).toBeNull();
+    expect(splitPipeline("cat < f")).toBeNull();
+    expect(splitPipeline("cat << EOF")).toBeNull();
+  });
+
+  test("command/process substitution and ANSI-C quoting return null", () => {
+    expect(splitPipeline("echo $(rm x)")).toBeNull();
+    expect(splitPipeline("echo `rm x`")).toBeNull();
+    expect(splitPipeline("diff <(ls) <(ls)")).toBeNull();
+    expect(splitPipeline("tee >(cat)")).toBeNull();
+    expect(splitPipeline("cat $'\\x66'")).toBeNull();
+  });
+
+  test("an unterminated quote returns null — never resolved to a splittable pipeline", () => {
+    expect(splitPipeline("echo 'a | b")).toBeNull();
+    expect(splitPipeline('echo "a | b')).toBeNull();
+  });
+
+  test("empty string returns a single empty segment — callers reject an empty/blank segment themselves", () => {
+    expect(splitPipeline("")).toEqual([""]);
   });
 });
 
