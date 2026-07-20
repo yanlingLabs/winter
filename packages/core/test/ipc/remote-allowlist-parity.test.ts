@@ -9,19 +9,20 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 
 // SP2a Task 2 — the cross-language drift tripwire (gate G7) + the remote token type (gate G8).
 //
-// The gateway enforces the SAME ten-method `remote` allowlist twice, once per language: here in
+// The gateway enforces the SAME eleven-method `remote` allowlist twice, once per language: here in
 // TS (`REMOTE_ALLOWED_METHODS`, ipc/server.ts) and once in Swift (`Gateway.remoteAllowedMethods`,
 // GatewayGateTests' testG7). Neither test imports the other's list — each pins its own side to the
-// literal ten names, so editing ONE side without the other fails here (or in Swift) rather than
+// literal eleven names, so editing ONE side without the other fails here (or in Swift) rather than
 // silently letting the two allowlists diverge and admitting/denying a method inconsistently.
 //
 // SP3 T4b grew the list 9→10: `approval.list` (queryable pending-approval state) is remote-facing
 // so a phone can query pending approvals it missed in the replay window.
+// SP3.4 grew it 10→11: `session.create` (the phone's sidebar "+ New Code session" button).
 
 describe("remote allowlist parity (SP2a gate G7)", () => {
-  // The canonical ten (SP1 spec §6 + SP3 T4b's approval.list) — the exact method STRINGS the Swift
-  // `Gateway` mirrors.
-  const TEN = [
+  // The canonical eleven (SP1 spec §6 + SP3 T4b approval.list + SP3.4 session.create) — the exact
+  // method STRINGS the Swift Gateway mirrors.
+  const ELEVEN = [
     METHODS.hello,
     METHODS.sessionList,
     METHODS.sessionAttach,
@@ -32,20 +33,18 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
     METHODS.sessionInterrupt,
     METHODS.engineActivity,
     METHODS.approvalList,
+    METHODS.sessionCreate,
   ];
 
-  test("REMOTE_ALLOWED_METHODS is EXACTLY the ten names", () => {
-    expect(REMOTE_ALLOWED_METHODS.size).toBe(10);
-    for (const m of TEN) {
+  test("REMOTE_ALLOWED_METHODS is EXACTLY the eleven names", () => {
+    expect(REMOTE_ALLOWED_METHODS.size).toBe(11);
+    for (const m of ELEVEN) {
       expect(REMOTE_ALLOWED_METHODS.has(m)).toBe(true);
     }
-    // No extras beyond the ten.
-    expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual([...TEN].sort());
+    expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual([...ELEVEN].sort());
   });
 
-  test("the ten string VALUES match the Swift Gateway.remoteAllowedMethods literals", () => {
-    // These literals are duplicated verbatim in Swift (Gateway.swift + GatewayGateTests.testG7);
-    // pinning them here catches a rename of a `METHODS.*` value that would desync the two sides.
+  test("the eleven string VALUES match the Swift Gateway.remoteAllowedMethods literals", () => {
     expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual(
       [
         "protocol.hello",
@@ -58,6 +57,7 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
         "session.interrupt",
         "engine.activity",
         "approval.list",
+        "session.create",
       ].sort(),
     );
   });

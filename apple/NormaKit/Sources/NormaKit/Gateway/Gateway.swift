@@ -29,12 +29,15 @@ import NormaSessionKit
 public actor Gateway {
     /// Mirrors the daemon's own `REMOTE_ALLOWED_METHODS` (packages/core/src/ipc/server.ts) as an
     /// independent Swift constant — defense in depth: the gateway rejects an off-list method
-    /// BEFORE it ever reaches the daemon, which enforces the identical 10-method allowlist itself.
-    /// SP3 T4b added `approval.list` (queryable pending-approval state) as the 10th.
+    /// BEFORE it ever reaches the daemon, which enforces the identical 11-method allowlist itself.
+    /// SP3 T4b added `approval.list` (queryable pending-approval state) as the 10th. SP3.4 added
+    /// `session.create` (the phone may START a Code session) as the 11th.
     static let remoteAllowedMethods: Set<String> = [
         "protocol.hello", "session.list", "session.attach", "session.send",
         "session.dispatch", "approval.respond", "ask_user.respond",
         "session.interrupt", "engine.activity", "approval.list",
+        // SP3.4: the phone may START a Code session (sidebar "+ New").
+        "session.create",
     ]
 
     /// Session-map cap (SP2b Task 4) — see `evictIfNeeded()`.
