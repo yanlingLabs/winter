@@ -68,5 +68,5 @@ export function hasShellHazards(command: string): boolean {
     if (c === "$" && (command[i + 1] === "(" || command[i + 1] === "'")) return true; // command/arithmetic substitution, ANSI-C quoting
     if (c === ";" || c === "|" || c === "&" || c === "\n" || c === ">" || c === "<") return true;
   }
-  return false;
+  return inSingle || inDouble; // an unterminated quote is exactly the kind of ambiguity this scans for — never resolve it to "safe"
 }

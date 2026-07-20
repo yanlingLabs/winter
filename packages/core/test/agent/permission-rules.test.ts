@@ -117,6 +117,22 @@ describe("hasShellHazards", () => {
     expect(hasShellHazards("ls -la")).toBe(false);
     expect(hasShellHazards('git commit -m "a; b"')).toBe(false);
   });
+
+  test("an UNTERMINATED quote is itself a hazard — the scanner must never resolve that ambiguity to safe", () => {
+    // A quote that never closes leaves the scan stuck 'inside' a quoted span, so a trailing
+    // `;`/`|`/newline goes unseen. Real bash rejects such a line with an EOF error (so it's inert
+    // today), but the scanner must fail SAFE by its own reasoning, not by bash's accident.
+    expect(hasShellHazards("git push 'unterminated ; rm -rf /")).toBe(true); // unterminated single
+    expect(hasShellHazards('git push "unterminated ; rm -rf /')).toBe(true); // unterminated double
+    expect(hasShellHazards("git push '")).toBe(true); // bare trailing single quote
+    expect(hasShellHazards('git push "')).toBe(true); // bare trailing double quote
+  });
+
+  test("a properly TERMINATED quote containing separators is still safe — the fix must not over-flag", () => {
+    expect(hasShellHazards('echo "a;b|c&d"')).toBe(false);
+    expect(hasShellHazards("echo 'a;b|c'")).toBe(false);
+    expect(hasShellHazards('git commit -m "wip; ready"')).toBe(false);
+  });
 });
 
 describe("ruleMatches", () => {
@@ -209,6 +225,10 @@ describe("ruleMatches — shell-hazard guard (SP-approvals T1 review)", () => {
 
   test("case sensitivity: a differently-cased command never matches (regression pin)", () => {
     expect(ruleMatches(prefixRule, call("bash", { command: "GIT PUSH" }))).toBe(false);
+  });
+
+  test("an unterminated quote hiding a trailing separator never matches a prefix rule", () => {
+    expect(ruleMatches(prefixRule, call("bash", { command: "git push 'x ; rm -rf /" }))).toBe(false);
   });
 });
 
