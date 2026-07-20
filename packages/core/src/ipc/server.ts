@@ -257,6 +257,8 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   METHODS.sessionInterrupt, METHODS.engineActivity,
   // SP3 T4b: the phone queries pending approvals it missed in the replay window (approval.list).
   METHODS.approvalList,
+  // SP3.4: the phone may START a Code session (sidebar "+ New"), not just continue one.
+  METHODS.sessionCreate,
 ]);
 
 /** Maps a failed `PluginSupervisor.invoke()` result to the message a `throw new Error(...)` in
@@ -610,8 +612,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // get-or-create — session.create rejects the mode outright rather than silently minting a
         // second one (there must only ever be one).
         if (p.mode === "dispatch") throw new RpcFailure(ERR.INVALID_PARAMS, "dispatch sessions are created via session.dispatch, not session.create");
-        const sessionId = opts.store.createSession(p.scope, { cwd: p.cwd, approvalPolicy: p.approvalPolicy, origin: p.origin });
-        const trusted = p.cwd ? (opts.trust?.isTrusted(p.cwd) ?? false) : false;
+        // SP3.4: a remote (phone) caller can't browse this Mac's filesystem to pick a cwd — its
+        // sessions default to the home directory (the same value session.dispatch uses). Scoped to
+        // the remote role so local/harness callers keep today's semantics (omitted cwd stays unset).
+        const cwd = p.cwd ?? (socket.data.authedRole === "remote" ? homedir() : undefined);
+        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy: p.approvalPolicy, origin: p.origin });
+        const trusted = cwd ? (opts.trust?.isTrusted(cwd) ?? false) : false;
         // Broadcast the session_created event to every authed harness (not just attachments —
         // a brand-new session has none) so other harnesses can offer to follow (spec §4.4).
         const created = opts.store.read(sessionId, 0)[0];

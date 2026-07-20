@@ -1778,7 +1778,7 @@ describe("daemon IPC", () => {
     expect(other.result.pending).toEqual([]);
 
     // But an off-list method from the SAME remote connection is still role-rejected before dispatch.
-    const offList = await remote.request(METHODS.sessionCreate, { scope: "global" });
+    const offList = await remote.request(METHODS.trustDir, {});
     expect(offList.error.code).toBe(ERR.UNAUTHORIZED);
     expect(offList.error.message).toMatch(/remote role may not call/);
 

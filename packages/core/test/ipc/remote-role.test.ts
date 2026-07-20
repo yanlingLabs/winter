@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@norma/protocol";
 import { startIpcServer } from "../../src/ipc/server";
@@ -117,6 +117,31 @@ describe("remote hello role + REMOTE_ALLOWED_METHODS gate (Remote Gateway SP1 Ta
       expect(res.error).toBeUndefined();
     }
     c.close();
+  });
+
+  // SP3.4: the phone may START a Code session, not just continue one. Remote-created sessions
+  // default cwd to the Mac's home dir (the phone can't browse the filesystem to pick one);
+  // harness callers are unchanged — an omitted cwd stays unset.
+  test("remote role may call session.create; omitted cwd defaults to homedir() for remote only", async () => {
+    const { socketPath, harnessToken, remoteToken } = await boot();
+
+    const remote = await TestClient.connect(socketPath);
+    await remote.hello(remoteToken, "iphone-gateway", "remote");
+    const created = await remote.request(METHODS.sessionCreate, { scope: "global" });
+    expect(created.error).toBeUndefined();
+    expect(typeof created.result.sessionId).toBe("string");
+
+    const harness = await TestClient.connect(socketPath);
+    await harness.hello(harnessToken, "local-tui");
+    const local = await harness.request(METHODS.sessionCreate, { scope: "global" });
+    expect(local.error).toBeUndefined();
+
+    const { result } = await harness.request(METHODS.sessionList, {});
+    const remoteRow = result.sessions.find((s: any) => s.sessionId === created.result.sessionId);
+    const localRow = result.sessions.find((s: any) => s.sessionId === local.result.sessionId);
+    expect(remoteRow.cwd).toBe(homedir());   // remote default applied
+    expect(localRow.cwd).toBeUndefined();    // harness behavior unchanged
+    remote.close(); harness.close();
   });
 
   test("off-list verbs are role-rejected before dispatch with the remote-specific message", async () => {
