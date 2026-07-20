@@ -130,6 +130,9 @@ describe("remote hello role + REMOTE_ALLOWED_METHODS gate (Remote Gateway SP1 Ta
     const created = await remote.request(METHODS.sessionCreate, { scope: "global" });
     expect(created.error).toBeUndefined();
     expect(typeof created.result.sessionId).toBe("string");
+    // boot() wires no TrustStore, so the defaulted-cwd path always falls back to untrusted —
+    // pins that fallback rather than the (unwired-here) real trust lookup.
+    expect(created.result.trusted).toBe(false);
 
     const harness = await TestClient.connect(socketPath);
     await harness.hello(harnessToken, "local-tui");
@@ -141,6 +144,25 @@ describe("remote hello role + REMOTE_ALLOWED_METHODS gate (Remote Gateway SP1 Ta
     const localRow = result.sessions.find((s: any) => s.sessionId === local.result.sessionId);
     expect(remoteRow.cwd).toBe(homedir());   // remote default applied
     expect(localRow.cwd).toBeUndefined();    // harness behavior unchanged
+    remote.close(); harness.close();
+  });
+
+  test("remote session.create rejects explicit cwd/approvalPolicy with INVALID_PARAMS; harness may still set them", async () => {
+    const { socketPath, harnessToken, remoteToken } = await boot();
+    const remote = await TestClient.connect(socketPath);
+    await remote.hello(remoteToken, "iphone-gateway", "remote");
+    for (const params of [
+      { scope: "global", cwd: "/tmp" },
+      { scope: "global", approvalPolicy: "auto" },
+    ]) {
+      const res = await remote.request(METHODS.sessionCreate, params);
+      expect(res.error?.code).toBe(ERR.INVALID_PARAMS);
+      expect(res.error?.message).toContain("remote session.create");
+    }
+    const harness = await TestClient.connect(socketPath);
+    await harness.hello(harnessToken, "local-tui");
+    const ok = await harness.request(METHODS.sessionCreate, { scope: "global", cwd: "/tmp", approvalPolicy: "auto" });
+    expect(ok.error).toBeUndefined();
     remote.close(); harness.close();
   });
 
