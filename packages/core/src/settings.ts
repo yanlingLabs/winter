@@ -16,6 +16,13 @@ export const ProviderSettings = z.discriminatedUnion("type", [
 
 export const PermissionsSettings = z.object({
   additionalDirectories: z.array(z.string()).optional(),
+  /** CC-grammar allow-rules (SP-approvals T1, `agent/permission-rules.ts`'s `PermissionRules`
+   *  class) — global-scope rule strings like `"Bash(git push:*)"`/`"Edit"`/`"Computer"`. Additive
+   *  optional key: schemaVersion stays 2, no migration needed. Absent means "no global rules
+   *  configured here"; the CC-parity `["Computer"]` default is NOT this field's default — it is
+   *  applied by the daemon's OWN getter fallback (Task 3), so an explicit `"allow": []` can
+   *  disable that default outright. */
+  allow: z.array(z.string()).optional(),
 });
 
 export const Settings = z.object({
