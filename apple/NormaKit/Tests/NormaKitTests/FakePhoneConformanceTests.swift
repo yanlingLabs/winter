@@ -131,14 +131,19 @@ final class FakePhoneConformanceTests: XCTestCase {
 
     // MARK: - Harness (Mac-side, non-phone) connections — drive session.create/peripheral.* the
     // way an ordinary harness client (a CLI, the menu-bar app itself) does; NEVER on the phone's
-    // own remote-role connection, since `session.create`/`peripheral.advertise`/`peripheral.lease`
-    // are deliberately NOT on `Gateway.remoteAllowedMethods` (v1: peripheral leasing is
-    // harness-only — ipc/server.ts's own `peripheral.lease` role guard). The phone still drives the
-    // REAL approval this provokes — via `pendingApprovals`/`answerApproval` (see this file's header
-    // comment on why those, not the push-event path, are what the phone leg below relies on) —
-    // exactly how a real phone would be asked to approve something the Mac side wants to do. A
-    // couple of these harness connections ALSO double as independent, gap-immune observers (see
-    // `verifier`/`approvalVerifier` below) that confirm the underlying events genuinely happened.
+    // own remote-role connection. `peripheral.advertise`/`peripheral.lease` are still deliberately
+    // NOT on `Gateway.remoteAllowedMethods` (v1: peripheral leasing is harness-only — ipc/server.ts's
+    // own `peripheral.lease` role guard). `session.create` itself IS on the allowlist as of SP3.4
+    // (the phone may start a Code session) — but the daemon rejects a remote-role caller that sets
+    // `cwd`/`approvalPolicy` explicitly (SP3.4 hardening: the phone can't browse the Mac's
+    // filesystem or override the approval gate), and the conformance session below is created with
+    // an explicit `approvalPolicy: "ask"` to force the approval leg — so it still has to go over a
+    // harness connection, not the phone's. The phone still drives the REAL approval this provokes —
+    // via `pendingApprovals`/`answerApproval` (see this file's header comment on why those, not the
+    // push-event path, are what the phone leg below relies on) — exactly how a real phone would be
+    // asked to approve something the Mac side wants to do. A couple of these harness connections
+    // ALSO double as independent, gap-immune observers (see `verifier`/`approvalVerifier` below)
+    // that confirm the underlying events genuinely happened.
 
     private func harnessClient(_ daemon: RealDaemon, name: String) async throws -> NormaClient {
         let c = NormaClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.harnessToken, clientName: name)

@@ -612,6 +612,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // get-or-create — session.create rejects the mode outright rather than silently minting a
         // second one (there must only ever be one).
         if (p.mode === "dispatch") throw new RpcFailure(ERR.INVALID_PARAMS, "dispatch sessions are created via session.dispatch, not session.create");
+        // SP3.4 hardening: the phone never picks a working directory or approval policy — the
+        // spec's "the phone does not browse the Mac's filesystem" is enforced here, not just
+        // convention. Local/harness callers are unchanged. Checked against the RAW wire params
+        // (not `p`): SessionCreateParams.approvalPolicy carries a zod `.default("ask")`, so on `p`
+        // it is never `undefined` even when the caller omitted it entirely — that would reject
+        // every remote session.create. The raw object only has the key when the caller sent it.
+        const rawParams = params as { cwd?: unknown; approvalPolicy?: unknown } | null | undefined;
+        if (socket.data.authedRole === "remote" && rawParams && typeof rawParams === "object" &&
+          (rawParams.cwd !== undefined || rawParams.approvalPolicy !== undefined)) {
+          throw new RpcFailure(ERR.INVALID_PARAMS, "remote session.create may not set cwd or approvalPolicy");
+        }
         // SP3.4: a remote (phone) caller can't browse this Mac's filesystem to pick a cwd — its
         // sessions default to the home directory (the same value session.dispatch uses). Scoped to
         // the remote role so local/harness callers keep today's semantics (omitted cwd stays unset).
