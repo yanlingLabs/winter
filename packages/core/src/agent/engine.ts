@@ -399,6 +399,11 @@ function fsWriteOutOfRootDir(call: { name: string; argsJson: string }, roots: st
   }
 }
 
+/** Files the daemon hot-merges into live policy/exec config (rules store + the two per-project
+ *  settings overlays once ProjectSettingsResolver feeds permissions.allow — Task 7). The agent
+ *  must never write ANY of them, in ANY project — humans edit them out-of-band or via cards. */
+const CONTROL_PLANE_FILENAMES = new Set(["permissions.local.json", "settings.json", "settings.local.json"]);
+
 /**
  * SP-approvals final review (composition hole, HIGH): a write/edit whose target is ANY project's
  * `<any>/.norma/permissions.local.json` — Task 1's PermissionRules project-scope rules file — must be a
@@ -440,11 +445,25 @@ function fsWriteOutOfRootDir(call: { name: string; argsJson: string }, roots: st
  * canonicalization can throw, so a pathological link chain never drops an otherwise-clear match.
  *
  * Matches by FILENAME alone, never by directory: `.norma/` itself stays writable (`.norma/memory/`
- * is the MEMDIR by design — memory files are `*.md`, never `permissions.local.json` — and any other
- * file under `.norma/` is unaffected). `null` for every non-write/edit call, a missing/malformed
- * `path` arg, or a resolution failure (unresolvable link-chain etc.) — the normal dispatch chain
- * decides from there, same fail-open-to-the-next-check shape as `fsWriteOutOfRootDir`. */
-function permissionRulesFileTarget(
+ * is the MEMDIR by design — memory files are `*.md`, never one of the control-plane filenames —
+ * and any other file under `.norma/` is unaffected). `null` for every non-write/edit call, a
+ * missing/malformed `path` arg, or a resolution failure (unresolvable link-chain etc.) — the normal
+ * dispatch chain decides from there, same fail-open-to-the-next-check shape as `fsWriteOutOfRootDir`.
+ *
+ * CC-parity Task 6.5 (controller-added): `settings.json` and `settings.local.json` — the two
+ * per-project overlays `ProjectSettingsResolver` (Task 6) reads — joined this function's filename
+ * set once Task 7 wires their merged `permissions.allow` into the live gate, making them rule-
+ * bearing control-plane files exactly like the rules store above: an agent write of
+ * `settings.local.json` → `{"permissions":{"allow":["BashUnsandboxed(*:*)"]}}` would self-grant a
+ * rule the same way an unguarded `permissions.local.json` write would. Matching by filename +
+ * parent-dir-named-`.norma` (never by project identity — this function has never taken a
+ * `projectRoot`, SP-policies whole-branch Item 1) has a deliberate side effect:
+ * `~/.norma/settings.json` — the user's OWN global settings, whose parent directory is literally
+ * named `.norma` — is now ALSO structurally denied, same as any project's. That closes the
+ * SP3.4-backlog hole where a session `cwd`'d at `$HOME` treated `~/.norma` as an ordinary
+ * in-project directory and could silently overwrite the user's global settings; nothing carves out
+ * an exception for it. */
+function controlPlaneFileTarget(
   call: { name: string; argsJson: string },
   roots: string[],
 ): { path: string; canonical: string } | null {
@@ -456,14 +475,15 @@ function permissionRulesFileTarget(
   } catch { return null; }
   if (!path) return null;
   const raw0 = isAbsolute(path) ? resolve(path) : resolve(roots[0] ?? "/", path);
-  // Cheap, syscall-free early-out: a target whose filename isn't SOME casing of
-  // "permissions.local.json" can never be the rules store, regardless of what its parent resolves
-  // to — memory files are `*.md`, every other file under `.norma/` has a different name. Comparing
-  // the ORIGINAL (pre-resolution) filename case-folded is equivalent to the resolved one:
-  // canonicalization only corrects an EXISTING file's spelling to what's on disk (the identical
-  // case-folded string on a case-insensitive volume) or leaves a not-yet-existing tail verbatim.
-  if (basename(raw0).toLowerCase() !== "permissions.local.json") return null;
-  // Pre-resolution parent: some casing of ".norma" ⇒ the rules store (catches a symlink NAMED
+  // Cheap, syscall-free early-out: a target whose filename isn't SOME casing of one of the
+  // control-plane filenames (CONTROL_PLANE_FILENAMES, above) can never be a control-plane file,
+  // regardless of what its parent resolves to — memory files are `*.md`, every other file under
+  // `.norma/` has a different name. Comparing the ORIGINAL (pre-resolution) filename case-folded
+  // is equivalent to the resolved one: canonicalization only corrects an EXISTING file's spelling
+  // to what's on disk (the identical case-folded string on a case-insensitive volume) or leaves a
+  // not-yet-existing tail verbatim.
+  if (!CONTROL_PLANE_FILENAMES.has(basename(raw0).toLowerCase())) return null;
+  // Pre-resolution parent: some casing of ".norma" ⇒ a control-plane file (catches a symlink NAMED
   // `.norma`). Checked BEFORE canonicalization so a link chain that throws below can't drop it.
   if (basename(dirname(raw0)).toLowerCase() === ".norma") {
     try { return { path, canonical: canonicalizeForWrite(resolveLeafSymlinks(raw0)) }; }
@@ -2685,7 +2705,7 @@ export class AgentEngine {
         // guard against an empty string — repoRootFor("") would realpath-fail and fall back to the
         // DAEMON's own process.cwd(), a wrong and misleading project root. `projectRoot: null`
         // degrades safely everywhere it's read below: PermissionRules.decision() just consults
-        // global rules, and permissionRulesFileTarget is projectRoot-INDEPENDENT (SP-policies
+        // global rules, and controlPlaneFileTarget is projectRoot-INDEPENDENT (SP-policies
         // whole-branch Item 1 — it refuses ANY project's rules store, so a null projectRoot never
         // affects its verdict; see its own doc comment). SP-policies Task 6: HOISTED above the
         // `dirGrant` computation just below (it used to sit between `dirGrantDenied` and
@@ -2724,10 +2744,11 @@ export class AgentEngine {
         // a valid write/edit target — checked here, unconditionally (not gated on `decision`,
         // `dirGrant`, or anything ruleAllowed-related below), so it is computed and dispatched
         // BEFORE the ruleAllowed short-circuit gets a chance to run. See
-        // permissionRulesFileTarget's own doc comment for the full exfil-composition rationale
-        // (final review 2: filesystem-IDENTITY comparison, not string spelling).
+        // controlPlaneFileTarget's own doc comment for the full exfil-composition rationale
+        // (final review 2: filesystem-IDENTITY comparison, not string spelling; CC-parity Task 6.5:
+        // now also the two per-project settings overlays, not just the rules store).
         const rulesFileTarget = (call.name === "write" || call.name === "edit")
-          ? permissionRulesFileTarget(call, this.writableRoots(sessionId, projectRoot, rootsOverride))
+          ? controlPlaneFileTarget(call, this.writableRoots(sessionId, projectRoot, rootsOverride))
           : null;
         // SP-approvals Task 10: web_fetch's dangerous-domain floor — computed for EVERY policy
         // (gate.ts's `decision` above is now unconditionally "allow" for web_fetch, so this is the
@@ -2859,9 +2880,11 @@ export class AgentEngine {
         // SP-policies whole-branch review (Item 2, MEDIUM — ACCEPTED, documented not guarded): a PERSISTED
         // `BashUnsandboxed(<prefix>:*)` rule (like `bypass`) grants SILENT, unsandboxed execution for that
         // prefix. For a file-WRITING prefix that necessarily includes writing the control plane itself —
-        // the rules store (`*/.norma/permissions.local.json`, which the seatbelt regex + permissionRulesFileTarget
-        // otherwise deny) and `~/.norma/run/core.sock` — because a true escape runs with NO seatbelt at all
-        // (tools/bash.ts spawns /bin/bash directly, no profile). This is a DELIBERATE, human-pre-authorized
+        // the rules store and, since CC-parity Task 6.5, the two settings overlays too
+        // (`*/.norma/{permissions.local,settings,settings.local}.json`, which the seatbelt regexes +
+        // controlPlaneFileTarget otherwise deny) and `~/.norma/run/core.sock` — because a true escape
+        // runs with NO seatbelt at all (tools/bash.ts spawns /bin/bash directly, no profile). This is
+        // a DELIBERATE, human-pre-authorized
         // consequence: the human wrote (or approved the "always allow" card for) that BashUnsandboxed rule,
         // explicitly choosing unrestricted shell for that prefix. Guarding it would require parsing the shell
         // command string to reason about what it writes — fragile and defeatable (out of scope). The store
@@ -2914,7 +2937,7 @@ export class AgentEngine {
           // SP-approvals final review: hard error, no card, no grant — mirrors dirGrantDenied's own
           // control-plane branch just below in both style and precedence (checked BEFORE it, and
           // before the out-of-root grant-card branch, so an Edit rule AND a would-be grant card are
-          // both preempted). See permissionRulesFileTarget's own doc comment for why.
+          // both preempted). See controlPlaneFileTarget's own doc comment for why.
           outcome = {
             output: `cannot ${call.name} ${rulesFileTarget.path}: the permission rules store can only be changed by answering an approval card (or editing it yourself)`,
             isError: true,
@@ -3676,7 +3699,7 @@ export class AgentEngine {
   /** SP-policies Task 6: the session's writable-dir set — `dirs.roots(sessionId)` (or a worktree
    *  child's FIXED `rootsOverride`) UNIONED with the absolute dirs a hand-authored `Edit(<path>)`
    *  rule declares for this project (PermissionRules.editPathRules). Consulted by BOTH the
-   *  write/edit fence (fsWriteOutOfRootDir, permissionRulesFileTarget, the fs-reviewer's fsRoots)
+   *  write/edit fence (fsWriteOutOfRootDir, controlPlaneFileTarget, the fs-reviewer's fsRoots)
    *  AND bash's seatbelt (executeCall's ctx.roots — tools/bash.ts realpaths this exact array into
    *  sandbox.ts's buildSeatbeltProfile `(subpath ...)` rules), so one Edit rule widens both
    *  surfaces identically. A worktree-isolated child (`rootsOverride` set) keeps its FIXED
@@ -3697,12 +3720,12 @@ export class AgentEngine {
    *     denylist the out-of-root dirGrant flow uses) — an `Edit(~/.norma)` (or an ancestor/
    *     descendant of it) must not silently become "in-root" either, or every downstream check that
    *     exists specifically to protect the control plane (dirGrantDenied's hard-error branch,
-   *     permissionRulesFileTarget's own identity check) would simply never run for it: `dirGrant`
+   *     controlPlaneFileTarget's own identity check) would simply never run for it: `dirGrant`
    *     would compute as `null` (the call looks ordinary, in-root), so `dirGrantDenied`'s
    *     `grantDenied` check — which only ever runs when `dirGrant` is non-null — is never reached.
    *  Each Edit dir is realpath-resolved FIRST (`realpathSync`) — and a not-yet-existing dir is
    *  SKIPPED entirely, never raw-fallback-included — so a symlinked Edit dir resolves to the identity
-   *  `grantDenied` itself expects (mirrors `permissionRulesFileTarget`'s filesystem-identity-over-
+   *  `grantDenied` itself expects (mirrors `controlPlaneFileTarget`'s filesystem-identity-over-
    *  string-spelling principle), and a missing root can never reach bash's realpath/Seatbelt (which
    *  would ENOENT-crash every bash call). See the loop below. */
   private writableRoots(sessionId: string, projectRoot: string | null, rootsOverride: string[] | undefined): string[] {

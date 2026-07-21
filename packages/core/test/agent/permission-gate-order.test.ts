@@ -1166,8 +1166,9 @@ describe("scenario 12: the permission-rules store is never agent-writable (SP-ap
   // the session writable set, making a SIBLING project's tree in-root) let the agent SILENTLY write
   // a DIFFERENT project's rules store: <parent>/projB/.norma/permissions.local.json. That store is
   // NOT this session's (projA's) store, so the old identity/structural checks both returned null →
-  // permissionRulesFileTarget said "not the rules store" → the in-project-silent flip wrote it with
-  // NO card. Those minted rules (WebFetch exfil exceptions, BashUnsandboxed escapes) then auto-
+  // the guard (then named permissionRulesFileTarget, since renamed to controlPlaneFileTarget) said
+  // "not the rules store" → the in-project-silent flip wrote it with NO card. Those minted rules
+  // (WebFetch exfil exceptions, BashUnsandboxed escapes) then auto-
   // activate the moment the user opens projB. The fix makes the guard projectRoot-INDEPENDENT: ANY
   // write whose target is some `*/.norma/permissions.local.json` is refused, whichever project owns it.
   test("(h) HIGH: Edit(<parent>) grant + write to a SIBLING project's rules store (<parent>/projB/.norma/permissions.local.json) → hard error, no card, file never created", async () => {
@@ -1217,4 +1218,136 @@ describe("scenario 12: the permission-rules store is never agent-writable (SP-ap
     expect(existsSync(target)).toBe(false);
     expect(existsSync(join(projB, ".NORMA"))).toBe(false); // nothing created at all
   });
+});
+
+// CC-parity Task 6.5 (controller-added): Task 7 wires ProjectSettingsResolver's `permissions.allow`
+// into this SAME gate, making `.norma/settings.json` and `.norma/settings.local.json` rule-bearing
+// control-plane files exactly like the rules store scenario 12 covers above — an agent write of
+// `settings.local.json` → `{"permissions":{"allow":["BashUnsandboxed(*:*)"]}}` would self-grant a
+// rule the moment Task 7 lands. This suite proves the SAME hard-error fence (engine.ts's
+// controlPlaneFileTarget, renamed from permissionRulesFileTarget in this same pass) already covers
+// both filenames, BEFORE Task 7 makes them live — closing the write side ahead of the read side
+// going hot. Each case mirrors one of scenario 12's own cases, run over the two new filenames
+// (parametrized via a plain loop over `test()` registration, since the harness has no `test.each`
+// precedent elsewhere in this file).
+describe("scenario 13 (Task 6.5): the two project-settings overlays are control-plane files too — never agent-writable, ahead of Task 7", () => {
+  const FILES: Array<{ filename: string; cased: string }> = [
+    { filename: "settings.json", cased: "Settings.Json" },
+    { filename: "settings.local.json", cased: "Settings.Local.Json" },
+  ];
+
+  for (const { filename, cased } of FILES) {
+    // Mirrors scenario 12(a): direct write, in-root, under the most permissive rule possible.
+    test(`direct write to .norma/${filename} → hard error, no approval_requested, file unchanged`, async () => {
+      const permissionRules = new PermissionRules({ globalAllow: () => ["Edit"], normaHome: tmpDir("norma-pgo-home-") });
+      const provider = new FakeProvider(writeTurn(`.norma/${filename}`, JSON.stringify({ permissions: { allow: ["BashUnsandboxed(*:*)"] } })));
+      const { engine, store, sessionId, cwd } = setupEngine(provider, { policy: "ask", permissionRules });
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      expect(events.some((e) => e.type === "approval_requested")).toBe(false); // no card
+      const result = events.find((e) => e.type === "tool_result") as any;
+      expect(result.isError).toBe(true);
+      expect(result.output).toContain(`cannot write .norma/${filename}`);
+      expect(result.output).toContain("the permission rules store can only be changed by answering an approval card (or editing it yourself)");
+      expect(existsSync(join(cwd, ".norma", filename))).toBe(false); // never landed
+    });
+
+    // Mirrors scenario 12(e)/(f) combined: BOTH the directory's and the filename's casing are
+    // mutated in the same write — macOS's default case-insensitive-but-case-preserving volume
+    // format means this reaches the identical real file a differently-cased reader would open.
+    test(`case-variant write .NORMA/${cased} → hard error, nothing created`, async () => {
+      const permissionRules = new PermissionRules({ globalAllow: () => ["Edit"], normaHome: tmpDir("norma-pgo-home-") });
+      const provider = new FakeProvider(writeTurn(`.NORMA/${cased}`, JSON.stringify({ permissions: { allow: ["BashUnsandboxed(*:*)"] } })));
+      const { engine, store, sessionId, cwd } = setupEngine(provider, { policy: "ask", permissionRules });
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+      const result = events.find((e) => e.type === "tool_result") as any;
+      expect(result.isError).toBe(true);
+      expect(result.output).toContain("the permission rules store can only be changed by answering an approval card (or editing it yourself)");
+      expect(existsSync(join(cwd, ".NORMA"))).toBe(false);
+      expect(existsSync(join(cwd, ".norma"))).toBe(false);
+    });
+
+    // Mirrors scenario 12(g): `.norma` itself is a PRE-CREATED SYMLINK to a real directory
+    // elsewhere — the PRE-resolution parent-name check (raw0) catches this before canonicalization
+    // ever runs.
+    test(`write THROUGH a symlink named .norma to .norma/${filename} → hard error, nothing lands on either side`, async () => {
+      const cwd = tmpDir("norma-pgo-cwd-");
+      const realDir = tmpDir("norma-pgo-realdir-");
+      symlinkSync(realDir, join(cwd, ".norma"));
+      const permissionRules = new PermissionRules({ globalAllow: () => ["Edit"], normaHome: tmpDir("norma-pgo-home-") });
+      const provider = new FakeProvider(writeTurn(`.norma/${filename}`, JSON.stringify({ permissions: { allow: ["BashUnsandboxed(*:*)"] } })));
+      const { engine, store, sessionId } = setupEngine(provider, { policy: "ask", permissionRules, cwd });
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+      const result = events.find((e) => e.type === "tool_result") as any;
+      expect(result.isError).toBe(true);
+      expect(result.output).toContain("the permission rules store can only be changed by answering an approval card (or editing it yourself)");
+      expect(existsSync(join(realDir, filename))).toBe(false); // nothing landed through the symlink
+      expect(existsSync(join(cwd, ".norma", filename))).toBe(false); // nor via the symlinked spelling
+    });
+
+    // NEW regression (no permissions.local.json analogue existed in scenario 12): the INVERSE
+    // symlink direction — `.norma` is a REAL directory, never itself a link, but reached via a
+    // symlink named something else entirely ("shortcut"). raw0's parent-name check fails (its
+    // literal parent is "shortcut", not ".norma"), so this exercises the CANONICALIZATION fallback
+    // branch (controlPlaneFileTarget's "Otherwise, resolve case/symlinks and re-check the parent"
+    // path) — previously undertested at the engine level for ANY control-plane filename.
+    test(`reaching a REAL .norma/${filename} via a DIFFERENTLY-NAMED symlink → hard error`, async () => {
+      const cwd = tmpDir("norma-pgo-cwd-");
+      mkdirSync(join(cwd, ".norma"), { recursive: true }); // the REAL .norma dir — never itself a link
+      symlinkSync(join(cwd, ".norma"), join(cwd, "shortcut")); // symlink named something ELSE, pointing at it
+      const permissionRules = new PermissionRules({ globalAllow: () => ["Edit"], normaHome: tmpDir("norma-pgo-home-") });
+      const provider = new FakeProvider(writeTurn(`shortcut/${filename}`, JSON.stringify({ permissions: { allow: ["BashUnsandboxed(*:*)"] } })));
+      const { engine, store, sessionId } = setupEngine(provider, { policy: "ask", permissionRules, cwd });
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+      const result = events.find((e) => e.type === "tool_result") as any;
+      expect(result.isError).toBe(true);
+      expect(result.output).toContain("the permission rules store can only be changed by answering an approval card (or editing it yourself)");
+      expect(existsSync(join(cwd, ".norma", filename))).toBe(false);
+    });
+  }
+});
+
+// CC-parity Task 6.5 (controller-added): the guard matches by FILENAME + parent-dir-named-`.norma`
+// ONLY — never by directory, never by extension. A `settings.json` NOT living directly under a
+// `.norma/` parent (another tool's config, or a bare file at the project root) must stay UNfenced,
+// exactly as `.norma/memory/*.md` and `.norma/rules/*.md` already do for the rules store. Each case
+// runs cardless under `ask` (the in-project-silent flip, SP-policies Task 7) and its content lands
+// unchanged — proving this ISN'T a directory-blanket or filename-substring match.
+describe("scenario 13 non-match regression (Task 6.5): filename+parent matching is FILE-specific, not directory- or extension-blanket", () => {
+  const CASES: Array<{ label: string; path: string; content: string }> = [
+    { label: ".vscode/settings.json (a different tool's config; .norma nowhere in the path)", path: ".vscode/settings.json", content: "vscode content" },
+    { label: "bare settings.json directly under cwd (no .norma parent at all)", path: "settings.json", content: "bare content" },
+    { label: ".norma/memory/foo.md (the MEMDIR)", path: ".norma/memory/foo.md", content: "memory content" },
+    { label: ".norma/rules/a.md (the prose-rules dir)", path: ".norma/rules/a.md", content: "rules content" },
+  ];
+
+  for (const { label, path, content } of CASES) {
+    test(`${label} → runs cardless, content lands unchanged`, async () => {
+      const permissionRules = new PermissionRules({ globalAllow: () => ["Edit"], normaHome: tmpDir("norma-pgo-home-") });
+      const provider = new FakeProvider(writeTurn(path, content));
+      const { engine, store, sessionId, cwd } = setupEngine(provider, { policy: "ask", permissionRules });
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+      const result = events.find((e) => e.type === "tool_result") as any;
+      expect(result.isError).toBe(false);
+      expect(readFileSync(join(cwd, path), "utf8")).toBe(content);
+    });
+  }
 });

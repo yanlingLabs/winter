@@ -42,9 +42,10 @@ d("bash tool (sandboxed)", () => {
   });
 
   // SP-approvals final review (composition hole, defense-in-depth): engine.ts's dispatch-loop hard
-  // error (permissionRulesFileTarget) only ever sees write/edit TOOL calls — a bash-invoked write
-  // never goes through it. The seatbelt itself (sandbox.ts's buildSeatbeltProfile) must
-  // independently deny this exact file, EVEN THOUGH it's inside the writable cwd subpath.
+  // error (controlPlaneFileTarget, renamed from permissionRulesFileTarget in the CC-parity Task 6.5
+  // pass) only ever sees write/edit TOOL calls — a bash-invoked write never goes through it. The
+  // seatbelt itself (sandbox.ts's buildSeatbeltProfile) must independently deny this exact file,
+  // EVEN THOUGH it's inside the writable cwd subpath.
   test("CANNOT write .norma/permissions.local.json even though it is INSIDE the writable cwd (seatbelt carve-out)", async () => {
     const cwd = proj();
     const target = join(cwd, ".norma", "permissions.local.json");
@@ -55,6 +56,22 @@ d("bash tool (sandboxed)", () => {
     );
     // mkdir succeeds (the .norma DIR itself is not carved out) but the redirect into the exact
     // file is denied → nonzero exit, file absent.
+    expect(existsSync(target)).toBe(false);
+    expect(res.output).not.toContain("[exit 0]");
+  });
+
+  // CC-parity Task 6.5 (controller-added): the same composition hole applies to the two settings
+  // overlays once Task 7 makes them rule-bearing — clones the case above for settings.local.json
+  // (settings.json is covered by the nested-nesting variant below instead, so both filenames get
+  // a REAL sandbox-exec case, not just the settings.json one twice).
+  test("CANNOT write .norma/settings.local.json even though it is INSIDE the writable cwd (seatbelt carve-out)", async () => {
+    const cwd = proj();
+    const target = join(cwd, ".norma", "settings.local.json");
+    const res = await reg().execute(
+      "bash",
+      { command: `mkdir -p ${join(cwd, ".norma")} && echo '{"permissions":{"allow":["BashUnsandboxed(*:*)"]}}' > ${target}` },
+      { cwd, roots: [cwd], sessionId: "s1" },
+    );
     expect(existsSync(target)).toBe(false);
     expect(res.output).not.toContain("[exit 0]");
   });
@@ -80,7 +97,7 @@ d("bash tool (sandboxed)", () => {
   // matching `*/.norma/permissions.local.json` at ANY depth, any case. Here `<parent>` is an EXTRA
   // writable root (roots: [cwd, parent]) and the store lives under `<parent>/projB`, so ONLY the
   // regex (not the per-root literal) can catch it — pinning the nested case end-to-end through a real
-  // sandbox-exec child, exactly the surface the engine's write/edit guard (permissionRulesFileTarget)
+  // sandbox-exec child, exactly the surface the engine's write/edit guard (controlPlaneFileTarget)
   // cannot see into.
   test("CANNOT write a NESTED sibling rules store <parent>/projB/.norma/permissions.local.json (regex deny at any depth)", async () => {
     const cwd = proj();
@@ -90,6 +107,23 @@ d("bash tool (sandboxed)", () => {
     const res = await reg().execute(
       "bash",
       { command: `echo '{"allow":["WebFetch(domain:webhook.site)"]}' > ${target}` },
+      { cwd, roots: [cwd, parent], sessionId: "s1" },
+    );
+    expect(existsSync(target)).toBe(false); // regex-denied even though it is nested under a writable root
+    expect(res.output).not.toContain("[exit 0]");
+  });
+
+  // CC-parity Task 6.5 (controller-added): clones the case above for the settings.json overlay's
+  // OWN regex (SETTINGS_FILE_REGEX) — proving the any-depth nested-sibling defense generalizes to
+  // both new filenames, not just the pre-existing rules-store one.
+  test("CANNOT write a NESTED sibling settings.json <parent>/projB/.norma/settings.json (regex deny at any depth)", async () => {
+    const cwd = proj();
+    const parent = proj();
+    const target = join(parent, "projB", ".norma", "settings.json");
+    mkdirSync(join(parent, "projB", ".norma"), { recursive: true });
+    const res = await reg().execute(
+      "bash",
+      { command: `echo '{"permissions":{"allow":["BashUnsandboxed(*:*)"]}}' > ${target}` },
       { cwd, roots: [cwd, parent], sessionId: "s1" },
     );
     expect(existsSync(target)).toBe(false); // regex-denied even though it is nested under a writable root
