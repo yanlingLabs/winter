@@ -279,11 +279,16 @@ public actor NormaSessionClient {
         if let expiresAt = a.expiresAt, Date().timeIntervalSince1970 * 1000 >= Double(expiresAt) {
             return .expired
         }
-        let params = SessionEvent.JSONValue.object([
+        var obj: [String: SessionEvent.JSONValue] = [
             "sessionId": .string(a.sessionID),
             "callId": .string(a.callID),
             "approved": .bool(a.approved),
-        ])
+        ]
+        // SP-approvals T4: only present when the caller chose an offered option — omitted (not
+        // sent as null) for a plain approve/deny, matching every other optional-param convention
+        // on this client (see `commandID`'s own doc comment above).
+        if let optionId = a.optionId { obj["optionId"] = .string(optionId) }
+        let params = SessionEvent.JSONValue.object(obj)
         let result = try await rpcCall(method: "approval.respond", params: params, commandID: a.commandID)
         if result["alreadyResolved"]?.boolValue == true { return .resolvedElsewhere }
         return .hostAccepted

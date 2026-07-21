@@ -49,19 +49,27 @@ public enum ApprovalState: Sendable, Equatable {
 /// an `approval.list` entry) lets the client derive `.expired` from its own clock BEFORE sending —
 /// past the deadline, the host has already failed the approval closed (`by:"timeout"`). Optional:
 /// `nil` means "never treat as locally expired" (always send and let the host answer).
+///
+/// `optionId` (SP-approvals T4): which `ApprovalOption` (`NormaProtocol.SessionEvent.
+/// ApprovalOption`, carried on the triggering `approval_requested`/`approval.list` entry) the
+/// caller chose, by `id` — e.g. "allow_project" to persist a rule alongside this answer. `nil`
+/// (the default) means a plain approve/deny with no rule offered/chosen, identical to the wire
+/// shape before this field existed.
 public struct ApprovalAnswer: Sendable, Equatable {
     public let sessionID: String
     public let callID: String
     public let approved: Bool
     public let commandID: String
     public let expiresAt: Int?
+    public let optionId: String?
 
-    public init(sessionID: String, callID: String, approved: Bool, commandID: String, expiresAt: Int? = nil) {
+    public init(sessionID: String, callID: String, approved: Bool, commandID: String, expiresAt: Int? = nil, optionId: String? = nil) {
         self.sessionID = sessionID
         self.callID = callID
         self.approved = approved
         self.commandID = commandID
         self.expiresAt = expiresAt
+        self.optionId = optionId
     }
 }
 

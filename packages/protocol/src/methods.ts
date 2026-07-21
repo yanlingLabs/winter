@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { SessionEvent, TaskSchema, PeripheralClassSchema, HolderSchema } from "./events";
+import { SessionEvent, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption } from "./events";
 
 export const PROTOCOL_VERSION = 0;
 
@@ -81,6 +81,12 @@ export const ApprovalRespondParams = z.object({
   sessionId: z.string(),
   callId: z.string().min(1),
   approved: z.boolean(),
+  // SP-approvals T4: which `ApprovalOption` (events.ts) the caller chose, by `id` — Task 5's
+  // respond handler looks up the pending approval's stored options by this id and, if it names a
+  // rule-bearing option AND `approved` is true, persists that rule. Optional/additive: a plain
+  // approve/deny (no options offered, or a client that predates this field) omits it and behaves
+  // exactly as before — no rule is ever persisted without an explicit optionId.
+  optionId: z.string().optional(),
 });
 export const ApprovalRespondResult = z.object({ ok: z.literal(true), alreadyResolved: z.boolean() });
 
@@ -98,6 +104,9 @@ export const PendingApprovalSchema = z.object({
   summary: z.string(),
   issuedAt: z.number().int(),
   expiresAt: z.number().int(),
+  // SP-approvals T4: mirrors ApprovalRequestedEvent.options field-for-field (same
+  // ApprovalBroker-stored meta backs both) — see that field's own doc comment in events.ts.
+  options: z.array(ApprovalOption).optional(),
 });
 export const ApprovalListResult = z.object({ pending: z.array(PendingApprovalSchema) });
 

@@ -1,3 +1,5 @@
+import type { ApprovalOption } from "@norma/protocol";
+
 export interface ApprovalOutcome { approved: boolean; by: string }
 
 /** A currently-pending approval, as returned by `ApprovalBroker.list()` and the `approval.list`
@@ -11,12 +13,17 @@ export interface PendingApproval {
   summary: string;
   issuedAt: number;   // epoch ms the approval was requested
   expiresAt: number;  // epoch ms the broker will fail it closed (issuedAt + timeoutMs)
+  // SP-approvals T4: mirrors `ApprovalRequestedEvent.options`/`PendingApprovalSchema.options`
+  // (protocol's events.ts/methods.ts) field-for-field — see that field's own doc comment. Undefined
+  // for grant/worktree/reviewer-escalation waits (Task 5 passes no options for those) and for any
+  // plain-tool wait where nothing rule-worthy applies.
+  options?: ApprovalOption[];
 }
 
 /** Optional metadata threaded from the emit site (engine.ts/daemon.ts) so a pending approval is
  *  listable + carries its deadline. Omitted by callers that don't need listing (direct unit tests);
  *  the broker then falls back to `Date.now()`/`+timeoutMs` and empty tool/summary strings. */
-export interface WaitMeta { toolName: string; summary: string; issuedAt: number; expiresAt: number }
+export interface WaitMeta { toolName: string; summary: string; issuedAt: number; expiresAt: number; options?: ApprovalOption[] }
 
 interface PendingEntry {
   sessionId: string;
@@ -27,6 +34,7 @@ interface PendingEntry {
   summary: string;
   issuedAt: number;
   expiresAt: number;
+  options?: ApprovalOption[];
 }
 
 /** In-flight approval requests, keyed by sessionId+callId. First response wins (spec §4.10).
@@ -56,6 +64,7 @@ export class ApprovalBroker {
         summary: meta?.summary ?? "",
         issuedAt,
         expiresAt: meta?.expiresAt ?? issuedAt + timeoutMs,
+        options: meta?.options,
       });
     });
   }
@@ -77,8 +86,21 @@ export class ApprovalBroker {
     const out: PendingApproval[] = [];
     for (const e of this.pending.values()) {
       if (e.sessionId !== sessionId) continue;
-      out.push({ callId: e.callId, toolName: e.toolName, summary: e.summary, issuedAt: e.issuedAt, expiresAt: e.expiresAt });
+      out.push({ callId: e.callId, toolName: e.toolName, summary: e.summary, issuedAt: e.issuedAt, expiresAt: e.expiresAt, options: e.options });
     }
     return out;
+  }
+
+  /** SP-approvals T4: the stored meta for ONE still-pending approval, WITHOUT resolving it —
+   *  Task 5's `approval.respond` handler needs to look up the chosen `optionId`'s `rule`/`scope`
+   *  BEFORE deciding whether to persist a permission rule, but must leave the entry untouched for
+   *  the `resolve()` call that follows right after (a lookup here must never itself count as an
+   *  answer). Returns `undefined` when there is no pending entry for this identity — already
+   *  resolved, timed out, or never existed (same "second answer is a no-op" shape `resolve()`
+   *  degrades to via `alreadyResolved`, just without mutating anything here). */
+  pendingMeta(sessionId: string, callId: string): PendingApproval | undefined {
+    const e = this.pending.get(this.key(sessionId, callId));
+    if (!e) return undefined;
+    return { callId: e.callId, toolName: e.toolName, summary: e.summary, issuedAt: e.issuedAt, expiresAt: e.expiresAt, options: e.options };
   }
 }

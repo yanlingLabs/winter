@@ -120,6 +120,20 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let isError: Bool
     }
 
+    /// SP-approvals T4: a caller-facing "grant a rule" choice offered alongside plain approve/
+    /// deny — e.g. "Always allow `git push` in this project." `id` is an open set (the daemon
+    /// mints the concrete ids per tool, engine.ts's `approvalOptionsFor` — Task 5); `label` is the
+    /// exact human-readable text to render, already composed with the rule string for a
+    /// rule-bearing option. `rule`/`scope` are present TOGETHER on an option that persists a
+    /// permission rule when chosen, and both absent (tolerant-decode: neither is required) on a
+    /// plain option (allow-once/deny) that grants nothing durable.
+    public struct ApprovalOption: Codable, Equatable, Sendable {
+        public let id: String
+        public let label: String
+        public let rule: String?
+        public let scope: String?
+    }
+
     public struct ApprovalRequested: Codable, Equatable, Sendable {
         public let seq: Int
         public let sessionId: String
@@ -146,6 +160,10 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         /// in the dispatch session's stream — identifies which child to respond into. Optional/
         /// additive — decode only, absent on native approvals.
         public let childSessionId: String?
+        /// SP-approvals T4: per-approval allow-rule choices (Task 5's `approvalOptionsFor`) — see
+        /// `ApprovalOption`'s own doc comment above. Optional/additive — decode only, absent for a
+        /// reviewer-escalation/grant/worktree card or an older-shaped payload.
+        public let options: [ApprovalOption]?
     }
 
     public struct ApprovalResolved: Codable, Equatable, Sendable {

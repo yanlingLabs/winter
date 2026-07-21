@@ -4,7 +4,7 @@ import XCTest
 final class RoundTripTests: XCTestCase {
     func fixtureURLs() throws -> [URL] {
         let urls = Bundle.module.urls(forResourcesWithExtension: "json", subdirectory: "Fixtures") ?? []
-        XCTAssertEqual(urls.count, 50, "expected 50 fixtures — regenerate via pnpm protocol:generate")
+        XCTAssertEqual(urls.count, 51, "expected 51 fixtures — regenerate via pnpm protocol:generate")
         return urls
     }
 
@@ -131,5 +131,34 @@ final class RoundTripTests: XCTestCase {
         guard case .notificationRequested(let v) = try JSONDecoder().decode(SessionEvent.self, from: data) else { return XCTFail() }
         XCTAssertEqual(v.title, "Norma")
         XCTAssertFalse(v.message.isEmpty)
+    }
+
+    /// SP-approvals T4: `approval_requested.options` is additive/optional — mirrors
+    /// `testApprovalRequestedReviewerReasonOptional`'s with/without pattern, via the TS-generated
+    /// `approval_requested_with_options.json` fixture (present, one rule-bearing option + one bare
+    /// allow_once option) vs. the pre-existing `approval_requested.json` (predates this field,
+    /// absent). Checks CONTENT, not just the fixture-count tripwire above — proves `ApprovalOption`
+    /// decodes id/label/rule/scope correctly, not merely that the union still compiles.
+    func testApprovalRequestedOptionsOptional() throws {
+        guard let withURL = Bundle.module.url(forResource: "approval_requested_with_options", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing approval_requested_with_options.json fixture")
+        }
+        let withData = try Data(contentsOf: withURL)
+        guard case .approvalRequested(let with) = try JSONDecoder().decode(SessionEvent.self, from: withData) else { return XCTFail() }
+        guard let options = with.options else { return XCTFail("expected options to be present") }
+        XCTAssertEqual(options.count, 2)
+        XCTAssertEqual(options[0], SessionEvent.ApprovalOption(id: "allow_once", label: "Allow once", rule: nil, scope: nil))
+        XCTAssertEqual(options[1], SessionEvent.ApprovalOption(id: "allow_project", label: "Always allow \"git push\" in this project", rule: "Bash(git push:*)", scope: "project"))
+
+        let reencoded = try JSONEncoder().encode(SessionEvent.approvalRequested(with))
+        guard case .approvalRequested(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(with, redecoded)
+
+        guard let withoutURL = Bundle.module.url(forResource: "approval_requested", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing approval_requested.json fixture")
+        }
+        let withoutData = try Data(contentsOf: withoutURL)
+        guard case .approvalRequested(let without) = try JSONDecoder().decode(SessionEvent.self, from: withoutData) else { return XCTFail() }
+        XCTAssertNil(without.options)
     }
 }

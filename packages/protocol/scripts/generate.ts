@@ -109,6 +109,14 @@ const fixtures: Record<string, unknown> = {
   "approval_resolved_with_child_session": { ...base, threadId: "main", type: "approval_resolved", callId: "call_40", approved: true, by: "orb", childSessionId: "s_child000001" },
   "question_asked_with_child_session": { ...base, threadId: "main", type: "question_asked", callId: "call_41", questions: [{ question: "Which package manager?", header: "PkgMgr", options: [{ label: "pnpm", description: "workspace default" }, { label: "npm", description: "plain" }], multiSelect: false }], childSessionId: "s_child000001" },
   "question_resolved_with_child_session": { ...base, threadId: "main", type: "question_resolved", callId: "call_41", answers: { "Which package manager?": "pnpm" }, by: "orb", childSessionId: "s_child000001" },
+  // SP-approvals T4: `options` is additive on the EXISTING approval_requested shape — mirrors the
+  // reviewerReason/childSessionId with/without pattern above. One rule-bearing option (rule+scope,
+  // the shape Task 5's `approvalOptionsFor` mints for a bash escalation) and one bare allow_once
+  // option (no rule/scope — grants nothing durable), so Swift round-trips both option flavors.
+  "approval_requested_with_options": { ...base, threadId: "main", type: "approval_requested", callId: "call_50", toolName: "bash", summary: "run git push origin main", issuedAt: 1781270000000, expiresAt: 1781270300000, options: [
+    { id: "allow_once", label: "Allow once" },
+    { id: "allow_project", label: "Always allow \"git push\" in this project", rule: "Bash(git push:*)", scope: "project" },
+  ] },
 };
 for (const [name, value] of Object.entries(fixtures)) {
   SessionEvent.parse(value); // fixtures must be valid by construction
