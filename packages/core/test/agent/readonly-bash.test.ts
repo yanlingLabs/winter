@@ -249,9 +249,9 @@ describe("readOnlyBash — structural fixtures", () => {
 });
 
 describe("READONLY_HEADS / READONLY_SUBCOMMANDS — exported tables", () => {
-  test("READONLY_HEADS contains exactly the brief's 50 heads", () => {
+  test("READONLY_HEADS contains exactly the brief's 48 heads (50 minus less/more, review FIX 2)", () => {
     const expected = [
-      "cat", "head", "tail", "less", "more", "ls", "pwd", "wc", "file", "stat", "du", "df",
+      "cat", "head", "tail", "ls", "pwd", "wc", "file", "stat", "du", "df",
       "which", "whereis", "whoami", "id", "date", "uptime", "uname", "sw_vers", "hostname",
       "printenv", "basename", "dirname", "realpath", "readlink", "echo", "printf",
       "grep", "rg", "fgrep", "egrep", "find", "fd", "tree",
@@ -268,6 +268,11 @@ describe("READONLY_HEADS / READONLY_SUBCOMMANDS — exported tables", () => {
     for (const head of ["rm", "mv", "cp", "chmod", "chown", "chgrp", "mkdir", "rmdir", "kill", "sed", "sudo", "sh", "bash", "zsh", "eval", "exec", "tee", "xargs"]) {
       expect(READONLY_HEADS.has(head)).toBe(false);
     }
+  });
+
+  test("review FIX 2: less/more are NOT in READONLY_HEADS (LESSOPEN/LESSCLOSE arbitrary-command preprocessing hook)", () => {
+    expect(READONLY_HEADS.has("less")).toBe(false);
+    expect(READONLY_HEADS.has("more")).toBe(false);
   });
 
   test("READONLY_SUBCOMMANDS has exactly the brief's keys", () => {
@@ -322,11 +327,11 @@ describe("readOnlyBash — additional regression coverage (beyond the required m
     expect(readOnlyBash("script -q /dev/null")).toBe(false);
   });
 
-  test("a path-qualified argv0 still resolves via basename for READONLY_HEADS", () => {
-    expect(readOnlyBash("/bin/cat foo.txt")).toBe(true);
+  test("review FIX 3 supersedes this: a path-qualified argv0 no longer resolves via basename — it is rejected outright", () => {
+    expect(readOnlyBash("/bin/cat foo.txt")).toBe(false);
   });
 
-  test("a path-qualified find is still subject to the action-flag veto (basename-based, not exact-string)", () => {
+  test("a path-qualified find is still rejected — now via the simpler FIX 3 path-qualification reason, not the find-flag veto", () => {
     expect(readOnlyBash("/usr/bin/find . -delete")).toBe(false);
   });
 
@@ -341,5 +346,211 @@ describe("readOnlyBash — additional regression coverage (beyond the required m
 
   test("multiple assignments before a command are still rejected (not just the single-assignment fixture)", () => {
     expect(readOnlyBash("FOO=1 BAR=2 ls")).toBe(false);
+  });
+});
+
+// SP-approvals T2 review (coordinator round): three probe-CONFIRMED allow-side holes. Each gets
+// its own describe block below, with the review's exact named probe cases plus additional
+// representative coverage, every one its own test() for the same pinpoint-a-regression reason as
+// the rest of this file.
+
+describe("readOnlyBash — review FIX 1: git branch/tag/remote require tightGitFormOk", () => {
+  // The review's 4 named probe cases (all previously returned true — silent mutations).
+  test("git branch newname — bare positional arg CREATES a branch", () => {
+    expect(readOnlyBash("git branch newname")).toBe(false);
+  });
+
+  test("git branch -D x — force-delete", () => {
+    expect(readOnlyBash("git branch -D x")).toBe(false);
+  });
+
+  test("git tag -f v1 — force (re-create/move a tag)", () => {
+    expect(readOnlyBash("git tag -f v1")).toBe(false);
+  });
+
+  test("git remote set-url origin url — positional subcommand mutates the remote's URL", () => {
+    expect(readOnlyBash("git remote set-url origin url")).toBe(false);
+  });
+
+  // Additional branch mutations (DENY-listed or simply not in the SAFE set).
+  test("git branch -d oldname — delete", () => {
+    expect(readOnlyBash("git branch -d oldname")).toBe(false);
+  });
+
+  test("git branch -m old new — rename", () => {
+    expect(readOnlyBash("git branch -m old new")).toBe(false);
+  });
+
+  test("git branch -M old new — force-rename", () => {
+    expect(readOnlyBash("git branch -M old new")).toBe(false);
+  });
+
+  test("git branch -c old new — copy", () => {
+    expect(readOnlyBash("git branch -c old new")).toBe(false);
+  });
+
+  test("git branch -C old new — force-copy", () => {
+    expect(readOnlyBash("git branch -C old new")).toBe(false);
+  });
+
+  test("git branch -f main HEAD~3 — force-move a branch pointer", () => {
+    expect(readOnlyBash("git branch -f main HEAD~3")).toBe(false);
+  });
+
+  test("git branch -u origin/main — set upstream", () => {
+    expect(readOnlyBash("git branch -u origin/main")).toBe(false);
+  });
+
+  test("git branch --set-upstream-to=origin/main — set upstream, long form", () => {
+    expect(readOnlyBash("git branch --set-upstream-to=origin/main")).toBe(false);
+  });
+
+  test("git branch --unset-upstream", () => {
+    expect(readOnlyBash("git branch --unset-upstream")).toBe(false);
+  });
+
+  test("git branch --edit-description", () => {
+    expect(readOnlyBash("git branch --edit-description")).toBe(false);
+  });
+
+  test("git branch -t — track, not in the safe set", () => {
+    expect(readOnlyBash("git branch -t")).toBe(false);
+  });
+
+  // Additional tag mutations.
+  test("git tag -d v1 — delete", () => {
+    expect(readOnlyBash("git tag -d v1")).toBe(false);
+  });
+
+  test('git tag -a v1 -m "msg" — create an annotated tag', () => {
+    expect(readOnlyBash('git tag -a v1 -m "msg"')).toBe(false);
+  });
+
+  test("git tag -s v1 — create a signed tag", () => {
+    expect(readOnlyBash("git tag -s v1")).toBe(false);
+  });
+
+  test('git tag -m "msg" v1 — message implies tag creation', () => {
+    expect(readOnlyBash('git tag -m "msg" v1')).toBe(false);
+  });
+
+  // Additional remote mutations — all positional (no leading `-`), per the review's own note.
+  test("git remote add origin url", () => {
+    expect(readOnlyBash("git remote add origin url")).toBe(false);
+  });
+
+  test("git remote remove origin", () => {
+    expect(readOnlyBash("git remote remove origin")).toBe(false);
+  });
+
+  test("git remote rename old new", () => {
+    expect(readOnlyBash("git remote rename old new")).toBe(false);
+  });
+
+  test("git remote prune origin", () => {
+    expect(readOnlyBash("git remote prune origin")).toBe(false);
+  });
+
+  test("git remote update", () => {
+    expect(readOnlyBash("git remote update")).toBe(false);
+  });
+
+  // Must-allow: bare forms and flags-only forms stay allowed.
+  test("git branch --all", () => {
+    expect(readOnlyBash("git branch --all")).toBe(true);
+  });
+
+  test("git branch -r", () => {
+    expect(readOnlyBash("git branch -r")).toBe(true);
+  });
+
+  test("git branch -vv", () => {
+    expect(readOnlyBash("git branch -vv")).toBe(true);
+  });
+
+  test("git branch — bare form", () => {
+    expect(readOnlyBash("git branch")).toBe(true);
+  });
+
+  test("git tag — bare form", () => {
+    expect(readOnlyBash("git tag")).toBe(true);
+  });
+
+  test("git remote — bare form", () => {
+    expect(readOnlyBash("git remote")).toBe(true);
+  });
+
+  test("git tag -v v1 — verify a tag's signature (the value-taking exception: -v/--verify legitimately takes the tag name)", () => {
+    expect(readOnlyBash("git tag -v v1")).toBe(true);
+  });
+
+  test("git tag --verify v1 — same, long flag form", () => {
+    expect(readOnlyBash("git tag --verify v1")).toBe(true);
+  });
+
+  test("git remote -v", () => {
+    expect(readOnlyBash("git remote -v")).toBe(true);
+  });
+
+  // A little extra SAFE-set coverage beyond the named probes.
+  test("git branch --show-current", () => {
+    expect(readOnlyBash("git branch --show-current")).toBe(true);
+  });
+
+  test("git branch -q", () => {
+    expect(readOnlyBash("git branch -q")).toBe(true);
+  });
+
+  test("git tag -l — bare list flag, no pattern", () => {
+    expect(readOnlyBash("git tag -l")).toBe(true);
+  });
+
+  // Accepted over-block (per the review): a genuinely read-only positional remote subcommand
+  // (`show`) is still refused, since the starts-with-"-" gate can't distinguish it from a
+  // mutating positional word like `add`/`remove`. Documented, not a bug to fix here.
+  test("git remote show origin — accepted over-block (positional, indistinguishable from a mutating remote subcommand by this gate)", () => {
+    expect(readOnlyBash("git remote show origin")).toBe(false);
+  });
+});
+
+describe("readOnlyBash — review FIX 2: less/more removed from READONLY_HEADS", () => {
+  test("less f — LESSOPEN/LESSCLOSE can make less invoke an arbitrary preprocessor command; bash.ts spreads the full daemon env, so a configured LESSOPEN fires for real", () => {
+    expect(readOnlyBash("less f")).toBe(false);
+  });
+
+  test("more f — same LESSOPEN/LESSCLOSE hook risk as less", () => {
+    expect(readOnlyBash("more f")).toBe(false);
+  });
+});
+
+describe("readOnlyBash — review FIX 3: path-qualified argv0 rejected before any table lookup", () => {
+  test("./cat x — relative path, cannot verify which binary would actually run", () => {
+    expect(readOnlyBash("./cat x")).toBe(false);
+  });
+
+  test("/tmp/evil/cat x — absolute path into an attacker-writable directory", () => {
+    expect(readOnlyBash("/tmp/evil/cat x")).toBe(false);
+  });
+
+  test("../cat x — parent-relative path", () => {
+    expect(readOnlyBash("../cat x")).toBe(false);
+  });
+
+  test("bin/cat x — any slash anywhere in argv0 rejects, not just a leading one", () => {
+    expect(readOnlyBash("bin/cat x")).toBe(false);
+  });
+
+  test("a bare (slash-free) argv0 is unaffected — still classifies normally", () => {
+    expect(readOnlyBash("cat foo.txt")).toBe(true);
+  });
+});
+
+describe("readOnlyBash — review MINOR: argvOf's double-quote backslash only recognizes bash's real escape set", () => {
+  test('"c\\at" foo — a backslash before a non-special character no longer gets silently consumed into resolving argv0 to `cat`', () => {
+    expect(readOnlyBash('"c\\at" foo')).toBe(false);
+  });
+
+  test("a quote-concatenated argv0 with NO backslash involved still resolves correctly (sanity: the tightened escape handling doesn't regress plain quote-concatenation)", () => {
+    expect(readOnlyBash('"c"at foo.txt')).toBe(true);
   });
 });

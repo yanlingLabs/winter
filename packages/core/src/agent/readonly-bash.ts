@@ -22,31 +22,45 @@ import { splitPipeline } from "./shell-scan";
  * `FOO=bar ls` could chain further assignments and there is no benefit to the extra complexity of
  * skipping over them), argv is extracted quote-aware (adjacent quoted/unquoted runs with no
  * separating whitespace concatenate into ONE token, so a quoting trick like `"r"m` still resolves
- * to the real argv0 `rm` — it cannot hide a mutating command's name from the classifier), and the
- * resolved argv0 must name a known read-only tool: either its basename is in `READONLY_HEADS`
- * (any arguments after it are unrestricted — these are tools that are read-only regardless of
- * flags), or it is a key in `READONLY_SUBCOMMANDS` and argv1 is in that tool's allowed-subcommand
- * set (again, anything after argv1 is unrestricted, mirroring how a `Bash(...:*)` prefix rule
- * allows free continuation) — except the one explicit two-token special case, `git stash list`,
- * which additionally requires argv2 to be exactly `"list"` (`git stash` alone also covers
- * `pop`/`apply`/`drop`/`clear`, all mutating). `find` gets one more veto after passing the above:
- * ANY of its own action flags (`-delete`, `-exec`, `-execdir`, `-ok`, `-okdir`, `-fprint`,
- * `-fprintf`, `-fls`) present anywhere in its resolved argv rejects the whole segment —
- * traversal-plus-print (find's default action) is the only read-only shape. A hard-coded
- * deny-list (`DENY_HEADS`) is also checked first, per segment, against argv0 alone (never a
- * substring-anywhere-in-argv scan, which would false-positive on e.g. `grep sh file.txt`, where
- * "sh" is an ARGUMENT, not the invoked command) — logically redundant with these names simply
- * being absent from the two allow tables (this classifier only ever allows what it recognizes),
- * kept explicit anyway as self-documentation and a guard against a future accidental addition to
- * either table.
+ * to the real argv0 `rm` — it cannot hide a mutating command's name from the classifier).
  *
- * KNOWN GAP, deliberately not closed here (flagged in the SP-approvals T2 report instead): `git
- * branch`/`git tag`/`git remote` are read-only ONLY as a bare or flags-only invocation (`git
- * branch -a`) — the only form the required fixture matrix exercises — but this classifier's
- * algorithm (argv0+argv1 match, unrestricted trailing args, exactly as specified) does not
- * distinguish that from `git branch <name>` / `git tag <name>` / `git remote add <name> <url>`,
- * all of which MUTATE. See the rationale comment on those three entries in `READONLY_SUBCOMMANDS`
- * below.
+ * A path-qualified argv0 (containing `/`, e.g. `./cat` or `/tmp/evil/cat`) is rejected
+ * IMMEDIATELY, before any table lookup (SP-approvals T2 review, FIX 3) — this classifier can only
+ * vouch for a NAME being one of a known-safe set of binaries resolved off `PATH`; it has no way
+ * to verify WHICH binary a relative or absolute path actually points at, and an attacker who
+ * controls any writable directory can trivially place an executable there that merely shares a
+ * trusted command's basename. So every argv0 that reaches a table lookup below is, by
+ * construction, already a bare name — there is no separate "basename" concept left to compute.
+ *
+ * The (bare) argv0 must then name a known read-only tool: either it's in `READONLY_HEADS` (any
+ * arguments after it are unrestricted — these are tools that are read-only regardless of flags),
+ * or it is a key in `READONLY_SUBCOMMANDS` and argv1 is in that tool's allowed-subcommand set
+ * (again, anything after argv1 is unrestricted, mirroring how a `Bash(...:*)` prefix rule allows
+ * free continuation) — with two exceptions:
+ *  - the two-token special case `git stash list` (argv2 must additionally be exactly `"list"` —
+ *    `git stash` alone also covers `pop`/`apply`/`drop`/`clear`, all mutating);
+ *  - git's `branch`/`tag`/`remote`, which additionally require `tightGitFormOk` to accept
+ *    everything past argv1 (SP-approvals T2 review, FIX 1 — see that function's doc comment). A
+ *    bare positional argument to any of the three (a branch/tag NAME, or one of remote's
+ *    positional subcommands like `add`/`set-url`) always mutates, and argv0+argv1 matching alone
+ *    could not tell that apart from the read-only bare/flags-only "list" form — this classifier
+ *    originally shipped without that gate (see git history / the SP-approvals T2 report for the
+ *    16 probe-confirmed silent-mutation fixtures that finding closed).
+ *
+ * `find` gets one more veto after passing the above: ANY of its own action flags (`-delete`,
+ * `-exec`, `-execdir`, `-ok`, `-okdir`, `-fprint`, `-fprintf`, `-fls`) present anywhere in its
+ * resolved argv rejects the whole segment — traversal-plus-print (find's default action) is the
+ * only read-only shape.
+ *
+ * A hard-coded deny-list (`DENY_HEADS`) is also checked first, per segment, against argv0 alone
+ * (never a substring-anywhere-in-argv scan, which would false-positive on e.g. `grep sh
+ * file.txt`, where "sh" is an ARGUMENT, not the invoked command) — logically redundant with these
+ * names simply being absent from the two allow tables (this classifier only ever allows what it
+ * recognizes), kept explicit anyway as self-documentation and a guard against a future accidental
+ * addition to either table. (FIX 3's blanket path-qualification rejection above also means a
+ * path-qualified deny-listed name, e.g. `/bin/sh`, is already rejected before this check ever
+ * runs — mooting what used to be a real, if minor, gap: this check alone couldn't see through a
+ * path prefix either.)
  */
 export function readOnlyBash(command: string): boolean {
   if (command.trim() === "") return false;
@@ -62,13 +76,15 @@ export function readOnlyBash(command: string): boolean {
 
 // argv0s that are read-only NO MATTER what flags/arguments follow — pure readers, filters, and
 // info/introspection tools with no write mode at all.
+//
+// less/more are DELIBERATELY ABSENT (SP-approvals T2 review, FIX 2) despite being read-only
+// viewers: both honor the LESSOPEN/LESSCLOSE environment variables, which can make either invoke
+// an ARBITRARY preprocessor command when opening a file — a well-known pager hazard, empirically
+// confirmed to fire under this classifier's exact no-TTY spawn shape, since the bash tool spreads
+// the full daemon environment (bash.ts) rather than a clean one. No required fixture uses either;
+// `cat`/`head`/`tail` already cover the "read a file" use case without that hook.
 export const READONLY_HEADS = new Set<string>([
   "cat", "head", "tail",
-  // less/more: pagers — read-only viewers. This classifier's only caller (the agent's bash tool)
-  // always runs non-interactively with stdout captured, never a live TTY, so both degrade to
-  // streaming their input straight out, the same as `cat` — no interactive-editing mode to worry
-  // about (that's `vi`/`nano`, deliberately NOT on this list).
-  "less", "more",
   "ls", "pwd",
   "wc", "file", "stat", "du", "df",
   "which", "whereis",
@@ -105,17 +121,15 @@ export const READONLY_HEADS = new Set<string>([
 export const READONLY_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   git: new Set([
     "status", "log", "diff", "show",
-    // branch/remote/tag: a BARE invocation (or one with only flags, e.g. `git branch -a`) lists
-    // existing refs/remotes and is read-only — the only form the required fixture matrix
-    // exercises. CAVEAT (flagged for a follow-up review, not fixed here — the brief specifies
-    // this classifier's algorithm as exactly "argv0 in this map AND argv1 in its set", with no
-    // further-argument constraint other than the git-stash-list special case below):
-    // `git branch <name>` CREATES a branch, `git tag <name>` CREATES a tag, and `git remote add
-    // <name> <url>` ADDS a remote — all mutating — and none of those are distinguished from the
-    // read-only "list" form by argv0+argv1 alone. Tightening this (e.g. requiring argv2, if
-    // present, to look like a flag) would not break any required fixture, but goes beyond the
-    // brief's literal, verbatim-specified algorithm, so it's called out here rather than done
-    // unilaterally.
+    // branch/remote/tag: UNLIKE every other entry in this file's tables, "anything after argv1 is
+    // unrestricted" does NOT hold for these three — readOnlySegment additionally requires
+    // `tightGitFormOk(argv1, rest)` to pass (SP-approvals T2 review, FIX 1). A bare invocation (or
+    // one with only recognized flags, e.g. `git branch -a`) lists existing refs/remotes and is
+    // read-only, but a POSITIONAL argument here always mutates: `git branch <name>` creates a
+    // branch (or `-d`/`-D` deletes one, `-m`/`-M` renames, `-c`/`-C` copies, ...), `git tag <name>`
+    // creates a tag (or `-d` deletes, `-f` forces, `-a`/`-s` annotates/signs, ...), and
+    // `git remote add <name> <url>` adds a remote (or `remove`/`rename`/`set-url`/`prune`/
+    // `update`, all positional, all mutating). `tightGitFormOk` closes exactly this hole.
     "branch", "remote", "tag",
     "describe", "rev-parse", "ls-files", "blame", "shortlog",
   ]),
@@ -126,6 +140,85 @@ export const READONLY_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   xcodebuild: new Set(["-version", "-showsdks", "-list"]),
 };
 
+// FIX 1 (SP-approvals T2 review): git branch/tag/remote flag allowlists, grounded in each
+// subcommand's real `-h` output. Every trailing token must start with `-`, be in the relevant
+// SAFE set, and not be in the DENY set (belt-and-braces — SAFE/DENY are disjoint by construction,
+// so "not in SAFE" alone already rejects everything in DENY; kept as an explicit second check
+// anyway). A bare (non-dash) token always fails the gate, with the sole exception of tag's
+// -v/--verify value (see TAG_VALUE_FLAGS below) — a branch/tag NAME or one of remote's positional
+// subcommands (add/remove/rename/set-url/prune/update) is exactly what real git treats as the
+// mutating form, so refusing every other bare token is the point, not an over-restriction.
+const BRANCH_SAFE_FLAGS = new Set([
+  "-a", "--all", "-r", "--remotes", "-l", "--list", "--no-list", "-v", "--verbose", "-vv",
+  "--no-verbose", "--show-current", "--no-show-current", "-i", "--ignore-case", "-q", "--quiet",
+  "--no-quiet", "--color", "--no-color",
+]);
+const BRANCH_DENY = new Set([
+  "-d", "-D", "--delete", "--no-delete", "-m", "-M", "--move", "--no-move", "-c", "-C", "--copy",
+  "--no-copy", "-f", "--force", "-u", "--set-upstream-to", "--unset-upstream", "-t", "--track",
+  "--no-track", "--edit-description", "--create-reflog", "--no-create-reflog",
+]);
+const TAG_SAFE = new Set(["-l", "--list", "-n", "-v", "--verify", "-i", "--ignore-case"]);
+// NOTE: tag's -a/--annotate MEANS "create an annotated tag" — the exact opposite of branch's -a
+// (list all). SAFE/DENY sets are kept separate per subcommand deliberately; never shared.
+const TAG_DENY = new Set([
+  "-d", "--delete", "-f", "--force", "-a", "--annotate", "--no-annotate", "-m", "--message", "-F",
+  "--file", "-s", "--sign", "-u", "--local-user", "-e", "--edit", "--cleanup", "--create-reflog",
+]);
+// remote's mutations (add/remove/rename/set-url/prune/update) are all positional WORDS, not
+// flags — the starts-with-"-" gate in tightGitFormOk alone already excludes every one of them, so
+// no REMOTE_DENY set is needed; kept as an empty set purely so tightGitFormOk's switch below can
+// treat all three subcommands uniformly.
+const REMOTE_SAFE = new Set(["-v", "--verbose"]);
+const REMOTE_DENY = new Set<string>();
+
+// -v/--verify legitimately takes the tag name(s) to verify as a following bare (non-dash) value —
+// read-only regardless of that value (verification never mutates, whatever string is passed), so
+// unlike everything else `tightGitFormOk` checks, ONE bare token immediately after -v/--verify is
+// tolerated, for "tag" only. Value-taking flags are otherwise deliberately excluded from every
+// SAFE set entirely (fail to card, per the review) — -v/--verify is the sole named exception,
+// required by the review's explicit `git tag -v v1` -> true test case.
+const TAG_VALUE_FLAGS = new Set(["-v", "--verify"]);
+
+/**
+ * Is `git <argv1> ...rest` one of the three tightened subcommands' read-only forms? Bare
+ * (`rest.length === 0`) is always fine — vacuously safe, matching the already-required fixture
+ * `git branch -a`-style bare-and-flags-only forms this classifier allowed before this fix, and
+ * still allows. Otherwise every token in `rest` must start with `-`, be in that subcommand's SAFE
+ * set, and not be in its DENY set — EXCEPT for `tag`, where a single bare token directly
+ * following `-v`/`--verify` is tolerated (see `TAG_VALUE_FLAGS` above). `argv1` values other than
+ * branch/tag/remote return `false` (defensive — `readOnlySegment` only ever calls this for those
+ * three).
+ */
+function tightGitFormOk(argv1: string, rest: string[]): boolean {
+  if (rest.length === 0) return true; // bare form — vacuously safe
+
+  let safe: ReadonlySet<string>;
+  let deny: ReadonlySet<string>;
+  switch (argv1) {
+    case "branch": safe = BRANCH_SAFE_FLAGS; deny = BRANCH_DENY; break;
+    case "tag": safe = TAG_SAFE; deny = TAG_DENY; break;
+    case "remote": safe = REMOTE_SAFE; deny = REMOTE_DENY; break;
+    default: return false; // not one of the three tightened subcommands
+  }
+
+  for (let i = 0; i < rest.length; i++) {
+    const tok = rest[i];
+    if (tok === undefined) continue; // unreachable — i < rest.length always yields a defined element
+    if (tok.startsWith("-")) {
+      if (!safe.has(tok) || deny.has(tok)) return false;
+      continue;
+    }
+    // A bare (non-dash) token: real git only ever needs one here, as tag's verification target
+    // immediately after -v/--verify (git tag -v <name> — read-only regardless of <name>). Every
+    // other bare token — a branch/tag NAME, or one of remote's positional subcommands — refuses.
+    const prev = i > 0 ? rest[i - 1] : undefined;
+    if (argv1 === "tag" && prev !== undefined && TAG_VALUE_FLAGS.has(prev)) continue;
+    return false;
+  }
+  return true;
+}
+
 // find's action flags: each one EXECUTES or MUTATES per matched file (runs a command, deletes it,
 // writes a report to a file, ...) — traversal + a predicate/print alone (find's default action)
 // is the only read-only shape.
@@ -134,7 +227,10 @@ const FIND_ACTION_FLAGS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdi
 // Rejected as argv0, per segment. See the module doc comment: this is redundant with these names
 // being absent from READONLY_HEADS/READONLY_SUBCOMMANDS (an allowlist already defaults to false
 // for anything unrecognized) — kept explicit as self-documentation and a guard against a future
-// accidental addition to either table above.
+// accidental addition to either table above. Checked against argv0 verbatim; FIX 3's blanket
+// "any `/` in argv0 rejects" (in readOnlySegment, below) already runs before this, so a
+// path-qualified deny-listed name (e.g. `/bin/sh`) never reaches this check needing its own
+// basename handling in the first place.
 const DENY_HEADS = new Set([
   "sudo", // privilege escalation — runs anything as another (usually root) user
   "xargs", // builds and runs arbitrary commands from its input; argv0 opaque to this classifier
@@ -151,21 +247,26 @@ const DENY_HEADS = new Set([
 // the added complexity of skipping over them when "no opinion" is always a safe fallback.
 const LEADING_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
-function basenameOf(argv0: string): string {
-  const idx = argv0.lastIndexOf("/");
-  return idx === -1 ? argv0 : argv0.slice(idx + 1);
-}
-
 /**
  * Quote-aware whitespace split of one pipeline segment into argv tokens. Adjacent quoted/
  * unquoted runs with no separating whitespace concatenate into a SINGLE token (`"r"m` resolves to
  * `rm`, not two tokens) — this is what stops a quoting trick from hiding a real argv0 from the
- * classifier. Quote characters are stripped from the resolved text; a backslash inside a
- * double-quoted span escapes the next character (mirrors `hasShellHazards`'s own double-quote
- * handling in shell-scan.ts) and single-quoted spans are taken verbatim with no escape processing
- * at all (POSIX single quotes have none). Callers must only pass a segment `splitPipeline` has
- * already vetted as hazard-free and quote-balanced — this function does no hazard scanning of its
- * own and assumes every quote closes within the segment.
+ * classifier. Quote characters are stripped from the resolved text; single-quoted spans are taken
+ * verbatim with no escape processing at all (POSIX single quotes have none).
+ *
+ * Inside a double-quoted span, a backslash is recognized as an escape ONLY when immediately
+ * followed by one of `$`, `` ` ``, `"`, or `\` — bash's own real double-quote escape set
+ * (SP-approvals T2 review, MINOR fix: this previously treated ANY backslash as escaping the next
+ * character, which let `"c\at" foo` wrongly resolve argv0 to `cat` — a genuine false-ALLOW risk,
+ * not merely an over-conservative one, since an arbitrary non-special character after a backslash
+ * could forge a match against any table entry). A backslash followed by anything else is a plain
+ * literal character inside double quotes (matches real bash: `"\a"` is literally backslash-then-a,
+ * never just `a`) — it is appended as-is, and the following character is processed normally on
+ * the next loop iteration, never consumed as part of a (non-existent) escape.
+ *
+ * Callers must only pass a segment `splitPipeline` has already vetted as hazard-free and
+ * quote-balanced — this function does no hazard scanning of its own and assumes every quote
+ * closes within the segment.
  *
  * Uses `.charAt()` rather than bracket indexing for character access (unlike shell-scan.ts's
  * scanners, which only ever COMPARE a character): this function builds a new string by
@@ -199,9 +300,16 @@ function argvOf(segment: string): string[] {
       continue;
     }
     if (inDouble) {
-      if (c === "\\" && i + 1 < segment.length) {
-        i++;
-        current += segment.charAt(i);
+      if (c === "\\") {
+        const next = i + 1 < segment.length ? segment.charAt(i + 1) : "";
+        if (next === "$" || next === "`" || next === '"' || next === "\\") {
+          i++;
+          current += next;
+          continue;
+        }
+        // Not one of bash's recognized double-quote escapes — the backslash is itself literal,
+        // and the following character (if any) is processed normally next iteration.
+        current += c;
         continue;
       }
       if (c === '"') { inDouble = false; continue; }
@@ -231,17 +339,24 @@ function readOnlySegment(segment: string): boolean {
   const argv = argvOf(trimmed);
   const argv0 = argv[0];
   if (argv0 === undefined || argv0 === "") return false;
+  // FIX 3 (SP-approvals T2 review): reject any path-qualified argv0 BEFORE any table lookup —
+  // this classifier can only vouch for a NAME, never for which binary a path actually resolves
+  // to. Every check below now sees a bare name by construction; `basenameOf` is gone as dead code.
+  if (argv0.includes("/")) return false;
   if (DENY_HEADS.has(argv0)) return false;
 
-  const basename = basenameOf(argv0);
-  let allowed = READONLY_HEADS.has(basename);
+  let allowed = READONLY_HEADS.has(argv0);
 
   if (!allowed) {
     const sub = READONLY_SUBCOMMANDS[argv0];
     const argv1 = argv[1];
     if (sub !== undefined && argv1 !== undefined) {
       if (sub.has(argv1)) {
-        allowed = true;
+        if (argv0 === "git" && (argv1 === "branch" || argv1 === "tag" || argv1 === "remote")) {
+          allowed = tightGitFormOk(argv1, argv.slice(2)); // FIX 1 (SP-approvals T2 review)
+        } else {
+          allowed = true;
+        }
       } else if (argv0 === "git" && argv1 === "stash" && argv[2] === "list") {
         allowed = true; // special-case: "stash" alone also covers pop/apply/drop/clear (mutating)
       }
@@ -249,7 +364,7 @@ function readOnlySegment(segment: string): boolean {
   }
   if (!allowed) return false;
 
-  if (basename === "find" && argv.some((tok) => FIND_ACTION_FLAGS.has(tok))) return false;
+  if (argv0 === "find" && argv.some((tok) => FIND_ACTION_FLAGS.has(tok))) return false;
 
   return true;
 }
