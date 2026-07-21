@@ -577,23 +577,30 @@ export interface EngineConfig {
   // followed by the same `?? `/`!== false` fallback the pre-getter code used) — the getter itself
   // may be absent (a caller/test that never sets the field, same as before) or may resolve to
   // undefined at call time; both fall through to that identical default.
-  reviewerEnabled?: () => boolean | undefined; // default true when reviewer is set; false disables the review path entirely
+  // Task 8 (CC project-folder-mechanics): widened to `(cwd?: string) => …` so daemon.ts's real
+  // wiring can resolve a PER-PROJECT reviewer.enabled (`ProjectSettingsResolver.effective(cwd)`)
+  // rather than only the global settings.json — every dispatch-loop call site below passes its
+  // own in-scope `cwd`, but a getter/test is free to ignore the param (every pre-Task-8
+  // caller/test passes a plain `() => …` or `(cwd) => plainValue`, both still valid — an extra
+  // optional param is call-site compatible either way).
+  reviewerEnabled?: (cwd?: string) => boolean | undefined; // default true when reviewer is set; false disables the review path entirely
   // Widened to `| undefined` (rather than a getter always guaranteed to return string[]) so the
   // `?? []` at the read site stays meaningful for a getter/test that doesn't pre-bake the default
-  // itself — daemon.ts's own getter DOES pre-bake it (`() => settings?.reviewer?.allow ?? []`),
-  // but that's a choice, not a contract this type enforces.
-  reviewerAllow?: () => string[] | undefined; // extra commands/argv0s bashLooksSafe treats as obviously-safe (bypass review)
+  // itself — daemon.ts's own getter DOES pre-bake it (`(cwd) => projectSettings.effective(cwd ??
+  // null)?.reviewer?.allow ?? []`), but that's a choice, not a contract this type enforces.
+  reviewerAllow?: (cwd?: string) => string[] | undefined; // extra commands/argv0s bashLooksSafe treats as obviously-safe (bypass review)
   // phase 5e T3: per-class on/off, read directly here (T4 threads settings.reviewerClasses → this
   // field; until then a caller sets it directly, same "stub until the settings task" shape as
   // reviewerEnabled predates settings wiring). Absent object OR an absent per-class key both mean
   // enabled=true — every existing caller/test that never sets this keeps today's default-on
   // behavior unchanged; only an EXPLICIT `false` for a class disables it.
-  reviewerClasses?: () => { bash?: boolean; fs?: boolean; external?: boolean } | undefined;
+  reviewerClasses?: (cwd?: string) => { bash?: boolean; fs?: boolean; external?: boolean } | undefined;
   // deferral wired ONLY when this is set AND enabled !== false — undefined (the setupEngine/
   // daemon default before this config existed) leaves specs()/instructions/execute untouched.
   // deferExternals mirrors registry.ts's opt of the same name ("always": externals defer whenever
   // ANY is visible, ignoring deferThreshold's count comparison; absent/"count" = unchanged).
-  toolSearch?: { enabled?: () => boolean | undefined; deferThreshold?: () => number | undefined; deferExternals?: () => "count" | "always" | undefined };
+  // Task 8: each sub-getter widened to `(cwd?: string) => …`, same reasoning as reviewerEnabled above.
+  toolSearch?: { enabled?: (cwd?: string) => boolean | undefined; deferThreshold?: (cwd?: string) => number | undefined; deferExternals?: (cwd?: string) => "count" | "always" | undefined };
   // Plan mode (1d-ii): both optional, and both absent leaves existing behavior untouched. Without
   // `plans`, exit_plan_mode falls to the else executeCall branch → the tool's own placeholder
   // run() (tools/plan.ts) rather than the approval bridge below. `setPolicy` persists an approved
@@ -699,7 +706,9 @@ export interface EngineConfig {
   // lspAutoDiagnosticsEnabledFrom) lets a user keep the on-demand `lsp` tool while opting OUT of
   // the automatic post-edit append.
   lsp?: () => LspManager | undefined;
-  autoDiagnosticsEnabled?: () => boolean | undefined;
+  // Task 8 (CC project-folder-mechanics): widened to `(cwd?: string) => …`, same reasoning as
+  // reviewerEnabled above — executeCall's own `cwd` param is passed at its one call site.
+  autoDiagnosticsEnabled?: (cwd?: string) => boolean | undefined;
   // task-30 (push-notification track): the headless osascript fallback (notify-fallback.ts's
   // notifyHeadless) — called by the `notify` bridge (executeCall, below) ONLY when
   // `hub.attachedCount(sessionId) === 0` at the moment push_notification fires. Optional/absent
@@ -1057,17 +1066,20 @@ export class AgentEngine {
   /** ToolSearch deferral is wired ONLY when cfg.toolSearch is set AND enabled !== false. Each
    *  sub-field is a getter (hot-settings T2) read fresh here — `enabled?.()` returning undefined
    *  (getter absent, or present but resolving to undefined) keeps the same "not explicitly false"
-   *  default the pre-getter code had. */
-  private toolSearchEnabled(): boolean {
-    return this.cfg.toolSearch !== undefined && this.cfg.toolSearch.enabled?.() !== false;
+   *  default the pre-getter code had. Task 8 (CC project-folder-mechanics): each helper now takes
+   *  the CALLER's in-scope `cwd` and threads it into every cfg getter, so daemon.ts's real wiring
+   *  can resolve a PER-PROJECT toolSearch setting; every call site below passes its own local
+   *  `cwd` (buildInstructionsFull's param, runThread's thread-local, executeCall's param). */
+  private toolSearchEnabled(cwd: string | undefined): boolean {
+    return this.cfg.toolSearch !== undefined && this.cfg.toolSearch.enabled?.(cwd) !== false;
   }
 
-  private toolSearchThreshold(): number | undefined {
-    return this.toolSearchEnabled() ? this.cfg.toolSearch!.deferThreshold?.() : undefined;
+  private toolSearchThreshold(cwd: string | undefined): number | undefined {
+    return this.toolSearchEnabled(cwd) ? this.cfg.toolSearch!.deferThreshold?.(cwd) : undefined;
   }
 
-  private toolSearchDeferExternals(): "count" | "always" | undefined {
-    return this.toolSearchEnabled() ? this.cfg.toolSearch!.deferExternals?.() : undefined;
+  private toolSearchDeferExternals(cwd: string | undefined): "count" | "always" | undefined {
+    return this.toolSearchEnabled(cwd) ? this.cfg.toolSearch!.deferExternals?.(cwd) : undefined;
   }
 
   /** Per-turn/round pins (4g-i): state-required deferred built-ins forced visible WITHOUT
@@ -1498,8 +1510,8 @@ export class AgentEngine {
   // in-turn exit_plan_mode approval (which mutates `meta.approvalPolicy` for the REST of this
   // turn) does not retroactively add/remove this reminder mid-turn.
   private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: SessionApprovalPolicy, sessionId: string): string {
-    const tsEnabled = this.toolSearchEnabled();
-    const deferThreshold = this.toolSearchThreshold();
+    const tsEnabled = this.toolSearchEnabled(cwd);
+    const deferThreshold = this.toolSearchThreshold(cwd);
     // Pins computed HERE, at instructionsFull's own once-per-turn/thread cadence (see this
     // method's callers — turn() and the spawn bridge each call it exactly once), NOT the
     // per-round cadence used at the specs()/executeCall seams below. `loaded` itself is never
@@ -1507,7 +1519,7 @@ export class AgentEngine {
     const pins = tsEnabled ? this.pinnedTools(sessionId, { approvalPolicy: policy }, cwd) : new Set<string>();
     const effectiveLoaded = pins.size ? new Set([...loaded, ...pins]) : loaded;
     const deferred = tsEnabled
-      ? this.cfg.registry.deferredIndex(cwd, effectiveLoaded, deferThreshold, tsEnabled, this.toolSearchDeferExternals())
+      ? this.cfg.registry.deferredIndex(cwd, effectiveLoaded, deferThreshold, tsEnabled, this.toolSearchDeferExternals(cwd))
       : [];
     let instructionsFull = deferred.length
       ? base + "\n\n# Deferred tools\nThe following tools exist but their schemas are NOT loaded — calling them directly fails. Load schemas first with the ToolSearch tool (query \"select:<name>\" or keywords), then call them normally.\n" + deferred.map((d) => `- ${d.name} — ${d.description}`).join("\n")
@@ -1690,8 +1702,8 @@ export class AgentEngine {
     // works). Undefined when the provider can't enumerate its models (openai-compatible with no
     // static list) → the tool treats undefined as "unknown, not blocked". Computed once per thread.
     const visionCapable = this.cfg.provider.provider.models().find((m) => m.id === opts.model)?.supportsVision;
-    const tsEnabled = this.toolSearchEnabled();
-    const deferThreshold = this.toolSearchThreshold();
+    const tsEnabled = this.toolSearchEnabled(cwd);
+    const deferThreshold = this.toolSearchThreshold(cwd);
     const usage = { inputTokens: 0, outputTokens: 0 };
     let lastText = "";
     // The effective iteration bound for THIS thread — opts.maxTurns (spawn bridge only) or the
@@ -1763,7 +1775,7 @@ export class AgentEngine {
         instructions: instructionsFull,
         input,
         tools: this.cfg.registry.specs(cwd, tsEnabled
-            ? { loaded: effectiveLoaded, deferThreshold, builtinDeferral: true, deferExternals: this.toolSearchDeferExternals() }
+            ? { loaded: effectiveLoaded, deferThreshold, builtinDeferral: true, deferExternals: this.toolSearchDeferExternals(cwd) }
             : undefined)
           .filter((s) => !excludeTools?.has(s.name))
           .filter((s) => !allowTools || allowTools.has(s.name)),
@@ -3047,7 +3059,7 @@ export class AgentEngine {
             { id: "allow_unsandboxed_global", label: `Always allow "${urule}" everywhere`, rule: urule, scope: "global" as const },
             { id: "deny", label: "Deny" },
           ];
-          const reviewerReady = this.cfg.reviewer && this.cfg.reviewerEnabled?.() !== false && this.reviewClassEnabled("bash");
+          const reviewerReady = this.cfg.reviewer && this.cfg.reviewerEnabled?.(cwd) !== false && this.reviewClassEnabled("bash", cwd);
           if (meta.approvalPolicy === "auto" && reviewerReady) {
             // auto: the reviewer is the GATE — safe runs unsandboxed unattended; non-safe/error escalates to
             // the SAME human card the ask path shows. One tool_review is emitted either way.
@@ -3152,7 +3164,7 @@ export class AgentEngine {
           // escape under auto is handled by the escape branch above (which gates it on the reviewer),
           // never reaching here (that branch's `decision` is "allow" too, but it's checked first).
           decision === "allow" && call.name === "bash" && !bashEscalation.dangerouslyDisableSandbox && this.cfg.reviewer &&
-          this.cfg.reviewerEnabled?.() !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("bash")
+          this.cfg.reviewerEnabled?.(cwd) !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("bash", cwd)
         ) {
           let command = "";
           let justification: string | undefined;
@@ -3161,7 +3173,7 @@ export class AgentEngine {
             command = typeof a.command === "string" ? a.command : "";
             justification = typeof a.justification === "string" ? a.justification : undefined;
           } catch { /* fall through to review of "" → likely unsafe */ }
-          if (command && bashLooksSafe(command, this.cfg.reviewerAllow?.() ?? [])) {
+          if (command && bashLooksSafe(command, this.cfg.reviewerAllow?.(cwd) ?? [])) {
             // Static bypass — reviewer.review() never runs, so NO tool_review event (phase 5e T2:
             // observability covers actual reviewer invocations, not every gate decision).
             outcome = await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable);
@@ -3173,7 +3185,7 @@ export class AgentEngine {
           }
         } else if (
           decision === "allow" && (call.name === "write" || call.name === "edit") && this.cfg.reviewer &&
-          this.cfg.reviewerEnabled?.() !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("fs")
+          this.cfg.reviewerEnabled?.(cwd) !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("fs", cwd)
         ) {
           // fs coverage (5e T3): review only an UNUSUAL write/edit target (outside the primary cwd
           // subtree, or a dotfile/dot-dir segment inside it) — a plain in-cwd write falls straight
@@ -3200,7 +3212,7 @@ export class AgentEngine {
           }
         } else if (
           decision === "allow" && isExternalToolName(call.name) && this.cfg.reviewer &&
-          this.cfg.reviewerEnabled?.() !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("external")
+          this.cfg.reviewerEnabled?.(cwd) !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("external", cwd)
         ) {
           // external coverage (5e T3): ALWAYS reviewed under auto when the class is enabled — no
           // "looks safe" bypass exists for third-party code Norma can't inspect (unlike bash).
@@ -3536,9 +3548,12 @@ export class AgentEngine {
    *  per-class key → enabled; only an EXPLICIT `false` disables that class. hot-settings T2:
    *  `reviewerClasses` is now a getter, called fresh here — an absent getter, or one that
    *  resolves to undefined/an absent key, both fall through to the same enabled-by-default `!==
-   *  false` check. */
-  private reviewClassEnabled(cls: "bash" | "fs" | "external"): boolean {
-    return this.cfg.reviewerClasses?.()?.[cls] !== false;
+   *  false` check. Task 8 (CC project-folder-mechanics): takes the caller's in-scope `cwd` and
+   *  threads it into `reviewerClasses` so daemon.ts's real wiring can resolve a PER-PROJECT
+   *  override; every call site (the dispatch loop's bash/fs/external reviewer branches) passes its
+   *  own branch-local `cwd`. */
+  private reviewClassEnabled(cls: "bash" | "fs" | "external", cwd: string | undefined): boolean {
+    return this.cfg.reviewerClasses?.(cwd)?.[cls] !== false;
   }
 
   /** SP-approvals T11 review, MEDIUM-1 (CC parity: an unsandboxed retry still rides the normal
@@ -4209,9 +4224,9 @@ export class AgentEngine {
       cwd, roots, tmpDir, sessionId, signal, markSkillLoaded,
       markToolLoaded,
       loadedTools: effectiveLoaded,
-      deferThreshold: this.toolSearchThreshold(),
-      deferExternals: this.toolSearchDeferExternals(),
-      builtinDeferral: this.toolSearchEnabled(),
+      deferThreshold: this.toolSearchThreshold(cwd),
+      deferExternals: this.toolSearchDeferExternals(cwd),
+      builtinDeferral: this.toolSearchEnabled(cwd),
       ask,
       taskEvent,
       notify,
@@ -4231,7 +4246,7 @@ export class AgentEngine {
     // (and thus the model-visible tool_result) untouched.
     if (!result.isError && AUTO_DIAG_TOOL_NAMES.has(call.name)) {
       const mgr = this.cfg.lsp?.();
-      if (mgr && this.cfg.autoDiagnosticsEnabled?.() !== false) {
+      if (mgr && this.cfg.autoDiagnosticsEnabled?.(cwd) !== false) {
         // `signal` (the turn's own abort signal) makes an ESC/interrupt cut the diagnostics wait
         // short — the suffix resolves "" promptly instead of riding out the full per-language
         // settle/timeout window (whole-branch review fast-follow).

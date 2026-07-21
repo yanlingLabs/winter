@@ -703,7 +703,16 @@ export async function startDaemon(opts: {
     // lsp-consolidation T3: same live-getter shape as `hooksEnabledHot`/`memoryEnabledHot` above —
     // `settings` can still be null (malformed settings.json at boot, or a test that injects
     // `agentProvider` directly), `true` there is the same fail-open default those two use.
-    const lspAutoDiagnosticsHot = (): boolean => (settings ? lspAutoDiagnosticsEnabledFrom(settings) : true);
+    // Task 8 (CC project-folder-mechanics): now resolves through the SAME `projectSettings`
+    // instance the reviewer/toolSearch getters below use — `cwd` is engine.ts's executeCall cwd;
+    // `effective(cwd ?? null)` degrades to `settings` verbatim for a null/untrusted/overlay-less
+    // cwd, so this reads byte-identically to the pre-Task-8 getter whenever no project overlay
+    // applies. The null-settings fail-open default is unchanged (`effective` itself returns
+    // `base()`'s null straight through when `base()` is null).
+    const lspAutoDiagnosticsHot = (cwd?: string): boolean => {
+      const s = projectSettings.effective(cwd ?? null);
+      return s ? lspAutoDiagnosticsEnabledFrom(s) : true;
+    };
     const hookFacade = new HookFacade({ registry: hookRegistry, runner: new HookRunner(), hooksEnabled: hooksEnabledHot });
     // Dispatch (Phase 7) Task 4: declared BEFORE `engine` is constructed (computerUse precedent —
     // see EngineConfig.dispatch's own doc comment, engine.ts) so the `dispatch: () =>
@@ -804,12 +813,22 @@ export async function startDaemon(opts: {
       // scope). A later task's watcher reassigns `settings` in place; engine.ts calls each getter
       // fresh per read site, so a reviewer.enabled/allow/classes edit applies with no engine
       // reconstruction.
-      reviewerEnabled: () => settings?.reviewer?.enabled,
-      reviewerAllow: () => settings?.reviewer?.allow ?? [],
+      // Task 8 (CC project-folder-mechanics): now resolved per-project through the SAME
+      // `projectSettings` instance `dangerousDomainsAdded`/`globalAllow` above use — `cwd` is the
+      // calling session's cwd (engine.ts's dispatch-loop/runThread locals, threaded straight
+      // through); `effective(cwd ?? null)` degrades to `settings` verbatim for a
+      // null/untrusted/overlay-less cwd, so this reads byte-identically to the pre-Task-8 getter
+      // whenever no project overlay applies. The reviewer OBJECT itself (`reviewer` just above)
+      // stays a single boot-constructed instance shared by every project — only whether it's
+      // CONSULTED for a given cwd is per-project (mirrors the doc comment on `reviewerCfg`/
+      // `lspAutoDiagnosticsHot`: which reviewer model to use is a boot snapshot; whether reviewing
+      // runs at all is hot, and now project-scoped too).
+      reviewerEnabled: (cwd) => projectSettings.effective(cwd ?? null)?.reviewer?.enabled,
+      reviewerAllow: (cwd) => projectSettings.effective(cwd ?? null)?.reviewer?.allow ?? [],
       // Phase 5e T4: raw pass-through — engine.ts's reviewClassEnabled already treats an absent
       // object/key as enabled, and reviewerEnabled:false already short-circuits before this is
       // ever consulted (see its own doc comment), so no extra defaulting belongs here.
-      reviewerClasses: () => settings?.reviewer?.classes,
+      reviewerClasses: (cwd) => projectSettings.effective(cwd ?? null)?.reviewer?.classes,
       titler,
       // hot-settings T5a/T5b: EngineConfig.computerUse is a getter (engine.ts) over the SAME `let
       // computerUse` holder assigned at boot above (~line 423) — T5b (below, after this engine is
@@ -826,10 +845,18 @@ export async function startDaemon(opts: {
       // field type (the getter itself, not the holder, is what's optional on EngineConfig).
       lsp: () => lspManager ?? undefined,
       autoDiagnosticsEnabled: lspAutoDiagnosticsHot,
+      // Task 8 (CC project-folder-mechanics): each sub-getter now resolves through the SAME
+      // `projectSettings` instance the reviewer getters above use — `cwd` is engine.ts's
+      // toolSearchEnabled/Threshold/DeferExternals param, threaded from every one of their own
+      // call sites (buildInstructionsFull, runThread, executeCall). `effective(cwd ?? null)`
+      // degrades to `settings` verbatim for a null/untrusted/overlay-less cwd, so this reads
+      // byte-identically to the pre-Task-8 getters whenever no project overlay applies — the
+      // deferThreshold env fallback is UNCHANGED, still consulted whenever the resolved effective
+      // settings (global or project-merged) don't set one.
       toolSearch: {
-        enabled: () => settings?.toolSearch?.enabled,
-        deferThreshold: () => settings?.toolSearch?.deferThreshold ?? Number(process.env.NORMA_TOOLSEARCH_THRESHOLD ?? 12),
-        deferExternals: () => settings?.toolSearch?.deferExternals,
+        enabled: (cwd) => projectSettings.effective(cwd ?? null)?.toolSearch?.enabled,
+        deferThreshold: (cwd) => projectSettings.effective(cwd ?? null)?.toolSearch?.deferThreshold ?? Number(process.env.NORMA_TOOLSEARCH_THRESHOLD ?? 12),
+        deferExternals: (cwd) => projectSettings.effective(cwd ?? null)?.toolSearch?.deferExternals,
       },
       hooks: hookFacade,
       // Subagent transcript files (CC parity): the SAME session-tmp-dir accessor registerLspTools
