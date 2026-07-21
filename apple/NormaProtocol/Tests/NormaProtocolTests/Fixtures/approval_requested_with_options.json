@@ -1,0 +1,24 @@
+{
+  "seq": 7,
+  "sessionId": "s_fixture",
+  "ts": 1781270000000,
+  "threadId": "main",
+  "type": "approval_requested",
+  "callId": "call_50",
+  "toolName": "bash",
+  "summary": "run git push origin main",
+  "issuedAt": 1781270000000,
+  "expiresAt": 1781270300000,
+  "options": [
+    {
+      "id": "allow_once",
+      "label": "Allow once"
+    },
+    {
+      "id": "allow_project",
+      "label": "Always allow \"git push\" in this project",
+      "rule": "Bash(git push:*)",
+      "scope": "project"
+    }
+  ]
+}

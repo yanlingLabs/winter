@@ -123,37 +123,40 @@ describe("PermissionGate v1", () => {
     }
   });
 
-  // 4g Task 5: web_fetch is Norma's only network-capable tool. It gets its OWN gate class
-  // (NETWORK), distinct from both READ_ONLY and MUTATING, because its plan-mode answer differs
-  // from MUTATING's (allow, not deny — read-only research is legitimate while planning) while its
-  // ask/auto answer is IDENTICAL to MUTATING's/bash's (ask under `ask`, allow under `auto`).
-  test("web_fetch is gate-classed NETWORK: allow under plan and auto, ask under ask", () => {
+  // 4g Task 5/6: web_fetch/web_search are Norma's only network-capable tools. They get their OWN
+  // gate class (NETWORK), distinct from both READ_ONLY and MUTATING.
+  //
+  // SP-approvals T10 (user addition 2026-07-21, spec §7): "web tools become free by default" —
+  // NETWORK's ask/auto answer changed from "ask under `ask`, matching bash/MUTATING" (pre-T10) to
+  // an unconditional "allow", now IDENTICAL to READ_ONLY's under every policy. web_fetch keeps its
+  // OWN dangerous-domain floor entirely inside engine.ts (a pre-exec check with path/domain
+  // awareness this gate deliberately never grows — see NETWORK's own doc comment above and
+  // dangerous-domains.ts) — that floor is NOT expressed here at all. NETWORK remains a SEPARATE
+  // const from READ_ONLY in gate.ts purely so the class boundary exists for engine.ts to hang
+  // web_fetch-specific behavior off of, even though their gate.ts answers are now byte-identical.
+  test("web_fetch/web_search are gate-classed NETWORK: allow under EVERY policy (ask/auto/plan) as of SP-approvals T10", () => {
     const g = new PermissionGate();
-    expect(g.evaluate("web_fetch", "plan")).toBe("allow");
-    expect(g.evaluate("web_fetch", "auto")).toBe("allow");
-    expect(g.evaluate("web_fetch", "ask")).toBe("ask");
+    for (const t of ["web_fetch", "web_search"]) {
+      expect(g.evaluate(t, "plan")).toBe("allow");
+      expect(g.evaluate(t, "auto")).toBe("allow");
+      expect(g.evaluate(t, "ask")).toBe("allow");
+    }
   });
 
-  test("web_fetch must NOT be classed READ_ONLY: it diverges from bash in plan mode (allow) but must match bash's ask/auto answer exactly, not read-only's unconditional allow", () => {
+  test("web_fetch/web_search now match READ_ONLY's ask/auto/plan answer exactly (T10) — they no longer match bash's ask-policy answer", () => {
     const g = new PermissionGate();
-    // If web_fetch were accidentally READ_ONLY, "ask" policy would wrongly return "allow" here.
-    expect(g.evaluate("web_fetch", "ask")).toBe(g.evaluate("bash", "ask"));
-    expect(g.evaluate("web_fetch", "auto")).toBe(g.evaluate("bash", "auto"));
+    for (const p of ["ask", "auto", "plan"] as const) {
+      expect(g.evaluate("web_fetch", p)).toBe(g.evaluate("read", p));
+      expect(g.evaluate("web_search", p)).toBe(g.evaluate("read", p));
+    }
+    // The pre-T10 invariant (web_fetch matches bash under ask) is GONE — pin the divergence so a
+    // future revert is caught here, not downstream.
+    expect(g.evaluate("web_fetch", "ask")).not.toBe(g.evaluate("bash", "ask"));
   });
 
-  // 4g Task 6: web_search joins web_fetch in the NETWORK class — same live-network-call posture
-  // (read-only research, no arbitrary fs/process mutation, but still a real outbound HTTP call to
-  // a third party), so it gets the IDENTICAL plan/ask/auto answer as web_fetch above.
   // T1 (file-based memory) note: memory_read/memory_write/memory_delete are DELETED (design doc
   // `2026-07-15-file-based-memory-design.md`) — a memory-fact read/write now goes through the
   // plain read/write/edit tools, already covered by their own tests elsewhere in this file.
-
-  test("web_search is gate-classed NETWORK: allow under plan and auto, ask under ask", () => {
-    const g = new PermissionGate();
-    expect(g.evaluate("web_search", "plan")).toBe("allow");
-    expect(g.evaluate("web_search", "auto")).toBe("allow");
-    expect(g.evaluate("web_search", "ask")).toBe("ask");
-  });
 
   // lsp consolidation T2: the single `lsp` tool (replacing lsp_diagnostics/lsp_definition/
   // lsp_references) only ever queries a language server or reads a fence-checked disk preview —

@@ -376,9 +376,23 @@ describe("state.ts — pending cards (f)", () => {
     // reviewerReason (phase 5e T5) must be OMITTED, not set to `undefined`, when the wire event
     // carries none — matches the `notes` omission convention pending-cards.test.tsx (b1) pins.
     expect(Object.prototype.hasOwnProperty.call(s.pending!, "reviewerReason")).toBe(false);
+    // options (SP-approvals T7): same omission discipline.
+    expect(Object.prototype.hasOwnProperty.call(s.pending!, "options")).toBe(false);
     s = reduce(s, { type: "approval_resolved", threadId: "main", callId: "call1", approved: true, by: "user" }, T0 + 5);
     expect(s.pending).toBeNull();
     expect(s.committed).toContainEqual({ kind: "note", text: "approved bash" });
+  });
+
+  test("approval_requested threads options through when the wire event carries them (SP-approvals T7)", () => {
+    let s = initialState();
+    const options = [
+      { id: "allow_once", label: "Allow once" },
+      { id: "allow_project", label: 'Allow "Bash(git push:*)" in this project', rule: "Bash(git push:*)", scope: "project" as const },
+      { id: "allow_global", label: 'Allow "Bash(git push:*)" everywhere', rule: "Bash(git push:*)", scope: "global" as const },
+      { id: "deny", label: "Deny" },
+    ];
+    s = reduce(s, { type: "approval_requested", threadId: "main", callId: "call3", toolName: "bash", summary: "git push", options }, T0);
+    expect(s.pending).toEqual({ kind: "approval", callId: "call3", toolName: "bash", summary: "git push", options });
   });
 
   test("approval_requested threads reviewerReason through when the wire event carries one (phase 5e T5)", () => {

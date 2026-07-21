@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync, mkdirSync } from "node:fs";
-import { relative, sep, isAbsolute, resolve, dirname } from "node:path";
-import type { NewSessionEvent, Question, SessionEvent, Task } from "@norma/protocol";
+import { relative, sep, isAbsolute, resolve, dirname, basename, join } from "node:path";
+import type { ApprovalOption, NewSessionEvent, Question, SessionEvent, Task } from "@norma/protocol";
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
 import type { Provider, ProviderEvent, TurnInputItem } from "../providers/types";
@@ -14,6 +14,10 @@ import type { TaskStore } from "./task-store";
 import type { PlanBroker } from "./plans";
 import type { SessionDirectories } from "./dirs";
 import { sessionTmpDir } from "./session-tmp";
+import type { PermissionRules } from "./permission-rules";
+import { readOnlyBash } from "./readonly-bash";
+import { SHIPPED_DANGEROUS_DOMAINS, dangerousDomainMatch } from "./dangerous-domains";
+import { repoRootFor } from "./memory-dir";
 import type { ContextAssembler } from "./context";
 import type { Compactor } from "./compactor";
 import type { McpManager } from "./mcp/manager";
@@ -145,13 +149,128 @@ function approvalCardSummary(call: { name: string; argsJson: string }): string {
   }
   if (call.name === "bash") {
     try {
-      const a = JSON.parse(call.argsJson || "{}") as { command?: unknown };
+      const a = JSON.parse(call.argsJson || "{}") as { command?: unknown; allowNetwork?: unknown; dangerouslyDisableSandbox?: unknown };
       if (typeof a.command === "string" && oneLine(a.command) !== "") {
-        return `bash ${oneLine(a.command).slice(0, 120)}`;
+        const cmd = oneLine(a.command).slice(0, 120);
+        // SP-approvals Task 11 (spec §8): the card must name WHICH escalation flavor this call
+        // is — dangerouslyDisableSandbox wins the label when both are somehow set (it subsumes
+        // allowNetwork's network grant; an unsandboxed call already has full network), mirroring
+        // the dispatch loop's own precedence (the unsandboxed always-card branch is checked
+        // before the generic ask branch that renders allowNetwork's "(with network)" label).
+        if (a.dangerouslyDisableSandbox === true) return `bash (UNSANDBOXED): ${cmd}`;
+        if (a.allowNetwork === true) return `bash (with network): ${cmd}`;
+        return `bash ${cmd}`;
       }
     } catch { /* malformed argsJson → generic slice below */ }
   }
   return `${call.name} ${call.argsJson.slice(0, 160)}`;
+}
+
+// SP-approvals Task 5: the "always allow" suggestion for a bash approval card's rule-bearing
+// options below — first token alone ("ls -la" → "ls"), or first+second for a well-known set of
+// multi-word CLI heads ("git push origin" → "git push") where the SECOND token is the meaningful
+// verb (CC's own bash-rule suggestion follows the same shape) — so `Bash(<prefix>:*)` reads as a
+// natural verb-object unit for the commands people actually want to blanket-allow, rather than a
+// single bare "git" that would then also cover `git push --force`, `git reset --hard`, etc.
+// Whitespace-normalized (irregular spacing between tokens collapses the same as single spaces) so
+// it composes cleanly with permission-rules.ts's own normalizeWhitespace on the read side.
+// Exported for approval-options.test.ts's direct unit coverage; `approvalOptionsFor` below stays
+// private — tested indirectly through the real dispatch loop instead (permission-gate-order.
+// test.ts's own precedent for this exact feature area: drive the loop, don't unit-test internals).
+const BASH_PREFIX_MULTI_WORD_HEADS = new Set([
+  "git", "npm", "pnpm", "cargo", "docker", "kubectl", "brew", "bun", "swift", "xcodebuild", "gh", "make",
+]);
+
+export function suggestBashPrefix(command: string): string {
+  const tokens = command.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return "";
+  const head = tokens[0]!;
+  return tokens.length > 1 && BASH_PREFIX_MULTI_WORD_HEADS.has(head) ? `${head} ${tokens[1]}` : head;
+}
+
+/** The "always allow" choices offered alongside plain approve/deny on an approval card
+ *  (SP-approvals Task 5). Called ONLY from the plain `decision === "ask"` dispatch-loop branch
+ *  below: a grant-flavored (out-of-root write/edit), worktree, or reviewer-escalation card asks a
+ *  DIFFERENT question — "grant this directory?" / "enter this worktree?" / "the reviewer flagged
+ *  this, proceed anyway?" — that a standing "always allow" rule must never silently answer on a
+ *  human's behalf (a reviewer escalation in particular is already a non-safe verdict; v1 offers no
+ *  memory for that path at all), so those three call sites pass no `options` and this helper is
+ *  never even consulted for them. `rule`/`scope` on a returned option mirror exactly what choosing
+ *  it persists via `PermissionRules.append` (server.ts's `approval.respond` handler) — the label
+ *  ALWAYS shows the literal rule string, so a human approves the exact text that gets written, not
+ *  a paraphrase of it. bash offers BOTH scopes (project/global): a shell command prefix is often
+ *  legitimately either project-specific or a genuine cross-project habit. write/edit offers
+ *  project scope ONLY — "always allow every edit, everywhere, forever" is a materially scarier
+ *  default than bash's equivalent and is deliberately not on the menu in v1. Every other tool name
+ *  (computer/schedule/web_fetch/skill_write/mcp__.../plugin__.../unclassified) returns `undefined`
+ *  — a plain approve/deny card, byte-identical to before this task. */
+function approvalOptionsFor(call: { name: string; argsJson: string }): ApprovalOption[] | undefined {
+  if (call.name === "bash") {
+    let command = "";
+    try {
+      const a = JSON.parse(call.argsJson || "{}") as { command?: unknown };
+      if (typeof a.command === "string") command = a.command;
+    } catch { /* malformed argsJson → suggestBashPrefix("") below yields "", same degenerate case */ }
+    const rule = `Bash(${suggestBashPrefix(command)}:*)`;
+    return [
+      { id: "allow_once", label: "Allow once" },
+      { id: "allow_project", label: `Allow "${rule}" in this project`, rule, scope: "project" },
+      { id: "allow_global", label: `Allow "${rule}" everywhere`, rule, scope: "global" },
+      { id: "deny", label: "Deny" },
+    ];
+  }
+  if (call.name === "write" || call.name === "edit") {
+    return [
+      { id: "allow_once", label: "Allow once" },
+      { id: "allow_project", label: "Always allow edits in this project", rule: "Edit", scope: "project" },
+      { id: "deny", label: "Deny" },
+    ];
+  }
+  return undefined;
+}
+
+/** SP-approvals Task 11 (spec §8): parses bash's two escalation args from a call's argsJson —
+ *  `allowNetwork` (widened sandbox: write fence intact, network allowed for this call) and
+ *  `dangerouslyDisableSandbox` (CC's exact name: a full sandbox escape). Malformed/missing
+ *  argsJson degrades to `{false, false}` — a best-effort, gating/display-only parse; bash.ts's own
+ *  zod schema re-validates the real args at execute time. Called from the dispatch loop below
+ *  ONCE per bash call (never for any other tool name — every other call gets the same `{false,
+ *  false}` fast path computed inline there, mirroring dirGrant/webFetchCard's own
+ *  null-for-everything-else shape). */
+function bashEscalationArgs(call: { argsJson: string }): { allowNetwork: boolean; dangerouslyDisableSandbox: boolean } {
+  try {
+    const a = JSON.parse(call.argsJson || "{}") as { allowNetwork?: unknown; dangerouslyDisableSandbox?: unknown };
+    return { allowNetwork: a.allowNetwork === true, dangerouslyDisableSandbox: a.dangerouslyDisableSandbox === true };
+  } catch {
+    return { allowNetwork: false, dangerouslyDisableSandbox: false };
+  }
+}
+
+/** SP-approvals Task 10 (spec §7): the web_fetch dangerous-domain approval card's options — called
+ *  ONLY from `webFetchGate` below, NEVER from `approvalOptionsFor` above (a structurally different
+ *  card: it fires for EVERY policy, not just `ask`, and its "always allow" option is scoped to a
+ *  matched DOMAIN, not a bash/edit rule). `host` is the raw request hostname; `matchedEntry` is the
+ *  SHIPPED/user-added list entry it matched against (the RULE this persists — e.g. a request to
+ *  `uploads.transfer.sh` matches the shipped `transfer.sh` entry, so approving writes
+ *  `WebFetch(domain:transfer.sh)`, covering the whole family, not just that one subdomain).
+ *  `undefined` for BOTH params only in the unparseable-URL/no-hostname case — there is no valid
+ *  host to name a rule for at all, so the card offers only Allow/Deny, no third option (an "always
+ *  allow ___" button with nothing to fill the blank would be actively misleading).
+ *
+ *  MEDIUM-1, SP-approvals T10 review: the label reads `Always allow all of ${matchedEntry}` when
+ *  `host !== matchedEntry` (a SUBDOMAIN hit) — approving actually grants the whole matched family
+ *  (every subdomain of, and the bare, `matchedEntry`), not just the one subdomain that happened to
+ *  trigger the card, and the label says so honestly rather than naming only the narrower host that
+ *  was fetched. An EXACT hit (`host === matchedEntry`) keeps the simpler `Always allow ${host}` —
+ *  nothing wider than the fetched host itself is being granted, so there's nothing to clarify. */
+function webFetchApprovalOptions(host: string | undefined, matchedEntry: string | undefined): ApprovalOption[] {
+  const options: ApprovalOption[] = [{ id: "allow_once", label: "Allow" }];
+  if (host !== undefined && matchedEntry !== undefined) {
+    const label = host === matchedEntry ? `Always allow ${host}` : `Always allow all of ${matchedEntry}`;
+    options.push({ id: "allow_source", label, rule: `WebFetch(domain:${matchedEntry})`, scope: "global" });
+  }
+  options.push({ id: "deny", label: "Deny" });
+  return options;
 }
 
 /** Sanitize+cap a reviewer-authored free-text field (`tool_review.reason`/`.summary`,
@@ -268,6 +387,98 @@ function fsWriteOutOfRootDir(call: { name: string; argsJson: string }, roots: st
   }
 }
 
+/**
+ * SP-approvals final review (composition hole, HIGH): a write/edit whose target IS — by real
+ * filesystem identity, not by string spelling — `<projectRoot>/.norma/permissions.local.json`,
+ * Task 1's PermissionRules project-scope rules file, must be a hard error, no card, no grant, no
+ * matter what rule is in force. Without this, a broad `Edit` rule (the feature's own most-
+ * encouraged click — it matches both `write` and `edit` call names, see permission-rules.ts's
+ * `toolForCallName`) lets the agent write a NEW rule into this file itself — e.g.
+ * `WebFetch(domain:webhook.site)` — which `webFetchGate` (§7, above) then treats as an already-
+ * approved standing exception, silently clearing the dangerous-domain floor for a zero-card exfil
+ * fetch. The store must be mutable ONLY through `PermissionRules.append()` (a human answering an
+ * approval card's "always allow" option) or a human's own editor — never through the agent's own
+ * write/edit tools.
+ *
+ * SP-approvals final review 2 (bypass in the FIRST version of this check, reproduced live on the
+ * default case-insensitive-but-case-preserving macOS volume format): comparing
+ * `basename(canonical) === "permissions.local.json"` and `basename(dirname(canonical)) ===
+ * ".norma"` as case-SENSITIVE string literals let `.norma/Permissions.Local.json`,
+ * `.NORMA/permissions.local.json`, and a pre-created `.norma` SYMLINK pointing at some other real
+ * directory all land on disk unflagged — while `permission-rules.ts`'s `projectRulesFor` reads the
+ * store back via a plain `join(root, ".norma", "permissions.local.json")` open, which macOS's
+ * default filesystem resolves CASE-INSENSITIVELY and follows symlinks through exactly like any
+ * other path — so the reader picked every one of those variants right back up as the real file.
+ * `canonicalizeForWrite`'s own "reappend the missing tail verbatim" behavior (by design — the tail
+ * doesn't exist on disk yet, so there's nothing on-disk to correct it against) is exactly why the
+ * bypass survived resolution: it only case/symlink-corrects the PREFIX that already exists, never
+ * the part that doesn't, and for a fresh project `.norma` itself frequently doesn't exist yet.
+ *
+ * The fix compares by FILESYSTEM IDENTITY instead of by spelling: the write target's PARENT
+ * DIRECTORY is realpath-resolved (resolves case AND symlinks at the dir level, on the real FS — the
+ * same principle `grantDenied`'s own control-plane check relies on) and compared against the
+ * project root's OWN `.norma` directory, ALSO realpath-resolved the identical way — so a write
+ * reaching the exact same real directory the reader would open, however it got there (differently-
+ * cased spelling, a symlink hop, whatever), is recognized as a match. The one case FS identity
+ * can't settle is the common one where `.norma` doesn't exist in ANY casing yet — nothing real to
+ * compare against — so that path falls back to a STRUCTURAL check instead: the write target's own
+ * (not-yet-real, so not OS-corrected) parent must sit directly under the project root's real path,
+ * and its own name must be some casing of ".norma" (explicitly case-folded here, since nothing on
+ * disk will do it for us in that branch). Either way, the FILENAME itself is also compared
+ * case-folded (`.toLowerCase()`), never as a literal spelling.
+ *
+ * Matches by FILENAME alone, never by directory: `.norma/` itself stays writable (`.norma/memory/`
+ * is the MEMDIR by design, and any other file under `.norma/` is unaffected) — only this one file,
+ * under any casing, inside the identity-matched directory, is ever denied. `null` for every
+ * non-write/edit call, a missing/malformed `path` arg, a null `projectRoot` (defensive — see the
+ * `ruleAllowed` block's own comment on why `cwd` is effectively never falsy in practice), or a
+ * resolution failure (unresolvable link-chain etc.) — the normal dispatch chain decides from there,
+ * same fail-open-to-the-next-check shape as `fsWriteOutOfRootDir`. */
+function permissionRulesFileTarget(
+  call: { name: string; argsJson: string },
+  roots: string[],
+  projectRoot: string | null,
+): { path: string; canonical: string } | null {
+  if (call.name !== "write" && call.name !== "edit") return null;
+  if (projectRoot === null) return null; // no project root — nothing to compare a filesystem identity against
+  let path = "";
+  try {
+    const a = JSON.parse(call.argsJson || "{}") as { path?: unknown };
+    path = typeof a.path === "string" ? a.path : "";
+  } catch { return null; }
+  if (!path) return null;
+  const raw0 = isAbsolute(path) ? resolve(path) : resolve(roots[0] ?? "/", path);
+  // Cheap, syscall-free early-out: a target whose filename isn't SOME casing of
+  // "permissions.local.json" can never match regardless of what its parent resolves to. Comparing
+  // the ORIGINAL (pre-resolution) filename case-folded is equivalent to comparing the eventually-
+  // resolved one — canonicalization can only correct an existing file's spelling to what's already
+  // on disk, which is the identical case-folded string by definition on a case-insensitive volume,
+  // or (the file doesn't exist yet) leave it exactly as given — either way the case-folded compare
+  // gives the same verdict without needing to resolve anything first.
+  if (basename(raw0).toLowerCase() !== "permissions.local.json") return null;
+  try {
+    const canonical = canonicalizeForWrite(resolveLeafSymlinks(raw0));
+    const parentReal = dirname(canonical);
+    const readerNorma = join(projectRoot, ".norma");
+    let matches: boolean;
+    try {
+      // `.norma` (some casing, or a symlink elsewhere) already exists as SOMETHING real —
+      // `realpathSync` fully resolves both case and symlinks for an entity that actually exists,
+      // so a plain identity compare against the reader's own `.norma` resolution is exact and
+      // needs no further case-folding.
+      matches = parentReal === realpathSync(readerNorma);
+    } catch {
+      // `.norma` doesn't exist under ANY casing yet (the common case for a fresh project) — there
+      // is no real directory entry for the OS to case/symlink-correct, so `parentReal`'s own final
+      // segment is whatever the model literally wrote, verbatim. Compare structurally instead: the
+      // REST of `parentReal` must be exactly the project root's own real path, and its final
+      // segment, case-folded, must be ".norma".
+      matches = dirname(parentReal) === realpathSync(projectRoot) && basename(parentReal).toLowerCase() === ".norma";
+    }
+    return matches ? { path, canonical } : null;
+  } catch { return null; } // unresolvable — not a confirmed match; the normal dispatch chain decides
+}
+
 /** phase 5e T3 (external coverage): the précis for an mcp__/plugin__ call — tool name + a
  *  single-line argsJson slice(160). Same "raw JSON, never a hand-crafted rendering" honesty as
  *  approvalCardSummary's generic fallback, just capped shorter — this is what the REVIEWER sees,
@@ -287,6 +498,25 @@ export interface EngineConfig {
   hub: SessionHub;
   registry: ToolRegistry;
   gate: PermissionGate;
+  // SP-approvals Task 3: the CC-grammar allow-rules store (project + global, Task 1) — consulted
+  // by the dispatch loop below ONLY for a call the gate has already decided is "ask", to let a
+  // standing rule (or, for bash, Task 2's readOnlyBash classifier) skip a re-prompt an ask-policy
+  // session would otherwise show forever. Plain instance, not a getter (mirrors `gate` just
+  // above): PermissionRules is already "hot" internally (its own mtime-cached project-file read,
+  // and the caller-injected globalAllow thunk daemon.ts wires over the live settings holder), so
+  // the engine never needs to re-resolve which INSTANCE to use, only call into the one it has.
+  // Optional — absent (every pre-T3 test/config) means the new ruleAllowed computation below never
+  // activates, byte-identical to before this field existed.
+  permissionRules?: PermissionRules;
+  // SP-approvals Task 10 (spec §7): the USER half of web_fetch's dangerous-domain floor —
+  // `effective = dangerous-domains.ts's SHIPPED_DANGEROUS_DOMAINS ∪ dangerousDomainsAdded()`, read
+  // fresh on every web_fetch call (webFetchGate below) so a settings.json edit to
+  // `permissions.dangerousDomains.added` applies with no daemon restart, same hot-getter shape as
+  // `reviewerAllow` below. Absent getter, or one resolving to undefined, means "no user
+  // additions" — the SHIPPED list alone still applies; this can narrow-to-empty but never disables
+  // the floor entirely (there is deliberately no equivalent of `permissions.allow: []`'s "opt out
+  // of the Computer default" for this list — the shipped entries are immutable by construction).
+  dangerousDomainsAdded?: () => string[] | undefined;
   broker: ApprovalBroker;
   dirs: SessionDirectories;
   // `live`, when wired (daemon.ts, from providers/manager.ts's ActiveProvider.liveModel),
@@ -2445,7 +2675,7 @@ export class AgentEngine {
           input.push({ type: "tool_result", callId: call.callId, output: outcome.output, isError: outcome.isError });
           continue;
         }
-        const decision = this.cfg.gate.evaluate(call.name, meta.approvalPolicy);
+        let decision = this.cfg.gate.evaluate(call.name, meta.approvalPolicy);
         // Worktree tools are MUTATING (gate.ts), so under `ask` policy (the DEFAULT) `decision` is
         // "ask", not "allow" — checked here, BEFORE the generic `decision === "ask"` branch below,
         // so that branch never gets first crack at a worktree call. Without this dedicated branch,
@@ -2475,6 +2705,35 @@ export class AgentEngine {
         // the read tools get) is NEVER grantable, either policy, no card — checked once here, and
         // consulted by both the auto pre-grant below and the deny branch in the dispatch chain.
         const dirGrantDenied = dirGrant !== null && this.grantDenied(dirGrant.dir);
+        // `cwd` is typed `string` (never undefined here), so this ternary is only a defensive
+        // guard against an empty string — repoRootFor("") would realpath-fail and fall back to the
+        // DAEMON's own process.cwd(), a wrong and misleading project root. `projectRoot: null`
+        // degrades safely everywhere it's read below: PermissionRules.decision() just consults
+        // global rules, and permissionRulesFileTarget refuses to match at all (see its own doc
+        // comment). Hoisted here (used to be computed separately, redundantly, inside the
+        // ruleAllowed block below) so both consumers share the exact same value.
+        const projectRoot = cwd ? repoRootFor(cwd) : null;
+        // SP-approvals final review (composition hole): the permission-rules store itself is NEVER
+        // a valid write/edit target — checked here, unconditionally (not gated on `decision`,
+        // `dirGrant`, or anything ruleAllowed-related below), so it is computed and dispatched
+        // BEFORE the ruleAllowed short-circuit gets a chance to run. See
+        // permissionRulesFileTarget's own doc comment for the full exfil-composition rationale
+        // (final review 2: filesystem-IDENTITY comparison, not string spelling).
+        const rulesFileTarget = (call.name === "write" || call.name === "edit")
+          ? permissionRulesFileTarget(call, rootsOverride ?? this.cfg.dirs.roots(sessionId), projectRoot)
+          : null;
+        // SP-approvals Task 10: web_fetch's dangerous-domain floor — computed for EVERY policy
+        // (gate.ts's `decision` above is now unconditionally "allow" for web_fetch, so this is the
+        // ONLY thing standing between a dangerous-domain fetch and executeCall). `null` for every
+        // non-web_fetch call and for a web_fetch call this floor has nothing to say about (byte-
+        // identical fast path, mirrors `dirGrant`'s own null-for-everything-else shape above).
+        const webFetchCard = call.name === "web_fetch" ? this.webFetchGate(call, cwd) : null;
+        // SP-approvals Task 11 (spec §8): bash's two escalation args, parsed ONCE here — before
+        // the ruleAllowed block below and the dispatch chain further down — so every consumer
+        // (the classifier guard, the always-card branch) sees the SAME parse. `{allowNetwork:
+        // false, dangerouslyDisableSandbox: false}` for every non-bash call (byte-identical fast
+        // path, mirrors dirGrant/webFetchCard's own null-for-everything-else shape just above).
+        const bashEscalation = call.name === "bash" ? bashEscalationArgs(call) : { allowNetwork: false, dangerouslyDisableSandbox: false };
         // [4f pre-tool — Site 2 (normal calls)] Post-gate (decision computed just above), before ANY
         // dispatch branch runs/approves. Bridged calls (spawn_agent/send_message) NEVER reach here —
         // they were siphoned into spawn/sendMessageOutcomes and hit the `preOutcome` branch ABOVE,
@@ -2515,11 +2774,75 @@ export class AgentEngine {
           grantFailure = this.applyDirGrant(sessionId, threadId, dirGrant.dir);
           if (!grantFailure) dirGrant = null;
         }
+        // SP-approvals Task 3: the whole point of `ask` policy is a human in the loop, but without
+        // this it re-prompts for the SAME command/tool forever — Task 1's PermissionRules (a
+        // CC-grammar allow-rules store, project + global) and Task 2's readOnlyBash (a
+        // deterministic, fail-to-ask read-only-command classifier) are the two ways a call can
+        // clear that prompt with no human touching anything. Computed ONCE per call, and ONLY
+        // reachable when there's an actual prompt to skip: `decision === "ask"` is the outer guard,
+        // so a `deny` (plan mode) call structurally NEVER consults a rule — not because no rule
+        // happens to match, but because this whole block never runs for it. An `auto`-policy
+        // MUTATING/NETWORK call never reaches here either (already silently allowed; nothing to
+        // skip) — the one exception is gate.ts's ALWAYS_ASK class (skill_write), which is `"ask"`
+        // under auto too; that's harmless here because Task 1's rule grammar (KNOWN_TOOLS: Bash/
+        // Edit/Computer/Worktree) has no token for it, so `toolForCallName` returns `null` and
+        // ruleAllowed can never flip to true for it regardless of what's configured — the "no
+        // policy setting silences it" invariant ALWAYS_ASK exists for stays intact unchanged.
+        //
+        // `grantPending` (an out-of-root write/edit still awaiting its OWN grant-flavored approval
+        // card, `dirGrant` computed above) takes precedence over both sources: a rule only speaks
+        // to WHETHER a tool/command is fine, never to WHICH directory it's fine to touch outside
+        // the session's roots — that second question is exactly what the grant card exists to ask,
+        // so a matching rule must never let a call skip it. Excluding ruleAllowed here — rather
+        // than letting it flip `decision` and relying on the `dirGrant` branch below to still fire
+        // — keeps that precedence structural, not incidental.
+        //
+        // SP-approvals Task 11 (spec §8): `dangerouslyDisableSandbox` excludes this ENTIRE block
+        // too, for the exact same "structural, not incidental" reason as `grantPending` above — a
+        // dangerouslyDisableSandbox call always cards regardless of what this block would compute
+        // (its own always-card branch, further down, never even reads `ruleAllowed`/`decision`),
+        // so excluding it here means "no rule/classifier can ever silence it" holds because
+        // ruleAllowed can NEVER become true for such a call, not merely because a later branch
+        // happens to intercept first. `allowNetwork` does NOT get the same outer exclusion — a
+        // STANDING RULE may still cover a network call (spec) — only the classifier sub-check
+        // below narrows for it.
+        let ruleAllowed = false;
+        if (decision === "ask" && this.cfg.permissionRules && !bashEscalation.dangerouslyDisableSandbox) {
+          // `projectRoot` is the SAME hoisted value rulesFileTarget's computation above already
+          // derived (see its own comment) — reused here rather than recomputed.
+          const grantPending = dirGrant !== null;
+          if (!grantPending && this.cfg.permissionRules.decision({ name: call.name, argsJson: call.argsJson }, projectRoot) === "allow") {
+            ruleAllowed = true;
+          }
+          // readOnlyBash is bash-only, and consulted ONLY when no rule already matched — a
+          // fail-to-ask classifier (readonly-bash.ts), so `false` here means "no opinion" (falls
+          // through to the normal ask prompt), never "unsafe". SP-approvals Task 11: also skipped
+          // whenever `allowNetwork` is set — the classifier must NEVER be the reason a network
+          // call runs unreviewed (a STANDING RULE may still cover one, per the check just above;
+          // the classifier's fail-to-ask heuristic simply has no concept of "safe to run WITH
+          // network" at all, so it stays out of that decision entirely).
+          if (!ruleAllowed && !grantPending && call.name === "bash" && !bashEscalation.allowNetwork) {
+            try {
+              const a = JSON.parse(call.argsJson || "{}");
+              if (typeof a.command === "string" && readOnlyBash(a.command)) ruleAllowed = true;
+            } catch { /* malformed argsJson → no opinion, falls through to the normal ask prompt */ }
+          }
+          if (ruleAllowed) decision = "allow";
+        }
         if (decision === "deny") {
           // Plan mode's blanket deny (gate.ts): tool NOT run. No approval flow here — the point
           // of plan mode is that nothing mutates until exit_plan_mode is approved.
           outcome = {
             output: "Blocked in plan mode — you are researching and planning, so file changes and commands are disabled. Make no changes; when your plan is ready, call exit_plan_mode to present it for approval.",
+            isError: true,
+          };
+        } else if (rulesFileTarget) {
+          // SP-approvals final review: hard error, no card, no grant — mirrors dirGrantDenied's own
+          // control-plane branch just below in both style and precedence (checked BEFORE it, and
+          // before the out-of-root grant-card branch, so an Edit rule AND a would-be grant card are
+          // both preempted). See permissionRulesFileTarget's own doc comment for why.
+          outcome = {
+            output: `cannot ${call.name} ${rulesFileTarget.path}: the permission rules store can only be changed by answering an approval card (or editing it yourself)`,
             isError: true,
           };
         } else if (dirGrant && dirGrantDenied) {
@@ -2575,11 +2898,82 @@ export class AgentEngine {
             if (failure) return { output: failure, isError: true };
             return this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable);
           }, pins, rootsOverride, visionCapable);
+        } else if (call.name === "bash" && bashEscalation.dangerouslyDisableSandbox) {
+          // SP-approvals Task 11 (spec §8): a full sandbox-escape floor — ALWAYS a card, under
+          // EVERY policy this branch can be reached under. Unlike every other branch in this
+          // chain, the condition here never consults `decision`/`ruleAllowed` at all — it fires
+          // purely off the ARG (parsed once into `bashEscalation` above) — so neither a matching
+          // PermissionRules rule nor the readOnlyBash classifier (both of which only ever
+          // influence `decision`/`ruleAllowed`, and are additionally excluded from ever running
+          // for this flag at all — see the `ruleAllowed` block's own doc comment above) can route
+          // a dangerouslyDisableSandbox call anywhere but here. Plan mode's blanket deny (the
+          // `decision === "deny"` branch, checked FIRST, above) still wins — bash is denied
+          // outright before this branch is ever reached under `plan` — so "every policy" in
+          // practice means ask/auto (spec, confirmed by permission-gate-order.test.ts). Options
+          // are deliberately narrower than approvalOptionsFor's bash shape: allow_once/deny ONLY,
+          // no allow_project/allow_global — v1 offers no standing memory for this flag at all
+          // (spec: "NO rule can silence it").
+          //
+          // SP-approvals T11 review, MEDIUM-1 (adjudicated ADOPTED — CC parity: an unsandboxed
+          // retry still rides the normal review path, which includes the reviewer under auto):
+          // the SAME bash reviewer is consulted here, BEFORE the card, but strictly as an
+          // ANNOTATION — see annotateWithReview's own doc comment for why this can never become a
+          // second gate. Gated on the identical three conditions the bash reviewAndDispatch branch
+          // below already requires (reviewer configured, reviewerEnabled, reviewClassEnabled) —
+          // deliberately WITHOUT bashLooksSafe's static bypass: that bypass exists to save a
+          // reviewer call when NOTHING would ever see the result (auto policy, no human in the
+          // loop); here a human card is already guaranteed regardless, so there's no cost-saving
+          // rationale for skipping the annotation on an obviously-safe-looking command.
+          let reviewerReason: string | undefined;
+          if (this.cfg.reviewer && this.cfg.reviewerEnabled?.() !== false && this.reviewClassEnabled("bash")) {
+            let command = "";
+            let justification: string | undefined;
+            try {
+              const a = JSON.parse(call.argsJson || "{}");
+              command = typeof a.command === "string" ? a.command : "";
+              justification = typeof a.justification === "string" ? a.justification : undefined;
+            } catch { /* malformed argsJson → review "" ; still annotation-only, never blocks the card */ }
+            reviewerReason = await this.annotateWithReview(
+              { class: "bash", command, justification }, approvalCardSummary(call), call, sessionId, threadId, signal,
+            );
+          }
+          outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
+            timeoutMs: this.approvalTimeoutFor(meta),
+            summary: approvalCardSummary(call),
+            reviewerReason,
+            options: [
+              { id: "allow_once", label: "Allow once" },
+              { id: "deny", label: "Deny" },
+            ],
+          }, loaded, undefined, pins, rootsOverride, visionCapable);
         } else if (decision === "ask") {
           outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
             timeoutMs: this.approvalTimeoutFor(meta),
             summary: approvalCardSummary(call),
             // no denialMessage → the helper defaults to `denied by ${res.by}` (unchanged behavior)
+            // SP-approvals Task 5: the bash/write/edit "always allow" options — see
+            // approvalOptionsFor's own doc comment for why the other sites in this dispatch loop
+            // (dirGrant just above, isWorktree above that, the dangerouslyDisableSandbox
+            // always-card branch just above THIS one too, reviewAndDispatch's escalation call
+            // below, and T10's webFetchCard branch right below THIS one) deliberately pass none of
+            // THIS SPECIFIC shape (webFetchCard has its own options, computed by webFetchGate).
+            // SP-approvals Task 11: this branch is ALSO where an allowNetwork bash call (no
+            // matching rule) cards — approvalCardSummary already renders its "(with network)"
+            // label, and approvalOptionsFor's bash options are unchanged (the suggested
+            // Bash(<prefix>:*) rule covers a matching call regardless of allowNetwork, by design —
+            // spec: "a persisted rule then covers matching network calls silently").
+            options: approvalOptionsFor(call),
+          }, loaded, undefined, pins, rootsOverride, visionCapable);
+        } else if (webFetchCard) {
+          // SP-approvals Task 10: web_fetch's dangerous-domain floor fires here — reached under
+          // EVERY policy (`decision` is unconditionally "allow" for web_fetch now, gate.ts), not
+          // just `ask`. `undefined` onApprove → the default executeCall path, same as the plain
+          // `decision === "ask"` branch above; the ONLY difference is the summary/options come from
+          // webFetchGate instead of approvalCardSummary/approvalOptionsFor.
+          outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
+            timeoutMs: this.approvalTimeoutFor(meta),
+            summary: webFetchCard.summary,
+            options: webFetchCard.options,
           }, loaded, undefined, pins, rootsOverride, visionCapable);
         } else if (call.name === "exit_plan_mode" && this.cfg.plans && meta.approvalPolicy === "plan") {
           outcome = await this.runPlanBridge(call, sessionId, threadId, meta);
@@ -2589,8 +2983,18 @@ export class AgentEngine {
           // READ_ONLY set under every policy), so this branch is reached for every call.
           outcome = await this.runEnterPlanBridge(sessionId, meta);
         } else if (
+          // SP-approvals Task 3: widened from `meta.approvalPolicy === "auto"` alone — a rule- or
+          // classifier-allowed bash call (`ruleAllowed`, computed above) reaches this branch with
+          // `decision === "allow"` under `ask` policy too, and must still hit the AI safety
+          // reviewer when one is configured. A standing rule/classifier says "this call needs no
+          // HUMAN gate"; it says nothing about whether the REVIEWER should still look at it — those
+          // are different questions, and only the human-gate one is what a rule/classifier answers.
+          // fs/external reviewer branches below are deliberately left `=== "auto"`-only: the brief
+          // scopes this widening to bash alone (write/edit's in-root rule coverage is the common
+          // case, and out-of-root always keeps its own grant card regardless — see the dirGrant
+          // precedence above; external tools have no rule/classifier source at all).
           decision === "allow" && call.name === "bash" && this.cfg.reviewer &&
-          this.cfg.reviewerEnabled?.() !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("bash")
+          this.cfg.reviewerEnabled?.() !== false && (meta.approvalPolicy === "auto" || ruleAllowed) && this.reviewClassEnabled("bash")
         ) {
           let command = "";
           let justification: string | undefined;
@@ -2978,6 +3382,43 @@ export class AgentEngine {
     return this.cfg.reviewerClasses?.()?.[cls] !== false;
   }
 
+  /** SP-approvals T11 review, MEDIUM-1 (CC parity: an unsandboxed retry still rides the normal
+   *  review path, which includes the reviewer under auto) — runs the SAME bash reviewer as
+   *  reviewAndDispatch below, but strictly as an ANNOTATION on the dangerouslyDisableSandbox
+   *  always-card, never as a second gate: unlike reviewAndDispatch (which escalates/executes off
+   *  the verdict), the verdict here is NEVER read for auto-approve/deny purposes — only `.reason`
+   *  is returned, for the caller to attach to its own ALREADY-DECIDED card via `reviewerReason`.
+   *  Emits EXACTLY ONE `tool_review` per invocation, for every verdict (safe/unsafe/error) — same
+   *  shape and the same fail-closed-to-"error" degradation on a throw/timeout as
+   *  reviewAndDispatch's own verdict computation — so this is indistinguishable, from the
+   *  observability side, from any other bash review. Returns `undefined` ONLY on an "error"
+   *  verdict (fail-open on the ANNOTATION only — the caller's card fires regardless either way, it
+   *  just shows no reviewer text); a genuine safe OR unsafe verdict's `.reason` is always
+   *  returned — the reviewer's stated opinion is useful context on this card either way, since the
+   *  CARD (never the verdict) is what actually gates the run. Deliberately does NOT consult
+   *  bashLooksSafe's static bypass (see the one call site's own doc comment for why). */
+  private async annotateWithReview(
+    reviewInput: ReviewInput,
+    toolSummary: string,
+    call: { name: string },
+    sessionId: string,
+    threadId: string,
+    signal: AbortSignal,
+  ): Promise<string | undefined> {
+    let v: { verdict: "safe" | "unsafe" | "error"; reason: string };
+    try {
+      v = await this.cfg.reviewer!.review(reviewInput, signal);
+    } catch {
+      v = { verdict: "error", reason: "reviewer unavailable — manual approval required" };
+    }
+    this.emit(sessionId, {
+      type: "tool_review", sessionId, threadId, toolName: call.name, verdict: v.verdict,
+      reason: sanitizeReviewText(v.reason, 300),
+      summary: sanitizeReviewText(toolSummary, 160),
+    });
+    return v.verdict === "error" ? undefined : sanitizeReviewText(v.reason, 300);
+  }
+
   /** phase 5e T3: the machinery every review class shares (T2's original bash-only flow,
    *  generalized) — call reviewer.review(), emit EXACTLY ONE tool_review (safe/unsafe/error), and
    *  on any non-safe verdict escalate via requestApproval; on safe, run the call normally. This is
@@ -3083,6 +3524,57 @@ export class AgentEngine {
     return false;
   }
 
+  /** SP-approvals Task 10 (spec §7): web_fetch's dangerous-domain floor — the ONE thing that still
+   *  cards for web_fetch now that gate.ts's NETWORK class is unconditionally "allow". Called from
+   *  the dispatch loop for EVERY `call.name === "web_fetch"`, regardless of `meta.approvalPolicy`
+   *  (ask, auto, AND plan — a floor, not a policy-gated check: NETWORK is allowed in plan for
+   *  read-only research, so a plan-mode session must not get a silent bypass either). Returns
+   *  `null` when the call should just run — a well-formed URL whose host matches nothing dangerous,
+   *  OR one that DOES match but is already covered by a standing `WebFetch(domain:...)` exception
+   *  rule (the "Always allow from this source" option's own persistence target) — otherwise the
+   *  `{summary, options}` for the approval card this call must show.
+   *
+   *  Fails CLOSED on an unparseable/missing `url`, AND on a `url` that parses but carries no
+   *  hostname at all (LOW-3, SP-approvals T10 review — e.g. a `file://` URL, whose `.hostname` is
+   *  `""`): neither case has a host to evaluate against the dangerous list, so there is nothing
+   *  safe to allow — `webFetchApprovalOptions(undefined, undefined)` gives that card only
+   *  Allow/Deny, no "always allow" option. (`tools/web.ts`'s `ssrfGuard` still separately refuses
+   *  private/loopback/non-http(s) targets at execute time regardless of this floor's verdict.) */
+  private webFetchGate(call: { name: string; argsJson: string }, cwd: string): { summary: string; options: ApprovalOption[] } | null {
+    let url: URL;
+    try {
+      const a = JSON.parse(call.argsJson || "{}") as { url?: unknown };
+      if (typeof a.url !== "string") throw new Error("missing url");
+      url = new URL(a.url);
+    } catch {
+      return {
+        summary: `web_fetch — could not parse the url argument to check it against the dangerous-domain list`,
+        options: webFetchApprovalOptions(undefined, undefined),
+      };
+    }
+    const host = url.hostname.toLowerCase();
+    if (!host) {
+      return {
+        summary: `web_fetch ${url.toString()} — the URL has no hostname to check against the dangerous-domain list`,
+        options: webFetchApprovalOptions(undefined, undefined),
+      };
+    }
+    const added = this.cfg.dangerousDomainsAdded?.() ?? [];
+    const matchedEntry = dangerousDomainMatch(host, [...SHIPPED_DANGEROUS_DOMAINS, ...added]);
+    if (matchedEntry === null) return null; // nothing dangerous about this host — free by default
+    // `projectRoot` mirrors the SAME ternary the ruleAllowed block above uses (a defensive guard
+    // against an empty cwd, not a real-world case — cwd is always set by the time a tool call
+    // dispatches). WebFetch(domain:...) rules only ever ride GLOBAL scope from this card (see
+    // webFetchApprovalOptions), but decision() itself is scope-generic — a hand-edited project rule
+    // works too (proven in permission-rules.test.ts), so this still passes a real project root.
+    const projectRoot = cwd ? repoRootFor(cwd) : null;
+    if (this.cfg.permissionRules?.decision({ name: call.name, argsJson: call.argsJson }, projectRoot) === "allow") return null;
+    return {
+      summary: `web_fetch ${url.toString()} — ${host} matches a dangerous-domain rule (known exfiltration/tunnel-provider risk)`,
+      options: webFetchApprovalOptions(host, matchedEntry),
+    };
+  }
+
   /** Shared approval-request flow for the `ask`-policy path, the reviewer's escalation path, and
    *  (1d-iii) the worktree bridge's ask-policy path. Registers the broker wait BEFORE emitting
    *  `approval_requested` — the broadcast is synchronous, so a watcher that resolves the approval
@@ -3124,7 +3616,14 @@ export class AgentEngine {
     // reviewerReason (phase 5e T2): populated ONLY by the reviewer-escalation call site — an
     // ask-policy or reviewer-less card omits it, matching the protocol field's additive-optional
     // shape (older-shaped events, and every non-reviewer caller here, still parse/behave unchanged).
-    opts: { timeoutMs: number; summary: string; denialMessage?: string; reviewerReason?: string },
+    opts: {
+      timeoutMs: number; summary: string; denialMessage?: string; reviewerReason?: string;
+      // SP-approvals Task 5: populated ONLY by the plain ask-policy call site below
+      // (approvalOptionsFor) — the dirGrant/worktree/reviewer-escalation call sites all omit it, so
+      // `options` stays `undefined` on their broker meta + emitted event, byte-identical to before
+      // this field existed.
+      options?: ApprovalOption[];
+    },
     loaded: Set<string>,
     onApprove?: () => Promise<{ output: string; isError: boolean }>,
     pins: Set<string> = new Set(),
@@ -3139,12 +3638,12 @@ export class AgentEngine {
     const issuedAt = Date.now();
     const expiresAt = issuedAt + opts.timeoutMs;
     const waiting = this.cfg.broker.wait(sessionId, call.callId, opts.timeoutMs, {
-      toolName: call.name, summary: opts.summary, issuedAt, expiresAt,
+      toolName: call.name, summary: opts.summary, issuedAt, expiresAt, options: opts.options,
     });
     try {
       this.emit(sessionId, {
         type: "approval_requested", sessionId, threadId, callId: call.callId, toolName: call.name,
-        summary: opts.summary, issuedAt, expiresAt, reviewerReason: opts.reviewerReason,
+        summary: opts.summary, issuedAt, expiresAt, reviewerReason: opts.reviewerReason, options: opts.options,
       });
     } catch (err) {
       // emit failed (e.g. disk): resolve the registered waiter now so it doesn't linger until timeout

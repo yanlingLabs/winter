@@ -286,9 +286,16 @@ extension NormaClient {
         return (r["compacted"]?.boolValue ?? false, r["uptoSeq"]?.intValue ?? 0)
     }
 
-    public func approvalRespond(sessionId: String, callId: String, approved: Bool) async throws -> Bool {
+    /// `optionId` (SP-approvals T6): the allow-rule choice the caller picked, when the card carried
+    /// `options` (`SessionEvent.ApprovalRequested.options` — Task 4/5's protocol+engine work).
+    /// Optional/defaulted so every pre-existing call site keeps compiling unchanged; `obj(...)`'s
+    /// `compactMapValues` (above) omits the `"optionId"` key entirely when `nil`, same convention as
+    /// `planRespond`'s `feedback`/`askUserRespond`'s `notes` — an older daemon that doesn't know
+    /// about rule options simply never sees the key and treats the respond as plain allow/deny.
+    public func approvalRespond(sessionId: String, callId: String, approved: Bool, optionId: String? = nil) async throws -> Bool {
         try await request("approval.respond", params: obj([
             "sessionId": .string(sessionId), "callId": .string(callId), "approved": .bool(approved),
+            "optionId": optionId.map { .string($0) },
         ]))["alreadyResolved"]?.boolValue ?? false
     }
 

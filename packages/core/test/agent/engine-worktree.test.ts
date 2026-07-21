@@ -26,8 +26,11 @@ function git(args: string[], cwd: string): { code: number; stdout: string; stder
   return { code: p.exitCode ?? 0, stdout: p.stdout.toString(), stderr: p.stderr.toString() };
 }
 
-/** mkdtemp + git init + an initial commit so HEAD exists. Mirrors worktree.test.ts's helper. */
-function repo(): string {
+/** mkdtemp + git init + an initial commit so HEAD exists. Mirrors worktree.test.ts's helper.
+ *  Exported for reuse by permission-gate-order.test.ts (SP-approvals T3 follow-up, scenario 9) —
+ *  same cross-test-file reuse precedent as engine-steer.test.ts's setupEngine / engine-reviewer
+ *  .test.ts's stubRegistry/bashTurn/stubReviewer. */
+export function repo(): string {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "norma-engine-wt-")));
   git(["init"], dir);
   git(["config", "user.email", "test@norma.dev"], dir);

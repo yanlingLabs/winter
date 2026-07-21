@@ -22,6 +22,7 @@ import { SkillStore } from "../../src/agent/skills";
 import { Compactor } from "../../src/agent/compactor";
 import type { McpManager } from "../../src/agent/mcp/manager";
 import type { BashReviewer } from "../../src/agent/reviewer";
+import type { PermissionRules } from "../../src/agent/permission-rules";
 
 // Mirrors packages/core/test/agent/engine.test.ts's setup(). Exported so other engine test
 // files (e.g. engine-interrupt.test.ts, engine-context.test.ts) can reuse the same harness
@@ -52,6 +53,23 @@ export function setupEngine(provider: Provider, opts?: {
   // sandboxed background process just to exercise the bash_output/task_stop pin.
   worktrees?: WorktreeManager;
   bgRegistry?: BgTaskLister;
+  // SP-approvals Task 3: plain instance (not a getter — mirrors `gate: new PermissionGate()`'s own
+  // boot-constant shape; PermissionRules is "hot" internally via its own mtime-cached project-file
+  // read and the caller-injected globalAllow thunk, so the engine never needs to re-resolve it).
+  // Undefined (every pre-T3 test) leaves EngineConfig.permissionRules absent — the new ruleAllowed
+  // block in the dispatch loop never activates, byte-identical to before this field existed.
+  permissionRules?: PermissionRules;
+  // Exposed so a test can pin the control-plane guard (dirGrant's `grantDenied` check) alongside a
+  // permissionRules rule, proving a rule can never bypass it (SP-approvals T3 scenario 8). Mirrors
+  // engine.test.ts's own `setup()` opt of the same name; undefined (every pre-existing caller here)
+  // leaves EngineConfig.grantDeniedPrefixes absent, unchanged behavior.
+  grantDeniedPrefixes?: string[];
+  // SP-approvals Task 10: the user-added half of web_fetch's dangerous-domain floor
+  // (`settings.permissions.dangerousDomains.added` in real daemon wiring) — a plain array here
+  // (mirrors reviewerAllow's shape), wrapped into a getter below. Undefined (every pre-T10 test)
+  // leaves EngineConfig.dangerousDomainsAdded absent, so the engine's webFetchGate check only ever
+  // consults the SHIPPED list, unchanged behavior for every existing caller.
+  dangerousDomainsAdded?: string[];
 }) {
   const home = mkdtempSync(join(tmpdir(), "norma-engine-steer-"));
   const cwd = opts?.cwd ?? realpathSync(mkdtempSync(join(tmpdir(), "norma-engine-steer-cwd-")));
@@ -104,6 +122,9 @@ export function setupEngine(provider: Provider, opts?: {
     compactor,
     mcp: opts?.mcp,
     reviewer: opts?.reviewer,
+    permissionRules: opts?.permissionRules,
+    grantDeniedPrefixes: opts?.grantDeniedPrefixes,
+    dangerousDomainsAdded: () => opts?.dangerousDomainsAdded,
     // hot-settings T2: EngineConfig's in-scope fields are now getters — every existing caller
     // here still passes a plain value (or, for reviewerClasses only, an already-built getter —
     // see its own doc comment above), wrapped into a getter at this ONE boundary so none of the

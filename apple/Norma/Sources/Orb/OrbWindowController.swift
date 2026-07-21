@@ -127,7 +127,7 @@ final class OrbWindowController: ObservableObject {
     /// `respondQuestion`/`respondPlan` (the focused-session surface), exactly mirroring the
     /// `onSubmit` chain (`FieldStateAdapter.onXRespond` → `GlassRootView.wireCallbacks()` → these
     /// closures → `AppDelegate` → `AppModel`) so this controller stays model-free.
-    var onApprovalRespond: ((String, Bool, String?) async -> Bool)?
+    var onApprovalRespond: ((String, Bool, String?, String?) async -> Bool)?  // callId, approved, optionId, childSessionId
     var onQuestionRespond: ((String, [String: String], [String: String], String?) async -> Bool)?
     var onPlanRespond: ((String, Bool, Bool, String?) async -> Bool)?
 
@@ -592,9 +592,9 @@ final class OrbWindowController: ObservableObject {
     private func dispatchCardKeyAction(_ action: CardKeyAction, topmost: PendingInteraction?) {
         switch action {
         case .approve(let callId, let childSessionId):
-            fieldAdapter.onApprovalRespond(callId, true, childSessionId)
+            fieldAdapter.onApprovalRespond(callId, true, nil, childSessionId)
         case .deny(let callId, let childSessionId):
-            fieldAdapter.onApprovalRespond(callId, false, childSessionId)
+            fieldAdapter.onApprovalRespond(callId, false, nil, childSessionId)
         case .selectOption(let callId, let index, let childSessionId):
             guard case .question(_, let questions, _) = topmost else { return }
             fieldAdapter.onQuestionRespond(callId, questionAnswers(for: questions, selections: [0: [index]], otherTexts: [:]), [:], childSessionId)
@@ -1544,7 +1544,7 @@ func cardKeyAction(
     guard composerDraft.isEmpty else { return nil }
     guard let topmost, let chars, let ch = chars.lowercased().first else { return nil }
     switch topmost {
-    case .approval(let callId, _, _, _, let childSessionId):
+    case .approval(let callId, _, _, _, let childSessionId, _):
         if ch == "y" { return .approve(callId, childSessionId) }
         if ch == "n" { return .deny(callId, childSessionId) }
         return nil

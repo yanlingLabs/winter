@@ -45,6 +45,7 @@ import { notifyHeadless } from "./agent/notify-fallback";
 import { registerLspTools } from "./agent/tools/lsp";
 import { LspManager } from "./agent/lsp/manager";
 import { PermissionGate } from "./agent/gate";
+import { PermissionRules } from "./agent/permission-rules";
 import { ApprovalBroker } from "./agent/approvals";
 import { QuestionBroker } from "./agent/questions";
 import { TaskStore } from "./agent/task-store";
@@ -340,6 +341,14 @@ export async function startDaemon(opts: {
   quota ??= new QuotaManager();
 
   let engine: AgentEngine | null = null;
+  // SP-approvals Task 5: hoisted alongside `engine` — same "declared null/undefined above, assigned
+  // inside the gate" shape as `dreamer`/`mcp`/etc below. PermissionRules itself needs no provider
+  // (only settings + normaHome), but has always been constructed inside the `if (agentProvider)`
+  // gate next to the engine that consumes it (see the assignment site's own doc comment); declared
+  // here so it's reachable AFTER the gate closes, where startIpcServer's opts (below) share this
+  // SAME instance with the engine's own ask-policy rule-consult path — one mtime cache, not two
+  // independently-stale copies.
+  let permissionRules: PermissionRules | undefined;
   // Dreaming (Phase 7b): constructed AFTER `engine` (its `activeTurnCount` thunk closes over it —
   // see the construction site inside `if (agentProvider)` below), and only there — a no-provider
   // daemon has no dispatch turns to dream about. Declared here (function scope, outside the gate)
@@ -691,9 +700,42 @@ export async function startDaemon(opts: {
     // `new AgentEngine(...)` returns, since DispatchChildren.spawnChild needs `engine.runTurn`/
     // `engine.isRunning`, which don't exist until the engine itself does.
     let dispatchChildren: DispatchChildren | undefined;
+    // SP-approvals Task 5: constructed here (a statement, not an inline object-literal value) and
+    // assigned to the OUTER `permissionRules` binding declared above the `if (agentProvider)` gate
+    // — startIpcServer's opts (below, built AFTER this gate closes) need this EXACT instance so
+    // `approval.respond`'s optionId-driven append() shares one mtime cache with the engine's own
+    // decision() reads, never two independently-stale PermissionRules. See the field below (still
+    // referenced by its old inline comment, now a shorthand) for what this class actually does.
+    permissionRules = new PermissionRules({ globalAllow: () => settings?.permissions?.allow ?? ["Computer"], normaHome });
     engine = new AgentEngine({
       store, hub, registry, broker: approvalBroker,
       gate: new PermissionGate(),
+      // SP-approvals Task 3: the CC-grammar allow-rules store (Task 1) — plain instance, not a
+      // getter (mirrors `gate` just above): PermissionRules is already "hot" internally (its own
+      // mtime-cached project-rules-file read, re-checked on every decision()/rulesFor() call), and
+      // `globalAllow` is the live-settings thunk that makes the GLOBAL side hot too — this reads
+      // `settings` (the SAME reassignable holder every other hot-settings getter in this file
+      // closes over) fresh on every call, so a settings.json edit to `permissions.allow` applies
+      // with no daemon restart, exactly like reviewerAllow/reviewerEnabled below.
+      //
+      // THE `["Computer"]` DEFAULT LIVES IN THIS GETTER FALLBACK, deliberately NOT inside
+      // PermissionRules itself (see that class's own doc comment, "Spec deviation"): CC parity
+      // wants a fresh session's `computer` tool calls pre-approved out of the box, but the default
+      // must be overridable — an explicit `"permissions": { "allow": [] }` in settings.json
+      // disables it outright (the `?? ["Computer"]` fallback only fires when the key is ABSENT,
+      // never when it's present-but-empty), while an absent `permissions` block (or an absent
+      // `allow` key within it) gets the default. normaHome is the SAME control-plane path passed
+      // to `grantDeniedPrefixes` below — PermissionRules uses it only to refuse writing a
+      // project-scoped rule file inside Norma's own home (append()'s control-plane guard), never
+      // to read/write settings.json's global rules itself (that's what the globalAllow thunk +
+      // this class's OWN read-modify-write in append(scope:"global") are for).
+      permissionRules,
+      // SP-approvals Task 10 (spec §7): the user-added half of web_fetch's dangerous-domain floor
+      // — same live-getter shape as `globalAllow` just above (re-reads the reassignable `settings`
+      // holder fresh on every web_fetch call), so an edit to `permissions.dangerousDomains.added`
+      // applies with no daemon restart. Absent block/field both resolve to `undefined`, which
+      // engine.ts's `?? []` treats as "no user additions" — the shipped list alone still applies.
+      dangerousDomainsAdded: () => settings?.permissions?.dangerousDomains?.added,
       dirs: sessionDirs,
       // write-permission-flow F2: the out-of-root write/edit grant flow must never silently grant
       // any part of Norma's OWN home directory. This is BROADER than the READ denylist above
@@ -910,6 +952,13 @@ export async function startDaemon(opts: {
     hub,
     engine,
     broker: approvalBroker,
+    // SP-approvals Task 5: the SAME PermissionRules instance the engine's ask-policy rule-consult
+    // path reads (hoisted above, assigned inside the `if (agentProvider)` gate) — lets
+    // `approval.respond`'s optionId-driven rule persistence share one mtime cache rather than a
+    // second, independently-stale instance. `undefined` on a no-agentProvider daemon (no engine,
+    // so no approval flow could ever produce a rule-bearing optionId to persist in the first
+    // place) — same typed-no-op precedent as `registry`/`mcp` elsewhere in this options object.
+    permissionRules,
     dirs: sessionDirs,
     trust: trustStore,
     bg: bgRegistry,

@@ -35,6 +35,8 @@ import type { SessionStore } from "../sessions/store";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { AgentEngine } from "../agent/engine";
 import type { ApprovalBroker } from "../agent/approvals";
+import type { PermissionRules } from "../agent/permission-rules";
+import { repoRootFor } from "../agent/memory-dir";
 import type { QuestionBroker } from "../agent/questions";
 import type { TaskStore } from "../agent/task-store";
 import type { PlanBroker } from "../agent/plans";
@@ -88,6 +90,14 @@ export interface IpcServerOptions {
   hub?: SessionHub;          // shared with the agent engine when the daemon wires one up
   engine?: AgentEngine | null;
   broker?: ApprovalBroker | null;
+  // SP-approvals Task 5: the CC-grammar allow-rules store (Task 1) — daemon.ts hoists ONE instance
+  // shared with the engine's own ask-policy rule-consult path, so `approval.respond`'s optionId-
+  // driven `append()` below and the dispatch loop's `decision()` reads share the SAME mtime cache,
+  // never two independently-stale copies. Optional: a server built without one (most existing
+  // tests, and any daemon with no agentProvider) makes a rule-bearing optionId a silent no-op —
+  // same "typed no-op, never a crash" precedent as `broker`/`dirs`/etc below — since without an
+  // engine there is no approval flow that could ever produce a rule-bearing optionId to persist.
+  permissionRules?: PermissionRules;
   dirs?: SessionDirectories; // live allowed-roots per session; addDir/setCwd need it
   trust?: TrustStore;        // per-directory trust; session.create result + daemon.trustDir
   bg?: BackgroundTaskRegistry; // background bash tasks; bg.list/peek/kill/killAll
@@ -772,6 +782,36 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.approvalRespond: {
         const p = parseParams(ApprovalRespondParams, params);
+        // SP-approvals Task 5: BEFORE resolving, look up the pending approval's stored options via
+        // Task 4's `pendingMeta` — a non-consuming read (see its own doc comment), so this lookup
+        // can never itself count as an answer for the `resolve()` call right below. Gated on
+        // `p.optionId` being present at all: a plain approve/deny (no options were ever offered on
+        // this card, or a client that predates this field) skips this entirely, byte-identical to
+        // before this task.
+        if (p.optionId !== undefined && opts.broker) {
+          const meta = opts.broker.pendingMeta(p.sessionId, p.callId);
+          const option = meta?.options?.find((o) => o.id === p.optionId);
+          if (meta && !option) {
+            // A genuinely pending approval, but optionId names nothing it actually offered — a
+            // client bug or protocol drift, not a crash: log once and fall through to the normal
+            // resolve below (approved per p.approved, exactly as if optionId had been omitted).
+            console.error(`approval.respond: unknown optionId ${JSON.stringify(p.optionId)} for session ${p.sessionId} call ${p.callId} — resolving with no rule persisted`);
+          } else if (option?.rule && p.approved && opts.permissionRules) {
+            // Persist the chosen rule. `approved:false` on a rule-bearing option must NEVER
+            // append — enforced by `p.approved` being part of THIS same condition, not a separate
+            // branch, so there is no path that persists a rule for a denied call. Wrapped in
+            // try/catch: `append()` throws RuleAppendError for scope "project" when there's no
+            // usable project root (a null session cwd, or one nested inside/equal to normaHome) —
+            // the approval outcome must never hang or fail on a persistence problem, so a failure
+            // here only logs; `resolve()` below still runs unconditionally either way.
+            try {
+              const cwd = opts.store.meta(p.sessionId).cwd;
+              opts.permissionRules.append(option.rule, option.scope ?? "project", cwd ? repoRootFor(cwd) : null);
+            } catch (err) {
+              console.error(`approval.respond: failed to persist permission rule ${JSON.stringify(option.rule)} for session ${p.sessionId}: ${(err as Error).message}`);
+            }
+          }
+        }
         return opts.broker?.resolve(p.sessionId, p.callId, p.approved, socket.data.clientName) ?? { ok: true, alreadyResolved: true };
       }
       case METHODS.approvalList: {

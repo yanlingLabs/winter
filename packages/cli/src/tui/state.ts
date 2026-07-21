@@ -33,7 +33,7 @@
  *  PURE: `nowMs` is the caller's injected clock (App.tsx will tick it); `reduce` itself never calls
  *  `Date.now()`. ZERO Ink/React import — unit-testable in isolation (state.test.ts). */
 
-import type { Task } from "@norma/protocol";
+import type { ApprovalOption, Task } from "@norma/protocol";
 import { updateSubagents, type CliSubagent } from "../subagent-state";
 import { subagentTokens } from "../subagent-display";
 import { upsertTask } from "../task-block";
@@ -77,7 +77,11 @@ export type PendingCard =
   // on the wire (protocol/events.ts) — set only when this escalation came from the safety reviewer.
   // Omitted (never `reviewerReason: undefined`) when absent, so a non-reviewer card's shape is
   // exactly what it was before this field existed (byte-identical regression pin, state.test.ts).
-  | { kind: "approval"; callId: string; toolName: string; summary: string; reviewerReason?: string }
+  // options (SP-approvals T7): additive/optional, mirroring `approval_requested.options` — the
+  // daemon's allow-rule choices (Task 5's `approvalOptionsFor`). Same omit-when-absent discipline:
+  // a reviewer-escalation/grant/worktree card or an older daemon carries none, and the card renders
+  // exactly as before this field existed (pending-cards.tsx's (d1a) byte-identical pin).
+  | { kind: "approval"; callId: string; toolName: string; summary: string; reviewerReason?: string; options?: ApprovalOption[] }
   | { kind: "question"; callId: string; questions: unknown[] }
   | { kind: "plan"; callId: string; plan: string };
 
@@ -405,6 +409,10 @@ export function reduce(s: TuiState, e: WireEvent, nowMs: number): TuiState {
       // phase 5e T5: thread reviewerReason through if present (spread-omitted, not `undefined`-set,
       // when absent — see the PendingCard doc comment above).
       const reviewerReason = typeof e.reviewerReason === "string" ? e.reviewerReason : undefined;
+      // SP-approvals T7: same cast-and-omit discipline as the "question" case's `questions` field
+      // below (no per-item validation here either — pending-cards.tsx's ApprovalCard is the render-
+      // time consumer, same division of labor as QuestionCard/`LegacyQuestion`).
+      const options = Array.isArray(e.options) ? (e.options as ApprovalOption[]) : undefined;
       return {
         ...s,
         pending: {
@@ -413,6 +421,7 @@ export function reduce(s: TuiState, e: WireEvent, nowMs: number): TuiState {
           toolName: str(e.toolName),
           summary: str(e.summary),
           ...(reviewerReason !== undefined ? { reviewerReason } : {}),
+          ...(options !== undefined ? { options } : {}),
         },
       };
     }

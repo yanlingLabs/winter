@@ -14,7 +14,7 @@ struct PendingCardsView: View {
     let interactions: [PendingInteraction]
     let inFlight: Set<String>                       // callIds with an RPC awaiting
     let errorLines: [String: String]                // callId → inline error text
-    let onApproval: (String, Bool, String?) -> Void          // callId, approved, childSessionId
+    let onApproval: (String, Bool, String?, String?) -> Void  // callId, approved, optionId, childSessionId
     let onQuestion: (String, [String: String], [String: String], String?) -> Void  // callId, answers, notes (both keyed by question text), childSessionId
     let onPlan: (String, Bool, Bool, String?) -> Void   // callId, approved, autoAccept, feedback
 
@@ -126,7 +126,7 @@ func questionFocusedPreview(_ question: SessionEvent.Question, selected: Set<Int
 /// itself, not a header field, is the body).
 func cardTitle(_ interaction: PendingInteraction) -> String {
     switch interaction {
-    case .approval(_, let toolName, _, _, _):
+    case .approval(_, let toolName, _, _, _, _):
         return "Approval needed — \(toolName)"
     case .question(_, let questions, _):
         return questions.first?.header ?? ""
@@ -167,7 +167,7 @@ private struct PendingCard: View {
     let interaction: PendingInteraction
     let isInFlight: Bool
     let errorLine: String?
-    let onApproval: (String, Bool, String?) -> Void
+    let onApproval: (String, Bool, String?, String?) -> Void
     let onQuestion: (String, [String: String], [String: String], String?) -> Void
     let onPlan: (String, Bool, Bool, String?) -> Void
 
@@ -196,8 +196,8 @@ private struct PendingCard: View {
     @ViewBuilder
     private var cardBody: some View {
         switch interaction {
-        case .approval(let callId, _, let summary, let reviewerReason, let childSessionId):
-            PendingApprovalBody(callId: callId, summary: summary, reviewerReason: reviewerReason, childSessionId: childSessionId, isInFlight: isInFlight, onApproval: onApproval)
+        case .approval(let callId, _, let summary, let reviewerReason, let childSessionId, let options):
+            PendingApprovalBody(callId: callId, summary: summary, reviewerReason: reviewerReason, childSessionId: childSessionId, options: options, isInFlight: isInFlight, onApproval: onApproval)
         case .question(let callId, let questions, let childSessionId):
             PendingQuestionBody(callId: callId, questions: questions, childSessionId: childSessionId, isInFlight: isInFlight, onQuestion: onQuestion)
         case .plan(let callId, let plan):
@@ -222,13 +222,27 @@ private struct PendingApprovalBody: View {
     /// session's approval (`PendingInteraction.approval`'s 5th associated value); threaded straight
     /// into `onApproval` so the respond routes to the child, not this card's own dispatch session.
     let childSessionId: String?
+    /// SP-approvals T6: additive/optional — `PendingInteraction.approval`'s 6th associated value,
+    /// mirroring `SessionEvent.ApprovalRequested.options` (Task 5's `approvalOptionsFor`). Only the
+    /// RULE-BEARING entries feed `ruleOptions` below — a plain allow-once/deny entry is already
+    /// covered by the Approve/Deny buttons and would just duplicate them. `nil`, or an array with no
+    /// rule-bearing entries, renders this card byte-identical to before this task.
+    let options: [SessionEvent.ApprovalOption]?
     let isInFlight: Bool
-    let onApproval: (String, Bool, String?) -> Void
+    let onApproval: (String, Bool, String?, String?) -> Void  // callId, approved, optionId, childSessionId
 
     @State private var isExpanded = false
 
     private var mightOverflowThreeLines: Bool {
         summary.count > 150 || summary.filter { $0 == "\n" }.count >= 3
+    }
+
+    /// `ApprovalOption.rule`/`scope` are present TOGETHER only on an option that persists a
+    /// permission rule when chosen (see that struct's own doc in NormaProtocol) — a plain
+    /// allow-once/deny option (`rule == nil`) is filtered out here since Approve/Deny already
+    /// cover it.
+    private var ruleOptions: [SessionEvent.ApprovalOption] {
+        (options ?? []).filter { $0.rule != nil }
     }
 
     var body: some View {
@@ -258,14 +272,34 @@ private struct PendingApprovalBody: View {
                     .foregroundStyle(.secondary)
             }
 
+            // Primary row — UNCHANGED from before this task: Approve is still plain allow-once
+            // (spec §5: "default button = Allow once"), Deny still bare deny; neither carries an
+            // optionId. Rule-writing choices are deliberate clicks on the quiet row below, never
+            // folded into these two.
             HStack(spacing: 8) {
-                Button("Approve") { onApproval(callId, true, childSessionId) }
+                Button("Approve") { onApproval(callId, true, nil, childSessionId) }
                     .buttonStyle(.borderedProminent)
-                Button("Deny") { onApproval(callId, false, childSessionId) }
+                Button("Deny") { onApproval(callId, false, nil, childSessionId) }
                     .buttonStyle(.bordered)
             }
             .controlSize(.small)
             .disabled(isInFlight)
+
+            // SP-approvals T6: one quiet button per rule-bearing option, below the primary row —
+            // `.plain` + secondary/small text, same "quiet" convention as the "Show more" toggle
+            // above, so a rule-writing choice never reads as visually equal to Approve/Deny. Labels
+            // render verbatim (the daemon already composes the exact rule string into them).
+            if !ruleOptions.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(ruleOptions, id: \.id) { option in
+                        Button(option.label) { onApproval(callId, true, option.id, childSessionId) }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(isInFlight)
+            }
         }
     }
 }

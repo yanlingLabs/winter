@@ -171,4 +171,31 @@ d("BackgroundTaskRegistry", () => {
     await sleep(400);
     expect(readFileSync(file, "utf8")).toBe("");
   });
+
+  // SP-approvals Task 11 (spec §8): the engine gates BEFORE a bg task ever starts (permission-
+  // gate-order.test.ts covers that wiring with a stub, no real sandbox) — this registry just needs
+  // to receive and honor the two resolved flags exactly like the foreground bash tool does
+  // (tools-bash.test.ts's own escalation-arg suite).
+  test("allowNetwork: true still cannot write outside the session roots (fence intact)", async () => {
+    const cwd = realDir();
+    const outside = realDir();
+    const { reg } = makeRegistry(cwd);
+    const id = reg.start("s1", `echo pwned > ${outside}/leak-network.txt 2>&1 || true`, { allowNetwork: true });
+    await sleep(500);
+    expect(existsSync(join(outside, "leak-network.txt"))).toBe(false);
+    expect(reg.read("s1", id).status).toBeDefined();
+  });
+
+  test("dangerouslyDisableSandbox: true escapes the fence entirely — a background write outside the roots now SUCCEEDS", async () => {
+    const cwd = realDir();
+    const outside = realDir();
+    const { reg } = makeRegistry(cwd);
+    const id = reg.start("s1", `echo pwned > ${outside}/leak-unsandboxed.txt`, { dangerouslyDisableSandbox: true });
+    await sleep(500);
+    expect(existsSync(join(outside, "leak-unsandboxed.txt"))).toBe(true);
+    expect(readFileSync(join(outside, "leak-unsandboxed.txt"), "utf8")).toBe("pwned\n");
+    const { status, exitCode } = reg.read("s1", id);
+    expect(status).toBe("exited");
+    expect(exitCode).toBe(0);
+  });
 });

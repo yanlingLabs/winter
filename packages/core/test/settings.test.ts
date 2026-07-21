@@ -26,6 +26,33 @@ describe("loadSettings", () => {
     expect(loadSettings(p).provider.type).toBe("openai-compatible");
   });
 
+  // SP-approvals T10 (spec §7): permissions.dangerousDomains.added — the user-added half of
+  // web_fetch's dangerous-domain floor (agent/dangerous-domains.ts's SHIPPED_DANGEROUS_DOMAINS is
+  // the other, immutable half). Additive optional key — absent means "no user additions".
+  test("permissions.dangerousDomains.added round-trips through the schema", () => {
+    const p = tmpSettings({
+      schemaVersion: 2,
+      provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL },
+      permissions: { dangerousDomains: { added: ["evil-example.net", "exfil.example.org"] } },
+    });
+    const s = loadSettings(p);
+    expect(s.permissions?.dangerousDomains?.added).toEqual(["evil-example.net", "exfil.example.org"]);
+  });
+
+  test("permissions.dangerousDomains absent is valid (no user additions)", () => {
+    const p = tmpSettings({ schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } });
+    expect(loadSettings(p).permissions?.dangerousDomains).toBeUndefined();
+  });
+
+  test("permissions.dangerousDomains.added rejects a non-array value", () => {
+    const p = tmpSettings({
+      schemaVersion: 2,
+      provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL },
+      permissions: { dangerousDomains: { added: "not-an-array" } },
+    });
+    expect(() => loadSettings(p)).toThrow(/settings/);
+  });
+
   test("corrupt settings throw a readable error", () => {
     const p = tmpSettings({ schemaVersion: 2, provider: { type: "telepathy" } });
     expect(() => loadSettings(p)).toThrow(/settings/);

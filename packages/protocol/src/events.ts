@@ -69,6 +69,24 @@ export const ToolResultEvent = ThreadBase.extend({
  *  never renders. Do NOT add a generator fixture: Swift's all-fixtures round-trip would degrade
  *  it to unknownEvent and fail equality; TS tests cover the variant. */
 export const ReasoningItemEvent = ThreadBase.extend({ type: z.literal("reasoning_item"), itemJson: z.string().min(1) });
+
+/** SP-approvals T4: a caller-facing "grant a rule" choice offered alongside plain approve/deny —
+ *  e.g. "Always allow `git push` in this project." `id` is an open set (not a literal union here:
+ *  the daemon mints the concrete ids per tool, engine.ts's `approvalOptionsFor` — Task 5 — typically
+ *  "allow_once" | "allow_project" | "allow_global" | "deny"); `label` is the exact human-readable
+ *  text to render, already composed with the rule string for a rule-bearing option, so a client
+ *  never has to build that sentence itself. `rule`/`scope` are present TOGETHER on an option that
+ *  persists a permission rule when chosen (the wire carries the chosen option back via
+ *  `ApprovalRespondParams.optionId`, methods.ts) and both absent on a plain option (allow-once/deny)
+ *  that grants nothing durable. */
+export const ApprovalOption = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  rule: z.string().optional(),
+  scope: z.enum(["project", "global"]).optional(),
+});
+export type ApprovalOption = z.infer<typeof ApprovalOption>;
+
 export const ApprovalRequestedEvent = ThreadBase.extend({
   type: z.literal("approval_requested"), callId: z.string().min(1), toolName: z.string().min(1), summary: z.string(),
   // SP3 T4b: the approval's issue/expiry timestamps (epoch ms). The daemon ALWAYS emits both on
@@ -91,6 +109,11 @@ export const ApprovalRequestedEvent = ThreadBase.extend({
   // Dispatch relay (Phase 7): set on the MIRRORED copy of a child session's approval living in the
   // dispatch session's stream — identifies which child to respond into. Absent on native approvals.
   childSessionId: z.string().optional(),
+  // SP-approvals T4: per-approval allow-rule choices (Task 5's `approvalOptionsFor`) — e.g. an
+  // "always allow `git push` in this project" option alongside plain approve/deny. Optional/
+  // additive: a reviewer-escalation/grant/worktree card (no rule-worthy shape) or an older
+  // persisted event omits it; clients that don't render options still see a valid approval card.
+  options: z.array(ApprovalOption).optional(),
 });
 export const ApprovalResolvedEvent = ThreadBase.extend({
   type: z.literal("approval_resolved"), callId: z.string().min(1), approved: z.boolean(), by: z.string().min(1),

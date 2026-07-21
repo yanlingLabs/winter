@@ -10,6 +10,8 @@ import { FileSecretStore } from "../src/auth/secret-store";
 import { TokenAuthority } from "../src/auth/tokens";
 import { PluginStore } from "../src/agent/plugins";
 import { ToolRegistry } from "../src/agent/tools/registry";
+import { ApprovalBroker } from "../src/agent/approvals";
+import { PermissionRules } from "../src/agent/permission-rules";
 import { PluginSupervisor } from "../src/plugins/supervisor";
 import { PluginContribRegistry } from "../src/plugins/contrib";
 import type { Provider, ProviderEvent } from "../src/providers/types";
@@ -79,6 +81,10 @@ class TestClient {
 describe("daemon IPC", () => {
   let daemon: RunningDaemon;
   let harnessToken: string;
+  // SP-approvals T10: captured so the web_fetch dangerous-domain full-loop test can read
+  // settings.json directly (proving the REAL daemon's approval.respond handler persisted the rule
+  // to disk) without RunningDaemon itself needing to expose its home directory.
+  let daemonHome: string;
 
   async function boot(
     serverOpts: { helloTimeoutMs?: number; maxConnections?: number } = {},
@@ -91,6 +97,7 @@ describe("daemon IPC", () => {
     settingsOverride?: Record<string, unknown>,
   ): Promise<void> {
     const home = mkdtempSync(join(tmpdir(), "norma-daemon-"));
+    daemonHome = home;
     if (settingsOverride) {
       writeFileSync(join(home, "settings.json"), JSON.stringify({
         schemaVersion: 2,
@@ -453,6 +460,289 @@ describe("daemon IPC", () => {
     await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
     expect(readFileSync(join(cwd, "f.txt"), "utf8")).toBe("x");
     c.close();
+  });
+
+  // SP-approvals Task 5: a rule-bearing optionId on approval.respond persists a CC-grammar
+  // permission rule to the SESSION-CWD project file (Task 1's PermissionRules, written via
+  // engine.ts's approvalOptionsFor + this handler's append) — this is the feature's whole point:
+  // card → "always allow" → rule written → the NEXT identical call runs silently (proven by
+  // permission-gate-order.test.ts's scenario 1, driven from the OTHER side of the same rule file).
+  test("approval.respond with a rule-bearing optionId persists the rule to the session-cwd project file, then resolves", async () => {
+    const { FakeProvider } = await import("../src/agent/fake-provider");
+    const fake = new FakeProvider([
+      [{ type: "tool_call", callId: "c1", name: "bash", argsJson: JSON.stringify({ command: "git push origin main" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    ]);
+    await boot({}, fake);
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(harnessToken, "rule-approver");
+    const cwd = mkdtempSync(join(tmpdir(), "norma-approve-rule-"));
+    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "ask" });
+    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
+    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "push" });
+    const ask = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "approval_requested");
+    expect(ask.params.options).toEqual([
+      { id: "allow_once", label: "Allow once" },
+      { id: "allow_project", label: 'Allow "Bash(git push:*)" in this project', rule: "Bash(git push:*)", scope: "project" },
+      { id: "allow_global", label: 'Allow "Bash(git push:*)" everywhere', rule: "Bash(git push:*)", scope: "global" },
+      { id: "deny", label: "Deny" },
+    ]);
+
+    const res = await c.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: ask.params.callId, approved: true, optionId: "allow_project" });
+    expect(res.result).toEqual({ ok: true, alreadyResolved: false });
+    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
+
+    expect(JSON.parse(readFileSync(join(cwd, ".norma", "permissions.local.json"), "utf8"))).toEqual({ allow: ["Bash(git push:*)"] });
+    c.close();
+  });
+
+  test("approval.respond with a rule-bearing optionId but approved:false does NOT persist any rule", async () => {
+    const { FakeProvider } = await import("../src/agent/fake-provider");
+    const fake = new FakeProvider([
+      [{ type: "tool_call", callId: "c1", name: "bash", argsJson: JSON.stringify({ command: "git push origin main" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    ]);
+    await boot({}, fake);
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(harnessToken, "rule-denier");
+    const cwd = mkdtempSync(join(tmpdir(), "norma-deny-rule-"));
+    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "ask" });
+    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
+    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "push" });
+    const ask = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "approval_requested");
+
+    const res = await c.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: ask.params.callId, approved: false, optionId: "allow_project" });
+    expect(res.result).toEqual({ ok: true, alreadyResolved: false });
+    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
+
+    expect(existsSync(join(cwd, ".norma", "permissions.local.json"))).toBe(false);
+    c.close();
+  });
+
+  test("approval.respond with an unrecognized optionId resolves normally, persists no rule, and logs a warning once", async () => {
+    const { FakeProvider } = await import("../src/agent/fake-provider");
+    const fake = new FakeProvider([
+      [{ type: "tool_call", callId: "c1", name: "bash", argsJson: JSON.stringify({ command: "git push origin main" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    ]);
+    await boot({}, fake);
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(harnessToken, "rule-unknown-option");
+    const cwd = mkdtempSync(join(tmpdir(), "norma-unknown-rule-"));
+    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "ask" });
+    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
+    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "push" });
+    const ask = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "approval_requested");
+
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await c.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: ask.params.callId, approved: true, optionId: "not-a-real-option" });
+      expect(res.result).toEqual({ ok: true, alreadyResolved: false });
+      expect(errSpy).toHaveBeenCalled();
+      expect(errSpy.mock.calls.some((call) => String(call[0]).includes("unknown optionId"))).toBe(true);
+    } finally {
+      errSpy.mockRestore();
+    }
+    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
+
+    expect(existsSync(join(cwd, ".norma", "permissions.local.json"))).toBe(false);
+    c.close();
+  });
+
+  // Remote Gateway parity: the phone answers approvals through role:"remote" (REMOTE_ALLOWED_METHODS
+  // already carries approval.respond) — an optionId-bearing respond from that role must persist a
+  // rule exactly like a harness caller's, since the server-side handler doesn't special-case role.
+  test("a remote-role connection's approval.respond with optionId persists the rule same as a harness caller (the phone path)", async () => {
+    const { FakeProvider } = await import("../src/agent/fake-provider");
+    const fake = new FakeProvider([
+      [{ type: "tool_call", callId: "c1", name: "bash", argsJson: JSON.stringify({ command: "git push origin main" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    ]);
+    await boot({}, fake);
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(harnessToken, "phone-rule-driver");
+    const cwd = mkdtempSync(join(tmpdir(), "norma-remote-rule-"));
+    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "ask" });
+    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
+    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "push" });
+    const ask = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "approval_requested");
+
+    const remote = await TestClient.connect(daemon.socketPath);
+    await remote.hello(daemon.tokens.remote, "phone", "remote");
+    const res = await remote.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: ask.params.callId, approved: true, optionId: "allow_project" });
+    expect(res.result).toEqual({ ok: true, alreadyResolved: false });
+    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
+
+    expect(JSON.parse(readFileSync(join(cwd, ".norma", "permissions.local.json"), "utf8"))).toEqual({ allow: ["Bash(git push:*)"] });
+    c.close(); remote.close();
+  });
+
+  // T4's broker->list() options passthrough, end to end over the wire (T4 itself only proved this
+  // at the ApprovalBroker unit level) — a phone that reconnects and calls approval.list mid-card
+  // must see the SAME options the approval_requested event it possibly missed would have carried.
+  test("approval.list surfaces the SAME options the approval_requested event carried (T4 passthrough, end to end)", async () => {
+    const { FakeProvider } = await import("../src/agent/fake-provider");
+    const fake = new FakeProvider([
+      [{ type: "tool_call", callId: "c1", name: "bash", argsJson: JSON.stringify({ command: "git push origin main" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    ]);
+    await boot({}, fake);
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(harnessToken, "list-options-driver");
+    const cwd = mkdtempSync(join(tmpdir(), "norma-list-options-"));
+    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "ask" });
+    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
+    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "push" });
+    const ask = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "approval_requested");
+
+    const listed = await c.request(METHODS.approvalList, { sessionId: created.sessionId });
+    expect(listed.result.pending).toHaveLength(1);
+    expect(listed.result.pending[0].options).toEqual(ask.params.options);
+    expect(ask.params.options?.[0]).toEqual({ id: "allow_once", label: "Allow once" }); // sanity: really the bash set, not an empty passthrough
+
+    await c.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: ask.params.callId, approved: true });
+    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
+    c.close();
+  });
+
+  // SP-approvals Task 10 (spec §7): the "Always allow from this source" web_fetch option, over the
+  // REAL wire, end to end — card shape, the REAL approval.respond handler persisting a
+  // WebFetch(domain:...) rule to the daemon's OWN settings.json (global scope), and the REAL
+  // daemon's live settings-watcher (settings-watcher.ts, 150ms debounce) picking it up so the NEXT
+  // fetch to the same domain AND a subdomain both run cardless. `globalThis.fetch` is monkey-patched
+  // for the duration (save/restore) so web_fetch never hits the real network — same technique as
+  // providers/openai-compatible.test.ts's own "consumer break mid-stream" test.
+  test("SP-approvals T10 full loop: dangerous web_fetch -> card -> respond allow_source -> rule persists globally -> next fetch to the same domain AND a subdomain run cardless", async () => {
+    const origFetch = globalThis.fetch;
+    const fetchedUrls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      fetchedUrls.push(String(input));
+      return new Response("hi", { status: 200, headers: { "content-type": "text/plain" } });
+    }) as typeof fetch;
+    try {
+      const { FakeProvider } = await import("../src/agent/fake-provider");
+      const fake = new FakeProvider([
+        [{ type: "tool_call", callId: "c1", name: "web_fetch", argsJson: JSON.stringify({ url: "https://uploads.transfer.sh/file1" }) }, { type: "done", stopReason: "tool_calls" }],
+        [{ type: "text_delta", delta: "done-1" }, { type: "done", stopReason: "end_turn" }],
+        [{ type: "tool_call", callId: "c2", name: "web_fetch", argsJson: JSON.stringify({ url: "https://transfer.sh/file2" }) }, { type: "done", stopReason: "tool_calls" }],
+        [{ type: "text_delta", delta: "done-2" }, { type: "done", stopReason: "end_turn" }],
+        [{ type: "tool_call", callId: "c3", name: "web_fetch", argsJson: JSON.stringify({ url: "https://another.transfer.sh/file3" }) }, { type: "done", stopReason: "tool_calls" }],
+        [{ type: "text_delta", delta: "done-3" }, { type: "done", stopReason: "end_turn" }],
+      ]);
+      // toolSearch disabled: web_fetch is a `deferred: true` built-in (ToolSearch deferral is
+      // default-ON in a real daemon boot, unlike setupEngine's test harness) — this test isn't
+      // about ToolSearch, so it's turned off to call web_fetch directly, same idiom the
+      // reviewer-disabling tests above use for their own out-of-scope machinery. titles disabled
+      // too: SessionTitler.maybeTitle fires fire-and-forget on the session's first message against
+      // this SAME FakeProvider instance (settings-hot-e2e.test.ts's writeSettingsFile doc comment
+      // — "races the turn's own call for the SAME script queue"), which would otherwise silently
+      // steal one of this test's carefully-ordered script entries.
+      await boot({}, fake, { toolSearch: { enabled: false }, titles: { enabled: false } });
+      const c = await TestClient.connect(daemon.socketPath);
+      await c.hello(harnessToken, "web-fetch-rule-driver");
+      const cwd = mkdtempSync(join(tmpdir(), "norma-webfetch-rule-"));
+      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "ask" });
+      await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
+
+      // Turn 1: a SUBDOMAIN of the shipped "transfer.sh" entry -> card. MEDIUM-1 (SP-approvals T10
+      // review): a subdomain hit's label reads "Always allow all of <matched-entry>", honestly
+      // communicating that approving grants the whole family, not just this one subdomain.
+      await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "fetch the paste" });
+      const ask = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "approval_requested");
+      expect(ask.params.options).toEqual([
+        { id: "allow_once", label: "Allow" },
+        { id: "allow_source", label: "Always allow all of transfer.sh", rule: "WebFetch(domain:transfer.sh)", scope: "global" },
+        { id: "deny", label: "Deny" },
+      ]);
+
+      const respond = await c.request(METHODS.approvalRespond, {
+        sessionId: created.sessionId, callId: ask.params.callId, approved: true, optionId: "allow_source",
+      });
+      expect(respond.result).toEqual({ ok: true, alreadyResolved: false });
+      await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
+
+      // The REAL ipc/server.ts handler persisted the rule to the daemon's own settings.json, global scope.
+      expect(JSON.parse(readFileSync(join(daemonHome, "settings.json"), "utf8")).permissions.allow).toEqual(["WebFetch(domain:transfer.sh)"]);
+
+      // Give the daemon's live SettingsWatcher (150ms debounce) time to hot-reload the rule into
+      // its in-memory settings before the next fetch's decision() check reads it — same "settled
+      // write" cadence settings-hot-e2e.test.ts's own torn-write test uses (a fixed sleep past a
+      // known debounce constant, comfortable headroom rather than a tight race).
+      await new Promise((r) => setTimeout(r, 500));
+
+      // Count-based waits (never a first-MATCH wait) — `waitForNotification` would otherwise
+      // resolve INSTANTLY against the turn-1 `turn_completed` already sitting in `c.notifications`.
+      // Mirrors settings-hot-e2e.test.ts's own `completedTurns()`/`driveTurn()` idiom.
+      const turnCompletedCount = () => c.notifications.filter((n) => n.method === METHODS.event && n.params.type === "turn_completed").length;
+      const approvalRequestedCount = () => c.notifications.filter((n) => n.method === METHODS.event && n.params.type === "approval_requested").length;
+      const waitForNextTurnCompleted = async (before: number): Promise<void> => {
+        const deadline = Date.now() + 5000;
+        while (turnCompletedCount() <= before) {
+          if (Date.now() > deadline) throw new Error("timed out waiting for the next turn_completed");
+          await new Promise((r) => setTimeout(r, 10));
+        }
+      };
+
+      const approvalsAfterTurn1 = approvalRequestedCount();
+      const completedAfterTurn1 = turnCompletedCount();
+
+      // Turn 2: the BARE matched entry itself -> must run cardless.
+      await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "fetch it again" });
+      await waitForNextTurnCompleted(completedAfterTurn1);
+      expect(approvalRequestedCount()).toBe(approvalsAfterTurn1);
+      const completedAfterTurn2 = turnCompletedCount();
+
+      // Turn 3: a DIFFERENT subdomain -> must ALSO run cardless.
+      await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "fetch a related paste" });
+      await waitForNextTurnCompleted(completedAfterTurn2);
+      expect(approvalRequestedCount()).toBe(approvalsAfterTurn1);
+
+      expect(fetchedUrls).toEqual(["https://uploads.transfer.sh/file1", "https://transfer.sh/file2", "https://another.transfer.sh/file3"]);
+      c.close();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  // Edge case called out explicitly by the brief: a rule-bearing optionId with NO usable project
+  // root (a null session cwd) must never hang or crash the respond — PermissionRules.append()
+  // throws RuleAppendError for scope "project" with no root, and the handler's try/catch must
+  // swallow it (log + still resolve). Unreachable through a REAL engine turn (a null-cwd session's
+  // turn() bails before any tool call — engine.ts's `if (!meta.cwd)` guard — so no approval_requested
+  // with options ever fires for one in practice); exercised here at the bare-server level instead,
+  // fabricating the pending entry directly against the broker to drive the server-side code path in
+  // isolation, same "own SessionStore + TokenAuthority, no AgentEngine" shape as
+  // remote-role.test.ts's bootPluginTestServer sibling below.
+  test("approval.respond: a rule-bearing optionId with no session cwd — RuleAppendError is caught, logged, and the approval still resolves", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-approve-nocwd-"));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    const broker = new ApprovalBroker();
+    const permissionRules = new PermissionRules({ globalAllow: () => undefined, normaHome: home });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, broker, permissionRules });
+    try {
+      const sessionId = store.createSession("global", { approvalPolicy: "ask" }); // no cwd at all
+      const options = [{ id: "allow_project", label: 'Allow "Bash(git push:*)" in this project', rule: "Bash(git push:*)", scope: "project" as const }];
+      void broker.wait(sessionId, "c1", 5000, { toolName: "bash", summary: "git push", issuedAt: Date.now(), expiresAt: Date.now() + 5000, options });
+
+      const c = await TestClient.connect(socketPath);
+      await c.hello(tokens.harness, "nocwd-approver");
+      const errSpy = spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const res = await c.request(METHODS.approvalRespond, { sessionId, callId: "c1", approved: true, optionId: "allow_project" });
+        expect(res.result).toEqual({ ok: true, alreadyResolved: false });
+        expect(errSpy).toHaveBeenCalled();
+        expect(errSpy.mock.calls.some((call) => String(call[0]).includes("failed to persist permission rule"))).toBe(true);
+      } finally {
+        errSpy.mockRestore();
+      }
+      c.close();
+    } finally {
+      server.stop();
+      store.close();
+    }
   });
 
   test("ask_user.respond round-trip + alreadyResolved; task.list snapshot", async () => {

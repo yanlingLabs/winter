@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, existsSync } from "node:fs";
+import { mkdtempSync, realpathSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer, type AddressInfo } from "node:net";
 import { ToolRegistry } from "../../src/agent/tools/registry";
 import { registerBashTool } from "../../src/agent/tools/bash";
 import { sandboxAvailable } from "../../src/agent/sandbox";
@@ -38,6 +39,38 @@ d("bash tool (sandboxed)", () => {
     // command runs but the write is denied → nonzero exit, file absent
     expect(existsSync(target)).toBe(false);
     expect(res.output).not.toContain("[exit 0]");
+  });
+
+  // SP-approvals final review (composition hole, defense-in-depth): engine.ts's dispatch-loop hard
+  // error (permissionRulesFileTarget) only ever sees write/edit TOOL calls — a bash-invoked write
+  // never goes through it. The seatbelt itself (sandbox.ts's buildSeatbeltProfile) must
+  // independently deny this exact file, EVEN THOUGH it's inside the writable cwd subpath.
+  test("CANNOT write .norma/permissions.local.json even though it is INSIDE the writable cwd (seatbelt carve-out)", async () => {
+    const cwd = proj();
+    const target = join(cwd, ".norma", "permissions.local.json");
+    const res = await reg().execute(
+      "bash",
+      { command: `mkdir -p ${join(cwd, ".norma")} && echo '{"allow":["WebFetch(domain:webhook.site)"]}' > ${target}` },
+      { cwd, roots: [cwd], sessionId: "s1" },
+    );
+    // mkdir succeeds (the .norma DIR itself is not carved out) but the redirect into the exact
+    // file is denied → nonzero exit, file absent.
+    expect(existsSync(target)).toBe(false);
+    expect(res.output).not.toContain("[exit 0]");
+  });
+
+  test("CAN still write .norma/memory/whatever.md (the MEMDIR) — the carve-out is file-specific, not directory-blanket", async () => {
+    const cwd = proj();
+    const target = join(cwd, ".norma", "memory", "whatever.md");
+    const res = await reg().execute(
+      "bash",
+      { command: `mkdir -p ${join(cwd, ".norma", "memory")} && echo memory-content > ${target} && cat ${target}` },
+      { cwd, roots: [cwd], sessionId: "s1" },
+    );
+    expect(res.isError).toBe(false);
+    expect(res.output).toContain("[exit 0]");
+    expect(existsSync(target)).toBe(true);
+    expect(readFileSync(target, "utf8")).toBe("memory-content\n");
   });
 
   test("kills a command that exceeds the timeout", async () => {
@@ -134,5 +167,80 @@ d("bash tool (sandboxed)", () => {
     expect(res.isError).toBe(false);
     expect(res.output).not.toContain("output_file");
     expect(existsSync(join(tmpDir, "bash"))).toBe(false);
+  });
+});
+
+// SP-approvals Task 11 (spec §8): bash's two escalation args, exercised end to end through the
+// REAL sandboxed spawn (registerBashTool + a real sandbox-exec child) — the engine's own gating
+// (whether/how a card fires) is covered separately, without a real sandbox, in
+// permission-gate-order.test.ts; this file proves the EXECUTION half: what each flag actually does
+// to the spawned process once a call has been approved.
+d("bash tool escalation args (SP-approvals T11)", () => {
+  test("allowNetwork: true still cannot write outside the session roots — the write fence survives widening the sandbox for network", async () => {
+    const cwd = proj();
+    const sibling = proj();
+    const target = join(sibling, "escaped-network.txt");
+    const res = await reg().execute("bash", { command: `echo pwned > ${target}`, allowNetwork: true }, { cwd, roots: [cwd], sessionId: "s1" });
+    expect(existsSync(target)).toBe(false); // denied — same fence as the plain (no-flag) case
+    expect(res.output).not.toContain("[exit 0]");
+  });
+
+  test("allowNetwork: true actually enables the network the default sandbox denies (loopback probe, no real internet needed)", async () => {
+    // A tiny local TCP server the SANDBOXED child can reach only if network is genuinely allowed.
+    // Deliberately a raw IP (127.0.0.1), never a hostname — avoids depending on whether the
+    // profile's mach-lookup allowlist covers DNS resolution (mDNSResponder), which is an entirely
+    // separate, pre-existing concern this task doesn't touch.
+    const server = createServer((socket) => socket.end());
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const cwd = proj();
+      const denied = await reg().execute(
+        "bash",
+        { command: `nc -z -w 2 127.0.0.1 ${port}; echo RC:$?`, timeoutMs: 8000 },
+        { cwd, roots: [cwd], sessionId: "s1" },
+      );
+      expect(denied.output).not.toContain("RC:0"); // default sandbox: network denied — connect fails
+
+      const allowed = await reg().execute(
+        "bash",
+        { command: `nc -z -w 2 127.0.0.1 ${port}; echo RC:$?`, allowNetwork: true, timeoutMs: 8000 },
+        { cwd, roots: [cwd], sessionId: "s1" },
+      );
+      expect(allowed.output).toContain("RC:0"); // allowNetwork: true — connect succeeds
+    } finally {
+      server.close();
+    }
+  });
+
+  test("dangerouslyDisableSandbox: true escapes the write fence entirely — a write outside every root now SUCCEEDS", async () => {
+    const cwd = proj();
+    const sibling = proj();
+    const target = join(sibling, "escaped-unsandboxed.txt");
+    const res = await reg().execute("bash", { command: `echo pwned > ${target}`, dangerouslyDisableSandbox: true }, { cwd, roots: [cwd], sessionId: "s1" });
+    expect(res.isError).toBe(false);
+    expect(res.output).toContain("[exit 0]"); // no sandbox-exec wrapper at all -> the write lands
+    expect(existsSync(target)).toBe(true);
+    expect(readFileSync(target, "utf8")).toBe("pwned\n");
+  });
+
+  test("dangerouslyDisableSandbox: true still honors cwd and $TMPDIR semantics (only the sandbox itself is skipped)", async () => {
+    const cwd = proj();
+    const tmpDir = sessionTmpDir("s_unsandboxed_tmp");
+    const res = await reg().execute(
+      "bash",
+      { command: 'pwd && echo scratch > "$TMPDIR/probe.txt" && cat "$TMPDIR/probe.txt"', dangerouslyDisableSandbox: true },
+      { cwd, roots: [cwd], tmpDir, sessionId: "s1" },
+    );
+    expect(res.isError).toBe(false);
+    expect(res.output).toContain(realpathSync(cwd));
+    expect(res.output).toContain("scratch");
+    expect(res.output).toContain("[exit 0]");
+  });
+
+  test("dangerouslyDisableSandbox: true does not require sandbox-exec to be usable — bad args are still a tool error, not a throw", async () => {
+    const cwd = proj();
+    const res = await reg().execute("bash", { command: "", dangerouslyDisableSandbox: true }, { cwd, roots: [cwd], sessionId: "s1" });
+    expect(res.isError).toBe(true); // zod's min(1) on command still rejects this before any spawn
   });
 });

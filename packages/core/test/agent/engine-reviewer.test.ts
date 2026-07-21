@@ -17,25 +17,49 @@ import { sessionTmpDir } from "../../src/agent/session-tmp";
 // Exported (with bashTurn/writeTurn/stubReviewer below) for reuse by reviewer-e2e.test.ts (phase
 // 5e T6) — same reuse precedent as engine-steer.test.ts's setupEngine / engine-spawn.test.ts's
 // setup: the e2e file drives the SAME harness idiom, not a re-derived one.
-export function stubRegistry(): { registry: ToolRegistry; calls: Array<{ command: string; justification?: string }> } {
+// SP-approvals Task 11 (spec §8): the schema also accepts (and `calls` also records) the two
+// escalation args — `allowNetwork`/`dangerouslyDisableSandbox` — so permission-gate-order.test.ts
+// can drive the REAL dispatch loop's gating for both flavors while still asserting "ran"/"did not
+// run" against a fake, non-sandboxed tool. Both stay `undefined` on a `calls` entry when the model
+// didn't pass them, so every PRE-EXISTING `toEqual([{command, justification}])` assertion in this
+// file (and reviewer-e2e.test.ts) is unaffected — bun/Jest's `toEqual` ignores undefined-valued
+// object properties.
+export function stubRegistry(): {
+  registry: ToolRegistry;
+  calls: Array<{ command: string; justification?: string; allowNetwork?: boolean; dangerouslyDisableSandbox?: boolean }>;
+} {
   const registry = new ToolRegistry();
-  const calls: Array<{ command: string; justification?: string }> = [];
+  const calls: Array<{ command: string; justification?: string; allowNetwork?: boolean; dangerouslyDisableSandbox?: boolean }> = [];
   registry.register({
     name: "bash",
     description: "stub bash",
-    args: z.object({ command: z.string(), justification: z.string().optional() }),
-    run({ command, justification }) {
-      calls.push({ command, justification });
+    args: z.object({
+      command: z.string(),
+      justification: z.string().optional(),
+      allowNetwork: z.boolean().optional(),
+      dangerouslyDisableSandbox: z.boolean().optional(),
+    }),
+    run({ command, justification, allowNetwork, dangerouslyDisableSandbox }) {
+      calls.push({ command, justification, allowNetwork, dangerouslyDisableSandbox });
       return `ran: ${command}`;
     },
   });
   return { registry, calls };
 }
 
-// One round: model calls bash(command[, justification]) then stops with tool_calls; round 2 ends the turn.
-export function bashTurn(command: string, justification?: string): ProviderEvent[][] {
-  const args: Record<string, string> = { command };
+// One round: model calls bash(command[, justification][, escalation args]) then stops with
+// tool_calls; round 2 ends the turn. SP-approvals Task 11: the optional 3rd param threads
+// allowNetwork/dangerouslyDisableSandbox into the call's argsJson — every pre-existing 2-arg
+// caller is unaffected (both stay unset, matching today's argsJson shape exactly).
+export function bashTurn(
+  command: string,
+  justification?: string,
+  extra?: { allowNetwork?: boolean; dangerouslyDisableSandbox?: boolean },
+): ProviderEvent[][] {
+  const args: Record<string, unknown> = { command };
   if (justification !== undefined) args.justification = justification;
+  if (extra?.allowNetwork !== undefined) args.allowNetwork = extra.allowNetwork;
+  if (extra?.dangerouslyDisableSandbox !== undefined) args.dangerouslyDisableSandbox = extra.dangerouslyDisableSandbox;
   return [
     [{ type: "tool_call", callId: "c1", name: "bash", argsJson: JSON.stringify(args) }, { type: "done", stopReason: "tool_calls" }],
     [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
