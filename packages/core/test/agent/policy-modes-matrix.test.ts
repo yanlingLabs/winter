@@ -46,7 +46,6 @@ import { stubRegistry, bashTurn, writeTurn, stubReviewer } from "./engine-review
 const tmp = (p: string) => realpathSync(mkdtempSync(join(tmpdir(), p)));
 
 type Mode = "plan" | "dont-ask" | "ask" | "accept-edits" | "auto" | "bypass";
-const MODES: readonly Mode[] = ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"] as const;
 
 type Expect = "ran" | "ran-silent" | "carded" | "denied" | "reviewed-ran" | "reviewed-card";
 type TR = { isError: boolean; output: string } | undefined;
