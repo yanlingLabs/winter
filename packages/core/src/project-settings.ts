@@ -91,9 +91,10 @@ interface ResolverCacheEntry {
 
 /**
  * Cwd-keyed, mtime-cached "effective settings" read-through: `base()` deep-merged (mergeSettings
- * above) with a project's `.norma/settings.json` (trust-gated) and `.norma/settings.local.json`
- * (always — gitignored, the user's own). A session with no cwd, an untrusted cwd, or any read
- * failure sees `base()` back verbatim — the SAME object, never a copy.
+ * above) with a project's `.norma/settings.json` and `.norma/settings.local.json` — BOTH
+ * trust-gated (fix-wave A1: gitignored is not a trust boundary — a repo can `git add -f` a
+ * settings.local.json, so it needs the same gate the committed file gets). A session with no cwd,
+ * an untrusted cwd, or any read failure sees `base()` back verbatim — the SAME object, never a copy.
  *
  * A cache hit requires ALL of: the same `base()` reference (a hot-settings reload swaps the whole
  * object, so a merge computed from the old one must not survive it), the same trust bit (trusting
@@ -149,7 +150,14 @@ export class ProjectSettingsResolver {
       if (raw) overlays.push(raw);
       else cacheable = false; // torn read — don't pin this under the current (torn) signature
     }
-    if (localSig !== "absent") {
+    // fix-wave A1: settings.local.json is trust-gated too, exactly like the project file just
+    // above — a repo can `git add -f` a `.norma/settings.local.json` (gitignore is advisory, a
+    // force-committed file checks out on a clone same as any other tracked file), so gitignored
+    // is NOT a trust boundary. An untrusted cwd applies NEITHER overlay; matches CC ("a
+    // repository-committed .claude/settings.local.json still requires workspace trust"). `localSig`
+    // is still computed above unconditionally (the cache key is unchanged) — only the READ is
+    // gated here; the cache sig already includes `trusted`, so a trust-flip re-resolves correctly.
+    if (trusted && localSig !== "absent") {
       const raw = readRawSettings(localPath);
       if (raw) overlays.push(raw);
       else cacheable = false;

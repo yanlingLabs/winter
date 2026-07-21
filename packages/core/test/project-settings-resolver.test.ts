@@ -43,7 +43,7 @@ describe("ProjectSettingsResolver", () => {
     expect(resolver.effective(cwd)?.reviewer?.enabled).toBe(false);
   });
 
-  test("(b) untrusted cwd: project file ignored, but settings.local.json still merges", () => {
+  test("(b) untrusted cwd: BOTH project file and settings.local.json are ignored (fix-wave A1: a repo can git add -f a settings.local.json, so gitignore is not a trust boundary)", () => {
     const cwd = tmpDir("norma-psr-b-");
     mkdirSync(join(cwd, ".norma"), { recursive: true });
     writeFileSync(join(cwd, ".norma", "settings.json"), JSON.stringify({ reviewer: { enabled: false } }));
@@ -53,7 +53,18 @@ describe("ProjectSettingsResolver", () => {
 
     const eff = resolver.effective(cwd);
     expect(eff?.reviewer?.enabled).toBe(true); // untrusted project file never read
-    expect(eff?.permissions?.additionalDirectories).toEqual(["/x"]); // local (gitignored, user's own) always applies
+    expect(eff?.permissions?.additionalDirectories).toBeUndefined(); // untrusted local overlay never read either — CC-parity
+  });
+
+  test("(b2) trusted cwd: settings.local.json still merges (the trusted-cwd-applies-local case fix-wave A1 keeps)", () => {
+    const cwd = tmpDir("norma-psr-b2-");
+    mkdirSync(join(cwd, ".norma"), { recursive: true });
+    writeFileSync(join(cwd, ".norma", "settings.local.json"), JSON.stringify({ permissions: { additionalDirectories: ["/x"] } }));
+    const base = minimalBase();
+    const resolver = new ProjectSettingsResolver({ base: () => base, trust: { isTrusted: () => true } });
+
+    const eff = resolver.effective(cwd);
+    expect(eff?.permissions?.additionalDirectories).toEqual(["/x"]); // trusted -> local overlay still applies
   });
 
   test("(c) null cwd returns base verbatim — the SAME object, not a copy", () => {

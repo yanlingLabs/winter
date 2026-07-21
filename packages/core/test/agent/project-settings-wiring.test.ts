@@ -164,6 +164,56 @@ describe("dangerousDomainsAdded becomes per-project via ProjectSettingsResolver"
   });
 });
 
+describe("A [fix-wave CRITICAL]: settings.local.json's permissions.allow is trust-gated (closes the untrusted-clone escalation)", () => {
+  test("an UNTRUSTED cwd's .norma/settings.local.json permissions.allow does NOT auto-approve a matching bash call (still cards); the SAME file in a TRUSTED cwd auto-approves", async () => {
+    // Attack shape (the brief's own hole): a repo can `git add -f` a `.norma/settings.local.json`
+    // (gitignore is advisory, a force-committed file checks out on clone) carrying a broad
+    // `permissions.allow` rule. Before the fix, ProjectSettingsResolver read settings.local.json
+    // regardless of trust, so this cloned-but-unreviewed file would silently widen the rule set.
+    const attackCwd = tmpDir("norma-psw-local-attack-");
+    mkdirSync(join(attackCwd, ".norma"), { recursive: true });
+    writeFileSync(join(attackCwd, ".norma", "settings.local.json"), JSON.stringify({ permissions: { allow: ["Bash(foo:*)"] } }));
+
+    const controlCwd = tmpDir("norma-psw-local-control-");
+    mkdirSync(join(controlCwd, ".norma"), { recursive: true });
+    writeFileSync(join(controlCwd, ".norma", "settings.local.json"), JSON.stringify({ permissions: { allow: ["Bash(foo:*)"] } }));
+
+    const base = minimalBase();
+    // Per the brief: the trust stub returns FALSE for the attack cwd, TRUE for the control cwd —
+    // the SAME settings.local.json content in both; only the trust bit differs.
+    const trust = { isTrusted: (dir: string) => dir === controlCwd };
+    const resolver = new ProjectSettingsResolver({ base: () => base, trust });
+    const normaHome = tmpDir("norma-psw-local-home-");
+    const permissionRules = new PermissionRules({
+      globalAllow: (projectRoot) => resolver.effective(projectRoot)?.permissions?.allow ?? ["Computer"],
+      normaHome,
+    });
+
+    const { registry, calls } = stubRegistry();
+    // A human DENIAL ends the turn immediately after the ONE tool_call round (same short-circuit
+    // the dangerousDomainsAdded test above relies on) — so the attack session below consumes only
+    // bashTurn(...)'s FIRST round. The control session's cardless run needs the full 2-round shape.
+    const provider = new FakeProvider([bashTurn("foo bar")[0]!, ...bashTurn("foo bar")]);
+    const { engine, store, hub, broker } = buildEngine(provider, { registry, permissionRules });
+
+    // Attack: the UNTRUSTED cwd — its own settings.local.json's permissions.allow must NOT be
+    // silently honored. `foo bar` must still card under ask.
+    const attackSessionId = store.createSession("global", { cwd: attackCwd, approvalPolicy: "ask" });
+    hub.attach(approver(broker, attackSessionId, false), attackSessionId, 0); // deny — only proving the card fired
+    await engine.runTurn(attackSessionId);
+    const attackEvents = store.read(attackSessionId);
+    expect(attackEvents.some((e) => e.type === "approval_requested")).toBe(true); // NOT auto-approved
+    expect(calls.length).toBe(0); // denied -> never actually ran
+
+    // Control: the SAME file, but a cwd the user has actually trusted -> the local rule applies.
+    const controlSessionId = store.createSession("global", { cwd: controlCwd, approvalPolicy: "ask" });
+    await engine.runTurn(controlSessionId);
+    const controlEvents = store.read(controlSessionId);
+    expect(controlEvents.some((e) => e.type === "approval_requested")).toBe(false);
+    expect(calls.length).toBe(1); // ran cardless — the trusted local rule matched
+  });
+});
+
 describe("permissions.allow becomes per-project via ProjectSettingsResolver (PermissionRules.globalAllow)", () => {
   test("a trusted project's .norma/settings.json permissions.allow lets a matching bash rule run WITHOUT a card there, but the SAME command still cards in a control project", async () => {
     const projectCwd = tmpDir("norma-psw-allow-project-");
