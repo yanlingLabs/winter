@@ -464,10 +464,11 @@ final class FieldStateAdapter: ObservableObject {
     @Published var interactionErrors: [String: String] = [:]
 
     /// Wired by whichever surface owns this adapter (see `interactionInFlight`'s doc) to reach
-    /// the daemon's `approval.respond` — callId, approved, childSessionId (Dispatch, Phase 7: set
-    /// only when this card is the mirrored copy of a CHILD session's approval — `nil` routes to
+    /// the daemon's `approval.respond` — callId, approved, optionId (SP-approvals T6: the allow-rule
+    /// choice tapped, `nil` for the plain Approve/Deny buttons), childSessionId (Dispatch, Phase 7:
+    /// set only when this card is the mirrored copy of a CHILD session's approval — `nil` routes to
     /// whatever session this surface already targets, unchanged from before Phase 7).
-    var onApprovalRespond: (String, Bool, String?) -> Void = { _, _, _ in }
+    var onApprovalRespond: (String, Bool, String?, String?) -> Void = { _, _, _, _ in }
     /// callId, answers, notes (both keyed by question text — see `PendingCards.swift`'s
     /// `questionAnswers`/`questionNotes`), childSessionId (same Dispatch/Phase-7 meaning as
     /// `onApprovalRespond`'s).

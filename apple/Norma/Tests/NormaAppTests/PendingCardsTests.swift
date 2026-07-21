@@ -188,11 +188,11 @@ final class PendingCardsTests: XCTestCase {
 
     func testApprovalReviewerReasonDefaultsNilAndIsPreservedWhenSet() {
         let withoutReason = PendingInteraction.approval(callId: "a1", toolName: "bash", summary: "rm x")
-        guard case .approval(_, _, _, let reviewerReason, _) = withoutReason else { return XCTFail("expected .approval") }
+        guard case .approval(_, _, _, let reviewerReason, _, _) = withoutReason else { return XCTFail("expected .approval") }
         XCTAssertNil(reviewerReason)
 
         let withReason = PendingInteraction.approval(callId: "a1", toolName: "bash", summary: "rm x", reviewerReason: "reviewer says no")
-        guard case .approval(_, _, _, let reviewerReason2, _) = withReason else { return XCTFail("expected .approval") }
+        guard case .approval(_, _, _, let reviewerReason2, _, _) = withReason else { return XCTFail("expected .approval") }
         XCTAssertEqual(reviewerReason2, "reviewer says no")
     }
 
@@ -200,11 +200,11 @@ final class PendingCardsTests: XCTestCase {
 
     func testApprovalAndQuestionChildSessionIdDefaultsNilAndIsPreservedWhenSet() {
         let nativeApproval = PendingInteraction.approval(callId: "a1", toolName: "bash", summary: "rm x")
-        guard case .approval(_, _, _, _, let childId) = nativeApproval else { return XCTFail("expected .approval") }
+        guard case .approval(_, _, _, _, let childId, _) = nativeApproval else { return XCTFail("expected .approval") }
         XCTAssertNil(childId)
 
         let relayedApproval = PendingInteraction.approval(callId: "a1", toolName: "bash", summary: "rm x", childSessionId: "child_1")
-        guard case .approval(_, _, _, _, let childId2) = relayedApproval else { return XCTFail("expected .approval") }
+        guard case .approval(_, _, _, _, let childId2, _) = relayedApproval else { return XCTFail("expected .approval") }
         XCTAssertEqual(childId2, "child_1")
 
         let qs = questions(#"[{"question":"Which db?","header":"DB","options":[{"label":"A","description":null}],"multiSelect":false}]"#)

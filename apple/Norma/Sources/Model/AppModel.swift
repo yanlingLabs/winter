@@ -264,10 +264,13 @@ final class AppModel: ObservableObject {
     /// approval (`PendingCard`'s own `PendingInteraction.approval` payload) — routes the respond
     /// RPC straight to the child instead of this focused (dispatch) session. `nil` is the pre-
     /// Phase-7 behavior, unchanged: respond into whatever session is currently focused.
-    func respondApproval(callId: String, approved: Bool, childSessionId: String? = nil) async -> Bool {
+    /// `optionId` (SP-approvals T6): the allow-rule choice tapped, when the card offered any —
+    /// threaded straight through to `NormaKit`'s `approvalRespond`, `nil` for the plain Approve/
+    /// Deny buttons (allow-once/deny carry no rule to persist).
+    func respondApproval(callId: String, approved: Bool, optionId: String? = nil, childSessionId: String? = nil) async -> Bool {
         let target = childSessionId ?? focusedSessionId
         guard let sid = target, pendingCallIdIsCurrent(callId) else { return false }
-        return (try? await client.approvalRespond(sessionId: sid, callId: callId, approved: approved)) != nil
+        return (try? await client.approvalRespond(sessionId: sid, callId: callId, approved: approved, optionId: optionId)) != nil
     }
 
     /// `childSessionId`: same Dispatch/Phase-7 routing as `respondApproval`'s.

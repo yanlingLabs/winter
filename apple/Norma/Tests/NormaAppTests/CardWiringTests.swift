@@ -170,7 +170,7 @@ final class CardWiringTests: XCTestCase {
         // wired here to a STUB (not a real AppModel/NormaClient) so this test locks down the
         // discipline itself: inFlight inserted synchronously, removed only after the async stub
         // resolves, and an error line set on failure (never on success).
-        adapter.onApprovalRespond = { [adapter] callId, approved, childSessionId in
+        adapter.onApprovalRespond = { [adapter] callId, approved, optionId, childSessionId in
             adapter.interactionInFlight.insert(callId)
             adapter.interactionErrors[callId] = nil
             Task { @MainActor in
@@ -182,14 +182,14 @@ final class CardWiringTests: XCTestCase {
             }
         }
 
-        adapter.onApprovalRespond("call1", true, nil)
+        adapter.onApprovalRespond("call1", true, nil, nil)
         XCTAssertTrue(adapter.interactionInFlight.contains("call1"), "inFlight must be inserted SYNCHRONOUSLY, before the RPC resolves")
         await waitUntil { !adapter.interactionInFlight.contains("call1") }
         XCTAssertFalse(adapter.interactionInFlight.contains("call1"))
         XCTAssertNil(adapter.interactionErrors["call1"], "success must not leave an error line behind")
 
         stubSucceeds = false
-        adapter.onApprovalRespond("call2", false, nil)
+        adapter.onApprovalRespond("call2", false, nil, nil)
         XCTAssertTrue(adapter.interactionInFlight.contains("call2"))
         await waitUntil { !adapter.interactionInFlight.contains("call2") }
         XCTAssertFalse(adapter.interactionInFlight.contains("call2"))

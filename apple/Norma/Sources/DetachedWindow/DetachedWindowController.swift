@@ -163,7 +163,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // outlive that repin (they're stored on the adapter for the window's whole lifetime). A
         // captured `sid` would keep targeting the OLD session forever after a repin.
         let client = feed.client
-        adapter.onApprovalRespond = { [weak self, weak adapter] callId, approved, childSessionId in
+        adapter.onApprovalRespond = { [weak self, weak adapter] callId, approved, optionId, childSessionId in
             guard let adapter else { return }
             adapter.interactionInFlight.insert(callId)
             adapter.interactionErrors[callId] = nil
@@ -172,7 +172,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
                 // Dispatch (Phase 7): route to the child when this card is a mirrored copy —
                 // same `childSessionId ?? <this surface's own session>` rule as AppModel's.
                 let target = childSessionId ?? self.sessionId
-                let ok = (try? await client.approvalRespond(sessionId: target, callId: callId, approved: approved)) != nil
+                let ok = (try? await client.approvalRespond(sessionId: target, callId: callId, approved: approved, optionId: optionId)) != nil
                 adapter?.interactionInFlight.remove(callId)
                 if !ok { adapter?.interactionErrors[callId] = "couldn't send — try again" }
             }
@@ -305,9 +305,9 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     private func dispatchCardKeyAction(_ action: CardKeyAction, topmost: PendingInteraction?) {
         switch action {
         case .approve(let callId, let childSessionId):
-            adapter.onApprovalRespond(callId, true, childSessionId)
+            adapter.onApprovalRespond(callId, true, nil, childSessionId)
         case .deny(let callId, let childSessionId):
-            adapter.onApprovalRespond(callId, false, childSessionId)
+            adapter.onApprovalRespond(callId, false, nil, childSessionId)
         case .selectOption(let callId, let index, let childSessionId):
             guard case .question(_, let questions, _) = topmost else { return }
             adapter.onQuestionRespond(callId, questionAnswers(for: questions, selections: [0: [index]], otherTexts: [:]), [:], childSessionId)

@@ -59,11 +59,11 @@ struct GlassRootView: View {
         // discipline: insert + clear any stale error SYNCHRONOUSLY (before the await), remove
         // in-flight once the RPC settles, set an error line ONLY on failure — a success does
         // nothing further, the resolved event removes the card via the reducer.
-        adapter.onApprovalRespond = { [adapter, controller] callId, approved, childSessionId in
+        adapter.onApprovalRespond = { [adapter, controller] callId, approved, optionId, childSessionId in
             adapter.interactionInFlight.insert(callId)
             adapter.interactionErrors[callId] = nil
             Task { @MainActor in
-                let ok = await controller.onApprovalRespond?(callId, approved, childSessionId) ?? false
+                let ok = await controller.onApprovalRespond?(callId, approved, optionId, childSessionId) ?? false
                 adapter.interactionInFlight.remove(callId)
                 if !ok { adapter.interactionErrors[callId] = "couldn't send — try again" }
             }

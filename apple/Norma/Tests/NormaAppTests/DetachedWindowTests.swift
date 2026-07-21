@@ -257,7 +257,7 @@ final class DetachedWindowTests: XCTestCase {
         await feedWaitUntil { session.state.status != .disconnected }
 
         // Relayed card: childSessionId set → the RPC must target the CHILD, not S_DISP.
-        controller.adapterForTesting.onApprovalRespond("call1", true, "s_child_1")
+        controller.adapterForTesting.onApprovalRespond("call1", true, nil, "s_child_1")
         await waitUntilSent(t, 3)
         let respond = feedLineJSON(t.sent[2])
         XCTAssertEqual(respond["method"] as? String, "approval.respond")
@@ -267,7 +267,7 @@ final class DetachedWindowTests: XCTestCase {
         t.feed(#"{"jsonrpc":"2.0","id":\#(respond["id"] as! Int),"result":{"alreadyResolved":false}}"#)
 
         // Native card: nil childSessionId → falls back to this window's own pinned session.
-        controller.adapterForTesting.onApprovalRespond("call2", false, nil)
+        controller.adapterForTesting.onApprovalRespond("call2", false, nil, nil)
         await waitUntilSent(t, 4)
         let native = feedLineJSON(t.sent[3])
         XCTAssertEqual(native["method"] as? String, "approval.respond")

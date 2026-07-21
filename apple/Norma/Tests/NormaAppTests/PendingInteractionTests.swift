@@ -51,7 +51,7 @@ final class PendingInteractionTests: XCTestCase {
         s = SessionReducer.reduce(s, approvalRequested(callId: "a1", toolName: "bash", summary: "rm -rf x"))
         XCTAssertEqual(s.pendingInteractions, [.approval(callId: "a1", toolName: "bash", summary: "rm -rf x")])
         // No reviewerReason on the wire event -> nil (default), matching a pre-5e-T5 event shape.
-        guard case .approval(_, _, _, let reviewerReason, _) = s.pendingInteractions[0] else { return XCTFail("expected .approval") }
+        guard case .approval(_, _, _, let reviewerReason, _, _) = s.pendingInteractions[0] else { return XCTFail("expected .approval") }
         XCTAssertNil(reviewerReason)
     }
 

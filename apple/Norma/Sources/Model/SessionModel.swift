@@ -57,15 +57,19 @@ enum PendingInteraction: Equatable {
     /// — set only when this escalation came from the safety reviewer, `nil` for an ask-policy card.
     /// `childSessionId` (Dispatch, Phase 7): additive, mirrors `SessionEvent.ApprovalRequested.childSessionId`
     /// — set only on the MIRRORED copy of a child session's approval living in the dispatch
-    /// session's stream; `nil` for a native (non-relayed) approval. Both default `nil` so existing
-    /// construction/pattern-match call sites written before either field existed stay untouched.
-    case approval(callId: String, toolName: String, summary: String, reviewerReason: String? = nil, childSessionId: String? = nil)
+    /// session's stream; `nil` for a native (non-relayed) approval.
+    /// `options` (SP-approvals T6): additive, mirrors `SessionEvent.ApprovalRequested.options` — the
+    /// daemon's allow-rule choices for this call (Task 5's `approvalOptionsFor`), `nil` for a card
+    /// with none (an unclassified tool, a grant/worktree card, or a reviewer escalation — see that
+    /// field's own doc). All three default `nil` so existing construction/pattern-match call sites
+    /// written before any of them existed stay untouched.
+    case approval(callId: String, toolName: String, summary: String, reviewerReason: String? = nil, childSessionId: String? = nil, options: [SessionEvent.ApprovalOption]? = nil)
     case question(callId: String, questions: [SessionEvent.Question], childSessionId: String? = nil)
     case plan(callId: String, plan: String)
 
     var callId: String {
         switch self {
-        case .approval(let callId, _, _, _, _): return callId
+        case .approval(let callId, _, _, _, _, _): return callId
         case .question(let callId, _, _): return callId
         case .plan(let callId, _): return callId
         }
@@ -245,7 +249,7 @@ enum SessionReducer {
         case .toolResult(let v) where v.threadId == mainThread:
             if s.pendingInteractions.isEmpty { s.status = .thinking }
         case .approvalRequested(let v) where v.threadId == mainThread:
-            appendPending(.approval(callId: v.callId, toolName: v.toolName, summary: v.summary, reviewerReason: v.reviewerReason, childSessionId: v.childSessionId), to: &s)
+            appendPending(.approval(callId: v.callId, toolName: v.toolName, summary: v.summary, reviewerReason: v.reviewerReason, childSessionId: v.childSessionId, options: v.options), to: &s)
             appendActivity(.interaction(v.summary), to: &s)
         case .questionAsked(let v) where v.threadId == mainThread:
             appendPending(.question(callId: v.callId, questions: v.questions, childSessionId: v.childSessionId), to: &s)
