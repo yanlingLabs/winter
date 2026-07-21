@@ -16,6 +16,7 @@ import type { SessionDirectories } from "./dirs";
 import { sessionTmpDir } from "./session-tmp";
 import type { PermissionRules } from "./permission-rules";
 import { readOnlyBash } from "./readonly-bash";
+import { SHIPPED_DANGEROUS_DOMAINS, dangerousDomainMatch } from "./dangerous-domains";
 import { repoRootFor } from "./memory-dir";
 import type { ContextAssembler } from "./context";
 import type { Compactor } from "./compactor";
@@ -220,6 +221,26 @@ function approvalOptionsFor(call: { name: string; argsJson: string }): ApprovalO
   return undefined;
 }
 
+/** SP-approvals Task 10 (spec §7): the web_fetch dangerous-domain approval card's options — called
+ *  ONLY from `webFetchGate` below, NEVER from `approvalOptionsFor` above (a structurally different
+ *  card: it fires for EVERY policy, not just `ask`, and its "always allow" option is scoped to a
+ *  matched DOMAIN, not a bash/edit rule). `host` is the raw request hostname (shown in the label,
+ *  so the human sees exactly what was fetched); `matchedEntry` is the SHIPPED/user-added list entry
+ *  it matched against (the RULE this persists — e.g. a request to `uploads.transfer.sh` matches
+ *  the shipped `transfer.sh` entry, so approving writes `WebFetch(domain:transfer.sh)`, covering
+ *  the whole family, not just that one subdomain). `undefined` for BOTH params only in the
+ *  unparseable-URL case — there is no valid host to name a rule for at all, so the card offers
+ *  only Allow/Deny, no third option (an "always allow ___" button with nothing to fill the blank
+ *  would be actively misleading). */
+function webFetchApprovalOptions(host: string | undefined, matchedEntry: string | undefined): ApprovalOption[] {
+  const options: ApprovalOption[] = [{ id: "allow_once", label: "Allow" }];
+  if (host !== undefined && matchedEntry !== undefined) {
+    options.push({ id: "allow_source", label: `Always allow ${host}`, rule: `WebFetch(domain:${matchedEntry})`, scope: "global" });
+  }
+  options.push({ id: "deny", label: "Deny" });
+  return options;
+}
+
 /** Sanitize+cap a reviewer-authored free-text field (`tool_review.reason`/`.summary`,
  *  `approval_requested.reviewerReason`) before it goes on the wire (phase 5e T2). Deliberately NOT
  *  `sanitizeForReminder` (below): that helper also neutralizes literal `<system-reminder>` tags,
@@ -363,6 +384,15 @@ export interface EngineConfig {
   // Optional — absent (every pre-T3 test/config) means the new ruleAllowed computation below never
   // activates, byte-identical to before this field existed.
   permissionRules?: PermissionRules;
+  // SP-approvals Task 10 (spec §7): the USER half of web_fetch's dangerous-domain floor —
+  // `effective = dangerous-domains.ts's SHIPPED_DANGEROUS_DOMAINS ∪ dangerousDomainsAdded()`, read
+  // fresh on every web_fetch call (webFetchGate below) so a settings.json edit to
+  // `permissions.dangerousDomains.added` applies with no daemon restart, same hot-getter shape as
+  // `reviewerAllow` below. Absent getter, or one resolving to undefined, means "no user
+  // additions" — the SHIPPED list alone still applies; this can narrow-to-empty but never disables
+  // the floor entirely (there is deliberately no equivalent of `permissions.allow: []`'s "opt out
+  // of the Computer default" for this list — the shipped entries are immutable by construction).
+  dangerousDomainsAdded?: () => string[] | undefined;
   broker: ApprovalBroker;
   dirs: SessionDirectories;
   // `live`, when wired (daemon.ts, from providers/manager.ts's ActiveProvider.liveModel),
@@ -2551,6 +2581,12 @@ export class AgentEngine {
         // the read tools get) is NEVER grantable, either policy, no card — checked once here, and
         // consulted by both the auto pre-grant below and the deny branch in the dispatch chain.
         const dirGrantDenied = dirGrant !== null && this.grantDenied(dirGrant.dir);
+        // SP-approvals Task 10: web_fetch's dangerous-domain floor — computed for EVERY policy
+        // (gate.ts's `decision` above is now unconditionally "allow" for web_fetch, so this is the
+        // ONLY thing standing between a dangerous-domain fetch and executeCall). `null` for every
+        // non-web_fetch call and for a web_fetch call this floor has nothing to say about (byte-
+        // identical fast path, mirrors `dirGrant`'s own null-for-everything-else shape above).
+        const webFetchCard = call.name === "web_fetch" ? this.webFetchGate(call, cwd) : null;
         // [4f pre-tool — Site 2 (normal calls)] Post-gate (decision computed just above), before ANY
         // dispatch branch runs/approves. Bridged calls (spawn_agent/send_message) NEVER reach here —
         // they were siphoned into spawn/sendMessageOutcomes and hit the `preOutcome` branch ABOVE,
@@ -2701,11 +2737,23 @@ export class AgentEngine {
             timeoutMs: this.approvalTimeoutFor(meta),
             summary: approvalCardSummary(call),
             // no denialMessage → the helper defaults to `denied by ${res.by}` (unchanged behavior)
-            // SP-approvals Task 5: the ONLY requestApproval call site that offers "always allow"
-            // options — see approvalOptionsFor's own doc comment for why the other three sites in
-            // this dispatch loop (dirGrant just above, isWorktree above that, reviewAndDispatch's
-            // escalation call below) deliberately pass none.
+            // SP-approvals Task 5: the bash/write/edit "always allow" options — see
+            // approvalOptionsFor's own doc comment for why the other sites in this dispatch loop
+            // (dirGrant just above, isWorktree above that, reviewAndDispatch's escalation call
+            // below, and T10's webFetchCard branch right below THIS one) deliberately pass none of
+            // THIS SPECIFIC shape (webFetchCard has its own options, computed by webFetchGate).
             options: approvalOptionsFor(call),
+          }, loaded, undefined, pins, rootsOverride, visionCapable);
+        } else if (webFetchCard) {
+          // SP-approvals Task 10: web_fetch's dangerous-domain floor fires here — reached under
+          // EVERY policy (`decision` is unconditionally "allow" for web_fetch now, gate.ts), not
+          // just `ask`. `undefined` onApprove → the default executeCall path, same as the plain
+          // `decision === "ask"` branch above; the ONLY difference is the summary/options come from
+          // webFetchGate instead of approvalCardSummary/approvalOptionsFor.
+          outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
+            timeoutMs: this.approvalTimeoutFor(meta),
+            summary: webFetchCard.summary,
+            options: webFetchCard.options,
           }, loaded, undefined, pins, rootsOverride, visionCapable);
         } else if (call.name === "exit_plan_mode" && this.cfg.plans && meta.approvalPolicy === "plan") {
           outcome = await this.runPlanBridge(call, sessionId, threadId, meta);
@@ -3217,6 +3265,48 @@ export class AgentEngine {
       if (dir === cp || dir.startsWith(cp + sep) || cp.startsWith(dir + sep)) return true;
     }
     return false;
+  }
+
+  /** SP-approvals Task 10 (spec §7): web_fetch's dangerous-domain floor — the ONE thing that still
+   *  cards for web_fetch now that gate.ts's NETWORK class is unconditionally "allow". Called from
+   *  the dispatch loop for EVERY `call.name === "web_fetch"`, regardless of `meta.approvalPolicy`
+   *  (ask, auto, AND plan — a floor, not a policy-gated check: NETWORK is allowed in plan for
+   *  read-only research, so a plan-mode session must not get a silent bypass either). Returns
+   *  `null` when the call should just run — a well-formed URL whose host matches nothing dangerous,
+   *  OR one that DOES match but is already covered by a standing `WebFetch(domain:...)` exception
+   *  rule (the "Always allow from this source" option's own persistence target) — otherwise the
+   *  `{summary, options}` for the approval card this call must show.
+   *
+   *  Fails CLOSED on an unparseable/missing `url` (no host to even evaluate against the dangerous
+   *  list, so there is nothing safe to allow) — `webFetchApprovalOptions(undefined, undefined)`
+   *  gives that card only Allow/Deny, no "always allow" option. */
+  private webFetchGate(call: { name: string; argsJson: string }, cwd: string): { summary: string; options: ApprovalOption[] } | null {
+    let url: URL;
+    try {
+      const a = JSON.parse(call.argsJson || "{}") as { url?: unknown };
+      if (typeof a.url !== "string") throw new Error("missing url");
+      url = new URL(a.url);
+    } catch {
+      return {
+        summary: `web_fetch — could not parse the url argument to check it against the dangerous-domain list`,
+        options: webFetchApprovalOptions(undefined, undefined),
+      };
+    }
+    const host = url.hostname.toLowerCase();
+    const added = this.cfg.dangerousDomainsAdded?.() ?? [];
+    const matchedEntry = dangerousDomainMatch(host, [...SHIPPED_DANGEROUS_DOMAINS, ...added]);
+    if (matchedEntry === null) return null; // nothing dangerous about this host — free by default
+    // `projectRoot` mirrors the SAME ternary the ruleAllowed block above uses (a defensive guard
+    // against an empty cwd, not a real-world case — cwd is always set by the time a tool call
+    // dispatches). WebFetch(domain:...) rules only ever ride GLOBAL scope from this card (see
+    // webFetchApprovalOptions), but decision() itself is scope-generic — a hand-edited project rule
+    // works too (proven in permission-rules.test.ts), so this still passes a real project root.
+    const projectRoot = cwd ? repoRootFor(cwd) : null;
+    if (this.cfg.permissionRules?.decision({ name: call.name, argsJson: call.argsJson }, projectRoot) === "allow") return null;
+    return {
+      summary: `web_fetch ${url.toString()} — ${host} matches a dangerous-domain rule (known exfiltration/tunnel-provider risk)`,
+      options: webFetchApprovalOptions(host, matchedEntry),
+    };
   }
 
   /** Shared approval-request flow for the `ask`-policy path, the reviewer's escalation path, and

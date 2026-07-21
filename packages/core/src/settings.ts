@@ -23,6 +23,16 @@ export const PermissionsSettings = z.object({
    *  applied by the daemon's OWN getter fallback (Task 3), so an explicit `"allow": []` can
    *  disable that default outright. */
   allow: z.array(z.string()).optional(),
+  /** SP-approvals T10 (spec §7 "Web tools"): user-added dangerous-domain entries — the effective
+   *  set web_fetch's pre-exec floor checks against is `agent/dangerous-domains.ts`'s
+   *  SHIPPED_DANGEROUS_DOMAINS ∪ this array. Additive optional key: schemaVersion stays 2, no
+   *  migration needed. Absent (or `added` absent) means "no user additions" — the shipped list
+   *  alone is still enforced. Removing an entry HERE is how a user-added domain is removed; the
+   *  shipped list itself is immutable by construction (there is no equivalent of `allow: []`'s
+   *  "opt out of a default" for it — a shipped entry can never be deleted this way). */
+  dangerousDomains: z.object({
+    added: z.array(z.string()).optional(),
+  }).optional(),
 });
 
 export const Settings = z.object({

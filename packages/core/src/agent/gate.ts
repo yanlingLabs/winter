@@ -92,11 +92,23 @@ const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_workt
 // carry adversarial "instructions", so an unattended session shouldn't get an implicit pass) and it
 // is NOT quite MUTATING either (unlike write/edit/bash it never touches an arbitrary fs/process
 // path on its own — it only ever saves into the session's own sandboxed tmp scratch dir). It gets
-// its own class because its PLAN-mode answer diverges from both: like READ_ONLY, it's ALLOWED under
-// `plan` (fetching a doc while researching is exactly the read-only-research case plan mode exists
-// to allow) — but OUTSIDE plan mode it rides the SAME branch as MUTATING/bash (ask under `ask`,
-// allow under `auto`), because a live network call is still an external side effect worth a human's
-// visibility. See evaluate() below for exactly where each half of this is implemented.
+// its own class so its answer can diverge from both READ_ONLY and MUTATING independently.
+//
+// SP-approvals T10 (user addition 2026-07-21, spec §7 "Web tools"): "web tools become free by
+// default" — web_search never prompts under ANY policy, and web_fetch never prompts under ANY
+// policy EITHER at this gate (its one remaining floor — a dangerous-domain check — is a pre-exec
+// check with path/domain awareness this gate deliberately never grows; it lives entirely in
+// engine.ts, run BEFORE executeCall for every policy including plan and auto, see dangerous-
+// domains.ts + engine.ts's webFetchGate). PRE-T10 this class rode the SAME branch as MUTATING/bash
+// outside plan mode (ask under `ask`, allow under `auto`); that changed because re-prompting for
+// every fetch/search trained users to click through without reading, while the one case that
+// actually matters — a fetch that could exfiltrate data to a paste/tunnel/collector endpoint —
+// needed a TARGETED floor, not a blanket prompt. web_search never makes an exfiltration-shaped
+// request (its only egress is the fixed Brave Search API endpoint — no caller-directed URL), so it
+// is unconditionally free with no floor at all. See evaluate() below for exactly where the
+// unconditional "allow" is returned (now identical to READ_ONLY's under every policy, even though
+// this stays a SEPARATE const from READ_ONLY — the class boundary is what lets engine.ts single
+// web_fetch out for its own check without touching read/glob/grep's).
 const NETWORK = new Set(["web_fetch", "web_search"]);
 // skill_write (phase 5c Task 2) gets a NEW class, strictly stricter than MUTATING: "ask" under
 // BOTH `ask` AND `auto` (a card on EVERY call — no policy setting silences it), "deny" under
@@ -133,15 +145,19 @@ export class PermissionGate {
       return "deny"; // write/edit/bash/mcp__/plugin__/unclassified — all blocked while planning
     }
     if (READ_ONLY.has(toolName)) return "allow";
-    // NETWORK (web_fetch) rides the SAME branch as MUTATING outside plan mode (ask under `ask`,
-    // allow under `auto`) — the ONLY place it diverges from bash/mcp externals is the plan-mode
-    // allow above. Do NOT move web_fetch into READ_ONLY — a live network call always gets this branch.
+    // SP-approvals T10: NETWORK is unconditionally "allow" here too (ask AND auto), matching the
+    // plan-mode branch above — web tools are free by default under EVERY policy at this gate.
+    // Do NOT move web_fetch/web_search into READ_ONLY (see NETWORK's own doc comment for why they
+    // stay a distinct class): this is a SEPARATE branch specifically so engine.ts's dispatch loop
+    // can single web_fetch out for its own dangerous-domain pre-exec check without that check
+    // needing to reach into read/glob/grep's handling at all.
+    if (NETWORK.has(toolName)) return "allow";
     // write/edit stay in MUTATING even after the write-permission-flow feature (request_directory
     // removed, task 24): this decision only gates whether the TOOL CALL ITSELF needs a human's
     // yes/no — an OUT-OF-ROOT target is a SEPARATE, path-aware question the engine's dispatch loop
     // asks on top (engine.ts's `dirGrant` branch, checked before the generic `decision === "ask"`
     // branch below) — this gate has no path awareness and must not grow any.
-    if (MUTATING.has(toolName) || NETWORK.has(toolName)) return policy === "auto" ? "allow" : "ask";
+    if (MUTATING.has(toolName)) return policy === "auto" ? "allow" : "ask";
     // MCP tools AND Phase 4b platform-plugin tools are external code (network/fs/arbitrary) →
     // approval-per-policy like bash: allowed under `auto`, prompt under `ask`. Must NOT be
     // READ_ONLY, and must NOT fall to the unclassified always-ask branch below (that would block

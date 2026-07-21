@@ -730,6 +730,12 @@ export async function startDaemon(opts: {
       // to read/write settings.json's global rules itself (that's what the globalAllow thunk +
       // this class's OWN read-modify-write in append(scope:"global") are for).
       permissionRules,
+      // SP-approvals Task 10 (spec §7): the user-added half of web_fetch's dangerous-domain floor
+      // — same live-getter shape as `globalAllow` just above (re-reads the reassignable `settings`
+      // holder fresh on every web_fetch call), so an edit to `permissions.dangerousDomains.added`
+      // applies with no daemon restart. Absent block/field both resolve to `undefined`, which
+      // engine.ts's `?? []` treats as "no user additions" — the shipped list alone still applies.
+      dangerousDomainsAdded: () => settings?.permissions?.dangerousDomains?.added,
       dirs: sessionDirs,
       // write-permission-flow F2: the out-of-root write/edit grant flow must never silently grant
       // any part of Norma's OWN home directory. This is BROADER than the READ denylist above

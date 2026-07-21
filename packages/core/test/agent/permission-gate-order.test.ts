@@ -10,6 +10,7 @@ import { WorktreeManager } from "../../src/agent/worktree";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import type { ProviderEvent } from "../../src/providers/types";
 import { PermissionRules } from "../../src/agent/permission-rules";
+import { registerWebTools } from "../../src/agent/tools/web";
 import { setupEngine } from "./engine-steer.test";
 import { stubRegistry, bashTurn, writeTurn, stubReviewer } from "./engine-reviewer.test";
 import { repo } from "./engine-worktree.test";
@@ -296,5 +297,223 @@ describe.if(isMac)("scenario 9: a Worktree rule allows enter_worktree outright �
     const entered = events.find((e) => e.type === "worktree_entered") as any;
     expect(entered).toMatchObject({ name: "feat", branch: "norma/feat" });
     expect(store.meta(sessionId).cwd).toBe(entered.path); // cwd moved into the worktree
+  });
+});
+
+// SP-approvals Task 10 (user addition 2026-07-21, spec §7): web tools become free by default —
+// gate.ts's NETWORK class now unconditionally "allow"s web_fetch/web_search under every policy —
+// but web_fetch keeps ONE floor no policy can silence, entirely inside the engine: a fetch to a
+// known/likely exfiltration or tunnel-provider domain still cards, under ask/auto/plan alike. This
+// drives the REAL dispatch loop (same setupEngine harness) rather than unit-testing the internal
+// check in isolation, matching every other scenario in this file.
+describe("scenario 10: web tools — free by default, dangerous-domain floor (SP-approvals T10)", () => {
+  /** A web tools registry whose `fetchFn` never hits the real network — records every URL it was
+   *  asked to fetch and returns a small, successful text/html response. Mirrors engine-spawn.
+   *  test.ts's own `buildWebDeferredRegistry` precedent (the established pattern for exercising a
+   *  real web_fetch call through the engine with no live network). */
+  function buildWebRegistry(): { registry: ToolRegistry; fetchCalls: string[] } {
+    const registry = new ToolRegistry();
+    const fetchCalls: string[] = [];
+    const fakeFetch = (async (url: string) => {
+      fetchCalls.push(String(url));
+      return new Response("<html><body><h1>hi</h1></body></html>", { status: 200, headers: { "content-type": "text/html" } });
+    }) as typeof fetch;
+    registerWebTools(registry, { fetchFn: fakeFetch });
+    return { registry, fetchCalls };
+  }
+
+  /** One round: model calls web_fetch(url), then stops with tool_calls; round 2 ends the turn. */
+  function webFetchTurn(url: string, callId = "c1"): ProviderEvent[][] {
+    return [
+      [{ type: "tool_call", callId, name: "web_fetch", argsJson: JSON.stringify({ url }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    ];
+  }
+
+  test("web_search under ask runs cardless (NETWORK is now unconditionally allow)", async () => {
+    const registry = new ToolRegistry();
+    registerWebTools(registry, {}); // no fetchFn/secret needed — a no-key error still counts as "ran with no card"
+    const provider = new FakeProvider([
+      [{ type: "tool_call", callId: "c1", name: "web_search", argsJson: JSON.stringify({ query: "hello" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    ]);
+    const { engine, store, sessionId } = setupEngine(provider, { registry, policy: "ask" });
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+  });
+
+  test("web_fetch to a safe (non-dangerous) domain under ask runs cardless", async () => {
+    const { registry, fetchCalls } = buildWebRegistry();
+    const provider = new FakeProvider(webFetchTurn("https://example.com/page"));
+    const { engine, store, sessionId } = setupEngine(provider, { registry, policy: "ask" });
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+    expect(fetchCalls).toEqual(["https://example.com/page"]);
+  });
+
+  test("web_fetch to a SHIPPED dangerous domain under ask -> card with Allow / Always allow <host> / Deny; the rule names the MATCHED ENTRY, not the raw host", async () => {
+    const { registry, fetchCalls } = buildWebRegistry();
+    // A SUBDOMAIN of the shipped "transfer.sh" entry — exercises the "label shows the raw host,
+    // rule names the broader matched entry" distinction the brief calls out explicitly.
+    const provider = new FakeProvider(webFetchTurn("https://uploads.transfer.sh/file1"));
+    const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask" });
+    hub.attach(approver(broker, sessionId, false), sessionId, 0); // deny — this test only cares about the card's shape
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    const requested = events.find((e) => e.type === "approval_requested") as any;
+    expect(requested).toBeDefined();
+    expect(requested.options).toEqual([
+      { id: "allow_once", label: "Allow" },
+      { id: "allow_source", label: "Always allow uploads.transfer.sh", rule: "WebFetch(domain:transfer.sh)", scope: "global" },
+      { id: "deny", label: "Deny" },
+    ]);
+    expect(fetchCalls).toEqual([]); // denied — the fetch never ran
+  });
+
+  test("a USER-ADDED dangerous domain (settings.permissions.dangerousDomains.added thunk) under ask -> card", async () => {
+    const { registry } = buildWebRegistry();
+    const provider = new FakeProvider(webFetchTurn("https://evil-example.net/x"));
+    const { engine, store, hub, broker, sessionId } = setupEngine(provider, {
+      registry, policy: "ask", dangerousDomainsAdded: ["evil-example.net"],
+    });
+    hub.attach(approver(broker, sessionId, false), sessionId, 0);
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    const requested = events.find((e) => e.type === "approval_requested") as any;
+    expect(requested).toBeDefined();
+    expect(requested.options).toEqual([
+      { id: "allow_once", label: "Allow" },
+      { id: "allow_source", label: "Always allow evil-example.net", rule: "WebFetch(domain:evil-example.net)", scope: "global" },
+      { id: "deny", label: "Deny" },
+    ]);
+  });
+
+  test("under AUTO policy the dangerous-domain card STILL fires — it is a floor, not an ask-only check", async () => {
+    const { registry, fetchCalls } = buildWebRegistry();
+    const provider = new FakeProvider(webFetchTurn("https://pastebin.com/x"));
+    const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "auto" });
+    hub.attach(approver(broker, sessionId, true), sessionId, 0);
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    expect(events.some((e) => e.type === "approval_requested")).toBe(true);
+    expect(fetchCalls).toEqual(["https://pastebin.com/x"]); // approved → ran
+  });
+
+  test("under PLAN policy the dangerous-domain card STILL fires — NETWORK is allowed in plan for research, but the floor still reaches there", async () => {
+    const { registry, fetchCalls } = buildWebRegistry();
+    const provider = new FakeProvider(webFetchTurn("https://pastebin.com/x"));
+    const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "plan" });
+    hub.attach(approver(broker, sessionId, true), sessionId, 0);
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    expect(events.some((e) => e.type === "approval_requested")).toBe(true);
+    expect(fetchCalls).toEqual(["https://pastebin.com/x"]); // approved → ran (plan still permits NETWORK itself)
+  });
+
+  test("an unparseable url arg -> card with ONLY Allow/Deny — no allow_source, since there is no valid host to name a rule for", async () => {
+    const { registry, fetchCalls } = buildWebRegistry();
+    const provider = new FakeProvider([
+      [{ type: "tool_call", callId: "c1", name: "web_fetch", argsJson: JSON.stringify({ url: "not a url" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    ]);
+    const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask" });
+    hub.attach(approver(broker, sessionId, false), sessionId, 0);
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    const requested = events.find((e) => e.type === "approval_requested") as any;
+    expect(requested).toBeDefined();
+    expect(requested.options).toEqual([
+      { id: "allow_once", label: "Allow" },
+      { id: "deny", label: "Deny" },
+    ]);
+    expect(fetchCalls).toEqual([]);
+  });
+
+  test("a missing url arg entirely also fails closed to the Allow/Deny-only card", async () => {
+    const { registry } = buildWebRegistry();
+    const provider = new FakeProvider([
+      [{ type: "tool_call", callId: "c1", name: "web_fetch", argsJson: JSON.stringify({}) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    ]);
+    const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask" });
+    hub.attach(approver(broker, sessionId, false), sessionId, 0);
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    const requested = events.find((e) => e.type === "approval_requested") as any;
+    expect(requested?.options).toEqual([{ id: "allow_once", label: "Allow" }, { id: "deny", label: "Deny" }]);
+  });
+
+  test("full loop: dangerous fetch -> card -> respond allow_source -> rule persists GLOBALLY -> the NEXT fetch to the same domain AND a subdomain both run cardless", async () => {
+    // A disk-backed globalAllow thunk (fresh readFileSync per call) — mirrors daemon.ts's real
+    // `() => settings?.permissions?.allow` getter conceptually, minus the hot-settings-watcher
+    // layer: since THIS thunk reads disk directly on every call, there is no propagation delay to
+    // wait out (that layer exists purely so the DAEMON's in-memory settings stay live; a direct
+    // PermissionRules consumer like this test needs no such caching at all).
+    const normaHome = tmpDir("norma-pgo-home-");
+    const settingsPath = join(normaHome, "settings.json");
+    writeFileSync(settingsPath, JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }));
+    const globalAllow = (): string[] | undefined => {
+      try {
+        return JSON.parse(readFileSync(settingsPath, "utf8")).permissions?.allow;
+      } catch {
+        return undefined;
+      }
+    };
+    const permissionRules = new PermissionRules({ globalAllow, normaHome });
+    const { registry, fetchCalls } = buildWebRegistry();
+    const provider = new FakeProvider([
+      ...webFetchTurn("https://uploads.transfer.sh/file1", "c1"), // turn 1: a subdomain of the shipped "transfer.sh" entry
+      ...webFetchTurn("https://transfer.sh/file2", "c2"), // turn 2: the bare matched entry itself
+      ...webFetchTurn("https://another.transfer.sh/file3", "c3"), // turn 3: a DIFFERENT subdomain
+    ]);
+    const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask", permissionRules });
+    // Mirrors ipc/server.ts's REAL approval.respond handler exactly (option lookup by id, append
+    // BEFORE resolve) — see that handler's own doc comment for the ordering rationale — without
+    // spinning up a real daemon/IPC layer just to prove the engine+PermissionRules wiring.
+    hub.attach({
+      clientName: "option-approver",
+      deliver(e) {
+        if (e.type === "approval_requested") {
+          const option = e.options?.find((o) => o.id === "allow_source");
+          if (option?.rule) permissionRules.append(option.rule, option.scope ?? "project", null);
+          broker.resolve(sessionId, e.callId, true, "option-approver");
+        }
+        return true;
+      },
+    }, sessionId, 0);
+
+    await engine.runTurn(sessionId); // turn 1: dangerous fetch, card, approved via allow_source
+    let events = store.read(sessionId);
+    expect(events.filter((e) => e.type === "approval_requested").length).toBe(1);
+    expect(JSON.parse(readFileSync(settingsPath, "utf8")).permissions.allow).toEqual(["WebFetch(domain:transfer.sh)"]);
+
+    await engine.runTurn(sessionId); // turn 2: the bare matched entry — must run cardless
+    await engine.runTurn(sessionId); // turn 3: a different subdomain — must ALSO run cardless
+
+    events = store.read(sessionId);
+    expect(events.filter((e) => e.type === "approval_requested").length).toBe(1); // still just the ONE card from turn 1
+    expect(fetchCalls).toEqual([
+      "https://uploads.transfer.sh/file1",
+      "https://transfer.sh/file2",
+      "https://another.transfer.sh/file3",
+    ]);
   });
 });

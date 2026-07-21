@@ -81,6 +81,10 @@ class TestClient {
 describe("daemon IPC", () => {
   let daemon: RunningDaemon;
   let harnessToken: string;
+  // SP-approvals T10: captured so the web_fetch dangerous-domain full-loop test can read
+  // settings.json directly (proving the REAL daemon's approval.respond handler persisted the rule
+  // to disk) without RunningDaemon itself needing to expose its home directory.
+  let daemonHome: string;
 
   async function boot(
     serverOpts: { helloTimeoutMs?: number; maxConnections?: number } = {},
@@ -93,6 +97,7 @@ describe("daemon IPC", () => {
     settingsOverride?: Record<string, unknown>,
   ): Promise<void> {
     const home = mkdtempSync(join(tmpdir(), "norma-daemon-"));
+    daemonHome = home;
     if (settingsOverride) {
       writeFileSync(join(home, "settings.json"), JSON.stringify({
         schemaVersion: 2,
@@ -598,6 +603,103 @@ describe("daemon IPC", () => {
     await c.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: ask.params.callId, approved: true });
     await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
     c.close();
+  });
+
+  // SP-approvals Task 10 (spec §7): the "Always allow from this source" web_fetch option, over the
+  // REAL wire, end to end — card shape, the REAL approval.respond handler persisting a
+  // WebFetch(domain:...) rule to the daemon's OWN settings.json (global scope), and the REAL
+  // daemon's live settings-watcher (settings-watcher.ts, 150ms debounce) picking it up so the NEXT
+  // fetch to the same domain AND a subdomain both run cardless. `globalThis.fetch` is monkey-patched
+  // for the duration (save/restore) so web_fetch never hits the real network — same technique as
+  // providers/openai-compatible.test.ts's own "consumer break mid-stream" test.
+  test("SP-approvals T10 full loop: dangerous web_fetch -> card -> respond allow_source -> rule persists globally -> next fetch to the same domain AND a subdomain run cardless", async () => {
+    const origFetch = globalThis.fetch;
+    const fetchedUrls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      fetchedUrls.push(String(input));
+      return new Response("hi", { status: 200, headers: { "content-type": "text/plain" } });
+    }) as typeof fetch;
+    try {
+      const { FakeProvider } = await import("../src/agent/fake-provider");
+      const fake = new FakeProvider([
+        [{ type: "tool_call", callId: "c1", name: "web_fetch", argsJson: JSON.stringify({ url: "https://uploads.transfer.sh/file1" }) }, { type: "done", stopReason: "tool_calls" }],
+        [{ type: "text_delta", delta: "done-1" }, { type: "done", stopReason: "end_turn" }],
+        [{ type: "tool_call", callId: "c2", name: "web_fetch", argsJson: JSON.stringify({ url: "https://transfer.sh/file2" }) }, { type: "done", stopReason: "tool_calls" }],
+        [{ type: "text_delta", delta: "done-2" }, { type: "done", stopReason: "end_turn" }],
+        [{ type: "tool_call", callId: "c3", name: "web_fetch", argsJson: JSON.stringify({ url: "https://another.transfer.sh/file3" }) }, { type: "done", stopReason: "tool_calls" }],
+        [{ type: "text_delta", delta: "done-3" }, { type: "done", stopReason: "end_turn" }],
+      ]);
+      // toolSearch disabled: web_fetch is a `deferred: true` built-in (ToolSearch deferral is
+      // default-ON in a real daemon boot, unlike setupEngine's test harness) — this test isn't
+      // about ToolSearch, so it's turned off to call web_fetch directly, same idiom the
+      // reviewer-disabling tests above use for their own out-of-scope machinery. titles disabled
+      // too: SessionTitler.maybeTitle fires fire-and-forget on the session's first message against
+      // this SAME FakeProvider instance (settings-hot-e2e.test.ts's writeSettingsFile doc comment
+      // — "races the turn's own call for the SAME script queue"), which would otherwise silently
+      // steal one of this test's carefully-ordered script entries.
+      await boot({}, fake, { toolSearch: { enabled: false }, titles: { enabled: false } });
+      const c = await TestClient.connect(daemon.socketPath);
+      await c.hello(harnessToken, "web-fetch-rule-driver");
+      const cwd = mkdtempSync(join(tmpdir(), "norma-webfetch-rule-"));
+      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "ask" });
+      await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
+
+      // Turn 1: a SUBDOMAIN of the shipped "transfer.sh" entry -> card.
+      await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "fetch the paste" });
+      const ask = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "approval_requested");
+      expect(ask.params.options).toEqual([
+        { id: "allow_once", label: "Allow" },
+        { id: "allow_source", label: "Always allow uploads.transfer.sh", rule: "WebFetch(domain:transfer.sh)", scope: "global" },
+        { id: "deny", label: "Deny" },
+      ]);
+
+      const respond = await c.request(METHODS.approvalRespond, {
+        sessionId: created.sessionId, callId: ask.params.callId, approved: true, optionId: "allow_source",
+      });
+      expect(respond.result).toEqual({ ok: true, alreadyResolved: false });
+      await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
+
+      // The REAL ipc/server.ts handler persisted the rule to the daemon's own settings.json, global scope.
+      expect(JSON.parse(readFileSync(join(daemonHome, "settings.json"), "utf8")).permissions.allow).toEqual(["WebFetch(domain:transfer.sh)"]);
+
+      // Give the daemon's live SettingsWatcher (150ms debounce) time to hot-reload the rule into
+      // its in-memory settings before the next fetch's decision() check reads it — same "settled
+      // write" cadence settings-hot-e2e.test.ts's own torn-write test uses (a fixed sleep past a
+      // known debounce constant, comfortable headroom rather than a tight race).
+      await new Promise((r) => setTimeout(r, 500));
+
+      // Count-based waits (never a first-MATCH wait) — `waitForNotification` would otherwise
+      // resolve INSTANTLY against the turn-1 `turn_completed` already sitting in `c.notifications`.
+      // Mirrors settings-hot-e2e.test.ts's own `completedTurns()`/`driveTurn()` idiom.
+      const turnCompletedCount = () => c.notifications.filter((n) => n.method === METHODS.event && n.params.type === "turn_completed").length;
+      const approvalRequestedCount = () => c.notifications.filter((n) => n.method === METHODS.event && n.params.type === "approval_requested").length;
+      const waitForNextTurnCompleted = async (before: number): Promise<void> => {
+        const deadline = Date.now() + 5000;
+        while (turnCompletedCount() <= before) {
+          if (Date.now() > deadline) throw new Error("timed out waiting for the next turn_completed");
+          await new Promise((r) => setTimeout(r, 10));
+        }
+      };
+
+      const approvalsAfterTurn1 = approvalRequestedCount();
+      const completedAfterTurn1 = turnCompletedCount();
+
+      // Turn 2: the BARE matched entry itself -> must run cardless.
+      await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "fetch it again" });
+      await waitForNextTurnCompleted(completedAfterTurn1);
+      expect(approvalRequestedCount()).toBe(approvalsAfterTurn1);
+      const completedAfterTurn2 = turnCompletedCount();
+
+      // Turn 3: a DIFFERENT subdomain -> must ALSO run cardless.
+      await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "fetch a related paste" });
+      await waitForNextTurnCompleted(completedAfterTurn2);
+      expect(approvalRequestedCount()).toBe(approvalsAfterTurn1);
+
+      expect(fetchedUrls).toEqual(["https://uploads.transfer.sh/file1", "https://transfer.sh/file2", "https://another.transfer.sh/file3"]);
+      c.close();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   });
 
   // Edge case called out explicitly by the brief: a rule-bearing optionId with NO usable project

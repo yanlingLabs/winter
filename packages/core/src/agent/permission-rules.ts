@@ -80,8 +80,10 @@ export class RuleAppendError extends Error {
 const MAX_RULES_FILE_BYTES = 64 * 1024;
 
 // The CC-grammar tool names this store recognizes. Built into the regex below (single source of
-// truth) rather than duplicated as a separate literal pattern.
-const KNOWN_TOOLS = ["Bash", "Edit", "Computer", "Worktree"] as const;
+// truth) rather than duplicated as a separate literal pattern. "WebFetch" (SP-approvals T10) is
+// the exception mechanism for engine.ts's dangerous-domain floor — its ONLY value grammar is
+// `domain:<host>` (kind "domain", handled in parseRule below), never a bare "any" form.
+const KNOWN_TOOLS = ["Bash", "Edit", "Computer", "Worktree", "WebFetch"] as const;
 // Matches a bare tool name ("Edit") or a tool name with a single parenthesized value
 // ("Bash(git push:*)"). The `s` (dotAll) flag lets the value legitimately contain newlines (e.g.
 // a multi-line bash command) instead of silently failing to parse.
@@ -97,6 +99,7 @@ function internalToolFor(ruleTool: string): string {
     case "Edit": return "edit";
     case "Computer": return "computer";
     case "Worktree": return "worktree";
+    case "WebFetch": return "web_fetch";
     default: return ruleTool.toLowerCase();
   }
 }
@@ -109,22 +112,41 @@ function normalizeWhitespace(s: string): string {
  * Parses one CC-grammar rule string. Grammar: `ToolName` alone (kind "any" — every call to that
  * tool is allowed), or `ToolName(value)` where a `value` ending in `:*` is a prefix rule (the
  * `:*` stripped, then whitespace-normalized) and any other `value` is an exact rule (also
- * whitespace-normalized). `ToolName` must be exactly one of Bash/Edit/Computer/Worktree
+ * whitespace-normalized). `ToolName` must be exactly one of Bash/Edit/Computer/Worktree/WebFetch
  * (case-sensitive) — anything else, an unterminated `(`, or an empty string returns `null` rather
  * than throwing; callers (the class below) treat `null` as "ignore this rule, warn once". An
  * empty value (`"Bash()"`, `"Bash(:*)"`) also returns `null` — a rule naming no command at all is
  * far more likely a typo than an intentional "match everything", and CC's own grammar has no such
  * wildcard-via-omission form either (bare `Bash` already covers "any bash call"). A parenthesized
- * value on any tool OTHER than Bash (e.g. `"Edit(/path:*)"`) also returns `null` — see the class
- * doc comment's "MINOR" note above this function for why (no non-bash call carries a `command`
- * for such a value to ever compare against, so it could never match anything).
+ * value on any tool OTHER than Bash/WebFetch (e.g. `"Edit(/path:*)"`) also returns `null` — see the
+ * class doc comment's "MINOR" note above this function for why (no non-bash, non-web_fetch call
+ * carries a `command`/`url` for such a value to ever compare against, so it could never match
+ * anything).
+ *
+ * `WebFetch` (SP-approvals T10, spec §7) is a THIRD shape, not a fourth exact/prefix pair: its
+ * only recognized value is `domain:<host>` (kind "domain", `host` whitespace-normalized but
+ * case-PRESERVED — see `ruleMatches` for where the case-insensitive comparison actually happens).
+ * Unlike Bash/Edit/Computer/Worktree, a BARE `"WebFetch"` (no domain) is REJECTED, not treated as
+ * kind "any" — every WebFetch rule this store's own writer (engine.ts's "Always allow from this
+ * source" approval option) ever produces names a specific matched domain, and a match-every-fetch
+ * rule would silence the dangerous-domain floor for EVERY site rather than just the one a human
+ * approved; no UI offers that, so the grammar doesn't accept it either.
  */
-export function parseRule(s: string): { tool: string; kind: "any" | "exact" | "prefix"; value?: string } | null {
+export function parseRule(s: string): { tool: string; kind: "any" | "exact" | "prefix" | "domain"; value?: string } | null {
   const m = RULE_GRAMMAR.exec(s);
   if (!m) return null;
   const tool = internalToolFor(m[1]!); // group 1 is mandatory in RULE_GRAMMAR — always set on a match
   const content = m[2];
-  if (content === undefined) return { tool, kind: "any" }; // bare "Bash" / "Edit" / "Computer" / "Worktree"
+  if (content === undefined) {
+    // Bare "Bash" / "Edit" / "Computer" / "Worktree" -> kind "any". Bare "WebFetch" is REJECTED —
+    // see this function's own doc comment above for why it gets no "any" form at all.
+    return tool === "web_fetch" ? null : { tool, kind: "any" };
+  }
+  if (tool === "web_fetch") {
+    if (!content.startsWith("domain:")) return null; // WebFetch's ONLY value grammar is "domain:<host>"
+    const value = normalizeWhitespace(content.slice("domain:".length));
+    return value ? { tool, kind: "domain", value } : null; // empty domain ("WebFetch(domain:)") -> null, same treatment as Bash's empty value
+  }
   if (tool !== "bash") return null; // parenthesized value on a tool with no `command` to match — see doc comment above
   if (content.endsWith(":*")) {
     const value = normalizeWhitespace(content.slice(0, -2));
@@ -136,9 +158,12 @@ export function parseRule(s: string): { tool: string; kind: "any" | "exact" | "p
 
 /** The tool a runtime call NAME maps to, in `parseRule`'s vocabulary — `write` and `edit` both
  *  map to "edit" (an `Edit` rule covers both; CC's grammar has no separate `Write` rule),
- *  `enter_worktree` and `exit_worktree` both map to "worktree". Anything else (including tool
- *  names this grammar simply has no opinion on yet, e.g. `read`) maps to `null` and therefore
- *  never matches any rule. */
+ *  `enter_worktree` and `exit_worktree` both map to "worktree". `web_fetch` maps to "web_fetch"
+ *  (SP-approvals T10) — deliberately NOT `web_search`: the dangerous-domain floor (and therefore
+ *  its "WebFetch(domain:...)" exception rule) only ever applies to web_fetch, so a WebFetch rule
+ *  must never accidentally match a web_search call. Anything else (including tool names this
+ *  grammar simply has no opinion on yet, e.g. `read`) maps to `null` and therefore never matches
+ *  any rule. */
 function toolForCallName(name: string): string | null {
   switch (name) {
     case "bash": return "bash";
@@ -147,7 +172,23 @@ function toolForCallName(name: string): string | null {
     case "computer": return "computer";
     case "enter_worktree":
     case "exit_worktree": return "worktree";
+    case "web_fetch": return "web_fetch";
     default: return null;
+  }
+}
+
+/** Extracts a web_fetch call's `url` arg hostname, lowercased — or `null` on malformed JSON, a
+ *  missing/non-string `url` field, or an unparseable URL. Same "malformed input degrades to a safe
+ *  null, never throws" shape as `rawCommand` above; used ONLY by `ruleMatches`'s "domain" kind
+ *  below (a bash/edit/computer/worktree call never reaches this — `ruleMatches` checks tool
+ *  identity first). */
+function callUrlHost(argsJson: string): string | null {
+  try {
+    const parsed = JSON.parse(argsJson || "{}") as { url?: unknown };
+    if (typeof parsed.url !== "string") return null;
+    return new URL(parsed.url).hostname.toLowerCase();
+  } catch {
+    return null;
   }
 }
 
@@ -194,12 +235,24 @@ function normalizedCommand(argsJson: string): string {
  * kinds (a compound command should never auto-match ANY bash rule, not just a prefix one) but NOT
  * for kind "any" — a bare `Bash` rule is an explicit "allow every bash call" grant with no narrow
  * scope for a chain to escape from, so there is no analogous hole to close there.
+ *
+ * Kind "domain" (SP-approvals T10) is checked and returned BEFORE the bash-only hazard guard
+ * below — no shell hazards apply to a URL, this is a wholly different comparison: it parses the
+ * call's `url` arg host (`callUrlHost`) and suffix-matches it against the rule's value, case-
+ * insensitively — the SAME semantics as `dangerous-domains.ts`'s `dangerousDomainMatch`, just
+ * against one rule value instead of a list. An unparseable/missing url never matches.
  */
 export function ruleMatches(parsed: NonNullable<ReturnType<typeof parseRule>>, call: { name: string; argsJson: string }): boolean {
   const tool = toolForCallName(call.name);
   if (tool === null || tool !== parsed.tool) return false;
   if (parsed.kind === "any") return true;
   if (parsed.value === undefined) return false; // malformed parsed rule (never produced by parseRule) — never matches
+  if (parsed.kind === "domain") {
+    const host = callUrlHost(call.argsJson);
+    if (host === null) return false;
+    const entry = parsed.value.toLowerCase();
+    return host === entry || host.endsWith(`.${entry}`);
+  }
   if (parsed.tool === "bash" && hasShellHazards(rawCommand(call.argsJson))) return false;
   const cmd = normalizedCommand(call.argsJson);
   if (parsed.kind === "exact") return cmd === parsed.value;

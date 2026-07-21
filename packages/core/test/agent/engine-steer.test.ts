@@ -64,6 +64,12 @@ export function setupEngine(provider: Provider, opts?: {
   // engine.test.ts's own `setup()` opt of the same name; undefined (every pre-existing caller here)
   // leaves EngineConfig.grantDeniedPrefixes absent, unchanged behavior.
   grantDeniedPrefixes?: string[];
+  // SP-approvals Task 10: the user-added half of web_fetch's dangerous-domain floor
+  // (`settings.permissions.dangerousDomains.added` in real daemon wiring) — a plain array here
+  // (mirrors reviewerAllow's shape), wrapped into a getter below. Undefined (every pre-T10 test)
+  // leaves EngineConfig.dangerousDomainsAdded absent, so the engine's webFetchGate check only ever
+  // consults the SHIPPED list, unchanged behavior for every existing caller.
+  dangerousDomainsAdded?: string[];
 }) {
   const home = mkdtempSync(join(tmpdir(), "norma-engine-steer-"));
   const cwd = opts?.cwd ?? realpathSync(mkdtempSync(join(tmpdir(), "norma-engine-steer-cwd-")));
@@ -118,6 +124,7 @@ export function setupEngine(provider: Provider, opts?: {
     reviewer: opts?.reviewer,
     permissionRules: opts?.permissionRules,
     grantDeniedPrefixes: opts?.grantDeniedPrefixes,
+    dangerousDomainsAdded: () => opts?.dangerousDomainsAdded,
     // hot-settings T2: EngineConfig's in-scope fields are now getters — every existing caller
     // here still passes a plain value (or, for reviewerClasses only, an already-built getter —
     // see its own doc comment above), wrapped into a getter at this ONE boundary so none of the
