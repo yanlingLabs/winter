@@ -89,20 +89,25 @@ export class BackgroundTaskRegistry {
     const { cwd, roots, tmpDir } = this.deps.spawnCtx(sessionId);
     const realCwd = realpathSync(cwd);
     const scratch = realpathSync(tmpDir);
-    let child: ChildProcess;
+    // SP-approvals T11 review, LOW-1: single spawn call site (spawnFile/spawnArgs decided by the
+    // branch below), mirroring bash.ts's own foreground shape exactly — was two separate `spawn`
+    // calls with duplicated options; hoisted so the two shapes can never drift apart.
+    let spawnFile: string;
+    let spawnArgs: string[];
     if (dangerouslyDisableSandbox) {
       // Plain, unsandboxed spawn — no seatbelt profile at all (no write fence, no network deny).
       // cwd/$TMPDIR semantics stay identical to the sandboxed branch below.
-      child = spawn("/bin/bash", ["-c", command], {
-        cwd: realCwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...process.env, TMPDIR: scratch },
-      });
+      spawnFile = "/bin/bash";
+      spawnArgs = ["-c", command];
     } else {
       const writable = [...new Set([realCwd, ...roots.map((r) => realpathSync(r)), scratch])];
       const profile = buildSeatbeltProfile({ cwd: realCwd, writableRoots: writable.filter((r) => r !== realCwd), allowNetwork });
-      child = spawn("/usr/bin/sandbox-exec", ["-p", profile, "/bin/bash", "-c", command], {
-        cwd: realCwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...process.env, TMPDIR: scratch },
-      });
+      spawnFile = "/usr/bin/sandbox-exec";
+      spawnArgs = ["-p", profile, "/bin/bash", "-c", command];
     }
+    const child: ChildProcess = spawn(spawnFile, spawnArgs, {
+      cwd: realCwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...process.env, TMPDIR: scratch },
+    });
     const taskId = `bg_${randomBytes(6).toString("hex")}`;
     // CC parity (TaskOutput deprecated in favor of Read on the task's output file): lazily create
     // <sessionTmpDir>/bash/ (only when a bg task actually starts — every OTHER session never gets

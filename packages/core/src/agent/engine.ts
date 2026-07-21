@@ -2799,9 +2799,34 @@ export class AgentEngine {
           // are deliberately narrower than approvalOptionsFor's bash shape: allow_once/deny ONLY,
           // no allow_project/allow_global — v1 offers no standing memory for this flag at all
           // (spec: "NO rule can silence it").
+          //
+          // SP-approvals T11 review, MEDIUM-1 (adjudicated ADOPTED — CC parity: an unsandboxed
+          // retry still rides the normal review path, which includes the reviewer under auto):
+          // the SAME bash reviewer is consulted here, BEFORE the card, but strictly as an
+          // ANNOTATION — see annotateWithReview's own doc comment for why this can never become a
+          // second gate. Gated on the identical three conditions the bash reviewAndDispatch branch
+          // below already requires (reviewer configured, reviewerEnabled, reviewClassEnabled) —
+          // deliberately WITHOUT bashLooksSafe's static bypass: that bypass exists to save a
+          // reviewer call when NOTHING would ever see the result (auto policy, no human in the
+          // loop); here a human card is already guaranteed regardless, so there's no cost-saving
+          // rationale for skipping the annotation on an obviously-safe-looking command.
+          let reviewerReason: string | undefined;
+          if (this.cfg.reviewer && this.cfg.reviewerEnabled?.() !== false && this.reviewClassEnabled("bash")) {
+            let command = "";
+            let justification: string | undefined;
+            try {
+              const a = JSON.parse(call.argsJson || "{}");
+              command = typeof a.command === "string" ? a.command : "";
+              justification = typeof a.justification === "string" ? a.justification : undefined;
+            } catch { /* malformed argsJson → review "" ; still annotation-only, never blocks the card */ }
+            reviewerReason = await this.annotateWithReview(
+              { class: "bash", command, justification }, approvalCardSummary(call), call, sessionId, threadId, signal,
+            );
+          }
           outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
             timeoutMs: this.approvalTimeoutFor(meta),
             summary: approvalCardSummary(call),
+            reviewerReason,
             options: [
               { id: "allow_once", label: "Allow once" },
               { id: "deny", label: "Deny" },
@@ -3241,6 +3266,43 @@ export class AgentEngine {
    *  false` check. */
   private reviewClassEnabled(cls: "bash" | "fs" | "external"): boolean {
     return this.cfg.reviewerClasses?.()?.[cls] !== false;
+  }
+
+  /** SP-approvals T11 review, MEDIUM-1 (CC parity: an unsandboxed retry still rides the normal
+   *  review path, which includes the reviewer under auto) — runs the SAME bash reviewer as
+   *  reviewAndDispatch below, but strictly as an ANNOTATION on the dangerouslyDisableSandbox
+   *  always-card, never as a second gate: unlike reviewAndDispatch (which escalates/executes off
+   *  the verdict), the verdict here is NEVER read for auto-approve/deny purposes — only `.reason`
+   *  is returned, for the caller to attach to its own ALREADY-DECIDED card via `reviewerReason`.
+   *  Emits EXACTLY ONE `tool_review` per invocation, for every verdict (safe/unsafe/error) — same
+   *  shape and the same fail-closed-to-"error" degradation on a throw/timeout as
+   *  reviewAndDispatch's own verdict computation — so this is indistinguishable, from the
+   *  observability side, from any other bash review. Returns `undefined` ONLY on an "error"
+   *  verdict (fail-open on the ANNOTATION only — the caller's card fires regardless either way, it
+   *  just shows no reviewer text); a genuine safe OR unsafe verdict's `.reason` is always
+   *  returned — the reviewer's stated opinion is useful context on this card either way, since the
+   *  CARD (never the verdict) is what actually gates the run. Deliberately does NOT consult
+   *  bashLooksSafe's static bypass (see the one call site's own doc comment for why). */
+  private async annotateWithReview(
+    reviewInput: ReviewInput,
+    toolSummary: string,
+    call: { name: string },
+    sessionId: string,
+    threadId: string,
+    signal: AbortSignal,
+  ): Promise<string | undefined> {
+    let v: { verdict: "safe" | "unsafe" | "error"; reason: string };
+    try {
+      v = await this.cfg.reviewer!.review(reviewInput, signal);
+    } catch {
+      v = { verdict: "error", reason: "reviewer unavailable — manual approval required" };
+    }
+    this.emit(sessionId, {
+      type: "tool_review", sessionId, threadId, toolName: call.name, verdict: v.verdict,
+      reason: sanitizeReviewText(v.reason, 300),
+      summary: sanitizeReviewText(toolSummary, 160),
+    });
+    return v.verdict === "error" ? undefined : sanitizeReviewText(v.reason, 300);
   }
 
   /** phase 5e T3: the machinery every review class shares (T2's original bash-only flow,

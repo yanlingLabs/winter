@@ -720,6 +720,118 @@ describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisabl
     });
   });
 
+  // SP-approvals T11 review, MEDIUM-1 (adjudicated ADOPTED — CC parity: an unsandboxed retry
+  // still rides the normal review path, which includes the reviewer under auto). The reviewer is
+  // consulted BEFORE the unsandboxed card, but strictly as an ANNOTATION: its verdict never
+  // auto-approves/denies, never adds/removes options, and never skips or replaces the card — only
+  // its `.reason` (when the review actually completes) is threaded into the card's
+  // `reviewerReason`. A reviewer failure/timeout degrades to no annotation, never to no card.
+  describe("MEDIUM-1: the unsandboxed card carries the reviewer's annotation, but the reviewer never gates it", () => {
+    test("reviewer returns a verdict+reason -> the card carries reviewerReason, tool_review is emitted, and the human (not the verdict) still decides — an UNSAFE verdict does not auto-deny", async () => {
+      const { registry, calls } = stubRegistry();
+      const reviewer = stubReviewer({ verdict: "unsafe", reason: "REASON_UNSANDBOXED_ANNOTATION" });
+      const provider = new FakeProvider(bashTurn("docker run --privileged x", undefined, { dangerouslyDisableSandbox: true }));
+      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "ask" });
+      hub.attach(approver(broker, sessionId, true), sessionId, 0); // human approves DESPITE the unsafe verdict
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      const review = events.find((e) => e.type === "tool_review") as any;
+      expect(review).toMatchObject({ toolName: "bash", verdict: "unsafe", reason: "REASON_UNSANDBOXED_ANNOTATION" });
+      const requested = events.find((e) => e.type === "approval_requested") as any;
+      expect(requested).toBeDefined();
+      expect(requested.reviewerReason).toBe("REASON_UNSANDBOXED_ANNOTATION");
+      // Options are UNCHANGED by the verdict — still the narrow allow_once/deny shape, no rule
+      // options ever appear, an unsafe verdict adds no third "escalation" option either.
+      expect(requested.options).toEqual([
+        { id: "allow_once", label: "Allow once" },
+        { id: "deny", label: "Deny" },
+      ]);
+      expect(calls.length).toBe(1); // human approved -> ran, DESPITE the unsafe verdict (annotation only, never a gate)
+      expect(reviewer.seen).toEqual([{ class: "bash", command: "docker run --privileged x", justification: undefined }]);
+    });
+
+    test("reviewer THROWS -> the card fires WITHOUT a reviewerReason (fail-open on the annotation, never on the card)", async () => {
+      const { registry, calls } = stubRegistry();
+      const reviewer = stubReviewer("throw");
+      const provider = new FakeProvider(bashTurn("docker ps", undefined, { dangerouslyDisableSandbox: true }));
+      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "ask" });
+      hub.attach(approver(broker, sessionId, true), sessionId, 0);
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      // Still exactly one tool_review, "error" verdict — same degradation reviewAndDispatch's own
+      // bash branch already uses for a throwing reviewer, reused here.
+      const review = events.find((e) => e.type === "tool_review") as any;
+      expect(review).toMatchObject({ toolName: "bash", verdict: "error" });
+      const requested = events.find((e) => e.type === "approval_requested") as any;
+      expect(requested).toBeDefined();
+      expect(requested.reviewerReason).toBeUndefined(); // no annotation
+      expect(requested.summary).toBe("bash (UNSANDBOXED): docker ps"); // the card itself is unaffected
+      expect(calls.length).toBe(1); // approved -> ran regardless — the card fired despite the reviewer failure
+    });
+
+    test("under AUTO policy the annotation still attaches (auto doesn't skip the reviewer step, and the card still always fires)", async () => {
+      const { registry, calls } = stubRegistry();
+      const reviewer = stubReviewer({ verdict: "safe", reason: "REASON_UNSANDBOXED_AUTO" });
+      const provider = new FakeProvider(bashTurn("docker ps", undefined, { dangerouslyDisableSandbox: true }));
+      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "auto" });
+      hub.attach(approver(broker, sessionId, true), sessionId, 0);
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      const requested = events.find((e) => e.type === "approval_requested") as any;
+      expect(requested).toBeDefined(); // auto still cards — the whole point of this floor
+      expect(requested.reviewerReason).toBe("REASON_UNSANDBOXED_AUTO");
+      expect(calls.length).toBe(1);
+    });
+
+    test("no reviewer configured -> byte-identical to before this fix: no tool_review, no reviewerReason", async () => {
+      const { registry, calls } = stubRegistry();
+      const provider = new FakeProvider(bashTurn("docker ps", undefined, { dangerouslyDisableSandbox: true }));
+      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask" }); // no `reviewer` opt
+      hub.attach(approver(broker, sessionId, true), sessionId, 0);
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      expect(events.some((e) => e.type === "tool_review")).toBe(false);
+      const requested = events.find((e) => e.type === "approval_requested") as any;
+      expect(requested).toBeDefined();
+      expect(requested.reviewerReason).toBeUndefined();
+      expect(calls.length).toBe(1);
+    });
+  });
+
+  // SP-approvals T11 review, LOW-2: pin the precedence when a (malformed/adversarial) call sets
+  // BOTH escalation args at once — dangerouslyDisableSandbox must win outright: the card is the
+  // UNSANDBOXED one (narrow options, no rule-bearing choices), never the "(with network)" one.
+  describe("LOW-2: both flags set at once -> dangerouslyDisableSandbox wins outright", () => {
+    test("allowNetwork:true AND dangerouslyDisableSandbox:true -> the card is UNSANDBOXED, not \"(with network)\", and offers only allow_once/deny", async () => {
+      const { registry, calls } = stubRegistry();
+      const provider = new FakeProvider(bashTurn("curl https://example.com", undefined, { allowNetwork: true, dangerouslyDisableSandbox: true }));
+      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask" });
+      hub.attach(approver(broker, sessionId, true), sessionId, 0);
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      const requested = events.find((e) => e.type === "approval_requested") as any;
+      expect(requested).toBeDefined();
+      expect(requested.summary).toBe("bash (UNSANDBOXED): curl https://example.com"); // NOT "(with network)"
+      expect(requested.options).toEqual([
+        { id: "allow_once", label: "Allow once" },
+        { id: "deny", label: "Deny" },
+      ]); // NOT the 4-option allow-similar shape allowNetwork alone would offer
+      expect(calls.length).toBe(1);
+      expect(calls[0]?.allowNetwork).toBe(true); // both flags still reach the tool unchanged — only the CARD's shape is affected
+      expect(calls[0]?.dangerouslyDisableSandbox).toBe(true);
+    });
+  });
+
   describe("allowNetwork: rule-silenceable ask-card; classifier can NEVER silence it; auto stays cardless", () => {
     test("ask policy, no rule, allowNetwork:true -> cards as \"bash (with network): <cmd>\" with the STANDARD allow-similar options", async () => {
       const { registry, calls } = stubRegistry();
