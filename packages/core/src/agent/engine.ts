@@ -489,6 +489,16 @@ function permissionRulesFileTarget(
   } catch { return null; } // unresolvable — not a confirmed match; the normal dispatch chain decides
 }
 
+/** SP-policies Task 6: realpath `p` if it exists (resolves case AND symlinks), else `resolve(p)`
+ *  raw — same graceful-fallback shape `grantDenied`'s own per-prefix canonicalization already uses
+ *  (below). Used by `writableRoots` to canonicalize an `Edit(<path>)` rule's declared dir BEFORE
+ *  comparing it against `grantDenied`'s realpath-compared denylist: a symlinked or not-yet-existing
+ *  Edit dir must resolve to the SAME identity `grantDenied` would itself compare against, or the
+ *  two could disagree about whether the exact same real directory is denied. */
+function canonicalDir(p: string): string {
+  try { return realpathSync(p); } catch { return resolve(p); }
+}
+
 /** phase 5e T3 (external coverage): the précis for an mcp__/plugin__ call — tool name + a
  *  single-line argsJson slice(160). Same "raw JSON, never a hand-crafted rendering" honesty as
  *  approvalCardSummary's generic fallback, just capped shorter — this is what the REVIEWER sees,
@@ -2693,6 +2703,17 @@ export class AgentEngine {
         // and the bridge (setCwd + git + same-turn cwd + worktree_* events) would NEVER run outside
         // `auto` policy — see task-4-report.md for the bug writeup.
         const isWorktree = (call.name === "enter_worktree" || call.name === "exit_worktree") && !!this.cfg.worktrees;
+        // `cwd` is typed `string` (never undefined here), so this ternary is only a defensive
+        // guard against an empty string — repoRootFor("") would realpath-fail and fall back to the
+        // DAEMON's own process.cwd(), a wrong and misleading project root. `projectRoot: null`
+        // degrades safely everywhere it's read below: PermissionRules.decision() just consults
+        // global rules, and permissionRulesFileTarget refuses to match at all (see its own doc
+        // comment). SP-policies Task 6: HOISTED above the `dirGrant` computation just below (it
+        // used to sit between `dirGrantDenied` and `rulesFileTarget`) — `writableRoots` (also
+        // below) needs it to resolve this call's `Edit(<path>)`-declared writable dirs BEFORE
+        // `dirGrant`'s own fsWriteOutOfRootDir check runs, not just for the later
+        // ruleAllowed/rulesFileTarget consumers that already read it.
+        const projectRoot = cwd ? repoRootFor(cwd) : null;
         // CC parity (write-permission-flow): out-of-root write/edit. Norma has no model-invocable
         // "request a directory" tool anymore — an out-of-root Write/Edit itself carries the SAME
         // approval seam bash uses (cc-expert findings, task-24 recon: real CC shows exactly ONE
@@ -2707,22 +2728,19 @@ export class AgentEngine {
         // plain reject instead (fs-write.ts's own fence, unchanged). `let`, not `const`: the auto
         // pre-grant below NULLS it once the grant lands, so the call then flows through the normal
         // dispatch chain as an ordinary in-root write (task-24 review F1 — see the pre-grant).
+        // SP-policies Task 6: roots come from `writableRoots` (this session's roots UNIONED with
+        // any `Edit(<path>)`-declared dirs for this project, see its own doc comment) rather than
+        // the raw session roots — `undefined` rootsOverride argument here since this whole ternary
+        // is already gated on `!rootsOverride` (a worktree child's fixed confinement is never
+        // widened by an Edit rule).
         let dirGrant =
           (call.name === "write" || call.name === "edit") && decision !== "deny" && !rootsOverride
-            ? fsWriteOutOfRootDir(call, this.cfg.dirs.roots(sessionId), sessionTmpDir(sessionId))
+            ? fsWriteOutOfRootDir(call, this.writableRoots(sessionId, projectRoot, undefined), sessionTmpDir(sessionId))
             : null;
         // task-24 review F2: the control plane (daemon.ts passes ~/.norma/run — the SAME denylist
         // the read tools get) is NEVER grantable, either policy, no card — checked once here, and
         // consulted by both the auto pre-grant below and the deny branch in the dispatch chain.
         const dirGrantDenied = dirGrant !== null && this.grantDenied(dirGrant.dir);
-        // `cwd` is typed `string` (never undefined here), so this ternary is only a defensive
-        // guard against an empty string — repoRootFor("") would realpath-fail and fall back to the
-        // DAEMON's own process.cwd(), a wrong and misleading project root. `projectRoot: null`
-        // degrades safely everywhere it's read below: PermissionRules.decision() just consults
-        // global rules, and permissionRulesFileTarget refuses to match at all (see its own doc
-        // comment). Hoisted here (used to be computed separately, redundantly, inside the
-        // ruleAllowed block below) so both consumers share the exact same value.
-        const projectRoot = cwd ? repoRootFor(cwd) : null;
         // SP-approvals final review (composition hole): the permission-rules store itself is NEVER
         // a valid write/edit target — checked here, unconditionally (not gated on `decision`,
         // `dirGrant`, or anything ruleAllowed-related below), so it is computed and dispatched
@@ -2730,7 +2748,7 @@ export class AgentEngine {
         // permissionRulesFileTarget's own doc comment for the full exfil-composition rationale
         // (final review 2: filesystem-IDENTITY comparison, not string spelling).
         const rulesFileTarget = (call.name === "write" || call.name === "edit")
-          ? permissionRulesFileTarget(call, rootsOverride ?? this.cfg.dirs.roots(sessionId), projectRoot)
+          ? permissionRulesFileTarget(call, this.writableRoots(sessionId, projectRoot, rootsOverride), projectRoot)
           : null;
         // SP-approvals Task 10: web_fetch's dangerous-domain floor — computed for EVERY policy
         // (gate.ts's `decision` above is now unconditionally "allow" for web_fetch, so this is the
@@ -3035,9 +3053,10 @@ export class AgentEngine {
             const a = JSON.parse(call.argsJson || "{}") as { path?: unknown };
             path = typeof a.path === "string" ? a.path : "";
           } catch { /* malformed argsJson → executeCall's own zod validation rejects it below */ }
-          // Same roots/tmpDir executeCall itself will resolve against (rootsOverride ?? live
-          // session roots) — the review must see EXACTLY the fence executeCall enforces.
-          const fsRoots = rootsOverride ?? this.cfg.dirs.roots(sessionId);
+          // Same roots/tmpDir executeCall itself will resolve against (SP-policies Task 6:
+          // writableRoots, not the raw session roots) — the review must see EXACTLY the fence
+          // executeCall enforces, Edit(<path>)-widened dirs included.
+          const fsRoots = this.writableRoots(sessionId, projectRoot, rootsOverride);
           const fsTmpDir = sessionTmpDir(sessionId);
           const resolved = path ? resolveFsReviewTarget(path, fsRoots, fsTmpDir) : null;
           if (resolved && fsWriteIsUnusual(resolved, fsRoots[0]!)) {
@@ -3534,6 +3553,45 @@ export class AgentEngine {
     return false;
   }
 
+  /** SP-policies Task 6: the session's writable-dir set — `dirs.roots(sessionId)` (or a worktree
+   *  child's FIXED `rootsOverride`) UNIONED with the absolute dirs a hand-authored `Edit(<path>)`
+   *  rule declares for this project (PermissionRules.editPathRules). Consulted by BOTH the
+   *  write/edit fence (fsWriteOutOfRootDir, permissionRulesFileTarget, the fs-reviewer's fsRoots)
+   *  AND bash's seatbelt (executeCall's ctx.roots — tools/bash.ts realpaths this exact array into
+   *  sandbox.ts's buildSeatbeltProfile `(subpath ...)` rules), so one Edit rule widens both
+   *  surfaces identically. A worktree-isolated child (`rootsOverride` set) keeps its FIXED
+   *  confinement — Edit rules never widen it, mirroring fsWriteOutOfRootDir's own `!rootsOverride`
+   *  guard at its call site (a grant there would be a no-op anyway: SessionDirectories.add can
+   *  never extend a worktree child's roots).
+   *
+   *  SECURITY GUARD (Task 4 reviewer carry-forward): `editPathRules` returns raw, unvetted dirs — a
+   *  rule string a human (or a persuaded model, via the "always allow" approval option) can write
+   *  directly. Two shapes must NEVER be unioned in as-is:
+   *   - the bare filesystem root "/" — checked explicitly, BEFORE `grantDenied`, because
+   *     `grantDenied`'s own bidirectional containment check (`dir.startsWith(cp + sep)`) degenerates
+   *     for a bare "/" (`"/" + sep` is `"//"`, which no real absolutized path ever starts with) and
+   *     so would never itself catch it. Without this, `Edit(/)` would leak "/" into bash's seatbelt
+   *     roots and make the ENTIRE disk bash-writable (sandbox.ts's `subpath` is a real macOS
+   *     Seatbelt primitive with no equivalent quirk — `subpath "/"` truly matches everything).
+   *   - any dir `grantDenied` already refuses to grant (the SAME `~/.norma`-class control-plane
+   *     denylist the out-of-root dirGrant flow uses) — an `Edit(~/.norma)` (or an ancestor/
+   *     descendant of it) must not silently become "in-root" either, or every downstream check that
+   *     exists specifically to protect the control plane (dirGrantDenied's hard-error branch,
+   *     permissionRulesFileTarget's own identity check) would simply never run for it: `dirGrant`
+   *     would compute as `null` (the call looks ordinary, in-root), so `dirGrantDenied`'s
+   *     `grantDenied` check — which only ever runs when `dirGrant` is non-null — is never reached.
+   *  Each Edit dir is realpath-canonicalized FIRST (`canonicalDir`) so a symlinked or not-yet-
+   *  existing Edit dir resolves to the identity `grantDenied` itself expects (mirrors
+   *  `permissionRulesFileTarget`'s own filesystem-identity-over-string-spelling principle). */
+  private writableRoots(sessionId: string, projectRoot: string | null, rootsOverride: string[] | undefined): string[] {
+    const base = rootsOverride ?? this.cfg.dirs.roots(sessionId);
+    if (rootsOverride || !this.cfg.permissionRules || projectRoot === null) return base;
+    const editDirs = this.cfg.permissionRules.editPathRules(projectRoot)
+      .map(canonicalDir)
+      .filter((d) => d !== "/" && !this.grantDenied(d));
+    return editDirs.length ? [...new Set([...base, ...editDirs])] : base;
+  }
+
   /** SP-approvals Task 10 (spec §7): web_fetch's dangerous-domain floor — the ONE thing that still
    *  cards for web_fetch now that gate.ts's NETWORK class is unconditionally "allow". Called from
    *  the dispatch loop for EVERY `call.name === "web_fetch"`, regardless of `meta.approvalPolicy`
@@ -3882,7 +3940,14 @@ export class AgentEngine {
     let args: unknown;
     try { args = call.argsJson.length ? JSON.parse(call.argsJson) : {}; }
     catch { return Promise.resolve({ output: `tool arguments were not valid JSON`, isError: true }); }
-    const roots = rootsOverride ?? this.cfg.dirs.roots(sessionId);
+    // SP-policies Task 6: writableRoots unions in any Edit(<path>)-declared dirs for this project
+    // (guarded against "/" and the grantDenied control-plane denylist — see its own doc comment)
+    // — this becomes ctx.roots below, so an Edit rule widens BOTH the write/edit fence (the
+    // dispatch-loop sites above) AND bash's seatbelt (tools/bash.ts realpaths this exact array
+    // into sandbox.ts's buildSeatbeltProfile). `cwd` here is executeCall's own param, not the
+    // dispatch loop's local — recomputed the identical way (`cwd ? repoRootFor(cwd) : null`) since
+    // this method has no access to the loop's already-hoisted `projectRoot`.
+    const roots = this.writableRoots(sessionId, cwd ? repoRootFor(cwd) : null, rootsOverride);
     const tmpDir = sessionTmpDir(sessionId);
     const markSkillLoaded = (n: string) => {
       let set = this.loadedSkills.get(sessionId);
