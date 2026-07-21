@@ -2,6 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSyn
 import { join, sep } from "node:path";
 import { hasShellHazards } from "./shell-scan";
 import { dangerousDomainMatch } from "./dangerous-domains";
+import { ensureGlobalGitignore, NORMA_PERSONAL_IGNORES } from "../global-gitignore";
 
 /**
  * CC-grammar allow-rules store (SP-approvals Task 1) — the foundation the engine gate (Task 3)
@@ -553,6 +554,7 @@ export class PermissionRules {
     // the mtime check and momentarily serve stale rules back to this SAME instance.
     const stat = statSync(path);
     this.cache.set(root, { mtimeMs: stat.mtimeMs, size: stat.size, rules: list });
+    ensureGlobalGitignore(NORMA_PERSONAL_IGNORES);
   }
 
   private appendGlobal(rule: string): void {

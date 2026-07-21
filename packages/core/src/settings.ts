@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { DEFAULT_CODEX_MODEL } from "./providers/codex-config";
+import { ensureGlobalGitignore, NORMA_PERSONAL_IGNORES } from "./global-gitignore";
 
 /** Reasoning-effort slugs — the live /models payload (2026-07-10) lists exactly these across
  *  the gpt-5.6 family (luna lacks "ultra", but validating per-model effort support is NOT done
@@ -334,4 +335,5 @@ export function addLocalDir(projectDir: string, dir: string): void {
   obj.permissions.additionalDirectories ??= [];
   if (!obj.permissions.additionalDirectories.includes(dir)) obj.permissions.additionalDirectories.push(dir);
   writeFileSync(path, JSON.stringify(obj, null, 2) + "\n");
+  ensureGlobalGitignore(NORMA_PERSONAL_IGNORES);
 }
