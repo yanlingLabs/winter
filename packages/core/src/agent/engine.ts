@@ -3031,18 +3031,23 @@ export class AgentEngine {
           // READ_ONLY set under every policy), so this branch is reached for every call.
           outcome = await this.runEnterPlanBridge(sessionId, meta);
         } else if (
-          // SP-approvals Task 3: widened from `meta.approvalPolicy === "auto"` alone — a rule- or
-          // classifier-allowed bash call (`ruleAllowed`, computed above) reaches this branch with
-          // `decision === "allow"` under `ask` policy too, and must still hit the AI safety
-          // reviewer when one is configured. A standing rule/classifier says "this call needs no
-          // HUMAN gate"; it says nothing about whether the REVIEWER should still look at it — those
-          // are different questions, and only the human-gate one is what a rule/classifier answers.
-          // fs/external reviewer branches below are deliberately left `=== "auto"`-only: the brief
-          // scopes this widening to bash alone (write/edit's in-root rule coverage is the common
-          // case, and out-of-root always keeps its own grant card regardless — see the dirGrant
-          // precedence above; external tools have no rule/classifier source at all).
+          // SP-policies Task 8: the reviewer is auto-ONLY — this DROPS the SP-approvals Task 3
+          // widening that used to also fire here whenever `ruleAllowed` was true under `ask`
+          // policy. A standing rule (or the readOnlyBash classifier) allowing a call under `ask`
+          // is a HUMAN pre-authorization: the human already decided this call needs no gate at
+          // all, and that decision is final. The reviewer's actual job is to stand in for a human
+          // gate that would otherwise fire; under `ask`, a rule-allowed call never reaches a human
+          // gate in the first place (`ruleAllowed`, computed above, short-circuits `decision` to
+          // "allow" before any of these branches run), so there is nothing left for the reviewer
+          // to stand in for. It now runs ONLY under `auto`, where every call — rule-allowed or not
+          // — is otherwise gateless and the reviewer is the sole safety net, unchanged in strictness.
+          // fs/external reviewer branches below are untouched by this — they were already
+          // `=== "auto"`-only (the SP-approvals T3 brief scoped the now-removed widening to bash
+          // alone: write/edit's in-root rule coverage is the common case, and out-of-root always
+          // keeps its own grant card regardless — see the dirGrant precedence above; external
+          // tools have no rule/classifier source at all).
           decision === "allow" && call.name === "bash" && this.cfg.reviewer &&
-          this.cfg.reviewerEnabled?.() !== false && (meta.approvalPolicy === "auto" || ruleAllowed) && this.reviewClassEnabled("bash")
+          this.cfg.reviewerEnabled?.() !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("bash")
         ) {
           let command = "";
           let justification: string | undefined;

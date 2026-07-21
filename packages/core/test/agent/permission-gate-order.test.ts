@@ -24,8 +24,12 @@ const isMac = process.platform === "darwin";
 // same one engine-reviewer.test.ts uses) rather than calling PermissionRules/readOnlyBash in
 // isolation (already covered by their own unit suites) — the point here is the WIRING and its
 // security invariants: rules are consulted ONLY on `ask`, NEVER on `deny` (plan mode), NEVER ahead
-// of an out-of-root write's own grant card, and NEVER in a way that lets the AI safety reviewer be
-// skipped for bash once a rule/classifier allows it.
+// of an out-of-root write's own grant card. SP-policies Task 8 REVERSES the last clause of this
+// comment's original claim: the AI safety reviewer is now auto-ONLY, so a rule/classifier allowing
+// a bash call under `ask` is a human pre-authorization and the call now runs with NO reviewer at
+// all (scenarios 6/7 below, and the allowNetwork rule-reviewer case in scenario 11, were updated
+// from "still rides the reviewer" to "now runs with no reviewer" accordingly —
+// policy-reviewer-ask.test.ts holds the dedicated auto-vs-ask regression coverage for this).
 
 function tmpDir(prefix: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
@@ -202,47 +206,49 @@ describe("scenario 5: plan policy denies outright — a rule is never even consu
   });
 });
 
-describe("scenario 6/7: a rule- or classifier-allowed bash call still rides the AI safety reviewer when configured", () => {
-  test("6. rule-allowed (Bash(npm test:*)) + reviewer configured, unsafe verdict → escalation card appears DESPITE the matching rule", async () => {
+describe("scenario 6/7: a rule- or classifier-allowed bash call under ASK now runs with NO reviewer (SP-policies Task 8)", () => {
+  test("6. rule-allowed (Bash(npm test:*)) bash under ASK runs unreviewed even with a reviewer configured", async () => {
     // "npm test" is rule-matched but NOT readOnlyBash-classified (npm's read-only subcommands are
-    // only ls/view/outdated) — isolates the RULE as the sole source of ruleAllowed.
+    // only ls/view/outdated) — isolates the RULE as the sole source of ruleAllowed. Pre-SP-policies
+    // this rule-allowed call still rode the AI reviewer under `ask` (the SP-approvals T3 widening,
+    // "escalation card appears DESPITE the matching rule"); Task 8 drops that widening — the
+    // reviewer is auto-only now, so a rule match under `ask` is a human pre-authorization and the
+    // call just runs, unreviewed. The stub verdict is "unsafe" so a regression (the reviewer
+    // wrongly running and escalating) would fail loudly rather than silently pass on a lucky verdict.
     const permissionRules = new PermissionRules({ globalAllow: () => ["Bash(npm test:*)"], normaHome: tmpDir("norma-pgo-home-") });
     const { registry, calls } = stubRegistry();
-    const reviewer = stubReviewer({ verdict: "unsafe", reason: "REASON_RULE_BASH" });
+    const reviewer = stubReviewer({ verdict: "unsafe", reason: "WOULD_BLOCK_IF_CONSULTED" });
     const provider = new FakeProvider(bashTurn("npm test"));
-    const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "ask", permissionRules });
-    hub.attach(approver(broker, sessionId, false), sessionId, 0);
+    const { engine, store, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "ask", permissionRules });
 
     await engine.runTurn(sessionId);
     const events = store.read(sessionId);
 
-    const review = events.find((e) => e.type === "tool_review") as any;
-    expect(review).toMatchObject({ toolName: "bash", verdict: "unsafe", reason: "REASON_RULE_BASH" });
-    const requested = events.find((e) => e.type === "approval_requested") as any;
-    expect(requested).toBeDefined();
-    expect(requested.reviewerReason).toBe("REASON_RULE_BASH");
+    expect(events.some((e) => e.type === "tool_review")).toBe(false);
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
     const result = events.find((e) => e.type === "tool_result") as any;
-    expect(result.isError).toBe(true);
-    expect(calls.length).toBe(0); // never ran — reviewer said unsafe, human denied
-    expect(reviewer.seen).toEqual([{ class: "bash", command: "npm test", justification: undefined }]);
+    expect(result.isError).toBe(false);
+    expect(calls.length).toBe(1); // ran — rule-allowed, no reviewer under ask
+    expect(reviewer.seen.length).toBe(0);
   });
 
-  test("7. classifier-allowed (`git log --oneline -5`, no rule at all) + reviewer configured, safe verdict → reviewer WAS consulted, bash ran", async () => {
+  test("7. classifier-allowed (`git log --oneline -5`, no rule at all) bash under ASK runs unreviewed too", async () => {
     // No rule anywhere — readOnlyBash alone is what flips ruleAllowed here, isolating the
-    // CLASSIFIER as the sole source (spec: both sources must ride the same reviewer branch).
+    // CLASSIFIER as the sole source: both sources of ruleAllowed lose the reviewer identically
+    // under `ask` post-Task-8 (the pre-Task-8 spec required both sources to ride the SAME reviewer
+    // branch; now both sources identically skip it).
     const permissionRules = new PermissionRules({ globalAllow: () => undefined, normaHome: tmpDir("norma-pgo-home-") });
     const { registry, calls } = stubRegistry();
-    const reviewer = stubReviewer({ verdict: "safe", reason: "REASON_CLASSIFIER_BASH" });
+    const reviewer = stubReviewer({ verdict: "unsafe", reason: "WOULD_BLOCK_IF_CONSULTED" });
     const provider = new FakeProvider(bashTurn("git log --oneline -5"));
     const { engine, store, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "ask", permissionRules });
 
     await engine.runTurn(sessionId);
     const events = store.read(sessionId);
 
-    expect(events.some((e) => e.type === "approval_requested")).toBe(false); // safe verdict, no escalation
-    const review = events.find((e) => e.type === "tool_review") as any;
-    expect(review).toMatchObject({ toolName: "bash", verdict: "safe", reason: "REASON_CLASSIFIER_BASH" });
-    expect(reviewer.seen.length).toBe(1); // the reviewer was genuinely consulted, not bypassed
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+    expect(events.some((e) => e.type === "tool_review")).toBe(false);
+    expect(reviewer.seen.length).toBe(0); // the reviewer is auto-only now — never consulted under ask
     expect(calls).toEqual([{ command: "git log --oneline -5", justification: undefined }]);
   });
 });
@@ -884,22 +890,25 @@ describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisabl
       expect(calls).toEqual([{ command: "git push", justification: undefined, allowNetwork: true, dangerouslyDisableSandbox: undefined }]);
     });
 
-    test("rule-allowed allowNetwork call still rides the AI safety reviewer (unsafe verdict escalates to a card)", async () => {
+    test("rule-allowed allowNetwork call under ASK now runs with NO reviewer (SP-policies Task 8)", async () => {
+      // Pre-SP-policies this rule-allowed (+ allowNetwork) call still rode the AI reviewer under
+      // `ask` and an "unsafe" verdict escalated to a card; Task 8's auto-only reviewer means a rule
+      // match under `ask` is a human pre-authorization regardless of allowNetwork — the call now
+      // just runs, unreviewed (the "unsafe" stub verdict below would still escalate+deny if the
+      // reviewer were wrongly consulted, so a regression here fails loudly).
       const permissionRules = new PermissionRules({ globalAllow: () => ["Bash(npm install:*)"], normaHome: tmpDir("norma-pgo-home-") });
       const { registry, calls } = stubRegistry();
       const reviewer = stubReviewer({ verdict: "unsafe", reason: "REASON_NETWORK_RULE" });
       const provider = new FakeProvider(bashTurn("npm install", undefined, { allowNetwork: true }));
-      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "ask", permissionRules });
-      hub.attach(approver(broker, sessionId, false), sessionId, 0);
+      const { engine, store, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "ask", permissionRules });
 
       await engine.runTurn(sessionId);
       const events = store.read(sessionId);
 
-      const review = events.find((e) => e.type === "tool_review") as any;
-      expect(review).toMatchObject({ toolName: "bash", verdict: "unsafe", reason: "REASON_NETWORK_RULE" });
-      const requested = events.find((e) => e.type === "approval_requested") as any;
-      expect(requested).toBeDefined();
-      expect(calls.length).toBe(0); // reviewer said unsafe, human denied -> never ran
+      expect(events.some((e) => e.type === "tool_review")).toBe(false);
+      expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+      expect(reviewer.seen.length).toBe(0);
+      expect(calls).toEqual([{ command: "npm install", justification: undefined, allowNetwork: true, dangerouslyDisableSandbox: undefined }]);
     });
 
     test("auto policy + allowNetwork:true -> runs cardless (reviewer still applies)", async () => {
