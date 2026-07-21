@@ -638,3 +638,26 @@ describe("Edit(/path) path-scoped rule (SP-policies)", () => {
     expect(rules.editPathRules(null).sort()).toEqual(["/tmp/a"]);
   });
 });
+
+describe("BashUnsandboxed rule — disjoint from Bash (SP-policies)", () => {
+  const esc = (command: string) => ({ name: "bash", argsJson: JSON.stringify({ command, dangerouslyDisableSandbox: true }) });
+  const plain = (command: string) => ({ name: "bash", argsJson: JSON.stringify({ command }) });
+
+  test("parses prefix form", () => {
+    expect(parseRule("BashUnsandboxed(docker:*)")).toEqual({ tool: "bash_unsandboxed", kind: "prefix", value: "docker" });
+  });
+  test("BashUnsandboxed matches ONLY an escape call", () => {
+    const p = parseRule("BashUnsandboxed(docker:*)")!;
+    expect(ruleMatches(p, esc("docker ps"))).toBe(true);
+    expect(ruleMatches(p, plain("docker ps"))).toBe(false);
+  });
+  test("a plain Bash rule NEVER authorizes an escape", () => {
+    const p = parseRule("Bash(docker:*)")!;
+    expect(ruleMatches(p, plain("docker ps"))).toBe(true);
+    expect(ruleMatches(p, esc("docker ps"))).toBe(false);
+  });
+  test("hazard scan still applies to the unsandboxed form", () => {
+    const p = parseRule("BashUnsandboxed(docker:*)")!;
+    expect(ruleMatches(p, esc("docker ps ; rm -rf /"))).toBe(false);
+  });
+});

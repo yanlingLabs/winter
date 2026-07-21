@@ -87,7 +87,7 @@ const MAX_RULES_FILE_BYTES = 64 * 1024;
 // truth) rather than duplicated as a separate literal pattern. "WebFetch" (SP-approvals T10) is
 // the exception mechanism for engine.ts's dangerous-domain floor — its ONLY value grammar is
 // `domain:<host>` (kind "domain", handled in parseRule below), never a bare "any" form.
-const KNOWN_TOOLS = ["Bash", "Edit", "Computer", "Worktree", "WebFetch"] as const;
+const KNOWN_TOOLS = ["BashUnsandboxed", "Bash", "Edit", "Computer", "Worktree", "WebFetch"] as const;
 // Matches a bare tool name ("Edit") or a tool name with a single parenthesized value
 // ("Bash(git push:*)"). The `s` (dotAll) flag lets the value legitimately contain newlines (e.g.
 // a multi-line bash command) instead of silently failing to parse.
@@ -99,6 +99,7 @@ const RULE_GRAMMAR = new RegExp(`^(${KNOWN_TOOLS.join("|")})(?:\\((.*)\\))?$`, "
  *  unreachable given `RULE_GRAMMAR` only ever captures one of `KNOWN_TOOLS` into group 1. */
 function internalToolFor(ruleTool: string): string {
   switch (ruleTool) {
+    case "BashUnsandboxed": return "bash_unsandboxed";
     case "Bash": return "bash";
     case "Edit": return "edit";
     case "Computer": return "computer";
@@ -161,7 +162,7 @@ export function parseRule(s: string): { tool: string; kind: "any" | "exact" | "p
     const value = content.trim();
     return value.startsWith("/") ? { tool, kind: "path", value } : null;
   }
-  if (tool !== "bash") return null; // parenthesized value on a tool with no `command` to match — see doc comment above
+  if (tool !== "bash" && tool !== "bash_unsandboxed") return null; // parenthesized value on a tool with no `command` to match — see doc comment above
   if (content.endsWith(":*")) {
     const value = normalizeWhitespace(content.slice(0, -2));
     return value ? { tool, kind: "prefix", value } : null;
@@ -220,6 +221,15 @@ function rawCommand(argsJson: string): string {
   }
 }
 
+/** SP-policies: does this bash call carry `dangerouslyDisableSandbox: true`? Malformed/absent → false
+ *  (a non-escape call). The one bit that makes Bash and BashUnsandboxed rules disjoint. */
+function callIsUnsandboxed(argsJson: string): boolean {
+  try {
+    const a = JSON.parse(argsJson || "{}") as { dangerouslyDisableSandbox?: unknown };
+    return a.dangerouslyDisableSandbox === true;
+  } catch { return false; }
+}
+
 /** `rawCommand`, whitespace-normalized the same way `parseRule` normalizes a rule's value — so
  *  "git   push x" and a rule's "git push" compare as equal tokens. Used ONLY for the actual
  *  exact/prefix VALUE comparison, after `hasShellHazards` has already vetted the raw form. `""`
@@ -261,21 +271,32 @@ function normalizedCommand(argsJson: string): string {
  * it. An unparseable/missing url never matches.
  */
 export function ruleMatches(parsed: NonNullable<ReturnType<typeof parseRule>>, call: { name: string; argsJson: string }): boolean {
-  // SP-policies: a path rule is a writable-dir DECLARATION (consumed via editPathRules), never a
-  // call-silencer — the silencing of edits under /foo falls out of in-project-silent once /foo is in
-  // the session writable set, not from a rule match here.
-  if (parsed.kind === "path") return false;
+  if (parsed.kind === "path") return false; // (Task 4) writable-dir declaration, never a call-silencer
   const tool = toolForCallName(call.name);
+  // SP-policies: Bash and BashUnsandboxed are DISJOINT by the call's `dangerouslyDisableSandbox`
+  // flag — a plain Bash rule never authorizes a sandbox escape, a BashUnsandboxed rule matches ONLY
+  // one. Both share the exact/prefix value comparison + raw-command hazard scan.
+  if (parsed.tool === "bash" || parsed.tool === "bash_unsandboxed") {
+    if (tool !== "bash") return false;
+    const unsandboxed = callIsUnsandboxed(call.argsJson);
+    if (parsed.tool === "bash" && unsandboxed) return false;
+    if (parsed.tool === "bash_unsandboxed" && !unsandboxed) return false;
+    if (parsed.kind === "any") return true;
+    if (parsed.value === undefined) return false;
+    if (hasShellHazards(rawCommand(call.argsJson))) return false; // a chain can't ride a narrow prefix rule
+    const cmd = normalizedCommand(call.argsJson);
+    if (parsed.kind === "exact") return cmd === parsed.value;
+    return cmd === parsed.value || cmd.startsWith(parsed.value + " ");
+  }
   if (tool === null || tool !== parsed.tool) return false;
   if (parsed.kind === "any") return true;
-  if (parsed.value === undefined) return false; // malformed parsed rule (never produced by parseRule) — never matches
+  if (parsed.value === undefined) return false;
   if (parsed.kind === "domain") {
     const host = callUrlHost(call.argsJson);
     if (host === null) return false;
     return dangerousDomainMatch(host, [parsed.value]) !== null;
   }
-  if (parsed.tool === "bash" && hasShellHazards(rawCommand(call.argsJson))) return false;
-  const cmd = normalizedCommand(call.argsJson);
+  const cmd = normalizedCommand(call.argsJson); // edit/computer/worktree exact/prefix (rare)
   if (parsed.kind === "exact") return cmd === parsed.value;
   return cmd === parsed.value || cmd.startsWith(parsed.value + " ");
 }
