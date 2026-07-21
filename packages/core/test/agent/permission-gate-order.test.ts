@@ -597,16 +597,21 @@ describe("scenario 10: web tools — free by default, dangerous-domain floor (SP
 // SP-approvals Task 11 (spec §8): bash's two escalation args. `allowNetwork` widens the sandbox
 // (write fence intact, network on for that one call) — under `ask` it cards like a normal bash
 // call (rule-silenceable), under `auto` it runs cardless (reviewer still applies, exactly like
-// today's plain bash). `dangerouslyDisableSandbox` (CC's exact name) is a full escape — it ALWAYS
-// cards, under every policy this branch can be reached under, and NO rule/classifier may ever
-// silence it (a stricter floor than allowNetwork's, similar in spirit to T10's dangerous-domain
-// floor). Every test below drives the REAL dispatch loop (setupEngine's harness) per this file's
-// own established precedent, using the stub bash registry (engine-reviewer.test.ts's stubRegistry/
-// bashTurn, now escalation-arg-aware) so no real sandbox-exec is needed — the actual sandboxed/
-// unsandboxed SPAWN behavior is covered separately, end to end, in tools-bash.test.ts.
+// today's plain bash). `dangerouslyDisableSandbox` (CC's exact name) is a full escape. SP-policies
+// Task 11 reworked its SP-approvals always-card floor into a mode split (full matrix in
+// policy-escape.test.ts): a BashUnsandboxed(<prefix>:*) rule now pre-clears it silently, `auto` lets
+// the reviewer GATE it (safe → runs unattended, non-safe → the human card), and `ask`/`accept-edits`
+// still card with the reviewer only annotating. The card now offers project/global BashUnsandboxed
+// rule options — a plain Bash rule and the readOnlyBash classifier still never silence an escape.
+// Pinned below: the no-rule ask/auto-no-reviewer card paths + plan/deny (the rule pre-clear and the
+// auto-safe run live in policy-escape.test.ts). Every test below drives the REAL dispatch loop
+// (setupEngine's harness) per this file's own established precedent, using the stub bash registry
+// (engine-reviewer.test.ts's stubRegistry/bashTurn, now escalation-arg-aware) so no real sandbox-exec
+// is needed — the actual sandboxed/unsandboxed SPAWN behavior is covered separately, end to end, in
+// tools-bash.test.ts.
 describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisableSandbox (SP-approvals T11)", () => {
-  describe("dangerouslyDisableSandbox: ALWAYS cards, no rule/classifier can ever silence it", () => {
-    test("auto policy + dangerouslyDisableSandbox:true -> card fires anyway (auto normally means cardless)", async () => {
+  describe("dangerouslyDisableSandbox: cards under ask / auto-with-no-reviewer; no plain-Bash rule or classifier silences it", () => {
+    test("auto policy + dangerouslyDisableSandbox:true, NO reviewer -> still cards (auto's reviewer GATE needs a reviewer; with none it falls to the human card)", async () => {
       const { registry, calls } = stubRegistry();
       const provider = new FakeProvider(bashTurn("rm -rf x", undefined, { dangerouslyDisableSandbox: true }));
       const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "auto" });
@@ -618,8 +623,13 @@ describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisabl
       const requested = events.find((e) => e.type === "approval_requested") as any;
       expect(requested).toBeDefined();
       expect(requested.summary).toBe("bash (UNSANDBOXED): rm -rf x");
+      // SP-policies Task 11: the escape card now carries standing BashUnsandboxed(<prefix>:*) memory
+      // (project/global) — suggestBashPrefix("rm -rf x") === "rm". (The auto-safe reviewer-GATE run and
+      // the BashUnsandboxed rule pre-clear are covered in policy-escape.test.ts.)
       expect(requested.options).toEqual([
         { id: "allow_once", label: "Allow once" },
+        { id: "allow_unsandboxed_project", label: 'Always allow "BashUnsandboxed(rm:*)" in this project', rule: "BashUnsandboxed(rm:*)", scope: "project" },
+        { id: "allow_unsandboxed_global", label: 'Always allow "BashUnsandboxed(rm:*)" everywhere', rule: "BashUnsandboxed(rm:*)", scope: "global" },
         { id: "deny", label: "Deny" },
       ]);
       expect(calls.length).toBe(1); // approved -> ran
@@ -729,13 +739,15 @@ describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisabl
     });
   });
 
-  // SP-approvals T11 review, MEDIUM-1 (adjudicated ADOPTED — CC parity: an unsandboxed retry
-  // still rides the normal review path, which includes the reviewer under auto). The reviewer is
-  // consulted BEFORE the unsandboxed card, but strictly as an ANNOTATION: its verdict never
-  // auto-approves/denies, never adds/removes options, and never skips or replaces the card — only
-  // its `.reason` (when the review actually completes) is threaded into the card's
-  // `reviewerReason`. A reviewer failure/timeout degrades to no annotation, never to no card.
-  describe("MEDIUM-1: the unsandboxed card carries the reviewer's annotation, but the reviewer never gates it", () => {
+  // SP-approvals T11 review, MEDIUM-1 (CC parity: an unsandboxed retry still rides the normal review
+  // path). Under `ask`/`accept-edits` the reviewer is consulted BEFORE the card but strictly as an
+  // ANNOTATION: its verdict never auto-approves/denies, never adds/removes options, never skips or
+  // replaces the card — only its `.reason` threads into `reviewerReason`; a reviewer failure/timeout
+  // degrades to no annotation, never to no card. SP-policies Task 11 changed ONE thing: under `auto`
+  // the reviewer now GATES (safe → runs unattended with no card; non-safe → the card) — the auto test
+  // below is updated to that; the ask-policy annotation cases are unchanged. Full gate matrix in
+  // policy-escape.test.ts.
+  describe("MEDIUM-1: under ask the reviewer only ANNOTATES the escape card; under auto it GATES (SP-policies Task 11)", () => {
     test("reviewer returns a verdict+reason -> the card carries reviewerReason, tool_review is emitted, and the human (not the verdict) still decides — an UNSAFE verdict does not auto-deny", async () => {
       const { registry, calls } = stubRegistry();
       const reviewer = stubReviewer({ verdict: "unsafe", reason: "REASON_UNSANDBOXED_ANNOTATION" });
@@ -751,10 +763,13 @@ describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisabl
       const requested = events.find((e) => e.type === "approval_requested") as any;
       expect(requested).toBeDefined();
       expect(requested.reviewerReason).toBe("REASON_UNSANDBOXED_ANNOTATION");
-      // Options are UNCHANGED by the verdict — still the narrow allow_once/deny shape, no rule
-      // options ever appear, an unsafe verdict adds no third "escalation" option either.
+      // The verdict never mutates the option set: an unsafe annotation adds no "escalation" option and
+      // removes none — the card shows the SAME BashUnsandboxed(<prefix>:*) escape options a safe (or
+      // absent) verdict would (SP-policies Task 11). suggestBashPrefix("docker run --privileged x") === "docker run".
       expect(requested.options).toEqual([
         { id: "allow_once", label: "Allow once" },
+        { id: "allow_unsandboxed_project", label: 'Always allow "BashUnsandboxed(docker run:*)" in this project', rule: "BashUnsandboxed(docker run:*)", scope: "project" },
+        { id: "allow_unsandboxed_global", label: 'Always allow "BashUnsandboxed(docker run:*)" everywhere', rule: "BashUnsandboxed(docker run:*)", scope: "global" },
         { id: "deny", label: "Deny" },
       ]);
       expect(calls.length).toBe(1); // human approved -> ran, DESPITE the unsafe verdict (annotation only, never a gate)
@@ -782,20 +797,24 @@ describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisabl
       expect(calls.length).toBe(1); // approved -> ran regardless — the card fired despite the reviewer failure
     });
 
-    test("under AUTO policy the annotation still attaches (auto doesn't skip the reviewer step, and the card still always fires)", async () => {
+    test("under AUTO the reviewer GATES the escape: a 'safe' verdict runs it UNATTENDED with no card (SP-policies Task 11)", async () => {
+      // Was: "auto still cards, annotation attaches". SP-policies Task 11 makes the reviewer the GATE
+      // under auto — a safe verdict now runs the escape unattended (no card). The auto+UNSAFE→card
+      // path and the ask-annotation path are covered in policy-escape.test.ts / the ask test above.
       const { registry, calls } = stubRegistry();
       const reviewer = stubReviewer({ verdict: "safe", reason: "REASON_UNSANDBOXED_AUTO" });
       const provider = new FakeProvider(bashTurn("docker ps", undefined, { dangerouslyDisableSandbox: true }));
-      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "auto" });
-      hub.attach(approver(broker, sessionId, true), sessionId, 0);
+      const { engine, store, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "auto" });
 
       await engine.runTurn(sessionId);
       const events = store.read(sessionId);
 
-      const requested = events.find((e) => e.type === "approval_requested") as any;
-      expect(requested).toBeDefined(); // auto still cards — the whole point of this floor
-      expect(requested.reviewerReason).toBe("REASON_UNSANDBOXED_AUTO");
-      expect(calls.length).toBe(1);
+      // The reviewer ran (exactly one tool_review, safe) and its verdict GATED — no human card fired.
+      expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+      const review = events.find((e) => e.type === "tool_review") as any;
+      expect(review).toMatchObject({ toolName: "bash", verdict: "safe", reason: "REASON_UNSANDBOXED_AUTO" });
+      expect(reviewer.seen).toEqual([{ class: "bash", command: "docker ps", justification: undefined }]);
+      expect(calls.length).toBe(1); // ran unsandboxed, unattended
     });
 
     test("no reviewer configured -> byte-identical to before this fix: no tool_review, no reviewerReason", async () => {
@@ -817,9 +836,10 @@ describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisabl
 
   // SP-approvals T11 review, LOW-2: pin the precedence when a (malformed/adversarial) call sets
   // BOTH escalation args at once — dangerouslyDisableSandbox must win outright: the card is the
-  // UNSANDBOXED one (narrow options, no rule-bearing choices), never the "(with network)" one.
+  // UNSANDBOXED one, carrying its own BashUnsandboxed(<prefix>:*) options (SP-policies Task 11),
+  // never the "(with network)" one (which would carry the plain Bash(<prefix>:*) options instead).
   describe("LOW-2: both flags set at once -> dangerouslyDisableSandbox wins outright", () => {
-    test("allowNetwork:true AND dangerouslyDisableSandbox:true -> the card is UNSANDBOXED, not \"(with network)\", and offers only allow_once/deny", async () => {
+    test("allowNetwork:true AND dangerouslyDisableSandbox:true -> the card is UNSANDBOXED (BashUnsandboxed options), not \"(with network)\" (Bash options)", async () => {
       const { registry, calls } = stubRegistry();
       const provider = new FakeProvider(bashTurn("curl https://example.com", undefined, { allowNetwork: true, dangerouslyDisableSandbox: true }));
       const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask" });
@@ -831,10 +851,13 @@ describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisabl
       const requested = events.find((e) => e.type === "approval_requested") as any;
       expect(requested).toBeDefined();
       expect(requested.summary).toBe("bash (UNSANDBOXED): curl https://example.com"); // NOT "(with network)"
+      // The ESCAPE options (BashUnsandboxed(curl:*)) — NOT allowNetwork's Bash(curl:*) shape.
       expect(requested.options).toEqual([
         { id: "allow_once", label: "Allow once" },
+        { id: "allow_unsandboxed_project", label: 'Always allow "BashUnsandboxed(curl:*)" in this project', rule: "BashUnsandboxed(curl:*)", scope: "project" },
+        { id: "allow_unsandboxed_global", label: 'Always allow "BashUnsandboxed(curl:*)" everywhere', rule: "BashUnsandboxed(curl:*)", scope: "global" },
         { id: "deny", label: "Deny" },
-      ]); // NOT the 4-option allow-similar shape allowNetwork alone would offer
+      ]);
       expect(calls.length).toBe(1);
       expect(calls[0]?.allowNetwork).toBe(true); // both flags still reach the tool unchanged — only the CARD's shape is affected
       expect(calls[0]?.dangerouslyDisableSandbox).toBe(true);

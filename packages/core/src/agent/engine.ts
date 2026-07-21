@@ -2861,6 +2861,19 @@ export class AgentEngine {
           }
           if (ruleAllowed) decision = "allow";
         }
+        // SP-policies: a BashUnsandboxed rule (permission-rules.ts, disjoint from Bash) pre-clears a sandbox
+        // escape in EVERY mode except plan (decision 7). decision() matches it ONLY for a
+        // dangerouslyDisableSandbox call, so this can never fire for an ordinary bash call. Computed even
+        // though the ruleAllowed block above excludes escape calls — the escape is a separate, higher-stakes
+        // class with its own rule form, never silenced by a plain Bash rule. Runs BEFORE the dont-ask deny
+        // flip below (ordering is load-bearing): a BashUnsandboxed-covered escape under dont-ask must stay
+        // "allow" and run silently, not get converted to "deny" by that flip.
+        let unsandboxedRuleAllowed = false;
+        if (bashEscalation.dangerouslyDisableSandbox && this.cfg.permissionRules && meta.approvalPolicy !== "plan"
+            && this.cfg.permissionRules.decision({ name: call.name, argsJson: call.argsJson }, projectRoot) === "allow") {
+          unsandboxedRuleAllowed = true;
+          decision = "allow"; // flows to executeCall (unsandboxed), skipping the escape card + the reviewer
+        }
         // SP-policies Task 7: in-project edits are SILENT by default. A write/edit whose target is in
         // the session writable set (dirGrant === null ⇒ in-root, now that Task 6's writableRoots has
         // folded in any Edit(<path>)-declared dirs) and is not the rules store gets no card — under
@@ -2879,10 +2892,12 @@ export class AgentEngine {
         // `decision === "deny"` branch is FIRST in the dispatch chain below, this deny short-circuits
         // before the `else if (dirGrant)` grant-card branch could run, so no grant card is surfaced.
         // `!rulesFileTarget` is excluded so a rules-store write still hits its dedicated hard-error
-        // branch (accurate message) rather than this generic dont-ask deny. A dangerouslyDisableSandbox
-        // escape is likewise converted here (the ruleAllowed block excluded it, in-project-silent skips
-        // it — not write/edit), so it denies before its own always-card branch; that is correct for
-        // this task (a later task adds a BashUnsandboxed-rule pre-clear ahead of these flips).
+        // branch (accurate message) rather than this generic dont-ask deny. An UNCOVERED
+        // dangerouslyDisableSandbox escape is likewise converted here (the ruleAllowed block excluded
+        // it, in-project-silent skips it — not write/edit), so it denies before its own escape branch.
+        // SP-policies Task 11: a BashUnsandboxed-COVERED escape never reaches this flip as "ask" —
+        // unsandboxedRuleAllowed (computed above, ahead of these flips) already set it "allow", so it
+        // runs silently under dont-ask instead of being denied here.
         if (decision === "ask" && meta.approvalPolicy === "dont-ask" && !rulesFileTarget) {
           decision = "deny";
         }
@@ -2976,63 +2991,63 @@ export class AgentEngine {
             if (failure) return { output: failure, isError: true };
             return this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, oneShot, visionCapable);
           }, pins, rootsOverride, visionCapable);
-        } else if (call.name === "bash" && bashEscalation.dangerouslyDisableSandbox && meta.approvalPolicy !== "bypass") {
-          // SP-approvals Task 11 (spec §8): a full sandbox-escape floor — ALWAYS a card, under
-          // EVERY policy this branch can be reached under. Unlike every other branch in this
-          // chain, the condition here never consults `decision`/`ruleAllowed` at all — it fires
-          // purely off the ARG (parsed once into `bashEscalation` above) — so neither a matching
-          // PermissionRules rule nor the readOnlyBash classifier (both of which only ever
-          // influence `decision`/`ruleAllowed`, and are additionally excluded from ever running
-          // for this flag at all — see the `ruleAllowed` block's own doc comment above) can route
-          // a dangerouslyDisableSandbox call anywhere but here. Plan mode's blanket deny (the
-          // `decision === "deny"` branch, checked FIRST, above) still wins — bash is denied
-          // outright before this branch is ever reached under `plan` — so "every policy" in
-          // practice means ask/auto (spec, confirmed by permission-gate-order.test.ts). Options
-          // are deliberately narrower than approvalOptionsFor's bash shape: allow_once/deny ONLY,
-          // no allow_project/allow_global — v1 offers no standing memory for this flag at all
-          // (spec: "NO rule can silence it").
+        } else if (call.name === "bash" && bashEscalation.dangerouslyDisableSandbox && !unsandboxedRuleAllowed && meta.approvalPolicy !== "bypass") {
+          // SP-policies Task 11: the sandbox-escape gate. Reworked from SP-approvals' always-card
+          // floor into a mode split. `!unsandboxedRuleAllowed` guards it because a BashUnsandboxed
+          // rule pre-cleared the escape above (set decision="allow"); the branch's own
+          // `bashEscalation.dangerouslyDisableSandbox` is still true, so without this guard a
+          // pre-cleared escape would still card here.
           //
-          // SP-policies Task 10: `bypass` now excludes this branch's CONDITION (the guard added
-          // above) — bypass is opt-in no-guardrails, so an escape call falls through every
-          // remaining branch (all `=== "auto"`-gated) to the final `else` → executeCall, silently.
-          // Keeping this a condition-only change is deliberate: SP-policies Task 11 (next, NOT the
-          // "SP-approvals Task 11" referenced throughout this branch's body above — a different,
-          // already-shipped phase) reworks this branch's BODY significantly (an auto reviewer-gate
-          // + a BashUnsandboxed-rule pre-clear ahead of these flips) — neither applies under
-          // bypass, which never reaches this body at all.
-          //
-          // SP-approvals T11 review, MEDIUM-1 (adjudicated ADOPTED — CC parity: an unsandboxed
-          // retry still rides the normal review path, which includes the reviewer under auto):
-          // the SAME bash reviewer is consulted here, BEFORE the card, but strictly as an
-          // ANNOTATION — see annotateWithReview's own doc comment for why this can never become a
-          // second gate. Gated on the identical three conditions the bash reviewAndDispatch branch
-          // below already requires (reviewer configured, reviewerEnabled, reviewClassEnabled) —
-          // deliberately WITHOUT bashLooksSafe's static bypass: that bypass exists to save a
-          // reviewer call when NOTHING would ever see the result (auto policy, no human in the
-          // loop); here a human card is already guaranteed regardless, so there's no cost-saving
-          // rationale for skipping the annotation on an obviously-safe-looking command.
-          let reviewerReason: string | undefined;
-          if (this.cfg.reviewer && this.cfg.reviewerEnabled?.() !== false && this.reviewClassEnabled("bash")) {
-            let command = "";
-            let justification: string | undefined;
-            try {
-              const a = JSON.parse(call.argsJson || "{}");
-              command = typeof a.command === "string" ? a.command : "";
-              justification = typeof a.justification === "string" ? a.justification : undefined;
-            } catch { /* malformed argsJson → review "" ; still annotation-only, never blocks the card */ }
-            reviewerReason = await this.annotateWithReview(
-              { class: "bash", command, justification }, approvalCardSummary(call), call, sessionId, threadId, signal,
-            );
+          // Remaining modes here: auto (reviewer GATES), ask/accept-edits (human card, reviewer
+          // annotates). plan denied it (deny branch); dont-ask denied it (ask→deny flip); bypass ran
+          // it silently (branch guard); a BashUnsandboxed rule pre-cleared it (unsandboxedRuleAllowed).
+          let command = "";
+          let justification: string | undefined;
+          try {
+            const a = JSON.parse(call.argsJson || "{}");
+            command = typeof a.command === "string" ? a.command : "";
+            justification = typeof a.justification === "string" ? a.justification : undefined;
+          } catch { /* review "" */ }
+          // The escape card now offers standing memory (v1 offered none): a BashUnsandboxed(<prefix>:*)
+          // rule, project or global scope, that a FUTURE matching escape's unsandboxedRuleAllowed
+          // pre-clear then silences. `<prefix>` is suggestBashPrefix (same head heuristic as the plain
+          // bash card's Bash(<prefix>:*)); the rule string is DISJOINT from Bash — a plain Bash rule
+          // never covers an escape (permission-rules.ts Task 5).
+          const urule = `BashUnsandboxed(${suggestBashPrefix(command)}:*)`;
+          const escapeOptions = [
+            { id: "allow_once", label: "Allow once" },
+            { id: "allow_unsandboxed_project", label: `Always allow "${urule}" in this project`, rule: urule, scope: "project" as const },
+            { id: "allow_unsandboxed_global", label: `Always allow "${urule}" everywhere`, rule: urule, scope: "global" as const },
+            { id: "deny", label: "Deny" },
+          ];
+          const reviewerReady = this.cfg.reviewer && this.cfg.reviewerEnabled?.() !== false && this.reviewClassEnabled("bash");
+          if (meta.approvalPolicy === "auto" && reviewerReady) {
+            // auto: the reviewer is the GATE — safe runs unsandboxed unattended; non-safe/error escalates to
+            // the SAME human card the ask path shows. One tool_review is emitted either way.
+            let v: { verdict: "safe" | "unsafe" | "error"; reason: string };
+            try { v = await this.cfg.reviewer!.review({ class: "bash", command, justification }, signal); }
+            catch { v = { verdict: "error", reason: "reviewer unavailable — manual approval required" }; }
+            this.emit(sessionId, { type: "tool_review", sessionId, threadId, toolName: call.name, verdict: v.verdict, reason: sanitizeReviewText(v.reason, 300), summary: sanitizeReviewText(approvalCardSummary(call), 160) });
+            if (v.verdict === "safe") {
+              outcome = await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable);
+            } else {
+              outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
+                timeoutMs: this.approvalTimeoutFor(meta), summary: approvalCardSummary(call),
+                reviewerReason: sanitizeReviewText(v.reason, 300), options: escapeOptions,
+              }, loaded, undefined, pins, rootsOverride, visionCapable);
+            }
+          } else {
+            // ask / accept-edits (or auto with no reviewer configured): human card; the reviewer, when
+            // present, ANNOTATES only (never a second gate) — unchanged from SP-approvals.
+            let reviewerReason: string | undefined;
+            if (reviewerReady) {
+              reviewerReason = await this.annotateWithReview({ class: "bash", command, justification }, approvalCardSummary(call), call, sessionId, threadId, signal);
+            }
+            outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
+              timeoutMs: this.approvalTimeoutFor(meta), summary: approvalCardSummary(call),
+              reviewerReason, options: escapeOptions,
+            }, loaded, undefined, pins, rootsOverride, visionCapable);
           }
-          outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
-            timeoutMs: this.approvalTimeoutFor(meta),
-            summary: approvalCardSummary(call),
-            reviewerReason,
-            options: [
-              { id: "allow_once", label: "Allow once" },
-              { id: "deny", label: "Deny" },
-            ],
-          }, loaded, undefined, pins, rootsOverride, visionCapable);
         } else if (decision === "ask") {
           outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
             timeoutMs: this.approvalTimeoutFor(meta),
@@ -3103,7 +3118,13 @@ export class AgentEngine {
           // alone: write/edit's in-root rule coverage is the common case, and out-of-root always
           // keeps its own grant card regardless — see the dirGrant precedence above; external
           // tools have no rule/classifier source at all).
-          decision === "allow" && call.name === "bash" && this.cfg.reviewer &&
+          // SP-policies Task 11: `!bashEscalation.dangerouslyDisableSandbox` excludes a sandbox escape
+          // from this ordinary bash reviewer. A rule-pre-cleared escape (unsandboxedRuleAllowed set
+          // decision="allow") would otherwise land here and be reviewed+carded like a plain bash call;
+          // instead it falls straight through to executeCall (unsandboxed, silent). An UN-pre-cleared
+          // escape under auto is handled by the escape branch above (which gates it on the reviewer),
+          // never reaching here (that branch's `decision` is "allow" too, but it's checked first).
+          decision === "allow" && call.name === "bash" && !bashEscalation.dangerouslyDisableSandbox && this.cfg.reviewer &&
           this.cfg.reviewerEnabled?.() !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("bash")
         ) {
           let command = "";
