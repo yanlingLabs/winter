@@ -9,6 +9,7 @@ import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
 import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom } from "./settings";
+import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
 import { createProvider } from "./providers/manager";
@@ -195,6 +196,16 @@ export async function startDaemon(opts: {
   }
 
   const trustStore = new TrustStore(join(normaHome, "trust.json"));
+  // Task 7 (CC project-folder-mechanics): the ONE cwd-keyed "effective settings" resolver for the
+  // whole daemon — `base` reads the reassignable `settings` holder above LIVE (same hot-settings
+  // shape as memoryEnabledHot/hooksEnabledHot below: a watcher-driven reload swaps in a NEW object
+  // in place, and this thunk re-reads that same binding on its NEXT call, never a boot snapshot).
+  // Constructed here — after both `trustStore` and the initial `settings` load exist, before
+  // anything that needs it — so it's reachable from every getter below that wants a per-project
+  // view of settings.json (today: the `permissionRules`/`dangerousDomainsAdded` getters further
+  // down; later tasks convert more getters against this SAME instance, never a second one, so
+  // there is exactly one mtime cache per project cwd for the whole daemon).
+  const projectSettings = new ProjectSettingsResolver({ base: () => settings, trust: trustStore });
   const pluginStore = new PluginStore({
     normaHome, plugins: settings?.plugins, consents: settings?.plugins?.consents, log: (m) => console.error(m),
   });
@@ -706,7 +717,16 @@ export async function startDaemon(opts: {
     // `approval.respond`'s optionId-driven append() shares one mtime cache with the engine's own
     // decision() reads, never two independently-stale PermissionRules. See the field below (still
     // referenced by its old inline comment, now a shorthand) for what this class actually does.
-    permissionRules = new PermissionRules({ globalAllow: () => settings?.permissions?.allow ?? ["Computer"], normaHome });
+    // Task 7: `globalAllow` now takes the `projectRoot` PermissionRules' own decision()/rulesFor()/
+    // editPathRules() already have in scope, and resolves it through the SAME `projectSettings`
+    // instance above — a trusted project's OWN `.norma/settings.json` `permissions.allow` UNIONS
+    // into this project's effective rules (mergeSettings, Task 5) on top of the global settings.json
+    // value; `effective(null)` degrades to `settings` verbatim, so a null projectRoot (or an
+    // untrusted/overlay-less one) reads byte-identically to the pre-Task-7 global-only getter.
+    permissionRules = new PermissionRules({
+      globalAllow: (projectRoot) => projectSettings.effective(projectRoot)?.permissions?.allow ?? ["Computer"],
+      normaHome,
+    });
     engine = new AgentEngine({
       store, hub, registry, broker: approvalBroker,
       gate: new PermissionGate(),
@@ -731,11 +751,16 @@ export async function startDaemon(opts: {
       // this class's OWN read-modify-write in append(scope:"global") are for).
       permissionRules,
       // SP-approvals Task 10 (spec §7): the user-added half of web_fetch's dangerous-domain floor
-      // — same live-getter shape as `globalAllow` just above (re-reads the reassignable `settings`
-      // holder fresh on every web_fetch call), so an edit to `permissions.dangerousDomains.added`
-      // applies with no daemon restart. Absent block/field both resolve to `undefined`, which
-      // engine.ts's `?? []` treats as "no user additions" — the shipped list alone still applies.
-      dangerousDomainsAdded: () => settings?.permissions?.dangerousDomains?.added,
+      // — same live-getter shape as `globalAllow` just above, so an edit to
+      // `permissions.dangerousDomains.added` applies with no daemon restart. Absent block/field
+      // both resolve to `undefined`, which engine.ts's `?? []` treats as "no user additions" — the
+      // shipped list alone still applies.
+      // Task 7: now resolved per-project through the SAME `projectSettings` instance `globalAllow`
+      // uses above — `cwd` is the calling session's cwd (engine.ts's webFetchGate passes its own
+      // param straight through); `effective(cwd ?? null)` degrades to `settings` verbatim for a
+      // null/untrusted/overlay-less cwd, so this reads byte-identically to the pre-Task-7 getter
+      // whenever no project overlay applies.
+      dangerousDomainsAdded: (cwd) => projectSettings.effective(cwd ?? null)?.permissions?.dangerousDomains?.added,
       dirs: sessionDirs,
       // write-permission-flow F2: the out-of-root write/edit grant flow must never silently grant
       // any part of Norma's OWN home directory. This is BROADER than the READ denylist above

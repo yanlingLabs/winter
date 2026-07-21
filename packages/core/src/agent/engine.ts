@@ -527,14 +527,19 @@ export interface EngineConfig {
   // activates, byte-identical to before this field existed.
   permissionRules?: PermissionRules;
   // SP-approvals Task 10 (spec §7): the USER half of web_fetch's dangerous-domain floor —
-  // `effective = dangerous-domains.ts's SHIPPED_DANGEROUS_DOMAINS ∪ dangerousDomainsAdded()`, read
-  // fresh on every web_fetch call (webFetchGate below) so a settings.json edit to
+  // `effective = dangerous-domains.ts's SHIPPED_DANGEROUS_DOMAINS ∪ dangerousDomainsAdded(cwd)`,
+  // read fresh on every web_fetch call (webFetchGate below) so a settings.json edit to
   // `permissions.dangerousDomains.added` applies with no daemon restart, same hot-getter shape as
   // `reviewerAllow` below. Absent getter, or one resolving to undefined, means "no user
   // additions" — the SHIPPED list alone still applies; this can narrow-to-empty but never disables
   // the floor entirely (there is deliberately no equivalent of `permissions.allow: []`'s "opt out
   // of the Computer default" for this list — the shipped entries are immutable by construction).
-  dangerousDomainsAdded?: () => string[] | undefined;
+  // Task 7 (CC project-folder-mechanics): takes the calling session's `cwd` so daemon.ts's real
+  // wiring can resolve a PER-PROJECT addition (`ProjectSettingsResolver.effective(cwd)`) rather
+  // than only the global settings.json — webFetchGate passes its own `cwd` param straight through.
+  // Optional param: every pre-Task-7 test/getter that ignores it (a plain `() => [...]`) keeps
+  // working unchanged — the call site below always passes `cwd`, but a getter is free not to use it.
+  dangerousDomainsAdded?: (cwd?: string) => string[] | undefined;
   broker: ApprovalBroker;
   dirs: SessionDirectories;
   // `live`, when wired (daemon.ts, from providers/manager.ts's ActiveProvider.liveModel),
@@ -3782,7 +3787,7 @@ export class AgentEngine {
         options: webFetchApprovalOptions(undefined, undefined),
       };
     }
-    const added = this.cfg.dangerousDomainsAdded?.() ?? [];
+    const added = this.cfg.dangerousDomainsAdded?.(cwd) ?? [];
     const matchedEntry = dangerousDomainMatch(host, [...SHIPPED_DANGEROUS_DOMAINS, ...added]);
     if (matchedEntry === null) return null; // nothing dangerous about this host — free by default
     // `projectRoot` mirrors the SAME ternary the ruleAllowed block above uses (a defensive guard
