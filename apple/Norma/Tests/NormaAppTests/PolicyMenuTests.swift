@@ -111,4 +111,28 @@ final class PolicyMenuTests: XCTestCase {
         XCTAssertFalse(ok)
         XCTAssertTrue(t.sent.isEmpty, "no RPC should go out with no focused session")
     }
+
+    // MARK: - SP-policies Task 14: six-mode list + bypass danger
+
+    /// The picker's offered modes — wire-identical to the CLI's `POLICY_ORDER`
+    /// (`packages/cli/src/tui/app.tsx`) and the protocol's `ApprovalPolicy` enum
+    /// (`packages/protocol/src/methods.ts`), in restrictiveness order.
+    func testSessionPolicyModesIsSixValuesInRestrictivenessOrder() {
+        XCTAssertEqual(sessionPolicyModes, ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"])
+    }
+
+    /// `bypass` is the only mode that auto-approves everything (including dangerous-domain
+    /// calls, SP-policies Task 10) — the picker row's danger treatment must key off exactly this.
+    func testBypassIsTheOnlyDangerousMode() {
+        for policy in sessionPolicyModes {
+            XCTAssertEqual(isPolicyDangerous(policy), policy == "bypass", "\(policy)'s danger flag")
+        }
+    }
+
+    /// Every mode gets a readable label — not a bare `.capitalized` (which would render the
+    /// hyphenated modes as "Dont-Ask"/"Accept-Edits").
+    func testPolicyDisplayLabelsAreReadableForEveryMode() {
+        let labels = sessionPolicyModes.map(policyDisplayLabel)
+        XCTAssertEqual(labels, ["Plan", "Don't Ask", "Ask", "Accept Edits", "Auto", "Bypass"])
+    }
 }

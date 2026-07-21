@@ -88,6 +88,40 @@ func dismissRightOverlay(_ s: SidebarState) -> SidebarState {
     var out = s; out.rightOverlayOpen = false; out.rightExpanded = false; return out
 }
 
+// MARK: - SP-policies Task 14: the six-mode restrictiveness order + display labels
+
+/// The six approval-policy modes offered by both pickers (the WorkSidebar Options block and the
+/// ⋯ popover's `policyMenuContent`), in restrictiveness order — wire-identical to the CLI's
+/// `POLICY_ORDER` (`packages/cli/src/tui/app.tsx`) and the protocol's `ApprovalPolicy` zod enum
+/// (`packages/protocol/src/methods.ts`). Raw strings only: `onSetPolicy`/`NormaClient.setPolicy`
+/// are stringly-typed (no generated Swift enum mirrors `ApprovalPolicy` — the protocol's
+/// three-value → six-value widening doesn't touch an exhaustive switch here), so these pass
+/// straight through to the wire unchanged. `FieldStateAdapter.sessionPolicy`'s `"auto"` seed is
+/// unaffected — this only widens what the PICKER offers.
+let sessionPolicyModes: [String] = ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"]
+
+/// Display label per mode — mirrors the CLI footer's wording (`packages/cli/src/tui/footer.tsx`)
+/// rather than a bare `.capitalized`, which would render the hyphenated modes as "Dont-Ask"/
+/// "Accept-Edits" instead of readable words.
+func policyDisplayLabel(_ policy: String) -> String {
+    switch policy {
+    case "plan": return "Plan"
+    case "dont-ask": return "Don't Ask"
+    case "ask": return "Ask"
+    case "accept-edits": return "Accept Edits"
+    case "auto": return "Auto"
+    case "bypass": return "Bypass"
+    default: return policy.capitalized
+    }
+}
+
+/// True only for `"bypass"` — the one mode that auto-approves everything, including
+/// dangerous-domain calls (SP-policies Task 10). Mirrors the CLI's `theme.dangerMode` red
+/// treatment (`footer.tsx`'s `⚠ bypass` segment) so the picker row carries the same danger signal.
+func isPolicyDangerous(_ policy: String) -> Bool {
+    policy == "bypass"
+}
+
 // MARK: - The right work sidebar (a function-family on WindowContentView, like `subagentSection`/
 // `pinnedTasksSection`, so it renders them directly — brief Step 2's "smallest diff" option).
 
@@ -114,19 +148,25 @@ extension WindowContentView {
     /// and the WorkSidebar's Options block both render (brief Step 2: "one implementation"). Reuses
     /// EXACTLY `adapter.onSetPolicy`/`sessionPolicy`/`policyChangeInFlight`. Internal (not `private`)
     /// so `policyMenuContent` in WindowContentView.swift can call it across files.
+    ///
+    /// SP-policies Task 14: `policy` ranges over all six `sessionPolicyModes` (not just
+    /// auto/ask/plan) — `onSetPolicy` still receives the raw wire string unchanged (no enum). The
+    /// `bypass` row gets a red danger treatment (`⚠` affix + red foreground), mirroring the CLI
+    /// footer's `theme.dangerMode` treatment for the same mode (`packages/cli/src/tui/footer.tsx`).
     @ViewBuilder
     func policyPickerRow(_ policy: String) -> some View {
         Button {
             adapter.onSetPolicy(policy)
         } label: {
             HStack {
-                Text(policy.capitalized)
+                Text(isPolicyDangerous(policy) ? "⚠ \(policyDisplayLabel(policy))" : policyDisplayLabel(policy))
                 Spacer()
                 if adapter.sessionPolicy == policy {
                     Image(systemName: "checkmark")
                 }
             }
             .contentShape(Rectangle())
+            .foregroundStyle(isPolicyDangerous(policy) ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
         }
         .buttonStyle(.plain)
         .disabled(adapter.policyChangeInFlight)
@@ -140,7 +180,7 @@ extension WindowContentView {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
-                ForEach(["auto", "ask", "plan"], id: \.self) { policyPickerRow($0) }
+                ForEach(sessionPolicyModes, id: \.self) { policyPickerRow($0) }
             }
             sidebarSessionInfo
         }
