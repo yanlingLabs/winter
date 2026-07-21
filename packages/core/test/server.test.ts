@@ -443,8 +443,14 @@ describe("daemon IPC", () => {
 
   test("approval.respond resolves a pending approval (first-wins over the wire)", async () => {
     const { FakeProvider } = await import("../src/agent/fake-provider");
+    // SP-policies Task 7: an in-root write under `ask` is SILENT now (in-project-silent flip), so it
+    // would raise no card to respond to. Target an OUT-OF-ROOT path instead — that still raises a
+    // (grant-flavored) approval card, and approving it lands the write, so the approval round-trip
+    // this test checks (card → approval.respond → resolved → effect observable on disk) is unchanged.
+    const outside = mkdtempSync(join(tmpdir(), "norma-approve-oor-"));
+    const target = join(outside, "f.txt");
     const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "c1", name: "write", argsJson: '{"path":"f.txt","content":"x"}' }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "tool_call", callId: "c1", name: "write", argsJson: JSON.stringify({ path: target, content: "x" }) }, { type: "done", stopReason: "tool_calls" }],
       [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
     ]);
     await boot({}, fake);
@@ -458,7 +464,7 @@ describe("daemon IPC", () => {
     const res = await c.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: ask.params.callId, approved: true });
     expect(res.result).toEqual({ ok: true, alreadyResolved: false });
     await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
-    expect(readFileSync(join(cwd, "f.txt"), "utf8")).toBe("x");
+    expect(readFileSync(target, "utf8")).toBe("x");
     c.close();
   });
 

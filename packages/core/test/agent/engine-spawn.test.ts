@@ -29,6 +29,7 @@ import { WorktreeManager } from "../../src/agent/worktree";
 import { sessionTmpDir } from "../../src/agent/session-tmp";
 import type { LspManager } from "../../src/agent/lsp/manager";
 import type { ModelInfo, Provider, ProviderEvent, TurnRequest } from "../../src/providers/types";
+import { stubRegistry } from "./engine-reviewer.test"; // SP-policies Task 7: stub `bash` tool for the escalation tests' discriminating observable
 
 export function setup(
   script: ProviderEvent[][],
@@ -864,14 +865,22 @@ describe("AgentEngine: spawn_agent mode (restrict-only, 4h-i Task 2)", () => {
     expect(store.meta(sessionId).approvalPolicy).toBe("auto");
   });
 
-  test("mode: 'bypassPermissions' from a parent-'ask' session is an ESCALATION — denied; the child's write still requires human approval, is not auto-allowed", async () => {
+  test("mode: 'bypassPermissions' from a parent-'ask' session is an ESCALATION — denied; the child's bash still requires human approval, is not auto-allowed", async () => {
+    // SP-policies Task 7: the child's observable MUST discriminate "ask" from the would-be-escalated
+    // "bypass". An in-root WRITE no longer works — the in-project-silent flip makes it silent under
+    // BOTH ask and bypass, so its card-presence proves nothing. A BASH call DOES discriminate: with
+    // no permissionRules it CARDS under `ask` (MUTATING, and readOnlyBash never even runs without a
+    // rules store) but is auto-allowed SILENTLY under bypass/auto. So an approval_requested for the
+    // child's bash proves the child stayed at the parent's "ask" (escalation rejected); had bypass
+    // taken effect, the bash would have auto-run with NO card at all.
+    const { registry } = stubRegistry();
     const script: ProviderEvent[][] = [
       [spawnCall("s1", "do X", { mode: "bypassPermissions" }), done("tool_calls")], // parent policy "ask"
-      [{ type: "tool_call", callId: "w1", name: "write", argsJson: JSON.stringify({ path: "x.txt", content: "y" }) }, done("tool_calls")],
+      [{ type: "tool_call", callId: "w1", name: "bash", argsJson: JSON.stringify({ command: "git push" }) }, done("tool_calls")],
       text("child acknowledged the denial"),
       text("parent wrap-up"),
     ];
-    const { engine, store, sessionId, hub, broker } = setup(script, { approvalPolicy: "ask" });
+    const { engine, store, sessionId, hub, broker } = setup(script, { approvalPolicy: "ask", registry });
     const watcher = {
       clientName: "auto-denier",
       deliver: (e: SessionEvent) => { if (e.type === "approval_requested") broker.resolve(sessionId, e.callId, false, "auto-denier"); return true; },
@@ -883,9 +892,9 @@ describe("AgentEngine: spawn_agent mode (restrict-only, 4h-i Task 2)", () => {
     const spawnResult = events.find((e) => e.type === "tool_result" && e.callId === "s1");
     expect(spawnResult).toMatchObject({ isError: false }); // spawn_agent itself is read-only, always allowed
 
-    // The child's write call REQUIRED approval — proof the "bypassPermissions" (→ Norma "auto")
+    // The child's bash call REQUIRED approval — proof the "bypassPermissions" (→ Norma "bypass")
     // escalation was denied and the child stayed at the parent's "ask" policy. If the escalation
-    // had gone through, this would have been an auto-allow with NO approval_requested at all.
+    // had gone through, this would have been a silent auto-allow with NO approval_requested at all.
     const approvalReq = events.find((e) => e.type === "approval_requested" && e.callId === "w1");
     expect(approvalReq).toBeDefined();
     expect(events.find((e) => e.type === "approval_resolved" && e.callId === "w1")).toMatchObject({ approved: false, by: "auto-denier" });
@@ -897,17 +906,22 @@ describe("AgentEngine: spawn_agent mode (restrict-only, 4h-i Task 2)", () => {
     expect(store.meta(sessionId).approvalPolicy).toBe("ask");
   });
 
-  test("no mode → child inherits the parent's policy exactly, and the spawn NEVER mutates the shared parent meta (a same-turn parent write still follows the original 'ask' policy)", async () => {
+  test("no mode → child inherits the parent's policy exactly, and the spawn NEVER mutates the shared parent meta (a same-turn parent bash still follows the original 'ask' policy)", async () => {
+    // SP-policies Task 7: the parent's post-spawn observable must discriminate "ask" from a corrupted
+    // (widened) meta. A BASH call cards under `ask` but is silent under auto — so an approval_requested
+    // for the parent's p1 proves the shared meta was NOT widened by the spawn. (An in-root write is
+    // silent under both now — the in-project-silent flip — so it could no longer prove this.)
+    const { registry } = stubRegistry();
     const script: ProviderEvent[][] = [
       [spawnCall("s1", "do X"), done("tool_calls")], // parent round 0: spawn, no mode at all
       text("child final report"), // the child's only round
-      // the parent's OWN continuation round makes its OWN write call — must still be gated under
+      // the parent's OWN continuation round makes its OWN bash call — must still be gated under
       // the session's ORIGINAL "ask" policy; if the spawn bridge had mutated the shared `meta`
-      // object (e.g. widened it while building childMeta), this call would see the corruption.
-      [{ type: "tool_call", callId: "p1", name: "write", argsJson: JSON.stringify({ path: "after.txt", content: "z" }) }, done("tool_calls")],
+      // object (e.g. widened it while building childMeta), this call would see the corruption (run silently).
+      [{ type: "tool_call", callId: "p1", name: "bash", argsJson: JSON.stringify({ command: "git push" }) }, done("tool_calls")],
       text("parent wrap-up"),
     ];
-    const { engine, store, sessionId, hub, broker } = setup(script, { approvalPolicy: "ask" });
+    const { engine, store, sessionId, hub, broker } = setup(script, { approvalPolicy: "ask", registry });
     const watcher = {
       clientName: "auto-approver",
       deliver: (e: SessionEvent) => { if (e.type === "approval_requested") broker.resolve(sessionId, e.callId, true, "auto-approver"); return true; },
@@ -923,7 +937,7 @@ describe("AgentEngine: spawn_agent mode (restrict-only, 4h-i Task 2)", () => {
     const childId = (events.find((e) => e.type === "thread_started") as Extract<SessionEvent, { type: "thread_started" }>).threadId;
     expect(spawnResult).toMatchObject({ isError: false, output: "child final report" + trailer(childId) });
 
-    // the parent's post-spawn write still went through the normal "ask" approval flow
+    // the parent's post-spawn bash still went through the normal "ask" approval flow
     const approvalReq = events.find((e) => e.type === "approval_requested" && e.callId === "p1");
     expect(approvalReq).toBeDefined();
     const p1Result = events.find((e) => e.type === "tool_result" && e.callId === "p1");

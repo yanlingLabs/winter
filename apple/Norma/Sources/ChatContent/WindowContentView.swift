@@ -252,12 +252,14 @@ struct WindowContentView<Accessory: View>: View {
         }
     }
 
-    /// The ⋯ menu's first (and currently only) item: an inline auto|ask|plan picker for
-    /// `adapter.sessionPolicy` — a checkmark marks the current value, rows disable while
-    /// `adapter.policyChangeInFlight` (a change is already in flight; mirrors the pending-card
-    /// buttons' own in-flight disable). Selecting a row fires `adapter.onSetPolicy` directly — the
-    /// wirer (`GlassRootView`/`DetachedWindowController`) owns the in-flight/success bookkeeping,
-    /// same convention as the three respond callbacks' card buttons.
+    /// The ⋯ menu's first (and currently only) item: an inline six-mode picker (SP-policies Task
+    /// 14 — `sessionPolicyModes`: plan/dont-ask/ask/accept-edits/auto/bypass, restrictiveness
+    /// order) for `adapter.sessionPolicy` — a checkmark marks the current value, rows disable
+    /// while `adapter.policyChangeInFlight` (a change is already in flight; mirrors the
+    /// pending-card buttons' own in-flight disable). Selecting a row fires `adapter.onSetPolicy`
+    /// directly — the wirer (`GlassRootView`/`DetachedWindowController`) owns the
+    /// in-flight/success bookkeeping, same convention as the three respond callbacks' card
+    /// buttons.
     @ViewBuilder
     private var policyMenuContent: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -267,7 +269,7 @@ struct WindowContentView<Accessory: View>: View {
                 .padding(.bottom, 4)
             // Task 6 (2e-iii): the row body is shared with the WorkSidebar's Options block via
             // `policyPickerRow` (WorkSidebar.swift) — one implementation for both surfaces.
-            ForEach(["auto", "ask", "plan"], id: \.self) { policy in
+            ForEach(sessionPolicyModes, id: \.self) { policy in
                 policyPickerRow(policy)
             }
         }

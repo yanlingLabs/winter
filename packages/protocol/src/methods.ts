@@ -9,7 +9,7 @@ export const AbsoluteDirPath = z.string().startsWith("/").refine((p) => p !== "/
 export const Role = z.enum(["harness", "plugin", "admin", "remote"]);
 export type Role = z.infer<typeof Role>;
 
-export const ApprovalPolicy = z.enum(["ask", "auto", "plan"]);
+export const ApprovalPolicy = z.enum(["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"]);
 export type ApprovalPolicy = z.infer<typeof ApprovalPolicy>;
 
 export const HelloParams = z.object({

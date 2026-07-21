@@ -18,9 +18,18 @@ describe("PermissionGate v1", () => {
     }
   });
 
-  test("unknown tools always ask (fail-closed toward the human)", () => {
-    expect(gate.evaluate("mystery", "auto")).toBe("ask");
+  // SP-policies Task 3 (6-mode evaluate() rewrite): an UNCLASSIFIED / unrecognized tool name still
+  // fails CLOSED — "ask" under dont-ask/ask/accept-edits/auto, "deny" under plan — and never rides
+  // auto's blanket allow (only KNOWN MUTATING/external tools do). Only `bypass` (opt-in
+  // no-guardrails) allows an unrecognized name. Preserves gate.ts's own class-doc fail-closed
+  // posture, which a flat "auto → allow" ordering had silently dropped.
+  test("unknown tools fail closed: ask under dont-ask/ask/accept-edits/auto, deny under plan, allow only under bypass", () => {
     expect(gate.evaluate("mystery", "ask")).toBe("ask");
+    expect(gate.evaluate("mystery", "auto")).toBe("ask"); // NOT allow — fail-closed under auto
+    expect(gate.evaluate("mystery", "dont-ask")).toBe("ask");
+    expect(gate.evaluate("mystery", "accept-edits")).toBe("ask");
+    expect(gate.evaluate("mystery", "plan")).toBe("deny");
+    expect(gate.evaluate("mystery", "bypass")).toBe("allow");
   });
 
   test("bash is a mutating tool: ask under ask-policy, allow under auto", () => {
@@ -97,7 +106,12 @@ describe("PermissionGate v1", () => {
     for (const t of ["ask_user", "task_create", "task_update", "task_list"]) expect(gate.evaluate(t, "ask")).toBe("allow");
   });
 
-  test("ask/auto matrices unchanged (byte-identical snapshot)", () => {
+  // SP-policies Task 3: classified MUTATING/external tools track policy (ask under `ask`, allow
+  // under `auto`), but "frobnicate" (UNCLASSIFIED) fails CLOSED to "ask" under BOTH — it never rides
+  // auto's blanket allow. This is the pre-SP-policies fail-closed posture the 6-mode rewrite
+  // preserves (only KNOWN mutating/external names earn auto's allow; see the "unknown tools fail
+  // closed" test above).
+  test("ask/auto matrix: classified MUTATING/external track policy; unclassified fails closed to ask under both (SP-policies Task 3)", () => {
     const g = new PermissionGate();
     for (const p of ["ask", "auto"] as const) {
       for (const [t, exp] of [
@@ -106,7 +120,7 @@ describe("PermissionGate v1", () => {
         ["bash", p === "auto" ? "allow" : "ask"],
         ["mcp__x__y", p === "auto" ? "allow" : "ask"],
         ["plugin__x__y", p === "auto" ? "allow" : "ask"],
-        ["frobnicate", "ask"],
+        ["frobnicate", "ask"], // unclassified — fail-closed under auto too, NOT allow
       ] as const) {
         expect(g.evaluate(t, p)).toBe(exp);
       }
@@ -211,7 +225,9 @@ describe("PermissionGate v1", () => {
   // out-of-root target now carries its own approval via the engine's dispatch loop (engine.ts's
   // `dirGrant` branch), not a self-gating tool the gate had to special-case. Guard against a
   // regression where the name comes back and the gate has to special-case it again.
-  test("request_directory is not a recognized tool name — falls to the unclassified fail-closed branch like any unknown tool", () => {
+  // SP-policies Task 3: an unrecognized name fails CLOSED — "ask" under ask AND auto, "deny" under
+  // plan — never auto-allow.
+  test("request_directory is not a recognized tool name — falls to the unclassified branch, fail-closed (ask under ask/auto, deny under plan)", () => {
     expect(gate.evaluate("request_directory", "ask")).toBe("ask");
     expect(gate.evaluate("request_directory", "auto")).toBe("ask");
     expect(gate.evaluate("request_directory", "plan")).toBe("deny");

@@ -24,8 +24,12 @@ const isMac = process.platform === "darwin";
 // same one engine-reviewer.test.ts uses) rather than calling PermissionRules/readOnlyBash in
 // isolation (already covered by their own unit suites) — the point here is the WIRING and its
 // security invariants: rules are consulted ONLY on `ask`, NEVER on `deny` (plan mode), NEVER ahead
-// of an out-of-root write's own grant card, and NEVER in a way that lets the AI safety reviewer be
-// skipped for bash once a rule/classifier allows it.
+// of an out-of-root write's own grant card. SP-policies Task 8 REVERSES the last clause of this
+// comment's original claim: the AI safety reviewer is now auto-ONLY, so a rule/classifier allowing
+// a bash call under `ask` is a human pre-authorization and the call now runs with NO reviewer at
+// all (scenarios 6/7 below, and the allowNetwork rule-reviewer case in scenario 11, were updated
+// from "still rides the reviewer" to "now runs with no reviewer" accordingly —
+// policy-reviewer-ask.test.ts holds the dedicated auto-vs-ask regression coverage for this).
 
 function tmpDir(prefix: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
@@ -173,11 +177,14 @@ describe("scenario 4: an Edit rule covers an IN-ROOT target only — an out-of-r
 
     const requested = events.find((e) => e.type === "approval_requested") as any;
     expect(requested).toBeDefined();
-    // The grant-flavored summary (engine.ts's dirGrant branch), NOT the generic approvalCardSummary
-    // — proves this rode the SAME out-of-root grant seam a ruleless call would, not a rule-skip.
-    expect(requested.summary).toContain("outside the allowed directories");
-    expect(requested.summary).toContain(`grant write access to ${outsideDir}`);
-    expect(readFileSync(target, "utf8")).toBe("should still need a grant"); // approved → grant applied → write landed
+    // The grant-flavored card (engine.ts's dirGrant branch), NOT the generic approvalCardSummary —
+    // proves this rode the SAME out-of-project grant seam a ruleless call would, not a rule-skip.
+    // SP-policies Task 9: the summary reads "outside your project" and the card now carries the
+    // three edit options (its rule option names the grant dir), whereas the generic ask card's
+    // options — when it has any — are approvalOptionsFor's Bash(...) shape, never an Edit(<dir>) one.
+    expect(requested.summary).toContain("outside your project");
+    expect(requested.options.find((o: any) => o.id === "allow_project")).toMatchObject({ rule: `Edit(${outsideDir})`, scope: "project" });
+    expect(readFileSync(target, "utf8")).toBe("should still need a grant"); // approved → one-shot write landed
   });
 });
 
@@ -202,47 +209,49 @@ describe("scenario 5: plan policy denies outright — a rule is never even consu
   });
 });
 
-describe("scenario 6/7: a rule- or classifier-allowed bash call still rides the AI safety reviewer when configured", () => {
-  test("6. rule-allowed (Bash(npm test:*)) + reviewer configured, unsafe verdict → escalation card appears DESPITE the matching rule", async () => {
+describe("scenario 6/7: a rule- or classifier-allowed bash call under ASK now runs with NO reviewer (SP-policies Task 8)", () => {
+  test("6. rule-allowed (Bash(npm test:*)) bash under ASK runs unreviewed even with a reviewer configured", async () => {
     // "npm test" is rule-matched but NOT readOnlyBash-classified (npm's read-only subcommands are
-    // only ls/view/outdated) — isolates the RULE as the sole source of ruleAllowed.
+    // only ls/view/outdated) — isolates the RULE as the sole source of ruleAllowed. Pre-SP-policies
+    // this rule-allowed call still rode the AI reviewer under `ask` (the SP-approvals T3 widening,
+    // "escalation card appears DESPITE the matching rule"); Task 8 drops that widening — the
+    // reviewer is auto-only now, so a rule match under `ask` is a human pre-authorization and the
+    // call just runs, unreviewed. The stub verdict is "unsafe" so a regression (the reviewer
+    // wrongly running and escalating) would fail loudly rather than silently pass on a lucky verdict.
     const permissionRules = new PermissionRules({ globalAllow: () => ["Bash(npm test:*)"], normaHome: tmpDir("norma-pgo-home-") });
     const { registry, calls } = stubRegistry();
-    const reviewer = stubReviewer({ verdict: "unsafe", reason: "REASON_RULE_BASH" });
+    const reviewer = stubReviewer({ verdict: "unsafe", reason: "WOULD_BLOCK_IF_CONSULTED" });
     const provider = new FakeProvider(bashTurn("npm test"));
-    const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "ask", permissionRules });
-    hub.attach(approver(broker, sessionId, false), sessionId, 0);
+    const { engine, store, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "ask", permissionRules });
 
     await engine.runTurn(sessionId);
     const events = store.read(sessionId);
 
-    const review = events.find((e) => e.type === "tool_review") as any;
-    expect(review).toMatchObject({ toolName: "bash", verdict: "unsafe", reason: "REASON_RULE_BASH" });
-    const requested = events.find((e) => e.type === "approval_requested") as any;
-    expect(requested).toBeDefined();
-    expect(requested.reviewerReason).toBe("REASON_RULE_BASH");
+    expect(events.some((e) => e.type === "tool_review")).toBe(false);
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
     const result = events.find((e) => e.type === "tool_result") as any;
-    expect(result.isError).toBe(true);
-    expect(calls.length).toBe(0); // never ran — reviewer said unsafe, human denied
-    expect(reviewer.seen).toEqual([{ class: "bash", command: "npm test", justification: undefined }]);
+    expect(result.isError).toBe(false);
+    expect(calls.length).toBe(1); // ran — rule-allowed, no reviewer under ask
+    expect(reviewer.seen.length).toBe(0);
   });
 
-  test("7. classifier-allowed (`git log --oneline -5`, no rule at all) + reviewer configured, safe verdict → reviewer WAS consulted, bash ran", async () => {
+  test("7. classifier-allowed (`git log --oneline -5`, no rule at all) bash under ASK runs unreviewed too", async () => {
     // No rule anywhere — readOnlyBash alone is what flips ruleAllowed here, isolating the
-    // CLASSIFIER as the sole source (spec: both sources must ride the same reviewer branch).
+    // CLASSIFIER as the sole source: both sources of ruleAllowed lose the reviewer identically
+    // under `ask` post-Task-8 (the pre-Task-8 spec required both sources to ride the SAME reviewer
+    // branch; now both sources identically skip it).
     const permissionRules = new PermissionRules({ globalAllow: () => undefined, normaHome: tmpDir("norma-pgo-home-") });
     const { registry, calls } = stubRegistry();
-    const reviewer = stubReviewer({ verdict: "safe", reason: "REASON_CLASSIFIER_BASH" });
+    const reviewer = stubReviewer({ verdict: "unsafe", reason: "WOULD_BLOCK_IF_CONSULTED" });
     const provider = new FakeProvider(bashTurn("git log --oneline -5"));
     const { engine, store, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "ask", permissionRules });
 
     await engine.runTurn(sessionId);
     const events = store.read(sessionId);
 
-    expect(events.some((e) => e.type === "approval_requested")).toBe(false); // safe verdict, no escalation
-    const review = events.find((e) => e.type === "tool_review") as any;
-    expect(review).toMatchObject({ toolName: "bash", verdict: "safe", reason: "REASON_CLASSIFIER_BASH" });
-    expect(reviewer.seen.length).toBe(1); // the reviewer was genuinely consulted, not bypassed
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+    expect(events.some((e) => e.type === "tool_review")).toBe(false);
+    expect(reviewer.seen.length).toBe(0); // the reviewer is auto-only now — never consulted under ask
     expect(calls).toEqual([{ command: "git log --oneline -5", justification: undefined }]);
   });
 });
@@ -588,16 +597,21 @@ describe("scenario 10: web tools — free by default, dangerous-domain floor (SP
 // SP-approvals Task 11 (spec §8): bash's two escalation args. `allowNetwork` widens the sandbox
 // (write fence intact, network on for that one call) — under `ask` it cards like a normal bash
 // call (rule-silenceable), under `auto` it runs cardless (reviewer still applies, exactly like
-// today's plain bash). `dangerouslyDisableSandbox` (CC's exact name) is a full escape — it ALWAYS
-// cards, under every policy this branch can be reached under, and NO rule/classifier may ever
-// silence it (a stricter floor than allowNetwork's, similar in spirit to T10's dangerous-domain
-// floor). Every test below drives the REAL dispatch loop (setupEngine's harness) per this file's
-// own established precedent, using the stub bash registry (engine-reviewer.test.ts's stubRegistry/
-// bashTurn, now escalation-arg-aware) so no real sandbox-exec is needed — the actual sandboxed/
-// unsandboxed SPAWN behavior is covered separately, end to end, in tools-bash.test.ts.
+// today's plain bash). `dangerouslyDisableSandbox` (CC's exact name) is a full escape. SP-policies
+// Task 11 reworked its SP-approvals always-card floor into a mode split (full matrix in
+// policy-escape.test.ts): a BashUnsandboxed(<prefix>:*) rule now pre-clears it silently, `auto` lets
+// the reviewer GATE it (safe → runs unattended, non-safe → the human card), and `ask`/`accept-edits`
+// still card with the reviewer only annotating. The card now offers project/global BashUnsandboxed
+// rule options — a plain Bash rule and the readOnlyBash classifier still never silence an escape.
+// Pinned below: the no-rule ask/auto-no-reviewer card paths + plan/deny (the rule pre-clear and the
+// auto-safe run live in policy-escape.test.ts). Every test below drives the REAL dispatch loop
+// (setupEngine's harness) per this file's own established precedent, using the stub bash registry
+// (engine-reviewer.test.ts's stubRegistry/bashTurn, now escalation-arg-aware) so no real sandbox-exec
+// is needed — the actual sandboxed/unsandboxed SPAWN behavior is covered separately, end to end, in
+// tools-bash.test.ts.
 describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisableSandbox (SP-approvals T11)", () => {
-  describe("dangerouslyDisableSandbox: ALWAYS cards, no rule/classifier can ever silence it", () => {
-    test("auto policy + dangerouslyDisableSandbox:true -> card fires anyway (auto normally means cardless)", async () => {
+  describe("dangerouslyDisableSandbox: cards under ask / auto-with-no-reviewer; no plain-Bash rule or classifier silences it", () => {
+    test("auto policy + dangerouslyDisableSandbox:true, NO reviewer -> still cards (auto's reviewer GATE needs a reviewer; with none it falls to the human card)", async () => {
       const { registry, calls } = stubRegistry();
       const provider = new FakeProvider(bashTurn("rm -rf x", undefined, { dangerouslyDisableSandbox: true }));
       const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "auto" });
@@ -609,8 +623,13 @@ describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisabl
       const requested = events.find((e) => e.type === "approval_requested") as any;
       expect(requested).toBeDefined();
       expect(requested.summary).toBe("bash (UNSANDBOXED): rm -rf x");
+      // SP-policies Task 11: the escape card now carries standing BashUnsandboxed(<prefix>:*) memory
+      // (project/global) — suggestBashPrefix("rm -rf x") === "rm". (The auto-safe reviewer-GATE run and
+      // the BashUnsandboxed rule pre-clear are covered in policy-escape.test.ts.)
       expect(requested.options).toEqual([
         { id: "allow_once", label: "Allow once" },
+        { id: "allow_unsandboxed_project", label: 'Always allow "BashUnsandboxed(rm:*)" in this project', rule: "BashUnsandboxed(rm:*)", scope: "project" },
+        { id: "allow_unsandboxed_global", label: 'Always allow "BashUnsandboxed(rm:*)" everywhere', rule: "BashUnsandboxed(rm:*)", scope: "global" },
         { id: "deny", label: "Deny" },
       ]);
       expect(calls.length).toBe(1); // approved -> ran
@@ -720,13 +739,15 @@ describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisabl
     });
   });
 
-  // SP-approvals T11 review, MEDIUM-1 (adjudicated ADOPTED — CC parity: an unsandboxed retry
-  // still rides the normal review path, which includes the reviewer under auto). The reviewer is
-  // consulted BEFORE the unsandboxed card, but strictly as an ANNOTATION: its verdict never
-  // auto-approves/denies, never adds/removes options, and never skips or replaces the card — only
-  // its `.reason` (when the review actually completes) is threaded into the card's
-  // `reviewerReason`. A reviewer failure/timeout degrades to no annotation, never to no card.
-  describe("MEDIUM-1: the unsandboxed card carries the reviewer's annotation, but the reviewer never gates it", () => {
+  // SP-approvals T11 review, MEDIUM-1 (CC parity: an unsandboxed retry still rides the normal review
+  // path). Under `ask`/`accept-edits` the reviewer is consulted BEFORE the card but strictly as an
+  // ANNOTATION: its verdict never auto-approves/denies, never adds/removes options, never skips or
+  // replaces the card — only its `.reason` threads into `reviewerReason`; a reviewer failure/timeout
+  // degrades to no annotation, never to no card. SP-policies Task 11 changed ONE thing: under `auto`
+  // the reviewer now GATES (safe → runs unattended with no card; non-safe → the card) — the auto test
+  // below is updated to that; the ask-policy annotation cases are unchanged. Full gate matrix in
+  // policy-escape.test.ts.
+  describe("MEDIUM-1: under ask the reviewer only ANNOTATES the escape card; under auto it GATES (SP-policies Task 11)", () => {
     test("reviewer returns a verdict+reason -> the card carries reviewerReason, tool_review is emitted, and the human (not the verdict) still decides — an UNSAFE verdict does not auto-deny", async () => {
       const { registry, calls } = stubRegistry();
       const reviewer = stubReviewer({ verdict: "unsafe", reason: "REASON_UNSANDBOXED_ANNOTATION" });
@@ -742,10 +763,13 @@ describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisabl
       const requested = events.find((e) => e.type === "approval_requested") as any;
       expect(requested).toBeDefined();
       expect(requested.reviewerReason).toBe("REASON_UNSANDBOXED_ANNOTATION");
-      // Options are UNCHANGED by the verdict — still the narrow allow_once/deny shape, no rule
-      // options ever appear, an unsafe verdict adds no third "escalation" option either.
+      // The verdict never mutates the option set: an unsafe annotation adds no "escalation" option and
+      // removes none — the card shows the SAME BashUnsandboxed(<prefix>:*) escape options a safe (or
+      // absent) verdict would (SP-policies Task 11). suggestBashPrefix("docker run --privileged x") === "docker run".
       expect(requested.options).toEqual([
         { id: "allow_once", label: "Allow once" },
+        { id: "allow_unsandboxed_project", label: 'Always allow "BashUnsandboxed(docker run:*)" in this project', rule: "BashUnsandboxed(docker run:*)", scope: "project" },
+        { id: "allow_unsandboxed_global", label: 'Always allow "BashUnsandboxed(docker run:*)" everywhere', rule: "BashUnsandboxed(docker run:*)", scope: "global" },
         { id: "deny", label: "Deny" },
       ]);
       expect(calls.length).toBe(1); // human approved -> ran, DESPITE the unsafe verdict (annotation only, never a gate)
@@ -773,20 +797,24 @@ describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisabl
       expect(calls.length).toBe(1); // approved -> ran regardless — the card fired despite the reviewer failure
     });
 
-    test("under AUTO policy the annotation still attaches (auto doesn't skip the reviewer step, and the card still always fires)", async () => {
+    test("under AUTO the reviewer GATES the escape: a 'safe' verdict runs it UNATTENDED with no card (SP-policies Task 11)", async () => {
+      // Was: "auto still cards, annotation attaches". SP-policies Task 11 makes the reviewer the GATE
+      // under auto — a safe verdict now runs the escape unattended (no card). The auto+UNSAFE→card
+      // path and the ask-annotation path are covered in policy-escape.test.ts / the ask test above.
       const { registry, calls } = stubRegistry();
       const reviewer = stubReviewer({ verdict: "safe", reason: "REASON_UNSANDBOXED_AUTO" });
       const provider = new FakeProvider(bashTurn("docker ps", undefined, { dangerouslyDisableSandbox: true }));
-      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "auto" });
-      hub.attach(approver(broker, sessionId, true), sessionId, 0);
+      const { engine, store, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "auto" });
 
       await engine.runTurn(sessionId);
       const events = store.read(sessionId);
 
-      const requested = events.find((e) => e.type === "approval_requested") as any;
-      expect(requested).toBeDefined(); // auto still cards — the whole point of this floor
-      expect(requested.reviewerReason).toBe("REASON_UNSANDBOXED_AUTO");
-      expect(calls.length).toBe(1);
+      // The reviewer ran (exactly one tool_review, safe) and its verdict GATED — no human card fired.
+      expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+      const review = events.find((e) => e.type === "tool_review") as any;
+      expect(review).toMatchObject({ toolName: "bash", verdict: "safe", reason: "REASON_UNSANDBOXED_AUTO" });
+      expect(reviewer.seen).toEqual([{ class: "bash", command: "docker ps", justification: undefined }]);
+      expect(calls.length).toBe(1); // ran unsandboxed, unattended
     });
 
     test("no reviewer configured -> byte-identical to before this fix: no tool_review, no reviewerReason", async () => {
@@ -808,9 +836,10 @@ describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisabl
 
   // SP-approvals T11 review, LOW-2: pin the precedence when a (malformed/adversarial) call sets
   // BOTH escalation args at once — dangerouslyDisableSandbox must win outright: the card is the
-  // UNSANDBOXED one (narrow options, no rule-bearing choices), never the "(with network)" one.
+  // UNSANDBOXED one, carrying its own BashUnsandboxed(<prefix>:*) options (SP-policies Task 11),
+  // never the "(with network)" one (which would carry the plain Bash(<prefix>:*) options instead).
   describe("LOW-2: both flags set at once -> dangerouslyDisableSandbox wins outright", () => {
-    test("allowNetwork:true AND dangerouslyDisableSandbox:true -> the card is UNSANDBOXED, not \"(with network)\", and offers only allow_once/deny", async () => {
+    test("allowNetwork:true AND dangerouslyDisableSandbox:true -> the card is UNSANDBOXED (BashUnsandboxed options), not \"(with network)\" (Bash options)", async () => {
       const { registry, calls } = stubRegistry();
       const provider = new FakeProvider(bashTurn("curl https://example.com", undefined, { allowNetwork: true, dangerouslyDisableSandbox: true }));
       const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask" });
@@ -822,10 +851,13 @@ describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisabl
       const requested = events.find((e) => e.type === "approval_requested") as any;
       expect(requested).toBeDefined();
       expect(requested.summary).toBe("bash (UNSANDBOXED): curl https://example.com"); // NOT "(with network)"
+      // The ESCAPE options (BashUnsandboxed(curl:*)) — NOT allowNetwork's Bash(curl:*) shape.
       expect(requested.options).toEqual([
         { id: "allow_once", label: "Allow once" },
+        { id: "allow_unsandboxed_project", label: 'Always allow "BashUnsandboxed(curl:*)" in this project', rule: "BashUnsandboxed(curl:*)", scope: "project" },
+        { id: "allow_unsandboxed_global", label: 'Always allow "BashUnsandboxed(curl:*)" everywhere', rule: "BashUnsandboxed(curl:*)", scope: "global" },
         { id: "deny", label: "Deny" },
-      ]); // NOT the 4-option allow-similar shape allowNetwork alone would offer
+      ]);
       expect(calls.length).toBe(1);
       expect(calls[0]?.allowNetwork).toBe(true); // both flags still reach the tool unchanged — only the CARD's shape is affected
       expect(calls[0]?.dangerouslyDisableSandbox).toBe(true);
@@ -884,22 +916,25 @@ describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisabl
       expect(calls).toEqual([{ command: "git push", justification: undefined, allowNetwork: true, dangerouslyDisableSandbox: undefined }]);
     });
 
-    test("rule-allowed allowNetwork call still rides the AI safety reviewer (unsafe verdict escalates to a card)", async () => {
+    test("rule-allowed allowNetwork call under ASK now runs with NO reviewer (SP-policies Task 8)", async () => {
+      // Pre-SP-policies this rule-allowed (+ allowNetwork) call still rode the AI reviewer under
+      // `ask` and an "unsafe" verdict escalated to a card; Task 8's auto-only reviewer means a rule
+      // match under `ask` is a human pre-authorization regardless of allowNetwork — the call now
+      // just runs, unreviewed (the "unsafe" stub verdict below would still escalate+deny if the
+      // reviewer were wrongly consulted, so a regression here fails loudly).
       const permissionRules = new PermissionRules({ globalAllow: () => ["Bash(npm install:*)"], normaHome: tmpDir("norma-pgo-home-") });
       const { registry, calls } = stubRegistry();
       const reviewer = stubReviewer({ verdict: "unsafe", reason: "REASON_NETWORK_RULE" });
       const provider = new FakeProvider(bashTurn("npm install", undefined, { allowNetwork: true }));
-      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "ask", permissionRules });
-      hub.attach(approver(broker, sessionId, false), sessionId, 0);
+      const { engine, store, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "ask", permissionRules });
 
       await engine.runTurn(sessionId);
       const events = store.read(sessionId);
 
-      const review = events.find((e) => e.type === "tool_review") as any;
-      expect(review).toMatchObject({ toolName: "bash", verdict: "unsafe", reason: "REASON_NETWORK_RULE" });
-      const requested = events.find((e) => e.type === "approval_requested") as any;
-      expect(requested).toBeDefined();
-      expect(calls.length).toBe(0); // reviewer said unsafe, human denied -> never ran
+      expect(events.some((e) => e.type === "tool_review")).toBe(false);
+      expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+      expect(reviewer.seen.length).toBe(0);
+      expect(calls).toEqual([{ command: "npm install", justification: undefined, allowNetwork: true, dangerouslyDisableSandbox: undefined }]);
     });
 
     test("auto policy + allowNetwork:true -> runs cardless (reviewer still applies)", async () => {
@@ -1123,5 +1158,63 @@ describe("scenario 12: the permission-rules store is never agent-writable (SP-ap
     expect(result.output).toContain("the permission rules store can only be changed by answering an approval card (or editing it yourself)");
     expect(existsSync(join(realDir, "permissions.local.json"))).toBe(false); // nothing landed through the symlink
     expect(existsSync(join(cwd, ".norma", "permissions.local.json"))).toBe(false); // nor via the symlinked spelling
+  });
+
+  // SP-policies whole-branch review (Item 1, HIGH): the guard used to be anchored to the CURRENT
+  // session's project ONLY — it matched a write target against `join(projectRoot, ".norma")` for
+  // this session's projectRoot alone. So a broad `Edit(<parent>)` grant (which folds <parent> into
+  // the session writable set, making a SIBLING project's tree in-root) let the agent SILENTLY write
+  // a DIFFERENT project's rules store: <parent>/projB/.norma/permissions.local.json. That store is
+  // NOT this session's (projA's) store, so the old identity/structural checks both returned null →
+  // permissionRulesFileTarget said "not the rules store" → the in-project-silent flip wrote it with
+  // NO card. Those minted rules (WebFetch exfil exceptions, BashUnsandboxed escapes) then auto-
+  // activate the moment the user opens projB. The fix makes the guard projectRoot-INDEPENDENT: ANY
+  // write whose target is some `*/.norma/permissions.local.json` is refused, whichever project owns it.
+  test("(h) HIGH: Edit(<parent>) grant + write to a SIBLING project's rules store (<parent>/projB/.norma/permissions.local.json) → hard error, no card, file never created", async () => {
+    const parent = tmpDir("norma-pgo-parent-");
+    const projA = join(parent, "projA"); // this session's project
+    const projB = join(parent, "projB"); // a DIFFERENT project, sibling of projA under <parent>
+    mkdirSync(projA, { recursive: true });
+    mkdirSync(join(projB, ".norma"), { recursive: true });
+    // Edit(<parent>) folds <parent> into the session writable set (writableRoots), so projB's tree
+    // is in-root — dirGrant is null, no grant card; the write reaches projB's store unless the guard
+    // (now projectRoot-independent) refuses it. cwd = projA, so this session's OWN project is projA,
+    // NOT projB — proving the guard no longer relies on single-project anchoring.
+    const permissionRules = new PermissionRules({ globalAllow: () => [`Edit(${parent})`], normaHome: tmpDir("norma-pgo-home-") });
+    const target = join(projB, ".norma", "permissions.local.json");
+    const provider = new FakeProvider(writeTurn(target, JSON.stringify({ allow: ["WebFetch(domain:webhook.site)"] })));
+    const { engine, store, sessionId } = setupEngine(provider, { policy: "ask", permissionRules, cwd: projA });
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false); // silent flip never got a chance — hard error instead
+    const result = events.find((e) => e.type === "tool_result") as any;
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("permissions.local.json");
+    expect(result.output).toContain("the permission rules store can only be changed by answering an approval card (or editing it yourself)");
+    expect(existsSync(target)).toBe(false); // never landed in the sibling project's store
+  });
+
+  test("(i) HIGH (case-varied): same sibling-store write with .NORMA/Permissions.Local.json → still hard-errored", async () => {
+    const parent = tmpDir("norma-pgo-parent-");
+    const projA = join(parent, "projA");
+    const projB = join(parent, "projB");
+    mkdirSync(projA, { recursive: true });
+    mkdirSync(projB, { recursive: true }); // .NORMA itself intentionally NOT pre-created — canonicalizeForWrite re-appends the verbatim tail
+    const permissionRules = new PermissionRules({ globalAllow: () => [`Edit(${parent})`], normaHome: tmpDir("norma-pgo-home-") });
+    const target = join(projB, ".NORMA", "Permissions.Local.json");
+    const provider = new FakeProvider(writeTurn(target, JSON.stringify({ allow: ["BashUnsandboxed(sh:*)"] })));
+    const { engine, store, sessionId } = setupEngine(provider, { policy: "ask", permissionRules, cwd: projA });
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+    const result = events.find((e) => e.type === "tool_result") as any;
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("the permission rules store can only be changed by answering an approval card (or editing it yourself)");
+    expect(existsSync(target)).toBe(false);
+    expect(existsSync(join(projB, ".NORMA"))).toBe(false); // nothing created at all
   });
 });

@@ -59,35 +59,45 @@ const MAX_TOOL_ITERATIONS = 24; // runaway guard until 1b-ii budgets land
 // own runtime reject.
 const SESSION_SPAWN_TOOL = "session_spawn";
 
-// 4h-i (CC parity: spawn_agent `mode`) — permissiveness order, LEAST to MOST permissive: "plan"
-// is read-only (most restrictive), "ask" is human-gated (middle), "auto" auto-allows non-
-// destructive tools (least restrictive). Mirrors gate.ts's own PermissionGate.evaluate() ordering
-// (plan denies everything mutating outright; ask/auto both gate mutating tools, auto auto-allows).
-const POLICY_RESTRICTIVENESS: Record<SessionApprovalPolicy, number> = { plan: 0, ask: 1, auto: 2 };
+// 4h-i (CC parity: spawn_agent `mode`), widened to 6 values (SP-policies Task 2) — permissiveness
+// order, LEAST to MOST permissive: "plan" (read-only, most restrictive) < "dont-ask" < "ask"
+// (human-gated) < "accept-edits" < "auto" (auto-allows non-destructive tools) < "bypass" (least
+// restrictive — no gating at all). Mirrors gate.ts's own PermissionGate.evaluate() ordering where
+// it currently distinguishes these (plan denies everything mutating outright; ask/auto both gate
+// mutating tools, auto auto-allows) — evaluate() itself is NOT behaviorally widened by this task
+// (a later task teaches it the new values' own distinct behavior; today dont-ask/accept-edits/
+// bypass ride evaluate()'s existing per-string branches unchanged, so behavior for the original
+// three values — plan/ask/auto — is untouched).
+const POLICY_RESTRICTIVENESS: Record<SessionApprovalPolicy, number> = {
+  plan: 0, "dont-ask": 1, ask: 2, "accept-edits": 3, auto: 4, bypass: 5,
+};
 
 /** RESTRICT-ONLY: returns the MORE RESTRICTIVE of {parent, requested} — a spawn_agent `mode`
  *  override can only NARROW a child's effective approval policy relative to its parent thread's,
- *  never WIDEN it. A request that would widen (e.g. parent "ask" + requested "auto", or parent
+ *  never WIDEN it. A request that would widen (e.g. parent "ask" + requested "bypass", or parent
  *  "plan" + requested "auto") is silently ignored — the parent's policy wins. Pure and exported
  *  for direct unit testing: this is the security-critical piece of the `mode` feature (a bug here
- *  is a privilege-escalation bug, not a UX one). */
+ *  is a privilege-escalation bug, not a UX one). Signature is unchanged by the 6-value widening —
+ *  it's generic over whatever SessionApprovalPolicy is, ranked purely through
+ *  POLICY_RESTRICTIVENESS above. */
 export function restrictPolicy(parent: SessionApprovalPolicy, requested: SessionApprovalPolicy): SessionApprovalPolicy {
   return POLICY_RESTRICTIVENESS[requested] < POLICY_RESTRICTIVENESS[parent] ? requested : parent;
 }
 
-/** Maps a CC-parity spawn `mode` arg to Norma's `approvalPolicy`. Only `plan` maps to Norma's
- *  "plan" (read-only); `acceptEdits`/`dontAsk`/`bypassPermissions` all collapse to "auto" — Norma
- *  has no finer-grained distinction between them (CC parity here is at the arg-surface level, not
- *  full behavioral parity with CC's own distinct modes). `default`, absent, or any unrecognized
- *  string maps to `undefined` — "no override", i.e. the child inherits the parent's policy
- *  unchanged (this is what lets the spawn bridge skip building a child-scoped meta entirely when
- *  there's nothing to narrow — see the bridge's `childMeta` computation). */
+/** Maps a CC-parity spawn `mode` arg to Norma's `approvalPolicy`. SP-policies Task 2: each CC mode
+ *  now maps to its OWN distinct policy — `acceptEdits`→"accept-edits", `dontAsk`→"dont-ask",
+ *  `bypassPermissions`→"bypass", `plan`→"plan" — no more collapsing to "auto" (that collapse was
+ *  only ever a stopgap from when SessionApprovalPolicy had just 3 values; the 6-value type now has
+ *  a home for each CC mode). `default`, absent, or any unrecognized string still maps to
+ *  `undefined` — "no override", i.e. the child inherits the parent's policy unchanged (this is
+ *  what lets the spawn bridge skip building a child-scoped meta entirely when there's nothing to
+ *  narrow — see the bridge's `childMeta` computation). */
 export function mapSpawnMode(mode: string | undefined): SessionApprovalPolicy | undefined {
   switch (mode) {
     case "plan": return "plan";
-    case "acceptEdits":
-    case "dontAsk":
-    case "bypassPermissions": return "auto";
+    case "acceptEdits": return "accept-edits";
+    case "dontAsk": return "dont-ask";
+    case "bypassPermissions": return "bypass";
     default: return undefined; // "default", absent, or an unrecognized string
   }
 }
@@ -199,11 +209,17 @@ export function suggestBashPrefix(command: string): string {
  *  it persists via `PermissionRules.append` (server.ts's `approval.respond` handler) — the label
  *  ALWAYS shows the literal rule string, so a human approves the exact text that gets written, not
  *  a paraphrase of it. bash offers BOTH scopes (project/global): a shell command prefix is often
- *  legitimately either project-specific or a genuine cross-project habit. write/edit offers
- *  project scope ONLY — "always allow every edit, everywhere, forever" is a materially scarier
- *  default than bash's equivalent and is deliberately not on the menu in v1. Every other tool name
- *  (computer/schedule/web_fetch/skill_write/mcp__.../plugin__.../unclassified) returns `undefined`
- *  — a plain approve/deny card, byte-identical to before this task. */
+ *  legitimately either project-specific or a genuine cross-project habit. SP-policies Task 7:
+ *  write/edit now return `undefined` here — they no longer reach this helper at all. An in-root
+ *  edit under `ask` is SILENT (the in-project-silent flip in the dispatch loop), an out-of-root
+ *  edit rides the grant card (its own options, NOT this helper), and a rules-store write
+ *  hard-errors — so the generic `decision === "ask"` branch (this helper's only caller) is
+ *  structurally unreachable for write/edit. The "persist an Edit rule from a write card" capability
+ *  is NOT lost: it moves to the out-of-root grant card's path-scoped "Always allow edits in /foo" =
+ *  `Edit(/foo)` option (Task 9), which is strictly better than the old blanket `Edit` rule
+ *  (path-scoped + feeds bash's sandbox roots). Every other tool name (computer/schedule/web_fetch/
+ *  skill_write/mcp__.../plugin__.../unclassified) likewise returns `undefined` — a plain
+ *  approve/deny card, byte-identical to before this feature. */
 function approvalOptionsFor(call: { name: string; argsJson: string }): ApprovalOption[] | undefined {
   if (call.name === "bash") {
     let command = "";
@@ -219,13 +235,9 @@ function approvalOptionsFor(call: { name: string; argsJson: string }): ApprovalO
       { id: "deny", label: "Deny" },
     ];
   }
-  if (call.name === "write" || call.name === "edit") {
-    return [
-      { id: "allow_once", label: "Allow once" },
-      { id: "allow_project", label: "Always allow edits in this project", rule: "Edit", scope: "project" },
-      { id: "deny", label: "Deny" },
-    ];
-  }
+  // SP-policies Task 7: write/edit deliberately fall through to `undefined` — see the doc comment
+  // above (their approval path is now silence-in-root / grant-card-out-of-root, never this generic
+  // card). Task 9 removes this helper's only remaining relevance to edits by reworking the grant card.
   return undefined;
 }
 
@@ -388,59 +400,55 @@ function fsWriteOutOfRootDir(call: { name: string; argsJson: string }, roots: st
 }
 
 /**
- * SP-approvals final review (composition hole, HIGH): a write/edit whose target IS — by real
- * filesystem identity, not by string spelling — `<projectRoot>/.norma/permissions.local.json`,
- * Task 1's PermissionRules project-scope rules file, must be a hard error, no card, no grant, no
- * matter what rule is in force. Without this, a broad `Edit` rule (the feature's own most-
- * encouraged click — it matches both `write` and `edit` call names, see permission-rules.ts's
- * `toolForCallName`) lets the agent write a NEW rule into this file itself — e.g.
- * `WebFetch(domain:webhook.site)` — which `webFetchGate` (§7, above) then treats as an already-
- * approved standing exception, silently clearing the dangerous-domain floor for a zero-card exfil
- * fetch. The store must be mutable ONLY through `PermissionRules.append()` (a human answering an
- * approval card's "always allow" option) or a human's own editor — never through the agent's own
+ * SP-approvals final review (composition hole, HIGH): a write/edit whose target is ANY project's
+ * `<any>/.norma/permissions.local.json` — Task 1's PermissionRules project-scope rules file — must be a
+ * hard error, no card, no grant, no matter what rule is in force. Without this, a broad `Edit` rule
+ * (the feature's own most-encouraged click — it matches both `write` and `edit` call names, see
+ * permission-rules.ts's `toolForCallName`) lets the agent write a NEW rule into this file itself —
+ * e.g. `WebFetch(domain:webhook.site)` — which `webFetchGate` (§7, above) then treats as an
+ * already-approved standing exception, silently clearing the dangerous-domain floor for a zero-card
+ * exfil fetch. The store must be mutable ONLY through `PermissionRules.append()` (a human answering
+ * an approval card's "always allow" option) or a human's own editor — never through the agent's own
  * write/edit tools.
  *
- * SP-approvals final review 2 (bypass in the FIRST version of this check, reproduced live on the
- * default case-insensitive-but-case-preserving macOS volume format): comparing
- * `basename(canonical) === "permissions.local.json"` and `basename(dirname(canonical)) ===
- * ".norma"` as case-SENSITIVE string literals let `.norma/Permissions.Local.json`,
- * `.NORMA/permissions.local.json`, and a pre-created `.norma` SYMLINK pointing at some other real
- * directory all land on disk unflagged — while `permission-rules.ts`'s `projectRulesFor` reads the
- * store back via a plain `join(root, ".norma", "permissions.local.json")` open, which macOS's
- * default filesystem resolves CASE-INSENSITIVELY and follows symlinks through exactly like any
- * other path — so the reader picked every one of those variants right back up as the real file.
- * `canonicalizeForWrite`'s own "reappend the missing tail verbatim" behavior (by design — the tail
- * doesn't exist on disk yet, so there's nothing on-disk to correct it against) is exactly why the
- * bypass survived resolution: it only case/symlink-corrects the PREFIX that already exists, never
- * the part that doesn't, and for a fresh project `.norma` itself frequently doesn't exist yet.
+ * SP-policies whole-branch review (Item 1, HIGH): this check is now projectRoot-INDEPENDENT. The
+ * PRIOR version anchored the match to the CURRENT session's project only — it compared the write's
+ * resolved parent against `join(projectRoot, ".norma")` for THIS session's `projectRoot` alone. But
+ * a broad `Edit(<parent>)` grant folds `<parent>` into the session writable set (writableRoots), so
+ * a SIBLING project's tree — `<parent>/projB/.norma/permissions.local.json`, whose owning project is
+ * NOT this session's — becomes in-root, and the single-project anchoring returned null ("not MY
+ * store") → the in-project-silent flip wrote it with no card. Those minted rules (exfil exceptions,
+ * BashUnsandboxed escapes) auto-activate the moment the user opens projB. The invariant is
+ * project-wide: the agent must NEVER write ANY `<any>/.norma/permissions.local.json`, whichever project
+ * owns it — so the match no longer needs (or takes) a `projectRoot`.
  *
- * The fix compares by FILESYSTEM IDENTITY instead of by spelling: the write target's PARENT
- * DIRECTORY is realpath-resolved (resolves case AND symlinks at the dir level, on the real FS — the
- * same principle `grantDenied`'s own control-plane check relies on) and compared against the
- * project root's OWN `.norma` directory, ALSO realpath-resolved the identical way — so a write
- * reaching the exact same real directory the reader would open, however it got there (differently-
- * cased spelling, a symlink hop, whatever), is recognized as a match. The one case FS identity
- * can't settle is the common one where `.norma` doesn't exist in ANY casing yet — nothing real to
- * compare against — so that path falls back to a STRUCTURAL check instead: the write target's own
- * (not-yet-real, so not OS-corrected) parent must sit directly under the project root's real path,
- * and its own name must be some casing of ".norma" (explicitly case-folded here, since nothing on
- * disk will do it for us in that branch). Either way, the FILENAME itself is also compared
- * case-folded (`.toLowerCase()`), never as a literal spelling.
+ * SP-approvals final review 2 (bypass reproduced live on the default case-insensitive-but-case-
+ * preserving macOS volume format): a case-SENSITIVE literal compare let `.norma/Permissions.Local.
+ * json`, `.NORMA/permissions.local.json`, and a pre-created `.norma` SYMLINK pointing at some other
+ * real directory all land unflagged — while `permission-rules.ts`'s `projectRulesFor` reads the
+ * store back via a plain `join(root, ".norma", "permissions.local.json")` open, which macOS's
+ * default filesystem resolves CASE-INSENSITIVELY and follows symlinks through — so the reader picked
+ * every variant right back up as the real file. Fixed by case-folding every compare (`.toLowerCase()`)
+ * and by testing the parent-dir name on BOTH spellings of the path:
+ *   - the PRE-resolution spelling (`raw0`) catches a write THROUGH a symlink NAMED `.norma` (the
+ *     reader follows the same link, so writer and reader hit the identical file) — canonicalization
+ *     would resolve that `.norma` away to the link's real destination, whose name is NOT `.norma`.
+ *   - the CANONICALIZED target (`canonicalizeForWrite`/`resolveLeafSymlinks`, preserved from the
+ *     prior fix) catches the inverse: reaching a REAL `.../.norma/...` via a differently-NAMED
+ *     symlink or `..` games — `raw0`'s literal parent isn't `.norma`, but the resolved one is.
+ * Either match means "this is (some project's) rules store". `raw0`'s parent is checked FIRST, before
+ * canonicalization can throw, so a pathological link chain never drops an otherwise-clear match.
  *
  * Matches by FILENAME alone, never by directory: `.norma/` itself stays writable (`.norma/memory/`
- * is the MEMDIR by design, and any other file under `.norma/` is unaffected) — only this one file,
- * under any casing, inside the identity-matched directory, is ever denied. `null` for every
- * non-write/edit call, a missing/malformed `path` arg, a null `projectRoot` (defensive — see the
- * `ruleAllowed` block's own comment on why `cwd` is effectively never falsy in practice), or a
- * resolution failure (unresolvable link-chain etc.) — the normal dispatch chain decides from there,
- * same fail-open-to-the-next-check shape as `fsWriteOutOfRootDir`. */
+ * is the MEMDIR by design — memory files are `*.md`, never `permissions.local.json` — and any other
+ * file under `.norma/` is unaffected). `null` for every non-write/edit call, a missing/malformed
+ * `path` arg, or a resolution failure (unresolvable link-chain etc.) — the normal dispatch chain
+ * decides from there, same fail-open-to-the-next-check shape as `fsWriteOutOfRootDir`. */
 function permissionRulesFileTarget(
   call: { name: string; argsJson: string },
   roots: string[],
-  projectRoot: string | null,
 ): { path: string; canonical: string } | null {
   if (call.name !== "write" && call.name !== "edit") return null;
-  if (projectRoot === null) return null; // no project root — nothing to compare a filesystem identity against
   let path = "";
   try {
     const a = JSON.parse(call.argsJson || "{}") as { path?: unknown };
@@ -449,33 +457,23 @@ function permissionRulesFileTarget(
   if (!path) return null;
   const raw0 = isAbsolute(path) ? resolve(path) : resolve(roots[0] ?? "/", path);
   // Cheap, syscall-free early-out: a target whose filename isn't SOME casing of
-  // "permissions.local.json" can never match regardless of what its parent resolves to. Comparing
-  // the ORIGINAL (pre-resolution) filename case-folded is equivalent to comparing the eventually-
-  // resolved one — canonicalization can only correct an existing file's spelling to what's already
-  // on disk, which is the identical case-folded string by definition on a case-insensitive volume,
-  // or (the file doesn't exist yet) leave it exactly as given — either way the case-folded compare
-  // gives the same verdict without needing to resolve anything first.
+  // "permissions.local.json" can never be the rules store, regardless of what its parent resolves
+  // to — memory files are `*.md`, every other file under `.norma/` has a different name. Comparing
+  // the ORIGINAL (pre-resolution) filename case-folded is equivalent to the resolved one:
+  // canonicalization only corrects an EXISTING file's spelling to what's on disk (the identical
+  // case-folded string on a case-insensitive volume) or leaves a not-yet-existing tail verbatim.
   if (basename(raw0).toLowerCase() !== "permissions.local.json") return null;
+  // Pre-resolution parent: some casing of ".norma" ⇒ the rules store (catches a symlink NAMED
+  // `.norma`). Checked BEFORE canonicalization so a link chain that throws below can't drop it.
+  if (basename(dirname(raw0)).toLowerCase() === ".norma") {
+    try { return { path, canonical: canonicalizeForWrite(resolveLeafSymlinks(raw0)) }; }
+    catch { return { path, canonical: raw0 }; } // still a confirmed match; report the raw target
+  }
+  // Otherwise, resolve case/symlinks and re-check the parent — catches reaching a REAL `.../.norma/`
+  // via a differently-named symlink or `..` games.
   try {
     const canonical = canonicalizeForWrite(resolveLeafSymlinks(raw0));
-    const parentReal = dirname(canonical);
-    const readerNorma = join(projectRoot, ".norma");
-    let matches: boolean;
-    try {
-      // `.norma` (some casing, or a symlink elsewhere) already exists as SOMETHING real —
-      // `realpathSync` fully resolves both case and symlinks for an entity that actually exists,
-      // so a plain identity compare against the reader's own `.norma` resolution is exact and
-      // needs no further case-folding.
-      matches = parentReal === realpathSync(readerNorma);
-    } catch {
-      // `.norma` doesn't exist under ANY casing yet (the common case for a fresh project) — there
-      // is no real directory entry for the OS to case/symlink-correct, so `parentReal`'s own final
-      // segment is whatever the model literally wrote, verbatim. Compare structurally instead: the
-      // REST of `parentReal` must be exactly the project root's own real path, and its final
-      // segment, case-folded, must be ".norma".
-      matches = dirname(parentReal) === realpathSync(projectRoot) && basename(parentReal).toLowerCase() === ".norma";
-    }
-    return matches ? { path, canonical } : null;
+    return basename(dirname(canonical)).toLowerCase() === ".norma" ? { path, canonical } : null;
   } catch { return null; } // unresolvable — not a confirmed match; the normal dispatch chain decides
 }
 
@@ -578,7 +576,7 @@ export interface EngineConfig {
   // mutates the in-memory `meta` object for the CURRENT turn regardless of whether setPolicy is
   // set, since that's what lets a same-turn follow-up call see the new mode immediately.
   plans?: PlanBroker;
-  setPolicy?: (sessionId: string, policy: "ask" | "auto" | "plan") => Promise<void> | void;
+  setPolicy?: (sessionId: string, policy: SessionApprovalPolicy) => Promise<void> | void;
   // Worktree isolation (1d-iii): optional — absent means enter_worktree/exit_worktree fall to
   // their own placeholder run() (tools/worktree.ts) rather than the bridge below. When set, the
   // bridge mutates the turn's local `cwd` (now `let`, not `const`) SAME-TURN, so a follow-up tool
@@ -1059,7 +1057,7 @@ export class AgentEngine {
    *  tool that was never hidden in the first place. `_cwd` is unused today (no current pin is
    *  scope-aware) — kept in the signature for parity with the other deferral seams, which all
    *  thread cwd, in case a future pin needs it. */
-  private pinnedTools(sessionId: string, meta: { approvalPolicy: "ask" | "auto" | "plan" }, _cwd: string | null): Set<string> {
+  private pinnedTools(sessionId: string, meta: { approvalPolicy: SessionApprovalPolicy }, _cwd: string | null): Set<string> {
     const pins = new Set<string>();
     if (meta.approvalPolicy === "plan") pins.add("exit_plan_mode");
     if (this.cfg.worktrees?.active(sessionId)) pins.add("exit_worktree");
@@ -1474,7 +1472,7 @@ export class AgentEngine {
   // plan-mode reminder is appended off the policy at turn start, not re-checked per round, so an
   // in-turn exit_plan_mode approval (which mutates `meta.approvalPolicy` for the REST of this
   // turn) does not retroactively add/remove this reminder mid-turn.
-  private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: "ask" | "auto" | "plan", sessionId: string): string {
+  private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: SessionApprovalPolicy, sessionId: string): string {
     const tsEnabled = this.toolSearchEnabled();
     const deferThreshold = this.toolSearchThreshold();
     // Pins computed HERE, at instructionsFull's own once-per-turn/thread cadence (see this
@@ -2683,6 +2681,18 @@ export class AgentEngine {
         // and the bridge (setCwd + git + same-turn cwd + worktree_* events) would NEVER run outside
         // `auto` policy — see task-4-report.md for the bug writeup.
         const isWorktree = (call.name === "enter_worktree" || call.name === "exit_worktree") && !!this.cfg.worktrees;
+        // `cwd` is typed `string` (never undefined here), so this ternary is only a defensive
+        // guard against an empty string — repoRootFor("") would realpath-fail and fall back to the
+        // DAEMON's own process.cwd(), a wrong and misleading project root. `projectRoot: null`
+        // degrades safely everywhere it's read below: PermissionRules.decision() just consults
+        // global rules, and permissionRulesFileTarget is projectRoot-INDEPENDENT (SP-policies
+        // whole-branch Item 1 — it refuses ANY project's rules store, so a null projectRoot never
+        // affects its verdict; see its own doc comment). SP-policies Task 6: HOISTED above the
+        // `dirGrant` computation just below (it used to sit between `dirGrantDenied` and
+        // `rulesFileTarget`) — `writableRoots` (also below) needs it to resolve this call's
+        // `Edit(<path>)`-declared writable dirs BEFORE `dirGrant`'s own fsWriteOutOfRootDir check
+        // runs, not just for the later ruleAllowed consumers that already read it.
+        const projectRoot = cwd ? repoRootFor(cwd) : null;
         // CC parity (write-permission-flow): out-of-root write/edit. Norma has no model-invocable
         // "request a directory" tool anymore — an out-of-root Write/Edit itself carries the SAME
         // approval seam bash uses (cc-expert findings, task-24 recon: real CC shows exactly ONE
@@ -2697,22 +2707,19 @@ export class AgentEngine {
         // plain reject instead (fs-write.ts's own fence, unchanged). `let`, not `const`: the auto
         // pre-grant below NULLS it once the grant lands, so the call then flows through the normal
         // dispatch chain as an ordinary in-root write (task-24 review F1 — see the pre-grant).
+        // SP-policies Task 6: roots come from `writableRoots` (this session's roots UNIONED with
+        // any `Edit(<path>)`-declared dirs for this project, see its own doc comment) rather than
+        // the raw session roots — `undefined` rootsOverride argument here since this whole ternary
+        // is already gated on `!rootsOverride` (a worktree child's fixed confinement is never
+        // widened by an Edit rule).
         let dirGrant =
           (call.name === "write" || call.name === "edit") && decision !== "deny" && !rootsOverride
-            ? fsWriteOutOfRootDir(call, this.cfg.dirs.roots(sessionId), sessionTmpDir(sessionId))
+            ? fsWriteOutOfRootDir(call, this.writableRoots(sessionId, projectRoot, undefined), sessionTmpDir(sessionId))
             : null;
         // task-24 review F2: the control plane (daemon.ts passes ~/.norma/run — the SAME denylist
         // the read tools get) is NEVER grantable, either policy, no card — checked once here, and
         // consulted by both the auto pre-grant below and the deny branch in the dispatch chain.
         const dirGrantDenied = dirGrant !== null && this.grantDenied(dirGrant.dir);
-        // `cwd` is typed `string` (never undefined here), so this ternary is only a defensive
-        // guard against an empty string — repoRootFor("") would realpath-fail and fall back to the
-        // DAEMON's own process.cwd(), a wrong and misleading project root. `projectRoot: null`
-        // degrades safely everywhere it's read below: PermissionRules.decision() just consults
-        // global rules, and permissionRulesFileTarget refuses to match at all (see its own doc
-        // comment). Hoisted here (used to be computed separately, redundantly, inside the
-        // ruleAllowed block below) so both consumers share the exact same value.
-        const projectRoot = cwd ? repoRootFor(cwd) : null;
         // SP-approvals final review (composition hole): the permission-rules store itself is NEVER
         // a valid write/edit target — checked here, unconditionally (not gated on `decision`,
         // `dirGrant`, or anything ruleAllowed-related below), so it is computed and dispatched
@@ -2720,7 +2727,7 @@ export class AgentEngine {
         // permissionRulesFileTarget's own doc comment for the full exfil-composition rationale
         // (final review 2: filesystem-IDENTITY comparison, not string spelling).
         const rulesFileTarget = (call.name === "write" || call.name === "edit")
-          ? permissionRulesFileTarget(call, rootsOverride ?? this.cfg.dirs.roots(sessionId), projectRoot)
+          ? permissionRulesFileTarget(call, this.writableRoots(sessionId, projectRoot, rootsOverride))
           : null;
         // SP-approvals Task 10: web_fetch's dangerous-domain floor — computed for EVERY policy
         // (gate.ts's `decision` above is now unconditionally "allow" for web_fetch, so this is the
@@ -2769,8 +2776,20 @@ export class AgentEngine {
         // SessionDirectories.add + directory_added), NULL dirGrant, and fall through — the call is
         // now an ordinary in-root write and every later branch (reviewer included) sees it
         // unchanged. Placed AFTER the pre-tool hook block so a hook-blocked call never grants.
+        //
+        // SP-policies Task 9: `accept-edits` joins `auto` on this silent pre-grant. That policy's
+        // whole contract is "edits/writes are free" (gate.ts's EDIT_CLASS → "allow"), so an
+        // out-of-project edit under it must land with NO card, exactly like an in-project one —
+        // applyDirGrant here gives it the same silent session grant an in-project write already has.
+        // Under `auto` the granted call then rides the fs reviewer (auto-only branch below); under
+        // `accept-edits` no reviewer branch fires (all three are `=== "auto"`-gated), so it flows
+        // straight to executeCall — silent either way. SP-policies Task 10: `bypass` now joins them
+        // too — bypass is opt-in no-guardrails, so an out-of-project edit under it gets the SAME
+        // silent pre-grant rather than riding the `ask`-shaped grant card below (its reviewer branch
+        // is `auto`-only same as the other two, so a bypass-granted call also flows straight to
+        // executeCall, silent).
         let grantFailure: string | null = null;
-        if (dirGrant && !dirGrantDenied && meta.approvalPolicy === "auto") {
+        if (dirGrant && !dirGrantDenied && (meta.approvalPolicy === "auto" || meta.approvalPolicy === "accept-edits" || meta.approvalPolicy === "bypass")) {
           grantFailure = this.applyDirGrant(sessionId, threadId, dirGrant.dir);
           if (!grantFailure) dirGrant = null;
         }
@@ -2808,8 +2827,8 @@ export class AgentEngine {
         // below narrows for it.
         let ruleAllowed = false;
         if (decision === "ask" && this.cfg.permissionRules && !bashEscalation.dangerouslyDisableSandbox) {
-          // `projectRoot` is the SAME hoisted value rulesFileTarget's computation above already
-          // derived (see its own comment) — reused here rather than recomputed.
+          // `projectRoot` is the SAME hoisted value the `dirGrant`/`writableRoots` computation above
+          // already used (derived once at the top of the loop) — reused here rather than recomputed.
           const grantPending = dirGrant !== null;
           if (!grantPending && this.cfg.permissionRules.decision({ name: call.name, argsJson: call.argsJson }, projectRoot) === "allow") {
             ruleAllowed = true;
@@ -2829,11 +2848,66 @@ export class AgentEngine {
           }
           if (ruleAllowed) decision = "allow";
         }
+        // SP-policies: a BashUnsandboxed rule (permission-rules.ts, disjoint from Bash) pre-clears a sandbox
+        // escape in EVERY mode except plan (decision 7). decision() matches it ONLY for a
+        // dangerouslyDisableSandbox call, so this can never fire for an ordinary bash call. Computed even
+        // though the ruleAllowed block above excludes escape calls — the escape is a separate, higher-stakes
+        // class with its own rule form, never silenced by a plain Bash rule. Runs BEFORE the dont-ask deny
+        // flip below (ordering is load-bearing): a BashUnsandboxed-covered escape under dont-ask must stay
+        // "allow" and run silently, not get converted to "deny" by that flip.
+        //
+        // SP-policies whole-branch review (Item 2, MEDIUM — ACCEPTED, documented not guarded): a PERSISTED
+        // `BashUnsandboxed(<prefix>:*)` rule (like `bypass`) grants SILENT, unsandboxed execution for that
+        // prefix. For a file-WRITING prefix that necessarily includes writing the control plane itself —
+        // the rules store (`*/.norma/permissions.local.json`, which the seatbelt regex + permissionRulesFileTarget
+        // otherwise deny) and `~/.norma/run/core.sock` — because a true escape runs with NO seatbelt at all
+        // (tools/bash.ts spawns /bin/bash directly, no profile). This is a DELIBERATE, human-pre-authorized
+        // consequence: the human wrote (or approved the "always allow" card for) that BashUnsandboxed rule,
+        // explicitly choosing unrestricted shell for that prefix. Guarding it would require parsing the shell
+        // command string to reason about what it writes — fragile and defeatable (out of scope). The store
+        // guard here protects the write/edit TOOLS and the SANDBOXED bash path; a self-authored escape rule is
+        // a strictly higher, separately-consented bar.
+        let unsandboxedRuleAllowed = false;
+        if (bashEscalation.dangerouslyDisableSandbox && this.cfg.permissionRules && meta.approvalPolicy !== "plan"
+            && this.cfg.permissionRules.decision({ name: call.name, argsJson: call.argsJson }, projectRoot) === "allow") {
+          unsandboxedRuleAllowed = true;
+          decision = "allow"; // flows to executeCall (unsandboxed), skipping the escape card + the reviewer
+        }
+        // SP-policies Task 7: in-project edits are SILENT by default. A write/edit whose target is in
+        // the session writable set (dirGrant === null ⇒ in-root, now that Task 6's writableRoots has
+        // folded in any Edit(<path>)-declared dirs) and is not the rules store gets no card — under
+        // ask/dont-ask alike (accept-edits/auto/bypass already return "allow" from the gate, so this
+        // never fires for them). This is the flip that stops `ask` from carding an ordinary edit.
+        // Runs BEFORE the dont-ask flip below so an in-project edit under dont-ask is SILENCED, not
+        // denied. `!rulesFileTarget` keeps a write to the permission-rules store on its dedicated
+        // hard-error branch (else if (rulesFileTarget)) with the accurate message.
+        if (decision === "ask" && (call.name === "write" || call.name === "edit") && !dirGrant && !rulesFileTarget) {
+          decision = "allow";
+        }
+        // SP-policies Task 7: dont-ask declines everything it would otherwise CARD, with no prompt.
+        // Anything still "ask" here (no rule, no classifier, not an in-project edit) is auto-denied.
+        // Deliberately NOT guarded by `!dirGrant`: an out-of-project edit is still "ask" at this point
+        // (its grant card hasn't been offered yet) and SHOULD be denied under dont-ask — because the
+        // `decision === "deny"` branch is FIRST in the dispatch chain below, this deny short-circuits
+        // before the `else if (dirGrant)` grant-card branch could run, so no grant card is surfaced.
+        // `!rulesFileTarget` is excluded so a rules-store write still hits its dedicated hard-error
+        // branch (accurate message) rather than this generic dont-ask deny. An UNCOVERED
+        // dangerouslyDisableSandbox escape is likewise converted here (the ruleAllowed block excluded
+        // it, in-project-silent skips it — not write/edit), so it denies before its own escape branch.
+        // SP-policies Task 11: a BashUnsandboxed-COVERED escape never reaches this flip as "ask" —
+        // unsandboxedRuleAllowed (computed above, ahead of these flips) already set it "allow", so it
+        // runs silently under dont-ask instead of being denied here.
+        if (decision === "ask" && meta.approvalPolicy === "dont-ask" && !rulesFileTarget) {
+          decision = "deny";
+        }
         if (decision === "deny") {
-          // Plan mode's blanket deny (gate.ts): tool NOT run. No approval flow here — the point
-          // of plan mode is that nothing mutates until exit_plan_mode is approved.
+          // Plan mode's blanket deny (gate.ts) OR dont-ask's auto-decline (the flip just above): tool
+          // NOT run, no approval flow. The message is mode-aware — dont-ask and plan reach this same
+          // branch but for different reasons, so each gets its own accurate explanation.
           outcome = {
-            output: "Blocked in plan mode — you are researching and planning, so file changes and commands are disabled. Make no changes; when your plan is ready, call exit_plan_mode to present it for approval.",
+            output: meta.approvalPolicy === "dont-ask"
+              ? "Denied automatically — you're in dont-ask mode, which declines every action that needs approval. Switch to ask or auto to be prompted, or add an allow-rule for this."
+              : "Blocked in plan mode — you are researching and planning, so file changes and commands are disabled. Make no changes; when your plan is ready, call exit_plan_mode to present it for approval.",
             isError: true,
           };
         } else if (rulesFileTarget) {
@@ -2882,70 +2956,97 @@ export class AgentEngine {
           }
           if (newCwd !== undefined) cwd = newCwd;
         } else if (dirGrant) {
-          // Out-of-root write/edit under `ask` policy (the auto case was pre-granted + nulled
-          // above, so it never reaches this branch): ONE grant-flavored card through the SAME
-          // requestApproval seam bash/worktree use — approval applies the grant (mkdir + roots +
-          // directory_added, review F3) then runs the call; the human card IS the review under
-          // `ask` (the AI-reviewer branches below are auto-policy-only, same as for an in-root
-          // write). Denial rides requestApproval's deniedByHuman path unchanged.
+          // Out-of-project write/edit under `ask` (the auto/accept-edits/bypass cases were ALL
+          // pre-granted + nulled above, so they never reach this branch): ONE grant-flavored card
+          // through the SAME requestApproval seam bash/worktree use. SP-policies Task 9 gives it
+          // three options — [Allow once, Always allow edits in <dir>, Deny] — and a ONE-SHOT roots
+          // override instead of task-24's persistent applyDirGrant session grant:
+          //   - `oneShot` = the session's writable set (writableRoots) PLUS this grant dir, passed to
+          //     THIS executeCall only. It's never stored, so the write lands but the dir does NOT join
+          //     the session roots — no directory_added, no free ride for the next out-of-project write.
+          //   - "Always allow edits in <dir>" persists `Edit(<dir>)` at project scope via the option's
+          //     rule (ipc/server.ts's approval.respond handler, keyed by optionId) — a FUTURE call then
+          //     gets <dir> in writableRoots (Task 6's editPathRules fold), silently. "Allow once"
+          //     persists nothing; a repeat out-of-project write cards again.
+          // onApprove mkdir's the grant dir FIRST (mkdirForOneShotGrant — NO dirs.add / directory_added,
+          // unlike applyDirGrant): the write fence (resolveWithinAny) SKIPS a not-yet-existing root, so
+          // a deep new grant dir would drop out of `oneShot` and the just-approved write would fail its
+          // own containment; creating it is exactly what was approved. The human card IS the review
+          // under `ask` (the AI-reviewer branches below are auto-policy-only). Denial rides
+          // requestApproval's deniedByHuman path unchanged (nothing created, nothing persisted).
           const grant = dirGrant; // narrow for the closure
+          const oneShot = [...this.writableRoots(sessionId, projectRoot, rootsOverride), grant.dir];
           outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
             timeoutMs: this.approvalTimeoutFor(meta),
-            summary: `${call.name} ${grant.path} — outside the allowed directories; grant write access to ${grant.dir}?`,
+            summary: `${call.name} ${grant.path} — outside your project; allow this edit?`,
             // no denialMessage → the helper defaults to `denied by ${res.by}` (unchanged behavior)
-          }, loaded, async () => {
-            const failure = this.applyDirGrant(sessionId, threadId, grant.dir);
-            if (failure) return { output: failure, isError: true };
-            return this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable);
-          }, pins, rootsOverride, visionCapable);
-        } else if (call.name === "bash" && bashEscalation.dangerouslyDisableSandbox) {
-          // SP-approvals Task 11 (spec §8): a full sandbox-escape floor — ALWAYS a card, under
-          // EVERY policy this branch can be reached under. Unlike every other branch in this
-          // chain, the condition here never consults `decision`/`ruleAllowed` at all — it fires
-          // purely off the ARG (parsed once into `bashEscalation` above) — so neither a matching
-          // PermissionRules rule nor the readOnlyBash classifier (both of which only ever
-          // influence `decision`/`ruleAllowed`, and are additionally excluded from ever running
-          // for this flag at all — see the `ruleAllowed` block's own doc comment above) can route
-          // a dangerouslyDisableSandbox call anywhere but here. Plan mode's blanket deny (the
-          // `decision === "deny"` branch, checked FIRST, above) still wins — bash is denied
-          // outright before this branch is ever reached under `plan` — so "every policy" in
-          // practice means ask/auto (spec, confirmed by permission-gate-order.test.ts). Options
-          // are deliberately narrower than approvalOptionsFor's bash shape: allow_once/deny ONLY,
-          // no allow_project/allow_global — v1 offers no standing memory for this flag at all
-          // (spec: "NO rule can silence it").
-          //
-          // SP-approvals T11 review, MEDIUM-1 (adjudicated ADOPTED — CC parity: an unsandboxed
-          // retry still rides the normal review path, which includes the reviewer under auto):
-          // the SAME bash reviewer is consulted here, BEFORE the card, but strictly as an
-          // ANNOTATION — see annotateWithReview's own doc comment for why this can never become a
-          // second gate. Gated on the identical three conditions the bash reviewAndDispatch branch
-          // below already requires (reviewer configured, reviewerEnabled, reviewClassEnabled) —
-          // deliberately WITHOUT bashLooksSafe's static bypass: that bypass exists to save a
-          // reviewer call when NOTHING would ever see the result (auto policy, no human in the
-          // loop); here a human card is already guaranteed regardless, so there's no cost-saving
-          // rationale for skipping the annotation on an obviously-safe-looking command.
-          let reviewerReason: string | undefined;
-          if (this.cfg.reviewer && this.cfg.reviewerEnabled?.() !== false && this.reviewClassEnabled("bash")) {
-            let command = "";
-            let justification: string | undefined;
-            try {
-              const a = JSON.parse(call.argsJson || "{}");
-              command = typeof a.command === "string" ? a.command : "";
-              justification = typeof a.justification === "string" ? a.justification : undefined;
-            } catch { /* malformed argsJson → review "" ; still annotation-only, never blocks the card */ }
-            reviewerReason = await this.annotateWithReview(
-              { class: "bash", command, justification }, approvalCardSummary(call), call, sessionId, threadId, signal,
-            );
-          }
-          outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
-            timeoutMs: this.approvalTimeoutFor(meta),
-            summary: approvalCardSummary(call),
-            reviewerReason,
             options: [
               { id: "allow_once", label: "Allow once" },
+              { id: "allow_project", label: `Always allow edits in ${grant.dir}`, rule: `Edit(${grant.dir})`, scope: "project" },
               { id: "deny", label: "Deny" },
             ],
-          }, loaded, undefined, pins, rootsOverride, visionCapable);
+          }, loaded, async () => {
+            const failure = this.mkdirForOneShotGrant(grant.dir);
+            if (failure) return { output: failure, isError: true };
+            return this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, oneShot, visionCapable);
+          }, pins, rootsOverride, visionCapable);
+        } else if (call.name === "bash" && bashEscalation.dangerouslyDisableSandbox && !unsandboxedRuleAllowed && meta.approvalPolicy !== "bypass") {
+          // SP-policies Task 11: the sandbox-escape gate. Reworked from SP-approvals' always-card
+          // floor into a mode split. `!unsandboxedRuleAllowed` guards it because a BashUnsandboxed
+          // rule pre-cleared the escape above (set decision="allow"); the branch's own
+          // `bashEscalation.dangerouslyDisableSandbox` is still true, so without this guard a
+          // pre-cleared escape would still card here.
+          //
+          // Remaining modes here: auto (reviewer GATES), ask/accept-edits (human card, reviewer
+          // annotates). plan denied it (deny branch); dont-ask denied it (ask→deny flip); bypass ran
+          // it silently (branch guard); a BashUnsandboxed rule pre-cleared it (unsandboxedRuleAllowed).
+          let command = "";
+          let justification: string | undefined;
+          try {
+            const a = JSON.parse(call.argsJson || "{}");
+            command = typeof a.command === "string" ? a.command : "";
+            justification = typeof a.justification === "string" ? a.justification : undefined;
+          } catch { /* review "" */ }
+          // The escape card now offers standing memory (v1 offered none): a BashUnsandboxed(<prefix>:*)
+          // rule, project or global scope, that a FUTURE matching escape's unsandboxedRuleAllowed
+          // pre-clear then silences. `<prefix>` is suggestBashPrefix (same head heuristic as the plain
+          // bash card's Bash(<prefix>:*)); the rule string is DISJOINT from Bash — a plain Bash rule
+          // never covers an escape (permission-rules.ts Task 5).
+          const urule = `BashUnsandboxed(${suggestBashPrefix(command)}:*)`;
+          const escapeOptions = [
+            { id: "allow_once", label: "Allow once" },
+            { id: "allow_unsandboxed_project", label: `Always allow "${urule}" in this project`, rule: urule, scope: "project" as const },
+            { id: "allow_unsandboxed_global", label: `Always allow "${urule}" everywhere`, rule: urule, scope: "global" as const },
+            { id: "deny", label: "Deny" },
+          ];
+          const reviewerReady = this.cfg.reviewer && this.cfg.reviewerEnabled?.() !== false && this.reviewClassEnabled("bash");
+          if (meta.approvalPolicy === "auto" && reviewerReady) {
+            // auto: the reviewer is the GATE — safe runs unsandboxed unattended; non-safe/error escalates to
+            // the SAME human card the ask path shows. One tool_review is emitted either way.
+            let v: { verdict: "safe" | "unsafe" | "error"; reason: string };
+            try { v = await this.cfg.reviewer!.review({ class: "bash", command, justification }, signal); }
+            catch { v = { verdict: "error", reason: "reviewer unavailable — manual approval required" }; }
+            this.emit(sessionId, { type: "tool_review", sessionId, threadId, toolName: call.name, verdict: v.verdict, reason: sanitizeReviewText(v.reason, 300), summary: sanitizeReviewText(approvalCardSummary(call), 160) });
+            if (v.verdict === "safe") {
+              outcome = await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable);
+            } else {
+              outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
+                timeoutMs: this.approvalTimeoutFor(meta), summary: approvalCardSummary(call),
+                reviewerReason: sanitizeReviewText(v.reason, 300), options: escapeOptions,
+              }, loaded, undefined, pins, rootsOverride, visionCapable);
+            }
+          } else {
+            // ask / accept-edits (or auto with no reviewer configured): human card; the reviewer, when
+            // present, ANNOTATES only (never a second gate) — unchanged from SP-approvals.
+            let reviewerReason: string | undefined;
+            if (reviewerReady) {
+              reviewerReason = await this.annotateWithReview({ class: "bash", command, justification }, approvalCardSummary(call), call, sessionId, threadId, signal);
+            }
+            outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
+              timeoutMs: this.approvalTimeoutFor(meta), summary: approvalCardSummary(call),
+              reviewerReason, options: escapeOptions,
+            }, loaded, undefined, pins, rootsOverride, visionCapable);
+          }
         } else if (decision === "ask") {
           outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
             timeoutMs: this.approvalTimeoutFor(meta),
@@ -2964,17 +3065,35 @@ export class AgentEngine {
             // spec: "a persisted rule then covers matching network calls silently").
             options: approvalOptionsFor(call),
           }, loaded, undefined, pins, rootsOverride, visionCapable);
-        } else if (webFetchCard) {
+        } else if (webFetchCard && meta.approvalPolicy !== "bypass") {
           // SP-approvals Task 10: web_fetch's dangerous-domain floor fires here — reached under
           // EVERY policy (`decision` is unconditionally "allow" for web_fetch now, gate.ts), not
           // just `ask`. `undefined` onApprove → the default executeCall path, same as the plain
           // `decision === "ask"` branch above; the ONLY difference is the summary/options come from
           // webFetchGate instead of approvalCardSummary/approvalOptionsFor.
-          outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
-            timeoutMs: this.approvalTimeoutFor(meta),
-            summary: webFetchCard.summary,
-            options: webFetchCard.options,
-          }, loaded, undefined, pins, rootsOverride, visionCapable);
+          //
+          // SP-policies Task 10: NOW excludes `bypass` (the guard added to this branch's
+          // condition) — bypass is opt-in no-guardrails, so a dangerous-domain fetch under it
+          // falls through to the final `else` → executeCall, silently, same as the escape branch
+          // above under bypass. And splits the remaining policies by mode: `dont-ask` DENIES
+          // outright here (no card — dont-ask never prompts). gate.ts's NETWORK class is
+          // unconditionally "allow", so the generic `decision === "ask"` → deny flip earlier in
+          // this function never even sees a web_fetch call — this floor is the ONLY place a
+          // dont-ask session's dangerous-domain fetch is ever adjudicated, so it needs its own
+          // accurate, mode-aware deny message rather than silently inheriting the ask-shaped card.
+          // Every OTHER policy (ask/auto/accept-edits/plan) keeps the UNCHANGED approval card below.
+          if (meta.approvalPolicy === "dont-ask") {
+            outcome = {
+              output: `web_fetch denied — dont-ask mode declines a fetch to a dangerous domain with no standing WebFetch rule.`,
+              isError: true,
+            };
+          } else {
+            outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
+              timeoutMs: this.approvalTimeoutFor(meta),
+              summary: webFetchCard.summary,
+              options: webFetchCard.options,
+            }, loaded, undefined, pins, rootsOverride, visionCapable);
+          }
         } else if (call.name === "exit_plan_mode" && this.cfg.plans && meta.approvalPolicy === "plan") {
           outcome = await this.runPlanBridge(call, sessionId, threadId, meta);
         } else if (call.name === "enter_plan_mode") {
@@ -2983,18 +3102,29 @@ export class AgentEngine {
           // READ_ONLY set under every policy), so this branch is reached for every call.
           outcome = await this.runEnterPlanBridge(sessionId, meta);
         } else if (
-          // SP-approvals Task 3: widened from `meta.approvalPolicy === "auto"` alone — a rule- or
-          // classifier-allowed bash call (`ruleAllowed`, computed above) reaches this branch with
-          // `decision === "allow"` under `ask` policy too, and must still hit the AI safety
-          // reviewer when one is configured. A standing rule/classifier says "this call needs no
-          // HUMAN gate"; it says nothing about whether the REVIEWER should still look at it — those
-          // are different questions, and only the human-gate one is what a rule/classifier answers.
-          // fs/external reviewer branches below are deliberately left `=== "auto"`-only: the brief
-          // scopes this widening to bash alone (write/edit's in-root rule coverage is the common
-          // case, and out-of-root always keeps its own grant card regardless — see the dirGrant
-          // precedence above; external tools have no rule/classifier source at all).
-          decision === "allow" && call.name === "bash" && this.cfg.reviewer &&
-          this.cfg.reviewerEnabled?.() !== false && (meta.approvalPolicy === "auto" || ruleAllowed) && this.reviewClassEnabled("bash")
+          // SP-policies Task 8: the reviewer is auto-ONLY — this DROPS the SP-approvals Task 3
+          // widening that used to also fire here whenever `ruleAllowed` was true under `ask`
+          // policy. A standing rule (or the readOnlyBash classifier) allowing a call under `ask`
+          // is a HUMAN pre-authorization: the human already decided this call needs no gate at
+          // all, and that decision is final. The reviewer's actual job is to stand in for a human
+          // gate that would otherwise fire; under `ask`, a rule-allowed call never reaches a human
+          // gate in the first place (`ruleAllowed`, computed above, short-circuits `decision` to
+          // "allow" before any of these branches run), so there is nothing left for the reviewer
+          // to stand in for. It now runs ONLY under `auto`, where every call — rule-allowed or not
+          // — is otherwise gateless and the reviewer is the sole safety net, unchanged in strictness.
+          // fs/external reviewer branches below are untouched by this — they were already
+          // `=== "auto"`-only (the SP-approvals T3 brief scoped the now-removed widening to bash
+          // alone: write/edit's in-root rule coverage is the common case, and out-of-root always
+          // keeps its own grant card regardless — see the dirGrant precedence above; external
+          // tools have no rule/classifier source at all).
+          // SP-policies Task 11: `!bashEscalation.dangerouslyDisableSandbox` excludes a sandbox escape
+          // from this ordinary bash reviewer. A rule-pre-cleared escape (unsandboxedRuleAllowed set
+          // decision="allow") would otherwise land here and be reviewed+carded like a plain bash call;
+          // instead it falls straight through to executeCall (unsandboxed, silent). An UN-pre-cleared
+          // escape under auto is handled by the escape branch above (which gates it on the reviewer),
+          // never reaching here (that branch's `decision` is "allow" too, but it's checked first).
+          decision === "allow" && call.name === "bash" && !bashEscalation.dangerouslyDisableSandbox && this.cfg.reviewer &&
+          this.cfg.reviewerEnabled?.() !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("bash")
         ) {
           let command = "";
           let justification: string | undefined;
@@ -3025,9 +3155,10 @@ export class AgentEngine {
             const a = JSON.parse(call.argsJson || "{}") as { path?: unknown };
             path = typeof a.path === "string" ? a.path : "";
           } catch { /* malformed argsJson → executeCall's own zod validation rejects it below */ }
-          // Same roots/tmpDir executeCall itself will resolve against (rootsOverride ?? live
-          // session roots) — the review must see EXACTLY the fence executeCall enforces.
-          const fsRoots = rootsOverride ?? this.cfg.dirs.roots(sessionId);
+          // Same roots/tmpDir executeCall itself will resolve against (SP-policies Task 6:
+          // writableRoots, not the raw session roots) — the review must see EXACTLY the fence
+          // executeCall enforces, Edit(<path>)-widened dirs included.
+          const fsRoots = this.writableRoots(sessionId, projectRoot, rootsOverride);
           const fsTmpDir = sessionTmpDir(sessionId);
           const resolved = path ? resolveFsReviewTarget(path, fsRoots, fsTmpDir) : null;
           if (resolved && fsWriteIsUnusual(resolved, fsRoots[0]!)) {
@@ -3508,6 +3639,24 @@ export class AgentEngine {
     return null;
   }
 
+  /** SP-policies Task 9: the mkdir-ONLY half of applyDirGrant — create a grant dir so an APPROVED
+   *  out-of-project edit's write can land, WITHOUT the persistent session grant applyDirGrant does
+   *  (no `dirs.add`, no `directory_added`). The `ask`-card path grants ONE-SHOT (the write rides an
+   *  explicit `oneShot` roots override for this call only; durable coverage comes from the
+   *  "Always allow edits in <dir>" Edit(<dir>) rule instead, if chosen), so it must NOT extend the
+   *  session roots. The mkdir itself is still required: the write fence (resolveWithinAny) SKIPS a
+   *  not-yet-existing root, so a deep new grant dir would otherwise drop out of `oneShot` and the
+   *  write would fail its own containment. Returns an error string on failure (EACCES/EROFS/...),
+   *  the same shape applyDirGrant surfaces, else null. */
+  private mkdirForOneShotGrant(dir: string): string | null {
+    try {
+      mkdirSync(dir, { recursive: true });
+      return null;
+    } catch (err) {
+      return `could not create ${dir}: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
   /** write-permission-flow hardening (task-24 review F2): true when `dir` (a computed grant dir —
    *  already canonicalized by fsWriteOutOfRootDir: existing part realpathed, missing tail literal)
    *  must never be granted. BIDIRECTIONAL containment against each denied prefix (realpathed here,
@@ -3522,6 +3671,57 @@ export class AgentEngine {
       if (dir === cp || dir.startsWith(cp + sep) || cp.startsWith(dir + sep)) return true;
     }
     return false;
+  }
+
+  /** SP-policies Task 6: the session's writable-dir set — `dirs.roots(sessionId)` (or a worktree
+   *  child's FIXED `rootsOverride`) UNIONED with the absolute dirs a hand-authored `Edit(<path>)`
+   *  rule declares for this project (PermissionRules.editPathRules). Consulted by BOTH the
+   *  write/edit fence (fsWriteOutOfRootDir, permissionRulesFileTarget, the fs-reviewer's fsRoots)
+   *  AND bash's seatbelt (executeCall's ctx.roots — tools/bash.ts realpaths this exact array into
+   *  sandbox.ts's buildSeatbeltProfile `(subpath ...)` rules), so one Edit rule widens both
+   *  surfaces identically. A worktree-isolated child (`rootsOverride` set) keeps its FIXED
+   *  confinement — Edit rules never widen it, mirroring fsWriteOutOfRootDir's own `!rootsOverride`
+   *  guard at its call site (a grant there would be a no-op anyway: SessionDirectories.add can
+   *  never extend a worktree child's roots).
+   *
+   *  SECURITY GUARD (Task 4 reviewer carry-forward): `editPathRules` returns raw, unvetted dirs — a
+   *  rule string a human (or a persuaded model, via the "always allow" approval option) can write
+   *  directly. Two shapes must NEVER be unioned in as-is:
+   *   - the bare filesystem root "/" — checked explicitly, BEFORE `grantDenied`, because
+   *     `grantDenied`'s own bidirectional containment check (`dir.startsWith(cp + sep)`) degenerates
+   *     for a bare "/" (`"/" + sep` is `"//"`, which no real absolutized path ever starts with) and
+   *     so would never itself catch it. Without this, `Edit(/)` would leak "/" into bash's seatbelt
+   *     roots and make the ENTIRE disk bash-writable (sandbox.ts's `subpath` is a real macOS
+   *     Seatbelt primitive with no equivalent quirk — `subpath "/"` truly matches everything).
+   *   - any dir `grantDenied` already refuses to grant (the SAME `~/.norma`-class control-plane
+   *     denylist the out-of-root dirGrant flow uses) — an `Edit(~/.norma)` (or an ancestor/
+   *     descendant of it) must not silently become "in-root" either, or every downstream check that
+   *     exists specifically to protect the control plane (dirGrantDenied's hard-error branch,
+   *     permissionRulesFileTarget's own identity check) would simply never run for it: `dirGrant`
+   *     would compute as `null` (the call looks ordinary, in-root), so `dirGrantDenied`'s
+   *     `grantDenied` check — which only ever runs when `dirGrant` is non-null — is never reached.
+   *  Each Edit dir is realpath-resolved FIRST (`realpathSync`) — and a not-yet-existing dir is
+   *  SKIPPED entirely, never raw-fallback-included — so a symlinked Edit dir resolves to the identity
+   *  `grantDenied` itself expects (mirrors `permissionRulesFileTarget`'s filesystem-identity-over-
+   *  string-spelling principle), and a missing root can never reach bash's realpath/Seatbelt (which
+   *  would ENOENT-crash every bash call). See the loop below. */
+  private writableRoots(sessionId: string, projectRoot: string | null, rootsOverride: string[] | undefined): string[] {
+    const base = rootsOverride ?? this.cfg.dirs.roots(sessionId);
+    if (rootsOverride || !this.cfg.permissionRules || projectRoot === null) return base;
+    const editDirs: string[] = [];
+    for (const raw of this.cfg.permissionRules.editPathRules(projectRoot)) {
+      // SP-policies Task 6 review (HIGH + MEDIUM): realpath-or-SKIP, never a raw fallback. A
+      // not-yet-existing Edit dir is SKIPPED entirely — every session root MUST exist (bash.ts
+      // realpaths ctx.roots and sandbox.ts turns each into a Seatbelt subpath; a missing root
+      // ENOENT-crashes EVERY bash call in the session, not just a write to that dir). realpathSync
+      // also fully resolves symlinks, so a symlinked Edit path can't dodge the grantDenied denylist
+      // below by pointing a not-yet-real tail at the control plane — an unresolvable tail just drops.
+      let real: string;
+      try { real = realpathSync(raw); } catch { continue; }
+      if (real === "/" || this.grantDenied(real)) continue; // "/" (whole disk) + ~/.norma control plane
+      editDirs.push(real);
+    }
+    return editDirs.length ? [...new Set([...base, ...editDirs])] : base;
   }
 
   /** SP-approvals Task 10 (spec §7): web_fetch's dangerous-domain floor — the ONE thing that still
@@ -3686,7 +3886,7 @@ export class AgentEngine {
     call: { callId: string; name: string; argsJson: string },
     sessionId: string,
     threadId: string,
-    meta: { approvalPolicy: "ask" | "auto" | "plan" },
+    meta: { approvalPolicy: SessionApprovalPolicy },
   ): Promise<{ output: string; isError: boolean }> {
     const plans = this.cfg.plans!;
     let plan = "";
@@ -3743,7 +3943,7 @@ export class AgentEngine {
    *  the next turn (same as the exit bridge — see runPlanBridge's doc comment). */
   private async runEnterPlanBridge(
     sessionId: string,
-    meta: { approvalPolicy: "ask" | "auto" | "plan" },
+    meta: { approvalPolicy: SessionApprovalPolicy },
   ): Promise<{ output: string; isError: boolean }> {
     if (meta.approvalPolicy === "plan") {
       return { output: "already in plan mode", isError: true };
@@ -3872,7 +4072,14 @@ export class AgentEngine {
     let args: unknown;
     try { args = call.argsJson.length ? JSON.parse(call.argsJson) : {}; }
     catch { return Promise.resolve({ output: `tool arguments were not valid JSON`, isError: true }); }
-    const roots = rootsOverride ?? this.cfg.dirs.roots(sessionId);
+    // SP-policies Task 6: writableRoots unions in any Edit(<path>)-declared dirs for this project
+    // (guarded against "/" and the grantDenied control-plane denylist — see its own doc comment)
+    // — this becomes ctx.roots below, so an Edit rule widens BOTH the write/edit fence (the
+    // dispatch-loop sites above) AND bash's seatbelt (tools/bash.ts realpaths this exact array
+    // into sandbox.ts's buildSeatbeltProfile). `cwd` here is executeCall's own param, not the
+    // dispatch loop's local — recomputed the identical way (`cwd ? repoRootFor(cwd) : null`) since
+    // this method has no access to the loop's already-hoisted `projectRoot`.
+    const roots = this.writableRoots(sessionId, cwd ? repoRootFor(cwd) : null, rootsOverride);
     const tmpDir = sessionTmpDir(sessionId);
     const markSkillLoaded = (n: string) => {
       let set = this.loadedSkills.get(sessionId);

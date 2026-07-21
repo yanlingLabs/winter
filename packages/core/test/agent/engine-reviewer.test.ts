@@ -114,16 +114,27 @@ function registryWithExternal(): { registry: ToolRegistry; calls: Array<{ argsJs
 // Stub reviewer: scripted verdict/throw, records every input it was asked to review — bash's
 // {command, justification} shape (with `class:"bash"`, per 5e T3) as well as fs/external's
 // {class, precis} shape.
-export function stubReviewer(behavior: { verdict: "safe" | "unsafe"; reason: string } | "throw") {
+export function stubReviewer(behavior: { verdict: "safe" | "unsafe"; reason: string } | "safe" | "unsafe" | "throw") {
   const seen: ReviewInput[] = [];
-  return {
+  // SP-policies (policy-escape.test.ts): also accept a bare verdict string ("safe"/"unsafe") — the
+  // terse form the escape tests use — alongside the original {verdict, reason} object and "throw". A
+  // bare string synthesizes a reason so the emitted tool_review still carries non-empty text.
+  const resolved: { verdict: "safe" | "unsafe"; reason: string } | "throw" =
+    behavior === "safe" ? { verdict: "safe", reason: "stub: safe" }
+      : behavior === "unsafe" ? { verdict: "unsafe", reason: "stub: unsafe" }
+        : behavior;
+  const stub = {
     seen,
     review: async (input: ReviewInput) => {
       seen.push(input);
-      if (behavior === "throw") throw new Error("reviewer boom");
-      return behavior;
+      if (resolved === "throw") throw new Error("reviewer boom");
+      return resolved;
     },
   };
+  // `{ reviewer, reviews }` aliases mirror stubRegistry's `{ registry, calls }` shape so
+  // policy-escape.test.ts can destructure them; every existing caller keeps using `{ seen, review }`
+  // directly (and passes the whole object as the reviewer via `as any`), both unchanged.
+  return Object.assign(stub, { reviewer: stub, reviews: seen });
 }
 
 describe("engine + safety reviewer (auto-policy bash)", () => {

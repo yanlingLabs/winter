@@ -32,7 +32,10 @@ export function setupEngine(provider: Provider, opts?: {
   // reviewerEnabled accepts a plain boolean (wrapped into a getter below) OR a getter directly —
   // hot-settings T2's engine-hot-config.test.ts passes `() => live` closing over a reassignable
   // outer var to prove reviewer.enabled is hot in BOTH directions with no engine reconstruction.
-  reviewer?: BashReviewer; reviewerEnabled?: boolean | (() => boolean | undefined); reviewerAllow?: string[]; policy?: "ask" | "auto" | "plan";
+  // SP-policies Task 7: widened to include "dont-ask" (policy-dont-ask.test.ts drives a dont-ask
+  // session). The value flows straight through to store.createSession's approvalPolicy — the full
+  // 6-value SessionApprovalPolicy is valid there; this union just lists the ones tests actually use.
+  reviewer?: BashReviewer; reviewerEnabled?: boolean | (() => boolean | undefined); reviewerAllow?: string[]; policy?: "ask" | "auto" | "plan" | "dont-ask";
   // phase 5e T3: per-class review on/off — undefined (every pre-5e-T3 test) leaves every class
   // enabled, unchanged. See EngineConfig.reviewerClasses's own doc comment. Also accepts a getter
   // directly (hot-settings T2's engine-hot-config.test.ts passes `() => live.reviewer?.classes`

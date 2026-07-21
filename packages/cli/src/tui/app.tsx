@@ -78,6 +78,7 @@ import { Box, Text, useInput, useStdin } from "ink";
 import { Chalk } from "chalk";
 import wrapAnsi from "wrap-ansi";
 import { METHODS, type ApprovalPolicy, type SessionEvent } from "@norma/protocol";
+import { POLICY_ORDER } from "./policy-order";
 import { initialState, reduce, type AgentRow, type Block, type LocalEvent, type PendingCard, type TuiState } from "./state";
 import { activeTurnLines, makeFlattenCache } from "./flatten-blocks";
 import { scrollBy, scrollToBottom, scrollToTop, viewportSlice, type ViewportState } from "./viewport";
@@ -148,7 +149,10 @@ export interface AppProps {
   resumeTargetSeq?: number;
 }
 
-const POLICY_ORDER: ApprovalPolicy[] = ["ask", "auto", "plan"];
+// Re-exported from the zero-dep `./policy-order` module (SP-policies): main.ts's cycler imports the
+// SAME constant from there, so the two can never drift; this re-export keeps app.tsx's existing
+// `POLICY_ORDER` import path (and test/policy-order.test.ts) working unchanged.
+export { POLICY_ORDER };
 const EXIT_WINDOW_MS = 800; // T5 double-press ctrl+C/ctrl+D window, timed off the App's ticking `nowMs`
 
 const readRows = (): number => (typeof process.stdout.rows === "number" ? process.stdout.rows : 24);

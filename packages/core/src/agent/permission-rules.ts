@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, type Stats, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, type Stats, writeFileSync } from "node:fs";
 import { join, sep } from "node:path";
 import { hasShellHazards } from "./shell-scan";
 import { dangerousDomainMatch } from "./dangerous-domains";
@@ -51,11 +51,14 @@ import { dangerousDomainMatch } from "./dangerous-domains";
  * into a space) `git push\nrm -rf /` — a chain riding a narrow prefix rule straight past the human
  * approval card. See `ruleMatches`'s own doc comment for the full mechanics.
  *
- * MINOR, same review: `parseRule` rejects (returns `null`) a parenthesized value on any tool OTHER
- * than Bash (e.g. `"Edit(/path:*)"`) — Edit/Computer/Worktree calls carry no `command` field for
- * an exact/prefix value to ever compare against, so such a rule could never match anything; it's
- * treated the same as any other unparseable rule string (ignored, warned once) rather than
- * silently accepted as a rule that can never fire.
+ * MINOR, same review: `parseRule` rejects (returns `null`) a parenthesized value on Computer/
+ * Worktree (e.g. `"Computer(x)"`) — those calls carry no `command` field for an exact/prefix value
+ * to ever compare against, so such a rule could never match anything; it's treated the same as any
+ * other unparseable rule string (ignored, warned once) rather than silently accepted as a rule that
+ * can never fire. UPDATE (SP-policies, Task 4): Edit is no longer in this bucket for EVERY
+ * parenthesized value — `Edit(<absolute path>)` is now a legitimate writable-dir declaration (kind
+ * "path", see `parseRule`'s own doc comment below and `editPathRules`); only a RELATIVE `Edit(...)`
+ * value still gets this same "unparseable, warn once" treatment.
  *
  * Spec deviation, called out explicitly per the SP-approvals brief: this class does NOT seed the
  * CC-parity default `["Computer"]` allow-rule anywhere. That default is a Task-3 concern — it
@@ -84,7 +87,7 @@ const MAX_RULES_FILE_BYTES = 64 * 1024;
 // truth) rather than duplicated as a separate literal pattern. "WebFetch" (SP-approvals T10) is
 // the exception mechanism for engine.ts's dangerous-domain floor — its ONLY value grammar is
 // `domain:<host>` (kind "domain", handled in parseRule below), never a bare "any" form.
-const KNOWN_TOOLS = ["Bash", "Edit", "Computer", "Worktree", "WebFetch"] as const;
+const KNOWN_TOOLS = ["BashUnsandboxed", "Bash", "Edit", "Computer", "Worktree", "WebFetch"] as const;
 // Matches a bare tool name ("Edit") or a tool name with a single parenthesized value
 // ("Bash(git push:*)"). The `s` (dotAll) flag lets the value legitimately contain newlines (e.g.
 // a multi-line bash command) instead of silently failing to parse.
@@ -96,6 +99,7 @@ const RULE_GRAMMAR = new RegExp(`^(${KNOWN_TOOLS.join("|")})(?:\\((.*)\\))?$`, "
  *  unreachable given `RULE_GRAMMAR` only ever captures one of `KNOWN_TOOLS` into group 1. */
 function internalToolFor(ruleTool: string): string {
   switch (ruleTool) {
+    case "BashUnsandboxed": return "bash_unsandboxed";
     case "Bash": return "bash";
     case "Edit": return "edit";
     case "Computer": return "computer";
@@ -119,10 +123,12 @@ function normalizeWhitespace(s: string): string {
  * empty value (`"Bash()"`, `"Bash(:*)"`) also returns `null` — a rule naming no command at all is
  * far more likely a typo than an intentional "match everything", and CC's own grammar has no such
  * wildcard-via-omission form either (bare `Bash` already covers "any bash call"). A parenthesized
- * value on any tool OTHER than Bash/WebFetch (e.g. `"Edit(/path:*)"`) also returns `null` — see the
- * class doc comment's "MINOR" note above this function for why (no non-bash, non-web_fetch call
+ * value on Computer/Worktree (e.g. `"Computer(x)"`) also returns `null` — see the class doc
+ * comment's "MINOR" note above this function for why (no non-bash, non-web_fetch, non-edit call
  * carries a `command`/`url` for such a value to ever compare against, so it could never match
- * anything).
+ * anything). A RELATIVE `Edit(...)` value (e.g. `"Edit(path:*)"`) returns `null` the same way —
+ * only an ABSOLUTE `Edit(<path>)` value parses, as a FOURTH shape below (kind "path", SP-policies
+ * Task 4): a writable-dir declaration, not a call-value comparison (see `editPathRules`).
  *
  * `WebFetch` (SP-approvals T10, spec §7) is a THIRD shape, not a fourth exact/prefix pair: its
  * only recognized value is `domain:<host>` (kind "domain", `host` whitespace-normalized but
@@ -133,7 +139,7 @@ function normalizeWhitespace(s: string): string {
  * rule would silence the dangerous-domain floor for EVERY site rather than just the one a human
  * approved; no UI offers that, so the grammar doesn't accept it either.
  */
-export function parseRule(s: string): { tool: string; kind: "any" | "exact" | "prefix" | "domain"; value?: string } | null {
+export function parseRule(s: string): { tool: string; kind: "any" | "exact" | "prefix" | "domain" | "path"; value?: string } | null {
   const m = RULE_GRAMMAR.exec(s);
   if (!m) return null;
   const tool = internalToolFor(m[1]!); // group 1 is mandatory in RULE_GRAMMAR — always set on a match
@@ -148,7 +154,15 @@ export function parseRule(s: string): { tool: string; kind: "any" | "exact" | "p
     const value = normalizeWhitespace(content.slice("domain:".length));
     return value ? { tool, kind: "domain", value } : null; // empty domain ("WebFetch(domain:)") -> null, same treatment as Bash's empty value
   }
-  if (tool !== "bash") return null; // parenthesized value on a tool with no `command` to match — see doc comment above
+  if (tool === "edit") {
+    // Edit(<absolute path>) — path-scoped writable-dir declaration (SP-policies): consumed via
+    // editPathRules() to feed the session writable set (engine's writableRoots); NEVER a call-
+    // silencer (see ruleMatches). Must be ABSOLUTE — a relative path is meaningless without a cwd
+    // this parser doesn't have. NOT whitespace-collapsed (a path may contain spaces) — trim only.
+    const value = content.trim();
+    return value.startsWith("/") ? { tool, kind: "path", value } : null;
+  }
+  if (tool !== "bash" && tool !== "bash_unsandboxed") return null; // parenthesized value on a tool with no `command` to match — see doc comment above
   if (content.endsWith(":*")) {
     const value = normalizeWhitespace(content.slice(0, -2));
     return value ? { tool, kind: "prefix", value } : null;
@@ -207,6 +221,15 @@ function rawCommand(argsJson: string): string {
   }
 }
 
+/** SP-policies: does this bash call carry `dangerouslyDisableSandbox: true`? Malformed/absent → false
+ *  (a non-escape call). The one bit that makes Bash and BashUnsandboxed rules disjoint. */
+function callIsUnsandboxed(argsJson: string): boolean {
+  try {
+    const a = JSON.parse(argsJson || "{}") as { dangerouslyDisableSandbox?: unknown };
+    return a.dangerouslyDisableSandbox === true;
+  } catch { return false; }
+}
+
 /** `rawCommand`, whitespace-normalized the same way `parseRule` normalizes a rule's value — so
  *  "git   push x" and a rule's "git push" compare as equal tokens. Used ONLY for the actual
  *  exact/prefix VALUE comparison, after `hasShellHazards` has already vetted the raw form. `""`
@@ -248,17 +271,32 @@ function normalizedCommand(argsJson: string): string {
  * it. An unparseable/missing url never matches.
  */
 export function ruleMatches(parsed: NonNullable<ReturnType<typeof parseRule>>, call: { name: string; argsJson: string }): boolean {
+  if (parsed.kind === "path") return false; // (Task 4) writable-dir declaration, never a call-silencer
   const tool = toolForCallName(call.name);
+  // SP-policies: Bash and BashUnsandboxed are DISJOINT by the call's `dangerouslyDisableSandbox`
+  // flag — a plain Bash rule never authorizes a sandbox escape, a BashUnsandboxed rule matches ONLY
+  // one. Both share the exact/prefix value comparison + raw-command hazard scan.
+  if (parsed.tool === "bash" || parsed.tool === "bash_unsandboxed") {
+    if (tool !== "bash") return false;
+    const unsandboxed = callIsUnsandboxed(call.argsJson);
+    if (parsed.tool === "bash" && unsandboxed) return false;
+    if (parsed.tool === "bash_unsandboxed" && !unsandboxed) return false;
+    if (parsed.kind === "any") return true;
+    if (parsed.value === undefined) return false;
+    if (hasShellHazards(rawCommand(call.argsJson))) return false; // a chain can't ride a narrow prefix rule
+    const cmd = normalizedCommand(call.argsJson);
+    if (parsed.kind === "exact") return cmd === parsed.value;
+    return cmd === parsed.value || cmd.startsWith(parsed.value + " ");
+  }
   if (tool === null || tool !== parsed.tool) return false;
   if (parsed.kind === "any") return true;
-  if (parsed.value === undefined) return false; // malformed parsed rule (never produced by parseRule) — never matches
+  if (parsed.value === undefined) return false;
   if (parsed.kind === "domain") {
     const host = callUrlHost(call.argsJson);
     if (host === null) return false;
     return dangerousDomainMatch(host, [parsed.value]) !== null;
   }
-  if (parsed.tool === "bash" && hasShellHazards(rawCommand(call.argsJson))) return false;
-  const cmd = normalizedCommand(call.argsJson);
+  const cmd = normalizedCommand(call.argsJson); // edit/computer/worktree exact/prefix (rare)
   if (parsed.kind === "exact") return cmd === parsed.value;
   return cmd === parsed.value || cmd.startsWith(parsed.value + " ");
 }
@@ -284,6 +322,19 @@ function writeFileAtomic(path: string, content: string): void {
 
 function statOrNull(path: string): Stats | null {
   try { return statSync(path); } catch { return null; }
+}
+
+/** Like `statOrNull`, but `lstat` — reports the link ITSELF, never following a final symlink. Used
+ *  by the symlink-indirection guard below (SP-policies whole-branch review): the rules store must
+ *  refuse to TRUST a symlinked `<root>/.norma` (or a symlinked `permissions.local.json`). An agent
+ *  that can create a symlink (sandboxed `ln -s`, needing NO write grant) could otherwise point
+ *  `.norma` at a decoy dir it CAN write, plant a `permissions.local.json` there (a path with no
+ *  `.norma` in it, so the write-guard never flags it), and have the hot reader follow the symlink
+ *  and mint allow-rules with no human card — self-escalating the live session, since rules are
+ *  hot-read. `statOrNull`/`existsSync` FOLLOW the symlink (they'd read/write the decoy); lstat is
+ *  what actually sees the link. */
+function lstatOrNull(path: string): Stats | null {
+  try { return lstatSync(path); } catch { return null; }
 }
 
 export class PermissionRules {
@@ -347,6 +398,20 @@ export class PermissionRules {
     };
   }
 
+  /** SP-policies: absolute dirs declared by `Edit(<path>)` rules (global ∪ project), deduped. The
+   *  engine unions these into the session writable set (writableRoots) so both the write/edit fence
+   *  AND bash's seatbelt may write there. A path-less `Edit` rule contributes nothing (no dir — it
+   *  relieves edit CARDS only, never widens the sandbox). Same hot read decision() uses. */
+  editPathRules(projectRoot: string | null): string[] {
+    const raw = [...(this.deps.globalAllow() ?? []), ...(projectRoot !== null ? this.projectRulesFor(projectRoot) : [])];
+    const out: string[] = [];
+    for (const s of raw) {
+      const p = parseRule(s);
+      if (p && p.kind === "path" && p.value) out.push(p.value);
+    }
+    return [...new Set(out)];
+  }
+
   // ---- internals ----
 
   private parsed(raw: string[]): NonNullable<ReturnType<typeof parseRule>>[] {
@@ -384,7 +449,27 @@ export class PermissionRules {
    *  re-logged on a later call, only a further CHANGE (a fix, or a different corruption) would
    *  trigger another read attempt. */
   private projectRulesFor(root: string): string[] {
+    // SP-policies whole-branch review residual (symlink indirection): never TRUST — hence never
+    // FOLLOW — a symlinked `<root>/.norma` or a symlinked `permissions.local.json`. lstat sees the
+    // link itself (statOrNull below would follow it into a decoy dir the agent controls). A
+    // symlinked `.norma` (or file) is treated as "this project has NO rules" — the same result as
+    // an absent file — and warned about once for this root (reusing warnFileOnce's per-root dedupe).
+    // A `.norma` that doesn't exist at all is fine (null lstat → fall through → no rules, as today);
+    // a real directory / real file passes straight through. See `lstatOrNull` for the full threat.
+    const dotNorma = join(root, ".norma");
+    const dotNormaLstat = lstatOrNull(dotNorma);
+    if (dotNormaLstat?.isSymbolicLink()) {
+      this.warnFileOnce(root, `${dotNorma} is a symlink, not a real directory — refusing to read project permission rules through it`);
+      this.cache.delete(root);
+      return [];
+    }
     const path = this.projectRulesFile(root);
+    const fileLstat = lstatOrNull(path);
+    if (fileLstat?.isSymbolicLink()) {
+      this.warnFileOnce(root, `${path} is a symlink, not a real file — refusing to read project permission rules through it`);
+      this.cache.delete(root);
+      return [];
+    }
     const stat = statOrNull(path);
     if (!stat) {
       this.cache.delete(root);
@@ -427,8 +512,26 @@ export class PermissionRules {
 
   private appendProject(rule: string, root: string): void {
     const dotNorma = join(root, ".norma");
+    // Defense in depth (SP-policies whole-branch review residual): never write THROUGH a symlinked
+    // `<root>/.norma` or a symlinked `permissions.local.json`. A human answering an approval card
+    // must never be tricked into planting a rules file into an attacker-chosen dir via a symlink an
+    // agent pre-created. lstat sees the link itself (mkdirSync/existsSync/rename below would follow
+    // it); throw rather than write through. A `.norma` that doesn't exist yet (null lstat) is fine —
+    // mkdir-on-first-use below still creates a REAL dir; a real dir/file passes straight through.
+    const dotNormaLstat = lstatOrNull(dotNorma);
+    if (dotNormaLstat?.isSymbolicLink()) {
+      throw new RuleAppendError(
+        `refusing to write a project permission rule for ${root} — ${dotNorma} is a symlink, not a real directory`,
+      );
+    }
     mkdirSync(dotNorma, { recursive: true });
     const path = this.projectRulesFile(root);
+    const fileLstat = lstatOrNull(path);
+    if (fileLstat?.isSymbolicLink()) {
+      throw new RuleAppendError(
+        `refusing to write a project permission rule for ${root} — ${path} is a symlink, not a real file`,
+      );
+    }
     let obj: any = {}; // dynamic JSON blob — same untyped-any idiom as settings.ts's addLocalDir
     if (existsSync(path)) {
       try {

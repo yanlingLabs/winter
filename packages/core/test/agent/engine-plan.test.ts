@@ -7,7 +7,7 @@ import { SessionHub, type HubClient } from "../../src/sessions/hub";
 import { ToolRegistry } from "../../src/agent/tools/registry";
 import { registerWriteTools } from "../../src/agent/tools/fs-write";
 import { registerPlanTool } from "../../src/agent/tools/plan";
-import { PermissionGate } from "../../src/agent/gate";
+import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { PlanBroker } from "../../src/agent/plans";
 import { AgentEngine } from "../../src/agent/engine";
@@ -21,7 +21,7 @@ import type { ProviderEvent } from "../../src/providers/types";
 
 function setup(
   script: ProviderEvent[][],
-  opts: { plans?: boolean; approvalPolicy?: "ask" | "auto" | "plan" } = {},
+  opts: { plans?: boolean; approvalPolicy?: SessionApprovalPolicy } = {},
 ) {
   const withPlans = opts.plans !== false;
   const home = mkdtempSync(join(tmpdir(), "norma-engine-plan-"));
@@ -32,8 +32,8 @@ function setup(
   registerWriteTools(registry);
   registerPlanTool(registry);
   const plans = withPlans ? new PlanBroker() : undefined;
-  const setPolicyCalls: Array<{ sessionId: string; policy: "ask" | "auto" | "plan" }> = [];
-  const setPolicy = (sessionId: string, policy: "ask" | "auto" | "plan") => {
+  const setPolicyCalls: Array<{ sessionId: string; policy: SessionApprovalPolicy }> = [];
+  const setPolicy = (sessionId: string, policy: SessionApprovalPolicy) => {
     setPolicyCalls.push({ sessionId, policy });
     store.setApprovalPolicy(sessionId, policy);
   };

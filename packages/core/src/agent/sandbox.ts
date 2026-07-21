@@ -40,6 +40,13 @@ function canon(p: string): string {
  * doesn't exist yet, `canon` gracefully falls through to the raw (already-canonical, since `roots`
  * is pre-canonicalized) concatenation, same graceful-fallback shape `canon` already has everywhere
  * else in this file.
+ *
+ * SP-policies whole-branch review (Item 1, HIGH): those per-root literals only cover a store
+ * DIRECTLY under a root; a broad `Edit(<parent>)` grant makes a NESTED store
+ * (`<parent>/projB/.norma/permissions.local.json`) writable. An additional `(deny file-write*
+ * (regex ...))` line — placed after the literals, matching `<any>/.norma/permissions.local.json` at ANY
+ * depth, case-folded per character (SBPL has no working `(?i)`) — closes that. See the inline
+ * comment on `RULES_FILE_REGEX` below for the real-`sandbox-exec` verification of both facts.
  */
 export function buildSeatbeltProfile(opts: SandboxOptions): string {
   const roots = [opts.cwd, ...(opts.writableRoots ?? [tmpdir()])].map(canon);
@@ -47,6 +54,20 @@ export function buildSeatbeltProfile(opts: SandboxOptions): string {
   const denyRulesFileRules = roots
     .map((r) => `(deny file-write* (literal "${sbplString(canon(join(r, ".norma", "permissions.local.json")))}"))`)
     .join("\n");
+  // SP-policies whole-branch review (Item 1, HIGH): the per-root literal denies above only cover a
+  // rules store DIRECTLY under a writable root (`<root>/.norma/permissions.local.json`). A broad
+  // `Edit(<parent>)` grant makes `<parent>` a writable root, so a NESTED store —
+  // `<parent>/projB/.norma/permissions.local.json` — sat inside a writable subpath with no literal
+  // deny for it, and sandboxed bash could write it (minting a sibling project's rules). This regex
+  // deny closes that: it matches any path ending in `/.norma/permissions.local.json` at ANY nesting
+  // depth. Case-folded per character on purpose — SBPL's regex engine does NOT honor an inline
+  // `(?i)` flag (verified against a real `/usr/bin/sandbox-exec`: with `(?i)` the write sailed
+  // straight through; with explicit `[Nn]`-style character classes it was denied), and the macOS
+  // default volume is case-insensitive so `.NORMA/Permissions.Local.json` reaches the SAME file the
+  // reader opens. It is a REGEX rule, never a `(subpath ...)` blanket — a sibling file, or the whole
+  // `.norma/memory/` MEMDIR, at any depth, stays writable (filename-specific, same as the literals).
+  const RULES_FILE_REGEX = String.raw`/\.[Nn][Oo][Rr][Mm][Aa]/[Pp][Ee][Rr][Mm][Ii][Ss][Ss][Ii][Oo][Nn][Ss]\.[Ll][Oo][Cc][Aa][Ll]\.[Jj][Ss][Oo][Nn]$`;
+  const denyRulesFileRegex = `(deny file-write* (regex #"${RULES_FILE_REGEX}"))`;
   const network = opts.allowNetwork ? "(allow network*)" : "(deny network*)";
   // Minimal mach services: deny blanket lookup so open/launchctl/osascript can't
   // ask a privileged, unsandboxed service to act out-of-band on our behalf.
@@ -74,6 +95,7 @@ ${writeRules})
 (allow file-write-data (path "/dev/null") (path "/dev/stdout") (path "/dev/stderr") (path "/dev/dtracehelper"))
 ${network}
 ${denyRulesFileRules}
+${denyRulesFileRegex}
 `;
 }
 

@@ -13,6 +13,7 @@ import { SessionHub } from "../../src/sessions/hub";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { ApprovalBroker } from "../../src/agent/approvals";
+import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { AuditLog } from "../../src/peripheral/audit";
 import { PeripheralBroker, type PeripheralClass } from "../../src/peripheral/broker";
 import { ProviderLink } from "../../src/peripheral/provider-link";
@@ -118,7 +119,7 @@ function buildLeasePolicy(deps: {
   hub: SessionHub;
 }): (sessionId: string, cls: PeripheralClass) => Promise<"granted" | "denied"> {
   return async (sessionId: string, cls: PeripheralClass): Promise<"granted" | "denied"> => {
-    let approvalPolicy: "ask" | "auto" | "plan";
+    let approvalPolicy: SessionApprovalPolicy;
     try {
       approvalPolicy = deps.store.meta(sessionId).approvalPolicy;
     } catch {

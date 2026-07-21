@@ -1,3 +1,5 @@
+import type { SessionApprovalPolicy } from "./gate";
+
 /**
  * BackgroundAgentRegistry — pure state tracker for detached (async) subagent
  * threads. Foundation for `run_in_background` on spawn_agent.
@@ -34,7 +36,7 @@ export interface ResumeContext {
   agentType?: string;
   cwd: string;
   roots?: string[];
-  approvalPolicy: "ask" | "auto" | "plan";
+  approvalPolicy: SessionApprovalPolicy;
   model?: string;
   instructions: string;
   maxTurns?: number;

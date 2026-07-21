@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolveNormaHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION } from "@norma/core";
 import type { Settings } from "@norma/core";
 import { METHODS, type ApprovalPolicy, type Task } from "@norma/protocol";
+import { POLICY_ORDER } from "./tui/policy-order";
 import { NormaClient } from "./client";
 import { applyEvent, isStalled, type WatchdogState } from "./watchdog";
 import { streamAction } from "./stream-state";
@@ -463,13 +464,16 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
 
   // --- interactive controls (Task 6) ---
 
-  // shift+tab cycles ask→auto→plan→ask via the session.setPolicy RPC; the mode bar updates only on
-  // success (repaint). An in-flight guard drops repeat presses until the RPC settles; a failure
-  // prints a dim one-line notice and leaves the bar unchanged.
+  // shift+tab cycles plan→dont-ask→ask→accept-edits→auto→bypass→plan (restrictiveness order, SP-
+  // policies Task 13) via the session.setPolicy RPC; the mode bar updates only on success (repaint).
+  // An in-flight guard drops repeat presses until the RPC settles; a failure prints a dim one-line
+  // notice and leaves the bar unchanged. Cycle order is the shared POLICY_ORDER (./tui/policy-order,
+  // a zero-dep module — importing it here does NOT pull in app.tsx's Ink graph), so app.tsx's footer
+  // cycler and this raw cycler can never drift.
   async function cyclePolicy(): Promise<void> {
     if (policyInFlight) return;
     policyInFlight = true;
-    const order: ApprovalPolicy[] = ["ask", "auto", "plan"];
+    const order = POLICY_ORDER;
     const next = order[(order.indexOf(policy) + 1) % order.length]!;
     try {
       await c.setPolicy(sessionId, next);

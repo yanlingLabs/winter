@@ -914,3 +914,17 @@ describe("memory RPCs (Phase 5b Task 3, design doc §4)", () => {
     expect(MemoryAuditResult.parse({ lines: [] })).toEqual({ lines: [] });
   });
 });
+
+describe("ApprovalPolicy — 6 modes (SP-policies)", () => {
+  test("all six parse", () => {
+    for (const p of ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"] as const) {
+      expect(ApprovalPolicy.parse(p)).toBe(p);
+    }
+  });
+  test("unknown mode rejected", () => {
+    expect(() => ApprovalPolicy.parse("yolo")).toThrow();
+  });
+  test("default is ask", () => {
+    expect(ApprovalPolicy.default("ask").parse(undefined)).toBe("ask");
+  });
+});

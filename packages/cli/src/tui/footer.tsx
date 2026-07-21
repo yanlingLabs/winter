@@ -1,7 +1,10 @@
-/** `<Footer>` (Phase 3b Task 5; Phase 3c Task 5 — exit-armed override) — the CC-shaped single dim
- *  hint line beneath the composer: an approval-policy mode indicator (plan/auto, colored per
- *  `theme.planMode`/`theme.autoAccept`), an `esc to interrupt` hint while a turn runs, and an
- *  agents pill (`N agent(s) · ctrl+a`) when any subagents are live — segments joined with `" · "`.
+/** `<Footer>` (Phase 3b Task 5; Phase 3c Task 5 — exit-armed override; SP-policies Task 13 — 6-mode
+ *  render) — the CC-shaped single dim hint line beneath the composer: an approval-policy mode
+ *  indicator for every non-`ask` policy (`plan`/`dont-ask`/`accept-edits`/`auto`/`bypass`, colored
+ *  per `theme.planMode`/`theme.warning`/`theme.autoAccept`(×2)/`theme.dangerMode` respectively;
+ *  `ask` renders no special segment — it's the unmarked default), an `esc to interrupt` hint while a
+ *  turn runs, and an agents pill (`N agent(s) · ctrl+a`) when any subagents are live — segments
+ *  joined with `" · "`.
  *  Live child-transcript view T3: the pill's hint changed from `ctrl+t` to `ctrl+a` — `ctrl+t`
  *  never opened/selected an agent, it toggles the (unrelated) task-list view; the roster's own
  *  select-mode toggle (app.tsx) is `ctrl+a`, so this is a truthfulness fix, not a rebind (`ctrl+t`
@@ -53,10 +56,28 @@ export function Footer({ policy, running, agents, exitArmed }: FooterProps) {
         ⏸ plan mode on (shift+tab to cycle)
       </Text>,
     );
+  } else if (policy === "dont-ask") {
+    segments.push(
+      <Text key="mode" color={theme.warning}>
+        ✕ dont-ask — auto-declines prompts (shift+tab to cycle)
+      </Text>,
+    );
+  } else if (policy === "accept-edits") {
+    segments.push(
+      <Text key="mode" color={theme.autoAccept}>
+        ✎ accept edits (shift+tab to cycle)
+      </Text>,
+    );
   } else if (policy === "auto") {
     segments.push(
       <Text key="mode" color={theme.autoAccept}>
         ⏵⏵ auto mode on (shift+tab to cycle)
+      </Text>,
+    );
+  } else if (policy === "bypass") {
+    segments.push(
+      <Text key="mode" color={theme.dangerMode}>
+        ⚠ bypass — all actions auto-approved (shift+tab to cycle)
       </Text>,
     );
   }

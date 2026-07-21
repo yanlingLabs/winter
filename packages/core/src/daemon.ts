@@ -44,7 +44,7 @@ import { registerPushNotificationTool } from "./agent/tools/push-notification";
 import { notifyHeadless } from "./agent/notify-fallback";
 import { registerLspTools } from "./agent/tools/lsp";
 import { LspManager } from "./agent/lsp/manager";
-import { PermissionGate } from "./agent/gate";
+import { PermissionGate, type SessionApprovalPolicy } from "./agent/gate";
 import { PermissionRules } from "./agent/permission-rules";
 import { ApprovalBroker } from "./agent/approvals";
 import { QuestionBroker } from "./agent/questions";
@@ -115,7 +115,7 @@ function buildLeasePolicy(deps: {
   timeoutMs?: number;
 }): (sessionId: string, cls: PeripheralClass) => Promise<"granted" | "denied"> {
   return async (sessionId: string, cls: PeripheralClass): Promise<"granted" | "denied"> => {
-    let approvalPolicy: "ask" | "auto" | "plan";
+    let approvalPolicy: SessionApprovalPolicy;
     try {
       // COUPLING (4h-i, refined 4h-ii-a): this reads the PERSISTED session policy as a proxy for
       // "the current caller's policy". That's safe because peripheral.lease is a harness-only RPC
