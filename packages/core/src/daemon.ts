@@ -10,7 +10,7 @@ import { SessionHub } from "./sessions/hub";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
 import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
-import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor } from "./agent/memory-dir";
+import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
 import { createProvider } from "./providers/manager";
 import type { Provider } from "./providers/types";
@@ -206,6 +206,17 @@ export async function startDaemon(opts: {
   // down; later tasks convert more getters against this SAME instance, never a second one, so
   // there is exactly one mtime cache per project cwd for the whole daemon).
   const projectSettings = new ProjectSettingsResolver({ base: () => settings, trust: trustStore });
+  // fix-wave B (I1): every per-project getter below resolves at the REPO ROOT, matching
+  // `globalAllow`'s own `projectRoot` (engine.ts's `repoRootFor(cwd)`) — NOT the raw session cwd.
+  // Before this, a SUBDIRECTORY session read a DIFFERENT `.norma/settings.json` than
+  // `globalAllow`/`editPathRules` did for the identical repo, so a repo-root settings.json was only
+  // half-honored: `permissions.allow` picked it up, but `dangerousDomains.added` (and
+  // reviewer/toolSearch/hooks/lsp) silently didn't — same-file keys diverging on which cwd they're
+  // even resolved against was never intended, and it made a project-configured dangerous domain
+  // fail-OPEN (card-less) for any subdir session. `repoRootFor` is memoized per canon(cwd) (a git
+  // spawn only on first sight of a dir) and falls back to the dir itself outside a git repo, so
+  // this is perf-neutral and a non-repo cwd behaves exactly as before.
+  const projectRootOf = (cwd?: string | null): string | null => (cwd ? repoRootFor(cwd) : null);
   const pluginStore = new PluginStore({
     normaHome, plugins: settings?.plugins, consents: settings?.plugins?.consents, log: (m) => console.error(m),
   });
@@ -709,7 +720,7 @@ export async function startDaemon(opts: {
     // cwd, so this reads byte-identically to the pre-Task-9 zero-arg getter whenever no project
     // overlay applies or no cwd was resolvable. The null-settings fail-open default is unchanged.
     const hooksEnabledHot = (cwd?: string | null): boolean => {
-      const s = projectSettings.effective(cwd ?? null);
+      const s = projectSettings.effective(projectRootOf(cwd));
       return s ? hooksEnabledFrom(s) : true;
     };
     // lsp-consolidation T3: same live-getter shape as `hooksEnabledHot`/`memoryEnabledHot` above —
@@ -722,7 +733,7 @@ export async function startDaemon(opts: {
     // applies. The null-settings fail-open default is unchanged (`effective` itself returns
     // `base()`'s null straight through when `base()` is null).
     const lspAutoDiagnosticsHot = (cwd?: string): boolean => {
-      const s = projectSettings.effective(cwd ?? null);
+      const s = projectSettings.effective(projectRootOf(cwd));
       return s ? lspAutoDiagnosticsEnabledFrom(s) : true;
     };
     const hookFacade = new HookFacade({
@@ -791,7 +802,7 @@ export async function startDaemon(opts: {
       // param straight through); `effective(cwd ?? null)` degrades to `settings` verbatim for a
       // null/untrusted/overlay-less cwd, so this reads byte-identically to the pre-Task-7 getter
       // whenever no project overlay applies.
-      dangerousDomainsAdded: (cwd) => projectSettings.effective(cwd ?? null)?.permissions?.dangerousDomains?.added,
+      dangerousDomainsAdded: (cwd) => projectSettings.effective(projectRootOf(cwd))?.permissions?.dangerousDomains?.added,
       dirs: sessionDirs,
       // write-permission-flow F2: the out-of-root write/edit grant flow must never silently grant
       // any part of Norma's OWN home directory. This is BROADER than the READ denylist above
@@ -845,12 +856,12 @@ export async function startDaemon(opts: {
       // CONSULTED for a given cwd is per-project (mirrors the doc comment on `reviewerCfg`/
       // `lspAutoDiagnosticsHot`: which reviewer model to use is a boot snapshot; whether reviewing
       // runs at all is hot, and now project-scoped too).
-      reviewerEnabled: (cwd) => projectSettings.effective(cwd ?? null)?.reviewer?.enabled,
-      reviewerAllow: (cwd) => projectSettings.effective(cwd ?? null)?.reviewer?.allow ?? [],
+      reviewerEnabled: (cwd) => projectSettings.effective(projectRootOf(cwd))?.reviewer?.enabled,
+      reviewerAllow: (cwd) => projectSettings.effective(projectRootOf(cwd))?.reviewer?.allow ?? [],
       // Phase 5e T4: raw pass-through — engine.ts's reviewClassEnabled already treats an absent
       // object/key as enabled, and reviewerEnabled:false already short-circuits before this is
       // ever consulted (see its own doc comment), so no extra defaulting belongs here.
-      reviewerClasses: (cwd) => projectSettings.effective(cwd ?? null)?.reviewer?.classes,
+      reviewerClasses: (cwd) => projectSettings.effective(projectRootOf(cwd))?.reviewer?.classes,
       titler,
       // hot-settings T5a/T5b: EngineConfig.computerUse is a getter (engine.ts) over the SAME `let
       // computerUse` holder assigned at boot above (~line 423) — T5b (below, after this engine is
@@ -876,9 +887,9 @@ export async function startDaemon(opts: {
       // deferThreshold env fallback is UNCHANGED, still consulted whenever the resolved effective
       // settings (global or project-merged) don't set one.
       toolSearch: {
-        enabled: (cwd) => projectSettings.effective(cwd ?? null)?.toolSearch?.enabled,
-        deferThreshold: (cwd) => projectSettings.effective(cwd ?? null)?.toolSearch?.deferThreshold ?? Number(process.env.NORMA_TOOLSEARCH_THRESHOLD ?? 12),
-        deferExternals: (cwd) => projectSettings.effective(cwd ?? null)?.toolSearch?.deferExternals,
+        enabled: (cwd) => projectSettings.effective(projectRootOf(cwd))?.toolSearch?.enabled,
+        deferThreshold: (cwd) => projectSettings.effective(projectRootOf(cwd))?.toolSearch?.deferThreshold ?? Number(process.env.NORMA_TOOLSEARCH_THRESHOLD ?? 12),
+        deferExternals: (cwd) => projectSettings.effective(projectRootOf(cwd))?.toolSearch?.deferExternals,
       },
       hooks: hookFacade,
       // Subagent transcript files (CC parity): the SAME session-tmp-dir accessor registerLspTools

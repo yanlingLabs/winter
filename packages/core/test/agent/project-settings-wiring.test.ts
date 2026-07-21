@@ -16,6 +16,7 @@ import { SkillStore } from "../../src/agent/skills";
 import { Compactor } from "../../src/agent/compactor";
 import { PermissionRules } from "../../src/agent/permission-rules";
 import { ProjectSettingsResolver } from "../../src/project-settings";
+import { repoRootFor } from "../../src/agent/memory-dir";
 import { Settings } from "../../src/settings";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import type { Provider, ProviderEvent } from "../../src/providers/types";
@@ -33,6 +34,16 @@ import { stubRegistry, bashTurn } from "./engine-reviewer.test";
 
 function tmpDir(prefix: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+}
+
+/** mkdtemp + git init + an empty commit so HEAD exists — mirrors memory-dir.test.ts's own
+ *  `initRepo()` helper. `repoRootFor` shells out to real git, so a subdir-vs-root test needs an
+ *  actual repository, not just two plain directories. */
+function initRepo(): string {
+  const dir = tmpDir("norma-psw-repo-");
+  Bun.spawnSync(["git", "-C", dir, "init", "-q"]);
+  Bun.spawnSync(["git", "-C", dir, "-c", "user.email=t@t.com", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "init"]);
+  return dir;
 }
 
 /** Minimal valid Settings — mirrors project-settings-resolver.test.ts's own helper. */
@@ -161,6 +172,59 @@ describe("dangerousDomainsAdded becomes per-project via ProjectSettingsResolver"
     const controlEvents = store.read(controlSessionId);
     expect(controlEvents.some((e) => e.type === "approval_requested")).toBe(false);
     expect(fetchCalls).toEqual(["https://evil-example.net/y"]); // ran cardless
+  });
+});
+
+describe("B [fix-wave IMPORTANT I1]: per-project getters resolve at the repo root, matching globalAllow (subdir sessions no longer fail-open)", () => {
+  test("a SUBDIR session of a trusted repo whose ROOT .norma/settings.json adds a dangerous domain -> web_fetch to it CARDS from the subdir; the SAME root file's permissions.allow rule ALSO applies from the subdir — both getters read the identical repo-root file", async () => {
+    const root = initRepo();
+    const nested = join(root, "a", "b");
+    mkdirSync(nested, { recursive: true });
+    mkdirSync(join(root, ".norma"), { recursive: true });
+    writeFileSync(
+      join(root, ".norma", "settings.json"),
+      JSON.stringify({ permissions: { dangerousDomains: { added: ["evil-example.net"] }, allow: ["Bash(foo:*)"] } }),
+    );
+
+    const base = minimalBase();
+    const trust = { isTrusted: (dir: string) => dir === root }; // only the REPO ROOT is ever trusted, never the subdir itself
+    const resolver = new ProjectSettingsResolver({ base: () => base, trust });
+
+    // Session A: dangerousDomainsAdded, wired EXACTLY as daemon.ts does post-fix-wave-B — through
+    // `repoRootFor`, the same transform `projectRootOf` applies there (matching `globalAllow`,
+    // which engine.ts already threads its own `projectRoot = repoRootFor(cwd)` into, unchanged by
+    // this fix). Session cwd is the SUBDIR — it has no `.norma` of its own.
+    const { registry: webRegistry, fetchCalls } = buildWebRegistry();
+    const webProvider = new FakeProvider(webFetchTurn("https://evil-example.net/x", "c1"));
+    const { engine: webEngine, store: webStore, hub: webHub, broker: webBroker } = buildEngine(webProvider, {
+      registry: webRegistry,
+      dangerousDomainsAdded: (cwd) => resolver.effective(cwd ? repoRootFor(cwd) : null)?.permissions?.dangerousDomains?.added,
+    });
+    const webSessionId = webStore.createSession("global", { cwd: nested, approvalPolicy: "ask" });
+    webHub.attach(approver(webBroker, webSessionId, false), webSessionId, 0); // deny — only proving the card fired
+    await webEngine.runTurn(webSessionId);
+    const webEvents = webStore.read(webSessionId);
+    expect(webEvents.some((e) => e.type === "approval_requested")).toBe(true); // subdir session still sees the root's addition
+    expect(fetchCalls).toEqual([]); // denied -> never actually fetched
+
+    // Session B: permissions.allow via PermissionRules.globalAllow — engine.ts already passes
+    // `repoRootFor(cwd)` as `projectRoot` here (untouched by fix-wave B), so this side already read
+    // the repo root even pre-fix. Included so the SAME subdir cwd proves both getters agree —
+    // before the fix, session A would fail to card (fail-open) while this one still ran cardless;
+    // that asymmetry (same file, different verdicts depending on WHICH getter) was the bug.
+    const normaHome = tmpDir("norma-psw-b-home-");
+    const permissionRules = new PermissionRules({
+      globalAllow: (projectRoot) => resolver.effective(projectRoot)?.permissions?.allow ?? ["Computer"],
+      normaHome,
+    });
+    const { registry: bashRegistry, calls } = stubRegistry();
+    const bashProvider = new FakeProvider(bashTurn("foo bar"));
+    const { engine: bashEngine, store: bashStore } = buildEngine(bashProvider, { registry: bashRegistry, permissionRules });
+    const bashSessionId = bashStore.createSession("global", { cwd: nested, approvalPolicy: "ask" });
+    await bashEngine.runTurn(bashSessionId);
+    const bashEvents = bashStore.read(bashSessionId);
+    expect(bashEvents.some((e) => e.type === "approval_requested")).toBe(false); // ran cardless — root's rule matched from the subdir
+    expect(calls.length).toBe(1);
   });
 });
 
