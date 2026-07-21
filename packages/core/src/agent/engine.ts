@@ -400,59 +400,55 @@ function fsWriteOutOfRootDir(call: { name: string; argsJson: string }, roots: st
 }
 
 /**
- * SP-approvals final review (composition hole, HIGH): a write/edit whose target IS — by real
- * filesystem identity, not by string spelling — `<projectRoot>/.norma/permissions.local.json`,
- * Task 1's PermissionRules project-scope rules file, must be a hard error, no card, no grant, no
- * matter what rule is in force. Without this, a broad `Edit` rule (the feature's own most-
- * encouraged click — it matches both `write` and `edit` call names, see permission-rules.ts's
- * `toolForCallName`) lets the agent write a NEW rule into this file itself — e.g.
- * `WebFetch(domain:webhook.site)` — which `webFetchGate` (§7, above) then treats as an already-
- * approved standing exception, silently clearing the dangerous-domain floor for a zero-card exfil
- * fetch. The store must be mutable ONLY through `PermissionRules.append()` (a human answering an
- * approval card's "always allow" option) or a human's own editor — never through the agent's own
+ * SP-approvals final review (composition hole, HIGH): a write/edit whose target is ANY project's
+ * `<any>/.norma/permissions.local.json` — Task 1's PermissionRules project-scope rules file — must be a
+ * hard error, no card, no grant, no matter what rule is in force. Without this, a broad `Edit` rule
+ * (the feature's own most-encouraged click — it matches both `write` and `edit` call names, see
+ * permission-rules.ts's `toolForCallName`) lets the agent write a NEW rule into this file itself —
+ * e.g. `WebFetch(domain:webhook.site)` — which `webFetchGate` (§7, above) then treats as an
+ * already-approved standing exception, silently clearing the dangerous-domain floor for a zero-card
+ * exfil fetch. The store must be mutable ONLY through `PermissionRules.append()` (a human answering
+ * an approval card's "always allow" option) or a human's own editor — never through the agent's own
  * write/edit tools.
  *
- * SP-approvals final review 2 (bypass in the FIRST version of this check, reproduced live on the
- * default case-insensitive-but-case-preserving macOS volume format): comparing
- * `basename(canonical) === "permissions.local.json"` and `basename(dirname(canonical)) ===
- * ".norma"` as case-SENSITIVE string literals let `.norma/Permissions.Local.json`,
- * `.NORMA/permissions.local.json`, and a pre-created `.norma` SYMLINK pointing at some other real
- * directory all land on disk unflagged — while `permission-rules.ts`'s `projectRulesFor` reads the
- * store back via a plain `join(root, ".norma", "permissions.local.json")` open, which macOS's
- * default filesystem resolves CASE-INSENSITIVELY and follows symlinks through exactly like any
- * other path — so the reader picked every one of those variants right back up as the real file.
- * `canonicalizeForWrite`'s own "reappend the missing tail verbatim" behavior (by design — the tail
- * doesn't exist on disk yet, so there's nothing on-disk to correct it against) is exactly why the
- * bypass survived resolution: it only case/symlink-corrects the PREFIX that already exists, never
- * the part that doesn't, and for a fresh project `.norma` itself frequently doesn't exist yet.
+ * SP-policies whole-branch review (Item 1, HIGH): this check is now projectRoot-INDEPENDENT. The
+ * PRIOR version anchored the match to the CURRENT session's project only — it compared the write's
+ * resolved parent against `join(projectRoot, ".norma")` for THIS session's `projectRoot` alone. But
+ * a broad `Edit(<parent>)` grant folds `<parent>` into the session writable set (writableRoots), so
+ * a SIBLING project's tree — `<parent>/projB/.norma/permissions.local.json`, whose owning project is
+ * NOT this session's — becomes in-root, and the single-project anchoring returned null ("not MY
+ * store") → the in-project-silent flip wrote it with no card. Those minted rules (exfil exceptions,
+ * BashUnsandboxed escapes) auto-activate the moment the user opens projB. The invariant is
+ * project-wide: the agent must NEVER write ANY `<any>/.norma/permissions.local.json`, whichever project
+ * owns it — so the match no longer needs (or takes) a `projectRoot`.
  *
- * The fix compares by FILESYSTEM IDENTITY instead of by spelling: the write target's PARENT
- * DIRECTORY is realpath-resolved (resolves case AND symlinks at the dir level, on the real FS — the
- * same principle `grantDenied`'s own control-plane check relies on) and compared against the
- * project root's OWN `.norma` directory, ALSO realpath-resolved the identical way — so a write
- * reaching the exact same real directory the reader would open, however it got there (differently-
- * cased spelling, a symlink hop, whatever), is recognized as a match. The one case FS identity
- * can't settle is the common one where `.norma` doesn't exist in ANY casing yet — nothing real to
- * compare against — so that path falls back to a STRUCTURAL check instead: the write target's own
- * (not-yet-real, so not OS-corrected) parent must sit directly under the project root's real path,
- * and its own name must be some casing of ".norma" (explicitly case-folded here, since nothing on
- * disk will do it for us in that branch). Either way, the FILENAME itself is also compared
- * case-folded (`.toLowerCase()`), never as a literal spelling.
+ * SP-approvals final review 2 (bypass reproduced live on the default case-insensitive-but-case-
+ * preserving macOS volume format): a case-SENSITIVE literal compare let `.norma/Permissions.Local.
+ * json`, `.NORMA/permissions.local.json`, and a pre-created `.norma` SYMLINK pointing at some other
+ * real directory all land unflagged — while `permission-rules.ts`'s `projectRulesFor` reads the
+ * store back via a plain `join(root, ".norma", "permissions.local.json")` open, which macOS's
+ * default filesystem resolves CASE-INSENSITIVELY and follows symlinks through — so the reader picked
+ * every variant right back up as the real file. Fixed by case-folding every compare (`.toLowerCase()`)
+ * and by testing the parent-dir name on BOTH spellings of the path:
+ *   - the PRE-resolution spelling (`raw0`) catches a write THROUGH a symlink NAMED `.norma` (the
+ *     reader follows the same link, so writer and reader hit the identical file) — canonicalization
+ *     would resolve that `.norma` away to the link's real destination, whose name is NOT `.norma`.
+ *   - the CANONICALIZED target (`canonicalizeForWrite`/`resolveLeafSymlinks`, preserved from the
+ *     prior fix) catches the inverse: reaching a REAL `.../.norma/...` via a differently-NAMED
+ *     symlink or `..` games — `raw0`'s literal parent isn't `.norma`, but the resolved one is.
+ * Either match means "this is (some project's) rules store". `raw0`'s parent is checked FIRST, before
+ * canonicalization can throw, so a pathological link chain never drops an otherwise-clear match.
  *
  * Matches by FILENAME alone, never by directory: `.norma/` itself stays writable (`.norma/memory/`
- * is the MEMDIR by design, and any other file under `.norma/` is unaffected) — only this one file,
- * under any casing, inside the identity-matched directory, is ever denied. `null` for every
- * non-write/edit call, a missing/malformed `path` arg, a null `projectRoot` (defensive — see the
- * `ruleAllowed` block's own comment on why `cwd` is effectively never falsy in practice), or a
- * resolution failure (unresolvable link-chain etc.) — the normal dispatch chain decides from there,
- * same fail-open-to-the-next-check shape as `fsWriteOutOfRootDir`. */
+ * is the MEMDIR by design — memory files are `*.md`, never `permissions.local.json` — and any other
+ * file under `.norma/` is unaffected). `null` for every non-write/edit call, a missing/malformed
+ * `path` arg, or a resolution failure (unresolvable link-chain etc.) — the normal dispatch chain
+ * decides from there, same fail-open-to-the-next-check shape as `fsWriteOutOfRootDir`. */
 function permissionRulesFileTarget(
   call: { name: string; argsJson: string },
   roots: string[],
-  projectRoot: string | null,
 ): { path: string; canonical: string } | null {
   if (call.name !== "write" && call.name !== "edit") return null;
-  if (projectRoot === null) return null; // no project root — nothing to compare a filesystem identity against
   let path = "";
   try {
     const a = JSON.parse(call.argsJson || "{}") as { path?: unknown };
@@ -461,33 +457,23 @@ function permissionRulesFileTarget(
   if (!path) return null;
   const raw0 = isAbsolute(path) ? resolve(path) : resolve(roots[0] ?? "/", path);
   // Cheap, syscall-free early-out: a target whose filename isn't SOME casing of
-  // "permissions.local.json" can never match regardless of what its parent resolves to. Comparing
-  // the ORIGINAL (pre-resolution) filename case-folded is equivalent to comparing the eventually-
-  // resolved one — canonicalization can only correct an existing file's spelling to what's already
-  // on disk, which is the identical case-folded string by definition on a case-insensitive volume,
-  // or (the file doesn't exist yet) leave it exactly as given — either way the case-folded compare
-  // gives the same verdict without needing to resolve anything first.
+  // "permissions.local.json" can never be the rules store, regardless of what its parent resolves
+  // to — memory files are `*.md`, every other file under `.norma/` has a different name. Comparing
+  // the ORIGINAL (pre-resolution) filename case-folded is equivalent to the resolved one:
+  // canonicalization only corrects an EXISTING file's spelling to what's on disk (the identical
+  // case-folded string on a case-insensitive volume) or leaves a not-yet-existing tail verbatim.
   if (basename(raw0).toLowerCase() !== "permissions.local.json") return null;
+  // Pre-resolution parent: some casing of ".norma" ⇒ the rules store (catches a symlink NAMED
+  // `.norma`). Checked BEFORE canonicalization so a link chain that throws below can't drop it.
+  if (basename(dirname(raw0)).toLowerCase() === ".norma") {
+    try { return { path, canonical: canonicalizeForWrite(resolveLeafSymlinks(raw0)) }; }
+    catch { return { path, canonical: raw0 }; } // still a confirmed match; report the raw target
+  }
+  // Otherwise, resolve case/symlinks and re-check the parent — catches reaching a REAL `.../.norma/`
+  // via a differently-named symlink or `..` games.
   try {
     const canonical = canonicalizeForWrite(resolveLeafSymlinks(raw0));
-    const parentReal = dirname(canonical);
-    const readerNorma = join(projectRoot, ".norma");
-    let matches: boolean;
-    try {
-      // `.norma` (some casing, or a symlink elsewhere) already exists as SOMETHING real —
-      // `realpathSync` fully resolves both case and symlinks for an entity that actually exists,
-      // so a plain identity compare against the reader's own `.norma` resolution is exact and
-      // needs no further case-folding.
-      matches = parentReal === realpathSync(readerNorma);
-    } catch {
-      // `.norma` doesn't exist under ANY casing yet (the common case for a fresh project) — there
-      // is no real directory entry for the OS to case/symlink-correct, so `parentReal`'s own final
-      // segment is whatever the model literally wrote, verbatim. Compare structurally instead: the
-      // REST of `parentReal` must be exactly the project root's own real path, and its final
-      // segment, case-folded, must be ".norma".
-      matches = dirname(parentReal) === realpathSync(projectRoot) && basename(parentReal).toLowerCase() === ".norma";
-    }
-    return matches ? { path, canonical } : null;
+    return basename(dirname(canonical)).toLowerCase() === ".norma" ? { path, canonical } : null;
   } catch { return null; } // unresolvable — not a confirmed match; the normal dispatch chain decides
 }
 
@@ -2699,12 +2685,13 @@ export class AgentEngine {
         // guard against an empty string — repoRootFor("") would realpath-fail and fall back to the
         // DAEMON's own process.cwd(), a wrong and misleading project root. `projectRoot: null`
         // degrades safely everywhere it's read below: PermissionRules.decision() just consults
-        // global rules, and permissionRulesFileTarget refuses to match at all (see its own doc
-        // comment). SP-policies Task 6: HOISTED above the `dirGrant` computation just below (it
-        // used to sit between `dirGrantDenied` and `rulesFileTarget`) — `writableRoots` (also
-        // below) needs it to resolve this call's `Edit(<path>)`-declared writable dirs BEFORE
-        // `dirGrant`'s own fsWriteOutOfRootDir check runs, not just for the later
-        // ruleAllowed/rulesFileTarget consumers that already read it.
+        // global rules, and permissionRulesFileTarget is projectRoot-INDEPENDENT (SP-policies
+        // whole-branch Item 1 — it refuses ANY project's rules store, so a null projectRoot never
+        // affects its verdict; see its own doc comment). SP-policies Task 6: HOISTED above the
+        // `dirGrant` computation just below (it used to sit between `dirGrantDenied` and
+        // `rulesFileTarget`) — `writableRoots` (also below) needs it to resolve this call's
+        // `Edit(<path>)`-declared writable dirs BEFORE `dirGrant`'s own fsWriteOutOfRootDir check
+        // runs, not just for the later ruleAllowed consumers that already read it.
         const projectRoot = cwd ? repoRootFor(cwd) : null;
         // CC parity (write-permission-flow): out-of-root write/edit. Norma has no model-invocable
         // "request a directory" tool anymore — an out-of-root Write/Edit itself carries the SAME
@@ -2740,7 +2727,7 @@ export class AgentEngine {
         // permissionRulesFileTarget's own doc comment for the full exfil-composition rationale
         // (final review 2: filesystem-IDENTITY comparison, not string spelling).
         const rulesFileTarget = (call.name === "write" || call.name === "edit")
-          ? permissionRulesFileTarget(call, this.writableRoots(sessionId, projectRoot, rootsOverride), projectRoot)
+          ? permissionRulesFileTarget(call, this.writableRoots(sessionId, projectRoot, rootsOverride))
           : null;
         // SP-approvals Task 10: web_fetch's dangerous-domain floor — computed for EVERY policy
         // (gate.ts's `decision` above is now unconditionally "allow" for web_fetch, so this is the
@@ -2840,8 +2827,8 @@ export class AgentEngine {
         // below narrows for it.
         let ruleAllowed = false;
         if (decision === "ask" && this.cfg.permissionRules && !bashEscalation.dangerouslyDisableSandbox) {
-          // `projectRoot` is the SAME hoisted value rulesFileTarget's computation above already
-          // derived (see its own comment) — reused here rather than recomputed.
+          // `projectRoot` is the SAME hoisted value the `dirGrant`/`writableRoots` computation above
+          // already used (derived once at the top of the loop) — reused here rather than recomputed.
           const grantPending = dirGrant !== null;
           if (!grantPending && this.cfg.permissionRules.decision({ name: call.name, argsJson: call.argsJson }, projectRoot) === "allow") {
             ruleAllowed = true;
@@ -2868,6 +2855,18 @@ export class AgentEngine {
         // class with its own rule form, never silenced by a plain Bash rule. Runs BEFORE the dont-ask deny
         // flip below (ordering is load-bearing): a BashUnsandboxed-covered escape under dont-ask must stay
         // "allow" and run silently, not get converted to "deny" by that flip.
+        //
+        // SP-policies whole-branch review (Item 2, MEDIUM — ACCEPTED, documented not guarded): a PERSISTED
+        // `BashUnsandboxed(<prefix>:*)` rule (like `bypass`) grants SILENT, unsandboxed execution for that
+        // prefix. For a file-WRITING prefix that necessarily includes writing the control plane itself —
+        // the rules store (`*/.norma/permissions.local.json`, which the seatbelt regex + permissionRulesFileTarget
+        // otherwise deny) and `~/.norma/run/core.sock` — because a true escape runs with NO seatbelt at all
+        // (tools/bash.ts spawns /bin/bash directly, no profile). This is a DELIBERATE, human-pre-authorized
+        // consequence: the human wrote (or approved the "always allow" card for) that BashUnsandboxed rule,
+        // explicitly choosing unrestricted shell for that prefix. Guarding it would require parsing the shell
+        // command string to reason about what it writes — fragile and defeatable (out of scope). The store
+        // guard here protects the write/edit TOOLS and the SANDBOXED bash path; a self-authored escape rule is
+        // a strictly higher, separately-consented bar.
         let unsandboxedRuleAllowed = false;
         if (bashEscalation.dangerouslyDisableSandbox && this.cfg.permissionRules && meta.approvalPolicy !== "plan"
             && this.cfg.permissionRules.decision({ name: call.name, argsJson: call.argsJson }, projectRoot) === "allow") {
@@ -2957,7 +2956,7 @@ export class AgentEngine {
           }
           if (newCwd !== undefined) cwd = newCwd;
         } else if (dirGrant) {
-          // Out-of-project write/edit under `ask`/`bypass` (the auto/accept-edits cases were
+          // Out-of-project write/edit under `ask` (the auto/accept-edits/bypass cases were ALL
           // pre-granted + nulled above, so they never reach this branch): ONE grant-flavored card
           // through the SAME requestApproval seam bash/worktree use. SP-policies Task 9 gives it
           // three options — [Allow once, Always allow edits in <dir>, Deny] — and a ONE-SHOT roots

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type AddressInfo } from "node:net";
@@ -71,6 +71,49 @@ d("bash tool (sandboxed)", () => {
     expect(res.output).toContain("[exit 0]");
     expect(existsSync(target)).toBe(true);
     expect(readFileSync(target, "utf8")).toBe("memory-content\n");
+  });
+
+  // SP-policies whole-branch review (Item 1, HIGH): the OLD seatbelt emitted ONE literal deny per
+  // writable root — `<root>/.norma/permissions.local.json` — which missed a NESTED store under a
+  // BROAD Edit(<parent>) root: `<parent>/B/.norma/permissions.local.json` was writable by sandboxed
+  // bash, minting a sibling project's rules. The fix adds an SBPL `(deny file-write* (regex ...))`
+  // matching `*/.norma/permissions.local.json` at ANY depth, any case. Here `<parent>` is an EXTRA
+  // writable root (roots: [cwd, parent]) and the store lives under `<parent>/projB`, so ONLY the
+  // regex (not the per-root literal) can catch it — pinning the nested case end-to-end through a real
+  // sandbox-exec child, exactly the surface the engine's write/edit guard (permissionRulesFileTarget)
+  // cannot see into.
+  test("CANNOT write a NESTED sibling rules store <parent>/projB/.norma/permissions.local.json (regex deny at any depth)", async () => {
+    const cwd = proj();
+    const parent = proj(); // an EXTRA writable root (mirrors an Edit(<parent>) grant)
+    const target = join(parent, "projB", ".norma", "permissions.local.json");
+    mkdirSync(join(parent, "projB", ".norma"), { recursive: true });
+    const res = await reg().execute(
+      "bash",
+      { command: `echo '{"allow":["WebFetch(domain:webhook.site)"]}' > ${target}` },
+      { cwd, roots: [cwd, parent], sessionId: "s1" },
+    );
+    expect(existsSync(target)).toBe(false); // regex-denied even though it is nested under a writable root
+    expect(res.output).not.toContain("[exit 0]");
+  });
+
+  test("the nested regex carve-out is still file-specific — sibling other.json, nested memory/, and plain files under the same root all remain writable; a trivial command still runs (profile valid)", async () => {
+    const cwd = proj();
+    const parent = proj();
+    mkdirSync(join(parent, "projB", ".norma", "memory"), { recursive: true });
+    const other = join(parent, "projB", ".norma", "other.json");
+    const mem = join(parent, "projB", ".norma", "memory", "x.md");
+    const plain = join(parent, "projB", "file.txt");
+    const res = await reg().execute(
+      "bash",
+      { command: `echo o > ${other} && echo m > ${mem} && echo p > ${plain} && echo hi` },
+      { cwd, roots: [cwd, parent], sessionId: "s1" },
+    );
+    expect(res.isError).toBe(false);
+    expect(res.output).toContain("[exit 0]"); // profile is VALID — a malformed regex would deny everything
+    expect(res.output).toContain("hi");
+    expect(existsSync(other)).toBe(true);
+    expect(existsSync(mem)).toBe(true);
+    expect(existsSync(plain)).toBe(true);
   });
 
   test("kills a command that exceeds the timeout", async () => {

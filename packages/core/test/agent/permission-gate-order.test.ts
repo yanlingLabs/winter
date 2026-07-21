@@ -1159,4 +1159,62 @@ describe("scenario 12: the permission-rules store is never agent-writable (SP-ap
     expect(existsSync(join(realDir, "permissions.local.json"))).toBe(false); // nothing landed through the symlink
     expect(existsSync(join(cwd, ".norma", "permissions.local.json"))).toBe(false); // nor via the symlinked spelling
   });
+
+  // SP-policies whole-branch review (Item 1, HIGH): the guard used to be anchored to the CURRENT
+  // session's project ONLY — it matched a write target against `join(projectRoot, ".norma")` for
+  // this session's projectRoot alone. So a broad `Edit(<parent>)` grant (which folds <parent> into
+  // the session writable set, making a SIBLING project's tree in-root) let the agent SILENTLY write
+  // a DIFFERENT project's rules store: <parent>/projB/.norma/permissions.local.json. That store is
+  // NOT this session's (projA's) store, so the old identity/structural checks both returned null →
+  // permissionRulesFileTarget said "not the rules store" → the in-project-silent flip wrote it with
+  // NO card. Those minted rules (WebFetch exfil exceptions, BashUnsandboxed escapes) then auto-
+  // activate the moment the user opens projB. The fix makes the guard projectRoot-INDEPENDENT: ANY
+  // write whose target is some `*/.norma/permissions.local.json` is refused, whichever project owns it.
+  test("(h) HIGH: Edit(<parent>) grant + write to a SIBLING project's rules store (<parent>/projB/.norma/permissions.local.json) → hard error, no card, file never created", async () => {
+    const parent = tmpDir("norma-pgo-parent-");
+    const projA = join(parent, "projA"); // this session's project
+    const projB = join(parent, "projB"); // a DIFFERENT project, sibling of projA under <parent>
+    mkdirSync(projA, { recursive: true });
+    mkdirSync(join(projB, ".norma"), { recursive: true });
+    // Edit(<parent>) folds <parent> into the session writable set (writableRoots), so projB's tree
+    // is in-root — dirGrant is null, no grant card; the write reaches projB's store unless the guard
+    // (now projectRoot-independent) refuses it. cwd = projA, so this session's OWN project is projA,
+    // NOT projB — proving the guard no longer relies on single-project anchoring.
+    const permissionRules = new PermissionRules({ globalAllow: () => [`Edit(${parent})`], normaHome: tmpDir("norma-pgo-home-") });
+    const target = join(projB, ".norma", "permissions.local.json");
+    const provider = new FakeProvider(writeTurn(target, JSON.stringify({ allow: ["WebFetch(domain:webhook.site)"] })));
+    const { engine, store, sessionId } = setupEngine(provider, { policy: "ask", permissionRules, cwd: projA });
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false); // silent flip never got a chance — hard error instead
+    const result = events.find((e) => e.type === "tool_result") as any;
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("permissions.local.json");
+    expect(result.output).toContain("the permission rules store can only be changed by answering an approval card (or editing it yourself)");
+    expect(existsSync(target)).toBe(false); // never landed in the sibling project's store
+  });
+
+  test("(i) HIGH (case-varied): same sibling-store write with .NORMA/Permissions.Local.json → still hard-errored", async () => {
+    const parent = tmpDir("norma-pgo-parent-");
+    const projA = join(parent, "projA");
+    const projB = join(parent, "projB");
+    mkdirSync(projA, { recursive: true });
+    mkdirSync(projB, { recursive: true }); // .NORMA itself intentionally NOT pre-created — canonicalizeForWrite re-appends the verbatim tail
+    const permissionRules = new PermissionRules({ globalAllow: () => [`Edit(${parent})`], normaHome: tmpDir("norma-pgo-home-") });
+    const target = join(projB, ".NORMA", "Permissions.Local.json");
+    const provider = new FakeProvider(writeTurn(target, JSON.stringify({ allow: ["BashUnsandboxed(sh:*)"] })));
+    const { engine, store, sessionId } = setupEngine(provider, { policy: "ask", permissionRules, cwd: projA });
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+    const result = events.find((e) => e.type === "tool_result") as any;
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("the permission rules store can only be changed by answering an approval card (or editing it yourself)");
+    expect(existsSync(target)).toBe(false);
+    expect(existsSync(join(projB, ".NORMA"))).toBe(false); // nothing created at all
+  });
 });

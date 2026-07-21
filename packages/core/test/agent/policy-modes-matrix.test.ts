@@ -27,21 +27,23 @@ import { stubRegistry, bashTurn, writeTurn, stubReviewer } from "./engine-review
 //   reviewed-ran — a tool_review fired, no card, the tool ran (auto + a "safe" verdict)
 //   reviewed-card— a tool_review fired AND a card fired (auto + a "non-safe" verdict escalates)
 //
-// TWO plan-mode cells were DRIVEN (not assumed) and pin what the code ACTUALLY does — each diverges
-// from a literal reading of the spec's matrix, and each divergence is DELIBERATE, shipped behavior
-// (not a defect), documented at its row:
+// TWO plan-mode cells were DRIVEN (not assumed) and pin what the code ACTUALLY does. (A) is a
+// DELIBERATE, shipped divergence from a literal reading of the spec's matrix (not a defect); (B) is
+// NOT a divergence — an earlier spec draft's matrix read "denied", but the spec was CORRECTED to say
+// plan CARDS, so the code is confirmed correct per the (corrected) spec. Documented at each row:
 //   (A) read-row / plan: a readonly bash `cat f` is DENIED under plan (not "ran"). `bash` is
 //       MUTATING at the gate (gate.ts) and plan denies all mutating tools BEFORE the readOnlyBash
 //       classifier is ever consulted (that classifier only runs inside the `decision === "ask"`
 //       ruleAllowed block). The genuinely read-only `read` TOOL (READ_ONLY at the gate) DOES run in
 //       every mode incl. plan — pinned separately — which is what the row's "reads are free" intent
 //       is really about.
-//   (B) web_fetch-row / plan: a dangerous-domain web_fetch with no rule CARDS under plan (not
-//       "denied"). gate.ts's NETWORK class is unconditionally "allow" (web tools free for research
-//       even in plan); the dangerous-domain floor is a CARD, not a deny, under every mode except
-//       dont-ask (deny) and bypass (silent). This exactly matches the SHIPPED, already-green
-//       permission-gate-order.test.ts scenario 10 ("under PLAN policy the dangerous-domain card
-//       STILL fires"). See task-12-report.md for the spec-vs-code reconciliation.
+//   (B) web_fetch-row / plan: a dangerous-domain web_fetch with no rule CARDS under plan. CONFIRMED
+//       CORRECT per the (corrected) spec — the earlier draft's matrix read "denied", but the spec was
+//       corrected to say plan CARDS, matching the code (so this is NOT a divergence). gate.ts's
+//       NETWORK class is unconditionally "allow" (web tools free for research even in plan); the
+//       dangerous-domain floor is a CARD, not a deny, under every mode except dont-ask (deny) and
+//       bypass (silent). This exactly matches the SHIPPED, already-green permission-gate-order.test.ts
+//       scenario 10 ("under PLAN policy the dangerous-domain card STILL fires").
 
 const tmp = (p: string) => realpathSync(mkdtempSync(join(tmpdir(), p)));
 
@@ -328,10 +330,11 @@ describe("SP-policies Task 12: policy × tool × floor matrix", () => {
   });
 
   // ── WEB_FETCH dangerous domain (no rule) ──────────────────────────────────────────────────────
-  // FINDING (plan cell): the code CARDS under plan (spec table said "denied"). NETWORK is
+  // CONFIRMED CORRECT (plan cell): the code CARDS under plan, matching the (corrected) spec — an
+  // earlier draft's table read "denied", but the spec was corrected to say plan CARDS. NETWORK is
   // unconditionally allowed under plan for research; the dangerous-domain floor is a card, not a
-  // deny — matching shipped scenario 10. See the file header (B) + task-12-report.md.
-  test("web_fetch dangerous (no rule): plan CARDS (finding — spec said denied), denied (dont-ask), carded (ask/accept-edits/auto), silent (bypass)", async () => {
+  // deny — matching shipped scenario 10. See the file header (B).
+  test("web_fetch dangerous (no rule): plan CARDS (confirmed correct per corrected spec), denied (dont-ask), carded (ask/accept-edits/auto), silent (bypass)", async () => {
     const row: Row = [
       ["plan", "carded"], ["dont-ask", "denied"], ["ask", "carded"],
       ["accept-edits", "carded"], ["auto", "carded"], ["bypass", "ran-silent"],
