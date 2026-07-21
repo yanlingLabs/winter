@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renam
 import { join } from "node:path";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { SessionEvent, type NewSessionEvent } from "@norma/protocol";
+import type { SessionApprovalPolicy } from "../agent/gate";
 
 // Keep in sync with SessionCreateParams scope regex (packages/protocol/src/methods.ts).
 const SCOPE_RE = /^[a-z0-9]([a-z0-9-]{0,39}[a-z0-9])?$/;
@@ -190,7 +191,7 @@ export class SessionStore {
 
   createSession(
     scope: string,
-    opts: { cwd?: string; approvalPolicy?: "ask" | "auto" | "plan"; origin?: string; mode?: "code" | "dispatch"; parentSessionId?: string } = {},
+    opts: { cwd?: string; approvalPolicy?: SessionApprovalPolicy; origin?: string; mode?: "code" | "dispatch"; parentSessionId?: string } = {},
   ): string {
     if (!SCOPE_RE.test(scope)) throw new Error(`invalid scope: ${scope}`);
     const sessionId = `s_${randomBytes(6).toString("hex")}`;
@@ -270,20 +271,23 @@ export class SessionStore {
 
   /** Deterministic on an unknown session: throws so the IPC server can map it to NOT_FOUND
    *  (unlike setCwd, which silently no-ops — approval policy changes must not fail silently). */
-  setApprovalPolicy(sessionId: string, policy: "ask" | "auto" | "plan"): void {
+  setApprovalPolicy(sessionId: string, policy: SessionApprovalPolicy): void {
     const res = this.db.run("UPDATE sessions SET approval_policy = ? WHERE session_id = ?", [policy, sessionId]);
     if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
   }
 
   meta(sessionId: string): {
-    sessionId: string; scope: string; cwd: string | null; approvalPolicy: "ask" | "auto" | "plan";
+    sessionId: string; scope: string; cwd: string | null; approvalPolicy: SessionApprovalPolicy;
     origin?: string; mode?: string; parentSessionId?: string;
   } {
     const row = this.db.query("SELECT scope, cwd, approval_policy, origin, mode, parent_session_id FROM sessions WHERE session_id = ?").get(sessionId) as
       | { scope: string; cwd: string | null; approval_policy: string; origin: string | null; mode: string | null; parent_session_id: string | null } | null;
     if (!row) throw new Error(`unknown session: ${sessionId}`);
     const p = row.approval_policy;
-    const approvalPolicy: "ask" | "auto" | "plan" = p === "auto" ? "auto" : p === "plan" ? "plan" : "ask";
+    const approvalPolicy: SessionApprovalPolicy =
+      (["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"] as const).includes(p as SessionApprovalPolicy)
+        ? (p as SessionApprovalPolicy)
+        : "ask";
     return {
       sessionId, scope: row.scope, cwd: row.cwd, approvalPolicy,
       origin: row.origin ?? undefined, mode: row.mode ?? undefined, parentSessionId: row.parent_session_id ?? undefined,

@@ -1,7 +1,7 @@
 import { isExternalToolName } from "./tools/registry";
 
 export type GateDecision = "allow" | "ask" | "deny";
-export type SessionApprovalPolicy = "ask" | "auto" | "plan";
+export type SessionApprovalPolicy = "plan" | "dont-ask" | "ask" | "accept-edits" | "auto" | "bypass";
 
 // Skill is read-only: it reads a SKILL.md body and marks it loaded in-memory (no filesystem
 // mutation) — same class as read/glob/grep. Without this it would fall through to the

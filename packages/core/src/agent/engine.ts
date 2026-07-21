@@ -59,35 +59,45 @@ const MAX_TOOL_ITERATIONS = 24; // runaway guard until 1b-ii budgets land
 // own runtime reject.
 const SESSION_SPAWN_TOOL = "session_spawn";
 
-// 4h-i (CC parity: spawn_agent `mode`) — permissiveness order, LEAST to MOST permissive: "plan"
-// is read-only (most restrictive), "ask" is human-gated (middle), "auto" auto-allows non-
-// destructive tools (least restrictive). Mirrors gate.ts's own PermissionGate.evaluate() ordering
-// (plan denies everything mutating outright; ask/auto both gate mutating tools, auto auto-allows).
-const POLICY_RESTRICTIVENESS: Record<SessionApprovalPolicy, number> = { plan: 0, ask: 1, auto: 2 };
+// 4h-i (CC parity: spawn_agent `mode`), widened to 6 values (SP-policies Task 2) — permissiveness
+// order, LEAST to MOST permissive: "plan" (read-only, most restrictive) < "dont-ask" < "ask"
+// (human-gated) < "accept-edits" < "auto" (auto-allows non-destructive tools) < "bypass" (least
+// restrictive — no gating at all). Mirrors gate.ts's own PermissionGate.evaluate() ordering where
+// it currently distinguishes these (plan denies everything mutating outright; ask/auto both gate
+// mutating tools, auto auto-allows) — evaluate() itself is NOT behaviorally widened by this task
+// (a later task teaches it the new values' own distinct behavior; today dont-ask/accept-edits/
+// bypass ride evaluate()'s existing per-string branches unchanged, so behavior for the original
+// three values — plan/ask/auto — is untouched).
+const POLICY_RESTRICTIVENESS: Record<SessionApprovalPolicy, number> = {
+  plan: 0, "dont-ask": 1, ask: 2, "accept-edits": 3, auto: 4, bypass: 5,
+};
 
 /** RESTRICT-ONLY: returns the MORE RESTRICTIVE of {parent, requested} — a spawn_agent `mode`
  *  override can only NARROW a child's effective approval policy relative to its parent thread's,
- *  never WIDEN it. A request that would widen (e.g. parent "ask" + requested "auto", or parent
+ *  never WIDEN it. A request that would widen (e.g. parent "ask" + requested "bypass", or parent
  *  "plan" + requested "auto") is silently ignored — the parent's policy wins. Pure and exported
  *  for direct unit testing: this is the security-critical piece of the `mode` feature (a bug here
- *  is a privilege-escalation bug, not a UX one). */
+ *  is a privilege-escalation bug, not a UX one). Signature is unchanged by the 6-value widening —
+ *  it's generic over whatever SessionApprovalPolicy is, ranked purely through
+ *  POLICY_RESTRICTIVENESS above. */
 export function restrictPolicy(parent: SessionApprovalPolicy, requested: SessionApprovalPolicy): SessionApprovalPolicy {
   return POLICY_RESTRICTIVENESS[requested] < POLICY_RESTRICTIVENESS[parent] ? requested : parent;
 }
 
-/** Maps a CC-parity spawn `mode` arg to Norma's `approvalPolicy`. Only `plan` maps to Norma's
- *  "plan" (read-only); `acceptEdits`/`dontAsk`/`bypassPermissions` all collapse to "auto" — Norma
- *  has no finer-grained distinction between them (CC parity here is at the arg-surface level, not
- *  full behavioral parity with CC's own distinct modes). `default`, absent, or any unrecognized
- *  string maps to `undefined` — "no override", i.e. the child inherits the parent's policy
- *  unchanged (this is what lets the spawn bridge skip building a child-scoped meta entirely when
- *  there's nothing to narrow — see the bridge's `childMeta` computation). */
+/** Maps a CC-parity spawn `mode` arg to Norma's `approvalPolicy`. SP-policies Task 2: each CC mode
+ *  now maps to its OWN distinct policy — `acceptEdits`→"accept-edits", `dontAsk`→"dont-ask",
+ *  `bypassPermissions`→"bypass", `plan`→"plan" — no more collapsing to "auto" (that collapse was
+ *  only ever a stopgap from when SessionApprovalPolicy had just 3 values; the 6-value type now has
+ *  a home for each CC mode). `default`, absent, or any unrecognized string still maps to
+ *  `undefined` — "no override", i.e. the child inherits the parent's policy unchanged (this is
+ *  what lets the spawn bridge skip building a child-scoped meta entirely when there's nothing to
+ *  narrow — see the bridge's `childMeta` computation). */
 export function mapSpawnMode(mode: string | undefined): SessionApprovalPolicy | undefined {
   switch (mode) {
     case "plan": return "plan";
-    case "acceptEdits":
-    case "dontAsk":
-    case "bypassPermissions": return "auto";
+    case "acceptEdits": return "accept-edits";
+    case "dontAsk": return "dont-ask";
+    case "bypassPermissions": return "bypass";
     default: return undefined; // "default", absent, or an unrecognized string
   }
 }
@@ -578,7 +588,7 @@ export interface EngineConfig {
   // mutates the in-memory `meta` object for the CURRENT turn regardless of whether setPolicy is
   // set, since that's what lets a same-turn follow-up call see the new mode immediately.
   plans?: PlanBroker;
-  setPolicy?: (sessionId: string, policy: "ask" | "auto" | "plan") => Promise<void> | void;
+  setPolicy?: (sessionId: string, policy: SessionApprovalPolicy) => Promise<void> | void;
   // Worktree isolation (1d-iii): optional — absent means enter_worktree/exit_worktree fall to
   // their own placeholder run() (tools/worktree.ts) rather than the bridge below. When set, the
   // bridge mutates the turn's local `cwd` (now `let`, not `const`) SAME-TURN, so a follow-up tool
@@ -1059,7 +1069,7 @@ export class AgentEngine {
    *  tool that was never hidden in the first place. `_cwd` is unused today (no current pin is
    *  scope-aware) — kept in the signature for parity with the other deferral seams, which all
    *  thread cwd, in case a future pin needs it. */
-  private pinnedTools(sessionId: string, meta: { approvalPolicy: "ask" | "auto" | "plan" }, _cwd: string | null): Set<string> {
+  private pinnedTools(sessionId: string, meta: { approvalPolicy: SessionApprovalPolicy }, _cwd: string | null): Set<string> {
     const pins = new Set<string>();
     if (meta.approvalPolicy === "plan") pins.add("exit_plan_mode");
     if (this.cfg.worktrees?.active(sessionId)) pins.add("exit_worktree");
@@ -1474,7 +1484,7 @@ export class AgentEngine {
   // plan-mode reminder is appended off the policy at turn start, not re-checked per round, so an
   // in-turn exit_plan_mode approval (which mutates `meta.approvalPolicy` for the REST of this
   // turn) does not retroactively add/remove this reminder mid-turn.
-  private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: "ask" | "auto" | "plan", sessionId: string): string {
+  private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: SessionApprovalPolicy, sessionId: string): string {
     const tsEnabled = this.toolSearchEnabled();
     const deferThreshold = this.toolSearchThreshold();
     // Pins computed HERE, at instructionsFull's own once-per-turn/thread cadence (see this
@@ -3686,7 +3696,7 @@ export class AgentEngine {
     call: { callId: string; name: string; argsJson: string },
     sessionId: string,
     threadId: string,
-    meta: { approvalPolicy: "ask" | "auto" | "plan" },
+    meta: { approvalPolicy: SessionApprovalPolicy },
   ): Promise<{ output: string; isError: boolean }> {
     const plans = this.cfg.plans!;
     let plan = "";
@@ -3743,7 +3753,7 @@ export class AgentEngine {
    *  the next turn (same as the exit bridge — see runPlanBridge's doc comment). */
   private async runEnterPlanBridge(
     sessionId: string,
-    meta: { approvalPolicy: "ask" | "auto" | "plan" },
+    meta: { approvalPolicy: SessionApprovalPolicy },
   ): Promise<{ output: string; isError: boolean }> {
     if (meta.approvalPolicy === "plan") {
       return { output: "already in plan mode", isError: true };
