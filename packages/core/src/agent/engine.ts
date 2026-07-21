@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync, mkdirSync } from "node:fs";
-import { relative, sep, isAbsolute, resolve, dirname } from "node:path";
+import { relative, sep, isAbsolute, resolve, dirname, basename } from "node:path";
 import type { ApprovalOption, NewSessionEvent, Question, SessionEvent, Task } from "@norma/protocol";
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
@@ -385,6 +385,51 @@ function fsWriteOutOfRootDir(call: { name: string; argsJson: string }, roots: st
       return { path, dir: dirname(canonicalizeForWrite(resolveLeafSymlinks(raw))) };
     } catch { return null; } // unresolvable (link-chain cap etc.) — fail closed to the plain fence reject
   }
+}
+
+/**
+ * SP-approvals final review (composition hole, HIGH): a write/edit whose CANONICAL resolved target
+ * is `<any>/.norma/permissions.local.json` — Task 1's PermissionRules project-scope rules file —
+ * must be a hard error, no card, no grant, no matter what rule is in force. Without this, a broad
+ * `Edit` rule (the feature's own most-encouraged click — it matches both `write` and `edit` call
+ * names, see permission-rules.ts's `toolForCallName`) lets the agent write a NEW rule into this
+ * file itself — e.g. `WebFetch(domain:webhook.site)` — which `webFetchGate` (§7, above) then treats
+ * as an already-approved standing exception, silently clearing the dangerous-domain floor for a
+ * zero-card exfil fetch. The store must be mutable ONLY through `PermissionRules.append()` (a
+ * human answering an approval card's "always allow" option) or a human's own editor — never
+ * through the agent's own write/edit tools.
+ *
+ * Resolution deliberately mirrors `fsWriteOutOfRootDir`'s own target-canonicalization exactly
+ * (relative → `roots[0]`, then `resolveLeafSymlinks` + `canonicalizeForWrite` so a symlinked
+ * ancestor can't be used to dodge the match and a not-yet-existing file — the common case, since a
+ * fresh project has no rules file yet — still resolves correctly) — just checked against the FULL
+ * canonical path's basename/parent-basename instead of only being used to compute a grant
+ * directory. Unlike `fsWriteOutOfRootDir`, this is NOT gated on "in-root vs. out-of-root": it must
+ * catch BOTH (an in-root rules file AND one reached through an out-of-root grant), so the caller
+ * consults this independently of `dirGrant`.
+ *
+ * Matches by FILENAME alone, never by directory: `.norma/` itself stays writable (`.norma/memory/`
+ * is the MEMDIR by design, and any other file under `.norma/` is unaffected) — only this one exact
+ * filename inside a `.norma` directory is ever denied. `null` for every non-write/edit call, a
+ * missing/malformed `path` arg, or a resolution failure (unresolvable link-chain etc.) — the normal
+ * dispatch chain decides from there, same fail-open-to-the-next-check shape as
+ * `fsWriteOutOfRootDir`. */
+function permissionRulesFileTarget(call: { name: string; argsJson: string }, roots: string[]): { path: string; canonical: string } | null {
+  if (call.name !== "write" && call.name !== "edit") return null;
+  let path = "";
+  try {
+    const a = JSON.parse(call.argsJson || "{}") as { path?: unknown };
+    path = typeof a.path === "string" ? a.path : "";
+  } catch { return null; }
+  if (!path) return null;
+  try {
+    const raw = isAbsolute(path) ? resolve(path) : resolve(roots[0] ?? "/", path);
+    const canonical = canonicalizeForWrite(resolveLeafSymlinks(raw));
+    if (basename(canonical) === "permissions.local.json" && basename(dirname(canonical)) === ".norma") {
+      return { path, canonical };
+    }
+    return null;
+  } catch { return null; } // unresolvable — not a confirmed match; the normal dispatch chain decides
 }
 
 /** phase 5e T3 (external coverage): the précis for an mcp__/plugin__ call — tool name + a
@@ -2613,6 +2658,14 @@ export class AgentEngine {
         // the read tools get) is NEVER grantable, either policy, no card — checked once here, and
         // consulted by both the auto pre-grant below and the deny branch in the dispatch chain.
         const dirGrantDenied = dirGrant !== null && this.grantDenied(dirGrant.dir);
+        // SP-approvals final review (composition hole): the permission-rules store itself is NEVER
+        // a valid write/edit target — checked here, unconditionally (not gated on `decision`,
+        // `dirGrant`, or anything ruleAllowed-related below), so it is computed and dispatched
+        // BEFORE the ruleAllowed short-circuit gets a chance to run. See
+        // permissionRulesFileTarget's own doc comment for the full exfil-composition rationale.
+        const rulesFileTarget = (call.name === "write" || call.name === "edit")
+          ? permissionRulesFileTarget(call, rootsOverride ?? this.cfg.dirs.roots(sessionId))
+          : null;
         // SP-approvals Task 10: web_fetch's dangerous-domain floor — computed for EVERY policy
         // (gate.ts's `decision` above is now unconditionally "allow" for web_fetch, so this is the
         // ONLY thing standing between a dangerous-domain fetch and executeCall). `null` for every
@@ -2729,6 +2782,15 @@ export class AgentEngine {
           // of plan mode is that nothing mutates until exit_plan_mode is approved.
           outcome = {
             output: "Blocked in plan mode — you are researching and planning, so file changes and commands are disabled. Make no changes; when your plan is ready, call exit_plan_mode to present it for approval.",
+            isError: true,
+          };
+        } else if (rulesFileTarget) {
+          // SP-approvals final review: hard error, no card, no grant — mirrors dirGrantDenied's own
+          // control-plane branch just below in both style and precedence (checked BEFORE it, and
+          // before the out-of-root grant-card branch, so an Edit rule AND a would-be grant card are
+          // both preempted). See permissionRulesFileTarget's own doc comment for why.
+          outcome = {
+            output: `cannot ${call.name} ${rulesFileTarget.path}: the permission rules store can only be changed by answering an approval card (or editing it yourself)`,
             isError: true,
           };
         } else if (dirGrant && dirGrantDenied) {

@@ -101,6 +101,10 @@ export class BackgroundTaskRegistry {
       spawnArgs = ["-c", command];
     } else {
       const writable = [...new Set([realCwd, ...roots.map((r) => realpathSync(r)), scratch])];
+      // SP-approvals final review: buildSeatbeltProfile now ALSO denies writing
+      // "<root>/.norma/permissions.local.json" for every one of these writable roots,
+      // automatically — no extra option to pass here (see that function's own doc comment,
+      // sandbox.ts, for the full rationale — same shape bash.ts's foreground spawn gets).
       const profile = buildSeatbeltProfile({ cwd: realCwd, writableRoots: writable.filter((r) => r !== realCwd), allowNetwork });
       spawnFile = "/usr/bin/sandbox-exec";
       spawnArgs = ["-p", profile, "/bin/bash", "-c", command];

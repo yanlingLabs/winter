@@ -55,6 +55,11 @@ export function registerBashTool(r: ToolRegistry, deps: { bgRegistry?: Backgroun
           throw new Error("bash is unavailable: macOS sandbox-exec not found on this host");
         }
         const writable = [...new Set([realCwd, ...roots.map((r) => realpathSync(r)), scratch])];
+        // SP-approvals final review: buildSeatbeltProfile now ALSO denies writing
+        // "<root>/.norma/permissions.local.json" for every one of these writable roots,
+        // automatically — no extra option to pass here. See that function's own doc comment
+        // (sandbox.ts) for why a bash-invoked write needs this on top of engine.ts's own
+        // dispatch-loop check (which only ever sees the write/edit TOOLS, never a shell command).
         const profile = buildSeatbeltProfile({
           cwd: realCwd,
           writableRoots: writable.filter((r) => r !== realCwd),

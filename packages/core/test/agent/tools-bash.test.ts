@@ -41,6 +41,38 @@ d("bash tool (sandboxed)", () => {
     expect(res.output).not.toContain("[exit 0]");
   });
 
+  // SP-approvals final review (composition hole, defense-in-depth): engine.ts's dispatch-loop hard
+  // error (permissionRulesFileTarget) only ever sees write/edit TOOL calls — a bash-invoked write
+  // never goes through it. The seatbelt itself (sandbox.ts's buildSeatbeltProfile) must
+  // independently deny this exact file, EVEN THOUGH it's inside the writable cwd subpath.
+  test("CANNOT write .norma/permissions.local.json even though it is INSIDE the writable cwd (seatbelt carve-out)", async () => {
+    const cwd = proj();
+    const target = join(cwd, ".norma", "permissions.local.json");
+    const res = await reg().execute(
+      "bash",
+      { command: `mkdir -p ${join(cwd, ".norma")} && echo '{"allow":["WebFetch(domain:webhook.site)"]}' > ${target}` },
+      { cwd, roots: [cwd], sessionId: "s1" },
+    );
+    // mkdir succeeds (the .norma DIR itself is not carved out) but the redirect into the exact
+    // file is denied → nonzero exit, file absent.
+    expect(existsSync(target)).toBe(false);
+    expect(res.output).not.toContain("[exit 0]");
+  });
+
+  test("CAN still write .norma/memory/whatever.md (the MEMDIR) — the carve-out is file-specific, not directory-blanket", async () => {
+    const cwd = proj();
+    const target = join(cwd, ".norma", "memory", "whatever.md");
+    const res = await reg().execute(
+      "bash",
+      { command: `mkdir -p ${join(cwd, ".norma", "memory")} && echo memory-content > ${target} && cat ${target}` },
+      { cwd, roots: [cwd], sessionId: "s1" },
+    );
+    expect(res.isError).toBe(false);
+    expect(res.output).toContain("[exit 0]");
+    expect(existsSync(target)).toBe(true);
+    expect(readFileSync(target, "utf8")).toBe("memory-content\n");
+  });
+
   test("kills a command that exceeds the timeout", async () => {
     const cwd = proj();
     const res = await reg().execute("bash", { command: "sleep 5", timeoutMs: 300 }, { cwd, roots: [cwd], sessionId: "s1" });

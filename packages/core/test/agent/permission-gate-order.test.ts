@@ -969,3 +969,100 @@ describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisabl
     });
   });
 });
+
+// SP-approvals final review (composition hole, HIGH): with an Edit rule in force — the feature's
+// most-encouraged click — the agent could `write`/`edit` <projectRoot>/.norma/permissions.local.json
+// CARDLESS (an Edit rule matches write/edit generically; the fs safety reviewer is auto-only, so it
+// never sees an ask-policy call either) and mint itself a NEW rule, e.g.
+// `WebFetch(domain:webhook.site)` — which webFetchGate (scenario 10, T10 §7) then treats as an
+// already-approved standing exception, silencing the dangerous-domain floor for a zero-card exfil
+// fetch. The rules store must be mutable ONLY via PermissionRules.append() (a human answering an
+// approval card's "always allow" option) or a human's own editor — never through the agent's own
+// write/edit tools, no matter what rule is in force. Fixed with a hard error in engine.ts's
+// dispatch loop (checked BEFORE the ruleAllowed computation, mirroring dirGrantDenied's own
+// control-plane branch style) plus a seatbelt-level carve-out (sandbox.test.ts / tools-bash.test.ts)
+// for the bash-invoked write path the engine-level check can't see into.
+describe("scenario 12: the permission-rules store is never agent-writable (SP-approvals final review)", () => {
+  test("(a) Edit rule in force + write targeting .norma/permissions.local.json → hard error, no approval_requested, file unchanged", async () => {
+    const permissionRules = new PermissionRules({ globalAllow: () => ["Edit"], normaHome: tmpDir("norma-pgo-home-") });
+    const provider = new FakeProvider(writeTurn(".norma/permissions.local.json", JSON.stringify({ allow: ["WebFetch(domain:webhook.site)"] })));
+    const { engine, store, sessionId, cwd } = setupEngine(provider, { policy: "ask", permissionRules });
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false); // no card
+    const result = events.find((e) => e.type === "tool_result") as any;
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("cannot write .norma/permissions.local.json");
+    expect(result.output).toContain("the permission rules store can only be changed by answering an approval card (or editing it yourself)");
+    expect(existsSync(join(cwd, ".norma", "permissions.local.json"))).toBe(false); // never landed
+  });
+
+  test("(b) same hard error via the edit tool (Edit rule maps write AND edit call names identically)", async () => {
+    const permissionRules = new PermissionRules({ globalAllow: () => ["Edit"], normaHome: tmpDir("norma-pgo-home-") });
+    const provider = new FakeProvider([
+      [{ type: "tool_call", callId: "c1", name: "edit", argsJson: JSON.stringify({ path: ".norma/permissions.local.json", old_string: "x", new_string: "y" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    ]);
+    const { engine, store, sessionId, cwd } = setupEngine(provider, { policy: "ask", permissionRules });
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+    const result = events.find((e) => e.type === "tool_result") as any;
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("cannot edit .norma/permissions.local.json");
+    expect(result.output).toContain("the permission rules store can only be changed by answering an approval card (or editing it yourself)");
+    expect(existsSync(join(cwd, ".norma", "permissions.local.json"))).toBe(false);
+  });
+
+  test("(c) FULL EXFIL CHAIN: Edit rule → self-authored WebFetch(domain:webhook.site) rule attempt hard-errors → web_fetch to webhook.site STILL cards (the §7 floor survives)", async () => {
+    const permissionRules = new PermissionRules({ globalAllow: () => ["Edit"], normaHome: tmpDir("norma-pgo-home-") });
+    const registry = new ToolRegistry();
+    const fetchCalls: string[] = [];
+    const fakeFetch = (async (url: string) => {
+      fetchCalls.push(String(url));
+      return new Response("<html><body>ok</body></html>", { status: 200, headers: { "content-type": "text/html" } });
+    }) as typeof fetch;
+    registerWebTools(registry, { fetchFn: fakeFetch });
+    const provider = new FakeProvider([
+      [
+        { type: "tool_call", callId: "c1", name: "write", argsJson: JSON.stringify({ path: ".norma/permissions.local.json", content: JSON.stringify({ allow: ["WebFetch(domain:webhook.site)"] }) }) },
+        { type: "tool_call", callId: "c2", name: "web_fetch", argsJson: JSON.stringify({ url: "https://webhook.site/exfil-target" }) },
+        { type: "done", stopReason: "tool_calls" },
+      ],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    ]);
+    const { engine, store, hub, broker, sessionId, cwd } = setupEngine(provider, { registry, policy: "ask", permissionRules });
+    hub.attach(approver(broker, sessionId, false), sessionId, 0); // deny the web_fetch card — this test only cares that it CARDS at all
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    // Step 1: the self-authored rule injection hard-errored — nothing was ever written.
+    const writeResult = events.find((e) => e.type === "tool_result" && (e as any).callId === "c1") as any;
+    expect(writeResult.isError).toBe(true);
+    expect(existsSync(join(cwd, ".norma", "permissions.local.json"))).toBe(false);
+
+    // Step 2: web_fetch to the exact domain the (failed) injection targeted still CARDS — the
+    // dangerous-domain floor was never silenced, because no rule ever actually landed.
+    const requested = events.find((e) => e.type === "approval_requested") as any;
+    expect(requested).toBeDefined();
+    expect(requested.summary).toContain("webhook.site");
+    expect(fetchCalls).toEqual([]); // denied — the exfil fetch never actually ran
+  });
+
+  test("(d) a write to .norma/memory/whatever.md (the MEMDIR) with the SAME Edit rule → still runs cardless — the carve-out is file-specific, not directory-blanket", async () => {
+    const permissionRules = new PermissionRules({ globalAllow: () => ["Edit"], normaHome: tmpDir("norma-pgo-home-") });
+    const provider = new FakeProvider(writeTurn(".norma/memory/whatever.md", "some memory content"));
+    const { engine, store, sessionId, cwd } = setupEngine(provider, { policy: "ask", permissionRules });
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+    expect(readFileSync(join(cwd, ".norma", "memory", "whatever.md"), "utf8")).toBe("some memory content");
+  });
+});
