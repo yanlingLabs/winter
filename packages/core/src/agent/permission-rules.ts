@@ -51,11 +51,14 @@ import { dangerousDomainMatch } from "./dangerous-domains";
  * into a space) `git push\nrm -rf /` — a chain riding a narrow prefix rule straight past the human
  * approval card. See `ruleMatches`'s own doc comment for the full mechanics.
  *
- * MINOR, same review: `parseRule` rejects (returns `null`) a parenthesized value on any tool OTHER
- * than Bash (e.g. `"Edit(/path:*)"`) — Edit/Computer/Worktree calls carry no `command` field for
- * an exact/prefix value to ever compare against, so such a rule could never match anything; it's
- * treated the same as any other unparseable rule string (ignored, warned once) rather than
- * silently accepted as a rule that can never fire.
+ * MINOR, same review: `parseRule` rejects (returns `null`) a parenthesized value on Computer/
+ * Worktree (e.g. `"Computer(x)"`) — those calls carry no `command` field for an exact/prefix value
+ * to ever compare against, so such a rule could never match anything; it's treated the same as any
+ * other unparseable rule string (ignored, warned once) rather than silently accepted as a rule that
+ * can never fire. UPDATE (SP-policies, Task 4): Edit is no longer in this bucket for EVERY
+ * parenthesized value — `Edit(<absolute path>)` is now a legitimate writable-dir declaration (kind
+ * "path", see `parseRule`'s own doc comment below and `editPathRules`); only a RELATIVE `Edit(...)`
+ * value still gets this same "unparseable, warn once" treatment.
  *
  * Spec deviation, called out explicitly per the SP-approvals brief: this class does NOT seed the
  * CC-parity default `["Computer"]` allow-rule anywhere. That default is a Task-3 concern — it
@@ -119,10 +122,12 @@ function normalizeWhitespace(s: string): string {
  * empty value (`"Bash()"`, `"Bash(:*)"`) also returns `null` — a rule naming no command at all is
  * far more likely a typo than an intentional "match everything", and CC's own grammar has no such
  * wildcard-via-omission form either (bare `Bash` already covers "any bash call"). A parenthesized
- * value on any tool OTHER than Bash/WebFetch (e.g. `"Edit(/path:*)"`) also returns `null` — see the
- * class doc comment's "MINOR" note above this function for why (no non-bash, non-web_fetch call
+ * value on Computer/Worktree (e.g. `"Computer(x)"`) also returns `null` — see the class doc
+ * comment's "MINOR" note above this function for why (no non-bash, non-web_fetch, non-edit call
  * carries a `command`/`url` for such a value to ever compare against, so it could never match
- * anything).
+ * anything). A RELATIVE `Edit(...)` value (e.g. `"Edit(path:*)"`) returns `null` the same way —
+ * only an ABSOLUTE `Edit(<path>)` value parses, as a FOURTH shape below (kind "path", SP-policies
+ * Task 4): a writable-dir declaration, not a call-value comparison (see `editPathRules`).
  *
  * `WebFetch` (SP-approvals T10, spec §7) is a THIRD shape, not a fourth exact/prefix pair: its
  * only recognized value is `domain:<host>` (kind "domain", `host` whitespace-normalized but
@@ -133,7 +138,7 @@ function normalizeWhitespace(s: string): string {
  * rule would silence the dangerous-domain floor for EVERY site rather than just the one a human
  * approved; no UI offers that, so the grammar doesn't accept it either.
  */
-export function parseRule(s: string): { tool: string; kind: "any" | "exact" | "prefix" | "domain"; value?: string } | null {
+export function parseRule(s: string): { tool: string; kind: "any" | "exact" | "prefix" | "domain" | "path"; value?: string } | null {
   const m = RULE_GRAMMAR.exec(s);
   if (!m) return null;
   const tool = internalToolFor(m[1]!); // group 1 is mandatory in RULE_GRAMMAR — always set on a match
@@ -147,6 +152,14 @@ export function parseRule(s: string): { tool: string; kind: "any" | "exact" | "p
     if (!content.startsWith("domain:")) return null; // WebFetch's ONLY value grammar is "domain:<host>"
     const value = normalizeWhitespace(content.slice("domain:".length));
     return value ? { tool, kind: "domain", value } : null; // empty domain ("WebFetch(domain:)") -> null, same treatment as Bash's empty value
+  }
+  if (tool === "edit") {
+    // Edit(<absolute path>) — path-scoped writable-dir declaration (SP-policies): consumed via
+    // editPathRules() to feed the session writable set (engine's writableRoots); NEVER a call-
+    // silencer (see ruleMatches). Must be ABSOLUTE — a relative path is meaningless without a cwd
+    // this parser doesn't have. NOT whitespace-collapsed (a path may contain spaces) — trim only.
+    const value = content.trim();
+    return value.startsWith("/") ? { tool, kind: "path", value } : null;
   }
   if (tool !== "bash") return null; // parenthesized value on a tool with no `command` to match — see doc comment above
   if (content.endsWith(":*")) {
@@ -248,6 +261,10 @@ function normalizedCommand(argsJson: string): string {
  * it. An unparseable/missing url never matches.
  */
 export function ruleMatches(parsed: NonNullable<ReturnType<typeof parseRule>>, call: { name: string; argsJson: string }): boolean {
+  // SP-policies: a path rule is a writable-dir DECLARATION (consumed via editPathRules), never a
+  // call-silencer — the silencing of edits under /foo falls out of in-project-silent once /foo is in
+  // the session writable set, not from a rule match here.
+  if (parsed.kind === "path") return false;
   const tool = toolForCallName(call.name);
   if (tool === null || tool !== parsed.tool) return false;
   if (parsed.kind === "any") return true;
@@ -345,6 +362,20 @@ export class PermissionRules {
       global: [...(this.deps.globalAllow() ?? [])],
       project: projectRoot !== null ? [...this.projectRulesFor(projectRoot)] : [],
     };
+  }
+
+  /** SP-policies: absolute dirs declared by `Edit(<path>)` rules (global ∪ project), deduped. The
+   *  engine unions these into the session writable set (writableRoots) so both the write/edit fence
+   *  AND bash's seatbelt may write there. A path-less `Edit` rule contributes nothing (no dir — it
+   *  relieves edit CARDS only, never widens the sandbox). Same hot read decision() uses. */
+  editPathRules(projectRoot: string | null): string[] {
+    const raw = [...(this.deps.globalAllow() ?? []), ...(projectRoot !== null ? this.projectRulesFor(projectRoot) : [])];
+    const out: string[] = [];
+    for (const s of raw) {
+      const p = parseRule(s);
+      if (p && p.kind === "path" && p.value) out.push(p.value);
+    }
+    return [...new Set(out)];
   }
 
   // ---- internals ----

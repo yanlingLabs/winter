@@ -55,11 +55,17 @@ describe("parseRule", () => {
     expect(parseRule("bash(ls)")).toBeNull();
   });
 
-  test("a parenthesized value on a non-Bash tool is rejected (SP-approvals T1 review, MINOR) — it could never match anything: Edit/Computer/Worktree calls carry no `command` field", () => {
-    expect(parseRule("Edit(/path:*)")).toBeNull();
-    expect(parseRule("Edit(/path)")).toBeNull();
+  test("a parenthesized value on Computer/Worktree is rejected (SP-approvals T1 review, MINOR) — it could never match anything: those calls carry no `command` field", () => {
     expect(parseRule("Computer(x)")).toBeNull();
     expect(parseRule("Worktree(y:*)")).toBeNull();
+  });
+
+  // SP-policies Task 4: Edit is no longer in the above bucket for EVERY parenthesized value — an
+  // ABSOLUTE path now parses as a legitimate writable-dir declaration (kind "path"; see its own
+  // describe block below). Only a RELATIVE Edit(...) value still has no legitimate grammar.
+  test("a parenthesized value on Edit still returns null when the path is relative (no absolute-path exception applies)", () => {
+    expect(parseRule("Edit(path:*)")).toBeNull();
+    expect(parseRule("Edit(path)")).toBeNull();
   });
 });
 
@@ -481,7 +487,10 @@ describe("PermissionRules.decision", () => {
 
   test("a non-Bash parenthesized rule is rejected like any other unparseable rule (warn once, never matches)", () => {
     const normaHome = tmpDir("norma-permrules-home-");
-    const pr = new PermissionRules({ globalAllow: () => ["Edit(/etc/passwd:*)"], normaHome });
+    // A RELATIVE Edit(...) value, not absolute — SP-policies Task 4 gives an ABSOLUTE Edit(<path>)
+    // legitimate (but non-silencing) meaning, so it no longer exercises this "unparseable" path;
+    // see the "Edit(/path)" describe block below for that case.
+    const pr = new PermissionRules({ globalAllow: () => ["Edit(etc/passwd:*)"], normaHome });
     const errSpy = spyOn(console, "error").mockImplementation(() => {});
     try {
       expect(pr.decision(call("write", { path: "/etc/passwd", content: "x" }), null)).toBeNull();
@@ -604,5 +613,28 @@ describe("PermissionRules.rulesFor", () => {
     const pr = new PermissionRules({ globalAllow: () => ["Computer"], normaHome });
     expect(pr.rulesFor(root)).toEqual({ global: ["Computer"], project: ["Bash(git status:*)"] });
     expect(pr.rulesFor(null)).toEqual({ global: ["Computer"], project: [] });
+  });
+});
+
+describe("Edit(/path) path-scoped rule (SP-policies)", () => {
+  test("parses an absolute path to kind 'path'", () => {
+    expect(parseRule("Edit(/tmp/foo)")).toEqual({ tool: "edit", kind: "path", value: "/tmp/foo" });
+  });
+  test("rejects a relative path", () => {
+    expect(parseRule("Edit(foo)")).toBeNull();
+  });
+  test("bare Edit is still kind 'any'", () => {
+    expect(parseRule("Edit")).toEqual({ tool: "edit", kind: "any" });
+  });
+  test("a path rule never silences a call (it is a writable-dir declaration)", () => {
+    const p = parseRule("Edit(/tmp/foo)")!;
+    expect(ruleMatches(p, { name: "edit", argsJson: JSON.stringify({ path: "/tmp/foo/x.txt" }) })).toBe(false);
+  });
+  test("editPathRules returns absolute paths from global+project, deduped; path-less Edit contributes nothing", () => {
+    const rules = new PermissionRules({
+      globalAllow: () => ["Edit(/tmp/a)", "Edit", "Bash(ls:*)"],
+      normaHome: "/nope",
+    });
+    expect(rules.editPathRules(null).sort()).toEqual(["/tmp/a"]);
   });
 });
