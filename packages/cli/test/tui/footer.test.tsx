@@ -27,11 +27,29 @@ describe("Footer (e, f, g)", () => {
     expect(lastFrame() ?? "").toContain("⏵⏵ auto mode on (shift+tab to cycle)");
   });
 
+  test("(SP-policies T13) dont-ask policy shows the dont-ask segment", () => {
+    const { lastFrame } = render(<Footer policy="dont-ask" running={false} agents={[]} />);
+    expect(lastFrame() ?? "").toContain("✕ dont-ask — auto-declines prompts (shift+tab to cycle)");
+  });
+
+  test("(SP-policies T13) accept-edits policy shows the accept-edits segment", () => {
+    const { lastFrame } = render(<Footer policy="accept-edits" running={false} agents={[]} />);
+    expect(lastFrame() ?? "").toContain("✎ accept edits (shift+tab to cycle)");
+  });
+
+  test("(SP-policies T13) bypass policy shows the danger segment", () => {
+    const { lastFrame } = render(<Footer policy="bypass" running={false} agents={[]} />);
+    expect(lastFrame() ?? "").toContain("⚠ bypass — all actions auto-approved (shift+tab to cycle)");
+  });
+
   test("(e) ask policy shows no mode segment", () => {
     const { lastFrame } = render(<Footer policy="ask" running={false} agents={[]} />);
     const frame = lastFrame() ?? "";
     expect(frame).not.toContain("plan mode on");
     expect(frame).not.toContain("auto mode on");
+    expect(frame).not.toContain("dont-ask");
+    expect(frame).not.toContain("accept edits");
+    expect(frame).not.toContain("bypass");
   });
 
   test("(f) running shows 'esc to interrupt'", () => {

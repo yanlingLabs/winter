@@ -14,6 +14,7 @@ const EXPECTED_KEYS: ThemeKey[] = [
   "userMessageBackground",
   "planMode",
   "autoAccept",
+  "dangerMode",
   "diffAdded",
   "diffRemoved",
 ];

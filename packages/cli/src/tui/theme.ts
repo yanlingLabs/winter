@@ -14,6 +14,7 @@ export const theme = {
   userMessageBackground: "#373737",
   planMode: "#48968C",
   autoAccept: "#AF87FF",
+  dangerMode: "#FF5F5F", // SP-policies Task 13 — bypass mode's footer color (all actions auto-approved)
   diffAdded: "#225C2B",
   diffRemoved: "#7A2936",
 } as const;

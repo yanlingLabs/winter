@@ -463,13 +463,15 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
 
   // --- interactive controls (Task 6) ---
 
-  // shift+tab cycles ask→auto→plan→ask via the session.setPolicy RPC; the mode bar updates only on
-  // success (repaint). An in-flight guard drops repeat presses until the RPC settles; a failure
-  // prints a dim one-line notice and leaves the bar unchanged.
+  // shift+tab cycles plan→dont-ask→ask→accept-edits→auto→bypass→plan (restrictiveness order, SP-
+  // policies Task 13) via the session.setPolicy RPC; the mode bar updates only on success (repaint).
+  // An in-flight guard drops repeat presses until the RPC settles; a failure prints a dim one-line
+  // notice and leaves the bar unchanged. Kept in lockstep with app.tsx's exported POLICY_ORDER (this
+  // file doesn't import app.tsx, so the array is duplicated here — not derived).
   async function cyclePolicy(): Promise<void> {
     if (policyInFlight) return;
     policyInFlight = true;
-    const order: ApprovalPolicy[] = ["ask", "auto", "plan"];
+    const order: ApprovalPolicy[] = ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"];
     const next = order[(order.indexOf(policy) + 1) % order.length]!;
     try {
       await c.setPolicy(sessionId, next);

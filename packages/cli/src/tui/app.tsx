@@ -148,7 +148,11 @@ export interface AppProps {
   resumeTargetSeq?: number;
 }
 
-const POLICY_ORDER: ApprovalPolicy[] = ["ask", "auto", "plan"];
+// Restrictiveness order (SP-policies Task 13): plan (must-approve-a-plan) is the most restrictive,
+// bypass (auto-approve everything) the least; shift+tab cycles forward through all six and wraps.
+// Exported for the CLI's own cycle test (test/policy-order.test.ts) — main.ts's `cyclePolicy` keeps
+// an independent copy of this same array (it doesn't import app.tsx) and MUST stay in lockstep.
+export const POLICY_ORDER: ApprovalPolicy[] = ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"];
 const EXIT_WINDOW_MS = 800; // T5 double-press ctrl+C/ctrl+D window, timed off the App's ticking `nowMs`
 
 const readRows = (): number => (typeof process.stdout.rows === "number" ? process.stdout.rows : 24);
