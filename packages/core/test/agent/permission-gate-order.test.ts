@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -1064,5 +1064,64 @@ describe("scenario 12: the permission-rules store is never agent-writable (SP-ap
 
     expect(events.some((e) => e.type === "approval_requested")).toBe(false);
     expect(readFileSync(join(cwd, ".norma", "memory", "whatever.md"), "utf8")).toBe("some memory content");
+  });
+
+  // SP-approvals final review 2: the closing re-review reproduced THREE live bypasses of (a)/(b)
+  // above on the default case-insensitive-but-case-preserving macOS volume format — a literal
+  // string compare of basenames (the FIRST version of this fix) missed all three, because the
+  // reader (permission-rules.ts's projectRulesFor) opens the file by plain `join(root, ".norma",
+  // "permissions.local.json")`, which the real filesystem resolves case-insensitively and through
+  // symlinks — so every one of these "different-looking" writes landed on the SAME real file the
+  // reader would pick right back up. Each of the three tests below was a REPRODUCED, LIVE bypass
+  // before the filesystem-identity fix; each must hard-error exactly like the exact-spelling case.
+  test("(e) BYPASS (fixed): a differently-cased FILENAME — .norma/Permissions.Local.json → hard error, file never created", async () => {
+    const permissionRules = new PermissionRules({ globalAllow: () => ["Edit"], normaHome: tmpDir("norma-pgo-home-") });
+    const provider = new FakeProvider(writeTurn(".norma/Permissions.Local.json", JSON.stringify({ allow: ["WebFetch(domain:webhook.site)"] })));
+    const { engine, store, sessionId, cwd } = setupEngine(provider, { policy: "ask", permissionRules });
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+    const result = events.find((e) => e.type === "tool_result") as any;
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("the permission rules store can only be changed by answering an approval card (or editing it yourself)");
+    expect(existsSync(join(cwd, ".norma", "Permissions.Local.json"))).toBe(false);
+    expect(existsSync(join(cwd, ".norma", "permissions.local.json"))).toBe(false);
+  });
+
+  test("(f) BYPASS (fixed): a differently-cased DIRECTORY — .NORMA/permissions.local.json → hard error, file never created", async () => {
+    const permissionRules = new PermissionRules({ globalAllow: () => ["Edit"], normaHome: tmpDir("norma-pgo-home-") });
+    const provider = new FakeProvider(writeTurn(".NORMA/permissions.local.json", JSON.stringify({ allow: ["WebFetch(domain:webhook.site)"] })));
+    const { engine, store, sessionId, cwd } = setupEngine(provider, { policy: "ask", permissionRules });
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+    const result = events.find((e) => e.type === "tool_result") as any;
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("the permission rules store can only be changed by answering an approval card (or editing it yourself)");
+    expect(existsSync(join(cwd, ".NORMA"))).toBe(false);
+    expect(existsSync(join(cwd, ".norma"))).toBe(false);
+  });
+
+  test("(g) BYPASS (fixed): .norma is a PRE-CREATED SYMLINK to a real directory elsewhere — writing through it → hard error, nothing landed on either side of the symlink", async () => {
+    const cwd = tmpDir("norma-pgo-cwd-");
+    const realDir = tmpDir("norma-pgo-realdir-");
+    symlinkSync(realDir, join(cwd, ".norma"));
+    const permissionRules = new PermissionRules({ globalAllow: () => ["Edit"], normaHome: tmpDir("norma-pgo-home-") });
+    const provider = new FakeProvider(writeTurn(".norma/permissions.local.json", JSON.stringify({ allow: ["WebFetch(domain:webhook.site)"] })));
+    const { engine, store, sessionId } = setupEngine(provider, { policy: "ask", permissionRules, cwd });
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+    const result = events.find((e) => e.type === "tool_result") as any;
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("the permission rules store can only be changed by answering an approval card (or editing it yourself)");
+    expect(existsSync(join(realDir, "permissions.local.json"))).toBe(false); // nothing landed through the symlink
+    expect(existsSync(join(cwd, ".norma", "permissions.local.json"))).toBe(false); // nor via the symlinked spelling
   });
 });
