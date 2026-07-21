@@ -177,11 +177,14 @@ describe("scenario 4: an Edit rule covers an IN-ROOT target only — an out-of-r
 
     const requested = events.find((e) => e.type === "approval_requested") as any;
     expect(requested).toBeDefined();
-    // The grant-flavored summary (engine.ts's dirGrant branch), NOT the generic approvalCardSummary
-    // — proves this rode the SAME out-of-root grant seam a ruleless call would, not a rule-skip.
-    expect(requested.summary).toContain("outside the allowed directories");
-    expect(requested.summary).toContain(`grant write access to ${outsideDir}`);
-    expect(readFileSync(target, "utf8")).toBe("should still need a grant"); // approved → grant applied → write landed
+    // The grant-flavored card (engine.ts's dirGrant branch), NOT the generic approvalCardSummary —
+    // proves this rode the SAME out-of-project grant seam a ruleless call would, not a rule-skip.
+    // SP-policies Task 9: the summary reads "outside your project" and the card now carries the
+    // three edit options (its rule option names the grant dir), whereas the generic ask card's
+    // options — when it has any — are approvalOptionsFor's Bash(...) shape, never an Edit(<dir>) one.
+    expect(requested.summary).toContain("outside your project");
+    expect(requested.options.find((o: any) => o.id === "allow_project")).toMatchObject({ rule: `Edit(${outsideDir})`, scope: "project" });
+    expect(readFileSync(target, "utf8")).toBe("should still need a grant"); // approved → one-shot write landed
   });
 });
 

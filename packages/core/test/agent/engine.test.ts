@@ -191,7 +191,7 @@ describe("AgentEngine", () => {
   // these tests assert exactly one approval_requested for the whole call, shaped like a write/edit
   // card (toolName "write"/"edit"), not a bespoke "request_directory" name.
   describe("out-of-root write/edit grant flow", () => {
-    test("ask policy: approve grants the directory and the write lands; a follow-up write to the SAME directory rides the existing grant SILENTLY (no SECOND directory_added, no second card at all — SP-policies Task 7)", async () => {
+    test("ask policy: approve lands the write via a ONE-SHOT grant — a follow-up write to the SAME dir cards AGAIN (SP-policies Task 9: no session-persisted grant; allow_once is once)", async () => {
       const outsideDir = realpathSync(mkdtempSync(join(tmpdir(), "norma-engine-outside-")));
       const target1 = join(outsideDir, "file1.txt");
       const target2 = join(outsideDir, "file2.txt");
@@ -208,22 +208,20 @@ describe("AgentEngine", () => {
       await engine.runTurn(sessionId);
       const events = store.read(sessionId);
       const approvalRequests = events.filter((e) => e.type === "approval_requested") as any[];
-      // SP-policies Task 7: an in-root write under `ask` is now SILENT (the in-project-silent flip).
-      // c1 is genuinely out-of-root, so it still raises exactly ONE grant-flavored card; approving
-      // it adds `outsideDir` to the session roots. c2 targets the SAME (now-granted, i.e. in-root)
-      // directory, so it rides the grant with NO card at all — not a second grant request, and not
-      // an "ordinary" write card either (that ordinary card is retired). So there is exactly ONE
-      // card total, and it is the grant card.
-      expect(approvalRequests.length).toBe(1);
+      // SP-policies Task 9: the ask-policy out-of-project grant is ONE-SHOT — approving lands the
+      // immediate write via a roots override for that call only, and does NOT add `outsideDir` to the
+      // session roots. This plain auto-approver mirrors "Allow once" (broker.resolve carries no
+      // optionId, so no Edit(<dir>) rule is ever persisted), so c2 — same dir, but persisted nowhere —
+      // is STILL out-of-project and raises its OWN grant card. Two out-of-project writes ⇒ two cards,
+      // and NO directory_added at all (contrast auto/accept-edits, which DO applyDirGrant silently).
+      expect(approvalRequests.length).toBe(2);
       expect(approvalRequests[0]).toMatchObject({ toolName: "write" });
       expect(approvalRequests[0].summary).toContain(outsideDir);
-      expect(approvalRequests[0].summary).toContain("outside the allowed directories");
-      expect(dirs.has(sessionId, outsideDir)).toBe(true);
-      const grants = events.filter((e) => e.type === "directory_added");
-      expect(grants.length).toBe(1); // granted exactly ONCE, not once per write
-      expect(grants[0]).toMatchObject({ path: outsideDir, persisted: false });
-      expect(readFileSync(target1, "utf8")).toBe("one"); // c1: approved grant → write lands
-      expect(readFileSync(target2, "utf8")).toBe("two"); // c2: silent (rides the grant) → write lands
+      expect(approvalRequests[0].summary).toContain("outside your project");
+      expect(dirs.has(sessionId, outsideDir)).toBe(false); // one-shot: never joins the session roots
+      expect(events.some((e) => e.type === "directory_added")).toBe(false); // no persistent grant event
+      expect(readFileSync(target1, "utf8")).toBe("one"); // c1: approved → one-shot write lands
+      expect(readFileSync(target2, "utf8")).toBe("two"); // c2: carded again, approved → lands too
       const results = events.filter((e) => e.type === "tool_result");
       expect(results.every((r: any) => r.isError === false)).toBe(true);
     });
@@ -285,7 +283,7 @@ describe("AgentEngine", () => {
       expect(readFileSync(join(cwd, "in-root.txt"), "utf8")).toBe("y");
     });
 
-    test("grants are session-scoped: a brand-new session sharing the SAME SessionDirectories store does not inherit a prior session's grant", async () => {
+    test("one-shot grants never persist to session roots: a new session (like the same one) re-prompts for an out-of-project write — no free ride, nothing shared through SessionDirectories (SP-policies Task 9)", async () => {
       const outsideDir = realpathSync(mkdtempSync(join(tmpdir(), "norma-engine-outside-iso-")));
       const target1 = join(outsideDir, "s1.txt");
       const target2 = join(outsideDir, "s2.txt");
@@ -301,17 +299,18 @@ describe("AgentEngine", () => {
       };
       hub.attach(watcher, sessionId, 0);
       await engine.runTurn(sessionId);
-      expect(dirs.has(sessionId, outsideDir)).toBe(true);
+      expect(dirs.has(sessionId, outsideDir)).toBe(false); // one-shot: session 1's approval persisted no session grant
 
-      // A NEW session, same store/dirs/engine instance — must NOT inherit session 1's grant.
+      // A NEW session, same store/dirs/engine instance — there is no prior grant to inherit under the
+      // one-shot model (nothing was ever added to the shared SessionDirectories store to begin with).
       const sessionId2 = store.createSession("global", { cwd, approvalPolicy: "ask" });
       hub.attach(watcher, sessionId2, 0);
-      expect(dirs.has(sessionId2, outsideDir)).toBe(false); // not inherited
+      expect(dirs.has(sessionId2, outsideDir)).toBe(false);
       await engine.runTurn(sessionId2);
       const events2 = store.read(sessionId2);
       expect(events2.some((e) => e.type === "approval_requested")).toBe(true); // re-prompted — no free ride off session 1
-      expect(dirs.has(sessionId2, outsideDir)).toBe(true); // approved again, granted for THIS session too
-      expect(readFileSync(target2, "utf8")).toBe("two");
+      expect(dirs.has(sessionId2, outsideDir)).toBe(false); // still one-shot — approving persists no session grant here either
+      expect(readFileSync(target2, "utf8")).toBe("two"); // approved → the write still lands
     });
 
     // task-24 review F2: the control plane (daemon.ts passes ~/.norma/run — the run dir holding
@@ -375,7 +374,7 @@ describe("AgentEngine", () => {
       expect(dirs.has(sessionId, grantDir)).toBe(true);
     });
 
-    test("deep not-yet-existing target dirs under ask+approve: same — grant mkdirs, write lands (task-24 review F3)", async () => {
+    test("deep not-yet-existing target dirs under ask+approve: the one-shot grant mkdir's the dir so the write lands — but persists NO session grant (SP-policies Task 9; the mkdir half of task-24 review F3)", async () => {
       const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-engine-deep-ask-")));
       const target = join(outside, "newsub", "deeper", "file.txt");
       const grantDir = join(outside, "newsub", "deeper");
@@ -390,10 +389,14 @@ describe("AgentEngine", () => {
       hub.attach(watcher, sessionId, 0);
       await engine.runTurn(sessionId);
       const events = store.read(sessionId);
-      expect(events.some((e) => e.type === "directory_added" && (e as any).path === grantDir)).toBe(true);
+      // The one-shot grant creates the deep dir (mkdirForOneShotGrant) so the fence's SKIP-a-missing-
+      // root behavior doesn't drop the just-approved write — but, unlike the auto/accept-edits
+      // pre-grant's applyDirGrant, it emits NO directory_added and adds nothing to the session roots.
+      expect(events.some((e) => e.type === "directory_added")).toBe(false);
       expect((events.find((e) => e.type === "tool_result") as any).isError).toBe(false);
-      expect(readFileSync(target, "utf8")).toBe("deep-ask");
-      expect(dirs.has(sessionId, grantDir)).toBe(true);
+      expect(readFileSync(target, "utf8")).toBe("deep-ask"); // the approved write LANDED — proves the mkdir ran
+      expect(existsSync(grantDir)).toBe(true); // the one-shot grant dir was created
+      expect(dirs.has(sessionId, grantDir)).toBe(false); // one-shot: never joined the session roots
     });
 
     // task-24 review F4 (engine half — the fence half is pinned in paths.test.ts): an in-root

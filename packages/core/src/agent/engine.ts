@@ -2789,8 +2789,18 @@ export class AgentEngine {
         // SessionDirectories.add + directory_added), NULL dirGrant, and fall through — the call is
         // now an ordinary in-root write and every later branch (reviewer included) sees it
         // unchanged. Placed AFTER the pre-tool hook block so a hook-blocked call never grants.
+        //
+        // SP-policies Task 9: `accept-edits` joins `auto` on this silent pre-grant. That policy's
+        // whole contract is "edits/writes are free" (gate.ts's EDIT_CLASS → "allow"), so an
+        // out-of-project edit under it must land with NO card, exactly like an in-project one —
+        // applyDirGrant here gives it the same silent session grant an in-project write already has.
+        // Under `auto` the granted call then rides the fs reviewer (auto-only branch below); under
+        // `accept-edits` no reviewer branch fires (all three are `=== "auto"`-gated), so it flows
+        // straight to executeCall — silent either way. `bypass` is deliberately NOT added here yet
+        // (Task 10 owns the bypass escape paths); under `bypass` an out-of-project edit still rides
+        // the `ask`-shaped grant card below, unchanged from before this task.
         let grantFailure: string | null = null;
-        if (dirGrant && !dirGrantDenied && meta.approvalPolicy === "auto") {
+        if (dirGrant && !dirGrantDenied && (meta.approvalPolicy === "auto" || meta.approvalPolicy === "accept-edits")) {
           grantFailure = this.applyDirGrant(sessionId, threadId, dirGrant.dir);
           if (!grantFailure) dirGrant = null;
         }
@@ -2930,21 +2940,39 @@ export class AgentEngine {
           }
           if (newCwd !== undefined) cwd = newCwd;
         } else if (dirGrant) {
-          // Out-of-root write/edit under `ask` policy (the auto case was pre-granted + nulled
-          // above, so it never reaches this branch): ONE grant-flavored card through the SAME
-          // requestApproval seam bash/worktree use — approval applies the grant (mkdir + roots +
-          // directory_added, review F3) then runs the call; the human card IS the review under
-          // `ask` (the AI-reviewer branches below are auto-policy-only, same as for an in-root
-          // write). Denial rides requestApproval's deniedByHuman path unchanged.
+          // Out-of-project write/edit under `ask`/`bypass` (the auto/accept-edits cases were
+          // pre-granted + nulled above, so they never reach this branch): ONE grant-flavored card
+          // through the SAME requestApproval seam bash/worktree use. SP-policies Task 9 gives it
+          // three options — [Allow once, Always allow edits in <dir>, Deny] — and a ONE-SHOT roots
+          // override instead of task-24's persistent applyDirGrant session grant:
+          //   - `oneShot` = the session's writable set (writableRoots) PLUS this grant dir, passed to
+          //     THIS executeCall only. It's never stored, so the write lands but the dir does NOT join
+          //     the session roots — no directory_added, no free ride for the next out-of-project write.
+          //   - "Always allow edits in <dir>" persists `Edit(<dir>)` at project scope via the option's
+          //     rule (ipc/server.ts's approval.respond handler, keyed by optionId) — a FUTURE call then
+          //     gets <dir> in writableRoots (Task 6's editPathRules fold), silently. "Allow once"
+          //     persists nothing; a repeat out-of-project write cards again.
+          // onApprove mkdir's the grant dir FIRST (mkdirForOneShotGrant — NO dirs.add / directory_added,
+          // unlike applyDirGrant): the write fence (resolveWithinAny) SKIPS a not-yet-existing root, so
+          // a deep new grant dir would drop out of `oneShot` and the just-approved write would fail its
+          // own containment; creating it is exactly what was approved. The human card IS the review
+          // under `ask` (the AI-reviewer branches below are auto-policy-only). Denial rides
+          // requestApproval's deniedByHuman path unchanged (nothing created, nothing persisted).
           const grant = dirGrant; // narrow for the closure
+          const oneShot = [...this.writableRoots(sessionId, projectRoot, rootsOverride), grant.dir];
           outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
             timeoutMs: this.approvalTimeoutFor(meta),
-            summary: `${call.name} ${grant.path} — outside the allowed directories; grant write access to ${grant.dir}?`,
+            summary: `${call.name} ${grant.path} — outside your project; allow this edit?`,
             // no denialMessage → the helper defaults to `denied by ${res.by}` (unchanged behavior)
+            options: [
+              { id: "allow_once", label: "Allow once" },
+              { id: "allow_project", label: `Always allow edits in ${grant.dir}`, rule: `Edit(${grant.dir})`, scope: "project" },
+              { id: "deny", label: "Deny" },
+            ],
           }, loaded, async () => {
-            const failure = this.applyDirGrant(sessionId, threadId, grant.dir);
+            const failure = this.mkdirForOneShotGrant(grant.dir);
             if (failure) return { output: failure, isError: true };
-            return this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable);
+            return this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, oneShot, visionCapable);
           }, pins, rootsOverride, visionCapable);
         } else if (call.name === "bash" && bashEscalation.dangerouslyDisableSandbox) {
           // SP-approvals Task 11 (spec §8): a full sandbox-escape floor — ALWAYS a card, under
@@ -3560,6 +3588,24 @@ export class AgentEngine {
     this.cfg.dirs.add(sessionId, dir);
     this.emit(sessionId, { type: "directory_added", sessionId, threadId, path: dir, persisted: false });
     return null;
+  }
+
+  /** SP-policies Task 9: the mkdir-ONLY half of applyDirGrant — create a grant dir so an APPROVED
+   *  out-of-project edit's write can land, WITHOUT the persistent session grant applyDirGrant does
+   *  (no `dirs.add`, no `directory_added`). The `ask`-card path grants ONE-SHOT (the write rides an
+   *  explicit `oneShot` roots override for this call only; durable coverage comes from the
+   *  "Always allow edits in <dir>" Edit(<dir>) rule instead, if chosen), so it must NOT extend the
+   *  session roots. The mkdir itself is still required: the write fence (resolveWithinAny) SKIPS a
+   *  not-yet-existing root, so a deep new grant dir would otherwise drop out of `oneShot` and the
+   *  write would fail its own containment. Returns an error string on failure (EACCES/EROFS/...),
+   *  the same shape applyDirGrant surfaces, else null. */
+  private mkdirForOneShotGrant(dir: string): string | null {
+    try {
+      mkdirSync(dir, { recursive: true });
+      return null;
+    } catch (err) {
+      return `could not create ${dir}: ${err instanceof Error ? err.message : String(err)}`;
+    }
   }
 
   /** write-permission-flow hardening (task-24 review F2): true when `dir` (a computed grant dir —
