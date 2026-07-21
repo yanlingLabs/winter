@@ -180,7 +180,7 @@ describe("PendingCards — approval with options (SP-approvals T7)", () => {
     expect(calls).toEqual([["o1", true, undefined]]);
   });
 
-  test("(e4) bare Enter -> onApprove(callId, true, undefined) — allow-once is the default when options are offered", async () => {
+  test("(e4) bare Enter -> onApprove(callId, false, undefined) — fail-safe deny, same as the no-options card and out-of-range digits", async () => {
     const calls: [string, boolean, string | undefined][] = [];
     const { stdin } = render(
       <PendingCards pending={card} onApprove={(id, yes, optionId) => calls.push([id, yes, optionId])} onAnswer={() => {}} onPlan={() => {}} />,
@@ -188,7 +188,7 @@ describe("PendingCards — approval with options (SP-approvals T7)", () => {
     await wait();
     stdin.write("\r");
     await wait();
-    expect(calls).toEqual([["o1", true, undefined]]);
+    expect(calls).toEqual([["o1", false, undefined]]);
   });
 
   test("(e5) 'n\\r' -> onApprove(callId, false, undefined)", async () => {
@@ -211,6 +211,19 @@ describe("PendingCards — approval with options (SP-approvals T7)", () => {
     );
     await wait();
     stdin.write("3");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(calls).toEqual([["o1", false, undefined]]);
+  });
+
+  test("(e9) a non-strict-digit numeric string ('1.0') denies rather than coercing through Number()", async () => {
+    const calls: [string, boolean, string | undefined][] = [];
+    const { stdin } = render(
+      <PendingCards pending={card} onApprove={(id, yes, optionId) => calls.push([id, yes, optionId])} onAnswer={() => {}} onPlan={() => {}} />,
+    );
+    await wait();
+    stdin.write("1.0");
     await wait();
     stdin.write("\r");
     await wait();

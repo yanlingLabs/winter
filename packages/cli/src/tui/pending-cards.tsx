@@ -97,17 +97,20 @@ function ApprovalCard({ pending, onApprove }: { pending: ApprovalCardPending; on
       return;
     }
     const trimmed = line.trim();
+    // Strict digit gate (SP-approvals T7 review): only a bare run of 0-9 counts as a menu index —
+    // "1.0"/"1e1"/"0x1" etc. must deny, not silently coerce through `Number()`.
+    const isDigits = /^\d+$/.test(trimmed);
     const asIndex = Number(trimmed);
-    if (trimmed !== "" && Number.isInteger(asIndex) && asIndex >= 1 && asIndex <= ruleOptions.length) {
+    if (isDigits && asIndex >= 1 && asIndex <= ruleOptions.length) {
       onApprove(pending.callId, true, ruleOptions[asIndex - 1]!.id);
-    } else if (trimmed === "" || trimmed.toLowerCase() === "y") {
-      // Bare Enter defaults to allow-once HERE (options present) — mirrors the Mac orb card's
-      // "Default button = Allow once (Enter)" (spec §5's surfaces section). The no-options branch
-      // above keeps the OLD default (bare Enter denies, like every other unrecognized input),
-      // untouched — this default only flips when there's a menu to default within.
+    } else if (trimmed.toLowerCase() === "y") {
       onApprove(pending.callId, true);
     } else {
-      // "n", an out-of-range/non-numeric digit, or any other input — deny, no optionId.
+      // "n", bare Enter, out-of-range/non-numeric, or anything else — deny, no optionId; only
+      // explicit "y" or an in-range digit allows — the CLI's rule is unrecognized/blank never
+      // allows; spec §5's CLI bullet has no Enter mandate (only the Mac bullet does, and a GUI
+      // default button is a different affordance) — fail-safe deny wins here, same as the
+      // no-options card above and the out-of-range-digit case just above.
       onApprove(pending.callId, false);
     }
     setBuffer("");
