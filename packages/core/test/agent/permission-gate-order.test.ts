@@ -5,11 +5,16 @@ import { join } from "node:path";
 import { z } from "zod";
 import type { HubClient } from "../../src/sessions/hub";
 import { ToolRegistry } from "../../src/agent/tools/registry";
+import { registerWorktreeTools } from "../../src/agent/tools/worktree";
+import { WorktreeManager } from "../../src/agent/worktree";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import type { ProviderEvent } from "../../src/providers/types";
 import { PermissionRules } from "../../src/agent/permission-rules";
 import { setupEngine } from "./engine-steer.test";
 import { stubRegistry, bashTurn, writeTurn, stubReviewer } from "./engine-reviewer.test";
+import { repo } from "./engine-worktree.test";
+
+const isMac = process.platform === "darwin";
 
 // SP-approvals Task 3: the engine's dispatch loop now consults Task 1's PermissionRules and Task
 // 2's readOnlyBash BEFORE carding an `ask`-policy call — this is the piece that stops an ask-policy
@@ -260,5 +265,36 @@ describe("scenario 8: the control-plane grant-denial hard error is unchanged —
     expect(result.output).toMatch(/never be granted/);
     expect(existsSync(target)).toBe(false);
     expect(dirs.has(sessionId, runDir)).toBe(false);
+  });
+});
+
+// Follow-up (reviewer's fast-follow on the T3 review — adjudicated CORRECT but untested): a
+// "Worktree" rule is in Task 1's grammar (KNOWN_TOOLS includes "Worktree"; toolForCallName maps
+// both enter_worktree/exit_worktree call names to it), so it rides the exact same `ruleAllowed`
+// path every other tool does — flipping `decision` to "allow" BEFORE the `isWorktree` branch's own
+// `decision === "ask"` check, which then takes its direct-bridge `else` arm instead of the
+// approval-seam one. Real git plumbing underneath, so `describe.if(isMac)` — same guard every
+// other real-worktree suite in this package uses (engine-worktree.test.ts, worktree.test.ts,
+// engine-spawn.test.ts, etc.).
+describe.if(isMac)("scenario 9: a Worktree rule allows enter_worktree outright — no card, the real bridge runs", () => {
+  test("global Worktree rule + enter_worktree under ask → no approval_requested; worktree_entered emitted; cwd moves into the worktree", async () => {
+    const cwd = repo();
+    const registry = new ToolRegistry();
+    registerWorktreeTools(registry);
+    const worktrees = new WorktreeManager({ baseRef: () => "head" });
+    const permissionRules = new PermissionRules({ globalAllow: () => ["Worktree"], normaHome: tmpDir("norma-pgo-home-") });
+    const provider = new FakeProvider([
+      [{ type: "tool_call", callId: "e1", name: "enter_worktree", argsJson: JSON.stringify({ name: "feat" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    ]);
+    const { engine, store, sessionId } = setupEngine(provider, { registry, cwd, policy: "ask", permissionRules, worktrees });
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false); // no card — the bridge ran directly
+    const entered = events.find((e) => e.type === "worktree_entered") as any;
+    expect(entered).toMatchObject({ name: "feat", branch: "norma/feat" });
+    expect(store.meta(sessionId).cwd).toBe(entered.path); // cwd moved into the worktree
   });
 });
