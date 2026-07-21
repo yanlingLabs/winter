@@ -644,12 +644,14 @@ describe("daemon IPC", () => {
       const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "ask" });
       await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
 
-      // Turn 1: a SUBDOMAIN of the shipped "transfer.sh" entry -> card.
+      // Turn 1: a SUBDOMAIN of the shipped "transfer.sh" entry -> card. MEDIUM-1 (SP-approvals T10
+      // review): a subdomain hit's label reads "Always allow all of <matched-entry>", honestly
+      // communicating that approving grants the whole family, not just this one subdomain.
       await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "fetch the paste" });
       const ask = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "approval_requested");
       expect(ask.params.options).toEqual([
         { id: "allow_once", label: "Allow" },
-        { id: "allow_source", label: "Always allow uploads.transfer.sh", rule: "WebFetch(domain:transfer.sh)", scope: "global" },
+        { id: "allow_source", label: "Always allow all of transfer.sh", rule: "WebFetch(domain:transfer.sh)", scope: "global" },
         { id: "deny", label: "Deny" },
       ]);
 

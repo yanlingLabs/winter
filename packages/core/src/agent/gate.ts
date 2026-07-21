@@ -106,9 +106,18 @@ const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_workt
 // needed a TARGETED floor, not a blanket prompt. web_search never makes an exfiltration-shaped
 // request (its only egress is the fixed Brave Search API endpoint — no caller-directed URL), so it
 // is unconditionally free with no floor at all. See evaluate() below for exactly where the
-// unconditional "allow" is returned (now identical to READ_ONLY's under every policy, even though
-// this stays a SEPARATE const from READ_ONLY — the class boundary is what lets engine.ts single
-// web_fetch out for its own check without touching read/glob/grep's).
+// unconditional "allow" is returned (now identical to READ_ONLY's under every policy).
+//
+// LOW-2, SP-approvals T10 review: NETWORK stays a SEPARATE const from READ_ONLY purely for the
+// SEMANTIC risk-shape distinction — web_fetch/web_search make a live outbound request to an
+// external endpoint and treat the RESPONSE as untrusted data (an adversarial page could carry
+// injected instructions), whereas read/glob/grep only ever touch the local filesystem the user
+// already controls. That's a meaningfully different risk shape worth its own labeled class in this
+// file's taxonomy, independent of whatever concrete allow/ask/deny verdict the two classes happen
+// to share today. It is NOT because engine.ts consults this class or its membership at runtime —
+// engine.ts's dangerous-domain floor (webFetchGate) is keyed on a plain `call.name === "web_fetch"`
+// string check, entirely decoupled from how this file organizes its sets; nothing about THIS class
+// boundary is what "lets" that check exist or run.
 const NETWORK = new Set(["web_fetch", "web_search"]);
 // skill_write (phase 5c Task 2) gets a NEW class, strictly stricter than MUTATING: "ask" under
 // BOTH `ask` AND `auto` (a card on EVERY call — no policy setting silences it), "deny" under
@@ -147,10 +156,10 @@ export class PermissionGate {
     if (READ_ONLY.has(toolName)) return "allow";
     // SP-approvals T10: NETWORK is unconditionally "allow" here too (ask AND auto), matching the
     // plan-mode branch above — web tools are free by default under EVERY policy at this gate.
-    // Do NOT move web_fetch/web_search into READ_ONLY (see NETWORK's own doc comment for why they
-    // stay a distinct class): this is a SEPARATE branch specifically so engine.ts's dispatch loop
-    // can single web_fetch out for its own dangerous-domain pre-exec check without that check
-    // needing to reach into read/glob/grep's handling at all.
+    // Do NOT move web_fetch/web_search into READ_ONLY (see NETWORK's own doc comment for the
+    // semantic risk-shape reason they stay a distinct class, and — LOW-2, T10 review — why that's
+    // NOT because anything downstream queries this class's membership: engine.ts's own
+    // dangerous-domain floor checks `call.name === "web_fetch"` directly, not this set).
     if (NETWORK.has(toolName)) return "allow";
     // write/edit stay in MUTATING even after the write-permission-flow feature (request_directory
     // removed, task 24): this decision only gates whether the TOOL CALL ITSELF needs a human's

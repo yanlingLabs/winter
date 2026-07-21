@@ -224,18 +224,25 @@ function approvalOptionsFor(call: { name: string; argsJson: string }): ApprovalO
 /** SP-approvals Task 10 (spec §7): the web_fetch dangerous-domain approval card's options — called
  *  ONLY from `webFetchGate` below, NEVER from `approvalOptionsFor` above (a structurally different
  *  card: it fires for EVERY policy, not just `ask`, and its "always allow" option is scoped to a
- *  matched DOMAIN, not a bash/edit rule). `host` is the raw request hostname (shown in the label,
- *  so the human sees exactly what was fetched); `matchedEntry` is the SHIPPED/user-added list entry
- *  it matched against (the RULE this persists — e.g. a request to `uploads.transfer.sh` matches
- *  the shipped `transfer.sh` entry, so approving writes `WebFetch(domain:transfer.sh)`, covering
- *  the whole family, not just that one subdomain). `undefined` for BOTH params only in the
- *  unparseable-URL case — there is no valid host to name a rule for at all, so the card offers
- *  only Allow/Deny, no third option (an "always allow ___" button with nothing to fill the blank
- *  would be actively misleading). */
+ *  matched DOMAIN, not a bash/edit rule). `host` is the raw request hostname; `matchedEntry` is the
+ *  SHIPPED/user-added list entry it matched against (the RULE this persists — e.g. a request to
+ *  `uploads.transfer.sh` matches the shipped `transfer.sh` entry, so approving writes
+ *  `WebFetch(domain:transfer.sh)`, covering the whole family, not just that one subdomain).
+ *  `undefined` for BOTH params only in the unparseable-URL/no-hostname case — there is no valid
+ *  host to name a rule for at all, so the card offers only Allow/Deny, no third option (an "always
+ *  allow ___" button with nothing to fill the blank would be actively misleading).
+ *
+ *  MEDIUM-1, SP-approvals T10 review: the label reads `Always allow all of ${matchedEntry}` when
+ *  `host !== matchedEntry` (a SUBDOMAIN hit) — approving actually grants the whole matched family
+ *  (every subdomain of, and the bare, `matchedEntry`), not just the one subdomain that happened to
+ *  trigger the card, and the label says so honestly rather than naming only the narrower host that
+ *  was fetched. An EXACT hit (`host === matchedEntry`) keeps the simpler `Always allow ${host}` —
+ *  nothing wider than the fetched host itself is being granted, so there's nothing to clarify. */
 function webFetchApprovalOptions(host: string | undefined, matchedEntry: string | undefined): ApprovalOption[] {
   const options: ApprovalOption[] = [{ id: "allow_once", label: "Allow" }];
   if (host !== undefined && matchedEntry !== undefined) {
-    options.push({ id: "allow_source", label: `Always allow ${host}`, rule: `WebFetch(domain:${matchedEntry})`, scope: "global" });
+    const label = host === matchedEntry ? `Always allow ${host}` : `Always allow all of ${matchedEntry}`;
+    options.push({ id: "allow_source", label, rule: `WebFetch(domain:${matchedEntry})`, scope: "global" });
   }
   options.push({ id: "deny", label: "Deny" });
   return options;
@@ -3277,9 +3284,12 @@ export class AgentEngine {
    *  rule (the "Always allow from this source" option's own persistence target) — otherwise the
    *  `{summary, options}` for the approval card this call must show.
    *
-   *  Fails CLOSED on an unparseable/missing `url` (no host to even evaluate against the dangerous
-   *  list, so there is nothing safe to allow) — `webFetchApprovalOptions(undefined, undefined)`
-   *  gives that card only Allow/Deny, no "always allow" option. */
+   *  Fails CLOSED on an unparseable/missing `url`, AND on a `url` that parses but carries no
+   *  hostname at all (LOW-3, SP-approvals T10 review — e.g. a `file://` URL, whose `.hostname` is
+   *  `""`): neither case has a host to evaluate against the dangerous list, so there is nothing
+   *  safe to allow — `webFetchApprovalOptions(undefined, undefined)` gives that card only
+   *  Allow/Deny, no "always allow" option. (`tools/web.ts`'s `ssrfGuard` still separately refuses
+   *  private/loopback/non-http(s) targets at execute time regardless of this floor's verdict.) */
   private webFetchGate(call: { name: string; argsJson: string }, cwd: string): { summary: string; options: ApprovalOption[] } | null {
     let url: URL;
     try {
@@ -3293,6 +3303,12 @@ export class AgentEngine {
       };
     }
     const host = url.hostname.toLowerCase();
+    if (!host) {
+      return {
+        summary: `web_fetch ${url.toString()} — the URL has no hostname to check against the dangerous-domain list`,
+        options: webFetchApprovalOptions(undefined, undefined),
+      };
+    }
     const added = this.cfg.dangerousDomainsAdded?.() ?? [];
     const matchedEntry = dangerousDomainMatch(host, [...SHIPPED_DANGEROUS_DOMAINS, ...added]);
     if (matchedEntry === null) return null; // nothing dangerous about this host — free by default

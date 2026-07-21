@@ -8,9 +8,13 @@ import { SHIPPED_DANGEROUS_DOMAINS, dangerousDomainMatch } from "../../src/agent
 // dangerousDomains.added) plus the pure suffix-match predicate engine.ts's pre-exec check consults.
 
 describe("SHIPPED_DANGEROUS_DOMAINS", () => {
-  test("is a non-empty, sanely-sized curated list (~15-25 entries, some headroom either side)", () => {
+  // Bound widened in the SP-approvals T10 review (list-delta adoption, 2026-07-21): the brief's own
+  // "~15-25" guidance was superseded by the reviewer's adopted 13-entry delta (12 reviewer-verified
+  // + transfer.archivete.am, WebFetch-verified live during that same review) — ~38 entries today,
+  // headroom kept generous so a small future addition doesn't require touching this bound again.
+  test("is a non-empty, sanely-sized curated list (generous headroom, not unbounded)", () => {
     expect(SHIPPED_DANGEROUS_DOMAINS.length).toBeGreaterThanOrEqual(15);
-    expect(SHIPPED_DANGEROUS_DOMAINS.length).toBeLessThanOrEqual(30);
+    expect(SHIPPED_DANGEROUS_DOMAINS.length).toBeLessThanOrEqual(45);
   });
 
   test("every entry is lowercase, trimmed, and non-empty — dangerousDomainMatch relies on this, it never normalizes the SHIPPED list itself beyond its own lowercasing", () => {
@@ -37,6 +41,20 @@ describe("SHIPPED_DANGEROUS_DOMAINS", () => {
       "dpaste.org", "temp.sh",
     ];
     for (const domain of required) {
+      expect(SHIPPED_DANGEROUS_DOMAINS).toContain(domain);
+    }
+  });
+
+  // SP-approvals T10 review (2026-07-21): 12 reviewer-adopted entries + transfer.archivete.am
+  // (WebFetch-verified live and running transfer.sh's own open-source codebase during the review —
+  // the brief's "unless you can verify it's a live transfer.sh mirror right now" condition).
+  test("covers the list-delta domains adopted in the T10 review", () => {
+    const delta = [
+      "x0.at", "sprunge.us", "rentry.co", "cl1p.net", "pastes.dev", "catbox.moe",
+      "bashupload.com", "bore.pub", "zrok.io", "webhookrelay.com", "pagekite.net",
+      "requestcatcher.com", "transfer.archivete.am",
+    ];
+    for (const domain of delta) {
       expect(SHIPPED_DANGEROUS_DOMAINS).toContain(domain);
     }
   });
@@ -86,5 +104,14 @@ describe("dangerousDomainMatch", () => {
 
   test("returns the FIRST matching entry when a host could match more than one list member", () => {
     expect(dangerousDomainMatch("pastebin.com", ["pastebin.com", "pastebin.com"])).toBe("pastebin.com");
+  });
+
+  // HIGH-1 (SP-approvals T10 review): a trailing-dot FQDN (the DNS root label, spelled literally —
+  // "pastebin.com." resolves to the EXACT SAME address as "pastebin.com") must not bypass the
+  // floor. Mirrors tools/web.ts's ssrfGuard, which already strips exactly one trailing dot before
+  // its own private-address checks for the identical reason.
+  test("a trailing-dot FQDN still matches — the exact host, and a subdomain, both with a literal trailing dot", () => {
+    expect(dangerousDomainMatch("pastebin.com.", list)).toBe("pastebin.com");
+    expect(dangerousDomainMatch("sub.pastebin.com.", list)).toBe("pastebin.com");
   });
 });

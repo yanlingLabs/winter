@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, type Stats, writeFileSync } from "node:fs";
 import { join, sep } from "node:path";
 import { hasShellHazards } from "./shell-scan";
+import { dangerousDomainMatch } from "./dangerous-domains";
 
 /**
  * CC-grammar allow-rules store (SP-approvals Task 1) — the foundation the engine gate (Task 3)
@@ -238,9 +239,13 @@ function normalizedCommand(argsJson: string): string {
  *
  * Kind "domain" (SP-approvals T10) is checked and returned BEFORE the bash-only hazard guard
  * below — no shell hazards apply to a URL, this is a wholly different comparison: it parses the
- * call's `url` arg host (`callUrlHost`) and suffix-matches it against the rule's value, case-
- * insensitively — the SAME semantics as `dangerous-domains.ts`'s `dangerousDomainMatch`, just
- * against one rule value instead of a list. An unparseable/missing url never matches.
+ * call's `url` arg host (`callUrlHost`) and hands it to `dangerous-domains.ts`'s own
+ * `dangerousDomainMatch` (called with a single-entry list — the rule's own value) rather than
+ * reimplementing the suffix/case-insensitivity/trailing-dot comparison inline. SP-approvals T10
+ * review, HIGH-1: this delegation is exactly WHY that fix (trailing-dot FQDN normalization) only
+ * needed to land in one place — before it, this function had its OWN inline copy of the suffix
+ * check, which would have needed the identical fix a second time and could easily have drifted from
+ * it. An unparseable/missing url never matches.
  */
 export function ruleMatches(parsed: NonNullable<ReturnType<typeof parseRule>>, call: { name: string; argsJson: string }): boolean {
   const tool = toolForCallName(call.name);
@@ -250,8 +255,7 @@ export function ruleMatches(parsed: NonNullable<ReturnType<typeof parseRule>>, c
   if (parsed.kind === "domain") {
     const host = callUrlHost(call.argsJson);
     if (host === null) return false;
-    const entry = parsed.value.toLowerCase();
-    return host === entry || host.endsWith(`.${entry}`);
+    return dangerousDomainMatch(host, [parsed.value]) !== null;
   }
   if (parsed.tool === "bash" && hasShellHazards(rawCommand(call.argsJson))) return false;
   const cmd = normalizedCommand(call.argsJson);

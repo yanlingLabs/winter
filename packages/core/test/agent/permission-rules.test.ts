@@ -297,6 +297,14 @@ describe("ruleMatches — WebFetch(domain:...) kind (SP-approvals T10)", () => {
     expect(ruleMatches(domainRule, call("web_fetch", { url: "https://raw.pastebin.com/xyz" }))).toBe(true);
   });
 
+  // HIGH-1 (SP-approvals T10 review): a trailing-dot FQDN must still match — ruleMatches's "domain"
+  // kind delegates to dangerous-domains.ts's own dangerousDomainMatch (rather than reimplementing
+  // the suffix comparison inline), so this gets the SAME trailing-dot normalization for free, one
+  // definition shared by both the dangerous-domain floor and its exception-rule grammar.
+  test("matches a trailing-dot FQDN — the literal DNS root label must not evade the rule", () => {
+    expect(ruleMatches(domainRule, call("web_fetch", { url: "https://pastebin.com./x" }))).toBe(true);
+  });
+
   test("case-insensitive on both the rule's value and the call's host", () => {
     const mixedRule = parseRule("WebFetch(domain:Pastebin.COM)")!;
     expect(ruleMatches(mixedRule, call("web_fetch", { url: "https://PASTEBIN.com/x" }))).toBe(true);

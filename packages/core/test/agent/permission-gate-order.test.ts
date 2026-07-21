@@ -357,10 +357,12 @@ describe("scenario 10: web tools — free by default, dangerous-domain floor (SP
     expect(fetchCalls).toEqual(["https://example.com/page"]);
   });
 
-  test("web_fetch to a SHIPPED dangerous domain under ask -> card with Allow / Always allow <host> / Deny; the rule names the MATCHED ENTRY, not the raw host", async () => {
+  test("web_fetch to a SHIPPED dangerous domain (SUBDOMAIN hit) under ask -> card with Allow / Always allow all of <matched-entry> / Deny; the rule names the MATCHED ENTRY, not the raw host", async () => {
     const { registry, fetchCalls } = buildWebRegistry();
-    // A SUBDOMAIN of the shipped "transfer.sh" entry — exercises the "label shows the raw host,
-    // rule names the broader matched entry" distinction the brief calls out explicitly.
+    // A SUBDOMAIN of the shipped "transfer.sh" entry — exercises the "matchedEntry !== host" case:
+    // MEDIUM-1 (SP-approvals T10 review) says this label must read "Always allow all of
+    // <matched-entry>" (not the raw host) — approving this actually grants the WHOLE family
+    // (any subdomain of transfer.sh, not just uploads.transfer.sh), so the label says so honestly.
     const provider = new FakeProvider(webFetchTurn("https://uploads.transfer.sh/file1"));
     const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask" });
     hub.attach(approver(broker, sessionId, false), sessionId, 0); // deny — this test only cares about the card's shape
@@ -372,9 +374,49 @@ describe("scenario 10: web tools — free by default, dangerous-domain floor (SP
     expect(requested).toBeDefined();
     expect(requested.options).toEqual([
       { id: "allow_once", label: "Allow" },
-      { id: "allow_source", label: "Always allow uploads.transfer.sh", rule: "WebFetch(domain:transfer.sh)", scope: "global" },
+      { id: "allow_source", label: "Always allow all of transfer.sh", rule: "WebFetch(domain:transfer.sh)", scope: "global" },
       { id: "deny", label: "Deny" },
     ]);
+    expect(fetchCalls).toEqual([]); // denied — the fetch never ran
+  });
+
+  // MEDIUM-1 (SP-approvals T10 review): the OTHER half — an EXACT host hit (matchedEntry === host)
+  // keeps the simple "Always allow <host>" wording, since approving it doesn't grant anything wider
+  // than the one host that was actually fetched.
+  test("web_fetch to a SHIPPED dangerous domain (EXACT host hit) under ask -> card label stays \"Always allow <host>\" (no \"all of\" wording — nothing wider is being granted)", async () => {
+    const { registry, fetchCalls } = buildWebRegistry();
+    const provider = new FakeProvider(webFetchTurn("https://pastebin.com/raw/xyz"));
+    const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask" });
+    hub.attach(approver(broker, sessionId, false), sessionId, 0);
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    const requested = events.find((e) => e.type === "approval_requested") as any;
+    expect(requested.options).toEqual([
+      { id: "allow_once", label: "Allow" },
+      { id: "allow_source", label: "Always allow pastebin.com", rule: "WebFetch(domain:pastebin.com)", scope: "global" },
+      { id: "deny", label: "Deny" },
+    ]);
+    expect(fetchCalls).toEqual([]);
+  });
+
+  // HIGH-1 (SP-approvals T10 review): a trailing-dot FQDN ("pastebin.com." — the literal DNS root
+  // label) resolves identically to "pastebin.com" but, before the fix, sailed past dangerousDomainMatch
+  // unmatched — a real bypass of the entire floor. Proven here end to end through the real dispatch
+  // loop, not just at the dangerous-domains.ts/permission-rules.ts unit level.
+  test("a trailing-dot FQDN does NOT bypass the floor — the card still fires", async () => {
+    const { registry, fetchCalls } = buildWebRegistry();
+    const provider = new FakeProvider(webFetchTurn("https://pastebin.com./raw/x"));
+    const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask" });
+    hub.attach(approver(broker, sessionId, false), sessionId, 0);
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    const requested = events.find((e) => e.type === "approval_requested") as any;
+    expect(requested).toBeDefined();
+    expect(requested.options.find((o: any) => o.id === "allow_source")).toMatchObject({ rule: "WebFetch(domain:pastebin.com)" });
     expect(fetchCalls).toEqual([]); // denied — the fetch never ran
   });
 
@@ -459,6 +501,31 @@ describe("scenario 10: web tools — free by default, dangerous-domain floor (SP
 
     const requested = events.find((e) => e.type === "approval_requested") as any;
     expect(requested?.options).toEqual([{ id: "allow_once", label: "Allow" }, { id: "deny", label: "Deny" }]);
+  });
+
+  // LOW-3 (SP-approvals T10 review): a URL that PARSES but carries no hostname at all (a `file://`
+  // URL — `new URL(...).hostname` is `""`) must also fail closed to the Allow/Deny-only card rather
+  // than silently falling through as "no match" (`dangerousDomainMatch("", …)` would indeed return
+  // null, which — before this fix — meant an empty-host URL ran with NO card at all). ssrfGuard
+  // still backstops actual SSRF risk separately; this is about this floor's own consistency: no
+  // valid host to check means no basis for concluding it's safe, so it must ask, exactly like the
+  // unparseable-URL case just above.
+  test("a URL with NO hostname (e.g. file://) also fails closed to the Allow/Deny-only card", async () => {
+    const { registry, fetchCalls } = buildWebRegistry();
+    const provider = new FakeProvider([
+      [{ type: "tool_call", callId: "c1", name: "web_fetch", argsJson: JSON.stringify({ url: "file:///etc/passwd" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    ]);
+    const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask" });
+    hub.attach(approver(broker, sessionId, false), sessionId, 0);
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    const requested = events.find((e) => e.type === "approval_requested") as any;
+    expect(requested).toBeDefined();
+    expect(requested.options).toEqual([{ id: "allow_once", label: "Allow" }, { id: "deny", label: "Deny" }]);
+    expect(fetchCalls).toEqual([]);
   });
 
   test("full loop: dangerous fetch -> card -> respond allow_source -> rule persists GLOBALLY -> the NEXT fetch to the same domain AND a subdomain both run cardless", async () => {

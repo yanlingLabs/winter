@@ -28,25 +28,47 @@
  * `dangerousDomainMatch` below) so a subdomain of any entry is covered without listing it
  * separately (e.g. `raw.pastebin.com` matches the `pastebin.com` entry).
  */
+// SP-approvals T10 review (2026-07-21, list-delta adoption): 13 entries added to the original 25 —
+// 12 reviewer-verified, plus transfer.archivete.am which this task's own implementer verified live
+// (WebFetch'd it during the review: it serves transfer.sh's own open-source codebase, credited to
+// "Dutch Coders" — the same org behind the original transfer.sh) per the review's explicit "unless
+// you can verify it's a live transfer.sh mirror right now" condition. requestbin.com's rationale
+// was also corrected in the same pass (it is NOT "the original" — see its own comment). Organized
+// by family (paste hosts, one-shot file hosts, request/interaction collectors, tunnel providers) so
+// a sibling's rationale reads in context; `dangerousDomainMatch`'s suffix matching doesn't care
+// about this ordering at all, it's purely for a human reviewer's benefit.
 export const SHIPPED_DANGEROUS_DOMAINS: readonly string[] = [
+  // --- paste hosts ---
   "pastebin.com", // the original anonymous paste host — classic exfil dead-drop, no auth to post or read
   "paste.ee", // anonymous paste host, no auth required
   "hastebin.com", // anonymous paste host (hackmd/hastebin family), no auth required
   "dpaste.org", // anonymous paste host
   "dpaste.com", // anonymous paste host — a distinct, commonly-confused-with-dpaste.org domain
   "ix.io", // anonymous curl-friendly paste host (`curl -F 'f:1=<-' ix.io`)
+  "sprunge.us", // curl-pipe paste host — ix.io's sibling (`cmd | curl -F 'sprunge=<-' sprunge.us`)
   "termbin.com", // anonymous nc-friendly paste host (`cmd | nc termbin.com 9999`), no auth at all
+  "rentry.co", // anonymous markdown paste host, no auth required
+  "cl1p.net", // anonymous clipboard paste host — paste now, retrieve later from any device
+  "pastes.dev", // anonymous POST-based paste host
+  // --- one-shot file hosts ---
   "transfer.sh", // anonymous one-shot file host — `curl --upload-file` exfil-by-upload, no auth
+  "transfer.archivete.am", // anonymous one-shot file host — verified-live transfer.sh-codebase mirror (2026-07-21)
   "0x0.st", // anonymous one-shot file host, no auth, minimal logging by design
+  "x0.at", // anonymous curl file host — 0x0.st's sibling domain, same service
   "file.io", // anonymous one-shot file host with self-destructing links
   "temp.sh", // anonymous one-shot file host
   "gofile.io", // anonymous file host, no auth required for uploads
+  "catbox.moe", // anonymous file host, no auth — suffix match also covers litterbox.catbox.moe
+  "bashupload.com", // curl one-shot upload host (`curl bashupload.com -T file`)
+  // --- request/interaction collectors ---
   "webhook.site", // request-capture collector — logs every header/byte POSTed to a throwaway URL
-  "requestbin.com", // request-capture collector (the original RequestBin)
+  "requestbin.com", // request-capture collector — Pipedream's hosted RequestBin (successor to Runscope's original requestb.in, discontinued 2018), not "the original"
   "pipedream.net", // request-capture / low-code relay — can forward captured data on to anywhere
   "interactsh.com", // out-of-band interaction collector (security-testing tool; equally exfil-capable)
   "oastify.com", // interactsh's default public collector domain (same tool, distinct domain)
   "burpcollaborator.net", // Burp Suite's public out-of-band collaborator — logs every inbound hit
+  "requestcatcher.com", // request-capture collector — issues a subdomain per catcher, logs everything sent to it
+  // --- tunnel providers ---
   "ngrok.io", // tunnel provider — exposes a local port/service to the public internet
   "ngrok-free.app", // ngrok's current free-tier public domain
   "ngrok.app", // ngrok's custom-domain suffix for paid tunnels
@@ -54,6 +76,10 @@ export const SHIPPED_DANGEROUS_DOMAINS: readonly string[] = [
   "localhost.run", // SSH-based tunnel provider, no signup required
   "telebit.io", // tunnel provider
   "loca.lt", // localtunnel's public relay domain
+  "bore.pub", // public relay for the `bore` tunnel tool — exposes a local port with one command
+  "zrok.io", // zrok tunnel shares are issued under this domain
+  "webhookrelay.com", // webhook relay service that also offers reverse-tunnel local exposure
+  "pagekite.net", // tunnel provider
 ] as const;
 
 /**
@@ -70,9 +96,21 @@ export const SHIPPED_DANGEROUS_DOMAINS: readonly string[] = [
  * Deliberately NOT a bare `.includes`/substring check — `pastebin.com.evil.com` (entry is a
  * PREFIX, not a suffix) and `evilpastebin.com` (no label-boundary dot) must both fail to match
  * `pastebin.com`; only an exact match or a `.`-anchored suffix counts.
+ *
+ * HIGH-1, SP-approvals T10 review: a single TRAILING DOT on `host` (`"pastebin.com."` — the literal
+ * DNS root label) is stripped before matching. `"pastebin.com."` resolves to the exact same address
+ * as `"pastebin.com"`, so leaving it unstripped would have let `https://pastebin.com./raw/x` sail
+ * past this floor with no card while DNS treated it identically to the bare domain — the textbook
+ * trailing-dot bypass. Mirrors `tools/web.ts`'s `ssrfGuard`, which already strips exactly one
+ * trailing dot from a fetch's hostname before its own private-address checks, for the identical
+ * reason (see that function's own comment). Only the HOST side is normalized here, not `entries` —
+ * nothing in this codebase ever writes a trailing-dot entry (the shipped list is a fixed constant;
+ * a user-typed addition with a stray trailing dot is a config mistake, not an attacker-controlled
+ * bypass vector, so it's out of scope for this specific fix).
  */
 export function dangerousDomainMatch(host: string, entries: readonly string[]): string | null {
-  const h = host.toLowerCase();
+  let h = host.toLowerCase();
+  if (h.endsWith(".")) h = h.slice(0, -1);
   for (const entry of entries) {
     const e = entry.toLowerCase();
     if (h === e || h.endsWith(`.${e}`)) return entry;
