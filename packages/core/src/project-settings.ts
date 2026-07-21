@@ -1,4 +1,6 @@
-import { Settings } from "./settings";
+import { lstatSync, type Stats } from "node:fs";
+import { join } from "node:path";
+import { readRawSettings, Settings } from "./settings";
 
 /** Keys never taken from a project/local overlay (top level only): `provider` is an exfil/MITM
  *  line and a provider-type change requires a daemon restart; `plugins` consent is its own
@@ -59,4 +61,103 @@ export function mergeSettings(base: Settings, overlays: Record<string, unknown>[
   }
   const parsed = Settings.safeParse(acc);
   return parsed.success ? parsed.data : base;
+}
+
+function lstatOrNull(path: string): Stats | null {
+  try {
+    return lstatSync(path);
+  } catch {
+    return null;
+  }
+}
+
+/** lstat-derived cache signature for one overlay file: "absent" when the path doesn't exist OR
+ *  isn't a regular file — which ALSO refuses a symlinked settings file itself, no separate check
+ *  needed: an lstat'd symlink's own `isFile()` is false regardless of what it points to, so it
+ *  collapses into the same bucket a missing file gets. A real regular file's lstat IS its stat (no
+ *  symlink hop to resolve), so mtimeMs/size are safe to read straight off it. */
+function fileSig(lstat: Stats | null): string {
+  return lstat && lstat.isFile() ? `${lstat.mtimeMs}:${lstat.size}` : "absent";
+}
+
+interface ResolverCacheEntry {
+  baseRef: Settings; // the exact object base() returned when this was computed — SettingsWatcher
+  // hot-swaps in a NEW object on reload, so `!==` here catches every reload without a deep compare.
+  trusted: boolean;
+  projectSig: string;
+  localSig: string;
+  effective: Settings;
+}
+
+/**
+ * Cwd-keyed, mtime-cached "effective settings" read-through: `base()` deep-merged (mergeSettings
+ * above) with a project's `.norma/settings.json` (trust-gated) and `.norma/settings.local.json`
+ * (always — gitignored, the user's own). A session with no cwd, an untrusted cwd, or any read
+ * failure sees `base()` back verbatim — the SAME object, never a copy.
+ *
+ * A cache hit requires ALL of: the same `base()` reference (a hot-settings reload swaps the whole
+ * object, so a merge computed from the old one must not survive it), the same trust bit (trusting
+ * a project mid-session must invalidate immediately, not wait for a file edit), and both overlay
+ * files' lstat signature unchanged. A hit costs one trust() call plus a couple of lstats — no
+ * reads, no merge.
+ *
+ * Symlink refusal mirrors permission-rules.ts's `projectRulesFor` (the reviewed precedent this
+ * pattern comes from): `<cwd>/.norma` must be a real directory and each settings file a real
+ * regular file, or that project's overlays are treated as absent. This matters for the identical
+ * reason it does there — the write-fence denies agent writes into a real `.norma` store, but a
+ * symlinked `.norma` (or a symlinked settings file) pointing at agent-writable space elsewhere
+ * would let overlay content bypass that fence once a later task wires `permissions.allow` through
+ * this resolver.
+ *
+ * Torn-read handling: a settings file that lstat says IS a regular file but fails to parse
+ * (`readRawSettings` -> null — e.g. a concurrent non-atomic write, `addLocalDir` writes that way)
+ * is dropped from THIS call's merge but never cached — the next `effective()` call re-reads rather
+ * than pinning a bad merge under the torn file's signature until it changes again.
+ */
+export class ProjectSettingsResolver {
+  private readonly cache = new Map<string, ResolverCacheEntry>();
+
+  constructor(private readonly deps: { base: () => Settings | null; trust: { isTrusted(dir: string): boolean } }) {}
+
+  effective(cwd: string | null): Settings | null {
+    const base = this.deps.base();
+    if (!cwd || !base) return base;
+
+    const trusted = this.deps.trust.isTrusted(cwd);
+    const dotNorma = join(cwd, ".norma");
+    const projectPath = join(dotNorma, "settings.json");
+    const localPath = join(dotNorma, "settings.local.json");
+
+    // A symlinked `.norma` would let the per-file lstats below silently follow it into
+    // agent-controlled space — lstat only refuses to follow the FINAL path component, and
+    // `.norma` is an earlier component once joined with a filename, so checking the files alone
+    // can never catch a swapped parent. Only trust the per-file lstats when it's a real directory.
+    const dotNormaLstat = lstatOrNull(dotNorma);
+    const dotNormaOk = !!dotNormaLstat && dotNormaLstat.isDirectory();
+    const projectSig = fileSig(dotNormaOk ? lstatOrNull(projectPath) : null);
+    const localSig = fileSig(dotNormaOk ? lstatOrNull(localPath) : null);
+
+    const cached = this.cache.get(cwd);
+    if (cached && cached.baseRef === base && cached.trusted === trusted && cached.projectSig === projectSig && cached.localSig === localSig) {
+      return cached.effective;
+    }
+
+    const overlays: Record<string, unknown>[] = [];
+    let cacheable = true;
+    if (trusted && projectSig !== "absent") {
+      const raw = readRawSettings(projectPath);
+      if (raw) overlays.push(raw);
+      else cacheable = false; // torn read — don't pin this under the current (torn) signature
+    }
+    if (localSig !== "absent") {
+      const raw = readRawSettings(localPath);
+      if (raw) overlays.push(raw);
+      else cacheable = false;
+    }
+
+    const effective = mergeSettings(base, overlays); // overlays.length === 0 -> returns base verbatim
+    if (cacheable) this.cache.set(cwd, { baseRef: base, trusted, projectSig, localSig, effective });
+    else this.cache.delete(cwd);
+    return effective;
+  }
 }

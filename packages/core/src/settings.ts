@@ -265,6 +265,16 @@ export function saveSettings(path: string, s: Settings): void {
   writeFileSync(path, JSON.stringify(s, null, 2) + "\n");
 }
 
+/** Parse a settings file to a raw object for OVERLAY merging (no zod, no migration) — absent/torn → null. */
+export function readRawSettings(path: string): Record<string, unknown> | null {
+  try {
+    const o = JSON.parse(readFileSync(path, "utf8"));
+    return o && typeof o === "object" ? o : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Pure `Settings -> Settings` provider-model transform (mirrors plugins/lifecycle.ts's
  *  `setPluginEnabled` pattern) — used by `norma model <slug>`. Preserves every other field,
  *  including `provider.reasoningEffort` if set. Validation (codex-oauth slug membership,
