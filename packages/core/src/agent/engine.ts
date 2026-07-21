@@ -14,6 +14,9 @@ import type { TaskStore } from "./task-store";
 import type { PlanBroker } from "./plans";
 import type { SessionDirectories } from "./dirs";
 import { sessionTmpDir } from "./session-tmp";
+import type { PermissionRules } from "./permission-rules";
+import { readOnlyBash } from "./readonly-bash";
+import { repoRootFor } from "./memory-dir";
 import type { ContextAssembler } from "./context";
 import type { Compactor } from "./compactor";
 import type { McpManager } from "./mcp/manager";
@@ -287,6 +290,16 @@ export interface EngineConfig {
   hub: SessionHub;
   registry: ToolRegistry;
   gate: PermissionGate;
+  // SP-approvals Task 3: the CC-grammar allow-rules store (project + global, Task 1) — consulted
+  // by the dispatch loop below ONLY for a call the gate has already decided is "ask", to let a
+  // standing rule (or, for bash, Task 2's readOnlyBash classifier) skip a re-prompt an ask-policy
+  // session would otherwise show forever. Plain instance, not a getter (mirrors `gate` just
+  // above): PermissionRules is already "hot" internally (its own mtime-cached project-file read,
+  // and the caller-injected globalAllow thunk daemon.ts wires over the live settings holder), so
+  // the engine never needs to re-resolve which INSTANCE to use, only call into the one it has.
+  // Optional — absent (every pre-T3 test/config) means the new ruleAllowed computation below never
+  // activates, byte-identical to before this field existed.
+  permissionRules?: PermissionRules;
   broker: ApprovalBroker;
   dirs: SessionDirectories;
   // `live`, when wired (daemon.ts, from providers/manager.ts's ActiveProvider.liveModel),
@@ -2445,7 +2458,7 @@ export class AgentEngine {
           input.push({ type: "tool_result", callId: call.callId, output: outcome.output, isError: outcome.isError });
           continue;
         }
-        const decision = this.cfg.gate.evaluate(call.name, meta.approvalPolicy);
+        let decision = this.cfg.gate.evaluate(call.name, meta.approvalPolicy);
         // Worktree tools are MUTATING (gate.ts), so under `ask` policy (the DEFAULT) `decision` is
         // "ask", not "allow" — checked here, BEFORE the generic `decision === "ask"` branch below,
         // so that branch never gets first crack at a worktree call. Without this dedicated branch,
@@ -2514,6 +2527,51 @@ export class AgentEngine {
         if (dirGrant && !dirGrantDenied && meta.approvalPolicy === "auto") {
           grantFailure = this.applyDirGrant(sessionId, threadId, dirGrant.dir);
           if (!grantFailure) dirGrant = null;
+        }
+        // SP-approvals Task 3: the whole point of `ask` policy is a human in the loop, but without
+        // this it re-prompts for the SAME command/tool forever — Task 1's PermissionRules (a
+        // CC-grammar allow-rules store, project + global) and Task 2's readOnlyBash (a
+        // deterministic, fail-to-ask read-only-command classifier) are the two ways a call can
+        // clear that prompt with no human touching anything. Computed ONCE per call, and ONLY
+        // reachable when there's an actual prompt to skip: `decision === "ask"` is the outer guard,
+        // so a `deny` (plan mode) call structurally NEVER consults a rule — not because no rule
+        // happens to match, but because this whole block never runs for it. An `auto`-policy
+        // MUTATING/NETWORK call never reaches here either (already silently allowed; nothing to
+        // skip) — the one exception is gate.ts's ALWAYS_ASK class (skill_write), which is `"ask"`
+        // under auto too; that's harmless here because Task 1's rule grammar (KNOWN_TOOLS: Bash/
+        // Edit/Computer/Worktree) has no token for it, so `toolForCallName` returns `null` and
+        // ruleAllowed can never flip to true for it regardless of what's configured — the "no
+        // policy setting silences it" invariant ALWAYS_ASK exists for stays intact unchanged.
+        //
+        // `grantPending` (an out-of-root write/edit still awaiting its OWN grant-flavored approval
+        // card, `dirGrant` computed above) takes precedence over both sources: a rule only speaks
+        // to WHETHER a tool/command is fine, never to WHICH directory it's fine to touch outside
+        // the session's roots — that second question is exactly what the grant card exists to ask,
+        // so a matching rule must never let a call skip it. Excluding ruleAllowed here — rather
+        // than letting it flip `decision` and relying on the `dirGrant` branch below to still fire
+        // — keeps that precedence structural, not incidental.
+        let ruleAllowed = false;
+        if (decision === "ask" && this.cfg.permissionRules) {
+          // `cwd` is typed `string` (never undefined here), so this ternary is only a defensive
+          // guard against an empty string — repoRootFor("") would realpath-fail and fall back to
+          // the DAEMON's own process.cwd(), a wrong and misleading project root. `projectRoot:
+          // null` degrades safely: decision() below just consults global rules only, same as any
+          // other session with no project scope.
+          const projectRoot = cwd ? repoRootFor(cwd) : null;
+          const grantPending = dirGrant !== null;
+          if (!grantPending && this.cfg.permissionRules.decision({ name: call.name, argsJson: call.argsJson }, projectRoot) === "allow") {
+            ruleAllowed = true;
+          }
+          // readOnlyBash is bash-only, and consulted ONLY when no rule already matched — a
+          // fail-to-ask classifier (readonly-bash.ts), so `false` here means "no opinion" (falls
+          // through to the normal ask prompt), never "unsafe".
+          if (!ruleAllowed && !grantPending && call.name === "bash") {
+            try {
+              const a = JSON.parse(call.argsJson || "{}");
+              if (typeof a.command === "string" && readOnlyBash(a.command)) ruleAllowed = true;
+            } catch { /* malformed argsJson → no opinion, falls through to the normal ask prompt */ }
+          }
+          if (ruleAllowed) decision = "allow";
         }
         if (decision === "deny") {
           // Plan mode's blanket deny (gate.ts): tool NOT run. No approval flow here — the point
@@ -2589,8 +2647,18 @@ export class AgentEngine {
           // READ_ONLY set under every policy), so this branch is reached for every call.
           outcome = await this.runEnterPlanBridge(sessionId, meta);
         } else if (
+          // SP-approvals Task 3: widened from `meta.approvalPolicy === "auto"` alone — a rule- or
+          // classifier-allowed bash call (`ruleAllowed`, computed above) reaches this branch with
+          // `decision === "allow"` under `ask` policy too, and must still hit the AI safety
+          // reviewer when one is configured. A standing rule/classifier says "this call needs no
+          // HUMAN gate"; it says nothing about whether the REVIEWER should still look at it — those
+          // are different questions, and only the human-gate one is what a rule/classifier answers.
+          // fs/external reviewer branches below are deliberately left `=== "auto"`-only: the brief
+          // scopes this widening to bash alone (write/edit's in-root rule coverage is the common
+          // case, and out-of-root always keeps its own grant card regardless — see the dirGrant
+          // precedence above; external tools have no rule/classifier source at all).
           decision === "allow" && call.name === "bash" && this.cfg.reviewer &&
-          this.cfg.reviewerEnabled?.() !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("bash")
+          this.cfg.reviewerEnabled?.() !== false && (meta.approvalPolicy === "auto" || ruleAllowed) && this.reviewClassEnabled("bash")
         ) {
           let command = "";
           let justification: string | undefined;

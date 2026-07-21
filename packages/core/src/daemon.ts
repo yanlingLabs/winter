@@ -45,6 +45,7 @@ import { notifyHeadless } from "./agent/notify-fallback";
 import { registerLspTools } from "./agent/tools/lsp";
 import { LspManager } from "./agent/lsp/manager";
 import { PermissionGate } from "./agent/gate";
+import { PermissionRules } from "./agent/permission-rules";
 import { ApprovalBroker } from "./agent/approvals";
 import { QuestionBroker } from "./agent/questions";
 import { TaskStore } from "./agent/task-store";
@@ -694,6 +695,26 @@ export async function startDaemon(opts: {
     engine = new AgentEngine({
       store, hub, registry, broker: approvalBroker,
       gate: new PermissionGate(),
+      // SP-approvals Task 3: the CC-grammar allow-rules store (Task 1) — plain instance, not a
+      // getter (mirrors `gate` just above): PermissionRules is already "hot" internally (its own
+      // mtime-cached project-rules-file read, re-checked on every decision()/rulesFor() call), and
+      // `globalAllow` is the live-settings thunk that makes the GLOBAL side hot too — this reads
+      // `settings` (the SAME reassignable holder every other hot-settings getter in this file
+      // closes over) fresh on every call, so a settings.json edit to `permissions.allow` applies
+      // with no daemon restart, exactly like reviewerAllow/reviewerEnabled below.
+      //
+      // THE `["Computer"]` DEFAULT LIVES IN THIS GETTER FALLBACK, deliberately NOT inside
+      // PermissionRules itself (see that class's own doc comment, "Spec deviation"): CC parity
+      // wants a fresh session's `computer` tool calls pre-approved out of the box, but the default
+      // must be overridable — an explicit `"permissions": { "allow": [] }` in settings.json
+      // disables it outright (the `?? ["Computer"]` fallback only fires when the key is ABSENT,
+      // never when it's present-but-empty), while an absent `permissions` block (or an absent
+      // `allow` key within it) gets the default. normaHome is the SAME control-plane path passed
+      // to `grantDeniedPrefixes` below — PermissionRules uses it only to refuse writing a
+      // project-scoped rule file inside Norma's own home (append()'s control-plane guard), never
+      // to read/write settings.json's global rules itself (that's what the globalAllow thunk +
+      // this class's OWN read-modify-write in append(scope:"global") are for).
+      permissionRules: new PermissionRules({ globalAllow: () => settings?.permissions?.allow ?? ["Computer"], normaHome }),
       dirs: sessionDirs,
       // write-permission-flow F2: the out-of-root write/edit grant flow must never silently grant
       // any part of Norma's OWN home directory. This is BROADER than the READ denylist above
