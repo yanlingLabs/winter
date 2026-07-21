@@ -467,11 +467,16 @@ function controlPlaneFileTarget(
   call: { name: string; argsJson: string },
   roots: string[],
 ): { path: string; canonical: string } | null {
-  if (call.name !== "write" && call.name !== "edit") return null;
+  // fix-wave C (Minor): notebook_edit writes via node fs directly (notebook.ts), bypassing the
+  // bash seatbelt — this is its only guard, added for defense-in-depth completeness alongside
+  // write/edit (not currently exploitable: notebook.ts requires an existing valid-notebook shape,
+  // so it can't CREATE a settings file from nothing). Its own arg schema names the path field
+  // `notebook_path`, not `path` — read below, or the name check alone would be a no-op.
+  if (call.name !== "write" && call.name !== "edit" && call.name !== "notebook_edit") return null;
   let path = "";
   try {
-    const a = JSON.parse(call.argsJson || "{}") as { path?: unknown };
-    path = typeof a.path === "string" ? a.path : "";
+    const a = JSON.parse(call.argsJson || "{}") as { path?: unknown; notebook_path?: unknown };
+    path = typeof a.path === "string" ? a.path : typeof a.notebook_path === "string" ? a.notebook_path : "";
   } catch { return null; }
   if (!path) return null;
   const raw0 = isAbsolute(path) ? resolve(path) : resolve(roots[0] ?? "/", path);
@@ -2764,7 +2769,7 @@ export class AgentEngine {
         // controlPlaneFileTarget's own doc comment for the full exfil-composition rationale
         // (final review 2: filesystem-IDENTITY comparison, not string spelling; CC-parity Task 6.5:
         // now also the two per-project settings overlays, not just the rules store).
-        const rulesFileTarget = (call.name === "write" || call.name === "edit")
+        const rulesFileTarget = (call.name === "write" || call.name === "edit" || call.name === "notebook_edit")
           ? controlPlaneFileTarget(call, this.writableRoots(sessionId, projectRoot, rootsOverride))
           : null;
         // SP-approvals Task 10: web_fetch's dangerous-domain floor — computed for EVERY policy

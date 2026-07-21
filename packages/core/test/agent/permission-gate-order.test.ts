@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import type { HubClient } from "../../src/sessions/hub";
 import { ToolRegistry } from "../../src/agent/tools/registry";
+import { registerNotebookTool } from "../../src/agent/tools/notebook";
 import { registerWorktreeTools } from "../../src/agent/tools/worktree";
 import { WorktreeManager } from "../../src/agent/worktree";
 import { FakeProvider } from "../../src/agent/fake-provider";
@@ -1350,4 +1351,37 @@ describe("scenario 13 non-match regression (Task 6.5): filename+parent matching 
       expect(readFileSync(join(cwd, path), "utf8")).toBe(content);
     });
   }
+});
+
+// fix-wave C (whole-branch review, Minor): notebook_edit writes via node fs directly
+// (notebook.ts), bypassing the bash seatbelt — so this tool-level fence is its only guard against
+// it targeting the rules store or a project-settings overlay. Not currently exploitable
+// (notebook.ts requires an existing valid-notebook shape, so it can't CREATE a settings file from
+// nothing) but added for the same defense-in-depth completeness the rest of this branch argues
+// for. notebook_edit's own arg schema names its path field `notebook_path`, not `path` (unlike
+// write/edit) — controlPlaneFileTarget must read THAT field for a notebook_edit call, or the name
+// check alone is a no-op (path always resolves empty, the function always returns null).
+describe("scenario 14 (fix-wave C): notebook_edit is a control-plane write-fence name too", () => {
+  test("notebook_edit targeting .norma/permissions.local.json → hard error, no approval_requested, file unchanged", async () => {
+    const registry = new ToolRegistry();
+    registerNotebookTool(registry);
+    const provider = new FakeProvider([
+      [
+        { type: "tool_call", callId: "c1", name: "notebook_edit", argsJson: JSON.stringify({ notebook_path: ".norma/permissions.local.json", new_source: "x", cell_id: "0" }) },
+        { type: "done", stopReason: "tool_calls" },
+      ],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    ]);
+    const { engine, store, sessionId, cwd } = setupEngine(provider, { registry, policy: "ask" });
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false); // no card
+    const result = events.find((e) => e.type === "tool_result") as any;
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("cannot notebook_edit .norma/permissions.local.json");
+    expect(result.output).toContain("the permission rules store can only be changed by answering an approval card (or editing it yourself)");
+    expect(existsSync(join(cwd, ".norma", "permissions.local.json"))).toBe(false); // never landed
+  });
 });
