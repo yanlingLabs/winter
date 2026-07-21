@@ -66,4 +66,38 @@ describe("ApprovalBroker", () => {
     expect(entry.issuedAt).toBeGreaterThanOrEqual(before);
     expect(entry.expiresAt).toBe(entry.issuedAt + 5000);
   });
+
+  // SP-approvals Task 5 (carried from T4's review): `pendingMeta` is the non-consuming lookup
+  // Task 5's `approval.respond` handler needs to read a chosen optionId's `rule`/`scope` BEFORE
+  // deciding whether to persist a permission rule — it must never itself count as an answer (the
+  // `resolve()` call that follows right after must still see a genuinely pending entry).
+  test("pendingMeta: unknown (sessionId, callId) → undefined", () => {
+    const b = new ApprovalBroker();
+    expect(b.pendingMeta("s1", "nope")).toBeUndefined();
+    expect(b.pendingMeta("nope", "c1")).toBeUndefined();
+  });
+
+  test("pendingMeta returns a live entry's stored options WITHOUT consuming it — list() and resolve() both still see it fresh", () => {
+    const b = new ApprovalBroker();
+    const options = [
+      { id: "allow_once", label: "Allow once" },
+      { id: "allow_project", label: 'Allow "Bash(git push:*)" in this project', rule: "Bash(git push:*)", scope: "project" as const },
+    ];
+    const meta = { toolName: "bash", summary: "run git push", issuedAt: 1000, expiresAt: 6000, options };
+    void b.wait("s1", "c1", 5000, meta);
+
+    expect(b.pendingMeta("s1", "c1")).toEqual({ callId: "c1", toolName: "bash", summary: "run git push", issuedAt: 1000, expiresAt: 6000, options });
+    // The lookup above must NOT have consumed/removed the entry — list() still reports it...
+    expect(b.list("s1").map((p) => p.callId)).toEqual(["c1"]);
+    // ...and resolve() still sees a genuinely pending entry (first-wins), not an "already resolved"
+    // false positive caused by the lookup itself.
+    expect(b.resolve("s1", "c1", true, "orb")).toEqual({ ok: true, alreadyResolved: false });
+  });
+
+  test("pendingMeta returns undefined once the approval has been resolved", () => {
+    const b = new ApprovalBroker();
+    void b.wait("s1", "c1", 5000, { toolName: "write", summary: "x", issuedAt: 1000, expiresAt: 6000 });
+    b.resolve("s1", "c1", true, "orb");
+    expect(b.pendingMeta("s1", "c1")).toBeUndefined();
+  });
 });

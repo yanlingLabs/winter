@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync, mkdirSync } from "node:fs";
 import { relative, sep, isAbsolute, resolve, dirname } from "node:path";
-import type { NewSessionEvent, Question, SessionEvent, Task } from "@norma/protocol";
+import type { ApprovalOption, NewSessionEvent, Question, SessionEvent, Task } from "@norma/protocol";
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
 import type { Provider, ProviderEvent, TurnInputItem } from "../providers/types";
@@ -155,6 +155,69 @@ function approvalCardSummary(call: { name: string; argsJson: string }): string {
     } catch { /* malformed argsJson → generic slice below */ }
   }
   return `${call.name} ${call.argsJson.slice(0, 160)}`;
+}
+
+// SP-approvals Task 5: the "always allow" suggestion for a bash approval card's rule-bearing
+// options below — first token alone ("ls -la" → "ls"), or first+second for a well-known set of
+// multi-word CLI heads ("git push origin" → "git push") where the SECOND token is the meaningful
+// verb (CC's own bash-rule suggestion follows the same shape) — so `Bash(<prefix>:*)` reads as a
+// natural verb-object unit for the commands people actually want to blanket-allow, rather than a
+// single bare "git" that would then also cover `git push --force`, `git reset --hard`, etc.
+// Whitespace-normalized (irregular spacing between tokens collapses the same as single spaces) so
+// it composes cleanly with permission-rules.ts's own normalizeWhitespace on the read side.
+// Exported for approval-options.test.ts's direct unit coverage; `approvalOptionsFor` below stays
+// private — tested indirectly through the real dispatch loop instead (permission-gate-order.
+// test.ts's own precedent for this exact feature area: drive the loop, don't unit-test internals).
+const BASH_PREFIX_MULTI_WORD_HEADS = new Set([
+  "git", "npm", "pnpm", "cargo", "docker", "kubectl", "brew", "bun", "swift", "xcodebuild", "gh", "make",
+]);
+
+export function suggestBashPrefix(command: string): string {
+  const tokens = command.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return "";
+  const head = tokens[0]!;
+  return tokens.length > 1 && BASH_PREFIX_MULTI_WORD_HEADS.has(head) ? `${head} ${tokens[1]}` : head;
+}
+
+/** The "always allow" choices offered alongside plain approve/deny on an approval card
+ *  (SP-approvals Task 5). Called ONLY from the plain `decision === "ask"` dispatch-loop branch
+ *  below: a grant-flavored (out-of-root write/edit), worktree, or reviewer-escalation card asks a
+ *  DIFFERENT question — "grant this directory?" / "enter this worktree?" / "the reviewer flagged
+ *  this, proceed anyway?" — that a standing "always allow" rule must never silently answer on a
+ *  human's behalf (a reviewer escalation in particular is already a non-safe verdict; v1 offers no
+ *  memory for that path at all), so those three call sites pass no `options` and this helper is
+ *  never even consulted for them. `rule`/`scope` on a returned option mirror exactly what choosing
+ *  it persists via `PermissionRules.append` (server.ts's `approval.respond` handler) — the label
+ *  ALWAYS shows the literal rule string, so a human approves the exact text that gets written, not
+ *  a paraphrase of it. bash offers BOTH scopes (project/global): a shell command prefix is often
+ *  legitimately either project-specific or a genuine cross-project habit. write/edit offers
+ *  project scope ONLY — "always allow every edit, everywhere, forever" is a materially scarier
+ *  default than bash's equivalent and is deliberately not on the menu in v1. Every other tool name
+ *  (computer/schedule/web_fetch/skill_write/mcp__.../plugin__.../unclassified) returns `undefined`
+ *  — a plain approve/deny card, byte-identical to before this task. */
+function approvalOptionsFor(call: { name: string; argsJson: string }): ApprovalOption[] | undefined {
+  if (call.name === "bash") {
+    let command = "";
+    try {
+      const a = JSON.parse(call.argsJson || "{}") as { command?: unknown };
+      if (typeof a.command === "string") command = a.command;
+    } catch { /* malformed argsJson → suggestBashPrefix("") below yields "", same degenerate case */ }
+    const rule = `Bash(${suggestBashPrefix(command)}:*)`;
+    return [
+      { id: "allow_once", label: "Allow once" },
+      { id: "allow_project", label: `Allow "${rule}" in this project`, rule, scope: "project" },
+      { id: "allow_global", label: `Allow "${rule}" everywhere`, rule, scope: "global" },
+      { id: "deny", label: "Deny" },
+    ];
+  }
+  if (call.name === "write" || call.name === "edit") {
+    return [
+      { id: "allow_once", label: "Allow once" },
+      { id: "allow_project", label: "Always allow edits in this project", rule: "Edit", scope: "project" },
+      { id: "deny", label: "Deny" },
+    ];
+  }
+  return undefined;
 }
 
 /** Sanitize+cap a reviewer-authored free-text field (`tool_review.reason`/`.summary`,
@@ -2638,6 +2701,11 @@ export class AgentEngine {
             timeoutMs: this.approvalTimeoutFor(meta),
             summary: approvalCardSummary(call),
             // no denialMessage → the helper defaults to `denied by ${res.by}` (unchanged behavior)
+            // SP-approvals Task 5: the ONLY requestApproval call site that offers "always allow"
+            // options — see approvalOptionsFor's own doc comment for why the other three sites in
+            // this dispatch loop (dirGrant just above, isWorktree above that, reviewAndDispatch's
+            // escalation call below) deliberately pass none.
+            options: approvalOptionsFor(call),
           }, loaded, undefined, pins, rootsOverride, visionCapable);
         } else if (call.name === "exit_plan_mode" && this.cfg.plans && meta.approvalPolicy === "plan") {
           outcome = await this.runPlanBridge(call, sessionId, threadId, meta);
@@ -3192,7 +3260,14 @@ export class AgentEngine {
     // reviewerReason (phase 5e T2): populated ONLY by the reviewer-escalation call site — an
     // ask-policy or reviewer-less card omits it, matching the protocol field's additive-optional
     // shape (older-shaped events, and every non-reviewer caller here, still parse/behave unchanged).
-    opts: { timeoutMs: number; summary: string; denialMessage?: string; reviewerReason?: string },
+    opts: {
+      timeoutMs: number; summary: string; denialMessage?: string; reviewerReason?: string;
+      // SP-approvals Task 5: populated ONLY by the plain ask-policy call site below
+      // (approvalOptionsFor) — the dirGrant/worktree/reviewer-escalation call sites all omit it, so
+      // `options` stays `undefined` on their broker meta + emitted event, byte-identical to before
+      // this field existed.
+      options?: ApprovalOption[];
+    },
     loaded: Set<string>,
     onApprove?: () => Promise<{ output: string; isError: boolean }>,
     pins: Set<string> = new Set(),
@@ -3207,12 +3282,12 @@ export class AgentEngine {
     const issuedAt = Date.now();
     const expiresAt = issuedAt + opts.timeoutMs;
     const waiting = this.cfg.broker.wait(sessionId, call.callId, opts.timeoutMs, {
-      toolName: call.name, summary: opts.summary, issuedAt, expiresAt,
+      toolName: call.name, summary: opts.summary, issuedAt, expiresAt, options: opts.options,
     });
     try {
       this.emit(sessionId, {
         type: "approval_requested", sessionId, threadId, callId: call.callId, toolName: call.name,
-        summary: opts.summary, issuedAt, expiresAt, reviewerReason: opts.reviewerReason,
+        summary: opts.summary, issuedAt, expiresAt, reviewerReason: opts.reviewerReason, options: opts.options,
       });
     } catch (err) {
       // emit failed (e.g. disk): resolve the registered waiter now so it doesn't linger until timeout
