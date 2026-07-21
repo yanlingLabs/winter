@@ -157,15 +157,19 @@ export class PermissionGate {
     if (READ_ONLY.has(toolName)) return "allow";
     if (NETWORK.has(toolName)) return "allow"; // web tools free at this gate; engine's dangerous-domain floor is separate
     // Below: MUTATING / external / unclassified.
-    if (policy === "plan") return "deny";       // nothing mutates while planning
-    if (policy === "bypass") return "allow";    // accept literally everything
+    if (policy === "plan") return "deny";       // nothing mutates while planning (unclassified included)
+    if (policy === "bypass") return "allow";    // bypass is opt-in no-guardrails — accept literally everything
+    // Past here a call must be a KNOWN mutating/external tool to earn a policy verdict. An
+    // UNCLASSIFIED name fails CLOSED to "ask" under dont-ask/ask/accept-edits/auto alike — it must
+    // never ride auto's blanket allow (a newly-added tool nobody remembered to classify would
+    // otherwise run unreviewed under auto). This is the pre-SP-policies fail-closed posture (this
+    // class's own doc comment) that a flat "auto → allow" ordering had silently dropped.
+    if (!MUTATING.has(toolName) && !isExternalToolName(toolName)) return "ask";
     if (policy === "auto") return "allow";      // reviewer gates the reviewable classes in engine.ts
     if (policy === "accept-edits" && EDIT_CLASS.has(toolName)) return "allow"; // edits free; rest → ask below
     // ask / accept-edits(non-edit) / dont-ask: a human gate. dont-ask converts a still-"ask" call to
     // deny in engine.ts (this gate has no mode/path awareness to do it here); in-project write/edit
     // is likewise silenced in engine.ts, not here.
-    if (MUTATING.has(toolName)) return "ask";
-    if (isExternalToolName(toolName)) return "ask";
-    return "ask"; // unclassified — fail-closed to the human
+    return "ask";
   }
 }
