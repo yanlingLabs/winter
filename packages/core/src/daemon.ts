@@ -699,7 +699,19 @@ export async function startDaemon(opts: {
     // every other in-scope field in this file now uses. `settings` can still be null (a malformed
     // settings.json at boot, or a test injecting `agentProvider` directly) — `true` there is the
     // SAME fail-open default the pre-collapse disk-read-failure catch used.
-    const hooksEnabledHot = (): boolean => (settings ? hooksEnabledFrom(settings) : true);
+    // Task 9 (CC project-folder-mechanics, final task): now resolves through the SAME
+    // `projectSettings` instance the reviewer/toolSearch/lsp.autoDiagnostics getters use (mirrors
+    // `lspAutoDiagnosticsHot` immediately below exactly). Unlike those getters, `cwd` is NOT threaded
+    // in by an engine.ts call site — HookFacade.runFor (hook-registry.ts) only ever has a
+    // `sessionId` in scope, so IT resolves the cwd (preferring the session-start `extra.cwd`, else
+    // the `cwdForSession` dep wired below, which reads `store.meta(sid).cwd`) before calling this.
+    // `effective(cwd ?? null)` degrades to `settings` verbatim for a null/untrusted/overlay-less
+    // cwd, so this reads byte-identically to the pre-Task-9 zero-arg getter whenever no project
+    // overlay applies or no cwd was resolvable. The null-settings fail-open default is unchanged.
+    const hooksEnabledHot = (cwd?: string | null): boolean => {
+      const s = projectSettings.effective(cwd ?? null);
+      return s ? hooksEnabledFrom(s) : true;
+    };
     // lsp-consolidation T3: same live-getter shape as `hooksEnabledHot`/`memoryEnabledHot` above —
     // `settings` can still be null (malformed settings.json at boot, or a test that injects
     // `agentProvider` directly), `true` there is the same fail-open default those two use.
@@ -713,7 +725,17 @@ export async function startDaemon(opts: {
       const s = projectSettings.effective(cwd ?? null);
       return s ? lspAutoDiagnosticsEnabledFrom(s) : true;
     };
-    const hookFacade = new HookFacade({ registry: hookRegistry, runner: new HookRunner(), hooksEnabled: hooksEnabledHot });
+    const hookFacade = new HookFacade({
+      registry: hookRegistry,
+      runner: new HookRunner(),
+      hooksEnabled: hooksEnabledHot,
+      // Task 9: resolves a session's cwd for the per-project `hooksEnabled` read above, for every
+      // event whose `extra` doesn't already carry one (only session-start's does). Same
+      // `store.meta(sid).cwd` source `cwdOf` (lsp wiring, above) already reads unguarded — a hook
+      // only ever fires for a session already created in `store`, so `meta`'s unknown-session throw
+      // is not a live path here, matching `cwdOf`'s own precedent.
+      cwdForSession: (sid) => store.meta(sid).cwd ?? null,
+    });
     // Dispatch (Phase 7) Task 4: declared BEFORE `engine` is constructed (computerUse precedent —
     // see EngineConfig.dispatch's own doc comment, engine.ts) so the `dispatch: () =>
     // dispatchChildren` getter below closes over this SAME binding; assigned right after
