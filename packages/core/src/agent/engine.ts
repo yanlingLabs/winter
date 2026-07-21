@@ -149,9 +149,17 @@ function approvalCardSummary(call: { name: string; argsJson: string }): string {
   }
   if (call.name === "bash") {
     try {
-      const a = JSON.parse(call.argsJson || "{}") as { command?: unknown };
+      const a = JSON.parse(call.argsJson || "{}") as { command?: unknown; allowNetwork?: unknown; dangerouslyDisableSandbox?: unknown };
       if (typeof a.command === "string" && oneLine(a.command) !== "") {
-        return `bash ${oneLine(a.command).slice(0, 120)}`;
+        const cmd = oneLine(a.command).slice(0, 120);
+        // SP-approvals Task 11 (spec §8): the card must name WHICH escalation flavor this call
+        // is — dangerouslyDisableSandbox wins the label when both are somehow set (it subsumes
+        // allowNetwork's network grant; an unsandboxed call already has full network), mirroring
+        // the dispatch loop's own precedence (the unsandboxed always-card branch is checked
+        // before the generic ask branch that renders allowNetwork's "(with network)" label).
+        if (a.dangerouslyDisableSandbox === true) return `bash (UNSANDBOXED): ${cmd}`;
+        if (a.allowNetwork === true) return `bash (with network): ${cmd}`;
+        return `bash ${cmd}`;
       }
     } catch { /* malformed argsJson → generic slice below */ }
   }
@@ -219,6 +227,23 @@ function approvalOptionsFor(call: { name: string; argsJson: string }): ApprovalO
     ];
   }
   return undefined;
+}
+
+/** SP-approvals Task 11 (spec §8): parses bash's two escalation args from a call's argsJson —
+ *  `allowNetwork` (widened sandbox: write fence intact, network allowed for this call) and
+ *  `dangerouslyDisableSandbox` (CC's exact name: a full sandbox escape). Malformed/missing
+ *  argsJson degrades to `{false, false}` — a best-effort, gating/display-only parse; bash.ts's own
+ *  zod schema re-validates the real args at execute time. Called from the dispatch loop below
+ *  ONCE per bash call (never for any other tool name — every other call gets the same `{false,
+ *  false}` fast path computed inline there, mirroring dirGrant/webFetchCard's own
+ *  null-for-everything-else shape). */
+function bashEscalationArgs(call: { argsJson: string }): { allowNetwork: boolean; dangerouslyDisableSandbox: boolean } {
+  try {
+    const a = JSON.parse(call.argsJson || "{}") as { allowNetwork?: unknown; dangerouslyDisableSandbox?: unknown };
+    return { allowNetwork: a.allowNetwork === true, dangerouslyDisableSandbox: a.dangerouslyDisableSandbox === true };
+  } catch {
+    return { allowNetwork: false, dangerouslyDisableSandbox: false };
+  }
 }
 
 /** SP-approvals Task 10 (spec §7): the web_fetch dangerous-domain approval card's options — called
@@ -2594,6 +2619,12 @@ export class AgentEngine {
         // non-web_fetch call and for a web_fetch call this floor has nothing to say about (byte-
         // identical fast path, mirrors `dirGrant`'s own null-for-everything-else shape above).
         const webFetchCard = call.name === "web_fetch" ? this.webFetchGate(call, cwd) : null;
+        // SP-approvals Task 11 (spec §8): bash's two escalation args, parsed ONCE here — before
+        // the ruleAllowed block below and the dispatch chain further down — so every consumer
+        // (the classifier guard, the always-card branch) sees the SAME parse. `{allowNetwork:
+        // false, dangerouslyDisableSandbox: false}` for every non-bash call (byte-identical fast
+        // path, mirrors dirGrant/webFetchCard's own null-for-everything-else shape just above).
+        const bashEscalation = call.name === "bash" ? bashEscalationArgs(call) : { allowNetwork: false, dangerouslyDisableSandbox: false };
         // [4f pre-tool — Site 2 (normal calls)] Post-gate (decision computed just above), before ANY
         // dispatch branch runs/approves. Bridged calls (spawn_agent/send_message) NEVER reach here —
         // they were siphoned into spawn/sendMessageOutcomes and hit the `preOutcome` branch ABOVE,
@@ -2656,8 +2687,18 @@ export class AgentEngine {
         // so a matching rule must never let a call skip it. Excluding ruleAllowed here — rather
         // than letting it flip `decision` and relying on the `dirGrant` branch below to still fire
         // — keeps that precedence structural, not incidental.
+        //
+        // SP-approvals Task 11 (spec §8): `dangerouslyDisableSandbox` excludes this ENTIRE block
+        // too, for the exact same "structural, not incidental" reason as `grantPending` above — a
+        // dangerouslyDisableSandbox call always cards regardless of what this block would compute
+        // (its own always-card branch, further down, never even reads `ruleAllowed`/`decision`),
+        // so excluding it here means "no rule/classifier can ever silence it" holds because
+        // ruleAllowed can NEVER become true for such a call, not merely because a later branch
+        // happens to intercept first. `allowNetwork` does NOT get the same outer exclusion — a
+        // STANDING RULE may still cover a network call (spec) — only the classifier sub-check
+        // below narrows for it.
         let ruleAllowed = false;
-        if (decision === "ask" && this.cfg.permissionRules) {
+        if (decision === "ask" && this.cfg.permissionRules && !bashEscalation.dangerouslyDisableSandbox) {
           // `cwd` is typed `string` (never undefined here), so this ternary is only a defensive
           // guard against an empty string — repoRootFor("") would realpath-fail and fall back to
           // the DAEMON's own process.cwd(), a wrong and misleading project root. `projectRoot:
@@ -2670,8 +2711,12 @@ export class AgentEngine {
           }
           // readOnlyBash is bash-only, and consulted ONLY when no rule already matched — a
           // fail-to-ask classifier (readonly-bash.ts), so `false` here means "no opinion" (falls
-          // through to the normal ask prompt), never "unsafe".
-          if (!ruleAllowed && !grantPending && call.name === "bash") {
+          // through to the normal ask prompt), never "unsafe". SP-approvals Task 11: also skipped
+          // whenever `allowNetwork` is set — the classifier must NEVER be the reason a network
+          // call runs unreviewed (a STANDING RULE may still cover one, per the check just above;
+          // the classifier's fail-to-ask heuristic simply has no concept of "safe to run WITH
+          // network" at all, so it stays out of that decision entirely).
+          if (!ruleAllowed && !grantPending && call.name === "bash" && !bashEscalation.allowNetwork) {
             try {
               const a = JSON.parse(call.argsJson || "{}");
               if (typeof a.command === "string" && readOnlyBash(a.command)) ruleAllowed = true;
@@ -2739,6 +2784,29 @@ export class AgentEngine {
             if (failure) return { output: failure, isError: true };
             return this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable);
           }, pins, rootsOverride, visionCapable);
+        } else if (call.name === "bash" && bashEscalation.dangerouslyDisableSandbox) {
+          // SP-approvals Task 11 (spec §8): a full sandbox-escape floor — ALWAYS a card, under
+          // EVERY policy this branch can be reached under. Unlike every other branch in this
+          // chain, the condition here never consults `decision`/`ruleAllowed` at all — it fires
+          // purely off the ARG (parsed once into `bashEscalation` above) — so neither a matching
+          // PermissionRules rule nor the readOnlyBash classifier (both of which only ever
+          // influence `decision`/`ruleAllowed`, and are additionally excluded from ever running
+          // for this flag at all — see the `ruleAllowed` block's own doc comment above) can route
+          // a dangerouslyDisableSandbox call anywhere but here. Plan mode's blanket deny (the
+          // `decision === "deny"` branch, checked FIRST, above) still wins — bash is denied
+          // outright before this branch is ever reached under `plan` — so "every policy" in
+          // practice means ask/auto (spec, confirmed by permission-gate-order.test.ts). Options
+          // are deliberately narrower than approvalOptionsFor's bash shape: allow_once/deny ONLY,
+          // no allow_project/allow_global — v1 offers no standing memory for this flag at all
+          // (spec: "NO rule can silence it").
+          outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
+            timeoutMs: this.approvalTimeoutFor(meta),
+            summary: approvalCardSummary(call),
+            options: [
+              { id: "allow_once", label: "Allow once" },
+              { id: "deny", label: "Deny" },
+            ],
+          }, loaded, undefined, pins, rootsOverride, visionCapable);
         } else if (decision === "ask") {
           outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
             timeoutMs: this.approvalTimeoutFor(meta),
@@ -2746,9 +2814,15 @@ export class AgentEngine {
             // no denialMessage → the helper defaults to `denied by ${res.by}` (unchanged behavior)
             // SP-approvals Task 5: the bash/write/edit "always allow" options — see
             // approvalOptionsFor's own doc comment for why the other sites in this dispatch loop
-            // (dirGrant just above, isWorktree above that, reviewAndDispatch's escalation call
+            // (dirGrant just above, isWorktree above that, the dangerouslyDisableSandbox
+            // always-card branch just above THIS one too, reviewAndDispatch's escalation call
             // below, and T10's webFetchCard branch right below THIS one) deliberately pass none of
             // THIS SPECIFIC shape (webFetchCard has its own options, computed by webFetchGate).
+            // SP-approvals Task 11: this branch is ALSO where an allowNetwork bash call (no
+            // matching rule) cards — approvalCardSummary already renders its "(with network)"
+            // label, and approvalOptionsFor's bash options are unchanged (the suggested
+            // Bash(<prefix>:*) rule covers a matching call regardless of allowNetwork, by design —
+            // spec: "a persisted rule then covers matching network calls silently").
             options: approvalOptionsFor(call),
           }, loaded, undefined, pins, rootsOverride, visionCapable);
         } else if (webFetchCard) {

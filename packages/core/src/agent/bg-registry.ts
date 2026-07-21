@@ -73,16 +73,36 @@ export class BackgroundTaskRegistry {
     return !!t && t.sessionId === sessionId;
   }
 
-  start(sessionId: string, command: string): string {
-    if (!sandboxAvailable()) throw new Error("background bash unavailable: macOS sandbox-exec not found");
+  // SP-approvals Task 11 (spec §8): `opts` carries bash's two escalation args, already RESOLVED
+  // (parsed + gated) by the caller — bash.ts's run() forwards its own same-named args unchanged;
+  // the engine's dispatch loop is what actually decides whether a call bearing either flag is
+  // allowed to reach here at all (permission-gate-order.test.ts covers that gating). This registry
+  // only needs to honor them at spawn time, identically to the foreground bash tool
+  // (tools-bash.test.ts's escalation-arg suite is the execution-level twin of this one). Default
+  // `{}` keeps every pre-T11 2-arg caller (tests included) byte-identical: sandboxed, no network.
+  start(sessionId: string, command: string, opts: { allowNetwork?: boolean; dangerouslyDisableSandbox?: boolean } = {}): string {
+    const allowNetwork = opts.allowNetwork === true;
+    const dangerouslyDisableSandbox = opts.dangerouslyDisableSandbox === true;
+    // dangerouslyDisableSandbox never touches sandbox-exec at all (see the spawn branch below), so
+    // requiring it to be present on the host would be a nonsensical, overly strict precondition.
+    if (!dangerouslyDisableSandbox && !sandboxAvailable()) throw new Error("background bash unavailable: macOS sandbox-exec not found");
     const { cwd, roots, tmpDir } = this.deps.spawnCtx(sessionId);
     const realCwd = realpathSync(cwd);
     const scratch = realpathSync(tmpDir);
-    const writable = [...new Set([realCwd, ...roots.map((r) => realpathSync(r)), scratch])];
-    const profile = buildSeatbeltProfile({ cwd: realCwd, writableRoots: writable.filter((r) => r !== realCwd), allowNetwork: false });
-    const child = spawn("/usr/bin/sandbox-exec", ["-p", profile, "/bin/bash", "-c", command], {
-      cwd: realCwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...process.env, TMPDIR: scratch },
-    });
+    let child: ChildProcess;
+    if (dangerouslyDisableSandbox) {
+      // Plain, unsandboxed spawn — no seatbelt profile at all (no write fence, no network deny).
+      // cwd/$TMPDIR semantics stay identical to the sandboxed branch below.
+      child = spawn("/bin/bash", ["-c", command], {
+        cwd: realCwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...process.env, TMPDIR: scratch },
+      });
+    } else {
+      const writable = [...new Set([realCwd, ...roots.map((r) => realpathSync(r)), scratch])];
+      const profile = buildSeatbeltProfile({ cwd: realCwd, writableRoots: writable.filter((r) => r !== realCwd), allowNetwork });
+      child = spawn("/usr/bin/sandbox-exec", ["-p", profile, "/bin/bash", "-c", command], {
+        cwd: realCwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...process.env, TMPDIR: scratch },
+      });
+    }
     const taskId = `bg_${randomBytes(6).toString("hex")}`;
     // CC parity (TaskOutput deprecated in favor of Read on the task's output file): lazily create
     // <sessionTmpDir>/bash/ (only when a bg task actually starts — every OTHER session never gets

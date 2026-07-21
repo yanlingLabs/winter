@@ -584,3 +584,276 @@ describe("scenario 10: web tools — free by default, dangerous-domain floor (SP
     ]);
   });
 });
+
+// SP-approvals Task 11 (spec §8): bash's two escalation args. `allowNetwork` widens the sandbox
+// (write fence intact, network on for that one call) — under `ask` it cards like a normal bash
+// call (rule-silenceable), under `auto` it runs cardless (reviewer still applies, exactly like
+// today's plain bash). `dangerouslyDisableSandbox` (CC's exact name) is a full escape — it ALWAYS
+// cards, under every policy this branch can be reached under, and NO rule/classifier may ever
+// silence it (a stricter floor than allowNetwork's, similar in spirit to T10's dangerous-domain
+// floor). Every test below drives the REAL dispatch loop (setupEngine's harness) per this file's
+// own established precedent, using the stub bash registry (engine-reviewer.test.ts's stubRegistry/
+// bashTurn, now escalation-arg-aware) so no real sandbox-exec is needed — the actual sandboxed/
+// unsandboxed SPAWN behavior is covered separately, end to end, in tools-bash.test.ts.
+describe("scenario 11: bash escalation args — allowNetwork + dangerouslyDisableSandbox (SP-approvals T11)", () => {
+  describe("dangerouslyDisableSandbox: ALWAYS cards, no rule/classifier can ever silence it", () => {
+    test("auto policy + dangerouslyDisableSandbox:true -> card fires anyway (auto normally means cardless)", async () => {
+      const { registry, calls } = stubRegistry();
+      const provider = new FakeProvider(bashTurn("rm -rf x", undefined, { dangerouslyDisableSandbox: true }));
+      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "auto" });
+      hub.attach(approver(broker, sessionId, true), sessionId, 0);
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      const requested = events.find((e) => e.type === "approval_requested") as any;
+      expect(requested).toBeDefined();
+      expect(requested.summary).toBe("bash (UNSANDBOXED): rm -rf x");
+      expect(requested.options).toEqual([
+        { id: "allow_once", label: "Allow once" },
+        { id: "deny", label: "Deny" },
+      ]);
+      expect(calls.length).toBe(1); // approved -> ran
+    });
+
+    test("ask policy + dangerouslyDisableSandbox:true -> cards too (same shape as auto)", async () => {
+      const { registry, calls } = stubRegistry();
+      const provider = new FakeProvider(bashTurn("docker ps", undefined, { dangerouslyDisableSandbox: true }));
+      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask" });
+      hub.attach(approver(broker, sessionId, true), sessionId, 0);
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      const requested = events.find((e) => e.type === "approval_requested") as any;
+      expect(requested).toBeDefined();
+      expect(requested.summary).toBe("bash (UNSANDBOXED): docker ps");
+      expect(calls.length).toBe(1);
+    });
+
+    test("a human DENY on the unsandboxed card means the tool never runs", async () => {
+      const { registry, calls } = stubRegistry();
+      const provider = new FakeProvider(bashTurn("docker ps", undefined, { dangerouslyDisableSandbox: true }));
+      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "auto" });
+      hub.attach(approver(broker, sessionId, false), sessionId, 0);
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      const result = events.find((e) => e.type === "tool_result") as any;
+      expect(result.isError).toBe(true);
+      expect(calls.length).toBe(0);
+    });
+
+    test("a GLOBAL Bash(rm:*) rule matching the exact command still does not silence the card", async () => {
+      // Contrast: WITHOUT dangerouslyDisableSandbox this exact rule+command combo would run
+      // cardless (scenario 1's own proof, same mechanism) — proving here that adding the flag is
+      // what changes the outcome, not some other difference between the two tests.
+      const permissionRules = new PermissionRules({ globalAllow: () => ["Bash(rm:*)"], normaHome: tmpDir("norma-pgo-home-") });
+      const { registry, calls } = stubRegistry();
+      const provider = new FakeProvider(bashTurn("rm -rf x", undefined, { dangerouslyDisableSandbox: true }));
+      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask", permissionRules });
+      hub.attach(approver(broker, sessionId, true), sessionId, 0);
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      expect(events.some((e) => e.type === "approval_requested")).toBe(true); // card still fired despite the matching rule
+      expect(calls.length).toBe(1); // approved -> ran
+    });
+
+    test("readOnlyBash-classified command (`cat f`) + dangerouslyDisableSandbox:true still cards (classifier cannot silence it either)", async () => {
+      const permissionRules = new PermissionRules({ globalAllow: () => undefined, normaHome: tmpDir("norma-pgo-home-") });
+      const { registry, calls } = stubRegistry();
+      const provider = new FakeProvider(bashTurn("cat f", undefined, { dangerouslyDisableSandbox: true }));
+      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask", permissionRules });
+      hub.attach(approver(broker, sessionId, true), sessionId, 0);
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      expect(events.some((e) => e.type === "approval_requested")).toBe(true);
+      expect(calls.length).toBe(1);
+    });
+
+    test("plan policy still denies outright — the unsandboxed floor never even gets consulted", async () => {
+      const { registry, calls } = stubRegistry();
+      const provider = new FakeProvider(bashTurn("rm -rf x", undefined, { dangerouslyDisableSandbox: true }));
+      const { engine, store, sessionId } = setupEngine(provider, { registry, policy: "plan" });
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      expect(events.some((e) => e.type === "approval_requested")).toBe(false); // plan denies silently, no card
+      const result = events.find((e) => e.type === "tool_result") as any;
+      expect(result.isError).toBe(true);
+      expect(result.output.toLowerCase()).toContain("plan mode");
+      expect(calls.length).toBe(0);
+    });
+
+    test("a background (runInBackground:true) dangerouslyDisableSandbox call gets the SAME always-card gating", async () => {
+      const registry = new ToolRegistry();
+      const calls: Array<{ command: string }> = [];
+      registry.register({
+        name: "bash",
+        description: "stub bash (bg-aware)",
+        args: z.object({ command: z.string(), runInBackground: z.boolean().optional(), dangerouslyDisableSandbox: z.boolean().optional(), allowNetwork: z.boolean().optional() }),
+        run({ command }) {
+          calls.push({ command });
+          return `background task bg_stub started`;
+        },
+      });
+      const provider = new FakeProvider([
+        [{ type: "tool_call", callId: "c1", name: "bash", argsJson: JSON.stringify({ command: "sleep 30", runInBackground: true, dangerouslyDisableSandbox: true }) }, { type: "done", stopReason: "tool_calls" }],
+        [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+      ]);
+      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "auto" });
+      hub.attach(approver(broker, sessionId, true), sessionId, 0);
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      const requested = events.find((e) => e.type === "approval_requested") as any;
+      expect(requested).toBeDefined();
+      expect(requested.summary).toBe("bash (UNSANDBOXED): sleep 30");
+      expect(calls.length).toBe(1); // approved -> the bg-flavored run() executed
+    });
+  });
+
+  describe("allowNetwork: rule-silenceable ask-card; classifier can NEVER silence it; auto stays cardless", () => {
+    test("ask policy, no rule, allowNetwork:true -> cards as \"bash (with network): <cmd>\" with the STANDARD allow-similar options", async () => {
+      const { registry, calls } = stubRegistry();
+      const provider = new FakeProvider(bashTurn("git push", undefined, { allowNetwork: true }));
+      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask" });
+      hub.attach(approver(broker, sessionId, true), sessionId, 0);
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      const requested = events.find((e) => e.type === "approval_requested") as any;
+      expect(requested).toBeDefined();
+      expect(requested.summary).toBe("bash (with network): git push");
+      expect(requested.options).toEqual([
+        { id: "allow_once", label: "Allow once" },
+        { id: "allow_project", label: 'Allow "Bash(git push:*)" in this project', rule: "Bash(git push:*)", scope: "project" },
+        { id: "allow_global", label: 'Allow "Bash(git push:*)" everywhere', rule: "Bash(git push:*)", scope: "global" },
+        { id: "deny", label: "Deny" },
+      ]);
+      expect(calls.length).toBe(1); // approved -> ran
+      expect(calls[0]?.allowNetwork).toBe(true); // the flag reached the tool
+    });
+
+    test("readOnlyBash-classified command (`cat x`, NO rule) + allowNetwork:true still CARDS — the classifier never covers a network call", async () => {
+      // Contrast with scenario 2's own proof that `cat f` WITHOUT allowNetwork runs cardless under
+      // the exact same policy/rule setup — isolating allowNetwork as what forces the card here.
+      const permissionRules = new PermissionRules({ globalAllow: () => undefined, normaHome: tmpDir("norma-pgo-home-") });
+      const { registry, calls } = stubRegistry();
+      const provider = new FakeProvider(bashTurn("cat x", undefined, { allowNetwork: true }));
+      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, policy: "ask", permissionRules });
+      hub.attach(approver(broker, sessionId, true), sessionId, 0);
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      expect(events.some((e) => e.type === "approval_requested")).toBe(true);
+      expect(calls.length).toBe(1);
+    });
+
+    test("a matching Bash(prefix:*) rule DOES silence an allowNetwork call — cardless, runs directly", async () => {
+      const permissionRules = new PermissionRules({ globalAllow: () => ["Bash(git push:*)"], normaHome: tmpDir("norma-pgo-home-") });
+      const { registry, calls } = stubRegistry();
+      const provider = new FakeProvider(bashTurn("git push", undefined, { allowNetwork: true }));
+      const { engine, store, sessionId } = setupEngine(provider, { registry, policy: "ask", permissionRules });
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+      expect(calls).toEqual([{ command: "git push", justification: undefined, allowNetwork: true, dangerouslyDisableSandbox: undefined }]);
+    });
+
+    test("rule-allowed allowNetwork call still rides the AI safety reviewer (unsafe verdict escalates to a card)", async () => {
+      const permissionRules = new PermissionRules({ globalAllow: () => ["Bash(npm install:*)"], normaHome: tmpDir("norma-pgo-home-") });
+      const { registry, calls } = stubRegistry();
+      const reviewer = stubReviewer({ verdict: "unsafe", reason: "REASON_NETWORK_RULE" });
+      const provider = new FakeProvider(bashTurn("npm install", undefined, { allowNetwork: true }));
+      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "ask", permissionRules });
+      hub.attach(approver(broker, sessionId, false), sessionId, 0);
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      const review = events.find((e) => e.type === "tool_review") as any;
+      expect(review).toMatchObject({ toolName: "bash", verdict: "unsafe", reason: "REASON_NETWORK_RULE" });
+      const requested = events.find((e) => e.type === "approval_requested") as any;
+      expect(requested).toBeDefined();
+      expect(calls.length).toBe(0); // reviewer said unsafe, human denied -> never ran
+    });
+
+    test("auto policy + allowNetwork:true -> runs cardless (reviewer still applies)", async () => {
+      const { registry, calls } = stubRegistry();
+      const reviewer = stubReviewer({ verdict: "safe", reason: "REASON_NETWORK_AUTO" });
+      const provider = new FakeProvider(bashTurn("npm install", undefined, { allowNetwork: true }));
+      const { engine, store, sessionId } = setupEngine(provider, { registry, reviewer: reviewer as any, policy: "auto" });
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      expect(events.some((e) => e.type === "approval_requested")).toBe(false); // no card
+      const review = events.find((e) => e.type === "tool_review") as any;
+      expect(review).toMatchObject({ toolName: "bash", verdict: "safe", reason: "REASON_NETWORK_AUTO" }); // but reviewed
+      expect(calls.length).toBe(1);
+    });
+
+    test("plan policy denies outright regardless of allowNetwork", async () => {
+      const { registry, calls } = stubRegistry();
+      const provider = new FakeProvider(bashTurn("git push", undefined, { allowNetwork: true }));
+      const { engine, store, sessionId } = setupEngine(provider, { registry, policy: "plan" });
+
+      await engine.runTurn(sessionId);
+      const events = store.read(sessionId);
+
+      expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+      const result = events.find((e) => e.type === "tool_result") as any;
+      expect(result.isError).toBe(true);
+      expect(result.output.toLowerCase()).toContain("plan mode");
+      expect(calls.length).toBe(0);
+    });
+
+    test("full loop: allowNetwork card -> respond allow_project -> rule persists -> the NEXT allowNetwork call with the same prefix runs cardless", async () => {
+      const cwd = tmpDir("norma-pgo-cwd-");
+      const permissionRules = new PermissionRules({ globalAllow: () => undefined, normaHome: tmpDir("norma-pgo-home-") });
+      const { registry, calls } = stubRegistry();
+      const provider = new FakeProvider([
+        ...bashTurn("git push origin main", undefined, { allowNetwork: true }),
+        ...bashTurn("git push origin main", undefined, { allowNetwork: true }),
+      ]);
+      const { engine, store, hub, broker, sessionId } = setupEngine(provider, { registry, cwd, policy: "ask", permissionRules });
+      // Mirrors ipc/server.ts's real approval.respond handler (option lookup by id, append BEFORE
+      // resolve) — same precedent as scenario 10's own "full loop" test.
+      hub.attach({
+        clientName: "option-approver",
+        deliver(e) {
+          if (e.type === "approval_requested") {
+            const option = e.options?.find((o) => o.id === "allow_project");
+            if (option?.rule) permissionRules.append(option.rule, option.scope ?? "project", cwd);
+            broker.resolve(sessionId, e.callId, true, "option-approver");
+          }
+          return true;
+        },
+      }, sessionId, 0);
+
+      await engine.runTurn(sessionId); // turn 1: cards, approved via allow_project
+      let events = store.read(sessionId);
+      expect(events.filter((e) => e.type === "approval_requested").length).toBe(1);
+      const rulesFile = JSON.parse(readFileSync(join(cwd, ".norma", "permissions.local.json"), "utf8"));
+      expect(rulesFile.allow).toEqual(["Bash(git push:*)"]);
+
+      await engine.runTurn(sessionId); // turn 2: same prefix, allowNetwork again -> must run cardless
+
+      events = store.read(sessionId);
+      expect(events.filter((e) => e.type === "approval_requested").length).toBe(1); // still just the one card
+      expect(calls.length).toBe(2); // both turns ran
+    });
+  });
+});
