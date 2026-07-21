@@ -153,38 +153,35 @@ describe("approvalOptionsFor via the real dispatch loop (engine.ts's private hel
     });
   });
 
-  test("write under plain (in-root) ask → allow_once/allow_project(Edit)/deny — no allow_global", async () => {
+  // SP-policies Task 7 RETIRED the generic write/edit options card. `approvalOptionsFor` no longer
+  // has a write/edit branch, AND an in-root write/edit under `ask` is silenced by the
+  // in-project-silent flip before it could ever reach the generic `decision === "ask"` card (this
+  // helper's only caller) — so an in-root edit produces NO card of any kind. The old
+  // allow_once/allow_project(Edit)/deny options card is gone; the "persist an Edit rule from a
+  // write card" capability moves to the OUT-OF-ROOT grant card's path-scoped "Always allow edits in
+  // /foo" = `Edit(/foo)` option (Task 9). These two tests pin that retirement (not just delete the
+  // old coverage); the out-of-root grant card's own no-options shape is pinned by "an out-of-root
+  // write's grant-flavored card gets no options" further below.
+  test("write under plain (in-root) ask → NO generic options card at all (SP-policies Task 7: retired; in-root edits are silent)", async () => {
     const provider = new FakeProvider(writeTurn("notes.txt", "hi"));
-    const { engine, events, hub, broker, sessionId, cwd } = setupEngine(provider, { policy: "ask" });
-    hub.attach(autoResolver(broker, sessionId, true), sessionId, 0);
+    const { engine, events, sessionId, cwd } = setupEngine(provider, { policy: "ask" });
 
     await engine.runTurn(sessionId);
 
-    const requested = events.find((e) => e.type === "approval_requested") as any;
-    expect(requested.options).toEqual([
-      { id: "allow_once", label: "Allow once" },
-      { id: "allow_project", label: "Always allow edits in this project", rule: "Edit", scope: "project" },
-      { id: "deny", label: "Deny" },
-    ]);
-    expect(readFileSync(join(cwd, "notes.txt"), "utf8")).toBe("hi"); // approved → ran
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false); // no card — not the old options card, not any card
+    expect(readFileSync(join(cwd, "notes.txt"), "utf8")).toBe("hi"); // silently ALLOWED (in-project-silent), not denied
   });
 
-  test("edit under plain (in-root) ask → the SAME Edit-rule options shape as write", async () => {
+  test("edit under plain (in-root) ask → NO generic options card either (same retirement as write)", async () => {
     const cwd = tmpDir("norma-approval-opts-edit-");
     writeFileSync(join(cwd, "notes.txt"), "hello world");
     const provider = new FakeProvider(editTurn("notes.txt", "world", "there"));
-    const { engine, events, hub, broker, sessionId } = setupEngine(provider, { policy: "ask", cwd });
-    hub.attach(autoResolver(broker, sessionId, true), sessionId, 0);
+    const { engine, events, sessionId } = setupEngine(provider, { policy: "ask", cwd });
 
     await engine.runTurn(sessionId);
 
-    const requested = events.find((e) => e.type === "approval_requested") as any;
-    expect(requested.options).toEqual([
-      { id: "allow_once", label: "Allow once" },
-      { id: "allow_project", label: "Always allow edits in this project", rule: "Edit", scope: "project" },
-      { id: "deny", label: "Deny" },
-    ]);
-    expect(readFileSync(join(cwd, "notes.txt"), "utf8")).toBe("hello there"); // approved → ran
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+    expect(readFileSync(join(cwd, "notes.txt"), "utf8")).toBe("hello there"); // silently ALLOWED, not denied
   });
 
   test("every other tool (e.g. computer) → NO options, even under plain ask", async () => {

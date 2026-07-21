@@ -226,31 +226,31 @@ const askArgs = {
 };
 
 describe("Task 6: engine timeout windows — approvals", () => {
+  // SP-policies Task 7: these spy on broker.wait to pin the timeout WINDOW; they used an in-root
+  // write to reach requestApproval, but an in-root write under `ask` is silent now (in-project-silent
+  // flip) and never calls broker.wait. Swapped the vehicle to a BASH call (stubRegistry + bashTurn,
+  // callId "c1" — same as the reviewer-escalation tests below): with no permissionRules configured
+  // it always cards under `ask`, reaching requestApproval → broker.wait unchanged. The mocked
+  // broker.wait short-circuits the actual prompt, so the spied timeout arg is all that matters.
   test("dispatch-child session: requestApproval waits 600_000ms regardless of cfg.approvalTimeoutMs", async () => {
-    const { engine, broker, sessionId } = setupEngine([
-      [{ type: "tool_call", callId: "c1", name: "write", argsJson: '{"path":"x.txt","content":"y"}' }, done("tool_calls")],
-      text("ok"),
-    ], { origin: "dispatch-child", approvalTimeoutMs: 45_000 });
+    const { registry } = stubRegistry();
+    const { engine, broker, sessionId } = setupEngine(bashTurn("git push"), { origin: "dispatch-child", approvalTimeoutMs: 45_000, registry });
     const waitSpy = spyOn(broker, "wait").mockResolvedValue({ approved: true, by: "test" });
     await engine.runTurn(sessionId);
     expect(waitSpy).toHaveBeenCalledWith(sessionId, "c1", 600_000, expect.anything());
   });
 
   test("non-child session: requestApproval waits cfg.approvalTimeoutMs when configured", async () => {
-    const { engine, broker, sessionId } = setupEngine([
-      [{ type: "tool_call", callId: "c1", name: "write", argsJson: '{"path":"x.txt","content":"y"}' }, done("tool_calls")],
-      text("ok"),
-    ], { approvalTimeoutMs: 45_000 });
+    const { registry } = stubRegistry();
+    const { engine, broker, sessionId } = setupEngine(bashTurn("git push"), { approvalTimeoutMs: 45_000, registry });
     const waitSpy = spyOn(broker, "wait").mockResolvedValue({ approved: true, by: "test" });
     await engine.runTurn(sessionId);
     expect(waitSpy).toHaveBeenCalledWith(sessionId, "c1", 45_000, expect.anything());
   });
 
   test("non-child session: requestApproval falls back to the 5-minute default when cfg.approvalTimeoutMs is unset", async () => {
-    const { engine, broker, sessionId } = setupEngine([
-      [{ type: "tool_call", callId: "c1", name: "write", argsJson: '{"path":"x.txt","content":"y"}' }, done("tool_calls")],
-      text("ok"),
-    ]);
+    const { registry } = stubRegistry();
+    const { engine, broker, sessionId } = setupEngine(bashTurn("git push"), { registry });
     const waitSpy = spyOn(broker, "wait").mockResolvedValue({ approved: true, by: "test" });
     await engine.runTurn(sessionId);
     expect(waitSpy).toHaveBeenCalledWith(sessionId, "c1", 300_000, expect.anything());

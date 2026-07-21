@@ -209,11 +209,17 @@ export function suggestBashPrefix(command: string): string {
  *  it persists via `PermissionRules.append` (server.ts's `approval.respond` handler) — the label
  *  ALWAYS shows the literal rule string, so a human approves the exact text that gets written, not
  *  a paraphrase of it. bash offers BOTH scopes (project/global): a shell command prefix is often
- *  legitimately either project-specific or a genuine cross-project habit. write/edit offers
- *  project scope ONLY — "always allow every edit, everywhere, forever" is a materially scarier
- *  default than bash's equivalent and is deliberately not on the menu in v1. Every other tool name
- *  (computer/schedule/web_fetch/skill_write/mcp__.../plugin__.../unclassified) returns `undefined`
- *  — a plain approve/deny card, byte-identical to before this task. */
+ *  legitimately either project-specific or a genuine cross-project habit. SP-policies Task 7:
+ *  write/edit now return `undefined` here — they no longer reach this helper at all. An in-root
+ *  edit under `ask` is SILENT (the in-project-silent flip in the dispatch loop), an out-of-root
+ *  edit rides the grant card (its own options, NOT this helper), and a rules-store write
+ *  hard-errors — so the generic `decision === "ask"` branch (this helper's only caller) is
+ *  structurally unreachable for write/edit. The "persist an Edit rule from a write card" capability
+ *  is NOT lost: it moves to the out-of-root grant card's path-scoped "Always allow edits in /foo" =
+ *  `Edit(/foo)` option (Task 9), which is strictly better than the old blanket `Edit` rule
+ *  (path-scoped + feeds bash's sandbox roots). Every other tool name (computer/schedule/web_fetch/
+ *  skill_write/mcp__.../plugin__.../unclassified) likewise returns `undefined` — a plain
+ *  approve/deny card, byte-identical to before this feature. */
 function approvalOptionsFor(call: { name: string; argsJson: string }): ApprovalOption[] | undefined {
   if (call.name === "bash") {
     let command = "";
@@ -229,13 +235,9 @@ function approvalOptionsFor(call: { name: string; argsJson: string }): ApprovalO
       { id: "deny", label: "Deny" },
     ];
   }
-  if (call.name === "write" || call.name === "edit") {
-    return [
-      { id: "allow_once", label: "Allow once" },
-      { id: "allow_project", label: "Always allow edits in this project", rule: "Edit", scope: "project" },
-      { id: "deny", label: "Deny" },
-    ];
-  }
+  // SP-policies Task 7: write/edit deliberately fall through to `undefined` — see the doc comment
+  // above (their approval path is now silence-in-root / grant-card-out-of-root, never this generic
+  // card). Task 9 removes this helper's only remaining relevance to edits by reworking the grant card.
   return undefined;
 }
 
@@ -2847,11 +2849,39 @@ export class AgentEngine {
           }
           if (ruleAllowed) decision = "allow";
         }
+        // SP-policies Task 7: in-project edits are SILENT by default. A write/edit whose target is in
+        // the session writable set (dirGrant === null ⇒ in-root, now that Task 6's writableRoots has
+        // folded in any Edit(<path>)-declared dirs) and is not the rules store gets no card — under
+        // ask/dont-ask alike (accept-edits/auto/bypass already return "allow" from the gate, so this
+        // never fires for them). This is the flip that stops `ask` from carding an ordinary edit.
+        // Runs BEFORE the dont-ask flip below so an in-project edit under dont-ask is SILENCED, not
+        // denied. `!rulesFileTarget` keeps a write to the permission-rules store on its dedicated
+        // hard-error branch (else if (rulesFileTarget)) with the accurate message.
+        if (decision === "ask" && (call.name === "write" || call.name === "edit") && !dirGrant && !rulesFileTarget) {
+          decision = "allow";
+        }
+        // SP-policies Task 7: dont-ask declines everything it would otherwise CARD, with no prompt.
+        // Anything still "ask" here (no rule, no classifier, not an in-project edit) is auto-denied.
+        // Deliberately NOT guarded by `!dirGrant`: an out-of-project edit is still "ask" at this point
+        // (its grant card hasn't been offered yet) and SHOULD be denied under dont-ask — because the
+        // `decision === "deny"` branch is FIRST in the dispatch chain below, this deny short-circuits
+        // before the `else if (dirGrant)` grant-card branch could run, so no grant card is surfaced.
+        // `!rulesFileTarget` is excluded so a rules-store write still hits its dedicated hard-error
+        // branch (accurate message) rather than this generic dont-ask deny. A dangerouslyDisableSandbox
+        // escape is likewise converted here (the ruleAllowed block excluded it, in-project-silent skips
+        // it — not write/edit), so it denies before its own always-card branch; that is correct for
+        // this task (a later task adds a BashUnsandboxed-rule pre-clear ahead of these flips).
+        if (decision === "ask" && meta.approvalPolicy === "dont-ask" && !rulesFileTarget) {
+          decision = "deny";
+        }
         if (decision === "deny") {
-          // Plan mode's blanket deny (gate.ts): tool NOT run. No approval flow here — the point
-          // of plan mode is that nothing mutates until exit_plan_mode is approved.
+          // Plan mode's blanket deny (gate.ts) OR dont-ask's auto-decline (the flip just above): tool
+          // NOT run, no approval flow. The message is mode-aware — dont-ask and plan reach this same
+          // branch but for different reasons, so each gets its own accurate explanation.
           outcome = {
-            output: "Blocked in plan mode — you are researching and planning, so file changes and commands are disabled. Make no changes; when your plan is ready, call exit_plan_mode to present it for approval.",
+            output: meta.approvalPolicy === "dont-ask"
+              ? "Denied automatically — you're in dont-ask mode, which declines every action that needs approval. Switch to ask or auto to be prompted, or add an allow-rule for this."
+              : "Blocked in plan mode — you are researching and planning, so file changes and commands are disabled. Make no changes; when your plan is ready, call exit_plan_mode to present it for approval.",
             isError: true,
           };
         } else if (rulesFileTarget) {

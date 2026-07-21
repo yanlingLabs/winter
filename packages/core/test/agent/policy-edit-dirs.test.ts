@@ -31,12 +31,16 @@ describe("engine.writableRoots(): Edit(<path>) rules feed the write/edit fence +
 
     await engine.runTurn(sessionId);
     const events = store.read(sessionId);
-    // Task 7 (in-project-silent) is what makes an in-writable-set write fully cardless under
-    // `ask`; at Task 6 the call may still hit the GENERIC ask card (approvalCardSummary's fallback
-    // `${call.name} ${argsJson}` slice — never contains "outside"). The Task-6-local proof is that
-    // the OUT-OF-PROJECT grant card specifically never appears — that card is the one whose
-    // absence directly demonstrates fsWriteOutOfRootDir now sees `foo` as in-root.
+    // Task 7 (in-project-silent) makes an in-writable-set write FULLY cardless under `ask`: with
+    // `foo` folded into the writable set by writableRoots, fsWriteOutOfRootDir sees the target as
+    // in-root (dirGrant === null), and the in-project-silent flip converts ask→allow — so NO
+    // approval card appears at all (not the out-of-project grant card, and not the generic ask card
+    // either — the latter is what Task 6 alone still left in place). The write lands silently.
     expect(outsideCard(events)).toBeUndefined();
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+    const result = events.find((e) => e.type === "tool_result") as { isError: boolean } | undefined;
+    expect(result?.isError).toBe(false);
+    expect(existsSync(target)).toBe(true);
   });
 
   test("without the rule, the same write DOES produce an out-of-project grant card", async () => {

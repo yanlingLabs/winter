@@ -83,8 +83,13 @@ describe("AgentEngine", () => {
   });
 
   test("ask policy: approval_requested is appended; denial produces an error tool_result", async () => {
+    // SP-policies Task 7: an in-root write under `ask` is now SILENT (in-project-silent flip), so
+    // this uses an OUT-OF-ROOT write as the still-carding vehicle (it rides the grant-flavored
+    // approval card). What this test checks is the ask-policy approval FLOW — card appended →
+    // denial → error tool_result — which is identical whichever card shape triggers it.
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-engine-oor-")));
     const { engine, store, hub, broker, sessionId } = setup([
-      [{ type: "tool_call", callId: "c1", name: "write", argsJson: '{"path":"x.txt","content":"y"}' }, done("tool_calls")],
+      [{ type: "tool_call", callId: "c1", name: "write", argsJson: JSON.stringify({ path: join(outside, "x.txt"), content: "y" }) }, done("tool_calls")],
       text("ok, not writing"),
     ], "ask");
     // watcher answers the approval as soon as it sees it:
@@ -102,8 +107,11 @@ describe("AgentEngine", () => {
   });
 
   test("approval timeout auto-denies", async () => {
+    // SP-policies Task 7: in-root writes/edits are silent now, so use an OUT-OF-ROOT write to raise
+    // a real card (grant seam) and leave it unanswered to exercise the timeout auto-deny path.
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-engine-oor-")));
     const { engine, store, sessionId } = setup([
-      [{ type: "tool_call", callId: "c1", name: "edit", argsJson: '{"path":"a","old_string":"x","new_string":"y"}' }, done("tool_calls")],
+      [{ type: "tool_call", callId: "c1", name: "write", argsJson: JSON.stringify({ path: join(outside, "a.txt"), content: "y" }) }, done("tool_calls")],
       text("gave up"),
     ], "ask");
     await engine.runTurn(sessionId);
@@ -183,7 +191,7 @@ describe("AgentEngine", () => {
   // these tests assert exactly one approval_requested for the whole call, shaped like a write/edit
   // card (toolName "write"/"edit"), not a bespoke "request_directory" name.
   describe("out-of-root write/edit grant flow", () => {
-    test("ask policy: approve grants the directory and the write lands; a follow-up write to the SAME directory rides the existing grant (no SECOND directory_added, no grant-flavored card) — it still gets Norma's ORDINARY per-write ask-policy card, same as any in-root write would", async () => {
+    test("ask policy: approve grants the directory and the write lands; a follow-up write to the SAME directory rides the existing grant SILENTLY (no SECOND directory_added, no second card at all — SP-policies Task 7)", async () => {
       const outsideDir = realpathSync(mkdtempSync(join(tmpdir(), "norma-engine-outside-")));
       const target1 = join(outsideDir, "file1.txt");
       const target2 = join(outsideDir, "file2.txt");
@@ -200,24 +208,22 @@ describe("AgentEngine", () => {
       await engine.runTurn(sessionId);
       const events = store.read(sessionId);
       const approvalRequests = events.filter((e) => e.type === "approval_requested") as any[];
-      // Norma's `ask` policy asks for EVERY write, in-root or not (gate.ts's MUTATING class,
-      // unrelated to this feature and unchanged by it — see the "in-root writes never trigger the
-      // grant flow" test below) — so there are still TWO cards here, one per call. The thing THIS
-      // test proves is which SHAPE each card is: c1 (genuinely out-of-root) gets the grant-flavored
-      // card; c2 (now in-root, riding the grant) gets the ORDINARY generic write card, not a
-      // second grant request.
-      expect(approvalRequests.length).toBe(2);
+      // SP-policies Task 7: an in-root write under `ask` is now SILENT (the in-project-silent flip).
+      // c1 is genuinely out-of-root, so it still raises exactly ONE grant-flavored card; approving
+      // it adds `outsideDir` to the session roots. c2 targets the SAME (now-granted, i.e. in-root)
+      // directory, so it rides the grant with NO card at all — not a second grant request, and not
+      // an "ordinary" write card either (that ordinary card is retired). So there is exactly ONE
+      // card total, and it is the grant card.
+      expect(approvalRequests.length).toBe(1);
       expect(approvalRequests[0]).toMatchObject({ toolName: "write" });
       expect(approvalRequests[0].summary).toContain(outsideDir);
       expect(approvalRequests[0].summary).toContain("outside the allowed directories");
-      expect(approvalRequests[1]).toMatchObject({ toolName: "write" });
-      expect(approvalRequests[1].summary).not.toContain("outside the allowed directories"); // ordinary card — no re-grant needed
       expect(dirs.has(sessionId, outsideDir)).toBe(true);
       const grants = events.filter((e) => e.type === "directory_added");
       expect(grants.length).toBe(1); // granted exactly ONCE, not once per write
       expect(grants[0]).toMatchObject({ path: outsideDir, persisted: false });
-      expect(readFileSync(target1, "utf8")).toBe("one");
-      expect(readFileSync(target2, "utf8")).toBe("two");
+      expect(readFileSync(target1, "utf8")).toBe("one"); // c1: approved grant → write lands
+      expect(readFileSync(target2, "utf8")).toBe("two"); // c2: silent (rides the grant) → write lands
       const results = events.filter((e) => e.type === "tool_result");
       expect(results.every((r: any) => r.isError === false)).toBe(true);
     });
@@ -263,21 +269,18 @@ describe("AgentEngine", () => {
       expect(readFileSync(target2, "utf8")).toBe("auto-granted-2");
     });
 
-    test("in-root writes never trigger the grant flow (byte-identical fast path): the pre-existing generic ask-policy card is unaffected, no directory_added is ever emitted", async () => {
-      const { engine, store, hub, broker, sessionId, cwd } = setup([
+    test("in-root writes never trigger the grant flow (no directory_added) — and are now fully SILENT under ask (SP-policies Task 7: no card at all)", async () => {
+      const { engine, store, sessionId, cwd } = setup([
         [{ type: "tool_call", callId: "c1", name: "write", argsJson: JSON.stringify({ path: "in-root.txt", content: "y" }) }, done("tool_calls")],
         text("wrote it"),
       ], "ask");
-      const watcher: HubClient = {
-        clientName: "auto-approver",
-        deliver(e) { if (e.type === "approval_requested") broker.resolve(sessionId, e.callId, true, "auto-approver"); return true; },
-      };
-      hub.attach(watcher, sessionId, 0);
       await engine.runTurn(sessionId);
       const events = store.read(sessionId);
-      const approvalRequests = events.filter((e) => e.type === "approval_requested");
-      expect(approvalRequests.length).toBe(1);
-      expect(approvalRequests[0]).toMatchObject({ toolName: "write" }); // the ordinary write-call card, not a directory grant
+      // SP-policies Task 7: an in-root write under `ask` is silenced by the in-project-silent flip —
+      // no approval card of ANY kind (the old "ordinary generic write card" is retired), and it
+      // still never touches the out-of-root grant flow, so no directory_added either. The write just
+      // lands silently.
+      expect(events.some((e) => e.type === "approval_requested")).toBe(false);
       expect(events.some((e) => e.type === "directory_added")).toBe(false);
       expect(readFileSync(join(cwd, "in-root.txt"), "utf8")).toBe("y");
     });

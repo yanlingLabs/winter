@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, existsSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import type { SessionEvent } from "@norma/protocol";
 import type { HubClient } from "../../src/sessions/hub";
 import { ToolRegistry } from "../../src/agent/tools/registry";
@@ -173,17 +174,26 @@ describe("AgentEngine: honest skill_write approval card (5c whole-branch review)
   });
 
   test("regression pin: a non-skill_write card keeps the generic summary byte-identical", async () => {
-    // In-cwd relative path (write-permission-flow, task 24): an out-of-root target now rides its
-    // OWN dedicated grant-flavored card (engine.ts's `dirGrant` branch) instead of this generic
-    // one — irrelevant to what THIS pin actually checks (approvalCardSummary's generic fallback
-    // format), so this stays in-cwd to keep testing that, not the out-of-root path.
-    const argsJson = JSON.stringify({ path: "regression-pin.txt", content: "hello card" });
+    // SP-policies Task 7: this pin used to drive an in-cwd WRITE, but an in-root write/edit under
+    // `ask` is now SILENT (the in-project-silent flip) — no card at all. Swapped the vehicle to a
+    // still-carding stub `computer` call: it's a MUTATING tool (cards under ask), and it is neither
+    // `bash` nor `skill_write` (the only two tools with a bespoke summary), so it exercises the
+    // EXACT SAME approvalCardSummary generic fallback (`<name> <argsJson slice>`) the old write
+    // vehicle did — which is all this pin actually checks.
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "computer",
+      description: "stub computer",
+      args: z.object({ action: z.string() }),
+      run({ action }) { return `did: ${action}`; },
+    });
+    const argsJson = JSON.stringify({ action: "screenshot" });
     const { engine, sessionId, events, hub, broker } = setup(
       [
-        [{ type: "tool_call", callId: "w1", name: "write", argsJson }, done("tool_calls")],
+        [{ type: "tool_call", callId: "w1", name: "computer", argsJson }, done("tool_calls")],
         text("unreachable — denial ends the turn"),
       ],
-      { approvalPolicy: "ask" },
+      { approvalPolicy: "ask", registry },
     );
     hub.attach(denier(broker, sessionId), sessionId, 0);
 
@@ -191,7 +201,7 @@ describe("AgentEngine: honest skill_write approval card (5c whole-branch review)
 
     const card = events.find((e) => e.type === "approval_requested") as ApprovalCard;
     expect(card).toBeDefined();
-    expect(card.summary).toBe(`write ${argsJson.slice(0, 160)}`);
+    expect(card.summary).toBe(`computer ${argsJson.slice(0, 160)}`);
   });
 });
 
