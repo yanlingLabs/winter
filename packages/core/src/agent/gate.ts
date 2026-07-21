@@ -135,6 +135,11 @@ const NETWORK = new Set(["web_fetch", "web_search"]);
 // reclassification (e.g. skill_write ALSO added to MUTATING) cannot widen it to allow-under-auto.
 const ALWAYS_ASK = new Set(["skill_write"]);
 
+// SP-policies: the "edit class" `accept-edits` auto-allows (spec: "edits/writes free"). write/edit
+// ONLY (matches every other edit-specific path in engine.ts — dirGrant, in-project-silent,
+// approvalOptionsFor); notebook_edit rides the generic MUTATING path (niche).
+const EDIT_CLASS = new Set(["write", "edit"]);
+
 /**
  * v1 policy matrix (spec §4.10 arrives fully in 1b-ii with the AI reviewer):
  * read-only tools always allowed; mutating tools follow the session policy;
@@ -142,37 +147,25 @@ const ALWAYS_ASK = new Set(["skill_write"]);
  */
 export class PermissionGate {
   evaluate(toolName: string, policy: SessionApprovalPolicy): GateDecision {
-    // ALWAYS_ASK precedes every policy branch (see the set's doc comment): plan → deny (a skill
-    // write is a mutation; plan mode mutates nothing), ask/auto → ask (the card is unconditional).
-    if (ALWAYS_ASK.has(toolName)) return policy === "plan" ? "deny" : "ask";
-    // Plan mode: only read-only tools (incl. exit_plan_mode, ask_user, task_*) are allowed;
-    // everything else (writes/edit/bash/mcp__/plugin__/unclassified) is denied outright — no prompt,
-    // since the whole point of plan mode is that nothing mutates until the plan is approved.
-    if (policy === "plan") {
-      if (READ_ONLY.has(toolName)) return "allow"; // incl. exit_plan_mode, ask_user, task_*
-      if (NETWORK.has(toolName)) return "allow"; // web_fetch: read-only research — see NETWORK's doc comment above
-      return "deny"; // write/edit/bash/mcp__/plugin__/unclassified — all blocked while planning
+    // ALWAYS_ASK (skill_write): a card no policy silences — EXCEPT bypass (accepts everything) and
+    // plan (mutates nothing). See the set's doc comment.
+    if (ALWAYS_ASK.has(toolName)) {
+      if (policy === "plan") return "deny";
+      if (policy === "bypass") return "allow";
+      return "ask";
     }
     if (READ_ONLY.has(toolName)) return "allow";
-    // SP-approvals T10: NETWORK is unconditionally "allow" here too (ask AND auto), matching the
-    // plan-mode branch above — web tools are free by default under EVERY policy at this gate.
-    // Do NOT move web_fetch/web_search into READ_ONLY (see NETWORK's own doc comment for the
-    // semantic risk-shape reason they stay a distinct class, and — LOW-2, T10 review — why that's
-    // NOT because anything downstream queries this class's membership: engine.ts's own
-    // dangerous-domain floor checks `call.name === "web_fetch"` directly, not this set).
-    if (NETWORK.has(toolName)) return "allow";
-    // write/edit stay in MUTATING even after the write-permission-flow feature (request_directory
-    // removed, task 24): this decision only gates whether the TOOL CALL ITSELF needs a human's
-    // yes/no — an OUT-OF-ROOT target is a SEPARATE, path-aware question the engine's dispatch loop
-    // asks on top (engine.ts's `dirGrant` branch, checked before the generic `decision === "ask"`
-    // branch below) — this gate has no path awareness and must not grow any.
-    if (MUTATING.has(toolName)) return policy === "auto" ? "allow" : "ask";
-    // MCP tools AND Phase 4b platform-plugin tools are external code (network/fs/arbitrary) →
-    // approval-per-policy like bash: allowed under `auto`, prompt under `ask`. Must NOT be
-    // READ_ONLY, and must NOT fall to the unclassified always-ask branch below (that would block
-    // MCP/plugin tool use even under `auto`). isExternalToolName (tools/registry.ts) is the SAME
-    // predicate ToolRegistry's deferral uses — one definition, both call sites widen together.
-    if (isExternalToolName(toolName)) return policy === "auto" ? "allow" : "ask";
-    return "ask";
+    if (NETWORK.has(toolName)) return "allow"; // web tools free at this gate; engine's dangerous-domain floor is separate
+    // Below: MUTATING / external / unclassified.
+    if (policy === "plan") return "deny";       // nothing mutates while planning
+    if (policy === "bypass") return "allow";    // accept literally everything
+    if (policy === "auto") return "allow";      // reviewer gates the reviewable classes in engine.ts
+    if (policy === "accept-edits" && EDIT_CLASS.has(toolName)) return "allow"; // edits free; rest → ask below
+    // ask / accept-edits(non-edit) / dont-ask: a human gate. dont-ask converts a still-"ask" call to
+    // deny in engine.ts (this gate has no mode/path awareness to do it here); in-project write/edit
+    // is likewise silenced in engine.ts, not here.
+    if (MUTATING.has(toolName)) return "ask";
+    if (isExternalToolName(toolName)) return "ask";
+    return "ask"; // unclassified — fail-closed to the human
   }
 }
