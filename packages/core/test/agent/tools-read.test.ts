@@ -129,10 +129,18 @@ describe("read tools — unrestricted reads (task-10, user rule)", () => {
   });
 
   test("glob: relative pattern still cannot escape the session roots via .. (unchanged)", async () => {
-    const d = proj();
+    // Give cwd a DEDICATED small parent so `../*` scans a tiny, controlled directory. Rooting cwd
+    // directly under the shared system tmpdir (as proj() does) made `..` scan os.tmpdir() itself —
+    // hundreds of thousands of entries on a busy machine — so the glob tool's legitimate 2s scan
+    // budget ("[scan time budget reached]", a non-empty non-error sentinel) fired nondeterministically
+    // and flaked the first assertion below. Mirrors the read-escape test above; containment unchanged.
+    const w = realpathSync(mkdtempSync(join(tmpdir(), "norma-glob-escape-")));
+    const d = join(w, "cwd");
+    mkdirSync(d);
+    writeFileSync(join(w, "sibling.txt"), "must not leak via a relative pattern");
     const res = await makeRegistry().execute("glob", { pattern: "../*" }, { cwd: d, roots: [d], sessionId: "s1" });
     expect(res.isError === true || res.output === "").toBe(true);
-    expect(res.output).not.toContain("norma-tools-"); // sibling temp dirs must not leak via a RELATIVE pattern
+    expect(res.output).not.toContain("sibling.txt"); // the parent's sibling must not leak via a RELATIVE pattern
   });
 
   test("glob: an absolute pattern may target anywhere on disk", async () => {
