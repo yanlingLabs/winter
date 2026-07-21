@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, type Stats, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, type Stats, writeFileSync } from "node:fs";
 import { join, sep } from "node:path";
 import { hasShellHazards } from "./shell-scan";
 import { dangerousDomainMatch } from "./dangerous-domains";
@@ -324,6 +324,19 @@ function statOrNull(path: string): Stats | null {
   try { return statSync(path); } catch { return null; }
 }
 
+/** Like `statOrNull`, but `lstat` — reports the link ITSELF, never following a final symlink. Used
+ *  by the symlink-indirection guard below (SP-policies whole-branch review): the rules store must
+ *  refuse to TRUST a symlinked `<root>/.norma` (or a symlinked `permissions.local.json`). An agent
+ *  that can create a symlink (sandboxed `ln -s`, needing NO write grant) could otherwise point
+ *  `.norma` at a decoy dir it CAN write, plant a `permissions.local.json` there (a path with no
+ *  `.norma` in it, so the write-guard never flags it), and have the hot reader follow the symlink
+ *  and mint allow-rules with no human card — self-escalating the live session, since rules are
+ *  hot-read. `statOrNull`/`existsSync` FOLLOW the symlink (they'd read/write the decoy); lstat is
+ *  what actually sees the link. */
+function lstatOrNull(path: string): Stats | null {
+  try { return lstatSync(path); } catch { return null; }
+}
+
 export class PermissionRules {
   private readonly cache = new Map<string, ProjectCacheEntry>();
   // Rule strings `parseRule` couldn't parse, already warned about once — keyed by the raw string
@@ -436,7 +449,27 @@ export class PermissionRules {
    *  re-logged on a later call, only a further CHANGE (a fix, or a different corruption) would
    *  trigger another read attempt. */
   private projectRulesFor(root: string): string[] {
+    // SP-policies whole-branch review residual (symlink indirection): never TRUST — hence never
+    // FOLLOW — a symlinked `<root>/.norma` or a symlinked `permissions.local.json`. lstat sees the
+    // link itself (statOrNull below would follow it into a decoy dir the agent controls). A
+    // symlinked `.norma` (or file) is treated as "this project has NO rules" — the same result as
+    // an absent file — and warned about once for this root (reusing warnFileOnce's per-root dedupe).
+    // A `.norma` that doesn't exist at all is fine (null lstat → fall through → no rules, as today);
+    // a real directory / real file passes straight through. See `lstatOrNull` for the full threat.
+    const dotNorma = join(root, ".norma");
+    const dotNormaLstat = lstatOrNull(dotNorma);
+    if (dotNormaLstat?.isSymbolicLink()) {
+      this.warnFileOnce(root, `${dotNorma} is a symlink, not a real directory — refusing to read project permission rules through it`);
+      this.cache.delete(root);
+      return [];
+    }
     const path = this.projectRulesFile(root);
+    const fileLstat = lstatOrNull(path);
+    if (fileLstat?.isSymbolicLink()) {
+      this.warnFileOnce(root, `${path} is a symlink, not a real file — refusing to read project permission rules through it`);
+      this.cache.delete(root);
+      return [];
+    }
     const stat = statOrNull(path);
     if (!stat) {
       this.cache.delete(root);
@@ -479,8 +512,26 @@ export class PermissionRules {
 
   private appendProject(rule: string, root: string): void {
     const dotNorma = join(root, ".norma");
+    // Defense in depth (SP-policies whole-branch review residual): never write THROUGH a symlinked
+    // `<root>/.norma` or a symlinked `permissions.local.json`. A human answering an approval card
+    // must never be tricked into planting a rules file into an attacker-chosen dir via a symlink an
+    // agent pre-created. lstat sees the link itself (mkdirSync/existsSync/rename below would follow
+    // it); throw rather than write through. A `.norma` that doesn't exist yet (null lstat) is fine —
+    // mkdir-on-first-use below still creates a REAL dir; a real dir/file passes straight through.
+    const dotNormaLstat = lstatOrNull(dotNorma);
+    if (dotNormaLstat?.isSymbolicLink()) {
+      throw new RuleAppendError(
+        `refusing to write a project permission rule for ${root} — ${dotNorma} is a symlink, not a real directory`,
+      );
+    }
     mkdirSync(dotNorma, { recursive: true });
     const path = this.projectRulesFile(root);
+    const fileLstat = lstatOrNull(path);
+    if (fileLstat?.isSymbolicLink()) {
+      throw new RuleAppendError(
+        `refusing to write a project permission rule for ${root} — ${path} is a symlink, not a real file`,
+      );
+    }
     let obj: any = {}; // dynamic JSON blob — same untyped-any idiom as settings.ts's addLocalDir
     if (existsSync(path)) {
       try {

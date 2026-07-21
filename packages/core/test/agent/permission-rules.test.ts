@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PermissionRules, RuleAppendError, parseRule, ruleMatches } from "../../src/agent/permission-rules";
@@ -659,5 +659,99 @@ describe("BashUnsandboxed rule — disjoint from Bash (SP-policies)", () => {
   test("hazard scan still applies to the unsandboxed form", () => {
     const p = parseRule("BashUnsandboxed(docker:*)")!;
     expect(ruleMatches(p, esc("docker ps ; rm -rf /"))).toBe(false);
+  });
+});
+
+// SP-policies whole-branch review residual — rules-store symlink indirection.
+// The store's write guard blocks writes to a path containing `.norma/permissions.local.json`, but
+// an agent that can create a symlink (sandboxed `ln -s`, needing NO Edit/write grant) could first
+// make `<root>/.norma` a symlink to a decoy dir it CAN write, plant `permissions.local.json` there
+// (a path with no `.norma` in it — the write guard never flags it), and the hot reader would then
+// FOLLOW the symlink and mint allow-rules with no human approval card, self-escalating this very
+// session (rules are hot-read). The generic close: the reader (projectRulesFor) AND the human-card
+// writer (appendProject) refuse to TRUST a symlinked `.norma` or a symlinked rules file. lstat
+// never follows the final symlink, so it sees the link itself; a real dir / real file passes.
+describe("PermissionRules — symlinked .norma is never trusted (SP-policies review residual)", () => {
+  test("read path (repro): a symlinked `.norma` pointing at a decoy dir mints NO rules, warned once", () => {
+    const normaHome = tmpDir("norma-permrules-home-");
+    const root = tmpDir("norma-permrules-proj-");
+    const decoy = tmpDir("norma-permrules-decoy-");
+    // Reachable as root/.norma/permissions.local.json ONLY by following the planted symlink.
+    writeFileSync(join(decoy, "permissions.local.json"), JSON.stringify({ allow: ["Bash(rm:*)"] }));
+    symlinkSync(decoy, join(root, ".norma"));
+
+    const pr = new PermissionRules({ globalAllow: () => undefined, normaHome });
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // BEFORE fix this returned "allow" (the hole); AFTER fix the symlinked `.norma` is ignored.
+      expect(pr.decision(call("bash", { command: "rm -rf /" }), root)).toBeNull();
+      expect(errSpy).toHaveBeenCalled(); // warned about the symlinked .norma
+      const after = errSpy.mock.calls.length;
+      pr.decision(call("bash", { command: "rm -rf /" }), root); // warn-once: no second warning for this root
+      expect(errSpy.mock.calls.length).toBe(after);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  test("read path: a real `.norma` dir but a symlinked permissions.local.json FILE is ignored too", () => {
+    const normaHome = tmpDir("norma-permrules-home-");
+    const root = tmpDir("norma-permrules-proj-");
+    const decoy = tmpDir("norma-permrules-decoy-");
+    writeFileSync(join(decoy, "x.json"), JSON.stringify({ allow: ["Bash(rm:*)"] }));
+    mkdirSync(join(root, ".norma"), { recursive: true });
+    symlinkSync(join(decoy, "x.json"), join(root, ".norma", "permissions.local.json"));
+
+    const pr = new PermissionRules({ globalAllow: () => undefined, normaHome });
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(pr.decision(call("bash", { command: "rm -rf /" }), root)).toBeNull();
+      expect(errSpy).toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  test("write path: append refuses to write THROUGH a symlinked `.norma` (throws, plants nothing in the decoy)", () => {
+    const normaHome = tmpDir("norma-permrules-home-");
+    const root = tmpDir("norma-permrules-proj-");
+    const decoy = tmpDir("norma-permrules-decoy-");
+    symlinkSync(decoy, join(root, ".norma"));
+
+    const pr = new PermissionRules({ globalAllow: () => undefined, normaHome });
+    expect(() => pr.append("Bash(ls:*)", "project", root)).toThrow(RuleAppendError);
+    // Nothing was written through the symlink into the decoy dir.
+    expect(existsSync(join(decoy, "permissions.local.json"))).toBe(false);
+  });
+
+  test("write path: append refuses a symlinked permissions.local.json FILE too, leaving it untouched (real .norma dir)", () => {
+    const normaHome = tmpDir("norma-permrules-home-");
+    const root = tmpDir("norma-permrules-proj-");
+    const decoy = tmpDir("norma-permrules-decoy-");
+    mkdirSync(join(root, ".norma"), { recursive: true });
+    const file = join(root, ".norma", "permissions.local.json");
+    symlinkSync(join(decoy, "planted.json"), file);
+
+    const pr = new PermissionRules({ globalAllow: () => undefined, normaHome });
+    expect(() => pr.append("Bash(ls:*)", "project", root)).toThrow(RuleAppendError);
+    expect(lstatSync(file).isSymbolicLink()).toBe(true); // untouched — NOT replaced by a real file
+  });
+
+  test("no-regression: a NORMAL real-dir `.norma` still reads its rules; a fresh root still mkdirs + writes on append", () => {
+    const normaHome = tmpDir("norma-permrules-home-");
+    const root = tmpDir("norma-permrules-proj-");
+    // real dir + real file still works
+    mkdirSync(join(root, ".norma"), { recursive: true });
+    writeFileSync(join(root, ".norma", "permissions.local.json"), JSON.stringify({ allow: ["Bash(git status:*)"] }));
+    const pr = new PermissionRules({ globalAllow: () => undefined, normaHome });
+    expect(pr.decision(call("bash", { command: "git status" }), root)).toBe("allow");
+
+    // fresh root with no `.norma` yet: append mkdirs + writes fine, then decision sees it
+    const fresh = tmpDir("norma-permrules-fresh-");
+    expect(pr.decision(call("bash", { command: "git push origin main" }), fresh)).toBeNull();
+    pr.append("Bash(git push:*)", "project", fresh);
+    expect(existsSync(join(fresh, ".norma", "permissions.local.json"))).toBe(true);
+    expect(lstatSync(join(fresh, ".norma")).isDirectory()).toBe(true); // a real dir, created normally
+    expect(pr.decision(call("bash", { command: "git push origin main" }), fresh)).toBe("allow");
   });
 });
