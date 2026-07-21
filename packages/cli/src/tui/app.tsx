@@ -610,8 +610,15 @@ export function App({
       .catch(() => { /* failure: leave the bar unchanged, same as legacy */ })
       .finally(() => { policyInFlight.current = false; });
   };
-  const onApprove = (callId: string, yes: boolean) => {
-    void client.request(METHODS.approvalRespond, { sessionId, callId, approved: yes });
+  // optionId (SP-approvals T7): set only when the human picked a numbered rule-bearing option in
+  // PendingCards' ApprovalCard — included in the RPC params only then (`ApprovalRespondParams`
+  // treats a missing optionId as plain allow-once/deny, methods.ts), never sent as a literal
+  // `optionId: undefined`.
+  const onApprove = (callId: string, yes: boolean, optionId?: string) => {
+    void client.request(METHODS.approvalRespond, {
+      sessionId, callId, approved: yes,
+      ...(optionId !== undefined ? { optionId } : {}),
+    });
   };
   const onAnswer = (callId: string, payload: AnswerPayload) => {
     void client.askUserRespond({

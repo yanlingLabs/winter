@@ -16,6 +16,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanup, render } from "ink-testing-library";
+import { METHODS } from "@norma/protocol";
 import { App, bottomBarRows } from "../../src/tui/app";
 import { makeEventBridge } from "../../src/tui/event-bridge";
 import type { AgentRow } from "../../src/tui/state";
@@ -342,6 +343,32 @@ describe("App — double ctrl+C/ctrl+D exit flow (Phase 3c Task 5)", () => {
     stdin.write("\x03");
     await wait();
     expect(exits).toEqual([1]);
+  });
+
+  test("(p2) picking a numbered allow-rule option sends approval.respond with that optionId (SP-approvals T7)", async () => {
+    const client = fakeClient();
+    const bridge = makeEventBridge();
+    const { stdin, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+    await wait();
+    bridge.push(ev({
+      type: "approval_requested", callId: "c9", toolName: "bash", summary: "git push origin main",
+      options: [
+        { id: "allow_once", label: "Allow once" },
+        { id: "allow_project", label: 'Allow "Bash(git push:*)" in this project', rule: "Bash(git push:*)", scope: "project" },
+        { id: "allow_global", label: 'Allow "Bash(git push:*)" everywhere', rule: "Bash(git push:*)", scope: "global" },
+        { id: "deny", label: "Deny" },
+      ],
+    }));
+    await wait();
+    expect(lastFrame() ?? "").toContain('[1] Allow "Bash(git push:*)" in this project');
+
+    stdin.write("1");
+    await wait();
+    stdin.write("\r");
+    await wait();
+
+    const req = client.calls.find((c) => c.method === "request" && c.args[0] === METHODS.approvalRespond);
+    expect(req?.args[1]).toEqual({ sessionId: "s1", callId: "c9", approved: true, optionId: "allow_project" });
   });
 
   test("(q) ctrl+D on an empty composer drives the identical arm/exit flow", async () => {

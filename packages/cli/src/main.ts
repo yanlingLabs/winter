@@ -845,6 +845,9 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
       // handlers for this chunk have run, and before the user's real next line can arrive.
       approvalConsumedChunk = true;
       queueMicrotask(() => { approvalConsumedChunk = false; });
+      // SP-approvals T7: this legacy non-TUI reader stays plain y/N — it never renders or parses
+      // `approval_requested.options` (that's the Ink TUI's pending-cards.tsx ApprovalCard only), so
+      // a "y" here always means allow-once (no optionId), same as before this feature existed.
       const yes = String(d).trim().toLowerCase() === "y";
       const callId = pending.shift();
       if (callId) await c.request(METHODS.approvalRespond, { sessionId, callId, approved: yes });

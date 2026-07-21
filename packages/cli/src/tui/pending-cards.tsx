@@ -35,7 +35,9 @@ export interface AnswerPayload {
 
 export interface PendingCardsProps {
   pending: PendingCard;
-  onApprove: (callId: string, yes: boolean) => void;
+  // optionId (SP-approvals T7): set only when the human picked a numbered rule-bearing option
+  // (never for the "y"/Enter/"n" paths) — see ApprovalCard below.
+  onApprove: (callId: string, yes: boolean, optionId?: string) => void;
   onAnswer: (callId: string, payload: AnswerPayload) => void;
   onPlan: (callId: string, resp: ReturnType<typeof parsePlanResponse>) => void;
 }
@@ -72,29 +74,83 @@ export function capReviewerReason(reason: string): string {
   return oneLine.length > REVIEWER_REASON_MAX_CHARS ? `${oneLine.slice(0, REVIEWER_REASON_MAX_CHARS)}…` : oneLine;
 }
 
-function ApprovalCard({ pending, onApprove }: { pending: Extract<PendingCard, { kind: "approval" }>; onApprove: PendingCardsProps["onApprove"] }) {
+type ApprovalCardPending = Extract<PendingCard, { kind: "approval" }>;
+
+// SP-approvals T7: of the daemon's `options` (events.ts's `ApprovalOption[]`, Task 5's
+// `approvalOptionsFor`), only the RULE-BEARING ones (a `rule` string attached — the
+// allow_project/allow_global shapes) get a numbered `[N]` menu line. `allow_once`/`deny` are the
+// CLI's own fixed `[y]`/`[n]` vocabulary regardless of the daemon's id/label for those two — same
+// division as today's plain y/N, which was never driven by a protocol-supplied label either.
+function ruleBearingOptions(options: ApprovalCardPending["options"]): NonNullable<ApprovalCardPending["options"]> {
+  return options?.filter((o) => o.rule !== undefined) ?? [];
+}
+
+function ApprovalCard({ pending, onApprove }: { pending: ApprovalCardPending; onApprove: PendingCardsProps["onApprove"] }) {
+  const ruleOptions = ruleBearingOptions(pending.options);
+
   const [buffer, setBuffer] = useBufferedInput((line) => {
-    onApprove(pending.callId, line.trim().toLowerCase() === "y");
+    if (pending.options === undefined) {
+      // Byte-identical legacy parse (regression-pinned by (d1a)/(a1-4) below): only a bare "y"
+      // (case-insensitive) is true; anything else — including a bare Enter — denies.
+      onApprove(pending.callId, line.trim().toLowerCase() === "y");
+      setBuffer("");
+      return;
+    }
+    const trimmed = line.trim();
+    const asIndex = Number(trimmed);
+    if (trimmed !== "" && Number.isInteger(asIndex) && asIndex >= 1 && asIndex <= ruleOptions.length) {
+      onApprove(pending.callId, true, ruleOptions[asIndex - 1]!.id);
+    } else if (trimmed === "" || trimmed.toLowerCase() === "y") {
+      // Bare Enter defaults to allow-once HERE (options present) — mirrors the Mac orb card's
+      // "Default button = Allow once (Enter)" (spec §5's surfaces section). The no-options branch
+      // above keeps the OLD default (bare Enter denies, like every other unrecognized input),
+      // untouched — this default only flips when there's a menu to default within.
+      onApprove(pending.callId, true);
+    } else {
+      // "n", an out-of-range/non-numeric digit, or any other input — deny, no optionId.
+      onApprove(pending.callId, false);
+    }
     setBuffer("");
   });
 
   // Phase 3b T7 restyle (theme colors only — no behavior/parse change): the approval prompt line is
   // rendered in `theme.permission` (CC's approval-request hue); the summary keeps its dim de-emphasis.
-  const actionRow = (
-    <Text color={theme.permission}>
-      approve {pending.toolName}? <Text dimColor>{pending.summary}</Text> [y/N] {buffer}
-    </Text>
-  );
+  if (pending.options === undefined) {
+    const actionRow = (
+      <Text color={theme.permission}>
+        approve {pending.toolName}? <Text dimColor>{pending.summary}</Text> [y/N] {buffer}
+      </Text>
+    );
 
-  // Phase 5e T5: reviewerReason absent → the EXACT SAME single <Text> returned before this field
-  // existed (no wrapping Box) — byte-identical regression pin (pending-cards.test.tsx). Present →
-  // one distinct dim `⚠ reviewer: …` line ABOVE the action row.
-  if (pending.reviewerReason === undefined) return actionRow;
+    // Phase 5e T5: reviewerReason absent → the EXACT SAME single <Text> returned before this field
+    // existed (no wrapping Box) — byte-identical regression pin (pending-cards.test.tsx). Present →
+    // one distinct dim `⚠ reviewer: …` line ABOVE the action row.
+    if (pending.reviewerReason === undefined) return actionRow;
 
+    return (
+      <Box flexDirection="column">
+        <Text dimColor>⚠ reviewer: {capReviewerReason(pending.reviewerReason)}</Text>
+        {actionRow}
+      </Box>
+    );
+  }
+
+  // SP-approvals T7: options present — a numbered allow-rule menu replaces the bare [y/N]
+  // indicator, one choice per line (same convention as PlanCard's fixed menu / QuestionCard's
+  // numbered options below it in this file), buffer echoing on the final [n] line.
   return (
     <Box flexDirection="column">
-      <Text dimColor>⚠ reviewer: {capReviewerReason(pending.reviewerReason)}</Text>
-      {actionRow}
+      {pending.reviewerReason !== undefined && (
+        <Text dimColor>⚠ reviewer: {capReviewerReason(pending.reviewerReason)}</Text>
+      )}
+      <Text color={theme.permission}>
+        approve {pending.toolName}? <Text dimColor>{pending.summary}</Text>
+      </Text>
+      <Text>[y] allow once</Text>
+      {ruleOptions.map((o, i) => (
+        <Text key={o.id}>{`[${i + 1}] ${o.label}`}</Text>
+      ))}
+      <Text>[n] deny {buffer}</Text>
     </Box>
   );
 }

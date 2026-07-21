@@ -129,6 +129,158 @@ describe("PendingCards — approval", () => {
   });
 });
 
+// SP-approvals T7: the daemon's allow-rule `options` (events.ts's `ApprovalOption[]`) rendered as a
+// numbered menu. Fixture mirrors engine.ts's real `approvalOptionsFor` bash shape (allow_once, the
+// two rule-bearing allow_project/allow_global entries, deny) — labels are verbatim daemon strings.
+describe("PendingCards — approval with options (SP-approvals T7)", () => {
+  const bashOptions = [
+    { id: "allow_once", label: "Allow once" },
+    { id: "allow_project", label: 'Allow "Bash(git push:*)" in this project', rule: "Bash(git push:*)", scope: "project" as const },
+    { id: "allow_global", label: 'Allow "Bash(git push:*)" everywhere', rule: "Bash(git push:*)", scope: "global" as const },
+    { id: "deny", label: "Deny" },
+  ];
+  const card: PendingCard = { kind: "approval", callId: "o1", toolName: "bash", summary: "git push", options: bashOptions };
+
+  test("(e1) '1\\r' -> onApprove(callId, true, 'allow_project') (first rule-bearing option)", async () => {
+    const calls: [string, boolean, string | undefined][] = [];
+    const { stdin } = render(
+      <PendingCards pending={card} onApprove={(id, yes, optionId) => calls.push([id, yes, optionId])} onAnswer={() => {}} onPlan={() => {}} />,
+    );
+    await wait();
+    stdin.write("1");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(calls).toEqual([["o1", true, "allow_project"]]);
+  });
+
+  test("(e2) '2\\r' -> onApprove(callId, true, 'allow_global') (second rule-bearing option)", async () => {
+    const calls: [string, boolean, string | undefined][] = [];
+    const { stdin } = render(
+      <PendingCards pending={card} onApprove={(id, yes, optionId) => calls.push([id, yes, optionId])} onAnswer={() => {}} onPlan={() => {}} />,
+    );
+    await wait();
+    stdin.write("2");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(calls).toEqual([["o1", true, "allow_global"]]);
+  });
+
+  test("(e3) 'y\\r' -> onApprove(callId, true, undefined) — no optionId", async () => {
+    const calls: [string, boolean, string | undefined][] = [];
+    const { stdin } = render(
+      <PendingCards pending={card} onApprove={(id, yes, optionId) => calls.push([id, yes, optionId])} onAnswer={() => {}} onPlan={() => {}} />,
+    );
+    await wait();
+    stdin.write("y");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(calls).toEqual([["o1", true, undefined]]);
+  });
+
+  test("(e4) bare Enter -> onApprove(callId, true, undefined) — allow-once is the default when options are offered", async () => {
+    const calls: [string, boolean, string | undefined][] = [];
+    const { stdin } = render(
+      <PendingCards pending={card} onApprove={(id, yes, optionId) => calls.push([id, yes, optionId])} onAnswer={() => {}} onPlan={() => {}} />,
+    );
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(calls).toEqual([["o1", true, undefined]]);
+  });
+
+  test("(e5) 'n\\r' -> onApprove(callId, false, undefined)", async () => {
+    const calls: [string, boolean, string | undefined][] = [];
+    const { stdin } = render(
+      <PendingCards pending={card} onApprove={(id, yes, optionId) => calls.push([id, yes, optionId])} onAnswer={() => {}} onPlan={() => {}} />,
+    );
+    await wait();
+    stdin.write("n");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(calls).toEqual([["o1", false, undefined]]);
+  });
+
+  test("(e6) an out-of-range digit ('3', only 2 rule-bearing options exist) -> denies rather than guessing", async () => {
+    const calls: [string, boolean, string | undefined][] = [];
+    const { stdin } = render(
+      <PendingCards pending={card} onApprove={(id, yes, optionId) => calls.push([id, yes, optionId])} onAnswer={() => {}} onPlan={() => {}} />,
+    );
+    await wait();
+    stdin.write("3");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(calls).toEqual([["o1", false, undefined]]);
+  });
+
+  test("(d4) frame renders the numbered menu with verbatim daemon labels, not the plain [y/N]", async () => {
+    const { lastFrame } = render(<PendingCards pending={card} onApprove={() => {}} onAnswer={() => {}} onPlan={() => {}} />);
+    await wait();
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("approve bash?");
+    expect(frame).toContain("git push");
+    expect(frame).toContain("[y] allow once");
+    expect(frame).toContain('[1] Allow "Bash(git push:*)" in this project');
+    expect(frame).toContain('[2] Allow "Bash(git push:*)" everywhere');
+    expect(frame).toContain("[n] deny");
+    expect(frame).not.toContain("[y/N]");
+  });
+
+  const editCard: PendingCard = {
+    kind: "approval",
+    callId: "o2",
+    toolName: "edit",
+    summary: "src/foo.ts",
+    options: [
+      { id: "allow_once", label: "Allow once" },
+      { id: "allow_project", label: "Always allow edits in this project", rule: "Edit", scope: "project" as const },
+      { id: "deny", label: "Deny" },
+    ],
+  };
+
+  test("(d5) a single rule-bearing option (edit-shaped) numbers only [1]; no [2] line", async () => {
+    const { lastFrame } = render(<PendingCards pending={editCard} onApprove={() => {}} onAnswer={() => {}} onPlan={() => {}} />);
+    await wait();
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("[1] Always allow edits in this project");
+    expect(frame).not.toContain("[2]");
+  });
+
+  test("(e8) edit-shaped card: '1\\r' -> onApprove(callId, true, 'allow_project')", async () => {
+    const calls: [string, boolean, string | undefined][] = [];
+    const { stdin } = render(
+      <PendingCards pending={editCard} onApprove={(id, yes, optionId) => calls.push([id, yes, optionId])} onAnswer={() => {}} onPlan={() => {}} />,
+    );
+    await wait();
+    stdin.write("1");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(calls).toEqual([["o2", true, "allow_project"]]);
+  });
+
+  test("(e7) reviewerReason + options can coexist: the reviewer line renders above the menu, keystrokes still work", async () => {
+    const cardWithReason: PendingCard = { ...card, callId: "o3", reviewerReason: "escalated after a rule-allowed run" };
+    const calls: [string, boolean, string | undefined][] = [];
+    const { stdin, lastFrame } = render(
+      <PendingCards pending={cardWithReason} onApprove={(id, yes, optionId) => calls.push([id, yes, optionId])} onAnswer={() => {}} onPlan={() => {}} />,
+    );
+    await wait();
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("⚠ reviewer: escalated after a rule-allowed run");
+    expect(frame.indexOf("⚠ reviewer:")).toBeLessThan(frame.indexOf("approve bash?"));
+    stdin.write("1");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(calls).toEqual([["o3", true, "allow_project"]]);
+  });
+});
+
 // 5e whole-branch hardening: the newline/boundary cases the Swift twin (PendingCardsTests's four
 // capReviewerReason tests) already pins — unit-level on the exported pure helper, because the
 // exact 100/101 boundary can't be asserted through a rendered frame (Ink wraps at terminal width).
