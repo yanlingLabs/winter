@@ -917,7 +917,7 @@ describe("memory RPCs (Phase 5b Task 3, design doc §4)", () => {
 
 describe("ApprovalPolicy — 6 modes (SP-policies)", () => {
   test("all six parse", () => {
-    for (const p of ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"]) {
+    for (const p of ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"] as const) {
       expect(ApprovalPolicy.parse(p)).toBe(p);
     }
   });
