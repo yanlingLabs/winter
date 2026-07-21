@@ -2796,11 +2796,13 @@ export class AgentEngine {
         // applyDirGrant here gives it the same silent session grant an in-project write already has.
         // Under `auto` the granted call then rides the fs reviewer (auto-only branch below); under
         // `accept-edits` no reviewer branch fires (all three are `=== "auto"`-gated), so it flows
-        // straight to executeCall — silent either way. `bypass` is deliberately NOT added here yet
-        // (Task 10 owns the bypass escape paths); under `bypass` an out-of-project edit still rides
-        // the `ask`-shaped grant card below, unchanged from before this task.
+        // straight to executeCall — silent either way. SP-policies Task 10: `bypass` now joins them
+        // too — bypass is opt-in no-guardrails, so an out-of-project edit under it gets the SAME
+        // silent pre-grant rather than riding the `ask`-shaped grant card below (its reviewer branch
+        // is `auto`-only same as the other two, so a bypass-granted call also flows straight to
+        // executeCall, silent).
         let grantFailure: string | null = null;
-        if (dirGrant && !dirGrantDenied && (meta.approvalPolicy === "auto" || meta.approvalPolicy === "accept-edits")) {
+        if (dirGrant && !dirGrantDenied && (meta.approvalPolicy === "auto" || meta.approvalPolicy === "accept-edits" || meta.approvalPolicy === "bypass")) {
           grantFailure = this.applyDirGrant(sessionId, threadId, dirGrant.dir);
           if (!grantFailure) dirGrant = null;
         }
@@ -2974,7 +2976,7 @@ export class AgentEngine {
             if (failure) return { output: failure, isError: true };
             return this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, oneShot, visionCapable);
           }, pins, rootsOverride, visionCapable);
-        } else if (call.name === "bash" && bashEscalation.dangerouslyDisableSandbox) {
+        } else if (call.name === "bash" && bashEscalation.dangerouslyDisableSandbox && meta.approvalPolicy !== "bypass") {
           // SP-approvals Task 11 (spec §8): a full sandbox-escape floor — ALWAYS a card, under
           // EVERY policy this branch can be reached under. Unlike every other branch in this
           // chain, the condition here never consults `decision`/`ruleAllowed` at all — it fires
@@ -2989,6 +2991,15 @@ export class AgentEngine {
           // are deliberately narrower than approvalOptionsFor's bash shape: allow_once/deny ONLY,
           // no allow_project/allow_global — v1 offers no standing memory for this flag at all
           // (spec: "NO rule can silence it").
+          //
+          // SP-policies Task 10: `bypass` now excludes this branch's CONDITION (the guard added
+          // above) — bypass is opt-in no-guardrails, so an escape call falls through every
+          // remaining branch (all `=== "auto"`-gated) to the final `else` → executeCall, silently.
+          // Keeping this a condition-only change is deliberate: SP-policies Task 11 (next, NOT the
+          // "SP-approvals Task 11" referenced throughout this branch's body above — a different,
+          // already-shipped phase) reworks this branch's BODY significantly (an auto reviewer-gate
+          // + a BashUnsandboxed-rule pre-clear ahead of these flips) — neither applies under
+          // bypass, which never reaches this body at all.
           //
           // SP-approvals T11 review, MEDIUM-1 (adjudicated ADOPTED — CC parity: an unsandboxed
           // retry still rides the normal review path, which includes the reviewer under auto):
@@ -3040,17 +3051,35 @@ export class AgentEngine {
             // spec: "a persisted rule then covers matching network calls silently").
             options: approvalOptionsFor(call),
           }, loaded, undefined, pins, rootsOverride, visionCapable);
-        } else if (webFetchCard) {
+        } else if (webFetchCard && meta.approvalPolicy !== "bypass") {
           // SP-approvals Task 10: web_fetch's dangerous-domain floor fires here — reached under
           // EVERY policy (`decision` is unconditionally "allow" for web_fetch now, gate.ts), not
           // just `ask`. `undefined` onApprove → the default executeCall path, same as the plain
           // `decision === "ask"` branch above; the ONLY difference is the summary/options come from
           // webFetchGate instead of approvalCardSummary/approvalOptionsFor.
-          outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
-            timeoutMs: this.approvalTimeoutFor(meta),
-            summary: webFetchCard.summary,
-            options: webFetchCard.options,
-          }, loaded, undefined, pins, rootsOverride, visionCapable);
+          //
+          // SP-policies Task 10: NOW excludes `bypass` (the guard added to this branch's
+          // condition) — bypass is opt-in no-guardrails, so a dangerous-domain fetch under it
+          // falls through to the final `else` → executeCall, silently, same as the escape branch
+          // above under bypass. And splits the remaining policies by mode: `dont-ask` DENIES
+          // outright here (no card — dont-ask never prompts). gate.ts's NETWORK class is
+          // unconditionally "allow", so the generic `decision === "ask"` → deny flip earlier in
+          // this function never even sees a web_fetch call — this floor is the ONLY place a
+          // dont-ask session's dangerous-domain fetch is ever adjudicated, so it needs its own
+          // accurate, mode-aware deny message rather than silently inheriting the ask-shaped card.
+          // Every OTHER policy (ask/auto/accept-edits/plan) keeps the UNCHANGED approval card below.
+          if (meta.approvalPolicy === "dont-ask") {
+            outcome = {
+              output: `web_fetch denied — dont-ask mode declines a fetch to a dangerous domain with no standing WebFetch rule.`,
+              isError: true,
+            };
+          } else {
+            outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
+              timeoutMs: this.approvalTimeoutFor(meta),
+              summary: webFetchCard.summary,
+              options: webFetchCard.options,
+            }, loaded, undefined, pins, rootsOverride, visionCapable);
+          }
         } else if (call.name === "exit_plan_mode" && this.cfg.plans && meta.approvalPolicy === "plan") {
           outcome = await this.runPlanBridge(call, sessionId, threadId, meta);
         } else if (call.name === "enter_plan_mode") {
