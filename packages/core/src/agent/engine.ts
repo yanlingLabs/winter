@@ -489,16 +489,6 @@ function permissionRulesFileTarget(
   } catch { return null; } // unresolvable — not a confirmed match; the normal dispatch chain decides
 }
 
-/** SP-policies Task 6: realpath `p` if it exists (resolves case AND symlinks), else `resolve(p)`
- *  raw — same graceful-fallback shape `grantDenied`'s own per-prefix canonicalization already uses
- *  (below). Used by `writableRoots` to canonicalize an `Edit(<path>)` rule's declared dir BEFORE
- *  comparing it against `grantDenied`'s realpath-compared denylist: a symlinked or not-yet-existing
- *  Edit dir must resolve to the SAME identity `grantDenied` would itself compare against, or the
- *  two could disagree about whether the exact same real directory is denied. */
-function canonicalDir(p: string): string {
-  try { return realpathSync(p); } catch { return resolve(p); }
-}
-
 /** phase 5e T3 (external coverage): the précis for an mcp__/plugin__ call — tool name + a
  *  single-line argsJson slice(160). Same "raw JSON, never a hand-crafted rendering" honesty as
  *  approvalCardSummary's generic fallback, just capped shorter — this is what the REVIEWER sees,
@@ -3580,15 +3570,27 @@ export class AgentEngine {
    *     permissionRulesFileTarget's own identity check) would simply never run for it: `dirGrant`
    *     would compute as `null` (the call looks ordinary, in-root), so `dirGrantDenied`'s
    *     `grantDenied` check — which only ever runs when `dirGrant` is non-null — is never reached.
-   *  Each Edit dir is realpath-canonicalized FIRST (`canonicalDir`) so a symlinked or not-yet-
-   *  existing Edit dir resolves to the identity `grantDenied` itself expects (mirrors
-   *  `permissionRulesFileTarget`'s own filesystem-identity-over-string-spelling principle). */
+   *  Each Edit dir is realpath-resolved FIRST (`realpathSync`) — and a not-yet-existing dir is
+   *  SKIPPED entirely, never raw-fallback-included — so a symlinked Edit dir resolves to the identity
+   *  `grantDenied` itself expects (mirrors `permissionRulesFileTarget`'s filesystem-identity-over-
+   *  string-spelling principle), and a missing root can never reach bash's realpath/Seatbelt (which
+   *  would ENOENT-crash every bash call). See the loop below. */
   private writableRoots(sessionId: string, projectRoot: string | null, rootsOverride: string[] | undefined): string[] {
     const base = rootsOverride ?? this.cfg.dirs.roots(sessionId);
     if (rootsOverride || !this.cfg.permissionRules || projectRoot === null) return base;
-    const editDirs = this.cfg.permissionRules.editPathRules(projectRoot)
-      .map(canonicalDir)
-      .filter((d) => d !== "/" && !this.grantDenied(d));
+    const editDirs: string[] = [];
+    for (const raw of this.cfg.permissionRules.editPathRules(projectRoot)) {
+      // SP-policies Task 6 review (HIGH + MEDIUM): realpath-or-SKIP, never a raw fallback. A
+      // not-yet-existing Edit dir is SKIPPED entirely — every session root MUST exist (bash.ts
+      // realpaths ctx.roots and sandbox.ts turns each into a Seatbelt subpath; a missing root
+      // ENOENT-crashes EVERY bash call in the session, not just a write to that dir). realpathSync
+      // also fully resolves symlinks, so a symlinked Edit path can't dodge the grantDenied denylist
+      // below by pointing a not-yet-real tail at the control plane — an unresolvable tail just drops.
+      let real: string;
+      try { real = realpathSync(raw); } catch { continue; }
+      if (real === "/" || this.grantDenied(real)) continue; // "/" (whole disk) + ~/.norma control plane
+      editDirs.push(real);
+    }
     return editDirs.length ? [...new Set([...base, ...editDirs])] : base;
   }
 

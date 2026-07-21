@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, existsSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, existsSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -141,5 +141,57 @@ describe("engine.writableRoots(): Edit(<path>) rules feed the write/edit fence +
     expect(result?.isError).toBe(true);
     expect(result?.output).toContain("control plane");
     expect(existsSync(target)).toBe(false);
+  });
+
+  // --- Task 6 review fixes: writableRoots realpath-or-SKIP (HIGH + MEDIUM) ---
+
+  test("HIGH: Edit(<not-yet-existing dir>) is SKIPPED from bash's ctx.roots — every root stays existing (no ENOENT crash in bash.ts's realpath of ctx.roots)", async () => {
+    const cwd = tmp("norma-ed-cwd6-");
+    const missing = join(tmp("norma-ed-miss-"), "does-not-exist-yet"); // parent exists, this leaf does not
+    const permissionRules = new PermissionRules({ globalAllow: () => [`Edit(${missing})`], normaHome: tmp("norma-ed-home6-") });
+    const registry = new ToolRegistry();
+    const seenRoots: string[][] = [];
+    registry.register({
+      name: "bash", description: "stub bash capturing ctx.roots",
+      args: z.object({ command: z.string() }),
+      run(_args, ctx) { seenRoots.push(ctx.roots); return "ok"; },
+    });
+    const provider = new FakeProvider(bashTurn("true"));
+    const { engine, sessionId } = setupEngine(provider, { registry, policy: "auto", cwd, permissionRules });
+
+    await engine.runTurn(sessionId);
+    expect(seenRoots.length).toBe(1);
+    expect(seenRoots[0]).not.toContain(missing); // never reaches bash → bash.ts's realpathSync can't ENOENT on it
+    for (const r of seenRoots[0]!) expect(existsSync(r)).toBe(true); // the "every session root exists" invariant bash.ts relies on
+  });
+
+  test("MEDIUM: an Edit(<symlink-into-denied>/<not-yet-existing tail>) is filtered, not raw-fallback-leaked past grantDenied", async () => {
+    const cwd = tmp("norma-ed-cwd7-");
+    const deniedRoot = tmp("norma-ed-denied2-");
+    // A symlink OUTSIDE the denied prefix pointing INTO it; the tail does NOT exist yet. The OLD
+    // single-shot canonicalDir raw-fell-back to `<link>/newsub` (symlink UNRESOLVED, so its string
+    // is under <link>, not <deniedRoot> — grantDenied missed it → LEAKED into ctx.roots). The fix
+    // realpath-throws on the missing tail and SKIPS it. (An EXISTING tail is resolved by realpath
+    // and caught by grantDenied under both old and new — the not-yet-existing tail is the actual gap.)
+    const link = join(tmp("norma-ed-link-"), "into-denied");
+    symlinkSync(deniedRoot, link);
+    const editViaLink = join(link, "newsub"); // newsub never created — realpathSync throws
+    const permissionRules = new PermissionRules({ globalAllow: () => [`Edit(${editViaLink})`], normaHome: tmp("norma-ed-home7-") });
+    const registry = new ToolRegistry();
+    const seenRoots: string[][] = [];
+    registry.register({
+      name: "bash", description: "stub bash capturing ctx.roots",
+      args: z.object({ command: z.string() }),
+      run(_args, ctx) { seenRoots.push(ctx.roots); return "ok"; },
+    });
+    const provider = new FakeProvider(bashTurn("true"));
+    const { engine, sessionId } = setupEngine(provider, {
+      registry, policy: "auto", cwd, permissionRules, grantDeniedPrefixes: [deniedRoot],
+    });
+
+    await engine.runTurn(sessionId);
+    expect(seenRoots.length).toBe(1);
+    expect(seenRoots[0]).not.toContain(editViaLink);               // the raw symlinked spelling (old leak)
+    expect(seenRoots[0]).not.toContain(join(deniedRoot, "newsub")); // nor its resolved form
   });
 });
