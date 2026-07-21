@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { TrustStore } from "./trust";
 import type { SkillStore } from "./skills";
@@ -153,6 +153,26 @@ export class ContextAssembler {
     if (cwd && trusted) {
       const projInstr = readCapped(join(cwd, "NORMA.md"), this.caps.instructionsBytes);
       if (projInstr) sections.push(`## Project instructions (NORMA.md)\n${projInstr}`);
+    }
+
+    // Project prose rules (CC-parity: `.claude/rules/` → `.norma/rules/*.md`). Same trust gate as
+    // the project NORMA.md block just above (reuses the same hoisted `trusted`, not a second
+    // `isTrusted` call). Every file's total is bounded by ONE shared budget — the instructions byte
+    // cap — rather than per-file, so a directory of many small rule files can't add up to an
+    // unbounded prompt; `readCapped` truncates each file to whatever of that budget remains, and
+    // files are read in sorted filename order for determinism.
+    if (cwd && trusted) {
+      const rulesDir = join(cwd, ".norma", "rules");
+      let files: string[] = [];
+      try { files = readdirSync(rulesDir).filter((f) => f.endsWith(".md")).sort(); } catch { /* no rules dir → none */ }
+      const parts: string[] = [];
+      let budget = this.caps.instructionsBytes; // reuse the instructions byte cap as the TOTAL rules budget
+      for (const f of files) {
+        if (budget <= 0) break;
+        const body = readCapped(join(rulesDir, f), budget);
+        if (body) { parts.push(`### ${f}\n${neutralizeReminderTags(body)}`); budget -= Buffer.byteLength(body); }
+      }
+      if (parts.length) sections.push(`## Project rules (.norma/rules/)\n${parts.join("\n\n")}`);
     }
 
     // File-based memory (MEMDIR, T1; bucket switch added by Dreaming Phase 7b): supersedes the
