@@ -3573,8 +3573,13 @@ export class AgentEngine {
   /** Workflows: bridges a workflow script's agent() call to the SAME SubagentManager/runThread path
    *  spawn_agent uses. The child runs at accept-edits (Global Constraints — the launch gate on the
    *  Workflow tool call itself is the human's one consent point) and is EXCLUDED from the Workflow
-   *  tool (nesting depth 1). Returns a plain {ok,result} the WorkflowRuntime posts back over the
-   *  bridge. Never throws — SubagentManager.run never throws (subagents.ts). */
+   *  tool (nesting depth 1) AND from spawn_agent itself (M3 review fix): a workflow's agent()
+   *  fan-out is bounded by the run's own semaphore + totalCap, but a workflow-spawned child that
+   *  called spawn_agent would nest a grandchild subtree that counts against the global
+   *  SubagentManager pool without ever counting against THIS run's totalCap — the run's caps must
+   *  stay authoritative over everything it spawns, direct or nested. Returns a plain {ok,result} the
+   *  WorkflowRuntime posts back over the bridge. Never throws — SubagentManager.run never throws
+   *  (subagents.ts). */
   async runWorkflowAgent(
     sessionId: string, prompt: string, opts: { label?: string; model?: string; schema?: unknown } | undefined, signal: AbortSignal,
   ): Promise<{ ok: boolean; result: string }> {
@@ -3590,7 +3595,7 @@ export class AgentEngine {
     const childId = "wfa_" + randomUUID().slice(0, 8); // same minting shape as the spawn bridge (engine.ts: "th_" + randomUUID().slice(0,8))
     const childLoaded = new Set<string>();
     const instructionsFull = this.buildInstructionsFull(def.instructions, childCwd, childLoaded, childPolicy, sessionId);
-    const childExcludeTools = new Set(["ask_user", "exit_plan_mode", "enter_plan_mode", "send_message", "task_stop", "agent_list", "agent_output", "skill_write", SESSION_SPAWN_TOOL, WORKFLOW_TOOL]);
+    const childExcludeTools = new Set(["ask_user", "exit_plan_mode", "enter_plan_mode", "send_message", "task_stop", "agent_list", "agent_output", "skill_write", SESSION_SPAWN_TOOL, WORKFLOW_TOOL, "spawn_agent"]);
     this.registerThread(sessionId, { threadId: childId, parentThreadId: MAIN_THREAD, agentType, status: "running" });
     this.emit(sessionId, { type: "thread_started", sessionId, threadId: childId, parentThreadId: MAIN_THREAD, agentType, prompt, description: opts?.label });
     const result = await this.cfg.subagents.run(async (childSignal, progress) => this.runThread({
