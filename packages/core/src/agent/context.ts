@@ -66,7 +66,7 @@ const MEMDIR_INDEX_MAX_BYTES = 25 * 1024;
  *  (MEMORY.md is a real multi-line markdown list — collapsing it to one line would make the index
  *  unreadable, and file content isn't attacker-controlled turn-input the way a tool result is, so
  *  only the tag itself needs neutralizing here). */
-function neutralizeReminderTags(s: string): string {
+export function neutralizeReminderTags(s: string): string {
   return s.replace(/<\/?system-reminder>/gi, "[tag]");
 }
 
