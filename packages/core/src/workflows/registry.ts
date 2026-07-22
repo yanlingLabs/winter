@@ -49,8 +49,12 @@ export class WorkflowRegistry {
   stop(runId: string): boolean {
     const e = this.runs.get(runId);
     if (!e || e.status !== "running") return false;
-    e.abort.abort();
+    // Set "stopped" BEFORE firing abort: abort() runs its listeners SYNCHRONOUSLY, and the runtime's
+    // abort→teardown→settle cascade (and any finish() it triggers, which guards on status==="running")
+    // reads the status during that synchronous run. Aborting first would let a concurrent await()
+    // settler resolve with a stale "running" snapshot, and a finish() overwrite "stopped" with "failed".
     e.status = "stopped";
+    e.abort.abort();
     return true;
   }
 

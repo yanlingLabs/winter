@@ -24,3 +24,15 @@ test("stop fires abort + flips to stopped only when running; unknown ids are no-
   expect(reg.stop("wf_2")).toBe(false); // already terminal
   expect(reg.stop("nope")).toBe(false); // unknown
 });
+
+test("stop() sets status BEFORE firing abort — a synchronous abort listener observes 'stopped', not stale 'running'", () => {
+  const reg = new WorkflowRegistry();
+  const abort = new AbortController();
+  reg.register({ runId: "wf_3", sessionId: "s_1", abort });
+  let observed: string | undefined;
+  // The runtime registers its teardown→settle cascade on this abort signal; abort() runs listeners
+  // synchronously, so whatever it reads out of the registry must already be terminal.
+  abort.signal.addEventListener("abort", () => { observed = reg.get("wf_3")?.status; });
+  reg.stop("wf_3");
+  expect(observed).toBe("stopped"); // was "running" before the ordering fix
+});
