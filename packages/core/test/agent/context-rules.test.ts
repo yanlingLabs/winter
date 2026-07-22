@@ -103,8 +103,39 @@ describe("ContextAssembler — .norma/rules/*.md prose rules (CC-parity, trust-g
     const section = (out.split("## Project rules")[1] ?? "").split("\n\n## ")[0] ?? "";
     // Formal bound: sum of injected rule-body bytes <= instructionsBytes + byteLength(TRUNC) (only the
     // last file processed can overshoot the entering budget, by exactly the truncation marker's length,
-    // before the loop's `budget <= 0` check breaks it). Generous extra slack below covers the section's
-    // own "## Project rules…"/"### x.md" markdown headers, which aren't part of that budget.
-    expect(Buffer.byteLength(section, "utf8")).toBeLessThanOrEqual(64 + 200);
+    // before the loop's `budget <= 0` check breaks it). fix-wave E: the budget now also counts each
+    // file's `### <filename>\n` header bytes (previously only the body was decremented, so headers
+    // were unbounded-per-file — see the dedicated "many small files" test below for the proof), so
+    // the slack this bound needs is much smaller than before; the modest margin left below just
+    // covers the section's own OUTER "## Project rules (.norma/rules/)\n" prefix and the "\n\n"
+    // joins between files, neither of which was ever part of the per-file budget, before or after.
+    expect(Buffer.byteLength(section, "utf8")).toBeLessThanOrEqual(64 + 50);
+  });
+
+  test("fix-wave E: header bytes count against the rules budget too — many small files can't balloon the payload past it", () => {
+    const { home, trust } = setup();
+    const cwd = realDir();
+    mkdirSync(join(cwd, ".norma", "rules"), { recursive: true });
+    // 20 files, each a single-byte body — under the OLD accounting (budget decremented by body
+    // bytes only) essentially all 20 files' ~14-byte headers would land uncounted, blowing the
+    // 20-byte budget many times over (bounded only by filename length × file count, per the
+    // brief). Under the FIX, each file's header+body together count, so the loop's own `budget <=
+    // 0` check now stops it after only a couple of files.
+    for (let i = 1; i <= 20; i++) {
+      writeFileSync(join(cwd, ".norma", "rules", `rule${String(i).padStart(2, "0")}.md`), "X");
+    }
+    trust.trust(cwd);
+    const a = new ContextAssembler({
+      normaHome: home,
+      trust,
+      skills: new SkillStore({ normaHome: home, trust }),
+      caps: { instructionsBytes: 20 },
+    });
+    const out = a.assemble({ cwd });
+    const section = (out.split("## Project rules")[1] ?? "").split("\n\n## ")[0] ?? "";
+    // Generous but still tight-relative-to-the-bug bound: comfortably covers the outer prefix/joins
+    // for the handful of files that now fit, yet is an order of magnitude below what the pre-fix
+    // (header-uncounted) accounting would have produced for 20 files (~355 bytes for this fixture).
+    expect(Buffer.byteLength(section, "utf8")).toBeLessThanOrEqual(20 + 100);
   });
 });

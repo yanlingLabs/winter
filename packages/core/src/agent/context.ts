@@ -170,7 +170,14 @@ export class ContextAssembler {
       for (const f of files) {
         if (budget <= 0) break;
         const body = readCapped(join(rulesDir, f), budget);
-        if (body) { parts.push(`### ${f}\n${neutralizeReminderTags(body)}`); budget -= Buffer.byteLength(body); }
+        if (body) {
+          // fix-wave E: decrement by the FULL pushed part's bytes (header included), not just the
+          // body — the `### <filename>\n` header was previously uncounted, making it
+          // unbounded-per-file (bounded only by filename length × file count).
+          const part = `### ${f}\n${neutralizeReminderTags(body)}`;
+          parts.push(part);
+          budget -= Buffer.byteLength(part);
+        }
       }
       if (parts.length) sections.push(`## Project rules (.norma/rules/)\n${parts.join("\n\n")}`);
     }
