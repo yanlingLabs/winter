@@ -59,6 +59,14 @@ const MAX_TOOL_ITERATIONS = 24; // runaway guard until 1b-ii budgets land
 // own runtime reject.
 const SESSION_SPAWN_TOOL = "session_spawn";
 
+// Workflows Task A4: the module-wide name for the `Workflow` tool (B2 registers it for real, on
+// the same shared registry every session's specs() reads from — see SESSION_SPAWN_TOOL's own doc
+// comment just above for the identical pattern). A workflow's own spawned agents (runWorkflowAgent,
+// below) are depth-1 and must never themselves be able to launch a workflow (Global Constraints:
+// nesting depth 1) — named ONCE here so A4's child-exclusion, B2's registration, B3's gating, and
+// B4's pin all read the SAME literal, with no `Workflow`/`workflow` casing drift between them.
+const WORKFLOW_TOOL = "Workflow";
+
 // 4h-i (CC parity: spawn_agent `mode`), widened to 6 values (SP-policies Task 2) — permissiveness
 // order, LEAST to MOST permissive: "plan" (read-only, most restrictive) < "dont-ask" < "ask"
 // (human-gated) < "accept-edits" < "auto" (auto-allows non-destructive tools) < "bypass" (least
@@ -3551,6 +3559,44 @@ export class AgentEngine {
     this.cfg.bgAgents!.complete(entry.agentId, { ok: !outcome.isError, result: outcome.output },
       { notified: true, timedOut: !result.ok && result.timedOut });
     return outcome;
+  }
+
+  /** Workflows: bridges a workflow script's agent() call to the SAME SubagentManager/runThread path
+   *  spawn_agent uses. The child runs at accept-edits (Global Constraints — the launch gate on the
+   *  Workflow tool call itself is the human's one consent point) and is EXCLUDED from the Workflow
+   *  tool (nesting depth 1). Returns a plain {ok,result} the WorkflowRuntime posts back over the
+   *  bridge. Never throws — SubagentManager.run never throws (subagents.ts). */
+  async runWorkflowAgent(
+    sessionId: string, prompt: string, opts: { label?: string; model?: string; schema?: unknown } | undefined, signal: AbortSignal,
+  ): Promise<{ ok: boolean; result: string }> {
+    if (!this.cfg.subagents || !this.cfg.agents) return { ok: false, result: "subagents are not available in this session" };
+    const meta = this.cfg.store.meta(sessionId);
+    const cwd = meta.cwd;
+    if (!cwd) return { ok: false, result: "session has no working directory" };
+    const agentType = opts?.label ?? "general-purpose";
+    const def = this.cfg.agents.resolve(agentType, cwd);
+    const childCwd = cwd;
+    const childPolicy: SessionApprovalPolicy = "accept-edits";
+    const childMeta = { ...meta, approvalPolicy: childPolicy };
+    const childId = "wfa_" + randomUUID().slice(0, 8); // same minting shape as the spawn bridge (engine.ts: "th_" + randomUUID().slice(0,8))
+    const childLoaded = new Set<string>();
+    const instructionsFull = this.buildInstructionsFull(def.instructions, childCwd, childLoaded, childPolicy, sessionId);
+    const childExcludeTools = new Set(["ask_user", "exit_plan_mode", "enter_plan_mode", "send_message", "task_stop", "agent_list", "agent_output", "skill_write", SESSION_SPAWN_TOOL, WORKFLOW_TOOL]);
+    this.registerThread(sessionId, { threadId: childId, parentThreadId: MAIN_THREAD, agentType, status: "running" });
+    this.emit(sessionId, { type: "thread_started", sessionId, threadId: childId, parentThreadId: MAIN_THREAD, agentType, prompt, description: opts?.label });
+    const result = await this.cfg.subagents.run(async (childSignal, progress) => this.runThread({
+      sessionId, threadId: childId, instructionsFull,
+      input: [{ type: "message", role: "user", content: prompt }],
+      cwd: childCwd, model: opts?.model ?? this.cfg.provider.model, meta: childMeta, depth: 1,
+      signal: AbortSignal.any([childSignal, signal]),
+      loaded: childLoaded, excludeTools: childExcludeTools, allowTools: def.allowTools, onProgress: progress,
+    }));
+    const stopReason = result.ok ? result.value.stopReason : result.stalled ? "stalled" : "error";
+    this.emit(sessionId, { type: "thread_completed", sessionId, threadId: childId, stopReason });
+    this.completeThread(sessionId, childId, stopReason);
+    if (!result.ok) return { ok: false, result: this.subagentFailureText(agentType, result, sessionId, childId) };
+    if (result.value.stopReason === "error") return { ok: false, result: `workflow agent (${agentType}) failed: ${result.value.errorMessage ?? "provider error"}` };
+    return { ok: true, result: result.value.finalText || "the agent finished without a final message" };
   }
 
   /** phase 5e T3: class-off flag — T4 threads settings.reviewerClasses into cfg; until then a
