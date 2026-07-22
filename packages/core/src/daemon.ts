@@ -575,7 +575,29 @@ export async function startDaemon(opts: {
     // INVOKED until a real Workflow launch happens, long after `engine` is assigned).
     workflowRuntime = new WorkflowRuntime({
       onEvent: (sid, ev) => {
-        // Track D rewires this to hub.append the wire events; here it drives the completion notify.
+        // Track D Task D1: hub.append the wire counterpart of this runtime event so an attached
+        // client (the app) can watch a Workflow run live — ADDITIVE to (never instead of) the
+        // notifyWorkflowCompletion call below, which still drives the assistant-facing
+        // task_notification on completion/failure. Field mapping mirrors the fixtures in
+        // packages/protocol/scripts/generate.ts (workflow_started/_progress/_completed/_failed).
+        switch (ev.type) {
+          case "started":
+            hub.append(sid, { type: "workflow_started", sessionId: sid, threadId: "main", runId: ev.runId, name: ev.name, summary: ev.summary });
+            break;
+          case "progress":
+            hub.append(sid, {
+              type: "workflow_progress", sessionId: sid, threadId: "main", runId: ev.runId,
+              phase: ev.progress.phase, log: ev.progress.log,
+              running: ev.progress.counts.running, completed: ev.progress.counts.completed, total: ev.progress.counts.total,
+            });
+            break;
+          case "completed":
+            hub.append(sid, { type: "workflow_completed", sessionId: sid, threadId: "main", runId: ev.runId, resultSummary: ev.result });
+            break;
+          case "failed":
+            hub.append(sid, { type: "workflow_failed", sessionId: sid, threadId: "main", runId: ev.runId, error: ev.error });
+            break;
+        }
         if (ev.type === "completed" || ev.type === "failed") engine?.notifyWorkflowCompletion(sid, ev.runId);
       },
       spawnAgent: (sid, prompt, o, signal) => engine!.runWorkflowAgent(sid, prompt, o, signal),

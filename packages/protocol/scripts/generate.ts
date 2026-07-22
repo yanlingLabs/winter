@@ -117,6 +117,13 @@ const fixtures: Record<string, unknown> = {
     { id: "allow_once", label: "Allow once" },
     { id: "allow_project", label: "Always allow \"git push\" in this project", rule: "Bash(git push:*)", scope: "project" },
   ] },
+  // CC-parity phase 3 (Workflows, Track D Task D1 — another NormaKit-trap task like tool_review/
+  // notification_requested above): 4 NEW SessionEvent variants mirroring the daemon's onEvent
+  // rewire of WorkflowRuntimeEvent's started/progress/completed/failed onto the wire.
+  "workflow_started": { ...base, threadId: "main", type: "workflow_started", runId: "wf_a1b2c3", name: "triage", summary: "Triage 20 files in parallel" },
+  "workflow_progress": { ...base, threadId: "main", type: "workflow_progress", runId: "wf_a1b2c3", phase: "synthesize", log: "merging findings", running: 3, completed: 17, total: 20 },
+  "workflow_completed": { ...base, threadId: "main", type: "workflow_completed", runId: "wf_a1b2c3", resultSummary: "12 issues found across 20 files; report written." },
+  "workflow_failed": { ...base, threadId: "main", type: "workflow_failed", runId: "wf_a1b2c3", error: "workflow exceeded the per-run agent cap (1000)" },
 };
 for (const [name, value] of Object.entries(fixtures)) {
   SessionEvent.parse(value); // fixtures must be valid by construction
