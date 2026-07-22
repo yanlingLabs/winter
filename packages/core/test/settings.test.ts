@@ -473,19 +473,19 @@ describe("loadPermissionDirs trust gating", () => {
     mkdirSync(join(project, ".norma"), { recursive: true });
     wf(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, permissions: { additionalDirectories: ["/opt/user-dir"] } }));
     wf(join(project, ".norma", "settings.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/committed-dir"] } }));       // committed → trust-gated
-    wf(join(project, ".norma", "settings.local.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/local-dir"] } }));    // gitignored → always
+    wf(join(project, ".norma", "settings.local.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/local-dir"] } }));    // fix-wave A2: local is ALSO trust-gated now (a repo can force-commit one)
     return { home, project };
   }
 
-  test("UNtrusted project: committed settings.json is IGNORED; user + local still apply", () => {
+  test("UNtrusted project: BOTH committed settings.json and settings.local.json are IGNORED; only user-global still applies (fix-wave A2: gitignore is not a trust boundary)", () => {
     const { home, project } = scaffold();
     const dirs = loadPermissionDirs(home, project, false);
     expect(dirs).toContain("/opt/user-dir");    // user global — always
-    expect(dirs).toContain("/opt/local-dir");   // local gitignored — always
+    expect(dirs).not.toContain("/opt/local-dir");     // local — gated out when untrusted too
     expect(dirs).not.toContain("/opt/committed-dir"); // committed — gated out when untrusted
   });
 
-  test("TRUSTED project: committed settings.json now applies", () => {
+  test("TRUSTED project: committed settings.json AND settings.local.json now apply", () => {
     const { home, project } = scaffold();
     const dirs = loadPermissionDirs(home, project, true);
     expect(dirs).toContain("/opt/committed-dir");

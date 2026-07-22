@@ -26,7 +26,7 @@ function canon(p: string): string {
  * (cwd + each of `writableRoots`) additionally gets an explicit `(deny file-write* (literal
  * "<root>/.norma/permissions.local.json"))` line, unconditionally — automatic for every caller,
  * with no opt-in flag to forget. This is the bash-invoked-write half of the same fix engine.ts's
- * dispatch loop applies to the write/edit TOOLS (`permissionRulesFileTarget`): a bash command like
+ * dispatch loop applies to the write/edit TOOLS (`controlPlaneFileTarget`): a bash command like
  * `echo x > .norma/permissions.local.json` never goes through that tool-level check at all — the
  * seatbelt is the only enforcement point left for it. Verified empirically (this exact profile
  * shape, a real `/usr/bin/sandbox-exec` child, on this task's own dev machine — see
@@ -47,12 +47,28 @@ function canon(p: string): string {
  * (regex ...))` line — placed after the literals, matching `<any>/.norma/permissions.local.json` at ANY
  * depth, case-folded per character (SBPL has no working `(?i)`) — closes that. See the inline
  * comment on `RULES_FILE_REGEX` below for the real-`sandbox-exec` verification of both facts.
+ *
+ * CC-parity Task 6.5 (controller-added): both the per-root literals and the any-depth regex now
+ * cover two MORE control-plane filenames — `settings.json` and `settings.local.json`, the
+ * `ProjectSettingsResolver` overlays Task 7 wires `permissions.allow` from. Same composition-hole
+ * logic as above: engine.ts's write/edit-tool fence (`controlPlaneFileTarget`, renamed from
+ * `permissionRulesFileTarget` in this same pass) only ever sees write/edit TOOL calls, so a
+ * bash-invoked `echo '{"permissions":{"allow":["BashUnsandboxed(*:*)"]}}' >
+ * .norma/settings.local.json` needs THIS seatbelt to be the one thing standing in its way. The two
+ * new filenames get their own SEPARATE `(deny file-write* (regex ...))` lines — never combined via
+ * alternation into one — mirroring `RULES_FILE_REGEX`'s own per-character case-class technique. See
+ * `SETTINGS_FILE_REGEX`/`SETTINGS_LOCAL_FILE_REGEX` below.
  */
 export function buildSeatbeltProfile(opts: SandboxOptions): string {
   const roots = [opts.cwd, ...(opts.writableRoots ?? [tmpdir()])].map(canon);
   const writeRules = roots.map((r) => `  (subpath "${sbplString(r)}")`).join("\n");
+  // CC-parity Task 6.5: three control-plane filenames per root now, not just the rules store —
+  // `settings.json`/`settings.local.json` join once Task 7 makes them rule-bearing (see this
+  // function's own doc comment above). `flatMap` over the cross product (roots × filenames) keeps
+  // this a single joined block of literal denies, same shape as before, just wider.
+  const CONTROL_PLANE_FILES = ["permissions.local.json", "settings.json", "settings.local.json"];
   const denyRulesFileRules = roots
-    .map((r) => `(deny file-write* (literal "${sbplString(canon(join(r, ".norma", "permissions.local.json")))}"))`)
+    .flatMap((r) => CONTROL_PLANE_FILES.map((f) => `(deny file-write* (literal "${sbplString(canon(join(r, ".norma", f)))}"))`))
     .join("\n");
   // SP-policies whole-branch review (Item 1, HIGH): the per-root literal denies above only cover a
   // rules store DIRECTLY under a writable root (`<root>/.norma/permissions.local.json`). A broad
@@ -68,6 +84,19 @@ export function buildSeatbeltProfile(opts: SandboxOptions): string {
   // `.norma/memory/` MEMDIR, at any depth, stays writable (filename-specific, same as the literals).
   const RULES_FILE_REGEX = String.raw`/\.[Nn][Oo][Rr][Mm][Aa]/[Pp][Ee][Rr][Mm][Ii][Ss][Ss][Ii][Oo][Nn][Ss]\.[Ll][Oo][Cc][Aa][Ll]\.[Jj][Ss][Oo][Nn]$`;
   const denyRulesFileRegex = `(deny file-write* (regex #"${RULES_FILE_REGEX}"))`;
+  // CC-parity Task 6.5: the same NESTED-store hole applies to the two settings overlays once a
+  // broad `Edit(<parent>)` grant is in force — `<parent>/projB/.norma/settings.local.json` sits
+  // inside a writable subpath with no literal deny for it either. Two SEPARATE regex deny lines
+  // (never one combined via alternation — only plain per-character char-class regexes are verified
+  // against real sandbox-exec, see the comment above), same per-character case-folding technique as
+  // `RULES_FILE_REGEX`. The `$`-anchored suffixes are disjoint by construction — `settings.json`
+  // cannot match a path ending in `settings.local.json` (it ends in `.local.json`, not directly in
+  // `settings` + `.json`) and vice versa — so each file gets exactly one of these two regexes, never
+  // both.
+  const SETTINGS_FILE_REGEX = String.raw`/\.[Nn][Oo][Rr][Mm][Aa]/[Ss][Ee][Tt][Tt][Ii][Nn][Gg][Ss]\.[Jj][Ss][Oo][Nn]$`;
+  const SETTINGS_LOCAL_FILE_REGEX = String.raw`/\.[Nn][Oo][Rr][Mm][Aa]/[Ss][Ee][Tt][Tt][Ii][Nn][Gg][Ss]\.[Ll][Oo][Cc][Aa][Ll]\.[Jj][Ss][Oo][Nn]$`;
+  const denySettingsFileRegex = `(deny file-write* (regex #"${SETTINGS_FILE_REGEX}"))`;
+  const denySettingsLocalFileRegex = `(deny file-write* (regex #"${SETTINGS_LOCAL_FILE_REGEX}"))`;
   const network = opts.allowNetwork ? "(allow network*)" : "(deny network*)";
   // Minimal mach services: deny blanket lookup so open/launchctl/osascript can't
   // ask a privileged, unsandboxed service to act out-of-band on our behalf.
@@ -96,6 +125,8 @@ ${writeRules})
 ${network}
 ${denyRulesFileRules}
 ${denyRulesFileRegex}
+${denySettingsFileRegex}
+${denySettingsLocalFileRegex}
 `;
 }
 

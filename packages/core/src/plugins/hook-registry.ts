@@ -54,9 +54,22 @@ export interface HookFacadeDeps {
   registry: HookRegistry;
   runner: HookRunnerLike;
   /** Hot per-call read of `settings.hooks.enabled` (default true — see settings.ts's
-   *  `hooksEnabledFrom`). Called AFTER the no-hooks fast path (see runFor's doc comment) so an
-   *  event with nothing registered never touches settings at all. */
-  hooksEnabled: () => boolean;
+   *  `hooksEnabledFrom`), now resolved PER-PROJECT (CC project-folder-mechanics Task 9, mirroring
+   *  Tasks 7-8's reviewer/toolSearch/lsp.autoDiagnostics getters): `runFor` (below) resolves the
+   *  cwd ONCE per call and passes it here. A null/undefined cwd (no session-start `extra.cwd`, no
+   *  `cwdForSession` dep, or an unresolvable session) degrades to the same global-only read the
+   *  pre-Task-9 zero-arg getter did — byte-identical. Called AFTER the no-hooks fast path (see
+   *  runFor's doc comment) so an event with nothing registered never touches settings, and never
+   *  resolves a cwd, at all. */
+  hooksEnabled: (cwd?: string | null) => boolean;
+  /** OPTIONAL (CC project-folder-mechanics Task 9): resolves a session's cwd for the per-project
+   *  `hooksEnabled` read above, consulted only when `extra.cwd` isn't already present (today, only
+   *  the session-start event passes `{cwd}` in extra — every other event needs this dep to reach a
+   *  cwd at all). Optional so every existing test/call site constructing a `HookFacade` with just
+   *  the original three deps keeps compiling unchanged (same back-compat shape Tasks 7-8 used for
+   *  their own optional cwd params) — omitting it simply means non-session-start events always read
+   *  the global default, exactly the pre-Task-9 behavior. */
+  cwdForSession?: (sessionId: string) => string | null | undefined;
 }
 
 /**
@@ -81,6 +94,13 @@ export class HookFacade {
    * list regardless of any individual hook's outcome (observe-only, per plan: "other events run
    * all").
    *
+   * Per-project resolution (CC project-folder-mechanics Task 9): cwd is resolved ONCE, AFTER the
+   * fast-path check above (so the no-hooks path stays zero-cost — it never resolves a cwd either)
+   * and BEFORE `hooksEnabled()` is invoked — preferring `extra.cwd` when it's a non-empty string
+   * (only the session-start call site passes one), else `deps.cwdForSession?.(sessionId)`, else
+   * `null`. A null cwd degrades `hooksEnabled(null)` to the same global-only read the pre-Task-9
+   * zero-arg getter did.
+   *
    * `signal` (4f whole-branch I1): the caller's session AbortSignal. Checked BEFORE STARTING each
    * hook so a session interrupt can cut through a running hook CHAIN — an aborted signal stops the
    * loop and returns the results gathered so far (an already-aborted signal starts zero hooks). The
@@ -91,7 +111,10 @@ export class HookFacade {
    */
   async runFor(event: string, extra: Record<string, unknown>, sessionId: string, signal?: AbortSignal): Promise<Array<{ pluginId: string; result: HookResult }>> {
     const specs = this.deps.registry.hooksFor(event);
-    if (specs.length === 0 || !this.deps.hooksEnabled()) return [];
+    if (specs.length === 0) return [];
+    const extraCwd = typeof extra.cwd === "string" && extra.cwd.length > 0 ? extra.cwd : undefined;
+    const cwd = extraCwd ?? this.deps.cwdForSession?.(sessionId) ?? null;
+    if (!this.deps.hooksEnabled(cwd)) return [];
 
     const results: Array<{ pluginId: string; result: HookResult }> = [];
     for (const spec of specs) {

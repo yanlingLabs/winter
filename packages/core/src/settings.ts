@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { DEFAULT_CODEX_MODEL } from "./providers/codex-config";
+import { ensureGlobalGitignore, NORMA_PERSONAL_IGNORES } from "./global-gitignore";
 
 /** Reasoning-effort slugs — the live /models payload (2026-07-10) lists exactly these across
  *  the gpt-5.6 family (luna lacks "ultra", but validating per-model effort support is NOT done
@@ -264,6 +265,16 @@ export function saveSettings(path: string, s: Settings): void {
   writeFileSync(path, JSON.stringify(s, null, 2) + "\n");
 }
 
+/** Parse a settings file to a raw object for OVERLAY merging (no zod, no migration) — absent/torn → null. */
+export function readRawSettings(path: string): Record<string, unknown> | null {
+  try {
+    const o = JSON.parse(readFileSync(path, "utf8"));
+    return o && typeof o === "object" ? o : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Pure `Settings -> Settings` provider-model transform (mirrors plugins/lifecycle.ts's
  *  `setPluginEnabled` pattern) — used by `norma model <slug>`. Preserves every other field,
  *  including `provider.reasoningEffort` if set. Validation (codex-oauth slug membership,
@@ -296,16 +307,19 @@ function readDirs(path: string): string[] {
 }
 
 /**
- * Merge additionalDirectories across scopes (Claude-Code-style). The COMMITTED
- * <projectDir>/.norma/settings.json is honored ONLY when `projectTrusted` — a repo
- * can't silently widen the fence until the user trusts the folder. The user's
- * ~/.norma/settings.json and the gitignored settings.local.json are always honored.
+ * Merge additionalDirectories across scopes (Claude-Code-style). BOTH the COMMITTED
+ * <projectDir>/.norma/settings.json AND the gitignored settings.local.json are honored ONLY when
+ * `projectTrusted` — a repo can't silently widen the fence until the user trusts the folder.
+ * fix-wave A2: settings.local.json used to be honored unconditionally ("gitignored, always"), but
+ * gitignore is advisory, not a trust boundary — a repo can `git add -f` one, so it needs the same
+ * gate the committed file gets (matches CC). Only the user's OWN ~/.norma/settings.json is always
+ * honored, trust-independent.
  */
 export function loadPermissionDirs(homeDir: string, projectDir?: string, projectTrusted = false): string[] {
   const sources = [join(homeDir, "settings.json")]; // user global — always
-  if (projectDir) {
-    if (projectTrusted) sources.push(join(projectDir, ".norma", "settings.json")); // committed — trust-gated
-    sources.push(join(projectDir, ".norma", "settings.local.json")); // local, gitignored — always
+  if (projectDir && projectTrusted) {
+    sources.push(join(projectDir, ".norma", "settings.json"));      // committed — trust-gated
+    sources.push(join(projectDir, ".norma", "settings.local.json")); // local: a repo can force-commit one → also trust-gated (matches CC)
   }
   const merged: string[] = [];
   for (const src of sources) {
@@ -334,4 +348,5 @@ export function addLocalDir(projectDir: string, dir: string): void {
   obj.permissions.additionalDirectories ??= [];
   if (!obj.permissions.additionalDirectories.includes(dir)) obj.permissions.additionalDirectories.push(dir);
   writeFileSync(path, JSON.stringify(obj, null, 2) + "\n");
+  ensureGlobalGitignore(NORMA_PERSONAL_IGNORES);
 }

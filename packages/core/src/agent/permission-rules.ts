@@ -2,16 +2,22 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSyn
 import { join, sep } from "node:path";
 import { hasShellHazards } from "./shell-scan";
 import { dangerousDomainMatch } from "./dangerous-domains";
+import { ensureGlobalGitignore, NORMA_PERSONAL_IGNORES } from "../global-gitignore";
 
 /**
  * CC-grammar allow-rules store (SP-approvals Task 1) — the foundation the engine gate (Task 3)
  * and approval-card persistence (Task 5) build on. Norma's `ask` policy today re-prompts forever;
  * this store lets a call that matches a standing rule skip that prompt. Two scopes:
  *
- *  - "global": rules that apply regardless of project. Read via the injected `globalAllow` thunk
- *    — the caller wires it to a live settings getter (e.g. `() => settings?.permissions?.allow`),
- *    the SAME hot-settings pattern every other live-reloadable setting in this codebase already
- *    follows (see settings-watcher.ts). `append(..., "global", ...)` writes the other direction: a
+ *  - "global": rules that apply regardless of project. Read via the injected `globalAllow(projectRoot)`
+ *    thunk — the caller wires it to a live settings getter (daemon.ts's real wiring, Task 7 of the
+ *    CC project-folder-mechanics plan, is `(projectRoot) => projectSettings.effective(projectRoot)
+ *    ?.permissions?.allow ?? ["Computer"]`), the SAME hot-settings pattern every other
+ *    live-reloadable setting in this codebase already follows (see settings-watcher.ts). Despite
+ *    the "global" name, the thunk itself may resolve to a PER-PROJECT value (a trusted project's
+ *    own `.norma/settings.json` `permissions.allow` union'd in via ProjectSettingsResolver) — this
+ *    class stays agnostic to that; it just calls the thunk with whatever `projectRoot` the
+ *    enclosing method already has in scope. `append(..., "global", ...)` writes the other direction: a
  *    read-modify-write of `<normaHome>/settings.json`'s `permissions.allow`, preserving every
  *    other key. The daemon's existing SettingsWatcher (already watching that one file) is what
  *    makes the write hot — this class never watches or caches the global side itself, it just
@@ -349,13 +355,13 @@ export class PermissionRules {
   // NEW way still only gets the one warning it already got. See `projectRulesFor` below.
   private readonly warnedFiles = new Set<string>();
 
-  constructor(private readonly deps: { globalAllow: () => string[] | undefined; normaHome: string }) {}
+  constructor(private readonly deps: { globalAllow: (projectRoot: string | null) => string[] | undefined; normaHome: string }) {}
 
   /** "allow" when any global or project rule matches this call; `null` = no opinion (the caller's
    *  existing `ask` policy decides from there — this class never itself denies). Never throws: a
    *  malformed rule string or rules file degrades to "ignore it", not an error. */
   decision(call: { name: string; argsJson: string }, projectRoot: string | null): "allow" | null {
-    const global = this.parsed(this.deps.globalAllow() ?? []);
+    const global = this.parsed(this.deps.globalAllow(projectRoot) ?? []);
     if (global.some((r) => ruleMatches(r, call))) return "allow";
     if (projectRoot !== null) {
       const project = this.parsed(this.projectRulesFor(projectRoot));
@@ -393,7 +399,7 @@ export class PermissionRules {
    *  Returns fresh copies — callers cannot mutate this instance's internal cache through them. */
   rulesFor(projectRoot: string | null): { global: string[]; project: string[] } {
     return {
-      global: [...(this.deps.globalAllow() ?? [])],
+      global: [...(this.deps.globalAllow(projectRoot) ?? [])],
       project: projectRoot !== null ? [...this.projectRulesFor(projectRoot)] : [],
     };
   }
@@ -403,7 +409,7 @@ export class PermissionRules {
    *  AND bash's seatbelt may write there. A path-less `Edit` rule contributes nothing (no dir — it
    *  relieves edit CARDS only, never widens the sandbox). Same hot read decision() uses. */
   editPathRules(projectRoot: string | null): string[] {
-    const raw = [...(this.deps.globalAllow() ?? []), ...(projectRoot !== null ? this.projectRulesFor(projectRoot) : [])];
+    const raw = [...(this.deps.globalAllow(projectRoot) ?? []), ...(projectRoot !== null ? this.projectRulesFor(projectRoot) : [])];
     const out: string[] = [];
     for (const s of raw) {
       const p = parseRule(s);
@@ -553,6 +559,7 @@ export class PermissionRules {
     // the mtime check and momentarily serve stale rules back to this SAME instance.
     const stat = statSync(path);
     this.cache.set(root, { mtimeMs: stat.mtimeMs, size: stat.size, rules: list });
+    ensureGlobalGitignore(NORMA_PERSONAL_IGNORES);
   }
 
   private appendGlobal(rule: string): void {

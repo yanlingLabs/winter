@@ -399,6 +399,11 @@ function fsWriteOutOfRootDir(call: { name: string; argsJson: string }, roots: st
   }
 }
 
+/** Files the daemon hot-merges into live policy/exec config (rules store + the two per-project
+ *  settings overlays once ProjectSettingsResolver feeds permissions.allow — Task 7). The agent
+ *  must never write ANY of them, in ANY project — humans edit them out-of-band or via cards. */
+const CONTROL_PLANE_FILENAMES = new Set(["permissions.local.json", "settings.json", "settings.local.json"]);
+
 /**
  * SP-approvals final review (composition hole, HIGH): a write/edit whose target is ANY project's
  * `<any>/.norma/permissions.local.json` — Task 1's PermissionRules project-scope rules file — must be a
@@ -440,30 +445,50 @@ function fsWriteOutOfRootDir(call: { name: string; argsJson: string }, roots: st
  * canonicalization can throw, so a pathological link chain never drops an otherwise-clear match.
  *
  * Matches by FILENAME alone, never by directory: `.norma/` itself stays writable (`.norma/memory/`
- * is the MEMDIR by design — memory files are `*.md`, never `permissions.local.json` — and any other
- * file under `.norma/` is unaffected). `null` for every non-write/edit call, a missing/malformed
- * `path` arg, or a resolution failure (unresolvable link-chain etc.) — the normal dispatch chain
- * decides from there, same fail-open-to-the-next-check shape as `fsWriteOutOfRootDir`. */
-function permissionRulesFileTarget(
+ * is the MEMDIR by design — memory files are `*.md`, never one of the control-plane filenames —
+ * and any other file under `.norma/` is unaffected). `null` for every non-write/edit call, a
+ * missing/malformed `path` arg, or a resolution failure (unresolvable link-chain etc.) — the normal
+ * dispatch chain decides from there, same fail-open-to-the-next-check shape as `fsWriteOutOfRootDir`.
+ *
+ * CC-parity Task 6.5 (controller-added): `settings.json` and `settings.local.json` — the two
+ * per-project overlays `ProjectSettingsResolver` (Task 6) reads — joined this function's filename
+ * set once Task 7 wires their merged `permissions.allow` into the live gate, making them rule-
+ * bearing control-plane files exactly like the rules store above: an agent write of
+ * `settings.local.json` → `{"permissions":{"allow":["BashUnsandboxed(*:*)"]}}` would self-grant a
+ * rule the same way an unguarded `permissions.local.json` write would. Matching by filename +
+ * parent-dir-named-`.norma` (never by project identity — this function has never taken a
+ * `projectRoot`, SP-policies whole-branch Item 1) has a deliberate side effect:
+ * `~/.norma/settings.json` — the user's OWN global settings, whose parent directory is literally
+ * named `.norma` — is now ALSO structurally denied, same as any project's. That closes the
+ * SP3.4-backlog hole where a session `cwd`'d at `$HOME` treated `~/.norma` as an ordinary
+ * in-project directory and could silently overwrite the user's global settings; nothing carves out
+ * an exception for it. */
+function controlPlaneFileTarget(
   call: { name: string; argsJson: string },
   roots: string[],
 ): { path: string; canonical: string } | null {
-  if (call.name !== "write" && call.name !== "edit") return null;
+  // fix-wave C (Minor): notebook_edit writes via node fs directly (notebook.ts), bypassing the
+  // bash seatbelt — this is its only guard, added for defense-in-depth completeness alongside
+  // write/edit (not currently exploitable: notebook.ts requires an existing valid-notebook shape,
+  // so it can't CREATE a settings file from nothing). Its own arg schema names the path field
+  // `notebook_path`, not `path` — read below, or the name check alone would be a no-op.
+  if (call.name !== "write" && call.name !== "edit" && call.name !== "notebook_edit") return null;
   let path = "";
   try {
-    const a = JSON.parse(call.argsJson || "{}") as { path?: unknown };
-    path = typeof a.path === "string" ? a.path : "";
+    const a = JSON.parse(call.argsJson || "{}") as { path?: unknown; notebook_path?: unknown };
+    path = typeof a.path === "string" ? a.path : typeof a.notebook_path === "string" ? a.notebook_path : "";
   } catch { return null; }
   if (!path) return null;
   const raw0 = isAbsolute(path) ? resolve(path) : resolve(roots[0] ?? "/", path);
-  // Cheap, syscall-free early-out: a target whose filename isn't SOME casing of
-  // "permissions.local.json" can never be the rules store, regardless of what its parent resolves
-  // to — memory files are `*.md`, every other file under `.norma/` has a different name. Comparing
-  // the ORIGINAL (pre-resolution) filename case-folded is equivalent to the resolved one:
-  // canonicalization only corrects an EXISTING file's spelling to what's on disk (the identical
-  // case-folded string on a case-insensitive volume) or leaves a not-yet-existing tail verbatim.
-  if (basename(raw0).toLowerCase() !== "permissions.local.json") return null;
-  // Pre-resolution parent: some casing of ".norma" ⇒ the rules store (catches a symlink NAMED
+  // Cheap, syscall-free early-out: a target whose filename isn't SOME casing of one of the
+  // control-plane filenames (CONTROL_PLANE_FILENAMES, above) can never be a control-plane file,
+  // regardless of what its parent resolves to — memory files are `*.md`, every other file under
+  // `.norma/` has a different name. Comparing the ORIGINAL (pre-resolution) filename case-folded
+  // is equivalent to the resolved one: canonicalization only corrects an EXISTING file's spelling
+  // to what's on disk (the identical case-folded string on a case-insensitive volume) or leaves a
+  // not-yet-existing tail verbatim.
+  if (!CONTROL_PLANE_FILENAMES.has(basename(raw0).toLowerCase())) return null;
+  // Pre-resolution parent: some casing of ".norma" ⇒ a control-plane file (catches a symlink NAMED
   // `.norma`). Checked BEFORE canonicalization so a link chain that throws below can't drop it.
   if (basename(dirname(raw0)).toLowerCase() === ".norma") {
     try { return { path, canonical: canonicalizeForWrite(resolveLeafSymlinks(raw0)) }; }
@@ -507,14 +532,19 @@ export interface EngineConfig {
   // activates, byte-identical to before this field existed.
   permissionRules?: PermissionRules;
   // SP-approvals Task 10 (spec §7): the USER half of web_fetch's dangerous-domain floor —
-  // `effective = dangerous-domains.ts's SHIPPED_DANGEROUS_DOMAINS ∪ dangerousDomainsAdded()`, read
-  // fresh on every web_fetch call (webFetchGate below) so a settings.json edit to
+  // `effective = dangerous-domains.ts's SHIPPED_DANGEROUS_DOMAINS ∪ dangerousDomainsAdded(cwd)`,
+  // read fresh on every web_fetch call (webFetchGate below) so a settings.json edit to
   // `permissions.dangerousDomains.added` applies with no daemon restart, same hot-getter shape as
   // `reviewerAllow` below. Absent getter, or one resolving to undefined, means "no user
   // additions" — the SHIPPED list alone still applies; this can narrow-to-empty but never disables
   // the floor entirely (there is deliberately no equivalent of `permissions.allow: []`'s "opt out
   // of the Computer default" for this list — the shipped entries are immutable by construction).
-  dangerousDomainsAdded?: () => string[] | undefined;
+  // Task 7 (CC project-folder-mechanics): takes the calling session's `cwd` so daemon.ts's real
+  // wiring can resolve a PER-PROJECT addition (`ProjectSettingsResolver.effective(cwd)`) rather
+  // than only the global settings.json — webFetchGate passes its own `cwd` param straight through.
+  // Optional param: every pre-Task-7 test/getter that ignores it (a plain `() => [...]`) keeps
+  // working unchanged — the call site below always passes `cwd`, but a getter is free not to use it.
+  dangerousDomainsAdded?: (cwd?: string) => string[] | undefined;
   broker: ApprovalBroker;
   dirs: SessionDirectories;
   // `live`, when wired (daemon.ts, from providers/manager.ts's ActiveProvider.liveModel),
@@ -552,23 +582,30 @@ export interface EngineConfig {
   // followed by the same `?? `/`!== false` fallback the pre-getter code used) — the getter itself
   // may be absent (a caller/test that never sets the field, same as before) or may resolve to
   // undefined at call time; both fall through to that identical default.
-  reviewerEnabled?: () => boolean | undefined; // default true when reviewer is set; false disables the review path entirely
+  // Task 8 (CC project-folder-mechanics): widened to `(cwd?: string) => …` so daemon.ts's real
+  // wiring can resolve a PER-PROJECT reviewer.enabled (`ProjectSettingsResolver.effective(cwd)`)
+  // rather than only the global settings.json — every dispatch-loop call site below passes its
+  // own in-scope `cwd`, but a getter/test is free to ignore the param (every pre-Task-8
+  // caller/test passes a plain `() => …` or `(cwd) => plainValue`, both still valid — an extra
+  // optional param is call-site compatible either way).
+  reviewerEnabled?: (cwd?: string) => boolean | undefined; // default true when reviewer is set; false disables the review path entirely
   // Widened to `| undefined` (rather than a getter always guaranteed to return string[]) so the
   // `?? []` at the read site stays meaningful for a getter/test that doesn't pre-bake the default
-  // itself — daemon.ts's own getter DOES pre-bake it (`() => settings?.reviewer?.allow ?? []`),
-  // but that's a choice, not a contract this type enforces.
-  reviewerAllow?: () => string[] | undefined; // extra commands/argv0s bashLooksSafe treats as obviously-safe (bypass review)
+  // itself — daemon.ts's own getter DOES pre-bake it (`(cwd) => projectSettings.effective(cwd ??
+  // null)?.reviewer?.allow ?? []`), but that's a choice, not a contract this type enforces.
+  reviewerAllow?: (cwd?: string) => string[] | undefined; // extra commands/argv0s bashLooksSafe treats as obviously-safe (bypass review)
   // phase 5e T3: per-class on/off, read directly here (T4 threads settings.reviewerClasses → this
   // field; until then a caller sets it directly, same "stub until the settings task" shape as
   // reviewerEnabled predates settings wiring). Absent object OR an absent per-class key both mean
   // enabled=true — every existing caller/test that never sets this keeps today's default-on
   // behavior unchanged; only an EXPLICIT `false` for a class disables it.
-  reviewerClasses?: () => { bash?: boolean; fs?: boolean; external?: boolean } | undefined;
+  reviewerClasses?: (cwd?: string) => { bash?: boolean; fs?: boolean; external?: boolean } | undefined;
   // deferral wired ONLY when this is set AND enabled !== false — undefined (the setupEngine/
   // daemon default before this config existed) leaves specs()/instructions/execute untouched.
   // deferExternals mirrors registry.ts's opt of the same name ("always": externals defer whenever
   // ANY is visible, ignoring deferThreshold's count comparison; absent/"count" = unchanged).
-  toolSearch?: { enabled?: () => boolean | undefined; deferThreshold?: () => number | undefined; deferExternals?: () => "count" | "always" | undefined };
+  // Task 8: each sub-getter widened to `(cwd?: string) => …`, same reasoning as reviewerEnabled above.
+  toolSearch?: { enabled?: (cwd?: string) => boolean | undefined; deferThreshold?: (cwd?: string) => number | undefined; deferExternals?: (cwd?: string) => "count" | "always" | undefined };
   // Plan mode (1d-ii): both optional, and both absent leaves existing behavior untouched. Without
   // `plans`, exit_plan_mode falls to the else executeCall branch → the tool's own placeholder
   // run() (tools/plan.ts) rather than the approval bridge below. `setPolicy` persists an approved
@@ -674,7 +711,9 @@ export interface EngineConfig {
   // lspAutoDiagnosticsEnabledFrom) lets a user keep the on-demand `lsp` tool while opting OUT of
   // the automatic post-edit append.
   lsp?: () => LspManager | undefined;
-  autoDiagnosticsEnabled?: () => boolean | undefined;
+  // Task 8 (CC project-folder-mechanics): widened to `(cwd?: string) => …`, same reasoning as
+  // reviewerEnabled above — executeCall's own `cwd` param is passed at its one call site.
+  autoDiagnosticsEnabled?: (cwd?: string) => boolean | undefined;
   // task-30 (push-notification track): the headless osascript fallback (notify-fallback.ts's
   // notifyHeadless) — called by the `notify` bridge (executeCall, below) ONLY when
   // `hub.attachedCount(sessionId) === 0` at the moment push_notification fires. Optional/absent
@@ -1032,17 +1071,20 @@ export class AgentEngine {
   /** ToolSearch deferral is wired ONLY when cfg.toolSearch is set AND enabled !== false. Each
    *  sub-field is a getter (hot-settings T2) read fresh here — `enabled?.()` returning undefined
    *  (getter absent, or present but resolving to undefined) keeps the same "not explicitly false"
-   *  default the pre-getter code had. */
-  private toolSearchEnabled(): boolean {
-    return this.cfg.toolSearch !== undefined && this.cfg.toolSearch.enabled?.() !== false;
+   *  default the pre-getter code had. Task 8 (CC project-folder-mechanics): each helper now takes
+   *  the CALLER's in-scope `cwd` and threads it into every cfg getter, so daemon.ts's real wiring
+   *  can resolve a PER-PROJECT toolSearch setting; every call site below passes its own local
+   *  `cwd` (buildInstructionsFull's param, runThread's thread-local, executeCall's param). */
+  private toolSearchEnabled(cwd: string | undefined): boolean {
+    return this.cfg.toolSearch !== undefined && this.cfg.toolSearch.enabled?.(cwd) !== false;
   }
 
-  private toolSearchThreshold(): number | undefined {
-    return this.toolSearchEnabled() ? this.cfg.toolSearch!.deferThreshold?.() : undefined;
+  private toolSearchThreshold(cwd: string | undefined): number | undefined {
+    return this.toolSearchEnabled(cwd) ? this.cfg.toolSearch!.deferThreshold?.(cwd) : undefined;
   }
 
-  private toolSearchDeferExternals(): "count" | "always" | undefined {
-    return this.toolSearchEnabled() ? this.cfg.toolSearch!.deferExternals?.() : undefined;
+  private toolSearchDeferExternals(cwd: string | undefined): "count" | "always" | undefined {
+    return this.toolSearchEnabled(cwd) ? this.cfg.toolSearch!.deferExternals?.(cwd) : undefined;
   }
 
   /** Per-turn/round pins (4g-i): state-required deferred built-ins forced visible WITHOUT
@@ -1473,8 +1515,8 @@ export class AgentEngine {
   // in-turn exit_plan_mode approval (which mutates `meta.approvalPolicy` for the REST of this
   // turn) does not retroactively add/remove this reminder mid-turn.
   private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: SessionApprovalPolicy, sessionId: string): string {
-    const tsEnabled = this.toolSearchEnabled();
-    const deferThreshold = this.toolSearchThreshold();
+    const tsEnabled = this.toolSearchEnabled(cwd);
+    const deferThreshold = this.toolSearchThreshold(cwd);
     // Pins computed HERE, at instructionsFull's own once-per-turn/thread cadence (see this
     // method's callers — turn() and the spawn bridge each call it exactly once), NOT the
     // per-round cadence used at the specs()/executeCall seams below. `loaded` itself is never
@@ -1482,7 +1524,7 @@ export class AgentEngine {
     const pins = tsEnabled ? this.pinnedTools(sessionId, { approvalPolicy: policy }, cwd) : new Set<string>();
     const effectiveLoaded = pins.size ? new Set([...loaded, ...pins]) : loaded;
     const deferred = tsEnabled
-      ? this.cfg.registry.deferredIndex(cwd, effectiveLoaded, deferThreshold, tsEnabled, this.toolSearchDeferExternals())
+      ? this.cfg.registry.deferredIndex(cwd, effectiveLoaded, deferThreshold, tsEnabled, this.toolSearchDeferExternals(cwd))
       : [];
     let instructionsFull = deferred.length
       ? base + "\n\n# Deferred tools\nThe following tools exist but their schemas are NOT loaded — calling them directly fails. Load schemas first with the ToolSearch tool (query \"select:<name>\" or keywords), then call them normally.\n" + deferred.map((d) => `- ${d.name} — ${d.description}`).join("\n")
@@ -1665,8 +1707,8 @@ export class AgentEngine {
     // works). Undefined when the provider can't enumerate its models (openai-compatible with no
     // static list) → the tool treats undefined as "unknown, not blocked". Computed once per thread.
     const visionCapable = this.cfg.provider.provider.models().find((m) => m.id === opts.model)?.supportsVision;
-    const tsEnabled = this.toolSearchEnabled();
-    const deferThreshold = this.toolSearchThreshold();
+    const tsEnabled = this.toolSearchEnabled(cwd);
+    const deferThreshold = this.toolSearchThreshold(cwd);
     const usage = { inputTokens: 0, outputTokens: 0 };
     let lastText = "";
     // The effective iteration bound for THIS thread — opts.maxTurns (spawn bridge only) or the
@@ -1738,7 +1780,7 @@ export class AgentEngine {
         instructions: instructionsFull,
         input,
         tools: this.cfg.registry.specs(cwd, tsEnabled
-            ? { loaded: effectiveLoaded, deferThreshold, builtinDeferral: true, deferExternals: this.toolSearchDeferExternals() }
+            ? { loaded: effectiveLoaded, deferThreshold, builtinDeferral: true, deferExternals: this.toolSearchDeferExternals(cwd) }
             : undefined)
           .filter((s) => !excludeTools?.has(s.name))
           .filter((s) => !allowTools || allowTools.has(s.name)),
@@ -2685,7 +2727,7 @@ export class AgentEngine {
         // guard against an empty string — repoRootFor("") would realpath-fail and fall back to the
         // DAEMON's own process.cwd(), a wrong and misleading project root. `projectRoot: null`
         // degrades safely everywhere it's read below: PermissionRules.decision() just consults
-        // global rules, and permissionRulesFileTarget is projectRoot-INDEPENDENT (SP-policies
+        // global rules, and controlPlaneFileTarget is projectRoot-INDEPENDENT (SP-policies
         // whole-branch Item 1 — it refuses ANY project's rules store, so a null projectRoot never
         // affects its verdict; see its own doc comment). SP-policies Task 6: HOISTED above the
         // `dirGrant` computation just below (it used to sit between `dirGrantDenied` and
@@ -2724,10 +2766,11 @@ export class AgentEngine {
         // a valid write/edit target — checked here, unconditionally (not gated on `decision`,
         // `dirGrant`, or anything ruleAllowed-related below), so it is computed and dispatched
         // BEFORE the ruleAllowed short-circuit gets a chance to run. See
-        // permissionRulesFileTarget's own doc comment for the full exfil-composition rationale
-        // (final review 2: filesystem-IDENTITY comparison, not string spelling).
-        const rulesFileTarget = (call.name === "write" || call.name === "edit")
-          ? permissionRulesFileTarget(call, this.writableRoots(sessionId, projectRoot, rootsOverride))
+        // controlPlaneFileTarget's own doc comment for the full exfil-composition rationale
+        // (final review 2: filesystem-IDENTITY comparison, not string spelling; CC-parity Task 6.5:
+        // now also the two per-project settings overlays, not just the rules store).
+        const rulesFileTarget = (call.name === "write" || call.name === "edit" || call.name === "notebook_edit")
+          ? controlPlaneFileTarget(call, this.writableRoots(sessionId, projectRoot, rootsOverride))
           : null;
         // SP-approvals Task 10: web_fetch's dangerous-domain floor — computed for EVERY policy
         // (gate.ts's `decision` above is now unconditionally "allow" for web_fetch, so this is the
@@ -2859,9 +2902,11 @@ export class AgentEngine {
         // SP-policies whole-branch review (Item 2, MEDIUM — ACCEPTED, documented not guarded): a PERSISTED
         // `BashUnsandboxed(<prefix>:*)` rule (like `bypass`) grants SILENT, unsandboxed execution for that
         // prefix. For a file-WRITING prefix that necessarily includes writing the control plane itself —
-        // the rules store (`*/.norma/permissions.local.json`, which the seatbelt regex + permissionRulesFileTarget
-        // otherwise deny) and `~/.norma/run/core.sock` — because a true escape runs with NO seatbelt at all
-        // (tools/bash.ts spawns /bin/bash directly, no profile). This is a DELIBERATE, human-pre-authorized
+        // the rules store and, since CC-parity Task 6.5, the two settings overlays too
+        // (`*/.norma/{permissions.local,settings,settings.local}.json`, which the seatbelt regexes +
+        // controlPlaneFileTarget otherwise deny) and `~/.norma/run/core.sock` — because a true escape
+        // runs with NO seatbelt at all (tools/bash.ts spawns /bin/bash directly, no profile). This is
+        // a DELIBERATE, human-pre-authorized
         // consequence: the human wrote (or approved the "always allow" card for) that BashUnsandboxed rule,
         // explicitly choosing unrestricted shell for that prefix. Guarding it would require parsing the shell
         // command string to reason about what it writes — fragile and defeatable (out of scope). The store
@@ -2914,7 +2959,7 @@ export class AgentEngine {
           // SP-approvals final review: hard error, no card, no grant — mirrors dirGrantDenied's own
           // control-plane branch just below in both style and precedence (checked BEFORE it, and
           // before the out-of-root grant-card branch, so an Edit rule AND a would-be grant card are
-          // both preempted). See permissionRulesFileTarget's own doc comment for why.
+          // both preempted). See controlPlaneFileTarget's own doc comment for why.
           outcome = {
             output: `cannot ${call.name} ${rulesFileTarget.path}: the permission rules store can only be changed by answering an approval card (or editing it yourself)`,
             isError: true,
@@ -3019,7 +3064,7 @@ export class AgentEngine {
             { id: "allow_unsandboxed_global", label: `Always allow "${urule}" everywhere`, rule: urule, scope: "global" as const },
             { id: "deny", label: "Deny" },
           ];
-          const reviewerReady = this.cfg.reviewer && this.cfg.reviewerEnabled?.() !== false && this.reviewClassEnabled("bash");
+          const reviewerReady = this.cfg.reviewer && this.cfg.reviewerEnabled?.(cwd) !== false && this.reviewClassEnabled("bash", cwd);
           if (meta.approvalPolicy === "auto" && reviewerReady) {
             // auto: the reviewer is the GATE — safe runs unsandboxed unattended; non-safe/error escalates to
             // the SAME human card the ask path shows. One tool_review is emitted either way.
@@ -3124,7 +3169,7 @@ export class AgentEngine {
           // escape under auto is handled by the escape branch above (which gates it on the reviewer),
           // never reaching here (that branch's `decision` is "allow" too, but it's checked first).
           decision === "allow" && call.name === "bash" && !bashEscalation.dangerouslyDisableSandbox && this.cfg.reviewer &&
-          this.cfg.reviewerEnabled?.() !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("bash")
+          this.cfg.reviewerEnabled?.(cwd) !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("bash", cwd)
         ) {
           let command = "";
           let justification: string | undefined;
@@ -3133,7 +3178,7 @@ export class AgentEngine {
             command = typeof a.command === "string" ? a.command : "";
             justification = typeof a.justification === "string" ? a.justification : undefined;
           } catch { /* fall through to review of "" → likely unsafe */ }
-          if (command && bashLooksSafe(command, this.cfg.reviewerAllow?.() ?? [])) {
+          if (command && bashLooksSafe(command, this.cfg.reviewerAllow?.(cwd) ?? [])) {
             // Static bypass — reviewer.review() never runs, so NO tool_review event (phase 5e T2:
             // observability covers actual reviewer invocations, not every gate decision).
             outcome = await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable);
@@ -3145,7 +3190,7 @@ export class AgentEngine {
           }
         } else if (
           decision === "allow" && (call.name === "write" || call.name === "edit") && this.cfg.reviewer &&
-          this.cfg.reviewerEnabled?.() !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("fs")
+          this.cfg.reviewerEnabled?.(cwd) !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("fs", cwd)
         ) {
           // fs coverage (5e T3): review only an UNUSUAL write/edit target (outside the primary cwd
           // subtree, or a dotfile/dot-dir segment inside it) — a plain in-cwd write falls straight
@@ -3172,7 +3217,7 @@ export class AgentEngine {
           }
         } else if (
           decision === "allow" && isExternalToolName(call.name) && this.cfg.reviewer &&
-          this.cfg.reviewerEnabled?.() !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("external")
+          this.cfg.reviewerEnabled?.(cwd) !== false && meta.approvalPolicy === "auto" && this.reviewClassEnabled("external", cwd)
         ) {
           // external coverage (5e T3): ALWAYS reviewed under auto when the class is enabled — no
           // "looks safe" bypass exists for third-party code Norma can't inspect (unlike bash).
@@ -3508,9 +3553,12 @@ export class AgentEngine {
    *  per-class key → enabled; only an EXPLICIT `false` disables that class. hot-settings T2:
    *  `reviewerClasses` is now a getter, called fresh here — an absent getter, or one that
    *  resolves to undefined/an absent key, both fall through to the same enabled-by-default `!==
-   *  false` check. */
-  private reviewClassEnabled(cls: "bash" | "fs" | "external"): boolean {
-    return this.cfg.reviewerClasses?.()?.[cls] !== false;
+   *  false` check. Task 8 (CC project-folder-mechanics): takes the caller's in-scope `cwd` and
+   *  threads it into `reviewerClasses` so daemon.ts's real wiring can resolve a PER-PROJECT
+   *  override; every call site (the dispatch loop's bash/fs/external reviewer branches) passes its
+   *  own branch-local `cwd`. */
+  private reviewClassEnabled(cls: "bash" | "fs" | "external", cwd: string | undefined): boolean {
+    return this.cfg.reviewerClasses?.(cwd)?.[cls] !== false;
   }
 
   /** SP-approvals T11 review, MEDIUM-1 (CC parity: an unsandboxed retry still rides the normal
@@ -3676,7 +3724,7 @@ export class AgentEngine {
   /** SP-policies Task 6: the session's writable-dir set — `dirs.roots(sessionId)` (or a worktree
    *  child's FIXED `rootsOverride`) UNIONED with the absolute dirs a hand-authored `Edit(<path>)`
    *  rule declares for this project (PermissionRules.editPathRules). Consulted by BOTH the
-   *  write/edit fence (fsWriteOutOfRootDir, permissionRulesFileTarget, the fs-reviewer's fsRoots)
+   *  write/edit fence (fsWriteOutOfRootDir, controlPlaneFileTarget, the fs-reviewer's fsRoots)
    *  AND bash's seatbelt (executeCall's ctx.roots — tools/bash.ts realpaths this exact array into
    *  sandbox.ts's buildSeatbeltProfile `(subpath ...)` rules), so one Edit rule widens both
    *  surfaces identically. A worktree-isolated child (`rootsOverride` set) keeps its FIXED
@@ -3697,12 +3745,12 @@ export class AgentEngine {
    *     denylist the out-of-root dirGrant flow uses) — an `Edit(~/.norma)` (or an ancestor/
    *     descendant of it) must not silently become "in-root" either, or every downstream check that
    *     exists specifically to protect the control plane (dirGrantDenied's hard-error branch,
-   *     permissionRulesFileTarget's own identity check) would simply never run for it: `dirGrant`
+   *     controlPlaneFileTarget's own identity check) would simply never run for it: `dirGrant`
    *     would compute as `null` (the call looks ordinary, in-root), so `dirGrantDenied`'s
    *     `grantDenied` check — which only ever runs when `dirGrant` is non-null — is never reached.
    *  Each Edit dir is realpath-resolved FIRST (`realpathSync`) — and a not-yet-existing dir is
    *  SKIPPED entirely, never raw-fallback-included — so a symlinked Edit dir resolves to the identity
-   *  `grantDenied` itself expects (mirrors `permissionRulesFileTarget`'s filesystem-identity-over-
+   *  `grantDenied` itself expects (mirrors `controlPlaneFileTarget`'s filesystem-identity-over-
    *  string-spelling principle), and a missing root can never reach bash's realpath/Seatbelt (which
    *  would ENOENT-crash every bash call). See the loop below. */
   private writableRoots(sessionId: string, projectRoot: string | null, rootsOverride: string[] | undefined): string[] {
@@ -3759,7 +3807,7 @@ export class AgentEngine {
         options: webFetchApprovalOptions(undefined, undefined),
       };
     }
-    const added = this.cfg.dangerousDomainsAdded?.() ?? [];
+    const added = this.cfg.dangerousDomainsAdded?.(cwd) ?? [];
     const matchedEntry = dangerousDomainMatch(host, [...SHIPPED_DANGEROUS_DOMAINS, ...added]);
     if (matchedEntry === null) return null; // nothing dangerous about this host — free by default
     // `projectRoot` mirrors the SAME ternary the ruleAllowed block above uses (a defensive guard
@@ -4181,9 +4229,9 @@ export class AgentEngine {
       cwd, roots, tmpDir, sessionId, signal, markSkillLoaded,
       markToolLoaded,
       loadedTools: effectiveLoaded,
-      deferThreshold: this.toolSearchThreshold(),
-      deferExternals: this.toolSearchDeferExternals(),
-      builtinDeferral: this.toolSearchEnabled(),
+      deferThreshold: this.toolSearchThreshold(cwd),
+      deferExternals: this.toolSearchDeferExternals(cwd),
+      builtinDeferral: this.toolSearchEnabled(cwd),
       ask,
       taskEvent,
       notify,
@@ -4203,7 +4251,7 @@ export class AgentEngine {
     // (and thus the model-visible tool_result) untouched.
     if (!result.isError && AUTO_DIAG_TOOL_NAMES.has(call.name)) {
       const mgr = this.cfg.lsp?.();
-      if (mgr && this.cfg.autoDiagnosticsEnabled?.() !== false) {
+      if (mgr && this.cfg.autoDiagnosticsEnabled?.(cwd) !== false) {
         // `signal` (the turn's own abort signal) makes an ESC/interrupt cut the diagnostics wait
         // short — the suffix resolves "" promptly instead of riding out the full per-language
         // settle/timeout window (whole-branch review fast-follow).

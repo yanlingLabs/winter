@@ -9,7 +9,8 @@ import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
 import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom } from "./settings";
-import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor } from "./agent/memory-dir";
+import { ProjectSettingsResolver } from "./project-settings";
+import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
 import { createProvider } from "./providers/manager";
 import type { Provider } from "./providers/types";
@@ -195,6 +196,27 @@ export async function startDaemon(opts: {
   }
 
   const trustStore = new TrustStore(join(normaHome, "trust.json"));
+  // Task 7 (CC project-folder-mechanics): the ONE cwd-keyed "effective settings" resolver for the
+  // whole daemon — `base` reads the reassignable `settings` holder above LIVE (same hot-settings
+  // shape as memoryEnabledHot/hooksEnabledHot below: a watcher-driven reload swaps in a NEW object
+  // in place, and this thunk re-reads that same binding on its NEXT call, never a boot snapshot).
+  // Constructed here — after both `trustStore` and the initial `settings` load exist, before
+  // anything that needs it — so it's reachable from every getter below that wants a per-project
+  // view of settings.json (today: the `permissionRules`/`dangerousDomainsAdded` getters further
+  // down; later tasks convert more getters against this SAME instance, never a second one, so
+  // there is exactly one mtime cache per project cwd for the whole daemon).
+  const projectSettings = new ProjectSettingsResolver({ base: () => settings, trust: trustStore });
+  // fix-wave B (I1): every per-project getter below resolves at the REPO ROOT, matching
+  // `globalAllow`'s own `projectRoot` (engine.ts's `repoRootFor(cwd)`) — NOT the raw session cwd.
+  // Before this, a SUBDIRECTORY session read a DIFFERENT `.norma/settings.json` than
+  // `globalAllow`/`editPathRules` did for the identical repo, so a repo-root settings.json was only
+  // half-honored: `permissions.allow` picked it up, but `dangerousDomains.added` (and
+  // reviewer/toolSearch/hooks/lsp) silently didn't — same-file keys diverging on which cwd they're
+  // even resolved against was never intended, and it made a project-configured dangerous domain
+  // fail-OPEN (card-less) for any subdir session. `repoRootFor` is memoized per canon(cwd) (a git
+  // spawn only on first sight of a dir) and falls back to the dir itself outside a git repo, so
+  // this is perf-neutral and a non-repo cwd behaves exactly as before.
+  const projectRootOf = (cwd?: string | null): string | null => (cwd ? repoRootFor(cwd) : null);
   const pluginStore = new PluginStore({
     normaHome, plugins: settings?.plugins, consents: settings?.plugins?.consents, log: (m) => console.error(m),
   });
@@ -688,12 +710,43 @@ export async function startDaemon(opts: {
     // every other in-scope field in this file now uses. `settings` can still be null (a malformed
     // settings.json at boot, or a test injecting `agentProvider` directly) — `true` there is the
     // SAME fail-open default the pre-collapse disk-read-failure catch used.
-    const hooksEnabledHot = (): boolean => (settings ? hooksEnabledFrom(settings) : true);
+    // Task 9 (CC project-folder-mechanics, final task): now resolves through the SAME
+    // `projectSettings` instance the reviewer/toolSearch/lsp.autoDiagnostics getters use (mirrors
+    // `lspAutoDiagnosticsHot` immediately below exactly). Unlike those getters, `cwd` is NOT threaded
+    // in by an engine.ts call site — HookFacade.runFor (hook-registry.ts) only ever has a
+    // `sessionId` in scope, so IT resolves the cwd (preferring the session-start `extra.cwd`, else
+    // the `cwdForSession` dep wired below, which reads `store.meta(sid).cwd`) before calling this.
+    // `effective(cwd ?? null)` degrades to `settings` verbatim for a null/untrusted/overlay-less
+    // cwd, so this reads byte-identically to the pre-Task-9 zero-arg getter whenever no project
+    // overlay applies or no cwd was resolvable. The null-settings fail-open default is unchanged.
+    const hooksEnabledHot = (cwd?: string | null): boolean => {
+      const s = projectSettings.effective(projectRootOf(cwd));
+      return s ? hooksEnabledFrom(s) : true;
+    };
     // lsp-consolidation T3: same live-getter shape as `hooksEnabledHot`/`memoryEnabledHot` above —
     // `settings` can still be null (malformed settings.json at boot, or a test that injects
     // `agentProvider` directly), `true` there is the same fail-open default those two use.
-    const lspAutoDiagnosticsHot = (): boolean => (settings ? lspAutoDiagnosticsEnabledFrom(settings) : true);
-    const hookFacade = new HookFacade({ registry: hookRegistry, runner: new HookRunner(), hooksEnabled: hooksEnabledHot });
+    // Task 8 (CC project-folder-mechanics): now resolves through the SAME `projectSettings`
+    // instance the reviewer/toolSearch getters below use — `cwd` is engine.ts's executeCall cwd;
+    // `effective(cwd ?? null)` degrades to `settings` verbatim for a null/untrusted/overlay-less
+    // cwd, so this reads byte-identically to the pre-Task-8 getter whenever no project overlay
+    // applies. The null-settings fail-open default is unchanged (`effective` itself returns
+    // `base()`'s null straight through when `base()` is null).
+    const lspAutoDiagnosticsHot = (cwd?: string): boolean => {
+      const s = projectSettings.effective(projectRootOf(cwd));
+      return s ? lspAutoDiagnosticsEnabledFrom(s) : true;
+    };
+    const hookFacade = new HookFacade({
+      registry: hookRegistry,
+      runner: new HookRunner(),
+      hooksEnabled: hooksEnabledHot,
+      // Task 9: resolves a session's cwd for the per-project `hooksEnabled` read above, for every
+      // event whose `extra` doesn't already carry one (only session-start's does). Same
+      // `store.meta(sid).cwd` source `cwdOf` (lsp wiring, above) already reads unguarded — a hook
+      // only ever fires for a session already created in `store`, so `meta`'s unknown-session throw
+      // is not a live path here, matching `cwdOf`'s own precedent.
+      cwdForSession: (sid) => store.meta(sid).cwd ?? null,
+    });
     // Dispatch (Phase 7) Task 4: declared BEFORE `engine` is constructed (computerUse precedent —
     // see EngineConfig.dispatch's own doc comment, engine.ts) so the `dispatch: () =>
     // dispatchChildren` getter below closes over this SAME binding; assigned right after
@@ -706,7 +759,16 @@ export async function startDaemon(opts: {
     // `approval.respond`'s optionId-driven append() shares one mtime cache with the engine's own
     // decision() reads, never two independently-stale PermissionRules. See the field below (still
     // referenced by its old inline comment, now a shorthand) for what this class actually does.
-    permissionRules = new PermissionRules({ globalAllow: () => settings?.permissions?.allow ?? ["Computer"], normaHome });
+    // Task 7: `globalAllow` now takes the `projectRoot` PermissionRules' own decision()/rulesFor()/
+    // editPathRules() already have in scope, and resolves it through the SAME `projectSettings`
+    // instance above — a trusted project's OWN `.norma/settings.json` `permissions.allow` UNIONS
+    // into this project's effective rules (mergeSettings, Task 5) on top of the global settings.json
+    // value; `effective(null)` degrades to `settings` verbatim, so a null projectRoot (or an
+    // untrusted/overlay-less one) reads byte-identically to the pre-Task-7 global-only getter.
+    permissionRules = new PermissionRules({
+      globalAllow: (projectRoot) => projectSettings.effective(projectRoot)?.permissions?.allow ?? ["Computer"],
+      normaHome,
+    });
     engine = new AgentEngine({
       store, hub, registry, broker: approvalBroker,
       gate: new PermissionGate(),
@@ -731,11 +793,16 @@ export async function startDaemon(opts: {
       // this class's OWN read-modify-write in append(scope:"global") are for).
       permissionRules,
       // SP-approvals Task 10 (spec §7): the user-added half of web_fetch's dangerous-domain floor
-      // — same live-getter shape as `globalAllow` just above (re-reads the reassignable `settings`
-      // holder fresh on every web_fetch call), so an edit to `permissions.dangerousDomains.added`
-      // applies with no daemon restart. Absent block/field both resolve to `undefined`, which
-      // engine.ts's `?? []` treats as "no user additions" — the shipped list alone still applies.
-      dangerousDomainsAdded: () => settings?.permissions?.dangerousDomains?.added,
+      // — same live-getter shape as `globalAllow` just above, so an edit to
+      // `permissions.dangerousDomains.added` applies with no daemon restart. Absent block/field
+      // both resolve to `undefined`, which engine.ts's `?? []` treats as "no user additions" — the
+      // shipped list alone still applies.
+      // Task 7: now resolved per-project through the SAME `projectSettings` instance `globalAllow`
+      // uses above — `cwd` is the calling session's cwd (engine.ts's webFetchGate passes its own
+      // param straight through); `effective(cwd ?? null)` degrades to `settings` verbatim for a
+      // null/untrusted/overlay-less cwd, so this reads byte-identically to the pre-Task-7 getter
+      // whenever no project overlay applies.
+      dangerousDomainsAdded: (cwd) => projectSettings.effective(projectRootOf(cwd))?.permissions?.dangerousDomains?.added,
       dirs: sessionDirs,
       // write-permission-flow F2: the out-of-root write/edit grant flow must never silently grant
       // any part of Norma's OWN home directory. This is BROADER than the READ denylist above
@@ -779,12 +846,22 @@ export async function startDaemon(opts: {
       // scope). A later task's watcher reassigns `settings` in place; engine.ts calls each getter
       // fresh per read site, so a reviewer.enabled/allow/classes edit applies with no engine
       // reconstruction.
-      reviewerEnabled: () => settings?.reviewer?.enabled,
-      reviewerAllow: () => settings?.reviewer?.allow ?? [],
+      // Task 8 (CC project-folder-mechanics): now resolved per-project through the SAME
+      // `projectSettings` instance `dangerousDomainsAdded`/`globalAllow` above use — `cwd` is the
+      // calling session's cwd (engine.ts's dispatch-loop/runThread locals, threaded straight
+      // through); `effective(cwd ?? null)` degrades to `settings` verbatim for a
+      // null/untrusted/overlay-less cwd, so this reads byte-identically to the pre-Task-8 getter
+      // whenever no project overlay applies. The reviewer OBJECT itself (`reviewer` just above)
+      // stays a single boot-constructed instance shared by every project — only whether it's
+      // CONSULTED for a given cwd is per-project (mirrors the doc comment on `reviewerCfg`/
+      // `lspAutoDiagnosticsHot`: which reviewer model to use is a boot snapshot; whether reviewing
+      // runs at all is hot, and now project-scoped too).
+      reviewerEnabled: (cwd) => projectSettings.effective(projectRootOf(cwd))?.reviewer?.enabled,
+      reviewerAllow: (cwd) => projectSettings.effective(projectRootOf(cwd))?.reviewer?.allow ?? [],
       // Phase 5e T4: raw pass-through — engine.ts's reviewClassEnabled already treats an absent
       // object/key as enabled, and reviewerEnabled:false already short-circuits before this is
       // ever consulted (see its own doc comment), so no extra defaulting belongs here.
-      reviewerClasses: () => settings?.reviewer?.classes,
+      reviewerClasses: (cwd) => projectSettings.effective(projectRootOf(cwd))?.reviewer?.classes,
       titler,
       // hot-settings T5a/T5b: EngineConfig.computerUse is a getter (engine.ts) over the SAME `let
       // computerUse` holder assigned at boot above (~line 423) — T5b (below, after this engine is
@@ -801,10 +878,18 @@ export async function startDaemon(opts: {
       // field type (the getter itself, not the holder, is what's optional on EngineConfig).
       lsp: () => lspManager ?? undefined,
       autoDiagnosticsEnabled: lspAutoDiagnosticsHot,
+      // Task 8 (CC project-folder-mechanics): each sub-getter now resolves through the SAME
+      // `projectSettings` instance the reviewer getters above use — `cwd` is engine.ts's
+      // toolSearchEnabled/Threshold/DeferExternals param, threaded from every one of their own
+      // call sites (buildInstructionsFull, runThread, executeCall). `effective(cwd ?? null)`
+      // degrades to `settings` verbatim for a null/untrusted/overlay-less cwd, so this reads
+      // byte-identically to the pre-Task-8 getters whenever no project overlay applies — the
+      // deferThreshold env fallback is UNCHANGED, still consulted whenever the resolved effective
+      // settings (global or project-merged) don't set one.
       toolSearch: {
-        enabled: () => settings?.toolSearch?.enabled,
-        deferThreshold: () => settings?.toolSearch?.deferThreshold ?? Number(process.env.NORMA_TOOLSEARCH_THRESHOLD ?? 12),
-        deferExternals: () => settings?.toolSearch?.deferExternals,
+        enabled: (cwd) => projectSettings.effective(projectRootOf(cwd))?.toolSearch?.enabled,
+        deferThreshold: (cwd) => projectSettings.effective(projectRootOf(cwd))?.toolSearch?.deferThreshold ?? Number(process.env.NORMA_TOOLSEARCH_THRESHOLD ?? 12),
+        deferExternals: (cwd) => projectSettings.effective(projectRootOf(cwd))?.toolSearch?.deferExternals,
       },
       hooks: hookFacade,
       // Subagent transcript files (CC parity): the SAME session-tmp-dir accessor registerLspTools
