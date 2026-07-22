@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { TrustStore } from "./trust";
 import type { SkillStore } from "./skills";
+import type { ResolvedStyle } from "./output-styles";
 
 export const BASE_PROMPT = [
   "You are Norma, an agentic assistant running on the user's Mac.",
@@ -111,6 +112,7 @@ export class ContextAssembler {
   private readonly basePrompt: string;
   private readonly caps: Required<AssemblerCaps>;
   private readonly memory?: MemoryContextConfig;
+  private readonly styleResolver?: (cwd: string | null) => ResolvedStyle | null;
   constructor(deps: {
     normaHome: string;
     trust: TrustStore;
@@ -118,12 +120,14 @@ export class ContextAssembler {
     basePrompt?: string;
     caps?: AssemblerCaps;
     memory?: MemoryContextConfig;
+    styleResolver?: (cwd: string | null) => ResolvedStyle | null;
   }) {
     this.normaHome = deps.normaHome;
     this.trust = deps.trust;
     this.skills = deps.skills;
     this.basePrompt = deps.basePrompt ?? BASE_PROMPT;
     this.memory = deps.memory;
+    this.styleResolver = deps.styleResolver;
     this.caps = {
       instructionsBytes: deps.caps?.instructionsBytes ?? 32768,
       memoryLines: deps.caps?.memoryLines ?? 200,
@@ -137,7 +141,20 @@ export class ContextAssembler {
     // Dispatch mode (Phase 7, spec §7): the coordinator gets its OWN base prompt — swapped in
     // whole, not patched — while every other section below (date, user/project instructions,
     // memory, capabilities) still applies unchanged regardless of caller.
-    const sections: string[] = [input.basePromptOverride ?? this.basePrompt];
+    // Output style (CC-parity): the resolved style fills the base slot. SKIPPED entirely under a
+    // basePromptOverride (dispatch/subagents keep their own base — styles are main-conversation
+    // only). keepCodingInstructions:true augments (base kept, overlay appended right after);
+    // false replaces the base. An empty body or a null resolver → base unchanged (byte-identical).
+    let baseSlot = input.basePromptOverride ?? this.basePrompt;
+    const styleAppend: string[] = [];
+    if (input.basePromptOverride === undefined) {
+      const style = this.styleResolver?.(cwd) ?? null;
+      if (style && style.body) {
+        if (style.keepCodingInstructions) styleAppend.push(style.body);
+        else baseSlot = style.body;
+      }
+    }
+    const sections: string[] = [baseSlot, ...styleAppend];
 
     // F2 (4e gate ledger): the model has no other way to know the current date — recomputed each
     // assemble() call (once per turn) so it stays current across long sessions. LOCAL time, not
