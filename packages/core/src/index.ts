@@ -8,6 +8,7 @@ export {
   workflowsEnabledFrom, keywordTriggerEnabledFrom,
   type Settings,
 } from "./settings";
+export { runWorkflowSubprocess } from "./workflows/subprocess-entry";
 export {
   deriveInstallName,
   resolvePluginTarget,
