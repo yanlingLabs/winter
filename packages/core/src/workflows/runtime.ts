@@ -1,19 +1,41 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promptKey, RunJournal } from "./journal";
 import { WorkflowRegistry } from "./registry";
+import { buildWorkflowSeatbeltProfile, sandboxAvailable } from "./sandbox";
 import { makeSemaphore, type Semaphore } from "./semaphore";
 import type { BridgeRequest, BridgeResponse, WorkerInit } from "./bridge";
 import type { AgentOpts, WorkflowProgress, WorkflowRunView } from "./types";
 
+const WORKFLOW_SUBCOMMAND = "__workflow-worker";
+
+/** Command to re-invoke THIS program in workflow-worker mode, correct for both the compiled binary
+ *  and dev/test. `process.execPath` is always the file to spawn; `Bun.main` is the discriminator
+ *  (compiled vs dev) because dev needs an extra script-path arg — verified both ways in the Track-A
+ *  spike (trackA-spike-notes.md). */
+function defaultWorkerCommand(): { file: string; args: string[] } {
+  if (Bun.main.startsWith("/$bunfs/") || Bun.main.includes("/$bunfs/")) {
+    // COMPILED: execPath IS the norma-core binary; the subcommand routes through main.ts's switch.
+    return { file: process.execPath, args: [WORKFLOW_SUBCOMMAND] };
+  }
+  // DEV/TEST: execPath is `bun`; hand it the entry .ts directly — this also works under `bun test`,
+  // where Bun.main is the test runner, not main.ts. The trailing subcommand is harmless here.
+  const entry = fileURLToPath(new URL("./subprocess-entry.ts", import.meta.url));
+  return { file: process.execPath, args: [entry, WORKFLOW_SUBCOMMAND] };
+}
+
 export interface WorkflowRuntimeDeps {
   onEvent: (sessionId: string, ev: WorkflowRuntimeEvent) => void;
   spawnAgent?: (sessionId: string, prompt: string, opts: AgentOpts | undefined, signal: AbortSignal) => Promise<{ ok: boolean; result: string }>;
-  workerUrl?: URL;
   caps?: { concurrency?: number; total?: number };
   runsDir?: string;
+  /** Test seam (REPLACES `workerUrl`): overrides the inner spawn command (file+args, pre-sandbox).
+   *  Default = defaultWorkerCommand(). Tests can point at a fake entry to avoid the real bridge. */
+  workerCommand?: () => { file: string; args: string[] };
 }
 
 export type WorkflowRuntimeEvent =
@@ -31,7 +53,10 @@ export interface WorkflowLaunch {
 interface LiveRun {
   runId: string;
   sessionId: string;
-  worker: Worker;
+  child: ChildProcess;
+  /** Reassembly buffer for NDJSON arriving on `child.stdout` — a `data` chunk may split or coalesce
+   *  lines, so partial data accumulates here until a `\n` completes a line. */
+  stdoutBuf: string;
   done: Promise<WorkflowRunView>;
   running: number;
   completed: number;
@@ -44,6 +69,10 @@ interface LiveRun {
   /** Task A6: this run's own journal — serviceAgent appends to it after each successful agent()
    *  result, keyed by call order, so a later resume(runId) can replay the unchanged prefix. */
   journal: RunJournal;
+  /** I2: this run's own controller (armed at launch, wired to teardown) — threaded into every
+   *  spawnAgent call via serviceAgent so stop()/teardown genuinely cancels in-flight bridged agents
+   *  instead of letting them run to completion after their reply can no longer reach the dead child. */
+  abort: AbortController;
 }
 
 const CONCURRENCY_DEFAULT = 16;
@@ -69,23 +98,50 @@ export class WorkflowRuntime {
     const abort = new AbortController();
     this.reg.register({ runId, sessionId: l.sessionId, name: l.name, abort });
 
-    const workerUrl = this.deps.workerUrl ?? new URL("./worker-entry.ts", import.meta.url);
-    const worker = new Worker(workerUrl.href, { type: "module" });
     let settle!: (v: WorkflowRunView) => void;
     const done = new Promise<WorkflowRunView>((res) => { settle = res; });
     this.settlers.set(runId, settle);
+
+    if (!sandboxAvailable()) throw new Error("workflows unavailable: macOS sandbox-exec not found");
+    const cmd = this.deps.workerCommand?.() ?? defaultWorkerCommand();
+    const profile = buildWorkflowSeatbeltProfile(cmd.file);
+    const child = spawn("/usr/bin/sandbox-exec", ["-p", profile, cmd.file, ...cmd.args],
+      { stdio: ["pipe", "pipe", "pipe"], detached: true });
+
     const run: LiveRun = {
-      runId, sessionId: l.sessionId, worker, done, running: 0, completed: 0, total: 0,
+      runId, sessionId: l.sessionId, child, stdoutBuf: "", done, running: 0, completed: 0, total: 0,
       sem: makeSemaphore(this.deps.caps?.concurrency ?? CONCURRENCY_DEFAULT),
       totalCap: this.deps.caps?.total ?? TOTAL_DEFAULT,
       journal: new RunJournal(this.runsDir, runId),
+      abort,
     };
     this.live.set(runId, run);
 
     abort.signal.addEventListener("abort", () => this.teardown(runId, () => this.finish(runId, "stopped")));
 
-    worker.onmessage = (ev: MessageEvent) => void this.onWorkerMessage(run, ev.data as BridgeRequest);
-    worker.onerror = () => this.teardown(runId, () => this.finish(runId, "failed", "worker crashed"));
+    // stdout NDJSON → onWorkerMessage (identical op-handling to before, now framed over a pipe
+    // instead of arriving as structured-clone MessageEvents).
+    child.stdout!.on("data", (d: Buffer) => {
+      run.stdoutBuf += d.toString("utf8");
+      let i;
+      while ((i = run.stdoutBuf.indexOf("\n")) >= 0) {
+        const line = run.stdoutBuf.slice(0, i); run.stdoutBuf = run.stdoutBuf.slice(i + 1);
+        if (!line.trim()) continue;
+        let msg: BridgeRequest;
+        try { msg = JSON.parse(line); } catch { continue; }
+        void this.onWorkerMessage(run, msg);
+      }
+    });
+    // Crash/exit-without-done fallback (replaces worker.onerror). The `done`/`error` bridge messages
+    // drive normal terminal state and teardown first; if the child dies without ever sending one
+    // (killed externally, OOM, sandbox-exec itself failing to start it), fail here instead of hanging
+    // await() forever. Guarded on `live.has` since a normal done/error/stop already tore this down.
+    child.on("close", (code) => {
+      if (this.live.has(runId)) this.teardown(runId, () => this.finish(runId, "failed", `workflow worker exited (code ${code ?? "signal"})`));
+    });
+    child.on("error", (err) => {
+      if (this.live.has(runId)) this.teardown(runId, () => this.finish(runId, "failed", `workflow worker failed to spawn: ${(err as Error).message}`));
+    });
 
     const summary = l.source.trim().split("\n")[0]?.slice(0, 120) ?? "";
     this.deps.onEvent(l.sessionId, { type: "started", runId, name: l.name, summary });
@@ -94,7 +150,7 @@ export class WorkflowRuntime {
       source: l.source, args: l.args ?? null, concurrency: this.deps.caps?.concurrency ?? CONCURRENCY_DEFAULT,
       resumeJournal: l.resumeJournal,
     };
-    worker.postMessage(init);
+    child.stdin!.write(JSON.stringify(init) + "\n");
     return runId;
   }
 
@@ -137,8 +193,8 @@ export class WorkflowRuntime {
         break;
       case "agent": {
         const reply = await this.serviceAgent(run, msg);
-        // guard: worker may already be torn down (stopped) before the agent resolves
-        if (this.live.has(run.runId)) run.worker.postMessage(reply);
+        // guard: the child may already be torn down (stopped) before the agent resolves
+        if (this.live.has(run.runId)) run.child.stdin!.write(JSON.stringify(reply) + "\n");
         break;
       }
       case "done":
@@ -163,21 +219,30 @@ export class WorkflowRuntime {
       return { callId: msg.callId, ok: false, error: err };
     }
     await run.sem.acquire();
-    run.running++; run.total++;
-    this.reg.setCounts(run.runId, { running: run.running, completed: run.completed, total: run.total });
-    this.emitProgress(run, {});
-    try {
-      const abort = new AbortController();
-      const out = await this.deps.spawnAgent(run.sessionId, msg.prompt, msg.opts, abort.signal);
+    try { // M4: everything acquire() pairs with is inside the try, so release() always runs
+      run.running++; run.total++;
+      if (this.live.has(run.runId)) { // M1: don't touch counts/progress for an already-torn-down run
+        this.reg.setCounts(run.runId, { running: run.running, completed: run.completed, total: run.total });
+        this.emitProgress(run, {});
+      }
+      const perCall = new AbortController();
+      // I2: stop()/teardown fires run.abort — chaining it here means it actually cancels this
+      // in-flight agent (via runWorkflowAgent's own AbortSignal.any([childSignal, signal])) instead
+      // of leaving it to run to completion with its reply discarded. perCall is reserved for future
+      // per-call cancellation (none exists yet — it never fires on its own today).
+      const signal = AbortSignal.any([run.abort.signal, perCall.signal]);
+      const out = await this.deps.spawnAgent(run.sessionId, msg.prompt, msg.opts, signal);
       // Task A6: only successful results are journaled — a failed call has nothing worth caching,
       // and a later resume() should retry it live rather than replay the failure.
       if (out.ok) run.journal.append(promptKey(msg.prompt, msg.opts), out.result);
       return out.ok ? { callId: msg.callId, ok: true, value: out.result } : { callId: msg.callId, ok: false, error: out.result };
     } finally {
       run.running--; run.completed++;
-      this.reg.setCounts(run.runId, { running: run.running, completed: run.completed, total: run.total });
-      this.emitProgress(run, {});
-      run.sem.release();
+      run.sem.release(); // M4: release FIRST — never blocked by a possibly-throwing emit below
+      if (this.live.has(run.runId)) { // M1: don't emit progress/counts for a run that already finished
+        this.reg.setCounts(run.runId, { running: run.running, completed: run.completed, total: run.total });
+        this.emitProgress(run, {});
+      }
     }
   }
 
@@ -190,7 +255,11 @@ export class WorkflowRuntime {
     const run = this.live.get(runId);
     if (!run) return;
     this.live.delete(runId);
-    try { run.worker.terminate(); } catch { /* already gone */ }
+    // Group-kill: `detached: true` at spawn made the child its own process-group leader, so the
+    // negative pid reaps sandbox-exec + the bun child together (mirrors agent/tools/bash.ts). Falls
+    // back to a direct kill of the child pid if the group-kill fails for any reason.
+    try { if (run.child.pid) process.kill(-run.child.pid, "SIGKILL"); }
+    catch { try { run.child.kill("SIGKILL"); } catch { /* already gone */ } }
     then();
   }
 
