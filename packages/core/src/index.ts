@@ -10,6 +10,7 @@ export {
 } from "./settings";
 export { runWorkflowSubprocess } from "./workflows/subprocess-entry";
 export { WorkflowRuntime, type WorkflowRuntimeDeps, type WorkflowRuntimeEvent, type WorkflowLaunch } from "./workflows/runtime";
+export { WorkflowStore, type ResolvedWorkflow } from "./workflows/store";
 export {
   deriveInstallName,
   resolvePluginTarget,
