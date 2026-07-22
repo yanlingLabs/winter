@@ -939,10 +939,17 @@ export async function startDaemon(opts: {
       // (settings.ts) already bake in the default-ON (`!== false`) semantics, so these resolve to a
       // definite boolean (fail-open `true` when neither a project overlay nor global settings.json
       // exist yet, mirroring hooksEnabledHot/lspAutoDiagnosticsHot's own null-settings fallback
-      // above). Neither getter is consumed yet — Task B3/B4 wires the deferred Workflow tool
-      // registration/gating and the `/ultracode` keyword trigger against these two names.
+      // above). workflowsEnabled is consumed by B3's per-session Workflow tool gating;
+      // keywordTriggerEnabled is consumed by B4's `/ultracode` keyword trigger (engine.ts).
       workflowsEnabled: (cwd?: string) => (projectSettings.effective(projectRootOf(cwd)) ?? settings) ? workflowsEnabledFrom(projectSettings.effective(projectRootOf(cwd)) ?? settings!) : true,
-      keywordTriggerEnabled: (cwd?: string) => keywordTriggerEnabledFrom(projectSettings.effective(projectRootOf(cwd)) ?? settings!),
+      // Task B4 fix: this getter originally had NO equivalent null-guard (unlike workflowsEnabled
+      // just above), so a genuinely-null `settings` (malformed settings.json at boot, or a test
+      // that injects `agentProvider` directly — the exact scenario hooksEnabledHot/
+      // lspAutoDiagnosticsHot's own doc comments call out) would throw at
+      // `keywordTriggerEnabledFrom(... ?? settings!)` instead of failing open. B4 is the first real
+      // consumer of this getter, so harden it now to the SAME null-guarded shape as workflowsEnabled
+      // (fails open to `true`, matching hooksEnabledHot/lspAutoDiagnosticsHot's own precedent).
+      keywordTriggerEnabled: (cwd?: string) => (projectSettings.effective(projectRootOf(cwd)) ?? settings) ? keywordTriggerEnabledFrom(projectSettings.effective(projectRootOf(cwd)) ?? settings!) : true,
       // Task B2: the runtime the Workflow tool bridge (engine.ts) launches/awaits against —
       // constructed above, right alongside bgAgents (see its own doc comment there for why
       // `spawnAgent`/`onEvent` safely close over `engine` before this very assignment completes).

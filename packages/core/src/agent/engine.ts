@@ -18,7 +18,7 @@ import type { PermissionRules } from "./permission-rules";
 import { readOnlyBash } from "./readonly-bash";
 import { SHIPPED_DANGEROUS_DOMAINS, dangerousDomainMatch } from "./dangerous-domains";
 import { repoRootFor } from "./memory-dir";
-import type { ContextAssembler } from "./context";
+import { type ContextAssembler, neutralizeReminderTags } from "./context";
 import type { Compactor } from "./compactor";
 import type { McpManager } from "./mcp/manager";
 import { bashLooksSafe, type BashReviewer, type ReviewInput } from "./reviewer";
@@ -80,6 +80,52 @@ const WORKFLOW_TOOL = "Workflow";
 function isChatOrCowork(_meta: { mode?: string }): boolean {
   return false;
 }
+
+// Task B4 (/ultracode): the fixed clientName sentinels the ENGINE ITSELF stamps onto a
+// user_message it synthesizes/relays on someone's behalf — never a real connecting harness's own
+// self-declared identity (those are e.g. "cli-chat"/"cli-p" — packages/cli/src/main.ts's own
+// `connect(chat ? "cli-chat" : "cli-p", ...)` — or "orb"/"iphone-gateway"/"norma-probe" for the
+// app/phone/debug harnesses). `/ultracode` must fire ONLY for a genuine top-level human turn (CC
+// parity: never a `-p` one-shot, a scheduled routine, or a dispatch session) — a DENYLIST, not an
+// allowlist (same "default open" shape as workflowsEnabledFrom/etc. below): any OTHER clientName is
+// treated as a real interactive harness.
+//  - "cli-p"    — norma -p, packages/cli/src/main.ts's own one-shot connect name.
+//  - "routine"  — a scheduled routine's single headless turn (routines/runner.ts).
+//  - "dispatch" — a dispatch-CHILD session's own initiating prompt (dispatch-children.ts) — belt-
+//    and-braces alongside this file's `meta.origin === "dispatch-child"` check (turn()'s own
+//    ultracodeGateOpen, below) — workflowToolAllowed's own doc comment above describes the
+//    identical redundant-condition relationship for this exact dispatch-child case.
+// "send_message"/"resume" (this file's own child-thread bridges, runThread's send_message drain and
+// resumeAgent) are deliberately NOT listed: both are stamped on a CHILD thread's events only, never
+// threadId===MAIN_THREAD — and latestMainUserMessage (below) only ever looks at MAIN_THREAD
+// messages, so neither sentinel is a reachable clientName for this check in the first place.
+const NON_HUMAN_CLIENT_NAMES = new Set(["cli-p", "routine", "dispatch"]);
+
+function isHumanOriginClientName(clientName: string): boolean {
+  return !NON_HUMAN_CLIENT_NAMES.has(clientName);
+}
+
+// Task B4: parses a `/ultracode` trigger off a MAIN-thread human message. Case-sensitive; requires
+// a word boundary right after the keyword (via the `\s+`-or-end alternation below) so
+// "/ultracoder"/"/ultracode2" never false-match — returns undefined for any text that doesn't
+// literally START with it (after trimming). `task` is the trimmed remainder, or undefined for a
+// BARE `/ultracode` (nothing — or only whitespace — after the keyword): the
+// session-wide-toggle-flip form (see turn()'s own use of this, below).
+function parseUltracodeTrigger(text: string): { task?: string } | undefined {
+  const m = /^\/ultracode(?:\s+([\s\S]*))?\s*$/.exec(text.trim());
+  if (!m) return undefined;
+  const task = m[1]?.trim();
+  return { task: task && task.length > 0 ? task : undefined };
+}
+
+// Task B4: AUTHORIZATION only, no know-how — the deferred Workflow tool's OWN registered
+// description already IS the authoring guide (tools/workflow.ts's AUTHORING_GUIDE); this just
+// tells the model the user opted in for THIS task. A <system-reminder>-tagged block embedded
+// directly in the assembled instructions string mirrors context.ts's own memory-index injections
+// (context.ts:70's neutralizeReminderTags is the exact sanitizer those use before embedding —
+// buildInstructionsFull, below, gives this static string the same treatment for consistency, even
+// though it has no interpolated content today).
+const ULTRACODE_REMINDER = "<system-reminder>\nThe user opted into workflow orchestration for this task. When the task is substantial and parallelizable, USE the Workflow tool to author and launch a dynamic workflow. This authorizes orchestration; it does not change how the tool works.\n</system-reminder>";
 
 // 4h-i (CC parity: spawn_agent `mode`), widened to 6 values (SP-policies Task 2) — permissiveness
 // order, LEAST to MOST permissive: "plan" (read-only, most restrictive) < "dont-ask" < "ask"
@@ -840,6 +886,14 @@ export class AgentEngine {
   // it already started; CC has the same re-fire-on-restart shape). Only consulted when cfg.hooks
   // is wired, so it's inert (allocated-but-untouched) for every hook-less config — byte-identical.
   private hookSessionStarted = new Set<string>();
+  // Task B4: session-wide "auto-orchestrate substantial tasks" toggle — flipped by a BARE
+  // `/ultracode` (no task text), read by turn() every turn thereafter. SESSION-scoped like
+  // loadedSkills/loadedTools above (sticky across turns, never cleared by runTurn's finally); CC
+  // parity ("resets on new session") falls out for free — a fresh sessionId was simply never added
+  // here, no explicit teardown needed. Never persisted: a daemon restart (or a resumed session in a
+  // fresh process) starts every session back at "off", same acceptable v1 shape hookSessionStarted
+  // above already has for its own per-process-only state.
+  private ultracodeToggle = new Set<string>();
   // Vision image bridge (originally Phase 5 CU-only; generalized so ANY tool can stage an image —
   // the `computer` tool's screenshots AND the `read` tool's image/notebook-image-output attaches
   // both go through this ONE map): images staged this turn, keyed by imageKey(sessionId, threadId,
@@ -1167,7 +1221,7 @@ export class AgentEngine {
    *  tool that was never hidden in the first place. `_cwd` is unused today (no current pin is
    *  scope-aware) — kept in the signature for parity with the other deferral seams, which all
    *  thread cwd, in case a future pin needs it. */
-  private pinnedTools(sessionId: string, meta: { approvalPolicy: SessionApprovalPolicy }, _cwd: string | null): Set<string> {
+  private pinnedTools(sessionId: string, meta: { approvalPolicy: SessionApprovalPolicy }, _cwd: string | null, ultracodeActive?: boolean): Set<string> {
     const pins = new Set<string>();
     if (meta.approvalPolicy === "plan") pins.add("exit_plan_mode");
     if (this.cfg.worktrees?.active(sessionId)) pins.add("exit_worktree");
@@ -1183,6 +1237,13 @@ export class AgentEngine {
     // this session — running OR terminal (unlike task_stop's running-only pin above), since a
     // FINISHED agent must stay collectable via agent_output without a ToolSearch load.
     if (this.cfg.bgAgents?.list(sessionId).length) { pins.add("agent_list"); pins.add("agent_output"); }
+    // Task B4: /ultracode pins the deferred Workflow tool for the turn — mirrors exit_plan_mode's
+    // own pin just above (a state-required deferred built-in forced visible without touching the
+    // sticky loadedTools set). `ultracodeActive` is computed ONCE per turn by turn() itself (its own
+    // doc comment there); both callers of this method (buildInstructionsFull's once-per-turn read,
+    // and the per-round loop in runThread) thread that SAME fixed-for-the-turn value through
+    // unchanged, so a mid-turn steer can never flicker the pin on/off within one turn.
+    if (ultracodeActive) pins.add(WORKFLOW_TOOL);
     return pins;
   }
 
@@ -1640,6 +1701,21 @@ export class AgentEngine {
       && !isChatOrCowork(meta);
   }
 
+  /** Task B4: the most recent MAIN-thread `user_message` in this session's log, if any — read
+   *  fresh (mirrors `historyInput`/`maybeAutoCompact`'s own independent `store.read` calls above;
+   *  no shared cache) so `/ultracode` detection in turn() always sees the message that's actually
+   *  driving THIS turn. Scoped to MAIN_THREAD only, mirroring `historyInput`'s own
+   *  `e.threadId !== MAIN_THREAD` skip — a child thread's own "send_message"/"resume"-clientName
+   *  events (runThread's send_message drain, resumeAgent) are never candidates. */
+  private latestMainUserMessage(sessionId: string): { text: string; clientName: string } | undefined {
+    const events = this.cfg.store.read(sessionId);
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i]!;
+      if (e.type === "user_message" && e.threadId === MAIN_THREAD) return { text: e.text, clientName: e.clientName };
+    }
+    return undefined;
+  }
+
   // Computed ONCE per turn by turn() (same one-per-turn rule as `instructions` itself) — a
   // same-turn ToolSearch load changes `loaded` but must not re-trigger this mid-turn; and the
   // plan-mode reminder is appended off the policy at turn start, not re-checked per round, so an
@@ -1657,14 +1733,19 @@ export class AgentEngine {
   // runWorkflowAgent's own childExcludeTools already keeps its child from CALLING Workflow via
   // specs() (Task A4), and this file's "Files" scope for B3 doesn't extend the same textual-listing
   // polish to that already-excluded, already-safe path.
-  private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: SessionApprovalPolicy, sessionId: string, excludeDeferred?: Set<string>): string {
+  // Task B4: `ultracodeActive` (optional — every pre-B4 caller/call site omits it, unchanged
+  // behavior) is turn()'s own once-per-turn `/ultracode` decision (see its doc comment there),
+  // threaded straight through to `pinnedTools` (pins Workflow for the turn) AND appended as an
+  // authorization <system-reminder> below, mirroring the "# Plan mode" block's own
+  // append-onto-instructionsFull shape.
+  private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: SessionApprovalPolicy, sessionId: string, excludeDeferred?: Set<string>, ultracodeActive?: boolean): string {
     const tsEnabled = this.toolSearchEnabled(cwd);
     const deferThreshold = this.toolSearchThreshold(cwd);
     // Pins computed HERE, at instructionsFull's own once-per-turn/thread cadence (see this
     // method's callers — turn() and the spawn bridge each call it exactly once), NOT the
     // per-round cadence used at the specs()/executeCall seams below. `loaded` itself is never
     // mutated — pins are unioned into a NEW Set.
-    const pins = tsEnabled ? this.pinnedTools(sessionId, { approvalPolicy: policy }, cwd) : new Set<string>();
+    const pins = tsEnabled ? this.pinnedTools(sessionId, { approvalPolicy: policy }, cwd, ultracodeActive) : new Set<string>();
     const effectiveLoaded = pins.size ? new Set([...loaded, ...pins]) : loaded;
     const deferred = tsEnabled
       ? this.cfg.registry.deferredIndex(cwd, effectiveLoaded, deferThreshold, tsEnabled, this.toolSearchDeferExternals(cwd)).filter((d) => !excludeDeferred?.has(d.name))
@@ -1674,6 +1755,15 @@ export class AgentEngine {
       : base;
     if (policy === "plan") {
       instructionsFull += "\n\n# Plan mode\nYou are in plan mode: research and form a plan, but make NO changes — file edits, writes, and commands are disabled and will be blocked. Any clarifying question or choice you need from the user MUST go through the ask_user tool (structured options) — do not ask in prose and stop. When your plan is ready, call exit_plan_mode with the plan (markdown) to present it for approval. Only after approval will editing be enabled.";
+    }
+    // Task B4: the /ultracode authorization reminder. Unconditional on `tsEnabled`/`deferred`
+    // above (a session with ToolSearch off entirely still needs the model told it's authorized to
+    // orchestrate) — independent concern from the pin, which only matters while the tool is
+    // actually deferred. A STATIC string (no interpolated model/user/file content) run through
+    // neutralizeReminderTags anyway, for the same "every <system-reminder> block gets the same
+    // hygiene treatment" reason context.ts's own memory-index injections do.
+    if (ultracodeActive) {
+      instructionsFull += "\n\n" + neutralizeReminderTags(ULTRACODE_REMINDER);
     }
     return instructionsFull;
   }
@@ -1736,13 +1826,63 @@ export class AgentEngine {
     // settings.json edit to `workflows.enabled` must not retroactively change what THIS turn
     // already advertised, mirroring `isDispatch`/`instructions`/`instructionsFull` themselves.
     const excludeWorkflow = !this.workflowToolAllowed(meta, cwd);
-    const instructionsFull = this.buildInstructionsFull(instructions, cwd, loaded, meta.approvalPolicy, sessionId, excludeWorkflow ? new Set([WORKFLOW_TOOL]) : undefined);
+    // Task B4: `/ultracode` — human-origin only, gated on BOTH workflows.enabled AND
+    // workflows.keywordTrigger (B1), independent of (but overlapping with) workflowToolAllowed's
+    // own gate just above. Every condition re-checked directly here (not just via `excludeWorkflow`)
+    // so this reads as a self-contained formula against the spec: `workflowsEnabled(cwd) &&
+    // keywordTriggerEnabled(cwd) && human-origin`, where human-origin itself is `meta.mode !==
+    // "dispatch"` (isDispatch, computed above) AND `meta.origin` names neither a dispatch nor a
+    // routine session (belt-and-braces alongside workflowToolAllowed's own identical
+    // dispatch-child check — see its doc comment for why that redundancy is deliberate) AND the
+    // driving message's `clientName` is a real interactive harness (isHumanOriginClientName).
+    const latestUserMessage = this.latestMainUserMessage(sessionId);
+    const ultracodeGateOpen = this.cfg.workflowsEnabled?.(cwd) !== false
+      && this.cfg.keywordTriggerEnabled?.(cwd) !== false
+      && !isDispatch
+      && meta.origin !== "dispatch-child"
+      && meta.origin !== "dispatch"
+      && !meta.origin?.startsWith("routine/")
+      && !isChatOrCowork(meta)
+      && !!latestUserMessage
+      && isHumanOriginClientName(latestUserMessage.clientName);
+    // Parsed only when the gate is open — a `/ultracode`-prefixed message in a gated-off session
+    // (workflows.enabled:false, keywordTrigger:false, or non-human-origin) is never even parsed, so
+    // it can't flip the toggle either (Design notes: "inert" means no pin, no reminder, AND no
+    // toggle side effect).
+    const ultracodeTrigger = ultracodeGateOpen && latestUserMessage ? parseUltracodeTrigger(latestUserMessage.text) : undefined;
+    if (ultracodeTrigger && ultracodeTrigger.task === undefined) {
+      // Bare `/ultracode` (no task): flip the session-wide auto-orchestrate toggle. Checked AFTER
+      // the flip below (`this.ultracodeToggle.has(sessionId)`), so a toggle-ON flip and a
+      // toggle-OFF flip both take effect starting with THIS very turn — no separate "was it already
+      // on before this message" bookkeeping needed.
+      if (this.ultracodeToggle.has(sessionId)) this.ultracodeToggle.delete(sessionId);
+      else this.ultracodeToggle.add(sessionId);
+    }
+    const ultracodeActive = ultracodeGateOpen && (ultracodeTrigger?.task !== undefined || this.ultracodeToggle.has(sessionId));
+    const instructionsFull = this.buildInstructionsFull(instructions, cwd, loaded, meta.approvalPolicy, sessionId, excludeWorkflow ? new Set([WORKFLOW_TOOL]) : undefined, ultracodeActive);
     // Auto-compact BEFORE historyInput is built, so a triggered compaction's checkpoint is
     // reflected in this turn's input. A compaction failure degrades to a normal (uncompacted)
     // turn rather than breaking it. Uses THIS turn's resolved model (sel.model), not the boot
     // snapshot — see contextWindow's doc comment.
     try { await this.maybeAutoCompact(sessionId, sel.model); } catch (e) { console.error("auto-compact failed", e); }
     const input = this.historyInput(sessionId);
+    // Task B4: strip the literal `/ultracode <task>` prefix from the MODEL-FACING copy of the
+    // triggering message — the persisted event (session log / every harness's transcript) keeps the
+    // real "/ultracode <task>" text forever; only THIS turn's reconstruction is rewritten. Matched
+    // by exact content (not position), scanning from the end, so this can only ever touch the exact
+    // message `latestUserMessage` itself identified, never some earlier unrelated message that
+    // happens to share the same text. A no-op whenever this turn's activity came from the
+    // session-wide toggle alone (no fresh trigger this turn) or from a bare `/ultracode` (nothing to
+    // substitute the prefix WITH).
+    if (ultracodeTrigger?.task !== undefined && latestUserMessage) {
+      for (let i = input.length - 1; i >= 0; i--) {
+        const item = input[i]!;
+        if (item.type === "message" && item.role === "user" && item.content === latestUserMessage.text) {
+          input[i] = { ...item, content: ultracodeTrigger.task };
+          break;
+        }
+      }
+    }
     // Appended AFTER history (nearest the model's attention), BEFORE the tool loop starts — see
     // taskListReminder's doc comment for why this is transient (assembled input only, never a
     // persisted event) and why it's a "user" message rather than a new TurnInputItem role.
@@ -1792,6 +1932,11 @@ export class AgentEngine {
       depth: 0,
       signal,
       loaded,
+      // Task B4: the once-per-turn ultracode decision, threaded to runThread's per-round pins seam
+      // (this file's pinnedTools, via the per-round loop) — buildInstructionsFull, above, already
+      // applied the SAME value at round 0's own pins computation; this covers every later round of
+      // this same turn too.
+      ultracodeActive,
       // Dispatch (Phase 7) Task 4: a dispatch session gets the allowTools whitelist (which already
       // includes session_spawn — dispatch-prompt.ts); a code session instead gets session_spawn
       // explicitly EXCLUDED (SESSION_SPAWN_TOOL's own doc comment above) — never both fields at
@@ -1830,6 +1975,14 @@ export class AgentEngine {
     loaded: Set<string>;
     excludeTools?: Set<string>;
     allowTools?: Set<string>;
+    // Task B4: turn()'s own once-per-turn `/ultracode` decision (see its doc comment there),
+    // threaded down so the per-round pins computation below can pin Workflow for EVERY round of
+    // this turn, not just round 0 (buildInstructionsFull's own once-per-turn call already pins it
+    // there too — both seams need the SAME fixed value). Only the main-thread caller (turn()) ever
+    // sets this; every spawn/resume call site below omits it, so a child thread never pins Workflow
+    // via this path (childExcludeTools' own literal exclusion of WORKFLOW_TOOL is the belt-and-
+    // braces backstop regardless, per Task A4/B2/B3).
+    ultracodeActive?: boolean;
     // 4h-i (CC parity: Agent.max_turns): a per-thread override of MAX_TOOL_ITERATIONS. Only the
     // spawn bridge (below) ever passes this — main-thread callers (turn()) never set it, so the
     // main thread's bound is unchanged (MAX_TOOL_ITERATIONS, 24). A child's effective bound is
@@ -1928,8 +2081,10 @@ export class AgentEngine {
       // bridges, a bg task started/exited) must be visible to the VERY NEXT round's specs() AND
       // to that round's tool-call dispatch below, not just the next turn. `loaded` is NEVER
       // mutated here — see the loadedTools NOTE above. Reused for every executeCall/
-      // requestApproval invocation triggered by THIS round's calls, further down.
-      const pins = tsEnabled ? this.pinnedTools(sessionId, meta, cwd) : new Set<string>();
+      // requestApproval invocation triggered by THIS round's calls, further down. `opts
+      // .ultracodeActive` (Task B4) is NOT recomputed per round like the rest of this Set — it's
+      // the one fixed-for-the-whole-turn value turn() already decided, just applied at this seam too.
+      const pins = tsEnabled ? this.pinnedTools(sessionId, meta, cwd, opts.ultracodeActive) : new Set<string>();
       const effectiveLoaded = pins.size ? new Set([...loaded, ...pins]) : loaded;
 
       for await (const ev of this.cfg.provider.provider.streamTurn({
