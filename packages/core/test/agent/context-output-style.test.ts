@@ -47,4 +47,12 @@ describe("assemble() output-style injection", () => {
     expect(out.startsWith("DISPATCH_BASE")).toBe(true);
     expect(called).toBe(false);
   });
+  test("skipOutputStyle (dispatch child) → base prompt, resolver NOT consulted", () => {
+    let called = false;
+    const out = assembler(() => { called = true; return { name: "x", description: "", body: "OVERLAY", keepCodingInstructions: true }; })
+      .assemble({ cwd: null, skipOutputStyle: true });
+    expect(out.startsWith(BASE)).toBe(true);      // normal base kept (NOT a dispatch override)
+    expect(out.includes("OVERLAY")).toBe(false);  // no style applied
+    expect(called).toBe(false);                   // resolver never called
+  });
 });

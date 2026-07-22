@@ -135,19 +135,21 @@ export class ContextAssembler {
     };
   }
 
-  assemble(input: { cwd: string | null; loadedSkills?: string[]; basePromptOverride?: string; memoryBucket?: "project" | "assistant" }): string {
+  assemble(input: { cwd: string | null; loadedSkills?: string[]; basePromptOverride?: string; memoryBucket?: "project" | "assistant"; skipOutputStyle?: boolean }): string {
     const cwd = input.cwd;
     const trusted = cwd ? this.trust.isTrusted(cwd) : false;
     // Dispatch mode (Phase 7, spec §7): the coordinator gets its OWN base prompt — swapped in
     // whole, not patched — while every other section below (date, user/project instructions,
     // memory, capabilities) still applies unchanged regardless of caller.
     // Output style (CC-parity): the resolved style fills the base slot. SKIPPED entirely under a
-    // basePromptOverride (dispatch/subagents keep their own base — styles are main-conversation
-    // only). keepCodingInstructions:true augments (base kept, overlay appended right after);
+    // basePromptOverride (dispatch coordinators keep their own base) OR `skipOutputStyle` (dispatch
+    // CHILD sessions — origin:"dispatch-child" — which run mode:"code" with the NORMAL base, so the
+    // override check alone wouldn't exclude them): styles are main-conversation only. Everything else
+    // still gets them. keepCodingInstructions:true augments (base kept, overlay appended right after);
     // false replaces the base. An empty body or a null resolver → base unchanged (byte-identical).
     let baseSlot = input.basePromptOverride ?? this.basePrompt;
     const styleAppend: string[] = [];
-    if (input.basePromptOverride === undefined) {
+    if (input.basePromptOverride === undefined && !input.skipOutputStyle) {
       const style = this.styleResolver?.(cwd) ?? null;
       if (style && style.body) {
         if (style.keepCodingInstructions) styleAppend.push(style.body);

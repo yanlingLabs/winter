@@ -1576,6 +1576,11 @@ export class AgentEngine {
       // of the cwd-resolved project MEMDIR (ContextAssembler's memoryBucket branch) — every other
       // caller keeps today's "project" behavior byte-for-byte.
       memoryBucket: isDispatch ? "assistant" : "project",
+      // Output styles are main-conversation only. The dispatch COORDINATOR is already excluded by its
+      // basePromptOverride above, but a dispatch CHILD (origin:"dispatch-child") runs mode:"code" with
+      // the normal base and no override, so it would otherwise inherit the user's active style — e.g.
+      // "learning" would leave TODO(human) gaps in autonomous work no human reviews. Exclude it here.
+      skipOutputStyle: meta.origin === "dispatch-child",
     });
     // NOTE (correctness-critical): `loaded` MUST be THE ONE LIVE SET for this session — never a
     // snapshot/copy. It's read here to build specs()/deferredIndex() for round 0, and the SAME
