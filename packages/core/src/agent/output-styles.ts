@@ -44,9 +44,11 @@ export const BUILTIN_STYLE_NAMES: readonly string[] = BUILTIN_OUTPUT_STYLES.map(
 
 const DEFAULT_BODY_CAP = 32768;
 
-/** Parse `<name>.md`: frontmatter (name, description, keep-coding-instructions) between the first
- *  ---…--- fence, then the body. Returns null if invalid (no fence / not a regular file). Mirrors
- *  skills.ts `parseSkill`. */
+/** Parse `<name>.md`: frontmatter (description, keep-coding-instructions) between the first
+ *  ---…--- fence, then the body. A `name:` line is tolerated (parsed but ignored, never an error) —
+ *  identity is ALWAYS `fallbackName` (the filename stem), never the frontmatter, so list()'s and
+ *  resolve()'s notions of a style's name can never disagree. Returns null if invalid (no fence /
+ *  not a regular file). Mirrors skills.ts `parseSkill`. */
 function parseStyleFile(path: string, fallbackName: string, cap: number): ResolvedStyle | null {
   let raw: string;
   try {
@@ -60,16 +62,21 @@ function parseStyleFile(path: string, fallbackName: string, cap: number): Resolv
   if (end === -1) return null;
   const fm = raw.slice(3, end);
   const body = raw.slice(end + 4).replace(/^\r?\n/, "");
-  let name = fallbackName;
+  const name = fallbackName;
   let description = "";
   let keep = false;
-  for (const line of fm.split(/\r?\n/)) {
+  for (const rawLine of fm.split(/\r?\n/)) {
+    // CRLF files: `end` is found via indexOf("\n---", ...), which lands on the \n of the closing
+    // fence's own \r\n — so the LAST frontmatter line's \r (from ITS \r\n) stays attached with no
+    // following \n for `split(/\r?\n/)` to consume. Strip it here so the key:value regex below
+    // (whose `(.*)$` can't match across a bare \r) doesn't silently fail on that last line.
+    const line = rawLine.replace(/\r$/, "");
     const m = line.match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
     if (!m) continue;
     const key = m[1]!.toLowerCase();
     const val = m[2]!.trim();
-    if (key === "name" && val) name = val;
-    else if (key === "description") description = val;
+    // "name" is intentionally parsed-and-ignored here (falls through, no branch) — see docblock.
+    if (key === "description") description = val;
     else if (key === "keep-coding-instructions") keep = val === "true";
   }
   let capped = neutralizeReminderTags(body);
@@ -88,8 +95,14 @@ export class OutputStyleStore {
     this.cap = deps.caps?.bodyBytes ?? DEFAULT_BODY_CAP;
   }
 
-  /** project[trusted] > user > built-in. null if the name resolves to nothing. */
+  /** project[trusted] > user > built-in. null if the name resolves to nothing, or isn't a valid slug. */
   resolve(name: string, cwd: string | null): ResolvedStyle | null {
+    // Path-traversal guard: `name` flows from settings.outputStyle — including a trusted project's
+    // checked-in .norma/settings.json — straight into join(..., `${name}.md`) below. Reject anything
+    // that isn't a bare slug BEFORE it ever reaches a filesystem call. Same slug-jail spirit as
+    // skills.ts's skillNameError; no dots either, so a bare "." or ".." stem is rejected too rather
+    // than relying on the `${name}.md` suffix to accidentally neuter it into "..md"/"...md".
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) return null;
     if (cwd && this.deps.trust.isTrusted(cwd)) {
       const p = parseStyleFile(join(cwd, ".norma", "output-styles", `${name}.md`), name, this.cap);
       if (p) return p;

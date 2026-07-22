@@ -70,6 +70,71 @@ describe("OutputStyleStore.resolve", () => {
   });
 });
 
+describe("OutputStyleStore.resolve — CRLF frontmatter (review finding #1)", () => {
+  test("CRLF file whose LAST frontmatter key is keep-coding-instructions still parses it", () => {
+    const home = tmp("nh-");
+    mkdirSync(join(home, "output-styles"), { recursive: true });
+    // \r\n throughout, including right before the closing fence — the last frontmatter line has
+    // no following \n of its own (it's consumed by the "\n---" fence search), so a naive \r?\n
+    // split leaves a bare trailing \r that the key:value regex then fails to match.
+    const content = "---\r\ndescription: hi\r\nkeep-coding-instructions: true\r\n---\r\nbody";
+    writeFileSync(join(home, "output-styles", "crlf-keep.md"), content);
+    const store = new OutputStyleStore({ normaHome: home, trust: trustStub(false) });
+    const r = store.resolve("crlf-keep", null);
+    expect(r).not.toBeNull();
+    expect(r!.keepCodingInstructions).toBe(true);
+  });
+
+  test("CRLF file whose LAST frontmatter key is description still parses it", () => {
+    const home = tmp("nh-");
+    mkdirSync(join(home, "output-styles"), { recursive: true });
+    const content = "---\r\nkeep-coding-instructions: true\r\ndescription: tail-desc\r\n---\r\nbody";
+    writeFileSync(join(home, "output-styles", "crlf-desc.md"), content);
+    const store = new OutputStyleStore({ normaHome: home, trust: trustStub(false) });
+    const r = store.resolve("crlf-desc", null);
+    expect(r).not.toBeNull();
+    expect(r!.description).toBe("tail-desc");
+  });
+});
+
+describe("OutputStyleStore.resolve — path traversal via name (review finding #2)", () => {
+  test("a '../' name cannot escape output-styles to leak a real file one level up", () => {
+    const home = tmp("nh-");
+    mkdirSync(join(home, "output-styles"), { recursive: true });
+    // Lands at <home>/secret.md if "../secret" is joined unguarded into
+    // <home>/output-styles/../secret.md — a real, parseable file placed one level OUTSIDE
+    // output-styles/ to prove the traversal would otherwise actually leak its content.
+    writeFileSync(join(home, "secret.md"), "---\ndescription: leaked\n---\nSECRET BODY");
+    const store = new OutputStyleStore({ normaHome: home, trust: trustStub(false) });
+    expect(store.resolve("../secret", null)).toBeNull();
+  });
+
+  test("a nested 'a/b' name cannot bypass the flat namespace to leak a real file", () => {
+    const home = tmp("nh-");
+    mkdirSync(join(home, "output-styles", "a"), { recursive: true });
+    writeFileSync(join(home, "output-styles", "a", "b.md"), "---\ndescription: leaked\n---\nSECRET BODY");
+    const store = new OutputStyleStore({ normaHome: home, trust: trustStub(false) });
+    expect(store.resolve("a/b", null)).toBeNull();
+  });
+
+  test("rejects other structurally-invalid names outright", () => {
+    const store = new OutputStyleStore({ normaHome: tmp("nh-"), trust: trustStub(false) });
+    expect(store.resolve("../../etc/whatever", null)).toBeNull();
+    expect(store.resolve("..", null)).toBeNull();
+    expect(store.resolve(".", null)).toBeNull();
+    expect(store.resolve("", null)).toBeNull();
+  });
+
+  test("valid slug names still resolve real files, and all built-ins still resolve", () => {
+    const home = tmp("nh-");
+    mkdirSync(join(home, "output-styles"), { recursive: true });
+    writeFileSync(join(home, "output-styles", "my-style.md"), "---\ndescription: mine\n---\nbody");
+    const store = new OutputStyleStore({ normaHome: home, trust: trustStub(false) });
+    expect(store.resolve("my-style", null)?.description).toBe("mine");
+    for (const n of BUILTIN_STYLE_NAMES) expect(store.resolve(n, null)?.name).toBe(n);
+  });
+});
+
 describe("OutputStyleStore.list", () => {
   test("lists built-ins plus user files, deduped by closest-wins name", () => {
     const home = tmp("nh-");
@@ -81,5 +146,26 @@ describe("OutputStyleStore.list", () => {
     expect(names).toContain("proactive");
     expect(names).toContain("mine");
     expect(names.filter((n) => n === "proactive").length).toBe(1);
+  });
+});
+
+describe("list()/resolve() identity (review finding #3)", () => {
+  test("filename is the sole identity: a frontmatter name: field does not override it", () => {
+    const home = tmp("nh-");
+    mkdirSync(join(home, "output-styles"), { recursive: true });
+    // File is foo.md but its frontmatter claims to be "bar" — identity must stay "foo".
+    writeFileSync(join(home, "output-styles", "foo.md"), "---\nname: bar\ndescription: d\n---\nBODY");
+    const store = new OutputStyleStore({ normaHome: home, trust: trustStub(false) });
+
+    const listed = store.list(null).map((s) => s.name);
+    expect(listed).toContain("foo");
+    expect(listed).not.toContain("bar");
+
+    const r = store.resolve("foo", null);
+    expect(r).not.toBeNull();
+    expect(r!.name).toBe("foo");
+    expect(r!.body).toContain("BODY");
+
+    expect(store.resolve("bar", null)).toBeNull();
   });
 });
