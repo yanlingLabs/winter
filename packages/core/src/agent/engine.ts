@@ -68,6 +68,19 @@ const SESSION_SPAWN_TOOL = "session_spawn";
 // B4's pin all read the SAME literal, with no `Workflow`/`workflow` casing drift between them.
 const WORKFLOW_TOOL = "Workflow";
 
+// Task B3: is this session a chat/cowork session (as opposed to the top-level interactive CODE
+// session the Workflow tool is gated to)? Always false today — SessionStore.createSession's own
+// `mode` param is typed `"code" | "dispatch"` (sessions/store.ts) and session_spawn's own
+// `type==="cowork"` branch (this file's dispatch loop, below) rejects it pre-launch ("type 'cowork'
+// is not yet available — use 'code'"), so no session anywhere can carry a chat/cowork identity yet.
+// Kept as an explicit named predicate (rather than inlining `false` into workflowToolAllowed below)
+// so the ONE place that needs a real check, whenever either mode ships, is THIS function's body —
+// workflowToolAllowed itself already excludes them correctly the day that lands, no gating logic
+// to revisit at the call site.
+function isChatOrCowork(_meta: { mode?: string }): boolean {
+  return false;
+}
+
 // 4h-i (CC parity: spawn_agent `mode`), widened to 6 values (SP-policies Task 2) — permissiveness
 // order, LEAST to MOST permissive: "plan" (read-only, most restrictive) < "dont-ask" < "ask"
 // (human-gated) < "accept-edits" < "auto" (auto-allows non-destructive tools) < "bypass" (least
@@ -1600,12 +1613,51 @@ export class AgentEngine {
     void this.runTurn(sessionId).catch((err) => console.error("workflow-notification turn failed:", err));
   }
 
+  /** Task B3: is the `Workflow` tool visible/usable for THIS session? Top-level interactive CODE
+   *  sessions only, and only while `workflows.enabled` (settings, B1's `EngineConfig.workflowsEnabled`
+   *  getter — absent entirely, e.g. every pre-B3 test/config, defaults to allowed: `!== false` reads
+   *  true for `undefined`, mirroring reviewerEnabled/toolSearch's own "absent getter → default-on"
+   *  shape). ANDs four independent conditions, ALL of which must hold:
+   *   - `workflowsEnabled(cwd) !== false` — the settings gate (workflowsEnabledFrom, settings.ts).
+   *   - `meta.mode !== "dispatch"` — the dispatch COORDINATOR session itself is excluded; it isn't
+   *     "the top-level interactive code session" the tool is scoped to, and it runs allowTools
+   *     (DISPATCH_ALLOW_TOOLS, dispatch-prompt.ts) which never lists "Workflow" anyway — this ANDs
+   *     with that pre-existing exclusion rather than depending on it alone (belt-and-braces, same
+   *     relationship SESSION_SPAWN_TOOL's own two exclusion sites have to each other).
+   *   - `meta.origin !== "dispatch-child"` — a session_spawn-created child session (a full session
+   *     in its own right, mode:"code", origin:"dispatch-child" stamped at createSession) — see
+   *     ContextAssembler's own skipOutputStyle check just below in turn() for the identical signal.
+   *   - `!isChatOrCowork(meta)` — always true today (see that function's own doc comment); kept so
+   *     this predicate is already correct the day a real chat/cowork mode ships.
+   *  Does NOT need to separately exclude a workflow-spawned agent or a plain spawn_agent child:
+   *  neither is a SESSION (both are child THREADS sharing this same session's `meta`, hence this
+   *  same session-level answer) — runWorkflowAgent's own `childExcludeTools` (Task A4) already
+   *  excludes WORKFLOW_TOOL for its depth-1 children independently of this predicate. */
+  private workflowToolAllowed(meta: { mode?: string; origin?: string }, cwd: string | undefined): boolean {
+    return this.cfg.workflowsEnabled?.(cwd) !== false
+      && meta.mode !== "dispatch"
+      && meta.origin !== "dispatch-child"
+      && !isChatOrCowork(meta);
+  }
+
   // Computed ONCE per turn by turn() (same one-per-turn rule as `instructions` itself) — a
   // same-turn ToolSearch load changes `loaded` but must not re-trigger this mid-turn; and the
   // plan-mode reminder is appended off the policy at turn start, not re-checked per round, so an
   // in-turn exit_plan_mode approval (which mutates `meta.approvalPolicy` for the REST of this
   // turn) does not retroactively add/remove this reminder mid-turn.
-  private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: SessionApprovalPolicy, sessionId: string): string {
+  //
+  // Task B3: `excludeDeferred` (optional — every pre-B3 caller/call site omits it, unchanged
+  // behavior) strips named tools from the DEFERRED-INDEX TEXT LISTING below, same names as
+  // whatever the caller ALSO excludes from specs() via runThread's own `excludeTools` — Workflow is
+  // registered `deferred:true` (B2), so excluding it from specs() alone leaves it still ADVERTISED
+  // in "# Deferred tools" (deferredIndex() and specs() are two independent seams over the same
+  // registry — see registry.ts's own doc comment on isDeferred), which would tell the model a tool
+  // exists that calling it will then just reject. turn() is the only caller that currently passes
+  // this (the main thread's own Workflow gating); the spawn-bridge callers below don't need to —
+  // runWorkflowAgent's own childExcludeTools already keeps its child from CALLING Workflow via
+  // specs() (Task A4), and this file's "Files" scope for B3 doesn't extend the same textual-listing
+  // polish to that already-excluded, already-safe path.
+  private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: SessionApprovalPolicy, sessionId: string, excludeDeferred?: Set<string>): string {
     const tsEnabled = this.toolSearchEnabled(cwd);
     const deferThreshold = this.toolSearchThreshold(cwd);
     // Pins computed HERE, at instructionsFull's own once-per-turn/thread cadence (see this
@@ -1615,7 +1667,7 @@ export class AgentEngine {
     const pins = tsEnabled ? this.pinnedTools(sessionId, { approvalPolicy: policy }, cwd) : new Set<string>();
     const effectiveLoaded = pins.size ? new Set([...loaded, ...pins]) : loaded;
     const deferred = tsEnabled
-      ? this.cfg.registry.deferredIndex(cwd, effectiveLoaded, deferThreshold, tsEnabled, this.toolSearchDeferExternals(cwd))
+      ? this.cfg.registry.deferredIndex(cwd, effectiveLoaded, deferThreshold, tsEnabled, this.toolSearchDeferExternals(cwd)).filter((d) => !excludeDeferred?.has(d.name))
       : [];
     let instructionsFull = deferred.length
       ? base + "\n\n# Deferred tools\nThe following tools exist but their schemas are NOT loaded — calling them directly fails. Load schemas first with the ToolSearch tool (query \"select:<name>\" or keywords), then call them normally.\n" + deferred.map((d) => `- ${d.name} — ${d.description}`).join("\n")
@@ -1680,7 +1732,11 @@ export class AgentEngine {
     // to execute's defense-in-depth check, all within this one turn, without re-reading anything.
     if (!this.loadedTools.has(sessionId)) this.loadedTools.set(sessionId, new Set());
     const loaded = this.loadedTools.get(sessionId)!;
-    const instructionsFull = this.buildInstructionsFull(instructions, cwd, loaded, meta.approvalPolicy, sessionId);
+    // Task B3: computed once per turn (workflowToolAllowed's own doc comment above) — a mid-turn
+    // settings.json edit to `workflows.enabled` must not retroactively change what THIS turn
+    // already advertised, mirroring `isDispatch`/`instructions`/`instructionsFull` themselves.
+    const excludeWorkflow = !this.workflowToolAllowed(meta, cwd);
+    const instructionsFull = this.buildInstructionsFull(instructions, cwd, loaded, meta.approvalPolicy, sessionId, excludeWorkflow ? new Set([WORKFLOW_TOOL]) : undefined);
     // Auto-compact BEFORE historyInput is built, so a triggered compaction's checkpoint is
     // reflected in this turn's input. A compaction failure degrades to a normal (uncompacted)
     // turn rather than breaking it. Uses THIS turn's resolved model (sel.model), not the boot
@@ -1741,7 +1797,12 @@ export class AgentEngine {
       // explicitly EXCLUDED (SESSION_SPAWN_TOOL's own doc comment above) — never both fields at
       // once (excludeTools would filter session_spawn OUT before allowTools ever got a chance to
       // filter it back IN, for a dispatch session that somehow had both set).
-      ...(isDispatch ? { allowTools: DISPATCH_ALLOW_TOOLS } : { excludeTools: new Set([SESSION_SPAWN_TOOL]) }),
+      // Task B3: `excludeWorkflow` folds WORKFLOW_TOOL into the SAME excludeTools Set whenever this
+      // session fails workflowToolAllowed — only reachable in the `else` (non-dispatch) branch: a
+      // dispatch session already takes the allowTools branch instead, and DISPATCH_ALLOW_TOOLS
+      // never lists "Workflow" (workflowToolAllowed's own doc comment above), so it's excluded
+      // there regardless of this Set.
+      ...(isDispatch ? { allowTools: DISPATCH_ALLOW_TOOLS } : { excludeTools: new Set([SESSION_SPAWN_TOOL, ...(excludeWorkflow ? [WORKFLOW_TOOL] : [])]) }),
     });
   }
 
