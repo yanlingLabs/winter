@@ -428,6 +428,15 @@ describe("runners — mirror main.ts's routes", () => {
     expect(notes).toEqual(["triage (user) — triage inbox\nrunning:\nrun_1 triage · running"]);
   });
 
+  test("/workflows list — the explicit sub-token lists identically to the bare form (mirrors /bg's default-to-list)", async () => {
+    const saved = [{ name: "triage", description: "triage inbox", source: "user" }];
+    const { client, calls } = makeClient({ workflowList: () => ({ saved, running: [] }) });
+    const { ctx, notes } = makeCtx(client, { sessionId: "sess-1", cwd: "/my/proj" });
+    await runCommand(ctx, "/workflows list");
+    expect(calls).toEqual([{ method: "workflowList", args: ["sess-1", "/my/proj"] }]);
+    expect(notes).toEqual(["triage (user) — triage inbox"]);
+  });
+
   test("/workflows — an inline (unnamed) running run falls back to '(inline script)'", async () => {
     const running = [{
       runId: "run_2", sessionId: "sess-1", status: "running" as const,

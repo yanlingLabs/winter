@@ -284,12 +284,25 @@ async function runMemory(ctx: CommandCtx): Promise<void> {
  *  `tryRunSavedWorkflow` below and the CLI's own `run` route make) and reports the new runId;
  *  `stop` calls `client.workflowStop` and reports whether it actually stopped anything (mirrors
  *  `workflowStop`'s soft `{ok,stopped}` contract, C2 — an unknown/already-terminal runId is not an
- *  error, just a `stopped: false`). */
+ *  error, just a `stopped: false`). A missing sub-token defaults to "list" — same "a bare /bg reads
+ *  naturally as show me what's running" rationale runBg's own doc comment gives (an explicit
+ *  `/workflows list` is handled identically, not just the no-arg form). */
 async function runWorkflows(ctx: CommandCtx, argText: string): Promise<void> {
-  const trimmed = argText.trim();
-  const tokens = trimmed.length > 0 ? trimmed.split(/\s+/) : [];
-  const sub = tokens[0];
-  const usage = "usage: /workflows [run <name> [json-args] | stop <runId>]";
+  const tokens = argText.trim().length > 0 ? argText.trim().split(/\s+/) : [];
+  const sub = tokens[0] ?? "list";
+  const usage = "usage: /workflows [list | run <name> [json-args] | stop <runId>]";
+
+  if (sub === "list") {
+    const { saved, running } = await ctx.client.workflowList(ctx.sessionId, ctx.cwd);
+    if (saved.length === 0 && running.length === 0) { ctx.appendNote("(no workflows)"); return; }
+    const lines = saved.map((w) => `${w.name} (${w.source}) — ${w.description}`);
+    if (running.length > 0) {
+      lines.push("running:");
+      for (const r of running) lines.push(`${r.runId} ${r.name ?? "(inline script)"} · ${r.status}`);
+    }
+    ctx.appendNote(lines.join("\n"));
+    return;
+  }
 
   if (sub === "run") {
     const name = tokens[1];
@@ -317,16 +330,7 @@ async function runWorkflows(ctx: CommandCtx, argText: string): Promise<void> {
     return;
   }
 
-  if (sub !== undefined) { ctx.appendNote(usage); return; }
-
-  const { saved, running } = await ctx.client.workflowList(ctx.sessionId, ctx.cwd);
-  if (saved.length === 0 && running.length === 0) { ctx.appendNote("(no workflows)"); return; }
-  const lines = saved.map((w) => `${w.name} (${w.source}) — ${w.description}`);
-  if (running.length > 0) {
-    lines.push("running:");
-    for (const r of running) lines.push(`${r.runId} ${r.name ?? "(inline script)"} · ${r.status}`);
-  }
-  ctx.appendNote(lines.join("\n"));
+  ctx.appendNote(usage);
 }
 
 // ---- registry -------------------------------------------------------------------------------
