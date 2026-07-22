@@ -63,6 +63,10 @@ export const Settings = z.object({
     enabled: z.boolean().optional(),
     model: z.string().optional(),
   }).optional(),
+  /** CC-parity output style: the active style NAME (built-in or a `.norma/output-styles/<name>.md`).
+   *  Absent or "default" → Norma's base prompt (today's behavior). Hot-reloaded; per-project via the
+   *  ProjectSettingsResolver. */
+  outputStyle: z.string().optional(),
   plugins: z.object({
     enabled: z.array(z.string()).optional(),
     disabled: z.array(z.string()).optional(),
@@ -283,6 +287,15 @@ export function readRawSettings(path: string): Record<string, unknown> | null {
  *  schema's `z.string().min(1)`). */
 export function setProviderModel(settings: Settings, model: string): Settings {
   return { ...settings, provider: { ...settings.provider, model } };
+}
+
+/** Pure Settings→Settings: set the active output style (or clear it for undefined/"default").
+ *  Preserves every other field — mirrors setProviderModel. */
+export function setOutputStyle(settings: Settings, name: string | undefined): Settings {
+  const next = { ...settings };
+  if (!name || name === "default") delete next.outputStyle;
+  else next.outputStyle = name;
+  return next;
 }
 
 /** Pure `Settings -> Settings` reasoning-effort transform — used by `norma model --effort

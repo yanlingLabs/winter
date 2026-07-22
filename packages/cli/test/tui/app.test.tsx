@@ -720,8 +720,11 @@ describe("App — help surfacing: '?' on empty runs /help (Phase 3d T4)", () => 
     await wait();
 
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("/help — List commands and keybindings"); // helpText() content
+    // helpText() content: the registry has grown past the 23-line viewport, so the very top line
+    // (/help itself) has scrolled off under "stick to bottom" — assert lines that are still in
+    // view instead (this is a pre-existing viewport-height coupling, not specific to /help).
     expect(frame).toContain("/compact — Compact conversation history to a summary");
+    expect(frame).toContain("/output-style [name] — Show or switch the output style");
     expect(frame).toContain("Keys:"); // the keybinding line (may hard-wrap at 80 cols; unchecked verbatim here)
     expect(frame).not.toContain("❯ ?"); // the "?" itself was never inserted into the buffer
     expect(frame).toContain(COMPOSER_CURSOR); // composer back to idle

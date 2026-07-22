@@ -8,10 +8,12 @@
 // 3d-task-1-brief.md reading list (packages/cli/src/main.ts).
 import { join } from "node:path";
 import {
-  CODEX_MODELS, loadSettings, resolveNormaHome, saveSettings, setProviderModel, setReasoningEffort,
+  CODEX_MODELS, OutputStyleStore, TrustStore, loadSettings, resolveNormaHome, saveSettings,
+  setOutputStyle, setProviderModel, setReasoningEffort,
 } from "@norma/core";
 import type { Settings } from "@norma/core";
 import { parseModelArgs, validateEffort, validateModelSlug } from "../model-cli";
+import { parseOutputStyleArgs } from "../output-style-cli";
 import { formatElapsed, formatTokens } from "../task-display";
 import { formatRoutineLine } from "../routines-cli";
 import { formatMemoryList } from "../memory-cli";
@@ -99,6 +101,45 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
     action.kind === "setEffort" || action.kind === "setModelAndEffort" ? `effort ${next.provider.reasoningEffort}` : null,
   ].filter(Boolean).join(", ");
   ctx.appendNote(`updated (${changed}) — takes effect next turn, no daemon restart needed`);
+}
+
+/** Mirrors main.ts `case "output-style"` (~:1546): NO client/daemon RPC at all — same
+ *  no-daemon-restart precedent as /model above (the daemon's live style resolver re-resolves
+ *  settings.outputStyle on the session's next turn). Reuses output-style-cli.ts's
+ *  parseOutputStyleArgs — the exact same pure parser main.ts's route calls — and @norma/core's
+ *  loadSettings/saveSettings/setOutputStyle/OutputStyleStore, the same helpers. Uses `ctx.cwd`
+ *  (not `process.cwd()`) for the store's trust-gated project lookup — same substitution as
+ *  /skills and /mcp above, since a project's `.norma/output-styles/` is resolved relative to the
+ *  session's tracked cwd, not the CLI process's own. No arg -> list (marks the active style);
+ *  `--help`/`-h` -> usage note; a name -> sets it (validated via store.resolve, same
+ *  unknown-name rejection as the route). */
+async function runOutputStyle(ctx: CommandCtx, argText: string): Promise<void> {
+  const args = argText.trim().length > 0 ? argText.trim().split(/\s+/) : [];
+  const action = parseOutputStyleArgs(args);
+
+  if (action.action === "help") {
+    ctx.appendNote("usage: /output-style [name]");
+    return;
+  }
+
+  const home = resolveNormaHome();
+  const settingsPath = join(home, "settings.json");
+  const settings = loadSettings(settingsPath);
+  const store = new OutputStyleStore({ normaHome: home, trust: new TrustStore(join(home, "trust.json")) });
+  const current = settings.outputStyle ?? "default";
+
+  if (action.action === "list") {
+    ctx.appendNote(store.list(ctx.cwd).map((s) => `${s.name === current ? "*" : " "} ${s.name.padEnd(14)} ${s.description}`).join("\n"));
+    return;
+  }
+
+  // set
+  if (!store.resolve(action.name, ctx.cwd)) {
+    ctx.appendNote(`Unknown output style: ${action.name}\nAvailable: ${store.list(ctx.cwd).map((s) => s.name).join(", ")}`);
+    return;
+  }
+  saveSettings(settingsPath, setOutputStyle(settings, action.name));
+  ctx.appendNote(`Output style set to: ${action.name}`);
 }
 
 /** Mirrors main.ts `case "status"` (~:929): `client.daemonStatus()`, same provider/"(none
@@ -237,6 +278,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "help", description: "List commands and keybindings", run: (ctx) => runHelp(ctx) },
   { name: "compact", description: "Compact conversation history to a summary", run: (ctx) => runCompact(ctx) },
   { name: "model", args: "[slug] [--effort <level>]", description: "Show or switch the active model/effort", run: (ctx, argText) => runModel(ctx, argText) },
+  { name: "output-style", args: "[name]", description: "Show or switch the output style", run: (ctx, argText) => runOutputStyle(ctx, argText) },
   { name: "status", description: "Show daemon status and provider info", run: (ctx) => runStatus(ctx) },
   { name: "quota", description: "Show token usage and quota state", run: (ctx) => runQuota(ctx) },
   { name: "sessions", description: "List resumable sessions", run: (ctx) => runSessions(ctx) },

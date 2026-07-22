@@ -4,7 +4,7 @@ export { FileSecretStore, KeychainSecretStore } from "./auth/secret-store";
 export { TOKEN_NAMES } from "./auth/tokens";
 export {
   loadSettings, saveSettings, loadPermissionDirs, addLocalDir,
-  REASONING_EFFORTS, setProviderModel, setReasoningEffort, memoryEnabledFrom,
+  REASONING_EFFORTS, setProviderModel, setReasoningEffort, setOutputStyle, memoryEnabledFrom,
   type Settings,
 } from "./settings";
 export {
@@ -52,6 +52,7 @@ export { sessionTmpDir } from "./agent/session-tmp";
 export { TrustStore } from "./agent/trust";
 export { ContextAssembler, BASE_PROMPT } from "./agent/context";
 export { SkillStore, type SkillMeta, type SkillResult } from "./agent/skills";
+export { OutputStyleStore, BUILTIN_STYLE_NAMES } from "./agent/output-styles";
 export {
   MemoryStore,
   type MemoryScope,
