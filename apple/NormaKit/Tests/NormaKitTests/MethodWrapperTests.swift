@@ -676,4 +676,128 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertEqual(deleteReq["method"] as? String, "skills.delete")
         XCTAssertEqual((deleteReq["params"] as? [String: Any])?["name"] as? String, "my-note")
     }
+
+    // MARK: - Workflows (CC-parity phase 3, Track D Task D2): workflow.list/run/stop/get wrappers
+
+    /// `workflow.list {sessionId, cwd?}` — decodes both the `running` array (one entry with every
+    /// optional field present, a second with them all absent) and the `saved` array; also proves
+    /// the omitted-`cwd` convention (dropped from wire params, not sent as null) and that a
+    /// supplied `cwd` is sent verbatim.
+    func testWorkflowListDecodesRunningAndSaved() async throws {
+        let (client, t) = try await connected()
+
+        let (req, result) = try await roundTrip(t, sentIndex: 1,
+            result: #"{"running":[{"runId":"wf_1","sessionId":"s_1","name":"deploy","status":"running","counts":{"running":1,"completed":2,"total":4},"phase":"build","startedAt":1000},{"runId":"wf_2","sessionId":"s_1","status":"failed","counts":{"running":0,"completed":1,"total":2},"error":"boom","startedAt":900}],"saved":[{"name":"deploy","description":"Ship it","source":"/repo/.norma/workflows/deploy.js"}]}"#
+        ) { try await client.workflowList(sessionId: "s_1") }
+        XCTAssertEqual(req["method"] as? String, "workflow.list")
+        XCTAssertEqual((req["params"] as? [String: Any])?["sessionId"] as? String, "s_1")
+        XCTAssertNil((req["params"] as? [String: Any])?["cwd"]) // omitted cwd dropped, not sent as null
+
+        XCTAssertEqual(result.running.count, 2)
+        XCTAssertEqual(result.running[0].runId, "wf_1")
+        XCTAssertEqual(result.running[0].name, "deploy")
+        XCTAssertEqual(result.running[0].status, "running")
+        XCTAssertEqual(result.running[0].counts.running, 1)
+        XCTAssertEqual(result.running[0].counts.completed, 2)
+        XCTAssertEqual(result.running[0].counts.total, 4)
+        XCTAssertEqual(result.running[0].phase, "build")
+        XCTAssertNil(result.running[0].result)
+        XCTAssertNil(result.running[0].error)
+        XCTAssertEqual(result.running[0].startedAt, 1000)
+
+        XCTAssertNil(result.running[1].name)
+        XCTAssertEqual(result.running[1].status, "failed")
+        XCTAssertEqual(result.running[1].error, "boom")
+        XCTAssertNil(result.running[1].phase)
+
+        XCTAssertEqual(result.saved.count, 1)
+        XCTAssertEqual(result.saved[0].name, "deploy")
+        XCTAssertEqual(result.saved[0].description, "Ship it")
+        XCTAssertEqual(result.saved[0].source, "/repo/.norma/workflows/deploy.js")
+
+        let (reqWithCwd, _) = try await roundTrip(t, sentIndex: 2, result: #"{"running":[],"saved":[]}"#) {
+            try await client.workflowList(sessionId: "s_1", cwd: "/repo/proj")
+        }
+        XCTAssertEqual((reqWithCwd["params"] as? [String: Any])?["cwd"] as? String, "/repo/proj")
+    }
+
+    /// `workflow.run {sessionId, name?, script?, args?}` — proves both the by-name and
+    /// inline-script call shapes encode correctly (mutually exclusive `name`/`script`, enforced
+    /// server-side per methods.ts's own doc comment, not schema-level) and that the result decodes
+    /// to just the `runId` — the wire's `status` is always the literal `"running"`
+    /// (`WorkflowRunResult`'s own doc comment), nothing else worth surfacing.
+    func testWorkflowRunEncodesNameOrScriptAndDecodesRunId() async throws {
+        let (client, t) = try await connected()
+
+        let (req1, runId1) = try await roundTrip(t, sentIndex: 1, result: #"{"runId":"wf_1","status":"running"}"#) {
+            try await client.workflowRun(sessionId: "s_1", name: "deploy")
+        }
+        XCTAssertEqual(req1["method"] as? String, "workflow.run")
+        let params1 = req1["params"] as? [String: Any]
+        XCTAssertEqual(params1?["sessionId"] as? String, "s_1")
+        XCTAssertEqual(params1?["name"] as? String, "deploy")
+        XCTAssertNil(params1?["script"])
+        XCTAssertNil(params1?["args"])
+        XCTAssertEqual(runId1, "wf_1")
+
+        let (req2, runId2) = try await roundTrip(t, sentIndex: 2, result: #"{"runId":"wf_2","status":"running"}"#) {
+            try await client.workflowRun(sessionId: "s_1", script: "phase('go'); done()", args: .object(["target": .string("prod")]))
+        }
+        let params2 = req2["params"] as? [String: Any]
+        XCTAssertNil(params2?["name"])
+        XCTAssertEqual(params2?["script"] as? String, "phase('go'); done()")
+        XCTAssertEqual((params2?["args"] as? [String: Any])?["target"] as? String, "prod")
+        XCTAssertEqual(runId2, "wf_2")
+    }
+
+    /// `workflow.stop {runId}` — a soft boolean, never a thrown error for an unknown or
+    /// already-terminal `runId` (methods.ts's own doc comment); proves both outcomes decode and
+    /// that the constant `ok:true` wrapper is dropped, same precedent as `trustDir`.
+    func testWorkflowStopDecodesStoppedBoolean() async throws {
+        let (client, t) = try await connected()
+
+        let (req, stopped) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"stopped":true}"#) {
+            try await client.workflowStop(runId: "wf_1")
+        }
+        XCTAssertEqual(req["method"] as? String, "workflow.stop")
+        XCTAssertEqual((req["params"] as? [String: Any])?["runId"] as? String, "wf_1")
+        XCTAssertTrue(stopped)
+
+        let (_, notStopped) = try await roundTrip(t, sentIndex: 2, result: #"{"ok":true,"stopped":false}"#) {
+            try await client.workflowStop(runId: "ghost")
+        }
+        XCTAssertFalse(notStopped)
+    }
+
+    /// `workflow.get {runId}` — decodes the `{run: WorkflowRunView}` wrapper into a bare
+    /// `WorkflowRunView`; an unresolvable runId is a thrown `RpcFailure` server-side (NOT_FOUND, per
+    /// the handler), surfaced here as a thrown `RpcError`, same discipline as `pluginRestart`.
+    func testWorkflowGetDecodesRunView() async throws {
+        let (client, t) = try await connected()
+
+        let (req, run) = try await roundTrip(t, sentIndex: 1,
+            result: #"{"run":{"runId":"wf_1","sessionId":"s_1","name":"deploy","status":"completed","counts":{"running":0,"completed":4,"total":4},"result":"ok","startedAt":1000}}"#
+        ) { try await client.workflowGet(runId: "wf_1") }
+        XCTAssertEqual(req["method"] as? String, "workflow.get")
+        XCTAssertEqual((req["params"] as? [String: Any])?["runId"] as? String, "wf_1")
+        XCTAssertEqual(run.runId, "wf_1")
+        XCTAssertEqual(run.status, "completed")
+        XCTAssertEqual(run.counts.completed, 4)
+        XCTAssertEqual(run.result, "ok")
+        XCTAssertNil(run.error)
+    }
+
+    func testWorkflowGetThrowsForUnknownRun() async throws {
+        let (client, t) = try await connected()
+        async let call = client.workflowGet(runId: "ghost")
+        let sent = try await waitForSent(t, count: 2)
+        let req = decodeLine(sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"error":{"code":-32000,"message":"unknown run: ghost"}}"#)
+        do {
+            _ = try await call
+            XCTFail("expected workflowGet to throw for an unknown run")
+        } catch let error as RpcError {
+            XCTAssertEqual(error.message, "unknown run: ghost")
+        }
+    }
 }

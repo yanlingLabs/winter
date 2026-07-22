@@ -744,3 +744,114 @@ extension NormaClient {
         _ = try await request("skills.delete", params: obj(["name": .string(name)]))
     }
 }
+
+// MARK: - Workflows (CC-parity phase 3, Track D Task D2: NormaKit workflow.* client surface)
+//
+// The Swift half of C2's workflow.list/run/stop/get RPCs (protocol/src/methods.ts) — D1 already
+// mirrored the 4 `workflow_*` SessionEvent variants (live progress broadcast) in NormaProtocol's
+// SessionEvent.swift; these four are the separate request/response management verbs (list runs +
+// saved scripts, launch, stop, poll one run by id) that back a future Dashboard/session workflows
+// view (D3). LOCAL-ONLY IN V1 (methods.ts's own header comment): none of the four are in
+// PLUGIN_ALLOWED_METHODS or REMOTE_ALLOWED_METHODS (ipc/server.ts) — a plugin or remote (iPhone
+// gateway) connection is role-rejected before dispatch ever reaches a handler for any of them, so
+// there is nothing to allowlist on the Swift side either.
+
+/// Mirrors `WorkflowRunViewSchema.counts` (methods.ts) — the in-flight step tally for a run.
+public struct WorkflowRunCounts: Equatable, Sendable {
+    public let running: Int
+    public let completed: Int
+    public let total: Int
+}
+
+/// Mirrors `WorkflowRunViewSchema` (methods.ts) field-for-field — a live or terminal workflow
+/// run's current view, returned by `workflow.list`'s `running` array, `workflow.run`, and
+/// `workflow.get`. `status` is kept as a plain wire string (`"running"|"completed"|"failed"|
+/// "stopped"`), same convention as `threadList`/`bgList`/`pluginsList`'s own status fields above,
+/// rather than a Swift enum a future server-added status would fail to decode.
+public struct WorkflowRunView: Equatable, Sendable {
+    public let runId: String
+    public let sessionId: String
+    public let name: String?
+    public let status: String
+    public let counts: WorkflowRunCounts
+    public let phase: String?
+    public let result: String?
+    public let error: String?
+    public let startedAt: Int
+}
+
+/// Mirrors `WorkflowSavedSchema` (methods.ts) — a saved (not-yet-running) workflow's identity, from
+/// `workflow.list`'s `saved` array (`WorkflowStore`, C1's trust-gated `.norma/workflows/*.js`
+/// scripts).
+public struct WorkflowSaved: Equatable, Sendable {
+    public let name: String
+    public let description: String
+    public let source: String
+}
+
+extension NormaClient {
+    /// Shared decode for `WorkflowRunViewSchema`'s wire shape — used by `workflowList`'s `running`
+    /// array and `workflowGet`'s `run` object.
+    private func decodeWorkflowRunView(_ v: JSONValue) -> WorkflowRunView? {
+        guard let runId = v["runId"]?.stringValue,
+              let sessionId = v["sessionId"]?.stringValue,
+              let status = v["status"]?.stringValue,
+              let counts = v["counts"],
+              let running = counts["running"]?.intValue,
+              let completed = counts["completed"]?.intValue,
+              let total = counts["total"]?.intValue,
+              let startedAt = v["startedAt"]?.intValue
+        else { return nil }
+        return WorkflowRunView(
+            runId: runId, sessionId: sessionId, name: v["name"]?.stringValue, status: status,
+            counts: WorkflowRunCounts(running: running, completed: completed, total: total),
+            phase: v["phase"]?.stringValue, result: v["result"]?.stringValue, error: v["error"]?.stringValue,
+            startedAt: startedAt
+        )
+    }
+
+    /// `workflow.list {sessionId, cwd?}` — live runs (`WorkflowRuntime`) plus saved scripts
+    /// (`WorkflowStore`, resolved against `cwd` if supplied, else the session's own cwd
+    /// server-side).
+    public func workflowList(sessionId: String, cwd: String? = nil) async throws -> (running: [WorkflowRunView], saved: [WorkflowSaved]) {
+        let r = try await request("workflow.list", params: obj(["sessionId": .string(sessionId), "cwd": cwd.map { .string($0) }]))
+        let running = (r["running"]?.arrayValue ?? []).compactMap { decodeWorkflowRunView($0) }
+        let saved = (r["saved"]?.arrayValue ?? []).compactMap { s -> WorkflowSaved? in
+            guard let n = s["name"]?.stringValue, let d = s["description"]?.stringValue, let src = s["source"]?.stringValue else { return nil }
+            return WorkflowSaved(name: n, description: d, source: src)
+        }
+        return (running, saved)
+    }
+
+    /// `workflow.run {sessionId, name?, script?, args?}` — exactly one of `name` (launch a saved
+    /// workflow by name) / `script` (launch an inline body verbatim) is expected; enforced
+    /// server-side (methods.ts's own doc comment), not here. Returns just the new run's `runId` —
+    /// the wire's `status` is always the literal `"running"` (`WorkflowRunResult`'s own doc
+    /// comment), nothing else worth surfacing.
+    public func workflowRun(sessionId: String, name: String? = nil, script: String? = nil, args: JSONValue? = nil) async throws -> String {
+        let r = try await request("workflow.run", params: obj([
+            "sessionId": .string(sessionId), "name": name.map { .string($0) }, "script": script.map { .string($0) }, "args": args,
+        ]))
+        guard let runId = r["runId"]?.stringValue else {
+            throw RpcError(code: -3, message: "invalid result from server for workflow.run")
+        }
+        return runId
+    }
+
+    /// `workflow.stop {runId}` — a soft boolean, never a thrown error for an unknown or
+    /// already-terminal `runId` (methods.ts's own doc comment, same idiom as `routines.delete`'s
+    /// `{ok, removed}`); the constant `ok:true` wrapper is dropped, same precedent as `trustDir`.
+    public func workflowStop(runId: String) async throws -> Bool {
+        try await request("workflow.stop", params: obj(["runId": .string(runId)]))["stopped"]?.boolValue ?? false
+    }
+
+    /// `workflow.get {runId}` — an unresolvable `runId` is a thrown `RpcFailure` server-side
+    /// (NOT_FOUND), surfaced here as a thrown `RpcError`, same discipline as `pluginRestart`.
+    public func workflowGet(runId: String) async throws -> WorkflowRunView {
+        let r = try await request("workflow.get", params: obj(["runId": .string(runId)]))
+        guard let run = r["run"], let view = decodeWorkflowRunView(run) else {
+            throw RpcError(code: -3, message: "invalid result from server for workflow.get")
+        }
+        return view
+    }
+}
