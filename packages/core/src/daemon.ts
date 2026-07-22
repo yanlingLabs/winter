@@ -56,6 +56,7 @@ import { AgentStore } from "./agent/agents";
 import { SubagentManager } from "./agent/subagents";
 import { BackgroundAgentRegistry } from "./agent/bg-agent-registry";
 import { AgentEngine, SYSTEM_PROMPT } from "./agent/engine";
+import { OutputStyleStore } from "./agent/output-styles";
 import { Dreamer } from "./agent/dreamer";
 import { deriveModelAliases } from "./agent/model-aliases";
 import { BashReviewer } from "./agent/reviewer";
@@ -217,6 +218,14 @@ export async function startDaemon(opts: {
   // spawn only on first sight of a dir) and falls back to the dir itself outside a git repo, so
   // this is perf-neutral and a non-repo cwd behaves exactly as before.
   const projectRootOf = (cwd?: string | null): string | null => (cwd ? repoRootFor(cwd) : null);
+  // Output styles (CC-parity phase 2, Task 4): per-project effective outputStyle, repo-root-keyed
+  // via the SAME projectRootOf as every other getter here — a trusted project's `.norma/settings.json`
+  // outputStyle applies; an untrusted project's is ignored (ProjectSettingsResolver.effective()'s own
+  // trust gate). Resolution itself (name -> ResolvedStyle, incl. the slug-guard against a
+  // project-supplied name escaping the output-styles dir) lives in OutputStyleStore.resolve — this is
+  // just the name lookup.
+  const outputStyleStore = new OutputStyleStore({ normaHome, trust: trustStore });
+  const outputStyleFor = (cwd?: string | null): string | undefined => projectSettings.effective(projectRootOf(cwd ?? null))?.outputStyle;
   const pluginStore = new PluginStore({
     normaHome, plugins: settings?.plugins, consents: settings?.plugins?.consents, log: (m) => console.error(m),
   });
@@ -252,6 +261,17 @@ export async function startDaemon(opts: {
       // the relocation override would collapse this bucket into the project bucket and leak dream
       // memories into code sessions (see assistantMemoryDirFor's own doc comment).
       assistantDir: () => assistantMemoryDirFor({ normaHome }),
+    },
+    // Output styles (CC-parity phase 2, Task 4): main-conversation only — assemble() itself skips
+    // this resolver under a basePromptOverride (dispatch coordinators/subagents keep their own base;
+    // see context.ts's assemble()), so wiring it here — and NOT into the :514 AgentStore's
+    // baseInstructions (a separate, subagent-only object) — is what keeps styles out of subagents.
+    styleResolver: (cwd: string | null) => {
+      const name = outputStyleFor(cwd);
+      if (!name || name === "default") return null;
+      const s = outputStyleStore.resolve(name, cwd);
+      if (!s) { console.error(`output-style: unknown style "${name}" — using default`); return null; }
+      return s;
     },
   });
   // T2 (design doc "migration importer"): one-time-per-fact, idempotent best-effort import of
