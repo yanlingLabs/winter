@@ -48,6 +48,7 @@ async function boot(init: WorkerInit): Promise<void> {
     const { result } = await runWorkflow({
       source: init.source, args: init.args, concurrency: init.concurrency,
       agent, phase: (title) => post({ op: "phase", title }), log: (message) => post({ op: "log", message }),
+      resumeJournal: init.resumeJournal,
     });
     post({ op: "done", result });
   } catch (e) {

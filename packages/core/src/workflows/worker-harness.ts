@@ -1,3 +1,4 @@
+import { promptKey } from "./journal";
 import { makeSemaphore } from "./semaphore";
 import type { AgentOpts } from "./types";
 
@@ -8,6 +9,9 @@ export interface HarnessDeps {
   agent: (prompt: string, opts?: AgentOpts) => Promise<unknown>;
   phase: (title: string) => void;
   log: (message: string) => void;
+  /** Task A6: the loaded journal from a prior run (resume() only) — the ordered cache of that run's
+   *  agent() results, keyed by call order. Absent/empty for a fresh (non-resumed) run. */
+  resumeJournal?: Array<{ promptKey: string; value: unknown }>;
 }
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as
@@ -38,7 +42,20 @@ export async function runWorkflow(deps: HarnessDeps): Promise<{ meta: unknown; r
   // Worker from posting thousands of agent requests at once. See semaphore.ts for details.
   const sem = makeSemaphore(Math.max(1, deps.concurrency));
 
+  // Resumability (Task A6, Global Constraints): the journal caches a prior run's agent() results by
+  // CALL ORDER. `diverged` latches true on the first call whose (prompt,opts) no longer matches the
+  // journal at that index (a changed call, or simply past the journal's recorded end) — that call
+  // and everything after it runs live, even if some later index would have coincidentally matched.
+  // The determinism guard above (Date/Math withheld) is what makes the untouched prefix byte-stable
+  // enough for this positional match to be trustworthy.
+  let callIndex = 0;
+  const journal = deps.resumeJournal ?? [];
+  let diverged = false;
   const agent = async (prompt: string, opts?: AgentOpts): Promise<unknown> => {
+    const idx = callIndex++;
+    const key = promptKey(prompt, opts);
+    if (!diverged && journal[idx] && journal[idx].promptKey === key) return journal[idx].value; // cached prefix
+    diverged = true; // first mismatch/new call → everything after runs live
     await sem.acquire();
     try { return await deps.agent(prompt, opts); } finally { sem.release(); }
   };
