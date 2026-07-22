@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, setProviderModel, setReasoningEffort, hooksEnabledFrom } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle } from "../src/settings";
 import { DEFAULT_CODEX_MODEL } from "../src/providers/codex-config";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 
@@ -425,6 +425,22 @@ describe("setProviderModel / setReasoningEffort (norma model CLI's pure transfor
   test("both transforms produce Settings.parse-valid output", () => {
     const s: Settings = { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } };
     expect(() => Settings.parse(setReasoningEffort(setProviderModel(s, "gpt-5.6-terra"), "max"))).not.toThrow();
+  });
+});
+
+describe("setOutputStyle (CC-parity output styles: the active style name)", () => {
+  test("setOutputStyle sets and clears the key, preserving other fields", () => {
+    const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: "x" } } as any;
+    const set = setOutputStyle(base, "proactive");
+    expect(set.outputStyle).toBe("proactive");
+    expect(set.provider).toEqual(base.provider); // untouched
+    expect(setOutputStyle(set, undefined).outputStyle).toBeUndefined(); // cleared
+    expect(setOutputStyle(set, "default").outputStyle).toBeUndefined();  // "default" clears it
+  });
+
+  test("Settings accepts an outputStyle string", () => {
+    const { Settings } = require("../src/settings");
+    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" }, outputStyle: "learning" }).outputStyle).toBe("learning");
   });
 });
 
