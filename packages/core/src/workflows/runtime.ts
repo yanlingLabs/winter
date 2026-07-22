@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { WorkflowRegistry } from "./registry";
+import { makeSemaphore, type Semaphore } from "./semaphore";
 import type { BridgeRequest, BridgeResponse, WorkerInit } from "./bridge";
 import type { AgentOpts, WorkflowProgress, WorkflowRunView } from "./types";
 
@@ -27,6 +28,11 @@ interface LiveRun {
   running: number;
   completed: number;
   total: number;
+  /** Run-local semaphore bounding how many `agent` bridge requests this run services concurrently
+   *  — layered over the global SubagentManager pool (Global Constraints). Default 16. */
+  sem: Semaphore;
+  /** Hard stop on total agents spawned by this run — never silently truncates. Default 1000. */
+  totalCap: number;
 }
 
 const CONCURRENCY_DEFAULT = 16;
@@ -47,7 +53,11 @@ export class WorkflowRuntime {
     let settle!: (v: WorkflowRunView) => void;
     const done = new Promise<WorkflowRunView>((res) => { settle = res; });
     this.settlers.set(runId, settle);
-    const run: LiveRun = { runId, sessionId: l.sessionId, worker, done, running: 0, completed: 0, total: 0 };
+    const run: LiveRun = {
+      runId, sessionId: l.sessionId, worker, done, running: 0, completed: 0, total: 0,
+      sem: makeSemaphore(this.deps.caps?.concurrency ?? CONCURRENCY_DEFAULT),
+      totalCap: this.deps.caps?.total ?? TOTAL_DEFAULT,
+    };
     this.live.set(runId, run);
 
     abort.signal.addEventListener("abort", () => this.teardown(runId, () => this.finish(runId, "stopped")));
@@ -99,19 +109,32 @@ export class WorkflowRuntime {
     }
   }
 
-  /** Task A4 replaces this body with the real spawn bridge; Task A5 wraps it in the per-run
-   *  semaphore + total counter. Absent spawnAgent → a typed reply the script's agent() rejects on. */
+  /** Absent spawnAgent → a typed reply the script's agent() rejects on. Otherwise: the total cap is
+   *  a hard stop (checked BEFORE acquiring the semaphore, so a run pinned at capacity fails fast
+   *  instead of queuing forever) — never silently truncates, and the failure message logs how many
+   *  completed before the stop. The semaphore then bounds how many spawnAgent calls (which count
+   *  against the global SubagentManager pool too) this run has in flight at once. */
   protected async serviceAgent(run: LiveRun, msg: Extract<BridgeRequest, { op: "agent" }>): Promise<BridgeResponse> {
     if (!this.deps.spawnAgent) return { callId: msg.callId, ok: false, error: "workflow agents are not available in this runtime" };
+    if (run.total >= run.totalCap) {
+      const err = `workflow exceeded the per-run agent cap (${run.totalCap}) — ${run.completed} completed before the stop`;
+      this.teardown(run.runId, () => this.finish(run.runId, "failed", err));
+      return { callId: msg.callId, ok: false, error: err };
+    }
+    await run.sem.acquire();
     run.running++; run.total++;
     this.reg.setCounts(run.runId, { running: run.running, completed: run.completed, total: run.total });
     this.emitProgress(run, {});
-    const abort = new AbortController();
-    const out = await this.deps.spawnAgent(run.sessionId, msg.prompt, msg.opts, abort.signal);
-    run.running--; run.completed++;
-    this.reg.setCounts(run.runId, { running: run.running, completed: run.completed, total: run.total });
-    this.emitProgress(run, {});
-    return out.ok ? { callId: msg.callId, ok: true, value: out.result } : { callId: msg.callId, ok: false, error: out.result };
+    try {
+      const abort = new AbortController();
+      const out = await this.deps.spawnAgent(run.sessionId, msg.prompt, msg.opts, abort.signal);
+      return out.ok ? { callId: msg.callId, ok: true, value: out.result } : { callId: msg.callId, ok: false, error: out.result };
+    } finally {
+      run.running--; run.completed++;
+      this.reg.setCounts(run.runId, { running: run.running, completed: run.completed, total: run.total });
+      this.emitProgress(run, {});
+      run.sem.release();
+    }
   }
 
   protected emitProgress(run: LiveRun, p: { phase?: string; log?: string }): void {

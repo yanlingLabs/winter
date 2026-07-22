@@ -1,3 +1,4 @@
+import { makeSemaphore } from "./semaphore";
 import type { AgentOpts } from "./types";
 
 export interface HarnessDeps {
@@ -31,18 +32,10 @@ const GuardedDate = new Proxy(Date, {
   },
 });
 
-/** A simple counting semaphore bounding in-Worker fan-out to `concurrency` (per-run cap, Global
- *  Constraints). The runtime-side per-run semaphore (Task A5) is the authoritative bound; this
- *  keeps the Worker from posting thousands of agent requests at once. */
-function makeSemaphore(max: number) {
-  let active = 0;
-  const queue: Array<() => void> = [];
-  const acquire = () => new Promise<void>((res) => { if (active < max) { active++; res(); } else queue.push(res); });
-  const release = () => { active--; const n = queue.shift(); if (n) { active++; n(); } };
-  return { acquire, release };
-}
-
 export async function runWorkflow(deps: HarnessDeps): Promise<{ meta: unknown; result: unknown }> {
+  // Bounds in-Worker fan-out to `concurrency` (per-run cap, Global Constraints); the runtime-side
+  // per-run semaphore (runtime.ts, Task A5) is the authoritative bound — this one just keeps the
+  // Worker from posting thousands of agent requests at once. See semaphore.ts for details.
   const sem = makeSemaphore(Math.max(1, deps.concurrency));
 
   const agent = async (prompt: string, opts?: AgentOpts): Promise<unknown> => {
