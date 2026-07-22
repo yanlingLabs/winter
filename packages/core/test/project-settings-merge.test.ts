@@ -85,6 +85,14 @@ describe("mergeSettings", () => {
       const merged = mergeSettings(base, [{ reviewer: { enabled: false } }]);
       expect(merged.permissions?.allow).toEqual(["Computer"]);
     });
+
+    test("fix-wave F (M3): a non-string entry in an overlay's permissions.allow is DROPPED, not coerced to a string", () => {
+      const base = minimalBase();
+      const evil = JSON.parse('{"permissions":{"allow":[123,"Bash(ls:*)"]}}');
+      const merged = mergeSettings(base, [evil]);
+      expect(merged.permissions?.allow).toEqual(["Bash(ls:*)"]); // "123" never appears
+      expect(Settings.safeParse(merged).success).toBe(true);
+    });
   });
 
   describe("prototype-pollution guard", () => {
@@ -104,6 +112,32 @@ describe("mergeSettings", () => {
       const merged = mergeSettings(base, [evil]);
       expect(({} as any).polluted).toBeUndefined();
       expect(merged.permissions?.allow).toEqual(["Computer"]); // untouched by the dropped key
+    });
+  });
+
+  describe("resilience (fix-wave G / M2): one bad overlay must not discard the others", () => {
+    test("base + an invalid project overlay (reviewer.enabled as a string) + a valid local overlay (permissions.allow) -> the bad key is dropped, the good overlay's effect survives", () => {
+      const base = minimalBase();
+      const badProjectOverlay = JSON.parse('{"reviewer":{"enabled":"yes"}}'); // enabled must be boolean — invalid
+      const goodLocalOverlay = { permissions: { allow: ["Bash(ls:*)"] } };
+      const merged = mergeSettings(base, [badProjectOverlay, goodLocalOverlay]);
+      expect(merged.reviewer?.enabled).toBeUndefined(); // the bad overlay never landed
+      expect(merged.permissions?.allow).toEqual(["Bash(ls:*)"]); // the LATER good overlay still applied
+    });
+
+    test("the reverse order (good overlay first, bad one second) — the good overlay's effect still survives, the bad one is skipped", () => {
+      const base = minimalBase();
+      const goodLocalOverlay = { permissions: { allow: ["Bash(ls:*)"] } };
+      const badProjectOverlay = JSON.parse('{"reviewer":{"enabled":"yes"}}');
+      const merged = mergeSettings(base, [goodLocalOverlay, badProjectOverlay]);
+      expect(merged.permissions?.allow).toEqual(["Bash(ls:*)"]);
+      expect(merged.reviewer?.enabled).toBeUndefined();
+    });
+
+    test("a single bad overlay with no others still fails safe to base (unchanged pre-existing behavior)", () => {
+      const base = minimalBase();
+      const merged = mergeSettings(base, [{ subagents: { maxDepth: 99 } }]);
+      expect(merged).toEqual(base);
     });
   });
 

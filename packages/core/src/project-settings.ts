@@ -26,24 +26,36 @@ function deepAssign(acc: Record<string, unknown>, overlay: Record<string, unknow
   }
 }
 
-/** Union an overlay's array onto the PRE-merge snapshot (dedup, stringified). Returns undefined
- *  when the overlay doesn't touch this array — the caller then leaves acc as deepAssign left it. */
+/** Union an overlay's array onto the PRE-merge snapshot (dedup). Returns undefined when the
+ *  overlay doesn't touch this array — the caller then leaves acc as deepAssign left it. fix-wave F
+ *  (M3): non-string entries (e.g. a malformed `permissions.allow: [123]`) are FILTERED OUT, never
+ *  coerced via String() — a stray number silently becoming a look-alike rule string is worse than
+ *  just dropping it. Applied to both the base snapshot and the overlay array before the union. */
 function unionArrays(pre: unknown, ov: unknown): string[] | undefined {
   if (!Array.isArray(ov)) return undefined;
-  const base = Array.isArray(pre) ? pre.map(String) : [];
-  return [...new Set([...base, ...ov.map(String)])];
+  const isString = (x: unknown): x is string => typeof x === "string";
+  const base = Array.isArray(pre) ? pre.filter(isString) : [];
+  return [...new Set([...base, ...ov.filter(isString)])];
 }
 
 /** Deep-merge raw overlay objects onto a validated base, in order (later wins). Scalars/objects
  *  last-wins; `permissions.{allow,additionalDirectories}` and `permissions.dangerousDomains.added`
- *  UNION across layers; `provider`/`plugins` never come from an overlay. The result is re-validated;
- *  an overlay that produces an invalid Settings makes the whole merge fail SAFE to `base`. */
+ *  UNION across layers; `provider`/`plugins` never come from an overlay. fix-wave G (M2): each
+ *  overlay is applied and validated ONE AT A TIME — a single overlay that produces an invalid
+ *  Settings is rolled back and skipped (its keys never land), but every OTHER overlay (earlier or
+ *  later in the list) still applies. A type-typo in a trusted settings.json must not silently
+ *  discard a perfectly valid settings.local.json layered on top of it. Returns the last valid
+ *  state — `base` itself if every overlay is bad (or the only one is). */
 export function mergeSettings(base: Settings, overlays: Record<string, unknown>[]): Settings {
   if (!overlays.length) return base;
-  const acc = structuredClone(base) as Record<string, any>;
+  let acc = structuredClone(base) as Record<string, any>;
+  let lastValid: Settings = base;
   for (const raw of overlays) {
     if (!isObj(raw)) continue;
     const ov = raw as Record<string, any>;
+    // Full pre-overlay snapshot (not just base) — a rollback restores "every EARLIER overlay that
+    // validated fine", so a later overlay in the chain keeps building on those, not on base alone.
+    const preSnapshot = structuredClone(acc);
     const preAllow = acc.permissions?.allow;
     const preDirs = acc.permissions?.additionalDirectories;
     const preDang = acc.permissions?.dangerousDomains?.added;
@@ -58,9 +70,11 @@ export function mergeSettings(base: Settings, overlays: Record<string, unknown>[
       acc.permissions.dangerousDomains ??= {};
       acc.permissions.dangerousDomains.added = mDang;
     }
+    const parsed = Settings.safeParse(acc);
+    if (parsed.success) lastValid = parsed.data;
+    else acc = preSnapshot; // this overlay alone broke validation — roll back, skip it, keep going
   }
-  const parsed = Settings.safeParse(acc);
-  return parsed.success ? parsed.data : base;
+  return lastValid;
 }
 
 function lstatOrNull(path: string): Stats | null {
