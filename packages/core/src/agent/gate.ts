@@ -86,20 +86,21 @@ const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill",
 // the OLD memory_write already had (THE USER PIN, design doc §"Status", 2026-07-08 sketch §5b:
 // "the model writes... on its own judgment; no card under auto policy"), just with no
 // memory-specific gate entry needed anymore since write/edit already ride it.
-// Workflow (CC-parity phase 3, Task B2) is MUTATING too, but with ONE extra carve-out below (the
-// accept-edits branch in evaluate()) that a plain MUTATING tool (bash, schedule, ...) doesn't get.
-// RATIONALE: a workflow's spawned agents ALWAYS run at accept-edits — a FIXED escalation floor
-// (engine.ts's runWorkflowAgent hardcodes childPolicy: "accept-edits"), not inherited from the
-// launching session's own policy the way spawn_agent's children inherit their parent's policy (see
-// spawn_agent's own comment above, why THAT tool safely stays READ_ONLY: delegation, not
-// escalation). Launching a workflow from a policy WEAKER than accept-edits (ask/dont-ask) would
-// hand its agents MORE trust than the session currently has, so it needs a human card just like any
-// other MUTATING tool; launching from a policy AT OR ABOVE accept-edits (accept-edits/auto/bypass)
-// escalates nothing — the agents run at the same or a less-trusted level the session already
-// operates under — so it should proceed free, same as `auto`/`bypass` already do for every MUTATING
-// tool. Plain MUTATING membership alone already gives `plan`→deny, `dont-ask`/`ask`→ask,
-// `auto`→allow, `bypass`→allow for free; only `accept-edits` needs the one-line carve-out just below
-// (EDIT_CLASS is write/edit ONLY — deliberately not widened to cover this very different tool).
+// Workflow (CC-parity phase 3, Task B2; CORRECTED by Task B-gatefix, user decision 2026-07-22) is
+// plain MUTATING — no special carve-out anymore. B2 originally gave it ONE extra accept-edits
+// carve-out here, reasoning that since a workflow's spawned agents ALWAYS run at a FIXED
+// accept-edits floor (engine.ts's runWorkflowAgent hardcodes childPolicy: "accept-edits"), launching
+// from a session already AT or above that policy (accept-edits/auto/bypass) escalated no trust, so
+// it should ride free like `auto`/`bypass` already do for every MUTATING tool. The user decided that
+// reasoning doesn't matter here: a launch starts a background run of up to 1000 agents, unattended,
+// so a human must confirm EVERY one — CC parity (CC cards under accept-edits on every run, and
+// reviews-or-cards under auto too), not just the launches weaker than accept-edits. So Workflow now
+// rides the plain-MUTATING path like bash/schedule/etc. for `plan`/`dont-ask`/`ask`/`bypass`
+// (`plan`→deny, `dont-ask`/`ask`→ask, `bypass`→allow), the accept-edits carve-out below is GONE
+// (falls to the same final `return "ask"` any non-edit MUTATING tool gets), and `auto` gets its OWN
+// one-line special case — see the comment just above the `auto` check in evaluate() below for why
+// that's a bespoke card, not the AI reviewer bash/fs/external get. EDIT_CLASS is (and always was)
+// write/edit ONLY.
 const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "Workflow"]);
 // web_fetch (4g Task 5, T6 adds web_search here) is Norma's ONLY network-capable tool — it does NOT
 // belong in READ_ONLY (it makes a live outbound request; the response bytes are DATA that could
@@ -179,11 +180,35 @@ export class PermissionGate {
     // otherwise run unreviewed under auto). This is the pre-SP-policies fail-closed posture (this
     // class's own doc comment) that a flat "auto → allow" ordering had silently dropped.
     if (!MUTATING.has(toolName) && !isExternalToolName(toolName)) return "ask";
+    // Task B-gatefix Part 2 (user decision 2026-07-22, CC-parity): a Workflow launch must not ride
+    // auto's blanket allow either — it starts a background run of up to 1000 accept-edits agents, so
+    // a human confirms EVERY launch, not just the ones under ask/dont-ask/accept-edits below.
+    // INVESTIGATED wiring this through the AI reviewer instead, mirroring the auto-policy bash/fs/
+    // external branches in engine.ts (each ultimately calls `this.cfg.reviewer.review(...)`,
+    // reviewer.ts): its `ReviewClass` is a closed `"bash" | "fs" | "external"` union, and EACH class's
+    // instructions text is FIXED inside `BashReviewer.review()` itself — "bash" reviews a shell
+    // command, "fs" an unusual write target, "external" a third-party MCP/plugin call Norma cannot
+    // inspect. None of the three describes "a script that launches an unbounded background
+    // multi-agent swarm"; reusing "external"'s text would misrepresent the review target to the
+    // REVIEWING MODEL itself (telling it this is uninspectable third-party code, when a workflow
+    // script is the opposite — fully Norma-authored and fully inspectable) — a correctness problem
+    // with the review, not merely a style mismatch. A proper fix would add a fourth ReviewClass (and
+    // its own instructions constant) to reviewer.ts, which sits outside this task's file scope
+    // (gate.ts/engine.ts/tests + the spec doc only) — so FALL BACK to carding it here, unconditionally,
+    // rather than reviewing it. Placed BEFORE the `auto` check just below so a Workflow call can never
+    // reach that blanket allow; harmless for dont-ask/ask/accept-edits too (each already returns "ask"
+    // from the plain fallthrough at the bottom of this method — this line only actually CHANGES
+    // auto's verdict for this one tool name).
+    if (toolName === "Workflow") return "ask";
     if (policy === "auto") return "allow";      // reviewer gates the reviewable classes in engine.ts
-    // Workflow rides accept-edits' free pass TOO, despite not being an edit — see MUTATING's own
-    // doc comment above for why (its agents already run at accept-edits, so a launch from a session
-    // already AT that policy escalates nothing). EDIT_CLASS itself stays write/edit ONLY.
-    if (policy === "accept-edits" && (EDIT_CLASS.has(toolName) || toolName === "Workflow")) return "allow"; // edits (+ Workflow) free; rest → ask below
+    // Workflow does NOT ride accept-edits' free pass anymore (Task B-gatefix, user decision
+    // 2026-07-22 — see MUTATING's own doc comment above for the full reversal of B2's original
+    // reasoning): a launch spawns a background run of up to 1000 accept-edits agents, so the human
+    // confirms it just like any other MUTATING tool under accept-edits (CC-parity: CC cards under
+    // accept-edits on every run). In practice this line is never reached for "Workflow" specifically
+    // (the special case above already returns "ask" for it before evaluate() gets here) — kept
+    // EDIT_CLASS-only anyway so this line still reads correctly in isolation.
+    if (policy === "accept-edits" && EDIT_CLASS.has(toolName)) return "allow"; // edits free; rest (incl. Workflow) → ask below
     // ask / accept-edits(non-edit) / dont-ask: a human gate. dont-ask converts a still-"ask" call to
     // deny in engine.ts (this gate has no mode/path awareness to do it here); in-project write/edit
     // is likewise silenced in engine.ts, not here.

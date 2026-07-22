@@ -75,20 +75,20 @@ describe("PermissionGate v1", () => {
     expect(gate.evaluate("schedule", "plan")).toBe("deny");
   });
 
-  // Task B2 (CC-parity phase 3, Workflows): the Workflow tool launches a background runtime whose
-  // spawned agents ALWAYS run at accept-edits (a FIXED escalation — unlike spawn_agent's children,
-  // which INHERIT the parent's policy and so stay safely READ_ONLY at the launch site). The launch
-  // itself must therefore be gated like any other mutating tool: denied outright under `plan`,
-  // carded under `ask`/`dont-ask` (never silently allowed), and free to proceed once the session is
-  // ALREADY at accept-edits or more permissive (accept-edits/auto/bypass) — launching then escalates
-  // nothing beyond what the session can already do.
-  test("Workflow is MUTATING with an accept-edits carve-out: deny under plan, ask/dont-ask card it, accept-edits/auto/bypass all proceed", () => {
+  // Task B2 (CC-parity phase 3, Workflows) originally gave Workflow an accept-edits/auto free pass,
+  // reasoning that a workflow's spawned agents ALWAYS run at accept-edits (a FIXED escalation) so
+  // launching from a session already at or above that policy escalated no trust. Task B-gatefix
+  // (user decision 2026-07-22) REVERSED that: a launch starts a background run of up to 1000
+  // agents, unattended, so a human must confirm EVERY one — CC parity (CC cards under accept-edits
+  // on every run, and reviews-or-cards under auto too). Only `bypass` (opt-in no-guardrails) still
+  // proceeds silently.
+  test("Workflow is MUTATING with NO free-pass carve-out: deny under plan, ask/dont-ask/accept-edits/auto all card it, only bypass proceeds", () => {
     const g = new PermissionGate();
     expect(g.evaluate("Workflow", "plan")).toBe("deny");
     expect(g.evaluate("Workflow", "ask")).toBe("ask"); // carded — never silently allowed
     expect(g.evaluate("Workflow", "dont-ask")).toBe("ask"); // gate-level "ask"; engine.ts's dont-ask flip denies it downstream, same as any other mutating tool
-    expect(g.evaluate("Workflow", "accept-edits")).toBe("allow");
-    expect(g.evaluate("Workflow", "auto")).toBe("allow");
+    expect(g.evaluate("Workflow", "accept-edits")).toBe("ask"); // B-gatefix: the old accept-edits carve-out is GONE
+    expect(g.evaluate("Workflow", "auto")).toBe("ask"); // B-gatefix: auto no longer rides the blanket MUTATING allow either
     expect(g.evaluate("Workflow", "bypass")).toBe("allow");
   });
 
@@ -234,17 +234,32 @@ describe("PermissionGate v1", () => {
   // "allow" under `auto`, so a tool silently moved into (or added to) ALWAYS_ASK fails HERE,
   // not in some downstream E2E. The list enumerates every member of READ_ONLY, MUTATING, and
   // NETWORK as of write-permission-flow (task 24 — SELF_GATING/request_directory removed, no
-  // replacement class), plus the external (mcp__/plugin__) shape.
+  // replacement class), plus the external (mcp__/plugin__) shape. "Workflow" is DELIBERATELY
+  // EXCLUDED from this list (Task B-gatefix, user decision 2026-07-22): it's the one MUTATING member
+  // with its own bespoke "ask" special-case under `auto` (gate.ts's evaluate(), checked BEFORE the
+  // blanket auto allow) — not a member of ALWAYS_ASK (bypass still allows it, unlike a true
+  // ALWAYS_ASK member), just a second, narrower exception this guard's list doesn't cover. See the
+  // dedicated test just below for its pinned auto/accept-edits verdicts.
   test("guard: no existing tool joined ALWAYS_ASK — every previously classified tool still allows under auto", () => {
     const classified = [
       // READ_ONLY
       "read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification",
-      // MUTATING
-      "write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "Workflow",
+      // MUTATING ("Workflow" excluded — see this test's own doc comment above)
+      "write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule",
       // NETWORK + externals
       "web_fetch", "web_search", "mcp__x__y", "plugin__x__y",
     ];
     for (const t of classified) expect(gate.evaluate(t, "auto")).toBe("allow");
+  });
+
+  // Companion to the guard above: Workflow is the ONE MUTATING member that does NOT allow under
+  // `auto` (nor `accept-edits`) — pinned here by name so a future accidental re-widening (e.g.
+  // someone "fixing" the guard list above by re-adding "Workflow") is caught by an explicit
+  // contradiction, not just a silent guard-list edit.
+  test("guard: Workflow specifically does NOT allow under auto or accept-edits (unlike every other MUTATING tool)", () => {
+    expect(gate.evaluate("Workflow", "auto")).toBe("ask");
+    expect(gate.evaluate("Workflow", "accept-edits")).toBe("ask");
+    expect(gate.evaluate("Workflow", "bypass")).toBe("allow"); // bypass still allows — not ALWAYS_ASK-like
   });
 
   // write-permission-flow (task 24, CC parity): request_directory is GONE — write/edit's own

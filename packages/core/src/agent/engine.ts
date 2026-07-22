@@ -1728,11 +1728,13 @@ export class AgentEngine {
   // registered `deferred:true` (B2), so excluding it from specs() alone leaves it still ADVERTISED
   // in "# Deferred tools" (deferredIndex() and specs() are two independent seams over the same
   // registry — see registry.ts's own doc comment on isDeferred), which would tell the model a tool
-  // exists that calling it will then just reject. turn() is the only caller that currently passes
-  // this (the main thread's own Workflow gating); the spawn-bridge callers below don't need to —
-  // runWorkflowAgent's own childExcludeTools already keeps its child from CALLING Workflow via
-  // specs() (Task A4), and this file's "Files" scope for B3 doesn't extend the same textual-listing
-  // polish to that already-excluded, already-safe path.
+  // exists that calling it will then just reject. turn() (the main thread's own Workflow gating) and,
+  // since Task B-gatefix Part 3, the plain spawn_agent bridge below BOTH pass this now — a spawned
+  // child thread is NEVER the top-level MAIN thread `workflowToolAllowed` gates for (see that
+  // bridge's own doc comment on `childExcludeTools`). runWorkflowAgent's own child creation still
+  // doesn't need to: its childExcludeTools literal already excludes WORKFLOW_TOOL from specs()
+  // (Task A4) — the load-bearing enforcement — and this file's "Files" scope doesn't extend the same
+  // textual-listing polish to that already-excluded, already-safe path.
   // Task B4: `ultracodeActive` (optional — every pre-B4 caller/call site omits it, unchanged
   // behavior) is turn()'s own once-per-turn `/ultracode` decision (see its doc comment there),
   // threaded straight through to `pinnedTools` (pins Workflow for the turn) AND appended as an
@@ -2554,7 +2556,20 @@ export class AgentEngine {
           // the main thread's own exclusion, not a new authorization boundary (the bridge's
           // `meta.mode === "dispatch"` gate above already denies it functionally either way).
           const childDepth = opts.depth + 1;
-          const childExcludeTools = new Set(["ask_user", "exit_plan_mode", "enter_plan_mode", "send_message", "task_stop", "agent_list", "agent_output", "skill_write", SESSION_SPAWN_TOOL]);
+          // Task B-gatefix Part 3 (from B3's own report, "concern" #1): a plain spawn_agent child is
+          // a THREAD, not a session — it shares its parent's `meta` byte-for-byte (childMeta above is
+          // often the exact same object), so re-running `workflowToolAllowed(childMeta, childCwd)`
+          // here would just repeat the PARENT's own session-level verdict (often `true`, for a
+          // workflows-enabled top-level session) — it can't see that THIS thread isn't the top-level
+          // MAIN thread. Workflow is scoped "top-level interactive code session ONLY"
+          // (workflowToolAllowed's own doc comment above), and `childDepth` here is ALWAYS >= 1
+          // (never MAIN_THREAD, which only ever runs at depth 0) — so WORKFLOW_TOOL is excluded
+          // UNCONDITIONALLY for every spawn_agent child, keyed on THREAD identity, not on any
+          // session-level gate. Defense-in-depth: even a provider that ignored specs() and called it
+          // anyway would still be rejected by the launch gate's own `isWorkflowLaunch`/
+          // `!!this.cfg.workflows` checks — but that's belt-and-braces; this is "top-level only"
+          // correctness (a plain subagent should never even see the tool is callable).
+          const childExcludeTools = new Set(["ask_user", "exit_plan_mode", "enter_plan_mode", "send_message", "task_stop", "agent_list", "agent_output", "skill_write", SESSION_SPAWN_TOOL, WORKFLOW_TOOL]);
           if (childDepth >= maxDepth) childExcludeTools.add("spawn_agent");
           // 4h-ii-b Task 1: instructionsFull is computed ONCE here — hoisted out of the bg and
           // sync closures below, which used to each build their own copy independently — so it
@@ -2563,7 +2578,11 @@ export class AgentEngine {
           // childPolicy, sessionId) is already known at this point in the bridge either way, so
           // this is purely a hoist: same value, computed earlier, not a behavior change.
           const childLoaded = new Set<string>();
-          const instructionsFull = this.buildInstructionsFull(def.instructions, childCwd, childLoaded, childPolicy, sessionId);
+          // Task B-gatefix Part 3: excludeDeferred keeps WORKFLOW_TOOL out of "# Deferred tools"
+          // text too (buildInstructionsFull's own doc comment above) — not just out of specs()
+          // (childExcludeTools just above) — so a spawn_agent child is never even told the tool
+          // exists, matching the MAIN thread's own excludeWorkflow treatment in turn().
+          const instructionsFull = this.buildInstructionsFull(def.instructions, childCwd, childLoaded, childPolicy, sessionId, new Set([WORKFLOW_TOOL]));
           // 4h-ii-b Task 1: everything a future `resume` (Task 3) needs to re-run THIS child
           // EXCEPT input/signal — captured now, at spawn time, from the exact values this bridge
           // already computed to start the child's own live run below. Stored on the registry
@@ -3320,13 +3339,21 @@ export class AgentEngine {
           }
           if (newCwd !== undefined) cwd = newCwd;
         } else if (isWorkflowLaunch) {
-          // Task B2: the SAME ask-vs-allow split as isWorktree just above — "allow" (accept-edits/
-          // auto/bypass, gate.ts) launches directly; "ask" waits on the SAME ApprovalBroker every
-          // other mutating tool uses, and passes the bridge itself as requestApproval's onApprove
-          // action, so an APPROVED call launches — it never falls through to executeCall's
-          // placeholder run() (tools/workflow.ts). `decision === "deny"` (plan mode) was already
-          // handled by the FIRST branch of this whole if/else-if chain, well above — this branch is
-          // never reached for a denied call.
+          // Task B2: the SAME ask-vs-allow split as isWorktree just above — "allow" launches
+          // directly; "ask" waits on the SAME ApprovalBroker every other mutating tool uses, and
+          // passes the bridge itself as requestApproval's onApprove action, so an APPROVED call
+          // launches — it never falls through to executeCall's placeholder run() (tools/workflow.ts).
+          // `decision === "deny"` (plan mode) was already handled by the FIRST branch of this whole
+          // if/else-if chain, well above — this branch is never reached for a denied call.
+          // Task B-gatefix (user decision 2026-07-22, CC-parity): `decision` reaches "allow" here
+          // ONLY under `bypass` now — gate.ts cards (returns "ask") a Workflow launch under
+          // ask/dont-ask/accept-edits/auto alike (a dedicated special-case for auto; the plain
+          // MUTATING fallthrough for the rest), reversing B2's original accept-edits/auto free pass.
+          // This ternary's SHAPE didn't need to change at all — it already branched on `decision`, so
+          // gate.ts's corrected verdicts flow straight through: every policy but bypass now takes the
+          // card path below. (Investigated gating this via the AI reviewer instead, mirroring the
+          // auto-policy bash/fs/external branches further down this same loop — see gate.ts's own
+          // doc comment on why that was rejected in favor of this card-based fallback.)
           outcome = decision === "ask"
             ? await this.requestApproval(call, cwd, sessionId, threadId, signal, {
                 timeoutMs: this.approvalTimeoutFor(meta),
