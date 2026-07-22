@@ -1,3 +1,13 @@
+// superseded by subprocess-entry.ts (A3′ removes the last import)
+//
+// Task A-entry′: this Worker-based entry is replaced by subprocess-entry.ts (stdio NDJSON bridge,
+// spawned as a sandboxed subprocess instead of a Bun Worker). It is kept in place — NOT deleted —
+// only because runtime.ts (`launch()`) still defaults `workerUrl` to `new URL("./worker-entry.ts",
+// import.meta.url)` and spawns a real `Worker` against it; runtime.test.ts's existing tests don't
+// override that default, so deleting this file breaks them today. Task A3′ swaps runtime.ts's
+// transport to spawn subprocess-entry.ts under the seatbelt (see task-A3prime-brief.md) and updates
+// those tests accordingly — once that lands, this file has no remaining reference and should be
+// deleted outright.
 /// <reference lib="webworker" />
 import { runWorkflow } from "./worker-harness";
 import type { BridgeRequest, BridgeResponse, WorkerInit } from "./bridge";
