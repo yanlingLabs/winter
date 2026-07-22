@@ -27,6 +27,7 @@ import { registerTaskTools } from "./agent/tools/tasks";
 import { registerPlanTool } from "./agent/tools/plan";
 import { registerWorkflowTool } from "./agent/tools/workflow";
 import { WorkflowRuntime } from "./workflows/runtime";
+import { WorkflowStore } from "./workflows/store";
 import { registerNotebookTool } from "./agent/tools/notebook";
 import { registerWorktreeTools } from "./agent/tools/worktree";
 import { registerSpawnAgentTool } from "./agent/tools/spawn";
@@ -228,6 +229,11 @@ export async function startDaemon(opts: {
   // just the name lookup.
   const outputStyleStore = new OutputStyleStore({ normaHome, trust: trustStore });
   const outputStyleFor = (cwd?: string | null): string | undefined => projectSettings.effective(projectRootOf(cwd ?? null))?.outputStyle;
+  // CC-parity phase 3 (Workflows, Track C Task C2): built unconditionally, same "no engine
+  // dependency" precedent as `outputStyleStore` just above — workflow.list's "saved" section and
+  // workflow.run's by-name resolution work even on a no-agentProvider daemon (only launching a
+  // resolved/inline script needs the WorkflowRuntime below, which DOES require an engine).
+  const workflowStore = new WorkflowStore({ normaHome, trust: trustStore });
   const pluginStore = new PluginStore({
     normaHome, plugins: settings?.plugins, consents: settings?.plugins?.consents, log: (m) => console.error(m),
   });
@@ -401,6 +407,11 @@ export async function startDaemon(opts: {
   let dreamer: Dreamer | undefined;
   let mcp: McpManager | null = null;
   let lspManager: LspManager | null = null;
+  // CC-parity phase 3 (Workflows, Track C Task C2): constructed inside the `if (agentProvider)`
+  // gate below (B2 — spawnAgent needs a live engine), reassigned onto this OUTER binding so
+  // startIpcServer's opts (built past the gate's close) can wire it — same "declared null above,
+  // assigned inside the gate" shape as `mcp`/`lspManager` just above.
+  let workflowRuntime: WorkflowRuntime | null = null;
   // hot-settings T5b: reassigned inside the `if (agentProvider)` gate below (built only when the
   // engine/registry exist to hot-apply against); declared here (function scope, outside the gate)
   // so the shutdown path past the gate's close can still stop() it regardless of agentProvider.
@@ -562,7 +573,7 @@ export async function startDaemon(opts: {
     // `spawnAgent`/`onEvent` both close over the `engine` binding assigned further down — same
     // later-assigned-closure precedent as `dispatchChildren`/`dreamer` below (neither is ever
     // INVOKED until a real Workflow launch happens, long after `engine` is assigned).
-    const workflowRuntime = new WorkflowRuntime({
+    workflowRuntime = new WorkflowRuntime({
       onEvent: (sid, ev) => {
         // Track D rewires this to hub.append the wire events; here it drives the completion notify.
         if (ev.type === "completed" || ev.type === "failed") engine?.notifyWorkflowCompletion(sid, ev.runId);
@@ -1161,6 +1172,12 @@ export async function startDaemon(opts: {
     // ipc/server.ts's memory.* handlers and memory-migrate.ts's own doc comment for why this is
     // the SAME bucket the importer uses for facts that don't map to a project.
     memoryFiles: { enabled: memoryEnabledHot, dirFor: memoryDirOf, globalDir: memoryGlobalDirOf },
+    // CC-parity phase 3 (Workflows, Track C Task C2): `workflowRuntime` is only ever assigned
+    // inside the `if (agentProvider)` gate above (B2); `workflowStore` is always built. Local-only
+    // in v1 — ipc/server.ts's PLUGIN_ALLOWED_METHODS/REMOTE_ALLOWED_METHODS deliberately don't
+    // gain these four verbs.
+    workflows: workflowRuntime ?? undefined,
+    workflowStore,
     ...opts.server,
   });
 

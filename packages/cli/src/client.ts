@@ -11,6 +11,7 @@ import {
   PluginRevokeTokenResult, PluginRestartResult,
   RoutinesCreateResult, RoutinesListResult, RoutinesUpdateResult, RoutinesDeleteResult,
   MemoryListResult, MemoryReadResult, MemoryDeleteResult,
+  WorkflowListResult, WorkflowRunResult, WorkflowStopResult, WorkflowGetResult,
   ConnWriter, type WritableSocket,
 } from "@norma/protocol";
 
@@ -30,6 +31,29 @@ export interface Routine {
   createdAt: number;
   lastResult: string | null;
   deferAttempts: number;
+}
+
+/** Mirrors `WorkflowRunViewSchema` (protocol/src/methods.ts) / `WorkflowRunView`
+ *  (core/src/workflows/types.ts) field-for-field — same plain-inline-interface convention as
+ *  `Routine` above (no z.infer import). */
+export interface WorkflowRunView {
+  runId: string;
+  sessionId: string;
+  name?: string;
+  status: "running" | "completed" | "failed" | "stopped";
+  counts: { running: number; completed: number; total: number };
+  phase?: string;
+  result?: string;
+  error?: string;
+  startedAt: number;
+}
+
+/** Mirrors `WorkflowSavedSchema` (protocol/src/methods.ts) / `ResolvedWorkflow`
+ *  (core/src/workflows/store.ts) field-for-field — a saved (not-yet-running) workflow's identity. */
+export interface SavedWorkflow {
+  name: string;
+  description: string;
+  source: string;
 }
 
 export interface ConnectOptions {
@@ -271,6 +295,25 @@ export class NormaClient {
   }
   async memoryDelete(scope: "user" | "project", name: string, cwd?: string): Promise<void> {
     await this.validated(MemoryDeleteResult, await this.request(METHODS.memoryDelete, { scope, name, cwd }), METHODS.memoryDelete);
+  }
+  /** CC-parity phase 3 (Workflows, Track C Task C2): the management/control surface over the
+   *  daemon's WorkflowRuntime (live runs) + WorkflowStore (saved `.norma/workflows` scripts, C1)
+   *  — mirrors the routines.* / memory.* quartets above: harness/admin role, no special gating
+   *  (LOCAL-ONLY IN V1 — these four are not reachable over the remote/plugin roles,
+   *  ipc/server.ts's allowlists). `workflowRun`'s `name`/`script` mirror the wire's own "exactly
+   *  one required" contract (handler-enforced, not the zod schema — see methods.ts's
+   *  WorkflowRunParams doc comment). */
+  async workflowList(sessionId: string, cwd?: string): Promise<{ running: WorkflowRunView[]; saved: SavedWorkflow[] }> {
+    return this.validated(WorkflowListResult, await this.request(METHODS.workflowList, { sessionId, cwd }), METHODS.workflowList);
+  }
+  async workflowRun(params: { sessionId: string; name?: string; script?: string; args?: unknown }): Promise<{ runId: string; status: "running" }> {
+    return this.validated(WorkflowRunResult, await this.request(METHODS.workflowRun, params), METHODS.workflowRun);
+  }
+  async workflowStop(runId: string): Promise<{ ok: true; stopped: boolean }> {
+    return this.validated(WorkflowStopResult, await this.request(METHODS.workflowStop, { runId }), METHODS.workflowStop);
+  }
+  async workflowGet(runId: string): Promise<{ run: WorkflowRunView }> {
+    return this.validated(WorkflowGetResult, await this.request(METHODS.workflowGet, { runId }), METHODS.workflowGet);
   }
   close(): void { this.socket.end(); }
 }

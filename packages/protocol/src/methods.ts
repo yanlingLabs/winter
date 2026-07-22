@@ -793,6 +793,67 @@ export const ProviderConfigureParams = z.object({
 });
 export const ProviderConfigureResult = z.object({ ok: z.literal(true) });
 
+// ---------------------------------------------------------------------------------------------
+// Workflows (CC-parity phase 3, Track C Task C2): the RPC surface over `WorkflowRuntime` (live
+// runs, core/src/workflows/runtime.ts, A3+/B2) + `WorkflowStore` (saved, trust-gated
+// `.norma/workflows/*.js` scripts, C1) — mirrors the routines.*/memory.* blocks above (harness AND
+// admin role, no additional role check at the wire-schema layer; ipc/server.ts enforces it).
+// LOCAL-ONLY IN V1 (Global Constraints): these four verbs are deliberately NOT added to
+// PLUGIN_ALLOWED_METHODS or REMOTE_ALLOWED_METHODS (ipc/server.ts) — a plugin or remote (iPhone
+// gateway) connection is role-rejected before dispatch ever reaches a handler for any of them. The
+// Swift NormaKit mirror for these same four methods is a LATER task (Track D) — no protocol
+// codegen fixture cost here either way: only new `SessionEvent` VARIANTS need
+// `pnpm protocol:generate`'s fixtures, and this task adds no new event variant.
+//
+// `WorkflowRunViewSchema` mirrors `WorkflowRunView` (core/src/workflows/types.ts) field-for-field,
+// same "kept as a separate literal, protocol can't import from core" precedent as `RoutineSchema`/
+// `ThreadInfoSchema` above. `WorkflowRunParams`'s `name`/`script` can't both be expressed as
+// "exactly one required" in zod without a discriminated union that would reject a plain
+// `{sessionId, name}` OR `{sessionId, script}` shape identically to how a caller naturally sends
+// them — the handler enforces it (methods.ts doc precedent: routines.create's `policy:"ask"`
+// rejection is schema-level because it's a single-field enum; this is a cross-field XOR, left to
+// ipc/server.ts, same as `PluginEnableParams`'s two-step consent flow being handler-shaped rather
+// than schema-shaped).
+// ---------------------------------------------------------------------------------------------
+
+export const WorkflowListParams = z.object({ sessionId: z.string().min(1), cwd: z.string().optional() });
+export const WorkflowRunViewSchema = z.object({
+  runId: z.string(), sessionId: z.string(), name: z.string().optional(),
+  status: z.enum(["running", "completed", "failed", "stopped"]),
+  counts: z.object({ running: z.number().int(), completed: z.number().int(), total: z.number().int() }),
+  phase: z.string().optional(), result: z.string().optional(), error: z.string().optional(),
+  startedAt: z.number().int(),
+});
+/** A saved (not-yet-running) workflow's identity — mirrors `ResolvedWorkflow`
+ *  (core/src/workflows/store.ts) field-for-field. */
+export const WorkflowSavedSchema = z.object({ name: z.string(), description: z.string(), source: z.string() });
+export const WorkflowListResult = z.object({
+  running: z.array(WorkflowRunViewSchema),
+  saved: z.array(z.object({ name: z.string(), description: z.string(), source: z.string() })),
+});
+
+/** `name`/`script`: exactly one required, enforced by the handler (see the block comment above) —
+ *  `name` resolves a saved workflow via `WorkflowStore` IN THE SESSION'S OWN cwd (trust-gated,
+ *  slug-guarded — C1's guards); `script` launches an inline body verbatim. `args` is opaque
+ *  (mirrors `WorkflowLaunch.args?: unknown`, runtime.ts) — the workflow script's own `args` binding. */
+export const WorkflowRunParams = z.object({
+  sessionId: z.string().min(1), name: z.string().optional(), script: z.string().optional(), args: z.unknown().optional(),
+});
+/** `status` is always `"running"` — `runtime.launch()` returns synchronously, right after
+ *  registering the run (WorkflowRegistry.register sets it "running" before launch() ever returns),
+ *  so there is no other value a fresh launch could report here. */
+export const WorkflowRunResult = z.object({ runId: z.string(), status: z.literal("running") });
+
+export const WorkflowStopParams = z.object({ runId: z.string().min(1) });
+/** `stopped` is a soft boolean, never a thrown NOT_FOUND — mirrors `routines.delete`'s
+ *  `{ok, removed}` idiom: stopping an unknown or already-terminal runId is not an error, it just
+ *  didn't stop anything (`WorkflowRegistry.stop`'s own "false for unknown/already terminal, never
+ *  throws" contract, runtime.ts). */
+export const WorkflowStopResult = z.object({ ok: z.literal(true), stopped: z.boolean() });
+
+export const WorkflowGetParams = z.object({ runId: z.string().min(1) });
+export const WorkflowGetResult = z.object({ run: WorkflowRunViewSchema });
+
 export const METHODS = {
   hello: "protocol.hello",
   sessionCreate: "session.create",
@@ -865,4 +926,8 @@ export const METHODS = {
   memoryDelete: "memory.delete",
   memoryAudit: "memory.audit",
   providerConfigure: "provider.configure",
+  workflowList: "workflow.list",
+  workflowRun: "workflow.run",
+  workflowStop: "workflow.stop",
+  workflowGet: "workflow.get",
 } as const;

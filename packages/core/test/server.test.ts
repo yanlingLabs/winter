@@ -17,6 +17,9 @@ import { PluginContribRegistry } from "../src/plugins/contrib";
 import type { Provider, ProviderEvent } from "../src/providers/types";
 import { OPENAI_API_KEY_SECRET } from "../src/providers/manager";
 import { setup as setupAgentEngine } from "./agent/engine-spawn.test";
+import { TrustStore } from "../src/agent/trust";
+import { WorkflowRuntime } from "../src/workflows/runtime";
+import { WorkflowStore } from "../src/workflows/store";
 
 /** Minimal raw test client speaking NDJSON JSON-RPC. */
 class TestClient {
@@ -992,6 +995,243 @@ describe("daemon IPC", () => {
       const res = await c.request(METHODS.agentStop, { sessionId: srv.sessionId, agent: "ghost" });
       expect(res.error.code).toBe(ERR.NOT_FOUND);
       expect(res.error.message).toContain("ghost");
+      c.close();
+      srv.stop();
+    });
+  });
+
+  // -------------------------------------------------------------------------------------------
+  // Workflows (CC-parity phase 3, Track C Task C2): workflow.list/run/stop/get — the RPC surface
+  // over WorkflowRuntime (live runs, A3+/B2) + WorkflowStore (saved `.norma/workflows/*.js`
+  // scripts, C1). Local-only in v1 (Global Constraints) — deliberately NOT on
+  // PLUGIN_ALLOWED_METHODS or REMOTE_ALLOWED_METHODS (see the two role-gate tests at the end of
+  // this block + test/ipc/remote-role.test.ts's own "off-list verbs" coverage). A self-contained
+  // bare IpcServer (own SessionStore/TrustStore/WorkflowRuntime/WorkflowStore, no AgentEngine) —
+  // same shape as bootAgentServer/bootPluginTestServer above. The runtime is built with NO
+  // `workerCommand` override — same "the real sandboxed-subprocess default transport is cheap
+  // enough for a test" precedent as workflow-bridge.testkit.ts / workflows/runtime.test.ts — and a
+  // `spawnAgent` that hangs until its AbortSignal fires, for the one test that needs a run to stay
+  // "running" long enough to list/stop; every other script here never calls `agent(...)`.
+  // -------------------------------------------------------------------------------------------
+  describe("workflow.list/run/stop/get (CC-parity phase 3, Track C Task C2)", () => {
+    async function bootWorkflowServer(): Promise<{
+      store: SessionStore; trust: TrustStore; workflows: WorkflowRuntime; workflowStore: WorkflowStore;
+      socketPath: string; harnessToken: string; remoteToken: string; normaHome: string; stop: () => void;
+    }> {
+      const home = mkdtempSync(join(tmpdir(), "norma-workflow-rpc-"));
+      const store = new SessionStore(home);
+      const trust = new TrustStore(join(home, "trust.json"));
+      const workflowStore = new WorkflowStore({ normaHome: home, trust });
+      const runsDir = mkdtempSync(join(tmpdir(), "norma-workflow-rpc-runs-"));
+      const workflows = new WorkflowRuntime({
+        onEvent: () => {},
+        spawnAgent: (_sid, _prompt, _opts, signal) =>
+          new Promise((resolve) => signal.addEventListener("abort", () => resolve({ ok: false, result: "stopped" }))),
+        runsDir,
+      });
+      const socketPath = join(home, "core.sock");
+      const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+      const tokens = await authority.ensureTokens();
+      const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, trust, workflows, workflowStore });
+      return {
+        store, trust, workflows, workflowStore, socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote,
+        normaHome: home, stop: () => { server.stop(); store.close(); },
+      };
+    }
+
+    test("workflow.run with an inline script launches a run; workflow.get polls it through to completion", async () => {
+      const srv = await bootWorkflowServer();
+      const c = await TestClient.connect(srv.socketPath);
+      await c.hello(srv.harnessToken, "wf-tester");
+      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
+
+      const run = await c.request(METHODS.workflowRun, {
+        sessionId: created.sessionId,
+        script: `export const meta = {name:"t", description:"d"}; return "hello";`,
+      });
+      expect(run.error).toBeUndefined();
+      expect(typeof run.result.runId).toBe("string");
+      expect(run.result.status).toBe("running");
+
+      let view: any;
+      for (let i = 0; i < 300; i++) {
+        const got = await c.request(METHODS.workflowGet, { runId: run.result.runId });
+        view = got.result.run;
+        if (view.status !== "running") break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(view.status).toBe("completed");
+      expect(view.result).toBe("hello");
+      expect(view.sessionId).toBe(created.sessionId);
+      c.close();
+      srv.stop();
+    });
+
+    test("workflow.get on an unknown runId → NOT_FOUND", async () => {
+      const srv = await bootWorkflowServer();
+      const c = await TestClient.connect(srv.socketPath);
+      await c.hello(srv.harnessToken, "wf-tester");
+      const res = await c.request(METHODS.workflowGet, { runId: "wf_ghost" });
+      expect(res.error?.code).toBe(ERR.NOT_FOUND);
+      c.close();
+      srv.stop();
+    });
+
+    test("workflow.list reports a session's own running runs and stays scoped per-session", async () => {
+      const srv = await bootWorkflowServer();
+      const c = await TestClient.connect(srv.socketPath);
+      await c.hello(srv.harnessToken, "wf-tester");
+      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
+      const { result: other } = await c.request(METHODS.sessionCreate, { scope: "global" });
+
+      const run = await c.request(METHODS.workflowRun, {
+        sessionId: created.sessionId,
+        script: `await agent("forever"); return "unreachable";`,
+      });
+      await new Promise((r) => setTimeout(r, 100)); // let the run actually reach its agent() call
+
+      const listMine = await c.request(METHODS.workflowList, { sessionId: created.sessionId });
+      expect(listMine.result.running.map((r: any) => r.runId)).toEqual([run.result.runId]);
+      expect(listMine.result.running[0].status).toBe("running");
+
+      const listOther = await c.request(METHODS.workflowList, { sessionId: other.sessionId });
+      expect(listOther.result.running).toEqual([]);
+
+      await c.request(METHODS.workflowStop, { runId: run.result.runId }); // tidy up the hanging subprocess
+      c.close();
+      srv.stop();
+    });
+
+    test("workflow.stop stops a running run; stopping an unknown or already-stopped runId is a soft no-op (ok:true, stopped:false)", async () => {
+      const srv = await bootWorkflowServer();
+      const c = await TestClient.connect(srv.socketPath);
+      await c.hello(srv.harnessToken, "wf-tester");
+      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
+      const run = await c.request(METHODS.workflowRun, {
+        sessionId: created.sessionId,
+        script: `await agent("forever"); return "unreachable";`,
+      });
+      await new Promise((r) => setTimeout(r, 100));
+
+      const stop = await c.request(METHODS.workflowStop, { runId: run.result.runId });
+      expect(stop.result).toEqual({ ok: true, stopped: true });
+
+      const ghost = await c.request(METHODS.workflowStop, { runId: "wf_ghost" });
+      expect(ghost.result).toEqual({ ok: true, stopped: false });
+
+      const again = await c.request(METHODS.workflowStop, { runId: run.result.runId });
+      expect(again.result).toEqual({ ok: true, stopped: false });
+      c.close();
+      srv.stop();
+    });
+
+    test("workflow.run requires name or script → INVALID_PARAMS", async () => {
+      const srv = await bootWorkflowServer();
+      const c = await TestClient.connect(srv.socketPath);
+      await c.hello(srv.harnessToken, "wf-tester");
+      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
+      const res = await c.request(METHODS.workflowRun, { sessionId: created.sessionId });
+      expect(res.error?.code).toBe(ERR.INVALID_PARAMS);
+      c.close();
+      srv.stop();
+    });
+
+    test("workflow.run with an unknown sessionId → NOT_FOUND", async () => {
+      const srv = await bootWorkflowServer();
+      const c = await TestClient.connect(srv.socketPath);
+      await c.hello(srv.harnessToken, "wf-tester");
+      const res = await c.request(METHODS.workflowRun, { sessionId: "s_ghost", script: "return 1;" });
+      expect(res.error?.code).toBe(ERR.NOT_FOUND);
+      c.close();
+      srv.stop();
+    });
+
+    test("workflow.run resolves a saved workflow by name via WorkflowStore, trust-gated to the session's own cwd", async () => {
+      const srv = await bootWorkflowServer();
+      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-workflow-rpc-cwd-")));
+      mkdirSync(join(cwd, ".norma", "workflows"), { recursive: true });
+      writeFileSync(join(cwd, ".norma", "workflows", "hello.js"),
+        `export const meta = {name:"hello", description:"says hi"}; return "hi from project";`);
+
+      const c = await TestClient.connect(srv.socketPath);
+      await c.hello(srv.harnessToken, "wf-tester");
+      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd });
+
+      // Untrusted: the project workflow exists on disk but the cwd isn't trusted yet.
+      const untrusted = await c.request(METHODS.workflowRun, { sessionId: created.sessionId, name: "hello" });
+      expect(untrusted.error?.code).toBe(ERR.NOT_FOUND);
+
+      srv.trust.trust(cwd);
+      const run = await c.request(METHODS.workflowRun, { sessionId: created.sessionId, name: "hello" });
+      expect(run.error).toBeUndefined();
+      expect(run.result.status).toBe("running");
+
+      let view: any;
+      for (let i = 0; i < 300; i++) {
+        const got = await c.request(METHODS.workflowGet, { runId: run.result.runId });
+        view = got.result.run;
+        if (view.status !== "running") break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(view.status).toBe("completed");
+      expect(view.result).toBe("hi from project");
+      expect(view.name).toBe("hello");
+      c.close();
+      srv.stop();
+    });
+
+    test("workflow.run with an unresolvable name → NOT_FOUND", async () => {
+      const srv = await bootWorkflowServer();
+      const c = await TestClient.connect(srv.socketPath);
+      await c.hello(srv.harnessToken, "wf-tester");
+      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
+      const res = await c.request(METHODS.workflowRun, { sessionId: created.sessionId, name: "ghost" });
+      expect(res.error?.code).toBe(ERR.NOT_FOUND);
+      c.close();
+      srv.stop();
+    });
+
+    test("workflow.list surfaces saved workflows from WorkflowStore alongside running runs", async () => {
+      const srv = await bootWorkflowServer();
+      mkdirSync(join(srv.normaHome, "workflows"), { recursive: true });
+      writeFileSync(join(srv.normaHome, "workflows", "nightly.js"),
+        `export const meta = {name:"nightly", description:"nightly sweep"}; return "ok";`);
+
+      const c = await TestClient.connect(srv.socketPath);
+      await c.hello(srv.harnessToken, "wf-tester");
+      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
+      const list = await c.request(METHODS.workflowList, { sessionId: created.sessionId });
+      expect(list.result.saved).toEqual([{ name: "nightly", description: "nightly sweep", source: "user" }]);
+      expect(list.result.running).toEqual([]);
+      c.close();
+      srv.stop();
+    });
+
+    test("workflow.* is role-rejected for a plugin connection — local-only, never added to PLUGIN_ALLOWED_METHODS", async () => {
+      const srv = await bootWorkflowServer();
+      const raw = srv.store.mintPluginToken("wf-plugin");
+      const c = await TestClient.connect(srv.socketPath);
+      await c.request(METHODS.hello, {
+        protocolVersion: PROTOCOL_VERSION, role: "plugin", token: raw, clientName: "wf-plugin", pluginId: "wf-plugin",
+      });
+      for (const method of [METHODS.workflowList, METHODS.workflowRun, METHODS.workflowStop, METHODS.workflowGet]) {
+        const res = await c.request(method, {});
+        expect(res.error?.code).toBe(ERR.UNAUTHORIZED);
+        expect(res.error?.message).toBe(`plugin role may not call ${method}`);
+      }
+      c.close();
+      srv.stop();
+    });
+
+    test("workflow.* is role-rejected for a remote connection — local-only, never added to REMOTE_ALLOWED_METHODS", async () => {
+      const srv = await bootWorkflowServer();
+      const c = await TestClient.connect(srv.socketPath);
+      await c.hello(srv.remoteToken, "wf-phone", "remote");
+      for (const method of [METHODS.workflowList, METHODS.workflowRun, METHODS.workflowStop, METHODS.workflowGet]) {
+        const res = await c.request(method, {});
+        expect(res.error?.code).toBe(ERR.UNAUTHORIZED);
+        expect(res.error?.message).toBe(`remote role may not call ${method}`);
+      }
       c.close();
       srv.stop();
     });
@@ -2525,6 +2765,12 @@ describe("daemon IPC", () => {
         [METHODS.trustList, {}],
         [METHODS.trustRemove, { path: "/tmp" }],
         [METHODS.pluginsList, {}],
+        // CC-parity phase 3 (Workflows, Track C Task C2): local-only in v1 (Global Constraints) —
+        // never added to PLUGIN_ALLOWED_METHODS.
+        [METHODS.workflowList, { sessionId: "s_x" }],
+        [METHODS.workflowRun, { sessionId: "s_x", script: "return 1;" }],
+        [METHODS.workflowStop, { runId: "wf_x" }],
+        [METHODS.workflowGet, { runId: "wf_x" }],
       ];
       for (const [method, params] of attempts) {
         const res = await plugin.request(method, params);
