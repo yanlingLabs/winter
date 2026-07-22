@@ -35,6 +35,7 @@ import type { LspManager } from "./lsp/manager";
 import { autoDiagnosticsSuffix, AUTO_DIAG_TOOL_NAMES } from "./lsp/auto-diagnostics";
 import { DISPATCH_ALLOW_TOOLS, DISPATCH_SYSTEM_PROMPT } from "./dispatch-prompt";
 import type { DispatchChildren } from "./dispatch-children";
+import type { WorkflowRuntime } from "../workflows/runtime";
 
 /** Structural narrowing of BackgroundTaskRegistry (bg-registry.ts) to just what pinnedTools
  *  (below) needs — lets the engine (and tests) work with anything shaped like a per-session task
@@ -178,6 +179,21 @@ function approvalCardSummary(call: { name: string; argsJson: string }): string {
         if (a.dangerouslyDisableSandbox === true) return `bash (UNSANDBOXED): ${cmd}`;
         if (a.allowNetwork === true) return `bash (with network): ${cmd}`;
         return `bash ${cmd}`;
+      }
+    } catch { /* malformed argsJson → generic slice below */ }
+  }
+  // Task B2: a Workflow card must show what the run actually DOES, not a raw-JSON slice whose
+  // escaping (a multi-line script quoted into one JSON string) would bury it — same "show the
+  // executed payload" rationale as bash's card just above. Only the script's FIRST line is shown
+  // (mirrors `summary` in WorkflowRuntime.launch — see runtime.ts); the full script is never on
+  // this card (an approval card is not a code-review surface, and the model already wrote it).
+  if (call.name === WORKFLOW_TOOL) {
+    try {
+      const a = JSON.parse(call.argsJson || "{}") as { script?: unknown; name?: unknown };
+      if (typeof a.script === "string" && oneLine(a.script.split(/\r?\n/)[0] ?? "") !== "") {
+        const label = typeof a.name === "string" && oneLine(a.name) !== "" ? ` "${oneLine(a.name)}"` : "";
+        const firstLine = oneLine(a.script.split(/\r?\n/)[0] ?? "").slice(0, 120);
+        return `Workflow${label}: ${firstLine}`;
       }
     } catch { /* malformed argsJson → generic slice below */ }
   }
@@ -739,6 +755,15 @@ export interface EngineConfig {
   // toolSearch's sub-getters above — these resolve to a definite `boolean`, never `undefined`.
   workflowsEnabled?: (cwd?: string) => boolean;
   keywordTriggerEnabled?: (cwd?: string) => boolean;
+  // Task B2: the runtime the Workflow tool bridge (below) actually launches/awaits against. Plain
+  // instance (not a getter) — mirrors `subagents`/`agents`/`worktrees` above, not the hot-settings
+  // getters just above this field: the runtime itself has no per-project/hot-reload story in B2
+  // (that's the settings getters' job). Absent (every test/config that doesn't wire it) → the
+  // Workflow tool's own placeholder run() answers every call ("workflows are not available in this
+  // session") and gate.ts's classification still applies (a plan/ask session still can't bypass the
+  // gate just because nothing is wired to launch), mirroring worktrees'/plans' own absent-dependency
+  // shape (isWorktree/exit_plan_mode's own `this.cfg.X &&` guards).
+  workflows?: WorkflowRuntime;
 }
 
 export class AgentEngine {
@@ -748,6 +773,19 @@ export class AgentEngine {
   // reentrant turn; runTurn's finally drains it (starts exactly one follow-up turn) once the
   // in-flight turn settles, UNLESS that turn ended via interrupt() (see runTurn's finally).
   private retriggerPending = new Set<string>();
+  // Task B2: runIds currently being awaited INLINE by a `run_in_background:false` Workflow call
+  // (runWorkflowBridge adds before its `await this.cfg.workflows.await(runId)`, removes in a
+  // `finally` right after) — consulted by notifyWorkflowCompletion to SKIP the notify+retrigger for
+  // a run whose result is ALREADY about to reach the model as that SAME call's own tool_result.
+  // Mirrors BackgroundAgentRegistry's sync-spawn `{notified:true}` opt-out (see notifyBgCompletion's
+  // own callers), reimplemented here because WorkflowRuntime.finish() (workflows/runtime.ts — not
+  // ours to modify) has no such opt: its onEvent fires "completed"/"failed" for EVERY run
+  // (background or inline) the instant the child process reports done, which — for an inline
+  // await — happens BEFORE `runtime.await(runId)` itself resolves (finish() calls onEvent, then
+  // resolves the settler promise runWorkflowBridge's own await is suspended on). Without this guard
+  // an inline call's result would be persisted TWICE (once as this call's tool_result, once as a
+  // task_notification moments later) and would kick off a spurious extra turn once this one ends.
+  private inlineWorkflowRuns = new Set<string>();
   private steerQueue = new Map<string, string[]>();
   // 4h-ii-b Task 4 (CC SendMessage): per-CHILD-THREAD steer queue, keyed by threadId (globally
   // unique th_<uuid>) — SEPARATE from the sessionId-keyed `steerQueue` above, which stays
@@ -1524,6 +1562,42 @@ export class AgentEngine {
     if (this.isRunning(sessionId)) { this.retriggerPending.add(sessionId); return; }
     // steer()'s idle idiom: the event is already in history; a fresh turn replays it.
     void this.runTurn(sessionId).catch((err) => console.error("bg-notification turn failed:", err));
+  }
+
+  /** Task B2: persists a completed/failed WORKFLOW run as a task_notification history event —
+   *  mirrors notifyBgCompletion just above (bg-agent completions), reusing the SAME event variant
+   *  (no new SessionEvent — the union already has task_notification). Exactly-once via
+   *  runtime.takeForNotification (single-consumer claim, mirrors
+   *  BackgroundAgentRegistry.takeForNotification). PUBLIC (unlike notifyBgCompletion): daemon.ts's
+   *  `onEvent` wiring calls this directly from outside the class, the same way it calls
+   *  `engine.runTurn`/`engine.interrupt` — see daemon.ts's WorkflowRuntime construction.
+   *
+   *  Skips entirely (no claim, no notification, no retrigger) for a run currently being awaited
+   *  INLINE by a `run_in_background:false` call (inlineWorkflowRuns, above) — that call's own
+   *  tool_result already carries this exact result to the model, THIS SAME turn; persisting a
+   *  second copy here (and possibly retriggering a fresh turn right after) would duplicate/leak it,
+   *  exactly the failure mode bg-agent-registry's own sync-spawn `{notified:true}` opt exists to
+   *  prevent (WorkflowRuntime.finish() has no such opt to pass — see runWorkflowBridge's own doc
+   *  comment for why this guard lives here instead). */
+  notifyWorkflowCompletion(sessionId: string, runId: string): void {
+    if (this.inlineWorkflowRuns.has(runId)) return;
+    const v = this.cfg.workflows?.takeForNotification(runId);
+    if (!v) return;
+    // Same sanitize-and-escape treatment notifyBgCompletion gives agent name/result — `name` is
+    // model-supplied (the Workflow tool's own `name` arg), `result`/`error` are script-authored.
+    const clean = (s: string) => this.sanitizeForReminder(s).replace(/<\/\s*task-notification\s*>/gi, "&lt;/task-notification&gt;");
+    const label = clean(v.name ?? v.runId);
+    const summary = v.status === "completed" ? `Workflow "${label}" completed`
+      : v.status === "failed" ? `Workflow "${label}" failed`
+      : `Workflow "${label}" was stopped`; // defensive — takeForNotification never returns "running", and onEvent never fires for "stopped"
+    const detail = v.status === "completed" ? v.result : v.error;
+    const result = detail ? `\n<result>${clean(detail)}</result>` : "";
+    const content = `<task-notification>\n<task-id>${v.runId}</task-id>\n<status>${v.status}</status>\n<summary>${summary}</summary>${result}\n</task-notification>`;
+    this.cfg.hub.append(sessionId, { type: "task_notification", sessionId, threadId: MAIN_THREAD, content });
+    // bg-retrigger Task 2's exact idiom, reused verbatim: defer if a turn is already running for
+    // this session (runTurn's finally drains it once that turn settles), otherwise wake it now.
+    if (this.isRunning(sessionId)) { this.retriggerPending.add(sessionId); return; }
+    void this.runTurn(sessionId).catch((err) => console.error("workflow-notification turn failed:", err));
   }
 
   // Computed ONCE per turn by turn() (same one-per-turn rule as `instructions` itself) — a
@@ -2745,6 +2819,13 @@ export class AgentEngine {
         // and the bridge (setCwd + git + same-turn cwd + worktree_* events) would NEVER run outside
         // `auto` policy — see task-4-report.md for the bug writeup.
         const isWorktree = (call.name === "enter_worktree" || call.name === "exit_worktree") && !!this.cfg.worktrees;
+        // Task B2: same "bridge instead of executeCall's placeholder" shape as isWorktree just
+        // above — both are MUTATING (gate.ts), so `decision` here can be "ask" (default policy) or
+        // "allow" (accept-edits/auto/bypass, or an approved ask card); the branch below handles
+        // both, exactly mirroring isWorktree's own ask-vs-allow split. Absent cfg.workflows → false,
+        // so the call falls through every branch below to the final default (executeCall → the
+        // tool's own placeholder run(), tools/workflow.ts).
+        const isWorkflowLaunch = call.name === WORKFLOW_TOOL && !!this.cfg.workflows;
         // `cwd` is typed `string` (never undefined here), so this ternary is only a defensive
         // guard against an empty string — repoRootFor("") would realpath-fail and fall back to the
         // DAEMON's own process.cwd(), a wrong and misleading project root. `projectRoot: null`
@@ -3022,6 +3103,21 @@ export class AgentEngine {
             outcome = this.runWorktreeBridge(call, sessionId, threadId, cwd, onCwd);
           }
           if (newCwd !== undefined) cwd = newCwd;
+        } else if (isWorkflowLaunch) {
+          // Task B2: the SAME ask-vs-allow split as isWorktree just above — "allow" (accept-edits/
+          // auto/bypass, gate.ts) launches directly; "ask" waits on the SAME ApprovalBroker every
+          // other mutating tool uses, and passes the bridge itself as requestApproval's onApprove
+          // action, so an APPROVED call launches — it never falls through to executeCall's
+          // placeholder run() (tools/workflow.ts). `decision === "deny"` (plan mode) was already
+          // handled by the FIRST branch of this whole if/else-if chain, well above — this branch is
+          // never reached for a denied call.
+          outcome = decision === "ask"
+            ? await this.requestApproval(call, cwd, sessionId, threadId, signal, {
+                timeoutMs: this.approvalTimeoutFor(meta),
+                summary: approvalCardSummary(call),
+                // no denialMessage → the helper defaults to `denied by ${res.by}` (unchanged behavior)
+              }, loaded, async () => this.runWorkflowBridge(call, sessionId), pins, rootsOverride, visionCapable)
+            : await this.runWorkflowBridge(call, sessionId);
         } else if (dirGrant) {
           // Out-of-project write/edit under `ask` (the auto/accept-edits/bypass cases were ALL
           // pre-granted + nulled above, so they never reach this branch): ONE grant-flavored card
@@ -4067,6 +4163,53 @@ export class AgentEngine {
       output: "Plan mode ON — read-only tools only; present your plan with exit_plan_mode when ready.",
       isError: false,
     };
+  }
+
+  /** Task B2: the Workflow tool's bridge — wired ONLY when cfg.workflows is set (see the
+   *  `isWorkflowLaunch` guard at the call site); otherwise the tool falls through to executeCall's
+   *  placeholder run (tools/workflow.ts). Called from BOTH decisions the gate can produce for a
+   *  MUTATING tool: directly when `decision === "allow"` (accept-edits/auto/bypass, gate.ts), and as
+   *  `requestApproval`'s `onApprove` action when `decision === "ask"` — see the dispatch loop above
+   *  (mirrors runWorktreeBridge's own two call sites just below).
+   *
+   *  Background by default (omitted or `run_in_background !== false`): `runtime.launch(...)` is
+   *  synchronous (it only spawns the child process and returns its runId — the script itself runs
+   *  independently), so this returns `{runId,status:"running"}` immediately; the run's own
+   *  completion later drives `notifyWorkflowCompletion` via the daemon's onEvent wiring, entirely
+   *  off-turn. `run_in_background:false` additionally `await`s `runtime.await(runId)` and returns
+   *  the result/error INLINE as this call's own tool_result — `inlineWorkflowRuns` (this class' own
+   *  field, above) brackets that await so notifyWorkflowCompletion (which WILL still fire — the
+   *  runtime has no concept of "this caller is already waiting inline") skips this runId entirely
+   *  instead of persisting a duplicate task_notification for a result the model is about to receive
+   *  as this exact call's answer. */
+  private async runWorkflowBridge(
+    call: { callId: string; name: string; argsJson: string },
+    sessionId: string,
+  ): Promise<{ output: string; isError: boolean }> {
+    const workflows = this.cfg.workflows!;
+    let parsed: { script?: unknown; args?: unknown; name?: unknown; run_in_background?: unknown } = {};
+    try { parsed = JSON.parse(call.argsJson || "{}"); } catch { /* defensive: empty script rejected below */ }
+    const script = typeof parsed.script === "string" ? parsed.script : "";
+    if (!script) return { output: "invalid arguments for Workflow: script", isError: true };
+    // Zod's own `.min(1).max(64)` (tools/workflow.ts) governs the real schema path; this bridge
+    // hand-parses argsJson BEFORE that ever runs (same reason every other bridge in this file does
+    // — spawn_agent's model/description checks, session_spawn's dir/prompt checks, above), so a
+    // provider that ignored the declared schema still gets a sane fallback: an out-of-range/wrong-
+    // type `name` is simply dropped (undefined), same as omitting it — never a thrown/rejected call.
+    const name = typeof parsed.name === "string" && parsed.name.length >= 1 && parsed.name.length <= 64
+      ? parsed.name
+      : undefined;
+    const runInBackground = parsed.run_in_background !== false; // default true — CC parity: background unless explicitly opted out
+    const runId = workflows.launch({ sessionId, source: script, args: parsed.args, name });
+    if (runInBackground) return { output: JSON.stringify({ runId, status: "running" }), isError: false };
+    this.inlineWorkflowRuns.add(runId);
+    try {
+      const view = await workflows.await(runId);
+      if (view.status === "completed") return { output: view.result ?? "", isError: false };
+      return { output: view.error ?? `workflow ${view.status}`, isError: true };
+    } finally {
+      this.inlineWorkflowRuns.delete(runId);
+    }
   }
 
   /** enter_worktree/exit_worktree's bridge — wired ONLY when cfg.worktrees is set (see the

@@ -75,6 +75,32 @@ describe("PermissionGate v1", () => {
     expect(gate.evaluate("schedule", "plan")).toBe("deny");
   });
 
+  // Task B2 (CC-parity phase 3, Workflows): the Workflow tool launches a background runtime whose
+  // spawned agents ALWAYS run at accept-edits (a FIXED escalation — unlike spawn_agent's children,
+  // which INHERIT the parent's policy and so stay safely READ_ONLY at the launch site). The launch
+  // itself must therefore be gated like any other mutating tool: denied outright under `plan`,
+  // carded under `ask`/`dont-ask` (never silently allowed), and free to proceed once the session is
+  // ALREADY at accept-edits or more permissive (accept-edits/auto/bypass) — launching then escalates
+  // nothing beyond what the session can already do.
+  test("Workflow is MUTATING with an accept-edits carve-out: deny under plan, ask/dont-ask card it, accept-edits/auto/bypass all proceed", () => {
+    const g = new PermissionGate();
+    expect(g.evaluate("Workflow", "plan")).toBe("deny");
+    expect(g.evaluate("Workflow", "ask")).toBe("ask"); // carded — never silently allowed
+    expect(g.evaluate("Workflow", "dont-ask")).toBe("ask"); // gate-level "ask"; engine.ts's dont-ask flip denies it downstream, same as any other mutating tool
+    expect(g.evaluate("Workflow", "accept-edits")).toBe("allow");
+    expect(g.evaluate("Workflow", "auto")).toBe("allow");
+    expect(g.evaluate("Workflow", "bypass")).toBe("allow");
+  });
+
+  // Contrast with spawn_agent (READ_ONLY, allowed under every policy including `ask`) — Workflow
+  // must NOT get the same free pass, since (unlike spawn_agent) its children don't merely inherit
+  // the parent's policy, they escalate to a fixed accept-edits.
+  test("Workflow is NOT READ_ONLY — unlike spawn_agent, it never gets a free pass under ask or plan", () => {
+    const g = new PermissionGate();
+    expect(g.evaluate("Workflow", "ask")).not.toBe(g.evaluate("spawn_agent", "ask"));
+    expect(g.evaluate("Workflow", "plan")).not.toBe(g.evaluate("spawn_agent", "plan"));
+  });
+
   test("Skill is read-only: always allowed (loading a skill body must not require approval)", () => {
     expect(gate.evaluate("Skill", "ask")).toBe("allow");
     expect(gate.evaluate("Skill", "auto")).toBe("allow");
@@ -214,7 +240,7 @@ describe("PermissionGate v1", () => {
       // READ_ONLY
       "read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification",
       // MUTATING
-      "write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule",
+      "write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "Workflow",
       // NETWORK + externals
       "web_fetch", "web_search", "mcp__x__y", "plugin__x__y",
     ];

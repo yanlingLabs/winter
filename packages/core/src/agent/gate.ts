@@ -86,7 +86,21 @@ const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill",
 // the OLD memory_write already had (THE USER PIN, design doc §"Status", 2026-07-08 sketch §5b:
 // "the model writes... on its own judgment; no card under auto policy"), just with no
 // memory-specific gate entry needed anymore since write/edit already ride it.
-const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule"]);
+// Workflow (CC-parity phase 3, Task B2) is MUTATING too, but with ONE extra carve-out below (the
+// accept-edits branch in evaluate()) that a plain MUTATING tool (bash, schedule, ...) doesn't get.
+// RATIONALE: a workflow's spawned agents ALWAYS run at accept-edits — a FIXED escalation floor
+// (engine.ts's runWorkflowAgent hardcodes childPolicy: "accept-edits"), not inherited from the
+// launching session's own policy the way spawn_agent's children inherit their parent's policy (see
+// spawn_agent's own comment above, why THAT tool safely stays READ_ONLY: delegation, not
+// escalation). Launching a workflow from a policy WEAKER than accept-edits (ask/dont-ask) would
+// hand its agents MORE trust than the session currently has, so it needs a human card just like any
+// other MUTATING tool; launching from a policy AT OR ABOVE accept-edits (accept-edits/auto/bypass)
+// escalates nothing — the agents run at the same or a less-trusted level the session already
+// operates under — so it should proceed free, same as `auto`/`bypass` already do for every MUTATING
+// tool. Plain MUTATING membership alone already gives `plan`→deny, `dont-ask`/`ask`→ask,
+// `auto`→allow, `bypass`→allow for free; only `accept-edits` needs the one-line carve-out just below
+// (EDIT_CLASS is write/edit ONLY — deliberately not widened to cover this very different tool).
+const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "Workflow"]);
 // web_fetch (4g Task 5, T6 adds web_search here) is Norma's ONLY network-capable tool — it does NOT
 // belong in READ_ONLY (it makes a live outbound request; the response bytes are DATA that could
 // carry adversarial "instructions", so an unattended session shouldn't get an implicit pass) and it
@@ -166,7 +180,10 @@ export class PermissionGate {
     // class's own doc comment) that a flat "auto → allow" ordering had silently dropped.
     if (!MUTATING.has(toolName) && !isExternalToolName(toolName)) return "ask";
     if (policy === "auto") return "allow";      // reviewer gates the reviewable classes in engine.ts
-    if (policy === "accept-edits" && EDIT_CLASS.has(toolName)) return "allow"; // edits free; rest → ask below
+    // Workflow rides accept-edits' free pass TOO, despite not being an edit — see MUTATING's own
+    // doc comment above for why (its agents already run at accept-edits, so a launch from a session
+    // already AT that policy escalates nothing). EDIT_CLASS itself stays write/edit ONLY.
+    if (policy === "accept-edits" && (EDIT_CLASS.has(toolName) || toolName === "Workflow")) return "allow"; // edits (+ Workflow) free; rest → ask below
     // ask / accept-edits(non-edit) / dont-ask: a human gate. dont-ask converts a still-"ask" call to
     // deny in engine.ts (this gate has no mode/path awareness to do it here); in-project write/edit
     // is likewise silenced in engine.ts, not here.

@@ -25,6 +25,8 @@ import { registerToolSearchTool } from "./agent/tools/toolsearch";
 import { registerAskUserTool } from "./agent/tools/ask-user";
 import { registerTaskTools } from "./agent/tools/tasks";
 import { registerPlanTool } from "./agent/tools/plan";
+import { registerWorkflowTool } from "./agent/tools/workflow";
+import { WorkflowRuntime } from "./workflows/runtime";
 import { registerNotebookTool } from "./agent/tools/notebook";
 import { registerWorktreeTools } from "./agent/tools/worktree";
 import { registerSpawnAgentTool } from "./agent/tools/spawn";
@@ -552,6 +554,27 @@ export async function startDaemon(opts: {
     // unconditionally alongside `subagents` — both are required together for the spawn bridge's
     // async branch to activate (engine.ts's EngineConfig.bgAgents doc comment).
     const bgAgents = new BackgroundAgentRegistry();
+    // CC-parity phase 3 (Workflows, Task B2): constructed unconditionally alongside bgAgents (same
+    // "always build it, the tool/bridge itself decides whether to use it" shape spawn_agent's own
+    // subagents/agents above follow) — PRODUCTION deps only: no `workerCommand` override (that's a
+    // test-only seam over in workflows/runtime.test.ts; the real default self-spawns the compiled
+    // binary in `__workflow-worker` mode, workflows/runtime.ts's own `defaultWorkerCommand`).
+    // `spawnAgent`/`onEvent` both close over the `engine` binding assigned further down — same
+    // later-assigned-closure precedent as `dispatchChildren`/`dreamer` below (neither is ever
+    // INVOKED until a real Workflow launch happens, long after `engine` is assigned).
+    const workflowRuntime = new WorkflowRuntime({
+      onEvent: (sid, ev) => {
+        // Track D rewires this to hub.append the wire events; here it drives the completion notify.
+        if (ev.type === "completed" || ev.type === "failed") engine?.notifyWorkflowCompletion(sid, ev.runId);
+      },
+      spawnAgent: (sid, prompt, o, signal) => engine!.runWorkflowAgent(sid, prompt, o, signal),
+      runsDir: join(normaHome, "workflows-runs"),
+    });
+    // Deferred (rides ToolSearch like worktree/notebook/plan/schedule above) — a specialized
+    // orchestration primitive, not needed in every turn. Session-type/settings gating (Task B3/B4,
+    // per workflowsEnabled/keywordTriggerEnabled below) is layered on top of this later; B2 only
+    // wires the tool + its launch bridge.
+    registerWorkflowTool(registry, { deferred: true });
     // `agentProvider` is already narrowed non-null here (we're inside `if (agentProvider)`), and
     // its `.provider` is the SAME provider instance the engine's spawn bridge calls .models() on
     // to validate a spawn_agent model override (4e gate F9) — so this list is exactly what the
@@ -920,6 +943,10 @@ export async function startDaemon(opts: {
       // registration/gating and the `/ultracode` keyword trigger against these two names.
       workflowsEnabled: (cwd?: string) => (projectSettings.effective(projectRootOf(cwd)) ?? settings) ? workflowsEnabledFrom(projectSettings.effective(projectRootOf(cwd)) ?? settings!) : true,
       keywordTriggerEnabled: (cwd?: string) => keywordTriggerEnabledFrom(projectSettings.effective(projectRootOf(cwd)) ?? settings!),
+      // Task B2: the runtime the Workflow tool bridge (engine.ts) launches/awaits against —
+      // constructed above, right alongside bgAgents (see its own doc comment there for why
+      // `spawnAgent`/`onEvent` safely close over `engine` before this very assignment completes).
+      workflows: workflowRuntime,
       hooks: hookFacade,
       // Subagent transcript files (CC parity): the SAME session-tmp-dir accessor registerLspTools
       // above already gets — sessionTmpDir-backed, so a subagent's transcript lands right next to
