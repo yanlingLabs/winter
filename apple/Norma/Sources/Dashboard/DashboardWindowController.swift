@@ -73,7 +73,17 @@ final class DashboardWindowController: NSObject, NSWindowDelegate {
     /// `DashboardTests.swift` call sites) it's never passed, same "harmless default seam" posture as
     /// `shortcutRegistry: ShortcutRegistry? = nil` just above. `AppDelegate.openDashboard()` passes
     /// the real `daemonSupervisor?.restart()` hook.
-    init(client: NormaClient, directory: SessionDirectory, peripheral: PeripheralProvider, helperClient: HelperClient, shortcutRegistry: ShortcutRegistry? = nil, onOpenSessionDetached: @escaping (String) -> Void, frame: NSRect, initialPane: DashboardPane = defaultDashboardPane, onConfigured: @escaping () -> Void = {}) {
+    /// CC-parity phase 3 (Workflows, Track D Task D3): `session`/`currentSessionId` default to
+    /// `nil`/`{ nil }` — same "harmless default seam" posture as `shortcutRegistry: ShortcutRegistry?
+    /// = nil` just above (this file's own `DashboardTests.swift` call sites only smoke-test window
+    /// construction/pane selection, never the Workflows pane's content, so they don't need to pass
+    /// the app's real session). `session` is `SessionModel?` rather than defaulting straight to a
+    /// fresh `SessionModel()` — `SessionModel.init` is `@MainActor`-isolated, and a default
+    /// ARGUMENT VALUE expression is checked as a nonisolated context regardless of the enclosing
+    /// initializer's own isolation, so `SessionModel()` can't sit in this parameter list directly;
+    /// the fallback construction below runs inside this (`@MainActor`) initializer's body instead,
+    /// where that isolation rule doesn't apply.
+    init(client: NormaClient, directory: SessionDirectory, peripheral: PeripheralProvider, helperClient: HelperClient, shortcutRegistry: ShortcutRegistry? = nil, onOpenSessionDetached: @escaping (String) -> Void, frame: NSRect, initialPane: DashboardPane = defaultDashboardPane, onConfigured: @escaping () -> Void = {}, session: SessionModel? = nil, currentSessionId: @escaping () -> String? = { nil }) {
         let window = NSWindow(
             contentRect: frame,
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -120,6 +130,12 @@ final class DashboardWindowController: NSObject, NSWindowDelegate {
         // baked in here (not carried on `DashboardWiring` itself), mirroring how `shortcutsModel`
         // bakes in `shortcutRegistry` rather than exposing it on the wiring struct.
         let providerModel = ProviderPaneModel(client: client, onConfigured: onConfigured)
+        // CC-parity phase 3 (Workflows, Track D Task D3): same "constructed fresh here, per
+        // window-open" posture as `memoryModel`/`skillsModel`/`providerModel` above — the Workflows
+        // pane has no other owner across the app's lifetime, and `WorkflowsPane.task` refreshes it
+        // on every appearance anyway. Unlike those, it also closes over `session`/`currentSessionId`
+        // (workflows are per-session — see `DashboardWiring.workflowsModel`'s own doc).
+        let workflowsModel = WorkflowsPaneModel(client: client, session: session ?? SessionModel(), currentSessionId: currentSessionId)
         let wiring = DashboardWiring(
             directory: directory,
             onOpenSessionDetached: onOpenSessionDetached,
@@ -134,7 +150,8 @@ final class DashboardWindowController: NSObject, NSWindowDelegate {
             shortcutsModel: shortcutsModel,
             memoryModel: memoryModel,
             skillsModel: skillsModel,
-            providerModel: providerModel
+            providerModel: providerModel,
+            workflowsModel: workflowsModel
         )
         window.contentView = NSHostingView(rootView: DashboardView(wiring: wiring, selectionModel: selectionModel))
         window.setFrame(frame, display: true)

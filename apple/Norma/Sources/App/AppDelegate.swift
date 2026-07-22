@@ -309,7 +309,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // place that closes the loop, same "AppDelegate wires the real side effect, the pane
             // only fires an injected closure" posture as every other real-side-effect hook in this
             // file (`onRestartDaemon` on the menu bar, just below in this same method's sibling).
-            onConfigured: { [weak self] in self?.daemonSupervisor?.restart() }
+            onConfigured: { [weak self] in self?.daemonSupervisor?.restart() },
+            // CC-parity phase 3 (Workflows, Track D Task D3): the Workflows pane runs/lists/stops
+            // against whichever session is CURRENTLY focused (`model.session` already mirrors
+            // exactly that — `AppModel.handle(_:)`'s own `guard e.sessionId == focusedSessionId`
+            // gate) — a closure, not a snapshot id, since focus can change while this window stays
+            // open (`DashboardWiring`'s own "data OR a closure" convention).
+            session: model.session,
+            currentSessionId: { model.focusedSessionId }
         )
         controller.onClosed = { [weak self] _ in
             self?.dashboardWindow = nil

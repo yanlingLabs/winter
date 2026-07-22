@@ -47,6 +47,27 @@ struct ChildItem: Equatable, Identifiable {
     var id: String { sessionId }
 }
 
+/// One live/terminal workflow run (CC-parity phase 3, Track D Task D3) — folded from the 4
+/// `workflow_*` SessionEvents (`workflowStarted`/`workflowProgress`/`workflowCompleted`/
+/// `workflowFailed`, Task D1), exactly like `ChildItem` above folds `child_update`. Keyed by runId
+/// in `OrbSessionState.workflowRuns` (a Dictionary — see that field's own doc for why, unlike
+/// `children`'s ordered array). `status` mirrors NormaKit's `WorkflowRunView.status` wire
+/// convention (a plain String — "running"/"completed"/"failed"; never "stopped", see the reducer's
+/// own doc on `workflowStop`), not a Swift enum a future server status would fail to decode.
+struct WorkflowRunState: Equatable, Identifiable {
+    let runId: String
+    var name: String?
+    var status: String = "running"
+    var phase: String?
+    var log: String?
+    var running: Int = 0
+    var completed: Int = 0
+    var total: Int = 0
+    var result: String?
+    var error: String?
+    var id: String { runId }
+}
+
 /// A single outstanding human-in-the-loop interaction the daemon is waiting on — approval,
 /// question, or plan — carrying the payload cards need to render (2d-iii task 1). Replaces the
 /// old `pendingApprovalIds: Set<String>`, which tracked only callIds and dropped everything else
@@ -131,6 +152,19 @@ struct OrbSessionState: Equatable {
     /// `turn_started` prune of `state.agents`), so a completed child's status is still visible for
     /// at least the rest of the turn it finished in, but doesn't accumulate forever.
     var children: [ChildItem] = []
+    /// CC-parity phase 3 (Workflows, Track D Task D3): live/terminal workflow runs, folded from
+    /// `workflow_started`/`workflow_progress`/`workflow_completed`/`workflow_failed` (Task D1) —
+    /// see `SessionReducer.reduce`'s explicit cases below. Keyed by `runId` (a Dictionary, not an
+    /// ordered array like `children`): this fold is a pure O(1) upsert-by-runId with no ordering
+    /// concerns of its own — the Dashboard's Workflows pane is what needs a stable display order,
+    /// and it already has to merge this against `workflow.list`'s own snapshot (which carries
+    /// `startedAt`, the thing worth ordering by) to show runs that started before the pane opened,
+    /// so the ordering decision belongs there, not in this reducer. UNLIKE `children`, never
+    /// pruned here — a workflow run has no "next turn_started" analog to prune on (these are
+    /// `threadId: "main"` events with no per-turn lifecycle), and the daemon's own registry never
+    /// prunes its run history either (workflows/registry.ts), so staying resident for the life of
+    /// the session matches the source of truth.
+    var workflowRuns: [String: WorkflowRunState] = [:]
     /// Ordered (oldest first), replay-rebuildable list of outstanding approvals/questions/plans —
     /// 2d-iii task 1. `*_requested`/`*_asked`/`*_presented` append (skipping a callId already
     /// present, so a replayed duplicate event is a no-op, not a second card); the matching
@@ -272,6 +306,36 @@ enum SessionReducer {
                 s.children[i] = ChildItem(sessionId: v.childSessionId, title: v.title, status: v.status)
             } else {
                 s.children.append(ChildItem(sessionId: v.childSessionId, title: v.title, status: v.status))
+            }
+        case .workflowStarted(let v):
+            // CC-parity phase 3 (Track D Task D3): a fresh run always REPLACES wholesale, never
+            // merges into a stale prior entry under the same runId — daemon runIds are fresh random
+            // hex per launch (`wf_<hex>`, workflows/runtime.ts), so a repeat `_started` for one only
+            // happens on a replayed duplicate, which should reset to a clean initial state exactly
+            // like a genuinely new run would.
+            s.workflowRuns[v.runId] = WorkflowRunState(runId: v.runId, name: v.name, status: "running")
+        case .workflowProgress(let v):
+            // `phase`/`log` are OPTIONAL per tick (WorkflowProgress's own doc, SessionEvent.swift:
+            // "a progress tick may carry only updated counts") — only overwrite when THIS tick
+            // actually carries a new one, so a counts-only tick can't blank out the last-seen
+            // phase/log. `running`/`completed`/`total` are always present, so those overwrite
+            // unconditionally.
+            upsertWorkflowRun(&s, runId: v.runId) { run in
+                if let phase = v.phase { run.phase = phase }
+                if let log = v.log { run.log = log }
+                run.running = v.running
+                run.completed = v.completed
+                run.total = v.total
+            }
+        case .workflowCompleted(let v):
+            upsertWorkflowRun(&s, runId: v.runId) { run in
+                run.status = "completed"
+                run.result = v.resultSummary
+            }
+        case .workflowFailed(let v):
+            upsertWorkflowRun(&s, runId: v.runId) { run in
+                run.status = "failed"
+                run.error = v.error
             }
         case .assistantDelta(let v) where v.threadId == mainThread:
             s.streamingText += v.delta
@@ -445,6 +509,18 @@ enum SessionReducer {
         guard !state.pendingInteractions.contains(where: { $0.callId == item.callId }) else { return }
         state.pendingInteractions.append(item)
         state.status = .approvalNeeded(count: state.pendingInteractions.count)
+    }
+
+    /// CC-parity phase 3 (Workflows, Track D Task D3): get-or-insert-default then mutate, same
+    /// upsert shape `childUpdate`'s inline `firstIndex`/replace-or-append pair expresses for an
+    /// array — a Dictionary makes this a one-liner at each call site instead of three. Defensive
+    /// against replay/attach-mid-stream (see `testProgressWithNoPriorStartedSynthesizesAnEntry`):
+    /// `workflow_progress`/`_completed`/`_failed` arriving with no prior `workflow_started` for
+    /// that runId still lands, rather than being silently dropped.
+    private static func upsertWorkflowRun(_ state: inout OrbSessionState, runId: String, _ mutate: (inout WorkflowRunState) -> Void) {
+        var run = state.workflowRuns[runId] ?? WorkflowRunState(runId: runId)
+        mutate(&run)
+        state.workflowRuns[runId] = run
     }
 
     /// Appends to the exchange currently being built. Transcript capture is MAIN-thread only

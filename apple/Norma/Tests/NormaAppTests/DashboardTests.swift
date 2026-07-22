@@ -16,12 +16,13 @@ import NormaKit
 final class DashboardTests: XCTestCase {
     // MARK: - dashboardPaneOrder / defaultDashboardPane (PURE)
 
-    func testDashboardPaneOrderContainsAllNinePanesInSpecOrder() {
+    func testDashboardPaneOrderContainsAllTenPanesInSpecOrder() {
         // Phase 4d-iii Task 2: `.pluginManager` appended at the END, every pre-existing pane keeps
         // its position (see `dashboardPaneOrder`'s own doc comment). Phase 5b Task 5: `.memory`
         // appended the same way. Phase 5c Task 4: `.skills` appended the same way again. BYOK T2:
-        // `.provider` appended the same way again.
-        XCTAssertEqual(dashboardPaneOrder, [.sessions, .daemonStatus, .quota, .trust, .peripheral, .pluginManager, .memory, .skills, .provider])
+        // `.provider` appended the same way again. CC-parity phase 3 (Workflows, Track D Task D3):
+        // `.workflows` appended the same way again.
+        XCTAssertEqual(dashboardPaneOrder, [.sessions, .daemonStatus, .quota, .trust, .peripheral, .pluginManager, .memory, .skills, .provider, .workflows])
         XCTAssertEqual(Set(dashboardPaneOrder), Set(DashboardPane.allCases), "every case must appear exactly once")
     }
 
@@ -300,6 +301,61 @@ final class DashboardTests: XCTestCase {
 
     func testProviderStatusTextWithNeitherReadsAsNoneConfigured() {
         XCTAssertEqual(providerStatusText(providerId: nil, providerModel: nil), "none configured")
+    }
+
+    // MARK: - mergeWorkflowRuns / workflowStatusBadge (PURE, WorkflowsPane.swift — CC-parity
+    // phase 3, Workflows, Track D Task D3)
+
+    func testWorkflowStatusBadgeMapsAllFourWireStatuses() {
+        XCTAssertEqual(workflowStatusBadge("running"), "Running")
+        XCTAssertEqual(workflowStatusBadge("completed"), "Completed")
+        XCTAssertEqual(workflowStatusBadge("failed"), "Failed")
+        XCTAssertEqual(workflowStatusBadge("stopped"), "Stopped")
+    }
+
+    /// An unrecognized status (a future server-side addition this client predates) falls back to a
+    /// capitalized rendering of the raw string — same posture as `memoryTypeBadge`/
+    /// `skillSourceBadge`'s own fallback.
+    func testWorkflowStatusBadgeUnrecognizedStatusFallsBackToCapitalized() {
+        XCTAssertEqual(workflowStatusBadge("mystery"), "Mystery")
+    }
+
+    private func workflowRow(_ runId: String, status: String = "running", startedAt: Int, total: Int = 0) -> WorkflowRunRow {
+        WorkflowRunRow(runId: runId, name: nil, status: status, phase: nil, running: 0, completed: 0, total: total, result: nil, error: nil, startedAt: startedAt)
+    }
+
+    func testMergeWorkflowRunsSnapshotOnlyPassesThroughSortedNewestFirst() {
+        let snapshot = [workflowRow("r_old", startedAt: 10), workflowRow("r_new", startedAt: 30), workflowRow("r_mid", startedAt: 20)]
+        let merged = mergeWorkflowRuns(snapshot: snapshot, live: [:])
+        XCTAssertEqual(merged.map(\.runId), ["r_new", "r_mid", "r_old"])
+    }
+
+    /// The live fold's fields win over a matching snapshot row's — status/counts/phase — while
+    /// `startedAt` (which the live fold never carries) is preserved from the snapshot.
+    func testMergeWorkflowRunsLiveOverlayWinsFieldsForAMatchingRunId() {
+        let snapshot = [workflowRow("r1", status: "running", startedAt: 100, total: 0)]
+        let live = ["r1": WorkflowRunState(runId: "r1", name: "nightly", status: "completed", phase: "done", running: 0, completed: 20, total: 20, result: "ok", error: nil)]
+        let merged = mergeWorkflowRuns(snapshot: snapshot, live: live)
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(merged[0].status, "completed")
+        XCTAssertEqual(merged[0].total, 20)
+        XCTAssertEqual(merged[0].phase, "done")
+        XCTAssertEqual(merged[0].startedAt, 100, "startedAt has no live-fold equivalent — the snapshot's own value survives")
+    }
+
+    /// A runId the live fold has learned about (via `workflow_started`) but the last
+    /// `workflow.list` snapshot doesn't yet (a run that started after the last refresh) is still
+    /// surfaced — and sorts AHEAD of every snapshot row, since it's the freshest possible signal a
+    /// run exists.
+    func testMergeWorkflowRunsLiveOnlyEntryIsSynthesizedAndSortedFirst() {
+        let snapshot = [workflowRow("r_old", startedAt: 999_999)]
+        let live = ["r_new": WorkflowRunState(runId: "r_new", name: "just-started", status: "running")]
+        let merged = mergeWorkflowRuns(snapshot: snapshot, live: live)
+        XCTAssertEqual(merged.map(\.runId), ["r_new", "r_old"])
+    }
+
+    func testMergeWorkflowRunsEmptyInputsProduceNoRows() {
+        XCTAssertTrue(mergeWorkflowRuns(snapshot: [], live: [:]).isEmpty)
     }
 
     // MARK: - DashboardSelectionModel (PURE — Phase 4d-cleanup Task 3 fix 1)
