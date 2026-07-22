@@ -8,7 +8,7 @@ import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom } from "./settings";
+import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -911,6 +911,15 @@ export async function startDaemon(opts: {
         deferThreshold: (cwd) => projectSettings.effective(projectRootOf(cwd))?.toolSearch?.deferThreshold ?? Number(process.env.NORMA_TOOLSEARCH_THRESHOLD ?? 12),
         deferExternals: (cwd) => projectSettings.effective(projectRootOf(cwd))?.toolSearch?.deferExternals,
       },
+      // CC-parity phase 3 (Workflows, Track B Task B1): same per-project/hot shape as
+      // reviewerEnabled/toolSearch above — `workflowsEnabledFrom`/`keywordTriggerEnabledFrom`
+      // (settings.ts) already bake in the default-ON (`!== false`) semantics, so these resolve to a
+      // definite boolean (fail-open `true` when neither a project overlay nor global settings.json
+      // exist yet, mirroring hooksEnabledHot/lspAutoDiagnosticsHot's own null-settings fallback
+      // above). Neither getter is consumed yet — Task B3/B4 wires the deferred Workflow tool
+      // registration/gating and the `/ultracode` keyword trigger against these two names.
+      workflowsEnabled: (cwd?: string) => (projectSettings.effective(projectRootOf(cwd)) ?? settings) ? workflowsEnabledFrom(projectSettings.effective(projectRootOf(cwd)) ?? settings!) : true,
+      keywordTriggerEnabled: (cwd?: string) => keywordTriggerEnabledFrom(projectSettings.effective(projectRootOf(cwd)) ?? settings!),
       hooks: hookFacade,
       // Subagent transcript files (CC parity): the SAME session-tmp-dir accessor registerLspTools
       // above already gets — sessionTmpDir-backed, so a subagent's transcript lands right next to

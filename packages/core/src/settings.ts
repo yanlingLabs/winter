@@ -210,6 +210,14 @@ export const Settings = z.object({
       directory: z.string().optional(),
     })
     .optional(),
+  /** Dynamic workflows (CC-parity phase 3). `enabled` default-ON (`!== false`, same shape as
+   *  hooks/memory/lsp above): the deferred Workflow tool is registered + /ultracode active only when
+   *  true. `keywordTrigger` default-ON: `/ultracode` is inert when false, but the tool is still
+   *  available to the model. Hot-reloaded, per-project via the ProjectSettingsResolver. */
+  workflows: z.object({
+    enabled: z.boolean().optional(),
+    keywordTrigger: z.boolean().optional(),
+  }).optional(),
 });
 export type Settings = z.infer<typeof Settings>;
 
@@ -225,6 +233,17 @@ export const hooksEnabledFrom = (s: Settings): boolean => s.hooks?.enabled !== f
  *  decision is made — daemon.ts's write-root join and context.ts's injection gate both call this
  *  (via a live getter over the `settings` holder) rather than re-deriving it inline. */
 export const memoryEnabledFrom = (s: Settings): boolean => s.memory?.enabled !== false;
+
+/** Same default-ON shape as `hooksEnabledFrom`/`memoryEnabledFrom` above: absent block, absent
+ *  field, or `true` all mean the dynamic Workflow tool is registered and `/ultracode` is active;
+ *  only an explicit `false` turns the whole feature off. The single place THIS decision is made —
+ *  daemon.ts's `workflowsEnabled` getter (mirrors reviewerEnabled/toolSearch's own per-project,
+ *  hot-reloaded shape) calls this rather than re-deriving it inline. */
+export const workflowsEnabledFrom = (s: Settings): boolean => s.workflows?.enabled !== false;
+/** Same default-ON shape as `workflowsEnabledFrom` just above, but gates ONLY the `/ultracode`
+ *  keyword trigger — an explicit `false` here leaves the Workflow tool itself registered and
+ *  available to the model; it just stops treating the keyword as an implicit invocation. */
+export const keywordTriggerEnabledFrom = (s: Settings): boolean => s.workflows?.keywordTrigger !== false;
 
 /** Same default-ON shape as `memoryEnabledFrom`/`hooksEnabledFrom` above: absent block, absent
  *  field, or `true` all mean auto-diagnostics-after-edit is on; only an explicit `false` turns it

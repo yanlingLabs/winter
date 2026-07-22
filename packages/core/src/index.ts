@@ -5,6 +5,7 @@ export { TOKEN_NAMES } from "./auth/tokens";
 export {
   loadSettings, saveSettings, loadPermissionDirs, addLocalDir,
   REASONING_EFFORTS, setProviderModel, setReasoningEffort, setOutputStyle, memoryEnabledFrom,
+  workflowsEnabledFrom, keywordTriggerEnabledFrom,
   type Settings,
 } from "./settings";
 export {

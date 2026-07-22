@@ -730,6 +730,15 @@ export interface EngineConfig {
   // field. daemon.ts wires the real `notifyHeadless`; tests inject a spy to assert it fires (or
   // doesn't) without ever shelling out to osascript for real.
   notifyFallback?: (title: string, message: string) => void;
+  // CC-parity phase 3 (Workflows, Track B Task B1): settings-backed getters for the dynamic
+  // Workflow tool. PRODUCED here (daemon.ts wires both via the SAME ProjectSettingsResolver
+  // instance reviewerEnabled/toolSearch above use, per-project + hot) so Task B3/B4 has a stable
+  // EngineConfig surface to build the tool-gating/keyword-trigger logic against; neither getter is
+  // read anywhere in this file yet. Each already bakes in settings.ts's own default-ON semantics
+  // (workflowsEnabledFrom/keywordTriggerEnabledFrom's `!== false`), so — unlike reviewerEnabled/
+  // toolSearch's sub-getters above — these resolve to a definite `boolean`, never `undefined`.
+  workflowsEnabled?: (cwd?: string) => boolean;
+  keywordTriggerEnabled?: (cwd?: string) => boolean;
 }
 
 export class AgentEngine {
