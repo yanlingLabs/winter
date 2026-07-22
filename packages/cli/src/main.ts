@@ -1543,6 +1543,49 @@ if (import.meta.main) {
     process.exit(0);
     break; // unreachable (every branch exits) — guards against silent fallthrough if exit behavior ever changes
   }
+  case "output-style": {
+    // Direct settings.json read/write (no daemon RPC needed) — mirrors `case "model"` above: an
+    // output-style switch must not require a daemon restart (the daemon re-resolves
+    // settings.outputStyle, live, on the session's next turn — same live-getter precedent as the
+    // provider model).
+    const { parseOutputStyleArgs } = await import("./output-style-cli");
+    const { loadSettings, saveSettings, resolveNormaHome, setOutputStyle, OutputStyleStore, TrustStore } = await import("@norma/core");
+    const action = parseOutputStyleArgs(process.argv.slice(3));
+    const home = resolveNormaHome();
+    const settingsPath = join(home, "settings.json");
+
+    if (action.action === "help") {
+      console.log("Usage: norma output-style [name]\n  (no arg)  list available styles\n  <name>    set the active output style");
+      break;
+    }
+
+    // loadSettings throws its own helpful error (mirrors `case "model"` above, which loads
+    // unguarded the same way) if settings.json is missing/unparseable — a Norma install always
+    // has one, so this never fabricates a fallback Settings object; a missing/invalid file fails
+    // the exact same way `norma model` would.
+    const settings = loadSettings(settingsPath);
+    const store = new OutputStyleStore({ normaHome: home, trust: new TrustStore(join(home, "trust.json")) });
+    const cwd = process.cwd();
+    const current = settings.outputStyle ?? "default";
+
+    if (action.action === "list") {
+      for (const s of store.list(cwd)) {
+        console.log(`${s.name === current ? "*" : " "} ${s.name.padEnd(14)} ${s.description}`);
+      }
+      break;
+    }
+
+    // set
+    if (!store.resolve(action.name, cwd)) {
+      console.error(`Unknown output style: ${action.name}`);
+      console.error(`Available: ${store.list(cwd).map((s) => s.name).join(", ")}`);
+      process.exitCode = 1;
+      break;
+    }
+    saveSettings(settingsPath, setOutputStyle(settings, action.name));
+    console.log(`Output style set to: ${action.name}`);
+    break;
+  }
   case "init": {
     await runTurnSession({ promptOverride: INIT_PROMPT, forceAuto: true, chat: false }); // force auto: writes NORMA.md without approval prompts
     break;
