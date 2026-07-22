@@ -37,4 +37,8 @@ describe("sessionTmpDir NORMA_TMPDIR override", () => {
   test("unset → os.tmpdir()", () => {
     expect(sessionTmpDir("s3")).toBe(join(realpathSync(tmpdir()), "norma-session-s3"));
   });
+  test("fix-wave D: whitespace-only NORMA_TMPDIR falls back to os.tmpdir() (blank is treated as unset, not used verbatim)", () => {
+    process.env.NORMA_TMPDIR = "   ";
+    expect(sessionTmpDir("s4")).toBe(join(realpathSync(tmpdir()), "norma-session-s4"));
+  });
 });
