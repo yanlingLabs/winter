@@ -53,7 +53,7 @@ export const SessionListResult = z.object({
     scope: z.string(),
     createdAt: z.number().int(),
     lastSeq: z.number().int().nonnegative(),
-    // Session history (design 2026-07-23 §1): the session's human title (session_titled's title or
+    // Session history: the session's human title (session_titled's title or
     // the daemon's first-message fallback). Values already flow from store.list(); this declares them
     // so a schema-validating client (the phone's SessionSummary) reads them without smuggling.
     title: z.string().optional(),
@@ -71,7 +71,7 @@ export const SessionAttachParams = z.object({
 });
 export const SessionAttachResult = z.object({ ok: z.literal(true), lastSeq: z.number().int().nonnegative() });
 
-// Session history (design 2026-07-23 §1): a paged, allowlisted, byte-budgeted read of past
+// Session history: a paged, allowlisted, byte-budgeted read of past
 // SessionEvents so a reconnecting/never-attached client can render history without an unbounded
 // attach replay. beforeSeq is an EXCLUSIVE upper bound (paging: pass the previous page's oldestSeq);
 // omitted = from newest. limit defaults to 200 server-side (packages/core/src/sessions/history.ts).
