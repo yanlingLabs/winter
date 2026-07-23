@@ -24,14 +24,14 @@ describe("readHistoryPage", () => {
     return { store, sessionId };
   }
 
-  test("the allowlist is exactly the 8 persisted foldable types", () => {
+  test("the allowlist is exactly the 10 persisted foldable types", () => {
     // Widening cast: HISTORY_EVENT_TYPES is a ReadonlySet<SessionEvent["type"]>, so the plain
     // string[] literal below (not a member of that narrower union type) would otherwise fail
     // toEqual's generic inference (bound to the `expect(...)` receiver's type) under tsc.
     expect([...HISTORY_EVENT_TYPES].sort() as string[]).toEqual(
       [
         "agent_error", "approval_requested", "approval_resolved", "assistant_message",
-        "tool_call", "tool_result", "turn_completed", "user_message",
+        "question_asked", "question_resolved", "tool_call", "tool_result", "turn_completed", "user_message",
       ].sort(),
     );
     // Security: the opaque reasoning_item is NOT allowlisted.
@@ -181,7 +181,7 @@ describe("readHistoryPage", () => {
     expect(() => readHistoryPage(store, { sessionId: "s_does_not_exist" })).toThrow("unknown session");
   });
 
-  test.skip("DEEP CAP: a giant NESTED string (question option description) is truncated with the marker", () => { // un-skipped in Task 2
+  test("DEEP CAP: a giant NESTED string (question option description) is truncated with the marker", () => {
     const { store, sessionId } = boot();
     const big = "q".repeat(70 * 1024); // > 64 KiB, nested two levels down
     store.append(sessionId, {
@@ -208,6 +208,24 @@ describe("readHistoryPage", () => {
     // Behavioral proxy for the same-reference no-op: the event round-trips byte-identically.
     expect(page.events[0]!.type).toBe("user_message");
     expect((page.events[0] as any).text).toBe("small");
+  });
+
+  test("question events appear in pages, ascending, resolved carries answers/by", () => {
+    const { store, sessionId } = boot();
+    store.append(sessionId, {
+      type: "question_asked", sessionId, threadId: "main", callId: "q1",
+      questions: [{ question: "Deploy?", header: "Deploy", multiSelect: false,
+        options: [{ label: "Yes" }, { label: "No" }] }],
+    });
+    store.append(sessionId, {
+      type: "question_resolved", sessionId, threadId: "main", callId: "q1",
+      answers: { "Deploy?": "Yes" }, by: "cli",
+    });
+    const page = readHistoryPage(store, { sessionId });
+    expect(page.events.map((e) => e.type)).toEqual(["question_asked", "question_resolved"]);
+    const resolved = page.events[1] as any;
+    expect(resolved.answers["Deploy?"]).toBe("Yes");
+    expect(resolved.by).toBe("cli");
   });
 
   test("DEEP CAP (unit): capEventForTest walks arrays and objects at any depth", () => {

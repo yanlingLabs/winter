@@ -1,8 +1,10 @@
 import type { SessionEvent } from "@norma/protocol";
 import type { SessionStore } from "./store";
 
-/** The 8 persisted, phone-foldable event types history is allowed to return. Allowlist, never a
- *  denylist: an unknown future type stays out until deliberately added. `reasoning_item` (opaque
+/** The 10 persisted, phone-foldable event types history is allowed to return. Allowlist, never a
+ *  denylist: an unknown future type stays out until deliberately added — and adding one REQUIRES
+ *  re-checking the per-event cap covers its large strings (capJson bounds strings at ANY depth,
+ *  which is what admitted question_asked's nested options[].description). `reasoning_item` (opaque
  *  encrypted_content), harness_attached/detached, lifecycle, checkpoint, workflow_*, plugin/lease
  *  events are excluded by construction. assistant_delta is transient (never on disk) and so can
  *  never appear here either. */
@@ -15,6 +17,8 @@ export const HISTORY_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<Se
   "approval_requested",
   "approval_resolved",
   "agent_error",
+  "question_asked",
+  "question_resolved",
 ]);
 
 /** Truncates `value` to `cap` UTF-8 bytes (backed off to a char boundary) plus a deterministic
