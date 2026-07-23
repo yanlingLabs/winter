@@ -17,19 +17,44 @@ export const HISTORY_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<Se
   "agent_error",
 ]);
 
-/** Replaces a tool_result whose output exceeds `outputCap` UTF-8 bytes with the first `outputCap`
- *  bytes (backed off to a char boundary) plus a deterministic marker. Envelope shape unchanged;
- *  refetches are byte-stable. Any other event is returned as-is. */
-function capToolResult(event: SessionEvent, outputCap: number): SessionEvent {
-  if (event.type !== "tool_result") return event;
-  const bytes = Buffer.byteLength(event.output, "utf8");
-  if (bytes <= outputCap) return event;
-  const buf = Buffer.from(event.output, "utf8");
-  let end = outputCap;
+/** Truncates `value` to `cap` UTF-8 bytes (backed off to a char boundary) plus a deterministic
+ *  marker recording the original total byte length. Returns `value` unchanged (the same reference)
+ *  when it's already within budget — the common no-op case. */
+function capString(value: string, cap: number): string {
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (bytes <= cap) return value;
+  const buf = Buffer.from(value, "utf8");
+  let end = cap;
   // Back off to a UTF-8 char boundary: 0x80-0xBF are continuation bytes.
   while (end > 0 && (buf[end]! & 0xc0) === 0x80) end--;
   const head = buf.subarray(0, end).toString("utf8");
-  return { ...event, output: `${head}\n…[truncated by history: ${bytes} bytes total]` };
+  return `${head}\n…[truncated by history: ${bytes} bytes total]`;
+}
+
+/** Generalized per-event cap (branch review — replaces the old tool_result-only `capToolResult`):
+ *  truncates EVERY top-level string property of `event` whose UTF-8 byte length exceeds `outputCap`
+ *  via `capString`, not just `tool_result.output`. Without this, a single oversized OTHER event (a
+ *  multi-MiB `user_message.text` paste, a `tool_call.argsJson` embedding a whole file,
+ *  `assistant_message.text`, `agent_error.message`, …) would ride the newest-event floor (below)
+ *  into an RPC frame the phone transport treats as fatal (silent connection kill, unrecoverable on
+ *  refetch). Type-agnostic by design: a FUTURE allowlisted type with a large string field is
+ *  automatically covered; short identifier fields (type/callId/threadId/by/toolName/etc.) are
+ *  nowhere near the cap and pass through untouched. Pure and deterministic — refetches are
+ *  byte-stable. Returns the SAME reference when nothing needed capping (the common case, preserving
+ *  the original single-field behavior byte-for-byte); otherwise a shallow copy (object spread) — the
+ *  input is never mutated. */
+function capEvent(event: SessionEvent, outputCap: number): SessionEvent {
+  const record = event as unknown as Record<string, unknown>;
+  let out: Record<string, unknown> | undefined;
+  for (const key of Object.keys(record)) {
+    const value = record[key];
+    if (typeof value !== "string") continue;
+    const capped = capString(value, outputCap);
+    if (capped === value) continue; // within budget — this field alone never triggers a copy
+    if (!out) out = { ...record };
+    out[key] = capped;
+  }
+  return (out ?? event) as unknown as SessionEvent;
 }
 
 export function readHistoryPage(
@@ -49,7 +74,7 @@ export function readHistoryPage(
   // Candidate = the newest `limit` of the filtered list (ascending).
   const candidate = filtered.slice(Math.max(0, filtered.length - limit));
   // Per-event cap, then byte-budget walk newest→oldest, always keeping at least the newest.
-  const capped = candidate.map((e) => capToolResult(e, outputCap));
+  const capped = candidate.map((e) => capEvent(e, outputCap));
   const kept: SessionEvent[] = [];
   let used = 0;
   for (let i = capped.length - 1; i >= 0; i--) {

@@ -9,10 +9,10 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 
 // SP2a Task 2 — the cross-language drift tripwire (gate G7) + the remote token type (gate G8).
 //
-// The gateway enforces the SAME eleven-method `remote` allowlist twice, once per language: here in
+// The gateway enforces the SAME twelve-method `remote` allowlist twice, once per language: here in
 // TS (`REMOTE_ALLOWED_METHODS`, ipc/server.ts) and once in Swift (`Gateway.remoteAllowedMethods`,
 // GatewayGateTests' testG7). Neither test imports the other's list — each pins its own side to the
-// literal eleven names, so editing ONE side without the other fails here (or in Swift) rather than
+// literal twelve names, so editing ONE side without the other fails here (or in Swift) rather than
 // silently letting the two allowlists diverge and admitting/denying a method inconsistently.
 //
 // SP3 T4b grew the list 9→10: `approval.list` (queryable pending-approval state) is remote-facing

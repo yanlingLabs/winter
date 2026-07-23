@@ -91,6 +91,59 @@ describe("readHistoryPage", () => {
     expect(r1.output).toBe(r2.output); // deterministic: refetches are byte-identical
   });
 
+  test("multibyte cap: UTF-8 back-off never splits a character (mid-character boundary)", () => {
+    const { store, sessionId } = boot();
+    const emoji = "\u{1F600}"; // 😀 — a 4-byte UTF-8 scalar (U+10000 and above always encode to 4 bytes)
+    // A leading single ASCII byte shifts every emoji's byte offset by 1, so the default 64 KiB
+    // (65536-byte, an exact multiple of 4) cap lands ONE byte INTO a character instead of neatly on
+    // a boundary — forcing the back-off loop to actually back off rather than trivially no-op.
+    const big = "a" + emoji.repeat(20 * 1024); // 1 + 80*1024 bytes ≫ 64 KiB
+    const totalBytes = Buffer.byteLength(big, "utf8");
+    store.append(sessionId, { type: "tool_call", sessionId, threadId: "main", callId: "c1", name: "bash", argsJson: "{}" });
+    store.append(sessionId, { type: "tool_result", sessionId, threadId: "main", callId: "c1", output: big, isError: false });
+    const p1 = readHistoryPage(store, { sessionId });
+    const p2 = readHistoryPage(store, { sessionId });
+    const r1 = p1.events.find((e) => e.type === "tool_result") as Extract<SessionEvent, { type: "tool_result" }>;
+    const r2 = p2.events.find((e) => e.type === "tool_result") as Extract<SessionEvent, { type: "tool_result" }>;
+    const marker = `\n…[truncated by history: ${totalBytes} bytes total]`;
+    expect(r1.output.endsWith(marker)).toBe(true);
+    const head = r1.output.slice(0, r1.output.length - marker.length);
+    // No replacement character — the back-off never leaves a partial multi-byte sequence dangling.
+    expect(head).not.toContain("�");
+    // Lossless round-trip: re-encoding the head to UTF-8 bytes and decoding it back reproduces it
+    // exactly — the byte-level confirmation that the cut landed exactly on a character boundary
+    // (a mid-character cut would corrupt this round-trip, not just risk a stray replacement char).
+    expect(Buffer.from(head, "utf8").toString("utf8")).toBe(head);
+    expect(r1.output).toBe(r2.output); // deterministic: refetches are byte-identical
+  });
+
+  test("user_message.text over the cap is truncated (generalized cap, not just tool_result)", () => {
+    const { store, sessionId } = boot();
+    const big = "m".repeat(2 * 1024 * 1024); // > 1 MiB paste
+    store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: big, clientName: "cli" });
+    const p1 = readHistoryPage(store, { sessionId });
+    const p2 = readHistoryPage(store, { sessionId });
+    const m1 = p1.events.find((e) => e.type === "user_message") as Extract<SessionEvent, { type: "user_message" }>;
+    const m2 = p2.events.find((e) => e.type === "user_message") as Extract<SessionEvent, { type: "user_message" }>;
+    expect(m1.text).toContain(`…[truncated by history: ${2 * 1024 * 1024} bytes total]`);
+    expect(Buffer.byteLength(JSON.stringify(m1), "utf8")).toBeLessThan(256 * 1024);
+    expect(m1.text).toBe(m2.text); // deterministic: refetches are byte-identical
+  });
+
+  test("tool_call.argsJson over the cap is truncated", () => {
+    const { store, sessionId } = boot();
+    const bigArgs = JSON.stringify({ blob: "q".repeat(70 * 1024) }); // > 64 KiB
+    const bigArgsBytes = Buffer.byteLength(bigArgs, "utf8");
+    store.append(sessionId, { type: "tool_call", sessionId, threadId: "main", callId: "c1", name: "write", argsJson: bigArgs });
+    const p1 = readHistoryPage(store, { sessionId });
+    const p2 = readHistoryPage(store, { sessionId });
+    const c1 = p1.events.find((e) => e.type === "tool_call") as Extract<SessionEvent, { type: "tool_call" }>;
+    const c2 = p2.events.find((e) => e.type === "tool_call") as Extract<SessionEvent, { type: "tool_call" }>;
+    expect(c1.argsJson).toContain(`…[truncated by history: ${bigArgsBytes} bytes total]`);
+    expect(Buffer.byteLength(c1.argsJson, "utf8")).toBeLessThan(65 * 1024);
+    expect(c1.argsJson).toBe(c2.argsJson); // deterministic: refetches are byte-identical
+  });
+
   test("byte budget caps page assembly but always keeps the newest event", () => {
     const { store, sessionId } = boot();
     const chunk = "y".repeat(30 * 1024);
