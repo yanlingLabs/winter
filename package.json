@@ -2,7 +2,9 @@
   "name": "norma-monorepo",
   "private": true,
   "type": "module",
-  "engines": { "bun": ">=1.3.0" },
+  "engines": {
+    "bun": ">=1.3.0"
+  },
   "scripts": {
     "test": "pnpm -r --workspace-concurrency=1 test",
     "protocol:generate": "pnpm --filter @norma/protocol generate",
@@ -14,5 +16,14 @@
     "typescript": "^5.6.0",
     "@types/bun": "^1.3.0"
   },
-  "workspaces": ["packages/*", "spikes/*", "examples/*"]
+  "workspaces": [
+    "packages/*",
+    "spikes/*",
+    "examples/*"
+  ],
+  "pnpm": {
+    "overrides": {
+      "shell-quote": ">=1.9.0"
+    }
+  }
 }
