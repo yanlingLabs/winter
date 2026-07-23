@@ -500,18 +500,18 @@ final class GatewayGateTests: XCTestCase {
         await live.close()
     }
 
-    // MARK: - G7: the Swift remote allowlist is EXACTLY the eleven names (cross-language tripwire)
+    // MARK: - G7: the Swift remote allowlist is EXACTLY the twelve names (cross-language tripwire)
 
-    func testG7_RemoteAllowlistIsExactlyTheElevenNames() {
+    func testG7_RemoteAllowlistIsExactlyTheTwelveNames() {
         let expected: Set<String> = [
             "protocol.hello", "session.list", "session.attach", "session.send",
             "session.dispatch", "approval.respond", "ask_user.respond",
             "session.interrupt", "engine.activity", "approval.list",
-            "session.create",
+            "session.create", "session.history",
         ]
-        XCTAssertEqual(Gateway.remoteAllowedMethods.count, 11)
+        XCTAssertEqual(Gateway.remoteAllowedMethods.count, 12)
         XCTAssertEqual(Gateway.remoteAllowedMethods, expected,
-                       "Swift remote allowlist drifted from the eleven — mirror packages/core/src/ipc/server.ts's REMOTE_ALLOWED_METHODS")
+                       "Swift remote allowlist drifted from the twelve — mirror packages/core/src/ipc/server.ts's REMOTE_ALLOWED_METHODS")
     }
 
     // MARK: - Eviction: session-map cap (32) bounds phone churn (SP2b Task 4)
