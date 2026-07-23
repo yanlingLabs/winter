@@ -70,8 +70,46 @@ function capJson(value: unknown, cap: number): unknown {
   return value; // number | boolean | null — nothing to cap
 }
 
+/** Whole-event serialized-size ceiling, enforced AFTER the per-string cap (`capJson`/`outputCap`,
+ *  e.g. 64 KiB per string). Per-string capping bounds each string but not the aggregate: a
+ *  schema-valid `question_asked` can carry up to 4 questions (question+header) plus 4 options per
+ *  question (label+description+preview) — dozens of independently-64-KiB-capped strings, several
+ *  MiB in the worst case. `readHistoryPage`'s newest-event floor ALWAYS includes the newest
+ *  allowlisted event regardless of the page byte budget, so an oversized event here bypasses that
+ *  budget entirely and hits the phone transport's hard 1 MiB frame limit — silently dropping the
+ *  connection right when the user opens the phone to answer a question. 160 KiB sits well under
+ *  that 1 MiB limit (headroom for JSON-escaping/structural overhead) and far above the 64 KiB
+ *  single-string cap, so ordinary events (a handful of strings) never trigger the second pass. */
+export const WHOLE_EVENT_CEILING = 160 * 1024;
+
+/** Counts every string leaf in a JSON tree (mirrors `capJson`'s walk) — sizes the tighter
+ *  per-string cap used to bring an event under `WHOLE_EVENT_CEILING`. */
+function countStrings(value: unknown): number {
+  if (typeof value === "string") return 1;
+  if (Array.isArray(value)) {
+    let n = 0;
+    for (const v of value) n += countStrings(v);
+    return n;
+  }
+  if (value !== null && typeof value === "object") {
+    let n = 0;
+    for (const v of Object.values(value as Record<string, unknown>)) n += countStrings(v);
+    return n;
+  }
+  return 0;
+}
+
 function capEvent(event: SessionEvent, outputCap: number): SessionEvent {
-  return capJson(event, outputCap) as SessionEvent;
+  const capped = capJson(event, outputCap);
+  const size = Buffer.byteLength(JSON.stringify(capped), "utf8");
+  if (size <= WHOLE_EVENT_CEILING) return capped as SessionEvent;
+  // The per-string pass left the aggregate over the ceiling (e.g. a question_asked with many
+  // large options) — re-run the deep cap against the ORIGINAL event with a tighter per-string cap
+  // sized to the event's string count. Pure: depends only on `event` + the two constants, so
+  // refetching the same page stays byte-stable (page determinism).
+  const stringCount = Math.max(1, countStrings(event));
+  const tighterCap = Math.max(1, Math.floor(WHOLE_EVENT_CEILING / stringCount));
+  return capJson(event, tighterCap) as SessionEvent;
 }
 
 export function readHistoryPage(

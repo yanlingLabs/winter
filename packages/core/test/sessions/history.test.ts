@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionEvent } from "@norma/protocol";
 import { SessionStore } from "../../src/sessions/store";
-import { HISTORY_EVENT_TYPES, readHistoryPage, capEventForTest } from "../../src/sessions/history";
+import { HISTORY_EVENT_TYPES, readHistoryPage, capEventForTest, WHOLE_EVENT_CEILING } from "../../src/sessions/history";
 
 describe("readHistoryPage", () => {
   let home: string | undefined;
@@ -190,7 +190,7 @@ describe("readHistoryPage", () => {
         question: "Pick one", header: "Choice", multiSelect: false,
         options: [{ label: "A", description: big }, { label: "B" }],
       }],
-    } as any);
+    });
     const p1 = readHistoryPage(store, { sessionId });
     const p2 = readHistoryPage(store, { sessionId });
     const q1 = p1.events.find((e) => e.type === "question_asked") as any;
@@ -232,12 +232,49 @@ describe("readHistoryPage", () => {
     const big = "z".repeat(70 * 1024);
     const event = {
       type: "question_asked", sessionId: "s", threadId: "main", callId: "q", seq: 1, ts: 1,
-      questions: [{ question: "Q", header: "H", multiSelect: false, options: [{ label: "A", description: big }] }],
+      questions: [{
+        question: "Q", header: "H", multiSelect: false,
+        options: [{ label: "A", description: big }, { label: "B" }],
+      }],
     } as any;
     const capped = capEventForTest(event, 64 * 1024) as any;
     expect(capped.questions[0].options[0].description).toContain("…[truncated by history:");
     expect(capped).not.toBe(event); // copy on change
+    // Sibling untouched by the change elsewhere in the spine keeps its original reference.
+    expect(capped.questions[0].options[1]).toBe(event.questions[0].options[1]);
     const small = { type: "user_message", sessionId: "s", threadId: "main", text: "ok", seq: 2, ts: 1 } as any;
     expect(capEventForTest(small, 64 * 1024)).toBe(small); // SAME reference on no-op
+  });
+
+  test("WHOLE-EVENT CEILING: a question_asked with many large options serializes under the ceiling, structure intact, deterministic", () => {
+    const { store, sessionId } = boot();
+    // 4 questions x 4 options, each description > 64 KiB — every description survives the
+    // per-string pass at ~70 KiB (under outputCap would shrink it, but here it's already over),
+    // so the aggregate is ~16 x 70 KiB (well over a MiB) before the whole-event ceiling kicks in.
+    const big = "d".repeat(70 * 1024);
+    const questions = Array.from({ length: 4 }, (_, qi) => ({
+      question: `Question number ${qi}`, header: `Q${qi}`, multiSelect: false,
+      options: Array.from({ length: 4 }, (_, oi) => ({ label: `opt${qi}-${oi}`, description: big })),
+    }));
+    store.append(sessionId, { type: "question_asked", sessionId, threadId: "main", callId: "q1", questions });
+    const p1 = readHistoryPage(store, { sessionId });
+    const p2 = readHistoryPage(store, { sessionId });
+    const q1 = p1.events.find((e) => e.type === "question_asked") as any;
+    // Aggregate is bounded under the ceiling (and far under the phone transport's 1 MiB hard
+    // frame limit) even though 16 independently-64KiB-capped descriptions would otherwise total
+    // several MiB and ride the newest-event floor straight past the page byte budget.
+    expect(Buffer.byteLength(JSON.stringify(q1), "utf8")).toBeLessThan(WHOLE_EVENT_CEILING);
+    // Structure intact: all 4 questions and all 4 options per question survive — strings
+    // shortened, not dropped.
+    expect(q1.questions.length).toBe(4);
+    for (const q of q1.questions) {
+      expect(q.options.length).toBe(4);
+      for (const o of q.options) {
+        expect(typeof o.description).toBe("string");
+        expect(o.description.length).toBeGreaterThan(0);
+      }
+    }
+    // Page determinism: two reads of the same page are byte-identical.
+    expect(JSON.stringify(p1.events)).toBe(JSON.stringify(p2.events));
   });
 });
