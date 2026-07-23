@@ -130,6 +130,8 @@ import {
   WorkflowStopResult,
   WorkflowGetParams,
   WorkflowGetResult,
+  SessionHistoryParams,
+  SessionHistoryResult,
   METHODS,
 } from "../src/methods";
 
@@ -215,6 +217,33 @@ describe("agent method schemas", () => {
     });
     expect(listed.sessions[0]!.origin).toBe("routine/abc123");
     expect(listed.sessions[1]!.origin).toBeUndefined();
+  });
+
+  test("session.list rows carry an optional title (values already flow; this declares them)", () => {
+    const listed = SessionListResult.parse({
+      sessions: [
+        { sessionId: "s_1", scope: "global", createdAt: 1, lastSeq: 3, title: "Fixing the login flow" },
+        { sessionId: "s_2", scope: "global", createdAt: 1, lastSeq: 0 }, // no title — pre-existing shape still parses
+      ],
+    });
+    expect(listed.sessions[0]!.title).toBe("Fixing the login flow");
+    expect(listed.sessions[1]!.title).toBeUndefined();
+  });
+
+  test("session.history params/result schemas", () => {
+    expect(METHODS.sessionHistory).toBe("session.history");
+    // params: sessionId required; beforeSeq/limit optional, positive, limit capped at 500
+    expect(SessionHistoryParams.parse({ sessionId: "s_1" }).sessionId).toBe("s_1");
+    expect(SessionHistoryParams.parse({ sessionId: "s_1", beforeSeq: 42, limit: 200 }).limit).toBe(200);
+    expect(() => SessionHistoryParams.parse({ sessionId: "s_1", beforeSeq: 0 })).toThrow();   // positive
+    expect(() => SessionHistoryParams.parse({ sessionId: "s_1", limit: 501 })).toThrow();      // max 500
+    // result: oldestSeq is nullable (null iff events empty)
+    const r = SessionHistoryResult.parse({ events: [], hasMore: false, oldestSeq: null });
+    expect(r.oldestSeq).toBeNull();
+    const one = { seq: 7, sessionId: "s_1", ts: 1, threadId: "main", type: "assistant_message", text: "hi" };
+    const r2 = SessionHistoryResult.parse({ events: [one], hasMore: true, oldestSeq: 7 });
+    expect(r2.events[0]!.type).toBe("assistant_message");
+    expect(r2.hasMore).toBe(true);
   });
 });
 

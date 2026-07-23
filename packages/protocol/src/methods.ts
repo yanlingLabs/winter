@@ -53,6 +53,10 @@ export const SessionListResult = z.object({
     scope: z.string(),
     createdAt: z.number().int(),
     lastSeq: z.number().int().nonnegative(),
+    // Session history: the session's human title (session_titled's title or
+    // the daemon's first-message fallback). Values already flow from store.list(); this declares them
+    // so a schema-validating client (the phone's SessionSummary) reads them without smuggling.
+    title: z.string().optional(),
     // Additive (phase 5 routines T3): round-trips SessionCreateParams.origin — undefined for
     // every session created before this field existed, or created without one.
     origin: z.string().optional(),
@@ -66,6 +70,21 @@ export const SessionAttachParams = z.object({
   fromSeq: z.number().int().nonnegative().optional().default(0),
 });
 export const SessionAttachResult = z.object({ ok: z.literal(true), lastSeq: z.number().int().nonnegative() });
+
+// Session history: a paged, allowlisted, byte-budgeted read of past
+// SessionEvents so a reconnecting/never-attached client can render history without an unbounded
+// attach replay. beforeSeq is an EXCLUSIVE upper bound (paging: pass the previous page's oldestSeq);
+// omitted = from newest. limit defaults to 200 server-side (packages/core/src/sessions/history.ts).
+export const SessionHistoryParams = z.object({
+  sessionId: z.string(),
+  beforeSeq: z.number().int().positive().optional(), // EXCLUSIVE upper bound; omitted = from newest
+  limit: z.number().int().positive().max(500).optional(), // default 200 (server-side)
+});
+export const SessionHistoryResult = z.object({
+  events: z.array(SessionEvent),         // ascending seq; live-stream envelopes verbatim (post filter/truncation)
+  hasMore: z.boolean(),                  // true iff an allowlisted event older than the page remains
+  oldestSeq: z.number().int().nullable(), // seq of events[0]; null iff events is empty
+});
 
 export const SessionSendParams = z.object({
   sessionId: z.string(),
@@ -859,6 +878,7 @@ export const METHODS = {
   sessionCreate: "session.create",
   sessionList: "session.list",
   sessionAttach: "session.attach",
+  sessionHistory: "session.history",
   sessionSend: "session.send",
   sessionDispatch: "session.dispatch",
   approvalRespond: "approval.respond",

@@ -551,4 +551,62 @@ final class NormaSessionClientTests: XCTestCase {
         // expiresAt decodes so a caller can render "expires in Ns".
         XCTAssertEqual(got.first?["expiresAt"]?.intValue, 6000)
     }
+
+    // MARK: - Session history (opaque decode)
+
+    func testHistoryDecodesPageOpaquelyIncludingAnUnknownEventType() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+
+        let call = Task { try await client.history(sessionID: "s1", beforeSeq: 42, limit: 200) }
+        let out = try await waitOutbound(conn, count: 2) // [hello, history request]
+        let req = decodeOutbound(out[1])
+        XCTAssertEqual(req.kind, .rpcRequest)
+        XCTAssertEqual(outboundPayload(req)["method"]?.stringValue, "session.history")
+        XCTAssertEqual(outboundPayload(req)["params"]?["sessionId"]?.stringValue, "s1")
+        XCTAssertEqual(outboundPayload(req)["params"]?["beforeSeq"]?.intValue, 42)
+        XCTAssertEqual(outboundPayload(req)["params"]?["limit"]?.intValue, 200)
+        let id = outboundPayload(req)["id"]!.intValue!
+
+        // A page whose 2nd event is an ADVERSARIALLY-inserted unknown type must decode without
+        // throwing (defense in depth — the strict SessionEvent enum is never used here).
+        let events = SessionEvent.JSONValue.array([
+            .object(["type": .string("assistant_message"), "sessionId": .string("s1"), "seq": .number(43), "threadId": .string("main"), "text": .string("hi")]),
+            .object(["type": .string("totally_unknown_future_type"), "sessionId": .string("s1"), "seq": .number(44), "mystery": .string("x")]),
+        ])
+        conn.enqueueInbound(rpcResponseFrame(id: id, result: .object([
+            "events": events, "hasMore": .bool(true), "oldestSeq": .number(43),
+        ])))
+
+        let page = try await call.value
+        XCTAssertEqual(page.envelopes.count, 2, "the unknown-type event is retained, not dropped or thrown")
+        XCTAssertEqual(page.envelopes.map(\.seq), [43, 44])
+        XCTAssertEqual(page.envelopes[1].json["type"]?.stringValue, "totally_unknown_future_type")
+        XCTAssertEqual(page.envelopes[0].kind, .event)
+        XCTAssertEqual(page.hasMore, true)
+        XCTAssertEqual(page.oldestSeq, 43)
+    }
+
+    func testHistoryOmitsBeforeSeqAndLimitWhenNil() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+
+        let call = Task { try await client.history(sessionID: "s1") }
+        let out = try await waitOutbound(conn, count: 2)
+        let req = decodeOutbound(out[1])
+        let params = outboundPayload(req)["params"]!
+        XCTAssertEqual(params["sessionId"]?.stringValue, "s1")
+        XCTAssertNil(params["beforeSeq"], "omitted, not sent as null")
+        XCTAssertNil(params["limit"], "omitted, not sent as null")
+        let id = outboundPayload(req)["id"]!.intValue!
+        conn.enqueueInbound(rpcResponseFrame(id: id, result: .object(["events": .array([]), "hasMore": .bool(false), "oldestSeq": .null])))
+        let page = try await call.value
+        XCTAssertTrue(page.envelopes.isEmpty)
+        XCTAssertNil(page.oldestSeq)
+        XCTAssertFalse(page.hasMore)
+    }
 }

@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
   HelloParams, SessionCreateParams, SessionDispatchParams, SessionAttachParams, SessionSendParams, ApprovalRespondParams,
+  SessionHistoryParams,
   ApprovalListParams,
   SessionAddDirParams, SessionSetCwdParams, TrustDirParams,
   BgListParams, BgPeekParams, BgKillParams, BgKillAllParams,
@@ -35,6 +36,7 @@ import type { WorkflowStore } from "../workflows/store";
 import type { MemoryStore, MemoryErrorKind } from "../agent/memory";
 import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTailMemDir } from "../agent/memory-file-ops";
 import type { SessionStore } from "../sessions/store";
+import { readHistoryPage } from "../sessions/history";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { AgentEngine } from "../agent/engine";
 import type { ApprovalBroker } from "../agent/approvals";
@@ -288,6 +290,9 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   METHODS.approvalList,
   // SP3.4: the phone may START a Code session (sidebar "+ New"), not just continue one.
   METHODS.sessionCreate,
+  // Session history: the phone reads past events to render history without
+  // an unbounded attach replay. Pure passthrough — all filtering/budgeting is daemon-side.
+  METHODS.sessionHistory,
 ]);
 
 /** Maps a failed `PluginSupervisor.invoke()` result to the message a `throw new Error(...)` in
@@ -697,6 +702,15 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           socket.data.hubClient = hubClient;
           return { ok: true, lastSeq };
         } catch (e) {
+          throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
+        }
+      }
+      case METHODS.sessionHistory: {
+        const p = parseParams(SessionHistoryParams, params);
+        try {
+          return readHistoryPage(opts.store, { sessionId: p.sessionId, beforeSeq: p.beforeSeq, limit: p.limit });
+        } catch (e) {
+          // Unknown session → the same NOT_FOUND mapping session.attach uses (store.read throws).
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
       }

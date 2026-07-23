@@ -185,6 +185,33 @@ describe("remote hello role + REMOTE_ALLOWED_METHODS gate (Remote Gateway SP1 Ta
     c.close();
   });
 
+  // Session history: remote-role may call session.history; it returns an
+  // allowlisted, ascending page and maps an unknown session to NOT_FOUND.
+  test("remote role may call session.history; page is allowlisted + ascending; unknown session is NOT_FOUND", async () => {
+    const { store, socketPath, remoteToken } = await boot();
+    const sessionId = store.createSession("global");
+    // EventInput requires `sessionId` on every event (DistributedOmit<SessionEvent, "seq"|"ts">
+    // only drops seq/ts) — matches the append(sessionId, {..., sessionId, ...}) pattern used by
+    // every other store.append call site in this test suite (brief's snippet omitted it).
+    store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: "hi", clientName: "cli" });
+    store.append(sessionId, { type: "reasoning_item", sessionId, threadId: "main", itemJson: "opaque" }); // must never surface
+    store.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: "yo" });
+
+    const c = await TestClient.connect(socketPath);
+    await c.hello(remoteToken, "iphone-gateway", "remote");
+
+    const res = await c.request(METHODS.sessionHistory, { sessionId });
+    expect(res.error).toBeUndefined();
+    expect(res.result.events.map((e: any) => e.type)).toEqual(["user_message", "assistant_message"]);
+    expect(res.result.events.some((e: any) => e.type === "reasoning_item")).toBe(false);
+    expect(res.result.oldestSeq).toBe(res.result.events[0].seq);
+    expect(res.result.hasMore).toBe(false);
+
+    const missing = await c.request(METHODS.sessionHistory, { sessionId: "s_nope" });
+    expect(missing.error?.code).toBe(ERR.NOT_FOUND);
+    c.close();
+  });
+
   test("hello role:remote with a wrong token is unauthorized", async () => {
     const { socketPath } = await boot();
     const c = await TestClient.connect(socketPath);
