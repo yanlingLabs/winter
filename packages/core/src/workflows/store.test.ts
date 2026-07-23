@@ -35,3 +35,53 @@ test("save writes ~/.norma/workflows/<name>.js and rejects a bad slug", () => {
   expect(store.resolve("mine", null)?.name).toBe("mine");
   expect(() => store.save("../oops", wf("x"))).toThrow();
 });
+
+// SECURITY regressions: the meta block must be parsed as TEXT ONLY. It must never be handed to
+// `new Function`/`eval`/`vm` — doing so would let ANY workflow file (a trusted project's, or any
+// file dropped in ~/.norma/workflows/) run arbitrary code in the unsandboxed daemon merely by being
+// *listed*, defeating the entire point of the workflow feature's sandboxed-subprocess architecture.
+
+test("SECURITY: a statement outside the meta block is never executed by list/resolve/read", () => {
+  const home = tmp();
+  mkdirSync(join(home, "workflows"), { recursive: true });
+  writeFileSync(
+    join(home, "workflows", "pwned1.js"),
+    'export const meta = { name: "pwned1", description: "y" };\nglobalThis.__WF_PWNED = true;\n',
+  );
+  delete (globalThis as Record<string, unknown>).__WF_PWNED;
+  const store = new WorkflowStore({ normaHome: home, trust: { isTrusted: () => false } });
+
+  store.list(null);
+  expect((globalThis as Record<string, unknown>).__WF_PWNED).toBeUndefined();
+  store.resolve("pwned1", null);
+  expect((globalThis as Record<string, unknown>).__WF_PWNED).toBeUndefined();
+  store.read("pwned1", null);
+  expect((globalThis as Record<string, unknown>).__WF_PWNED).toBeUndefined();
+});
+
+test("SECURITY: a side-effecting expression used as a meta field's value is never executed; description still extracts, no crash", () => {
+  const home = tmp();
+  mkdirSync(join(home, "workflows"), { recursive: true });
+  writeFileSync(
+    join(home, "workflows", "pwned2.js"),
+    'export const meta = { name: (globalThis.__WF_PWNED2 = true, "x"), description: "d" };\n',
+  );
+  delete (globalThis as Record<string, unknown>).__WF_PWNED2;
+  const store = new WorkflowStore({ normaHome: home, trust: { isTrusted: () => false } });
+
+  expect(() => store.list(null)).not.toThrow();
+  expect((globalThis as Record<string, unknown>).__WF_PWNED2).toBeUndefined();
+
+  expect(() => store.resolve("pwned2", null)).not.toThrow();
+  expect((globalThis as Record<string, unknown>).__WF_PWNED2).toBeUndefined();
+
+  expect(() => store.read("pwned2", null)).not.toThrow();
+  expect((globalThis as Record<string, unknown>).__WF_PWNED2).toBeUndefined();
+
+  // Graceful degradation: identity is ALWAYS the filename stem (never the meta's `name` field), so
+  // a bogus/computed `name` expression can't crash resolution — and a well-formed sibling
+  // `description` still extracts correctly even though `name` is garbage.
+  const resolved = store.resolve("pwned2", null);
+  expect(resolved?.name).toBe("pwned2");
+  expect(resolved?.description).toBe("d");
+});

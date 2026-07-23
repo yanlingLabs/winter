@@ -21,30 +21,36 @@ export interface ResolvedWorkflow {
  *  can't drift between the two call sites. */
 const SLUG_RE = /^[A-Za-z0-9_-]+$/;
 
-/** Finds `meta = {`, slices the balanced `{...}` that follows, and evaluates ONLY that slice via a
- *  guarded `new Function` to pull out `.description` — the rest of the file (the actual workflow
- *  body/script) is never evaluated at parse time. Any failure (no `meta`, unbalanced braces, a
- *  throwing/non-object literal) yields "" rather than throwing: a missing or malformed `meta` block
- *  must not make an otherwise-valid workflow file unresolvable/unlistable. */
+/** Matches a `description` key's value INSIDE a meta object-literal's text, but only when that
+ *  value is a plain quoted string literal (single/double/backtick-quoted, backslash-escapes
+ *  tolerated within it). Deliberately does not match a computed expression, a template literal with
+ *  interpolation (`${...}`), or anything else that isn't a bare string — those are treated the same
+ *  as "no description key at all" (see extractMetaDescription). Mirrors the plain-text key:value
+ *  extraction output-styles.ts's parseStyleFile does for frontmatter — no eval there either. */
+const DESCRIPTION_RE = /(?:^|[{,\s])description\s*:\s*(["'`])((?:\\.|(?!\1).)*)\1/;
+
+/** Finds `meta = {`, slices the balanced `{...}` that follows, and pulls the `description` key's
+ *  value out of that slice as TEXT — via DESCRIPTION_RE, never by evaluating it. The workflow
+ *  feature's entire raison d'être is a sandboxed subprocess for a script's actual body; running any
+ *  fragment of a workflow file — even just its meta block — in the unsandboxed daemon defeats that,
+ *  since `list()`/`resolve()`/`read()` (and thus this function) fire passively, e.g. whenever the
+ *  Workflows pane opens or `norma workflow list` runs, on every workflow file the trust gate would
+ *  ever surface (a trusted project's `.norma/workflows/*.js`, or ANY `~/.norma/workflows/*.js`) —
+ *  there is no opportunity for a human to review the file first. Any failure to find a well-formed
+ *  `meta`/`description` (no `meta`, unbalanced braces, a computed/interpolated/missing description)
+ *  yields "" rather than throwing or evaluating anything: a missing or malformed `meta` block must
+ *  not make an otherwise-valid workflow file unresolvable/unlistable. */
 function extractMetaDescription(raw: string): string {
   const m = raw.match(/\bmeta\s*=\s*\{/);
   if (!m || m.index === undefined) return "";
   const braceStart = m.index + m[0].length - 1; // index of the '{' itself
   const objLiteral = sliceBalancedBraces(raw, braceStart);
   if (!objLiteral) return "";
-  try {
-    const evaluate = new Function(`"use strict"; return (${objLiteral});`) as () => unknown;
-    const obj = evaluate();
-    // Cast to an explicit optional property (not an index signature) so this stays a plain
-    // `string` after the typeof-narrow below, rather than `string | undefined` via
-    // noUncheckedIndexedAccess on a Record's index signature.
-    if (obj && typeof obj === "object" && typeof (obj as { description?: unknown }).description === "string") {
-      return (obj as { description: string }).description;
-    }
-    return "";
-  } catch {
-    return "";
-  }
+  const dm = objLiteral.match(DESCRIPTION_RE);
+  if (!dm) return "";
+  // Unescape backslash-escapes within the matched literal (\", \\, \n, ...) — a plain text
+  // substitution, not evaluation: no expression is ever run, only literal characters replaced.
+  return dm[2]!.replace(/\\(.)/g, (_, c: string) => (c === "n" ? "\n" : c === "t" ? "\t" : c));
 }
 
 /** `src[start]` must be the opening '{'. Returns the substring through its matching '}', counting
