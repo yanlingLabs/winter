@@ -22,7 +22,7 @@ export type WorkflowCliAction =
 
 export function parseWorkflowArgs(argv: string[]): WorkflowCliAction {
   const args = argv.filter((a) => a.length > 0);
-  if (args.length === 0) return { action: "list" };
+  if (args.length === 0 || args[0] === "list") return { action: "list" }; // explicit `list` token — the usage line advertises `norma workflow [list]`
   if (args[0] === "--help" || args[0] === "-h") return { action: "help" };
 
   if (args[0] === "run") {

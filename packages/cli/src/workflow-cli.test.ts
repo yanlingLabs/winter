@@ -3,6 +3,7 @@ import { parseWorkflowArgs } from "./workflow-cli";
 
 test("parses list/run/save/help", () => {
   expect(parseWorkflowArgs([])).toEqual({ action: "list" });
+  expect(parseWorkflowArgs(["list"])).toEqual({ action: "list" }); // explicit token, as the usage line advertises (fell through to help before the live-gate fix)
   expect(parseWorkflowArgs(["run", "triage", '{"files":["a"]}'])).toEqual({ action: "run", name: "triage", args: '{"files":["a"]}' });
   expect(parseWorkflowArgs(["save", "triage", "./t.js"])).toEqual({ action: "save", name: "triage", file: "./t.js" });
   expect(parseWorkflowArgs(["--help"])).toEqual({ action: "help" });
