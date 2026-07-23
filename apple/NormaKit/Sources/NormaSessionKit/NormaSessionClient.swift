@@ -313,8 +313,12 @@ public actor NormaSessionClient {
     /// an unknown/future event type never fails the decode (the daemon also filters, this is defense
     /// in depth). `beforeSeq` (EXCLUSIVE) / `limit` are omitted from the params when nil. Read-only:
     /// a fresh idempotency id per call is fine (the daemon dedups WRITES; a repeated read is safe).
-    public func history(sessionId: String, beforeSeq: Int? = nil, limit: Int? = nil) async throws -> HistoryPage {
-        var params: [String: SessionEvent.JSONValue] = ["sessionId": .string(sessionId)]
+    ///
+    /// Swift label is `sessionID:` (matching this file's universal convention, e.g.
+    /// `pendingApprovals(sessionID:)`); the wire param key stays `"sessionId"` below — that's the TS
+    /// contract (`session.history`, methods.ts) and is unaffected by this Swift-only naming choice.
+    public func history(sessionID: String, beforeSeq: Int? = nil, limit: Int? = nil) async throws -> HistoryPage {
+        var params: [String: SessionEvent.JSONValue] = ["sessionId": .string(sessionID)]
         if let beforeSeq { params["beforeSeq"] = .number(Double(beforeSeq)) }
         if let limit { params["limit"] = .number(Double(limit)) }
         let result = try await send(method: "session.history", params: .object(params))

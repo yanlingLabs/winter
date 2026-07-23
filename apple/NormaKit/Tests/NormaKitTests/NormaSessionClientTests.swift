@@ -560,7 +560,7 @@ final class NormaSessionClientTests: XCTestCase {
         conn.enqueueInbound(helloAckFrame(verdicts: []))
         _ = try await client.handshake(resumes: [])
 
-        let call = Task { try await client.history(sessionId: "s1", beforeSeq: 42, limit: 200) }
+        let call = Task { try await client.history(sessionID: "s1", beforeSeq: 42, limit: 200) }
         let out = try await waitOutbound(conn, count: 2) // [hello, history request]
         let req = decodeOutbound(out[1])
         XCTAssertEqual(req.kind, .rpcRequest)
@@ -595,7 +595,7 @@ final class NormaSessionClientTests: XCTestCase {
         conn.enqueueInbound(helloAckFrame(verdicts: []))
         _ = try await client.handshake(resumes: [])
 
-        let call = Task { try await client.history(sessionId: "s1") }
+        let call = Task { try await client.history(sessionID: "s1") }
         let out = try await waitOutbound(conn, count: 2)
         let req = decodeOutbound(out[1])
         let params = outboundPayload(req)["params"]!
