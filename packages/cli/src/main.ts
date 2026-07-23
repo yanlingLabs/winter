@@ -833,14 +833,17 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
     process.exit(0);
   }
 
-  // Persistent y/N approval reader. Installed whenever approvals are possible: one-shot keeps its
-  // exact `!auto` condition (byte-unchanged); chat always installs it, since shift+tab can cycle
-  // the policy INTO "ask" mid-session. When no approval is pending it early-returns — so during a
-  // running turn it coexists harmlessly with the raw key listener (a keystroke just no-ops here),
-  // and during the composer read it ignores the typed message. When an approval IS pending the raw
-  // key listener is suspended (below), so this cooked handler reads the whole "y\n" line; on the
-  // last pending approval it hands stdin back to the key listener.
-  if (chat || !auto) {
+  // Persistent y/N approval reader. Installed unconditionally: chat because shift+tab can cycle
+  // the policy INTO "ask" mid-session, and one-shot because approvals are possible under EVERY
+  // policy since the Workflow launch gate cards even in auto (gate.ts's pre-auto-allow "ask" —
+  // the historic `!auto` condition made a `-p --auto` Workflow launch unanswerable: the card
+  // rendered, piped "y" lines were discarded, and the broker timed out at 300s into a denial).
+  // When no approval is pending it early-returns — so during a running turn it coexists
+  // harmlessly with the raw key listener (a keystroke just no-ops here), and during the composer
+  // read it ignores the typed message. When an approval IS pending the raw key listener is
+  // suspended (below), so this cooked handler reads the whole "y\n" line; on the last pending
+  // approval it hands stdin back to the key listener.
+  {
     process.stdin.on("data", async (d) => {
       if (pending.length === 0) return;
       // Claim this chunk for the approval BEFORE any concurrently-armed readLine() onData (which is
