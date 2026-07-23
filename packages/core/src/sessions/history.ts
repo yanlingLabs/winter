@@ -31,30 +31,43 @@ function capString(value: string, cap: number): string {
   return `${head}\n…[truncated by history: ${bytes} bytes total]`;
 }
 
-/** Generalized per-event cap (branch review — replaces the old tool_result-only `capToolResult`):
- *  truncates EVERY top-level string property of `event` whose UTF-8 byte length exceeds `outputCap`
- *  via `capString`, not just `tool_result.output`. Without this, a single oversized OTHER event (a
- *  multi-MiB `user_message.text` paste, a `tool_call.argsJson` embedding a whole file,
- *  `assistant_message.text`, `agent_error.message`, …) would ride the newest-event floor (below)
- *  into an RPC frame the phone transport treats as fatal (silent connection kill, unrecoverable on
- *  refetch). Type-agnostic by design: a FUTURE allowlisted type with a large string field is
- *  automatically covered; short identifier fields (type/callId/threadId/by/toolName/etc.) are
- *  nowhere near the cap and pass through untouched. Pure and deterministic — refetches are
- *  byte-stable. Returns the SAME reference when nothing needed capping (the common case, preserving
- *  the original single-field behavior byte-for-byte); otherwise a shallow copy (object spread) — the
- *  input is never mutated. */
-function capEvent(event: SessionEvent, outputCap: number): SessionEvent {
-  const record = event as unknown as Record<string, unknown>;
-  let out: Record<string, unknown> | undefined;
-  for (const key of Object.keys(record)) {
-    const value = record[key];
-    if (typeof value !== "string") continue;
-    const capped = capString(value, outputCap);
-    if (capped === value) continue; // within budget — this field alone never triggers a copy
-    if (!out) out = { ...record };
-    out[key] = capped;
+/** Recursively caps every string ANYWHERE in a JSON tree (object values, array elements, any
+ *  depth) via `capString`. Returns the SAME reference when nothing under it changed (the common
+ *  no-op case — preserving the original flat behavior byte-for-byte and copy-for-copy); copies
+ *  only the spine that actually changed. Pure and deterministic — refetches stay byte-stable.
+ *  This closes the session-history branch review's forward-warning: the old walk bounded only
+ *  TOP-LEVEL strings, so a nested large string (e.g. question_asked's options[].description)
+ *  could ride the newest-event floor into an oversized frame. */
+function capJson(value: unknown, cap: number): unknown {
+  if (typeof value === "string") return capString(value, cap);
+  if (Array.isArray(value)) {
+    let out: unknown[] | undefined;
+    for (let i = 0; i < value.length; i++) {
+      const capped = capJson(value[i], cap);
+      if (capped !== value[i]) {
+        if (!out) out = [...value];
+        out[i] = capped;
+      }
+    }
+    return out ?? value;
   }
-  return (out ?? event) as unknown as SessionEvent;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    let out: Record<string, unknown> | undefined;
+    for (const key of Object.keys(record)) {
+      const capped = capJson(record[key], cap);
+      if (capped !== record[key]) {
+        if (!out) out = { ...record };
+        out[key] = capped;
+      }
+    }
+    return out ?? value;
+  }
+  return value; // number | boolean | null — nothing to cap
+}
+
+function capEvent(event: SessionEvent, outputCap: number): SessionEvent {
+  return capJson(event, outputCap) as SessionEvent;
 }
 
 export function readHistoryPage(
@@ -89,3 +102,7 @@ export function readHistoryPage(
   const hasMore = filtered.some((e) => e.seq < (oldestSeq ?? upper));
   return { events: kept, hasMore, oldestSeq };
 }
+
+/** Test-only export of the deep cap (the page-level tests can't reach a nested-string event until
+ *  question_asked joins the allowlist in the next commit). */
+export const capEventForTest = capEvent;

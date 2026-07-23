@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionEvent } from "@norma/protocol";
 import { SessionStore } from "../../src/sessions/store";
-import { HISTORY_EVENT_TYPES, readHistoryPage } from "../../src/sessions/history";
+import { HISTORY_EVENT_TYPES, readHistoryPage, capEventForTest } from "../../src/sessions/history";
 
 describe("readHistoryPage", () => {
   let home: string | undefined;
@@ -179,5 +179,47 @@ describe("readHistoryPage", () => {
   test("unknown session propagates the store's Error (handler maps NOT_FOUND)", () => {
     const { store } = boot();
     expect(() => readHistoryPage(store, { sessionId: "s_does_not_exist" })).toThrow("unknown session");
+  });
+
+  test.skip("DEEP CAP: a giant NESTED string (question option description) is truncated with the marker", () => { // un-skipped in Task 2
+    const { store, sessionId } = boot();
+    const big = "q".repeat(70 * 1024); // > 64 KiB, nested two levels down
+    store.append(sessionId, {
+      type: "question_asked", sessionId, threadId: "main", callId: "q1",
+      questions: [{
+        question: "Pick one", header: "Choice", multiSelect: false,
+        options: [{ label: "A", description: big }, { label: "B" }],
+      }],
+    } as any);
+    const p1 = readHistoryPage(store, { sessionId });
+    const p2 = readHistoryPage(store, { sessionId });
+    const q1 = p1.events.find((e) => e.type === "question_asked") as any;
+    const desc = q1.questions[0].options[0].description as string;
+    expect(desc).toContain(`…[truncated by history: ${70 * 1024} bytes total]`);
+    expect(Buffer.byteLength(desc, "utf8")).toBeLessThan(65 * 1024);
+    expect(q1.questions[0].options[1].label).toBe("B"); // small nested strings untouched
+    expect(JSON.stringify(p1.events)).toBe(JSON.stringify(p2.events)); // deep determinism
+  });
+
+  test("DEEP CAP: no-op events keep the same reference shape (no gratuitous copies)", () => {
+    const { store, sessionId } = boot();
+    store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: "small", clientName: "cli" });
+    const page = readHistoryPage(store, { sessionId });
+    // Behavioral proxy for the same-reference no-op: the event round-trips byte-identically.
+    expect(page.events[0]!.type).toBe("user_message");
+    expect((page.events[0] as any).text).toBe("small");
+  });
+
+  test("DEEP CAP (unit): capEventForTest walks arrays and objects at any depth", () => {
+    const big = "z".repeat(70 * 1024);
+    const event = {
+      type: "question_asked", sessionId: "s", threadId: "main", callId: "q", seq: 1, ts: 1,
+      questions: [{ question: "Q", header: "H", multiSelect: false, options: [{ label: "A", description: big }] }],
+    } as any;
+    const capped = capEventForTest(event, 64 * 1024) as any;
+    expect(capped.questions[0].options[0].description).toContain("…[truncated by history:");
+    expect(capped).not.toBe(event); // copy on change
+    const small = { type: "user_message", sessionId: "s", threadId: "main", text: "ok", seq: 2, ts: 1 } as any;
+    expect(capEventForTest(small, 64 * 1024)).toBe(small); // SAME reference on no-op
   });
 });
