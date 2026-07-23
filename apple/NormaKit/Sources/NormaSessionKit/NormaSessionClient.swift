@@ -307,6 +307,28 @@ public actor NormaSessionClient {
         return result["pending"]?.arrayValue ?? []
     }
 
+    /// Fetches one page of past events for a session. Built on the generic
+    /// `send` + the opaque `SessionEvent.JSONValue` decode path — NEVER the strict `SessionEvent`
+    /// enum, which throws on an unmodeled type; a page is retained verbatim as `SessionEnvelope`s so
+    /// an unknown/future event type never fails the decode (the daemon also filters, this is defense
+    /// in depth). `beforeSeq` (EXCLUSIVE) / `limit` are omitted from the params when nil. Read-only:
+    /// a fresh idempotency id per call is fine (the daemon dedups WRITES; a repeated read is safe).
+    public func history(sessionId: String, beforeSeq: Int? = nil, limit: Int? = nil) async throws -> HistoryPage {
+        var params: [String: SessionEvent.JSONValue] = ["sessionId": .string(sessionId)]
+        if let beforeSeq { params["beforeSeq"] = .number(Double(beforeSeq)) }
+        if let limit { params["limit"] = .number(Double(limit)) }
+        let result = try await send(method: "session.history", params: .object(params))
+        let raw = result["events"]?.arrayValue ?? []
+        let envelopes: [SessionEnvelope] = raw.compactMap { ev in
+            guard let sessionID = ev["sessionId"]?.stringValue, let seq = ev["seq"]?.intValue else { return nil }
+            return SessionEnvelope(sessionID: sessionID, streamID: sessionID, seq: seq, kind: .event, json: ev)
+        }
+        return HistoryPage(
+            envelopes: envelopes,
+            hasMore: result["hasMore"]?.boolValue ?? false,
+            oldestSeq: result["oldestSeq"]?.intValue)
+    }
+
     /// Registers the response continuation BEFORE the async send, so a fast reply is never lost, then
     /// awaits the read-loop-delivered `rpcResponse`/`error` correlated by JSON-RPC id.
     private func rpcCall(method: String, params: SessionEvent.JSONValue?, commandID: String) async throws -> SessionEvent.JSONValue {

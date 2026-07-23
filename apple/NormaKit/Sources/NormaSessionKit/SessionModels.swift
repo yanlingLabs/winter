@@ -26,6 +26,22 @@ public struct SessionEnvelope: Sendable, Equatable {
     }
 }
 
+/// One page of `session.history`: a paged, allowlisted, byte-budgeted read of
+/// past events, decoded OPAQUELY (`SessionEnvelope.json`), never through the strict `SessionEvent`
+/// enum — so an unknown/future event type in a page never throws. `oldestSeq` is `nil` iff
+/// `envelopes` is empty; page older by re-requesting with `beforeSeq: oldestSeq` (EXCLUSIVE).
+public struct HistoryPage: Sendable, Equatable {
+    public let envelopes: [SessionEnvelope]
+    public let hasMore: Bool
+    public let oldestSeq: Int?
+
+    public init(envelopes: [SessionEnvelope], hasMore: Bool, oldestSeq: Int?) {
+        self.envelopes = envelopes
+        self.hasMore = hasMore
+        self.oldestSeq = oldestSeq
+    }
+}
+
 /// The lifecycle of one remote approval answer. `sent` is the pre-ack state (the request is on the
 /// wire, the host has not answered yet); `answerApproval` NEVER returns it — it blocks until the
 /// host acks and then returns one of the three terminal states.
