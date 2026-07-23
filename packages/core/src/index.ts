@@ -5,8 +5,12 @@ export { TOKEN_NAMES } from "./auth/tokens";
 export {
   loadSettings, saveSettings, loadPermissionDirs, addLocalDir,
   REASONING_EFFORTS, setProviderModel, setReasoningEffort, setOutputStyle, memoryEnabledFrom,
+  workflowsEnabledFrom, keywordTriggerEnabledFrom,
   type Settings,
 } from "./settings";
+export { runWorkflowSubprocess } from "./workflows/subprocess-entry";
+export { WorkflowRuntime, type WorkflowRuntimeDeps, type WorkflowRuntimeEvent, type WorkflowLaunch } from "./workflows/runtime";
+export { WorkflowStore, type ResolvedWorkflow } from "./workflows/store";
 export {
   deriveInstallName,
   resolvePluginTarget,
@@ -38,6 +42,7 @@ export { registerWebTools, WEB_SEARCH_API_KEY_SECRET, type WebToolDeps } from ".
 export { registerToolSearchTool } from "./agent/tools/toolsearch";
 export { registerAskUserTool } from "./agent/tools/ask-user";
 export { registerPlanTool } from "./agent/tools/plan";
+export { registerWorkflowTool } from "./agent/tools/workflow";
 export { registerPushNotificationTool } from "./agent/tools/push-notification";
 export { notifyHeadless, type OsascriptSpawnFn } from "./agent/notify-fallback";
 export { TaskStore } from "./agent/task-store";

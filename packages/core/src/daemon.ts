@@ -8,7 +8,7 @@ import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom } from "./settings";
+import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -25,6 +25,9 @@ import { registerToolSearchTool } from "./agent/tools/toolsearch";
 import { registerAskUserTool } from "./agent/tools/ask-user";
 import { registerTaskTools } from "./agent/tools/tasks";
 import { registerPlanTool } from "./agent/tools/plan";
+import { registerWorkflowTool } from "./agent/tools/workflow";
+import { WorkflowRuntime } from "./workflows/runtime";
+import { WorkflowStore } from "./workflows/store";
 import { registerNotebookTool } from "./agent/tools/notebook";
 import { registerWorktreeTools } from "./agent/tools/worktree";
 import { registerSpawnAgentTool } from "./agent/tools/spawn";
@@ -226,6 +229,11 @@ export async function startDaemon(opts: {
   // just the name lookup.
   const outputStyleStore = new OutputStyleStore({ normaHome, trust: trustStore });
   const outputStyleFor = (cwd?: string | null): string | undefined => projectSettings.effective(projectRootOf(cwd ?? null))?.outputStyle;
+  // CC-parity phase 3 (Workflows, Track C Task C2): built unconditionally, same "no engine
+  // dependency" precedent as `outputStyleStore` just above — workflow.list's "saved" section and
+  // workflow.run's by-name resolution work even on a no-agentProvider daemon (only launching a
+  // resolved/inline script needs the WorkflowRuntime below, which DOES require an engine).
+  const workflowStore = new WorkflowStore({ normaHome, trust: trustStore });
   const pluginStore = new PluginStore({
     normaHome, plugins: settings?.plugins, consents: settings?.plugins?.consents, log: (m) => console.error(m),
   });
@@ -399,6 +407,11 @@ export async function startDaemon(opts: {
   let dreamer: Dreamer | undefined;
   let mcp: McpManager | null = null;
   let lspManager: LspManager | null = null;
+  // CC-parity phase 3 (Workflows, Track C Task C2): constructed inside the `if (agentProvider)`
+  // gate below (B2 — spawnAgent needs a live engine), reassigned onto this OUTER binding so
+  // startIpcServer's opts (built past the gate's close) can wire it — same "declared null above,
+  // assigned inside the gate" shape as `mcp`/`lspManager` just above.
+  let workflowRuntime: WorkflowRuntime | null = null;
   // hot-settings T5b: reassigned inside the `if (agentProvider)` gate below (built only when the
   // engine/registry exist to hot-apply against); declared here (function scope, outside the gate)
   // so the shutdown path past the gate's close can still stop() it regardless of agentProvider.
@@ -552,6 +565,49 @@ export async function startDaemon(opts: {
     // unconditionally alongside `subagents` — both are required together for the spawn bridge's
     // async branch to activate (engine.ts's EngineConfig.bgAgents doc comment).
     const bgAgents = new BackgroundAgentRegistry();
+    // CC-parity phase 3 (Workflows, Task B2): constructed unconditionally alongside bgAgents (same
+    // "always build it, the tool/bridge itself decides whether to use it" shape spawn_agent's own
+    // subagents/agents above follow) — PRODUCTION deps only: no `workerCommand` override (that's a
+    // test-only seam over in workflows/runtime.test.ts; the real default self-spawns the compiled
+    // binary in `__workflow-worker` mode, workflows/runtime.ts's own `defaultWorkerCommand`).
+    // `spawnAgent`/`onEvent` both close over the `engine` binding assigned further down — same
+    // later-assigned-closure precedent as `dispatchChildren`/`dreamer` below (neither is ever
+    // INVOKED until a real Workflow launch happens, long after `engine` is assigned).
+    workflowRuntime = new WorkflowRuntime({
+      onEvent: (sid, ev) => {
+        // Track D Task D1: hub.append the wire counterpart of this runtime event so an attached
+        // client (the app) can watch a Workflow run live — ADDITIVE to (never instead of) the
+        // notifyWorkflowCompletion call below, which still drives the assistant-facing
+        // task_notification on completion/failure. Field mapping mirrors the fixtures in
+        // packages/protocol/scripts/generate.ts (workflow_started/_progress/_completed/_failed).
+        switch (ev.type) {
+          case "started":
+            hub.append(sid, { type: "workflow_started", sessionId: sid, threadId: "main", runId: ev.runId, name: ev.name, summary: ev.summary });
+            break;
+          case "progress":
+            hub.append(sid, {
+              type: "workflow_progress", sessionId: sid, threadId: "main", runId: ev.runId,
+              phase: ev.progress.phase, log: ev.progress.log,
+              running: ev.progress.counts.running, completed: ev.progress.counts.completed, total: ev.progress.counts.total,
+            });
+            break;
+          case "completed":
+            hub.append(sid, { type: "workflow_completed", sessionId: sid, threadId: "main", runId: ev.runId, resultSummary: ev.result });
+            break;
+          case "failed":
+            hub.append(sid, { type: "workflow_failed", sessionId: sid, threadId: "main", runId: ev.runId, error: ev.error });
+            break;
+        }
+        if (ev.type === "completed" || ev.type === "failed") engine?.notifyWorkflowCompletion(sid, ev.runId);
+      },
+      spawnAgent: (sid, prompt, o, signal) => engine!.runWorkflowAgent(sid, prompt, o, signal),
+      runsDir: join(normaHome, "workflows-runs"),
+    });
+    // Deferred (rides ToolSearch like worktree/notebook/plan/schedule above) — a specialized
+    // orchestration primitive, not needed in every turn. Session-type/settings gating (Task B3/B4,
+    // per workflowsEnabled/keywordTriggerEnabled below) is layered on top of this later; B2 only
+    // wires the tool + its launch bridge.
+    registerWorkflowTool(registry, { deferred: true });
     // `agentProvider` is already narrowed non-null here (we're inside `if (agentProvider)`), and
     // its `.provider` is the SAME provider instance the engine's spawn bridge calls .models() on
     // to validate a spawn_agent model override (4e gate F9) — so this list is exactly what the
@@ -911,6 +967,26 @@ export async function startDaemon(opts: {
         deferThreshold: (cwd) => projectSettings.effective(projectRootOf(cwd))?.toolSearch?.deferThreshold ?? Number(process.env.NORMA_TOOLSEARCH_THRESHOLD ?? 12),
         deferExternals: (cwd) => projectSettings.effective(projectRootOf(cwd))?.toolSearch?.deferExternals,
       },
+      // CC-parity phase 3 (Workflows, Track B Task B1): same per-project/hot shape as
+      // reviewerEnabled/toolSearch above — `workflowsEnabledFrom`/`keywordTriggerEnabledFrom`
+      // (settings.ts) already bake in the default-ON (`!== false`) semantics, so these resolve to a
+      // definite boolean (fail-open `true` when neither a project overlay nor global settings.json
+      // exist yet, mirroring hooksEnabledHot/lspAutoDiagnosticsHot's own null-settings fallback
+      // above). workflowsEnabled is consumed by B3's per-session Workflow tool gating;
+      // keywordTriggerEnabled is consumed by B4's `/ultracode` keyword trigger (engine.ts).
+      workflowsEnabled: (cwd?: string) => (projectSettings.effective(projectRootOf(cwd)) ?? settings) ? workflowsEnabledFrom(projectSettings.effective(projectRootOf(cwd)) ?? settings!) : true,
+      // Task B4 fix: this getter originally had NO equivalent null-guard (unlike workflowsEnabled
+      // just above), so a genuinely-null `settings` (malformed settings.json at boot, or a test
+      // that injects `agentProvider` directly — the exact scenario hooksEnabledHot/
+      // lspAutoDiagnosticsHot's own doc comments call out) would throw at
+      // `keywordTriggerEnabledFrom(... ?? settings!)` instead of failing open. B4 is the first real
+      // consumer of this getter, so harden it now to the SAME null-guarded shape as workflowsEnabled
+      // (fails open to `true`, matching hooksEnabledHot/lspAutoDiagnosticsHot's own precedent).
+      keywordTriggerEnabled: (cwd?: string) => (projectSettings.effective(projectRootOf(cwd)) ?? settings) ? keywordTriggerEnabledFrom(projectSettings.effective(projectRootOf(cwd)) ?? settings!) : true,
+      // Task B2: the runtime the Workflow tool bridge (engine.ts) launches/awaits against —
+      // constructed above, right alongside bgAgents (see its own doc comment there for why
+      // `spawnAgent`/`onEvent` safely close over `engine` before this very assignment completes).
+      workflows: workflowRuntime,
       hooks: hookFacade,
       // Subagent transcript files (CC parity): the SAME session-tmp-dir accessor registerLspTools
       // above already gets — sessionTmpDir-backed, so a subagent's transcript lands right next to
@@ -1118,6 +1194,12 @@ export async function startDaemon(opts: {
     // ipc/server.ts's memory.* handlers and memory-migrate.ts's own doc comment for why this is
     // the SAME bucket the importer uses for facts that don't map to a project.
     memoryFiles: { enabled: memoryEnabledHot, dirFor: memoryDirOf, globalDir: memoryGlobalDirOf },
+    // CC-parity phase 3 (Workflows, Track C Task C2): `workflowRuntime` is only ever assigned
+    // inside the `if (agentProvider)` gate above (B2); `workflowStore` is always built. Local-only
+    // in v1 — ipc/server.ts's PLUGIN_ALLOWED_METHODS/REMOTE_ALLOWED_METHODS deliberately don't
+    // gain these four verbs.
+    workflows: workflowRuntime ?? undefined,
+    workflowStore,
     ...opts.server,
   });
 

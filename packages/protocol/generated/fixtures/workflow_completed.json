@@ -1,0 +1,9 @@
+{
+  "seq": 7,
+  "sessionId": "s_fixture",
+  "ts": 1781270000000,
+  "threadId": "main",
+  "type": "workflow_completed",
+  "runId": "wf_a1b2c3",
+  "resultSummary": "12 issues found across 20 files; report written."
+}

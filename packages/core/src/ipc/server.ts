@@ -22,6 +22,7 @@ import {
   RoutinesCreateParams, RoutinesListParams, RoutinesUpdateParams, RoutinesDeleteParams,
   MemoryListParams, MemoryReadParams, MemoryWriteParams, MemoryDeleteParams, MemoryAuditParams,
   ProviderConfigureParams,
+  WorkflowListParams, WorkflowRunParams, WorkflowStopParams, WorkflowGetParams,
   SYSTEM_SESSION_ID,
   type SessionEvent, ConnWriter, type WritableSocket,
 } from "@norma/protocol";
@@ -29,6 +30,8 @@ import type { TokenAuthority } from "../auth/tokens";
 import type { SecretStore } from "../auth/secret-store";
 import { OPENAI_API_KEY_SECRET } from "../providers/manager";
 import type { RoutineStore } from "../routines/store";
+import type { WorkflowRuntime } from "../workflows/runtime";
+import type { WorkflowStore } from "../workflows/store";
 import type { MemoryStore, MemoryErrorKind } from "../agent/memory";
 import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTailMemDir } from "../agent/memory-file-ops";
 import type { SessionStore } from "../sessions/store";
@@ -187,6 +190,22 @@ export interface IpcServerOptions {
   // comment for why a cwd-less request's target (`globalDir()`) is the SAME bucket the migration
   // importer uses for facts that don't map to a project.
   memoryFiles?: { enabled(): boolean; dirFor(cwd: string): string; globalDir(): string };
+  // CC-parity phase 3 (Workflows, Track C Task C2): the daemon's own WorkflowRuntime (B2) —
+  // constructed only inside daemon.ts's `if (agentProvider)` gate (spawnAgent needs a live engine
+  // to bridge a script's `agent()` calls) — backing workflow.list's "running" section plus
+  // workflow.run/stop/get. LOCAL-ONLY IN V1 (Global Constraints) — never added to
+  // PLUGIN_ALLOWED_METHODS or REMOTE_ALLOWED_METHODS above. Optional — same "typed no-op/INTERNAL
+  // failure, never a crash" precedent as `routines`/`memory` above: a server built without one
+  // (every pre-C2 test, and a no-agentProvider daemon) degrades workflow.list's running section to
+  // [] and workflow.stop to a soft no-op, while workflow.run/get become a typed RpcFailure.
+  workflows?: WorkflowRuntime;
+  // The daemon's own WorkflowStore (C1) — trust-gated project/user `.norma`/`<normaHome>` `.js`
+  // workflow discovery, backing workflow.list's "saved" section and workflow.run's by-name
+  // resolution. Built UNCONDITIONALLY in daemon.ts (no engine dependency — same precedent as
+  // `outputStyleStore`), so it's present even on a no-agentProvider daemon. Optional here only for
+  // tests that don't need it (degrades to an empty `saved` list / a NOT_FOUND on workflow.run by
+  // name, same "typed no-op" precedent as `routines` above).
+  workflowStore?: WorkflowStore;
   providerInfo?: { id: string; model: string } | null; // active LLM provider identity; daemon.status
   startedAt?: number;        // daemon process start time (Date.now()); daemon.status uptimeMs
   helloTimeoutMs?: number;   // default 5000
@@ -1009,6 +1028,64 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // once, rather than pushing that inversion onto every caller.
         const lines = (opts.memory?.auditTail(p.limit) ?? []).slice().reverse();
         return { lines };
+      }
+
+      // -----------------------------------------------------------------------------------------
+      // Workflows (CC-parity phase 3, Track C Task C2): the management/control surface over
+      // WorkflowRuntime (live runs) + WorkflowStore (saved `.norma/workflows/*.js` scripts, C1).
+      // Role-gated exactly like routines.*/memory.* above — no additional role check here (harness
+      // AND admin may both call these; a plugin or remote connection is role-rejected before
+      // dispatch ever reaches this switch, since none of these four are in PLUGIN_ALLOWED_METHODS
+      // or REMOTE_ALLOWED_METHODS — LOCAL-ONLY IN V1, Global Constraints). Every verb below
+      // validates `sessionId`/`runId` exist first (unknown → NOT_FOUND), same
+      // `opts.store.meta(...)` try/catch idiom as session.addDir/peripheral.lease above.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.workflowList: {
+        const p = parseParams(WorkflowListParams, params);
+        let meta: ReturnType<SessionStore["meta"]>;
+        try {
+          meta = opts.store.meta(p.sessionId);
+        } catch (e) {
+          throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
+        }
+        const cwd = p.cwd ?? meta.cwd;
+        const running = opts.workflows?.list(p.sessionId) ?? [];
+        const saved = opts.workflowStore?.list(cwd) ?? [];
+        return { running, saved };
+      }
+      case METHODS.workflowRun: {
+        const p = parseParams(WorkflowRunParams, params);
+        let meta: ReturnType<SessionStore["meta"]>;
+        try {
+          meta = opts.store.meta(p.sessionId);
+        } catch (e) {
+          throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
+        }
+        if (!opts.workflows) throw new RpcFailure(ERR.INTERNAL, "workflows are not available on this server (no WorkflowRuntime configured)");
+        let source: string;
+        if (p.name) {
+          if (!opts.workflowStore) throw new RpcFailure(ERR.INTERNAL, "workflows are not available on this server (no WorkflowStore configured)");
+          const resolved = opts.workflowStore.read(p.name, meta.cwd);
+          if (!resolved) throw new RpcFailure(ERR.NOT_FOUND, `unknown workflow: ${p.name}`);
+          source = resolved.body;
+        } else if (p.script) {
+          source = p.script;
+        } else {
+          throw new RpcFailure(ERR.INVALID_PARAMS, "workflow.run requires either `name` or `script`");
+        }
+        const runId = opts.workflows.launch({ sessionId: p.sessionId, source, args: p.args, name: p.name });
+        return { runId, status: "running" };
+      }
+      case METHODS.workflowStop: {
+        const p = parseParams(WorkflowStopParams, params);
+        const stopped = opts.workflows?.stop(p.runId) ?? false;
+        return { ok: true, stopped };
+      }
+      case METHODS.workflowGet: {
+        const p = parseParams(WorkflowGetParams, params);
+        const run = opts.workflows?.get(p.runId);
+        if (!run) throw new RpcFailure(ERR.NOT_FOUND, `unknown run: ${p.runId}`);
+        return { run };
       }
 
       case METHODS.sessionAddDir: {

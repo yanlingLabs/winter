@@ -242,6 +242,20 @@ export const ChildUpdateEvent = ThreadBase.extend({
   resultSummary: z.string().optional(),
 });
 
+/** CC-parity phase 3 (Workflows, Track D Task D1): the wire counterpart of WorkflowRuntime's
+ *  internal `WorkflowRuntimeEvent` (core's `workflows/runtime.ts`) — the daemon's `onEvent` bridge
+ *  (daemon.ts) maps its `started`/`progress`/`completed`/`failed` variants onto these 4 events so
+ *  an attached client (the app) can watch a Workflow run live. Additive to, never instead of, the
+ *  existing `notifyWorkflowCompletion` assistant-facing `task_notification` these SAME runtime
+ *  events also drive — the wire events are new observability, not a replacement channel. NOT
+ *  sensitive (no `encrypted_content`) — normal generator fixtures, same precedent as
+ *  `tool_review`/`notification_requested` above (full NormaKit exhaustive-switch discipline: these
+ *  are NEW variants). */
+export const WorkflowStartedEvent = ThreadBase.extend({ type: z.literal("workflow_started"), runId: z.string().min(1), name: z.string().optional(), summary: z.string() });
+export const WorkflowProgressEvent = ThreadBase.extend({ type: z.literal("workflow_progress"), runId: z.string().min(1), phase: z.string().optional(), log: z.string().optional(), running: z.number().int().nonnegative(), completed: z.number().int().nonnegative(), total: z.number().int().nonnegative() });
+export const WorkflowCompletedEvent = ThreadBase.extend({ type: z.literal("workflow_completed"), runId: z.string().min(1), resultSummary: z.string() });
+export const WorkflowFailedEvent = ThreadBase.extend({ type: z.literal("workflow_failed"), runId: z.string().min(1), error: z.string() });
+
 /** Background-agent completion notice (CC parity: <task-notification>), persisted and replayed as a
  *  user-role message so the model learns a detached agent finished without a user keystroke.
  *  Clients render nothing for it (thread_completed carries the visible finish line). Do NOT add a
@@ -440,6 +454,10 @@ export const SessionEvent = z.discriminatedUnion("type", [
   ToolReviewEvent,
   NotificationRequestedEvent,
   ChildUpdateEvent,
+  WorkflowStartedEvent,
+  WorkflowProgressEvent,
+  WorkflowCompletedEvent,
+  WorkflowFailedEvent,
 ]);
 export type SessionEvent = z.infer<typeof SessionEvent>;
 

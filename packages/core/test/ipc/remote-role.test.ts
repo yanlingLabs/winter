@@ -174,6 +174,9 @@ describe("remote hello role + REMOTE_ALLOWED_METHODS gate (Remote Gateway SP1 Ta
     for (const method of [
       METHODS.trustDir, METHODS.sessionSetCwd, METHODS.pluginRegister,
       METHODS.memoryList, METHODS.providerConfigure,
+      // CC-parity phase 3 (Workflows, Track C Task C2): local-only in v1 (Global Constraints) —
+      // never added to REMOTE_ALLOWED_METHODS.
+      METHODS.workflowList, METHODS.workflowRun, METHODS.workflowStop, METHODS.workflowGet,
     ]) {
       const res = await c.request(method, {});
       expect(res.error?.code).toBe(ERR.UNAUTHORIZED);

@@ -583,7 +583,12 @@ describe("App — slash-command wiring (Phase 3d T2: onRunCommand + local_note)"
     await wait();
 
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("/compact — Compact conversation history to a summary"); // helpText() content
+    // helpText() content: the registry has grown past the 23-line viewport (Task C4 added
+    // /workflows, the 15th entry), so early lines like /help/compact have scrolled off under
+    // "stick to bottom" — anchor on /workflows instead, the newest (last) registry entry and so
+    // the most robust to future registry growth (a pre-existing viewport-height coupling, not
+    // specific to /help — see the identical note on the '?'-on-empty test below).
+    expect(frame).toContain("/workflows [run <name> [json]|stop <runId>] — List saved + running workflows");
     expect(frame).toContain("Keys:"); // the keybinding line
     expect(frame).toContain(COMPOSER_CURSOR); // composer back to idle, buffer cleared
     expect(client.calls).toEqual([]); // never reached the model
@@ -720,10 +725,12 @@ describe("App — help surfacing: '?' on empty runs /help (Phase 3d T4)", () => 
     await wait();
 
     const frame = lastFrame() ?? "";
-    // helpText() content: the registry has grown past the 23-line viewport, so the very top line
-    // (/help itself) has scrolled off under "stick to bottom" — assert lines that are still in
-    // view instead (this is a pre-existing viewport-height coupling, not specific to /help).
-    expect(frame).toContain("/compact — Compact conversation history to a summary");
+    // helpText() content: the registry has grown past the 23-line viewport, so early lines
+    // (/help, /compact — the latter dropped in favor of /workflows by Task C4, which added the
+    // registry's 15th entry) have scrolled off under "stick to bottom" — assert lines that are
+    // still in view instead (this is a pre-existing viewport-height coupling, not specific to
+    // /help). /workflows anchors the newest (last) entry, the most robust to future registry growth.
+    expect(frame).toContain("/workflows [run <name> [json]|stop <runId>] — List saved + running workflows");
     expect(frame).toContain("/output-style [name] — Show or switch the output style");
     expect(frame).toContain("Keys:"); // the keybinding line (may hard-wrap at 80 cols; unchecked verbatim here)
     expect(frame).not.toContain("❯ ?"); // the "?" itself was never inserted into the buffer

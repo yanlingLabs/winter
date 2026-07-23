@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom } from "../src/settings";
 import { DEFAULT_CODEX_MODEL } from "../src/providers/codex-config";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 
@@ -362,6 +362,30 @@ describe("loadSettings", () => {
     expect(Settings.safeParse({ ...base, updates: { channel: "stable" } }).success).toBe(true);
     expect(Settings.safeParse({ ...base, updates: {} }).success).toBe(true);
     expect(Settings.safeParse({ ...base, updates: { channel: "nightly" } }).success).toBe(false);
+  });
+
+  // Task B1 (CC-parity phase 3, Workflows Track B): workflows.{enabled,keywordTrigger} — same
+  // additive optional-block shape as hooks/toolSearch/lsp above (unknown keys stripped, wrong-typed
+  // known keys throw); default-ON semantics for each flag are covered separately below
+  // (workflowsEnabledFrom/keywordTriggerEnabledFrom).
+  test("workflows config parses; absent → undefined", () => {
+    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, workflows: { enabled: false, keywordTrigger: true } });
+    expect(s.workflows).toEqual({ enabled: false, keywordTrigger: true });
+    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } }).workflows).toBeUndefined();
+  });
+});
+
+describe("workflowsEnabledFrom / keywordTriggerEnabledFrom (Task B1: workflows.{enabled,keywordTrigger} default-ON semantics)", () => {
+  test("workflows key parses; both flags default ON when absent", () => {
+    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } });
+    expect(workflowsEnabledFrom(s)).toBe(true);
+    expect(keywordTriggerEnabledFrom(s)).toBe(true);
+  });
+
+  test("explicit false disables each independently", () => {
+    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" }, workflows: { enabled: false, keywordTrigger: true } });
+    expect(workflowsEnabledFrom(s)).toBe(false);
+    expect(keywordTriggerEnabledFrom(s)).toBe(true);
   });
 });
 

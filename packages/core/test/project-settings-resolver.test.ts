@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, utimesSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProjectSettingsResolver } from "../src/project-settings";
-import { Settings } from "../src/settings";
+import { Settings, workflowsEnabledFrom } from "../src/settings";
 
 // Task 6: the cwd-keyed, mtime-cached "effective settings" read-through built on Task 5's
 // mergeSettings. Every test uses a fresh mkdtemp'd directory — never ~/.norma (project rule).
@@ -171,5 +171,33 @@ describe("ProjectSettingsResolver", () => {
     const first = resolver.effective(cwd);
     const second = resolver.effective(cwd);
     expect(second).toBe(first);
+  });
+});
+
+// Task B1 (CC-parity phase 3, Workflows Track B): workflows.{enabled,keywordTrigger} become
+// per-project the SAME way reviewer.enabled does above (tests (a)/(b)) — mirrored here rather than
+// re-using `reviewer.enabled` as the demonstration field, since this task's own daemon.ts getter
+// composes the resolver's `effective()` read with the NEW workflowsEnabledFrom helper (settings.ts),
+// not just a raw property read.
+describe("workflows.{enabled,keywordTrigger} become per-project via ProjectSettingsResolver", () => {
+  test("an untrusted project's workflows.enabled:false overlay is IGNORED (base's default-ON wins); a trusted project's applies", () => {
+    const untrustedCwd = tmpDir("norma-psr-wf-untrusted-");
+    mkdirSync(join(untrustedCwd, ".norma"), { recursive: true });
+    writeFileSync(join(untrustedCwd, ".norma", "settings.json"), JSON.stringify({ workflows: { enabled: false } }));
+
+    const trustedCwd = tmpDir("norma-psr-wf-trusted-");
+    mkdirSync(join(trustedCwd, ".norma"), { recursive: true });
+    writeFileSync(join(trustedCwd, ".norma", "settings.json"), JSON.stringify({ workflows: { enabled: false } }));
+
+    const base = minimalBase();
+    const trust = { isTrusted: (dir: string) => dir === trustedCwd }; // only the trusted cwd is trusted
+    const resolver = new ProjectSettingsResolver({ base: () => base, trust });
+
+    // Same composition daemon.ts's real `workflowsEnabled` getter uses: workflowsEnabledFrom over
+    // the resolver's per-project effective() read (falling back to base when effective() is null).
+    const workflowsEnabled = (cwd: string) => workflowsEnabledFrom(resolver.effective(cwd) ?? base);
+
+    expect(workflowsEnabled(untrustedCwd)).toBe(true); // untrusted overlay never read — default-ON wins
+    expect(workflowsEnabled(trustedCwd)).toBe(false); // trusted overlay applies
   });
 });

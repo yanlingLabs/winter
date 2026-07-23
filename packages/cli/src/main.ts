@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveNormaHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION } from "@norma/core";
+import { resolveNormaHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess } from "@norma/core";
 import type { Settings } from "@norma/core";
 import { METHODS, type ApprovalPolicy, type Task } from "@norma/protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
@@ -950,6 +950,15 @@ export function routeCliInvocation(argv: string[], isTTY: boolean): CliRoute {
 // Guarded so `main.ts` can be imported (e.g. by tests, for INIT_PROMPT/runTurnSession) without
 // executing the CLI — import.meta.main is true only when this file is the entry point.
 if (import.meta.main) {
+  // Workflow worker subprocess (COMPILED path): the daemon self-spawns `<norma-core> __workflow-worker`
+  // already wrapped in sandbox-exec; THIS process is the sandboxed worker. Route straight to the entry
+  // and never fall through to daemon-connect / TUI. (In dev/test the runtime spawns the entry .ts
+  // directly, so this branch is only exercised by the compiled binary.)
+  if (process.argv.includes("__workflow-worker")) {
+    runWorkflowSubprocess();
+    await new Promise(() => {});   // entry drives itself to process.exit(); block everything below
+  }
+
   const argv = process.argv.slice(2);
   const isTTY = !!(process.stdin.isTTY && process.stdout.isTTY);
   const route = routeCliInvocation(argv, isTTY);
@@ -1584,6 +1593,96 @@ if (import.meta.main) {
     }
     saveSettings(settingsPath, setOutputStyle(settings, action.name));
     console.log(`Output style set to: ${action.name}`);
+    break;
+  }
+  case "workflow": {
+    // CC-parity phase 3 (Workflows), Track C Task C3. `list`/`save` are file-direct (WorkflowStore,
+    // C1) — mirrors `case "output-style"` just above: reading/writing `.norma/workflows/*.js`
+    // never needs the daemon up, exactly like an output-style switch never needing a restart.
+    // `run` is the one exception: workflows actually EXECUTE in the daemon (WorkflowRuntime,
+    // core/src/workflows/runtime.ts, C2), so it goes through NormaClient/connect() like every
+    // other daemon-RPC case (`memory`, `routines`, …) instead of touching files directly.
+    const { parseWorkflowArgs } = await import("./workflow-cli");
+    const action = parseWorkflowArgs(process.argv.slice(3));
+
+    if (action.action === "help") {
+      console.log("Usage: norma workflow [list] | run <name> [json-args] | save <name> [file]\n  (no arg)     list saved workflows (+ running runs, if a daemon is already up)\n  run <name>   run a saved workflow; json-args (a JSON string) seeds its `args` binding\n  save <name>  save a workflow script from <file> (or stdin, if omitted) to ~/.norma/workflows/<name>.js");
+      break;
+    }
+
+    const { WorkflowStore, TrustStore } = await import("@norma/core");
+    const home = resolveNormaHome();
+    const store = new WorkflowStore({ normaHome: home, trust: new TrustStore(join(home, "trust.json")) });
+    const cwd = process.cwd();
+
+    if (action.action === "list") {
+      const saved = store.list(cwd);
+      if (saved.length === 0) console.log(`${DIM}(no saved workflows)${RESET}`);
+      for (const w of saved) console.log(`${AQUA}${w.name}${RESET} ${DIM}(${w.source}) — ${w.description}${RESET}`);
+
+      // Best-effort daemon augmentation, ONLY if a daemon is ALREADY up (a direct existsSync
+      // check — never connect()'s own autolaunch: unlike `run`, a plain `list` must not have the
+      // side effect of spawning Norma.app). workflow.list is session-scoped server-side
+      // (WorkflowRegistry.list(sessionId) filters strictly to that session's own runs), so this
+      // creates a session the same way `run` does below; wrapped in try/catch because the
+      // file-direct saved list above already answered the primary ask — a down/flaked daemon must
+      // never turn a successful `list` into a failed one.
+      if (existsSync(socketPath())) {
+        try {
+          const c = await connect("cli-workflow-list");
+          try {
+            const { sessionId } = await c.createSession("global", { cwd });
+            const { running } = await c.workflowList(sessionId, cwd);
+            if (running.length > 0) {
+              console.log(`${DIM}running:${RESET}`);
+              for (const r of running) console.log(`${AQUA}${r.runId}${RESET} ${DIM}${r.name ?? "(inline script)"} · ${r.status}${RESET}`);
+            }
+          } finally {
+            c.close();
+          }
+        } catch {
+          // daemon flaked between the exists-check and connect()/hello — best-effort, never fatal.
+        }
+      }
+      break;
+    }
+
+    if (action.action === "save") {
+      try {
+        const source = action.file !== undefined ? readFileSync(action.file, "utf8") : await Bun.stdin.text();
+        store.save(action.name, source);
+      } catch (err) {
+        console.error((err as Error).message);
+        process.exit(1);
+      }
+      console.log(`${AQUA}saved${RESET} ${DIM}${action.name} → ${join(home, "workflows", `${action.name}.js`)}${RESET}`);
+      break;
+    }
+
+    // run — the only verb that needs the daemon: workflows execute there, never locally.
+    let args: unknown;
+    if (action.args !== undefined) {
+      try {
+        args = JSON.parse(action.args);
+      } catch {
+        console.error(`invalid JSON args: ${action.args}`);
+        process.exit(1);
+      }
+    }
+    const c = await connect("cli-workflow-run");
+    try {
+      const { sessionId } = await c.createSession("global", { cwd });
+      const { runId } = await c.workflowRun({ sessionId, name: action.name, args });
+      console.log(`${AQUA}${runId}${RESET} ${DIM}running${RESET}`);
+    } catch (err) {
+      // Unknown workflow name (or any other RPC failure, e.g. no WorkflowRuntime configured) comes
+      // back as a rejected request (client.ts's request() rejects with the server's RpcFailure
+      // message) — same "caller's try/catch prints .message and exits 1" idiom as `case "memory"`.
+      console.error((err as Error).message);
+      c.close();
+      process.exit(1);
+    }
+    c.close();
     break;
   }
   case "init": {

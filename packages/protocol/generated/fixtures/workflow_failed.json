@@ -1,0 +1,9 @@
+{
+  "seq": 7,
+  "sessionId": "s_fixture",
+  "ts": 1781270000000,
+  "threadId": "main",
+  "type": "workflow_failed",
+  "runId": "wf_a1b2c3",
+  "error": "workflow exceeded the per-run agent cap (1000)"
+}

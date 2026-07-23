@@ -40,6 +40,10 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     case toolReview(ToolReview)
     case notificationRequested(NotificationRequested)
     case childUpdate(ChildUpdate)
+    case workflowStarted(WorkflowStarted)
+    case workflowProgress(WorkflowProgress)
+    case workflowCompleted(WorkflowCompleted)
+    case workflowFailed(WorkflowFailed)
 
     public struct SessionCreated: Codable, Equatable, Sendable {
         public let seq: Int
@@ -578,6 +582,58 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let resultSummary: String?
     }
 
+    /// CC-parity phase 3 (Workflows, Track D Task D1): the wire counterpart of WorkflowRuntime's
+    /// internal `WorkflowRuntimeEvent` (core's `workflows/runtime.ts`) — the daemon's `onEvent`
+    /// bridge maps its `started`/`progress`/`completed`/`failed` variants onto these 4 events so an
+    /// attached client (this app) can watch a Workflow run live. Additive to, never instead of, the
+    /// existing `notifyWorkflowCompletion` assistant-facing `task_notification` these SAME runtime
+    /// events also drive.
+    public struct WorkflowStarted: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let threadId: String
+        public let runId: String
+        public let name: String?
+        public let summary: String
+    }
+
+    /// See WorkflowStarted above. `phase`/`log` mirror the script's own `phase()`/`log()` bridge
+    /// calls (optional — a progress tick may carry only updated counts); `running`/`completed`/
+    /// `total` are always present (WorkflowRuntimeEvent's `progress.counts`, workflows/types.ts).
+    public struct WorkflowProgress: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let threadId: String
+        public let runId: String
+        public let phase: String?
+        public let log: String?
+        public let running: Int
+        public let completed: Int
+        public let total: Int
+    }
+
+    /// See WorkflowStarted above.
+    public struct WorkflowCompleted: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let threadId: String
+        public let runId: String
+        public let resultSummary: String
+    }
+
+    /// See WorkflowStarted above.
+    public struct WorkflowFailed: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let threadId: String
+        public let runId: String
+        public let error: String
+    }
+
     private enum Discriminator: String, Codable {
         case session_created
         case harness_attached
@@ -618,6 +674,10 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case tool_review
         case notification_requested
         case child_update
+        case workflow_started
+        case workflow_progress
+        case workflow_completed
+        case workflow_failed
     }
 
     private enum TypeKey: String, CodingKey { case type }
@@ -664,6 +724,10 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case .tool_review:          self = .toolReview(try ToolReview(from: decoder))
         case .notification_requested: self = .notificationRequested(try NotificationRequested(from: decoder))
         case .child_update:         self = .childUpdate(try ChildUpdate(from: decoder))
+        case .workflow_started:     self = .workflowStarted(try WorkflowStarted(from: decoder))
+        case .workflow_progress:    self = .workflowProgress(try WorkflowProgress(from: decoder))
+        case .workflow_completed:   self = .workflowCompleted(try WorkflowCompleted(from: decoder))
+        case .workflow_failed:      self = .workflowFailed(try WorkflowFailed(from: decoder))
         }
     }
 
@@ -825,6 +889,22 @@ public enum SessionEvent: Codable, Equatable, Sendable {
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)
             try c.encode(Discriminator.child_update.rawValue, forKey: .type)
+        case .workflowStarted(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.workflow_started.rawValue, forKey: .type)
+        case .workflowProgress(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.workflow_progress.rawValue, forKey: .type)
+        case .workflowCompleted(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.workflow_completed.rawValue, forKey: .type)
+        case .workflowFailed(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.workflow_failed.rawValue, forKey: .type)
         }
     }
 }

@@ -18,7 +18,7 @@ import type { PermissionRules } from "./permission-rules";
 import { readOnlyBash } from "./readonly-bash";
 import { SHIPPED_DANGEROUS_DOMAINS, dangerousDomainMatch } from "./dangerous-domains";
 import { repoRootFor } from "./memory-dir";
-import type { ContextAssembler } from "./context";
+import { type ContextAssembler, neutralizeReminderTags } from "./context";
 import type { Compactor } from "./compactor";
 import type { McpManager } from "./mcp/manager";
 import { bashLooksSafe, type BashReviewer, type ReviewInput } from "./reviewer";
@@ -35,6 +35,7 @@ import type { LspManager } from "./lsp/manager";
 import { autoDiagnosticsSuffix, AUTO_DIAG_TOOL_NAMES } from "./lsp/auto-diagnostics";
 import { DISPATCH_ALLOW_TOOLS, DISPATCH_SYSTEM_PROMPT } from "./dispatch-prompt";
 import type { DispatchChildren } from "./dispatch-children";
+import type { WorkflowRuntime } from "../workflows/runtime";
 
 /** Structural narrowing of BackgroundTaskRegistry (bg-registry.ts) to just what pinnedTools
  *  (below) needs — lets the engine (and tests) work with anything shaped like a per-session task
@@ -58,6 +59,73 @@ const MAX_TOOL_ITERATIONS = 24; // runaway guard until 1b-ii budgets land
 // spawn.ts), same belt-and-braces relationship spawn_agent's own depth-cap exclusion has to its
 // own runtime reject.
 const SESSION_SPAWN_TOOL = "session_spawn";
+
+// Workflows Task A4: the module-wide name for the `Workflow` tool (B2 registers it for real, on
+// the same shared registry every session's specs() reads from — see SESSION_SPAWN_TOOL's own doc
+// comment just above for the identical pattern). A workflow's own spawned agents (runWorkflowAgent,
+// below) are depth-1 and must never themselves be able to launch a workflow (Global Constraints:
+// nesting depth 1) — named ONCE here so A4's child-exclusion, B2's registration, B3's gating, and
+// B4's pin all read the SAME literal, with no `Workflow`/`workflow` casing drift between them.
+const WORKFLOW_TOOL = "Workflow";
+
+// Task B3: is this session a chat/cowork session (as opposed to the top-level interactive CODE
+// session the Workflow tool is gated to)? Always false today — SessionStore.createSession's own
+// `mode` param is typed `"code" | "dispatch"` (sessions/store.ts) and session_spawn's own
+// `type==="cowork"` branch (this file's dispatch loop, below) rejects it pre-launch ("type 'cowork'
+// is not yet available — use 'code'"), so no session anywhere can carry a chat/cowork identity yet.
+// Kept as an explicit named predicate (rather than inlining `false` into workflowToolAllowed below)
+// so the ONE place that needs a real check, whenever either mode ships, is THIS function's body —
+// workflowToolAllowed itself already excludes them correctly the day that lands, no gating logic
+// to revisit at the call site.
+function isChatOrCowork(_meta: { mode?: string }): boolean {
+  return false;
+}
+
+// Task B4 (/ultracode): the fixed clientName sentinels the ENGINE ITSELF stamps onto a
+// user_message it synthesizes/relays on someone's behalf — never a real connecting harness's own
+// self-declared identity (those are e.g. "cli-chat"/"cli-p" — packages/cli/src/main.ts's own
+// `connect(chat ? "cli-chat" : "cli-p", ...)` — or "orb"/"iphone-gateway"/"norma-probe" for the
+// app/phone/debug harnesses). `/ultracode` must fire ONLY for a genuine top-level human turn (CC
+// parity: never a `-p` one-shot, a scheduled routine, or a dispatch session) — a DENYLIST, not an
+// allowlist (same "default open" shape as workflowsEnabledFrom/etc. below): any OTHER clientName is
+// treated as a real interactive harness.
+//  - "cli-p"    — norma -p, packages/cli/src/main.ts's own one-shot connect name.
+//  - "routine"  — a scheduled routine's single headless turn (routines/runner.ts).
+//  - "dispatch" — a dispatch-CHILD session's own initiating prompt (dispatch-children.ts) — belt-
+//    and-braces alongside this file's `meta.origin === "dispatch-child"` check (turn()'s own
+//    ultracodeGateOpen, below) — workflowToolAllowed's own doc comment above describes the
+//    identical redundant-condition relationship for this exact dispatch-child case.
+// "send_message"/"resume" (this file's own child-thread bridges, runThread's send_message drain and
+// resumeAgent) are deliberately NOT listed: both are stamped on a CHILD thread's events only, never
+// threadId===MAIN_THREAD — and latestMainUserMessage (below) only ever looks at MAIN_THREAD
+// messages, so neither sentinel is a reachable clientName for this check in the first place.
+const NON_HUMAN_CLIENT_NAMES = new Set(["cli-p", "routine", "dispatch"]);
+
+function isHumanOriginClientName(clientName: string): boolean {
+  return !NON_HUMAN_CLIENT_NAMES.has(clientName);
+}
+
+// Task B4: parses a `/ultracode` trigger off a MAIN-thread human message. Case-sensitive; requires
+// a word boundary right after the keyword (via the `\s+`-or-end alternation below) so
+// "/ultracoder"/"/ultracode2" never false-match — returns undefined for any text that doesn't
+// literally START with it (after trimming). `task` is the trimmed remainder, or undefined for a
+// BARE `/ultracode` (nothing — or only whitespace — after the keyword): the
+// session-wide-toggle-flip form (see turn()'s own use of this, below).
+function parseUltracodeTrigger(text: string): { task?: string } | undefined {
+  const m = /^\/ultracode(?:\s+([\s\S]*))?\s*$/.exec(text.trim());
+  if (!m) return undefined;
+  const task = m[1]?.trim();
+  return { task: task && task.length > 0 ? task : undefined };
+}
+
+// Task B4: AUTHORIZATION only, no know-how — the deferred Workflow tool's OWN registered
+// description already IS the authoring guide (tools/workflow.ts's AUTHORING_GUIDE); this just
+// tells the model the user opted in for THIS task. A <system-reminder>-tagged block embedded
+// directly in the assembled instructions string mirrors context.ts's own memory-index injections
+// (context.ts:70's neutralizeReminderTags is the exact sanitizer those use before embedding —
+// buildInstructionsFull, below, gives this static string the same treatment for consistency, even
+// though it has no interpolated content today).
+const ULTRACODE_REMINDER = "<system-reminder>\nThe user opted into workflow orchestration for this task. When the task is substantial and parallelizable, USE the Workflow tool to author and launch a dynamic workflow. This authorizes orchestration; it does not change how the tool works.\n</system-reminder>";
 
 // 4h-i (CC parity: spawn_agent `mode`), widened to 6 values (SP-policies Task 2) — permissiveness
 // order, LEAST to MOST permissive: "plan" (read-only, most restrictive) < "dont-ask" < "ask"
@@ -170,6 +238,21 @@ function approvalCardSummary(call: { name: string; argsJson: string }): string {
         if (a.dangerouslyDisableSandbox === true) return `bash (UNSANDBOXED): ${cmd}`;
         if (a.allowNetwork === true) return `bash (with network): ${cmd}`;
         return `bash ${cmd}`;
+      }
+    } catch { /* malformed argsJson → generic slice below */ }
+  }
+  // Task B2: a Workflow card must show what the run actually DOES, not a raw-JSON slice whose
+  // escaping (a multi-line script quoted into one JSON string) would bury it — same "show the
+  // executed payload" rationale as bash's card just above. Only the script's FIRST line is shown
+  // (mirrors `summary` in WorkflowRuntime.launch — see runtime.ts); the full script is never on
+  // this card (an approval card is not a code-review surface, and the model already wrote it).
+  if (call.name === WORKFLOW_TOOL) {
+    try {
+      const a = JSON.parse(call.argsJson || "{}") as { script?: unknown; name?: unknown };
+      if (typeof a.script === "string" && oneLine(a.script.split(/\r?\n/)[0] ?? "") !== "") {
+        const label = typeof a.name === "string" && oneLine(a.name) !== "" ? ` "${oneLine(a.name)}"` : "";
+        const firstLine = oneLine(a.script.split(/\r?\n/)[0] ?? "").slice(0, 120);
+        return `Workflow${label}: ${firstLine}`;
       }
     } catch { /* malformed argsJson → generic slice below */ }
   }
@@ -722,6 +805,24 @@ export interface EngineConfig {
   // field. daemon.ts wires the real `notifyHeadless`; tests inject a spy to assert it fires (or
   // doesn't) without ever shelling out to osascript for real.
   notifyFallback?: (title: string, message: string) => void;
+  // CC-parity phase 3 (Workflows, Track B Task B1): settings-backed getters for the dynamic
+  // Workflow tool. PRODUCED here (daemon.ts wires both via the SAME ProjectSettingsResolver
+  // instance reviewerEnabled/toolSearch above use, per-project + hot) so Task B3/B4 has a stable
+  // EngineConfig surface to build the tool-gating/keyword-trigger logic against; neither getter is
+  // read anywhere in this file yet. Each already bakes in settings.ts's own default-ON semantics
+  // (workflowsEnabledFrom/keywordTriggerEnabledFrom's `!== false`), so — unlike reviewerEnabled/
+  // toolSearch's sub-getters above — these resolve to a definite `boolean`, never `undefined`.
+  workflowsEnabled?: (cwd?: string) => boolean;
+  keywordTriggerEnabled?: (cwd?: string) => boolean;
+  // Task B2: the runtime the Workflow tool bridge (below) actually launches/awaits against. Plain
+  // instance (not a getter) — mirrors `subagents`/`agents`/`worktrees` above, not the hot-settings
+  // getters just above this field: the runtime itself has no per-project/hot-reload story in B2
+  // (that's the settings getters' job). Absent (every test/config that doesn't wire it) → the
+  // Workflow tool's own placeholder run() answers every call ("workflows are not available in this
+  // session") and gate.ts's classification still applies (a plan/ask session still can't bypass the
+  // gate just because nothing is wired to launch), mirroring worktrees'/plans' own absent-dependency
+  // shape (isWorktree/exit_plan_mode's own `this.cfg.X &&` guards).
+  workflows?: WorkflowRuntime;
 }
 
 export class AgentEngine {
@@ -731,6 +832,19 @@ export class AgentEngine {
   // reentrant turn; runTurn's finally drains it (starts exactly one follow-up turn) once the
   // in-flight turn settles, UNLESS that turn ended via interrupt() (see runTurn's finally).
   private retriggerPending = new Set<string>();
+  // Task B2: runIds currently being awaited INLINE by a `run_in_background:false` Workflow call
+  // (runWorkflowBridge adds before its `await this.cfg.workflows.await(runId)`, removes in a
+  // `finally` right after) — consulted by notifyWorkflowCompletion to SKIP the notify+retrigger for
+  // a run whose result is ALREADY about to reach the model as that SAME call's own tool_result.
+  // Mirrors BackgroundAgentRegistry's sync-spawn `{notified:true}` opt-out (see notifyBgCompletion's
+  // own callers), reimplemented here because WorkflowRuntime.finish() (workflows/runtime.ts — not
+  // ours to modify) has no such opt: its onEvent fires "completed"/"failed" for EVERY run
+  // (background or inline) the instant the child process reports done, which — for an inline
+  // await — happens BEFORE `runtime.await(runId)` itself resolves (finish() calls onEvent, then
+  // resolves the settler promise runWorkflowBridge's own await is suspended on). Without this guard
+  // an inline call's result would be persisted TWICE (once as this call's tool_result, once as a
+  // task_notification moments later) and would kick off a spurious extra turn once this one ends.
+  private inlineWorkflowRuns = new Set<string>();
   private steerQueue = new Map<string, string[]>();
   // 4h-ii-b Task 4 (CC SendMessage): per-CHILD-THREAD steer queue, keyed by threadId (globally
   // unique th_<uuid>) — SEPARATE from the sessionId-keyed `steerQueue` above, which stays
@@ -772,6 +886,14 @@ export class AgentEngine {
   // it already started; CC has the same re-fire-on-restart shape). Only consulted when cfg.hooks
   // is wired, so it's inert (allocated-but-untouched) for every hook-less config — byte-identical.
   private hookSessionStarted = new Set<string>();
+  // Task B4: session-wide "auto-orchestrate substantial tasks" toggle — flipped by a BARE
+  // `/ultracode` (no task text), read by turn() every turn thereafter. SESSION-scoped like
+  // loadedSkills/loadedTools above (sticky across turns, never cleared by runTurn's finally); CC
+  // parity ("resets on new session") falls out for free — a fresh sessionId was simply never added
+  // here, no explicit teardown needed. Never persisted: a daemon restart (or a resumed session in a
+  // fresh process) starts every session back at "off", same acceptable v1 shape hookSessionStarted
+  // above already has for its own per-process-only state.
+  private ultracodeToggle = new Set<string>();
   // Vision image bridge (originally Phase 5 CU-only; generalized so ANY tool can stage an image —
   // the `computer` tool's screenshots AND the `read` tool's image/notebook-image-output attaches
   // both go through this ONE map): images staged this turn, keyed by imageKey(sessionId, threadId,
@@ -1099,7 +1221,7 @@ export class AgentEngine {
    *  tool that was never hidden in the first place. `_cwd` is unused today (no current pin is
    *  scope-aware) — kept in the signature for parity with the other deferral seams, which all
    *  thread cwd, in case a future pin needs it. */
-  private pinnedTools(sessionId: string, meta: { approvalPolicy: SessionApprovalPolicy }, _cwd: string | null): Set<string> {
+  private pinnedTools(sessionId: string, meta: { approvalPolicy: SessionApprovalPolicy }, _cwd: string | null, ultracodeActive?: boolean): Set<string> {
     const pins = new Set<string>();
     if (meta.approvalPolicy === "plan") pins.add("exit_plan_mode");
     if (this.cfg.worktrees?.active(sessionId)) pins.add("exit_worktree");
@@ -1115,6 +1237,13 @@ export class AgentEngine {
     // this session — running OR terminal (unlike task_stop's running-only pin above), since a
     // FINISHED agent must stay collectable via agent_output without a ToolSearch load.
     if (this.cfg.bgAgents?.list(sessionId).length) { pins.add("agent_list"); pins.add("agent_output"); }
+    // Task B4: /ultracode pins the deferred Workflow tool for the turn — mirrors exit_plan_mode's
+    // own pin just above (a state-required deferred built-in forced visible without touching the
+    // sticky loadedTools set). `ultracodeActive` is computed ONCE per turn by turn() itself (its own
+    // doc comment there); both callers of this method (buildInstructionsFull's once-per-turn read,
+    // and the per-round loop in runThread) thread that SAME fixed-for-the-turn value through
+    // unchanged, so a mid-turn steer can never flicker the pin on/off within one turn.
+    if (ultracodeActive) pins.add(WORKFLOW_TOOL);
     return pins;
   }
 
@@ -1509,28 +1638,134 @@ export class AgentEngine {
     void this.runTurn(sessionId).catch((err) => console.error("bg-notification turn failed:", err));
   }
 
+  /** Task B2: persists a completed/failed WORKFLOW run as a task_notification history event —
+   *  mirrors notifyBgCompletion just above (bg-agent completions), reusing the SAME event variant
+   *  (no new SessionEvent — the union already has task_notification). Exactly-once via
+   *  runtime.takeForNotification (single-consumer claim, mirrors
+   *  BackgroundAgentRegistry.takeForNotification). PUBLIC (unlike notifyBgCompletion): daemon.ts's
+   *  `onEvent` wiring calls this directly from outside the class, the same way it calls
+   *  `engine.runTurn`/`engine.interrupt` — see daemon.ts's WorkflowRuntime construction.
+   *
+   *  Skips entirely (no claim, no notification, no retrigger) for a run currently being awaited
+   *  INLINE by a `run_in_background:false` call (inlineWorkflowRuns, above) — that call's own
+   *  tool_result already carries this exact result to the model, THIS SAME turn; persisting a
+   *  second copy here (and possibly retriggering a fresh turn right after) would duplicate/leak it,
+   *  exactly the failure mode bg-agent-registry's own sync-spawn `{notified:true}` opt exists to
+   *  prevent (WorkflowRuntime.finish() has no such opt to pass — see runWorkflowBridge's own doc
+   *  comment for why this guard lives here instead). */
+  notifyWorkflowCompletion(sessionId: string, runId: string): void {
+    if (this.inlineWorkflowRuns.has(runId)) return;
+    const v = this.cfg.workflows?.takeForNotification(runId);
+    if (!v) return;
+    // Same sanitize-and-escape treatment notifyBgCompletion gives agent name/result — `name` is
+    // model-supplied (the Workflow tool's own `name` arg), `result`/`error` are script-authored.
+    const clean = (s: string) => this.sanitizeForReminder(s).replace(/<\/\s*task-notification\s*>/gi, "&lt;/task-notification&gt;");
+    const label = clean(v.name ?? v.runId);
+    const summary = v.status === "completed" ? `Workflow "${label}" completed`
+      : v.status === "failed" ? `Workflow "${label}" failed`
+      : `Workflow "${label}" was stopped`; // defensive — takeForNotification never returns "running", and onEvent never fires for "stopped"
+    const detail = v.status === "completed" ? v.result : v.error;
+    const result = detail ? `\n<result>${clean(detail)}</result>` : "";
+    const content = `<task-notification>\n<task-id>${v.runId}</task-id>\n<status>${v.status}</status>\n<summary>${summary}</summary>${result}\n</task-notification>`;
+    this.cfg.hub.append(sessionId, { type: "task_notification", sessionId, threadId: MAIN_THREAD, content });
+    // bg-retrigger Task 2's exact idiom, reused verbatim: defer if a turn is already running for
+    // this session (runTurn's finally drains it once that turn settles), otherwise wake it now.
+    if (this.isRunning(sessionId)) { this.retriggerPending.add(sessionId); return; }
+    void this.runTurn(sessionId).catch((err) => console.error("workflow-notification turn failed:", err));
+  }
+
+  /** Task B3: is the `Workflow` tool visible/usable for THIS session? Top-level interactive CODE
+   *  sessions only, and only while `workflows.enabled` (settings, B1's `EngineConfig.workflowsEnabled`
+   *  getter — absent entirely, e.g. every pre-B3 test/config, defaults to allowed: `!== false` reads
+   *  true for `undefined`, mirroring reviewerEnabled/toolSearch's own "absent getter → default-on"
+   *  shape). ANDs four independent conditions, ALL of which must hold:
+   *   - `workflowsEnabled(cwd) !== false` — the settings gate (workflowsEnabledFrom, settings.ts).
+   *   - `meta.mode !== "dispatch"` — the dispatch COORDINATOR session itself is excluded; it isn't
+   *     "the top-level interactive code session" the tool is scoped to, and it runs allowTools
+   *     (DISPATCH_ALLOW_TOOLS, dispatch-prompt.ts) which never lists "Workflow" anyway — this ANDs
+   *     with that pre-existing exclusion rather than depending on it alone (belt-and-braces, same
+   *     relationship SESSION_SPAWN_TOOL's own two exclusion sites have to each other).
+   *   - `meta.origin !== "dispatch-child"` — a session_spawn-created child session (a full session
+   *     in its own right, mode:"code", origin:"dispatch-child" stamped at createSession) — see
+   *     ContextAssembler's own skipOutputStyle check just below in turn() for the identical signal.
+   *   - `!isChatOrCowork(meta)` — always true today (see that function's own doc comment); kept so
+   *     this predicate is already correct the day a real chat/cowork mode ships.
+   *  Does NOT need to separately exclude a workflow-spawned agent or a plain spawn_agent child:
+   *  neither is a SESSION (both are child THREADS sharing this same session's `meta`, hence this
+   *  same session-level answer) — runWorkflowAgent's own `childExcludeTools` (Task A4) already
+   *  excludes WORKFLOW_TOOL for its depth-1 children independently of this predicate. */
+  private workflowToolAllowed(meta: { mode?: string; origin?: string }, cwd: string | undefined): boolean {
+    return this.cfg.workflowsEnabled?.(cwd) !== false
+      && meta.mode !== "dispatch"
+      && meta.origin !== "dispatch-child"
+      && !isChatOrCowork(meta);
+  }
+
+  /** Task B4: the most recent MAIN-thread `user_message` in this session's log, if any — read
+   *  fresh (mirrors `historyInput`/`maybeAutoCompact`'s own independent `store.read` calls above;
+   *  no shared cache) so `/ultracode` detection in turn() always sees the message that's actually
+   *  driving THIS turn. Scoped to MAIN_THREAD only, mirroring `historyInput`'s own
+   *  `e.threadId !== MAIN_THREAD` skip — a child thread's own "send_message"/"resume"-clientName
+   *  events (runThread's send_message drain, resumeAgent) are never candidates. */
+  private latestMainUserMessage(sessionId: string): { text: string; clientName: string } | undefined {
+    const events = this.cfg.store.read(sessionId);
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i]!;
+      if (e.type === "user_message" && e.threadId === MAIN_THREAD) return { text: e.text, clientName: e.clientName };
+    }
+    return undefined;
+  }
+
   // Computed ONCE per turn by turn() (same one-per-turn rule as `instructions` itself) — a
   // same-turn ToolSearch load changes `loaded` but must not re-trigger this mid-turn; and the
   // plan-mode reminder is appended off the policy at turn start, not re-checked per round, so an
   // in-turn exit_plan_mode approval (which mutates `meta.approvalPolicy` for the REST of this
   // turn) does not retroactively add/remove this reminder mid-turn.
-  private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: SessionApprovalPolicy, sessionId: string): string {
+  //
+  // Task B3: `excludeDeferred` (optional — every pre-B3 caller/call site omits it, unchanged
+  // behavior) strips named tools from the DEFERRED-INDEX TEXT LISTING below, same names as
+  // whatever the caller ALSO excludes from specs() via runThread's own `excludeTools` — Workflow is
+  // registered `deferred:true` (B2), so excluding it from specs() alone leaves it still ADVERTISED
+  // in "# Deferred tools" (deferredIndex() and specs() are two independent seams over the same
+  // registry — see registry.ts's own doc comment on isDeferred), which would tell the model a tool
+  // exists that calling it will then just reject. turn() (the main thread's own Workflow gating) and,
+  // since Task B-gatefix Part 3, the plain spawn_agent bridge below BOTH pass this now — a spawned
+  // child thread is NEVER the top-level MAIN thread `workflowToolAllowed` gates for (see that
+  // bridge's own doc comment on `childExcludeTools`). runWorkflowAgent's own child creation still
+  // doesn't need to: its childExcludeTools literal already excludes WORKFLOW_TOOL from specs()
+  // (Task A4) — the load-bearing enforcement — and this file's "Files" scope doesn't extend the same
+  // textual-listing polish to that already-excluded, already-safe path.
+  // Task B4: `ultracodeActive` (optional — every pre-B4 caller/call site omits it, unchanged
+  // behavior) is turn()'s own once-per-turn `/ultracode` decision (see its doc comment there),
+  // threaded straight through to `pinnedTools` (pins Workflow for the turn) AND appended as an
+  // authorization <system-reminder> below, mirroring the "# Plan mode" block's own
+  // append-onto-instructionsFull shape.
+  private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: SessionApprovalPolicy, sessionId: string, excludeDeferred?: Set<string>, ultracodeActive?: boolean): string {
     const tsEnabled = this.toolSearchEnabled(cwd);
     const deferThreshold = this.toolSearchThreshold(cwd);
     // Pins computed HERE, at instructionsFull's own once-per-turn/thread cadence (see this
     // method's callers — turn() and the spawn bridge each call it exactly once), NOT the
     // per-round cadence used at the specs()/executeCall seams below. `loaded` itself is never
     // mutated — pins are unioned into a NEW Set.
-    const pins = tsEnabled ? this.pinnedTools(sessionId, { approvalPolicy: policy }, cwd) : new Set<string>();
+    const pins = tsEnabled ? this.pinnedTools(sessionId, { approvalPolicy: policy }, cwd, ultracodeActive) : new Set<string>();
     const effectiveLoaded = pins.size ? new Set([...loaded, ...pins]) : loaded;
     const deferred = tsEnabled
-      ? this.cfg.registry.deferredIndex(cwd, effectiveLoaded, deferThreshold, tsEnabled, this.toolSearchDeferExternals(cwd))
+      ? this.cfg.registry.deferredIndex(cwd, effectiveLoaded, deferThreshold, tsEnabled, this.toolSearchDeferExternals(cwd)).filter((d) => !excludeDeferred?.has(d.name))
       : [];
     let instructionsFull = deferred.length
       ? base + "\n\n# Deferred tools\nThe following tools exist but their schemas are NOT loaded — calling them directly fails. Load schemas first with the ToolSearch tool (query \"select:<name>\" or keywords), then call them normally.\n" + deferred.map((d) => `- ${d.name} — ${d.description}`).join("\n")
       : base;
     if (policy === "plan") {
       instructionsFull += "\n\n# Plan mode\nYou are in plan mode: research and form a plan, but make NO changes — file edits, writes, and commands are disabled and will be blocked. Any clarifying question or choice you need from the user MUST go through the ask_user tool (structured options) — do not ask in prose and stop. When your plan is ready, call exit_plan_mode with the plan (markdown) to present it for approval. Only after approval will editing be enabled.";
+    }
+    // Task B4: the /ultracode authorization reminder. Unconditional on `tsEnabled`/`deferred`
+    // above (a session with ToolSearch off entirely still needs the model told it's authorized to
+    // orchestrate) — independent concern from the pin, which only matters while the tool is
+    // actually deferred. A STATIC string (no interpolated model/user/file content) run through
+    // neutralizeReminderTags anyway, for the same "every <system-reminder> block gets the same
+    // hygiene treatment" reason context.ts's own memory-index injections do.
+    if (ultracodeActive) {
+      instructionsFull += "\n\n" + neutralizeReminderTags(ULTRACODE_REMINDER);
     }
     return instructionsFull;
   }
@@ -1589,13 +1824,67 @@ export class AgentEngine {
     // to execute's defense-in-depth check, all within this one turn, without re-reading anything.
     if (!this.loadedTools.has(sessionId)) this.loadedTools.set(sessionId, new Set());
     const loaded = this.loadedTools.get(sessionId)!;
-    const instructionsFull = this.buildInstructionsFull(instructions, cwd, loaded, meta.approvalPolicy, sessionId);
+    // Task B3: computed once per turn (workflowToolAllowed's own doc comment above) — a mid-turn
+    // settings.json edit to `workflows.enabled` must not retroactively change what THIS turn
+    // already advertised, mirroring `isDispatch`/`instructions`/`instructionsFull` themselves.
+    const excludeWorkflow = !this.workflowToolAllowed(meta, cwd);
+    // Task B4: `/ultracode` — human-origin only, gated on BOTH workflows.enabled AND
+    // workflows.keywordTrigger (B1), independent of (but overlapping with) workflowToolAllowed's
+    // own gate just above. Every condition re-checked directly here (not just via `excludeWorkflow`)
+    // so this reads as a self-contained formula against the spec: `workflowsEnabled(cwd) &&
+    // keywordTriggerEnabled(cwd) && human-origin`, where human-origin itself is `meta.mode !==
+    // "dispatch"` (isDispatch, computed above) AND `meta.origin` names neither a dispatch nor a
+    // routine session (belt-and-braces alongside workflowToolAllowed's own identical
+    // dispatch-child check — see its doc comment for why that redundancy is deliberate) AND the
+    // driving message's `clientName` is a real interactive harness (isHumanOriginClientName).
+    const latestUserMessage = this.latestMainUserMessage(sessionId);
+    const ultracodeGateOpen = this.cfg.workflowsEnabled?.(cwd) !== false
+      && this.cfg.keywordTriggerEnabled?.(cwd) !== false
+      && !isDispatch
+      && meta.origin !== "dispatch-child"
+      && meta.origin !== "dispatch"
+      && !meta.origin?.startsWith("routine/")
+      && !isChatOrCowork(meta)
+      && !!latestUserMessage
+      && isHumanOriginClientName(latestUserMessage.clientName);
+    // Parsed only when the gate is open — a `/ultracode`-prefixed message in a gated-off session
+    // (workflows.enabled:false, keywordTrigger:false, or non-human-origin) is never even parsed, so
+    // it can't flip the toggle either (Design notes: "inert" means no pin, no reminder, AND no
+    // toggle side effect).
+    const ultracodeTrigger = ultracodeGateOpen && latestUserMessage ? parseUltracodeTrigger(latestUserMessage.text) : undefined;
+    if (ultracodeTrigger && ultracodeTrigger.task === undefined) {
+      // Bare `/ultracode` (no task): flip the session-wide auto-orchestrate toggle. Checked AFTER
+      // the flip below (`this.ultracodeToggle.has(sessionId)`), so a toggle-ON flip and a
+      // toggle-OFF flip both take effect starting with THIS very turn — no separate "was it already
+      // on before this message" bookkeeping needed.
+      if (this.ultracodeToggle.has(sessionId)) this.ultracodeToggle.delete(sessionId);
+      else this.ultracodeToggle.add(sessionId);
+    }
+    const ultracodeActive = ultracodeGateOpen && (ultracodeTrigger?.task !== undefined || this.ultracodeToggle.has(sessionId));
+    const instructionsFull = this.buildInstructionsFull(instructions, cwd, loaded, meta.approvalPolicy, sessionId, excludeWorkflow ? new Set([WORKFLOW_TOOL]) : undefined, ultracodeActive);
     // Auto-compact BEFORE historyInput is built, so a triggered compaction's checkpoint is
     // reflected in this turn's input. A compaction failure degrades to a normal (uncompacted)
     // turn rather than breaking it. Uses THIS turn's resolved model (sel.model), not the boot
     // snapshot — see contextWindow's doc comment.
     try { await this.maybeAutoCompact(sessionId, sel.model); } catch (e) { console.error("auto-compact failed", e); }
     const input = this.historyInput(sessionId);
+    // Task B4: strip the literal `/ultracode <task>` prefix from the MODEL-FACING copy of the
+    // triggering message — the persisted event (session log / every harness's transcript) keeps the
+    // real "/ultracode <task>" text forever; only THIS turn's reconstruction is rewritten. Matched
+    // by exact content (not position), scanning from the end, so this can only ever touch the exact
+    // message `latestUserMessage` itself identified, never some earlier unrelated message that
+    // happens to share the same text. A no-op whenever this turn's activity came from the
+    // session-wide toggle alone (no fresh trigger this turn) or from a bare `/ultracode` (nothing to
+    // substitute the prefix WITH).
+    if (ultracodeTrigger?.task !== undefined && latestUserMessage) {
+      for (let i = input.length - 1; i >= 0; i--) {
+        const item = input[i]!;
+        if (item.type === "message" && item.role === "user" && item.content === latestUserMessage.text) {
+          input[i] = { ...item, content: ultracodeTrigger.task };
+          break;
+        }
+      }
+    }
     // Appended AFTER history (nearest the model's attention), BEFORE the tool loop starts — see
     // taskListReminder's doc comment for why this is transient (assembled input only, never a
     // persisted event) and why it's a "user" message rather than a new TurnInputItem role.
@@ -1645,12 +1934,22 @@ export class AgentEngine {
       depth: 0,
       signal,
       loaded,
+      // Task B4: the once-per-turn ultracode decision, threaded to runThread's per-round pins seam
+      // (this file's pinnedTools, via the per-round loop) — buildInstructionsFull, above, already
+      // applied the SAME value at round 0's own pins computation; this covers every later round of
+      // this same turn too.
+      ultracodeActive,
       // Dispatch (Phase 7) Task 4: a dispatch session gets the allowTools whitelist (which already
       // includes session_spawn — dispatch-prompt.ts); a code session instead gets session_spawn
       // explicitly EXCLUDED (SESSION_SPAWN_TOOL's own doc comment above) — never both fields at
       // once (excludeTools would filter session_spawn OUT before allowTools ever got a chance to
       // filter it back IN, for a dispatch session that somehow had both set).
-      ...(isDispatch ? { allowTools: DISPATCH_ALLOW_TOOLS } : { excludeTools: new Set([SESSION_SPAWN_TOOL]) }),
+      // Task B3: `excludeWorkflow` folds WORKFLOW_TOOL into the SAME excludeTools Set whenever this
+      // session fails workflowToolAllowed — only reachable in the `else` (non-dispatch) branch: a
+      // dispatch session already takes the allowTools branch instead, and DISPATCH_ALLOW_TOOLS
+      // never lists "Workflow" (workflowToolAllowed's own doc comment above), so it's excluded
+      // there regardless of this Set.
+      ...(isDispatch ? { allowTools: DISPATCH_ALLOW_TOOLS } : { excludeTools: new Set([SESSION_SPAWN_TOOL, ...(excludeWorkflow ? [WORKFLOW_TOOL] : [])]) }),
     });
   }
 
@@ -1678,6 +1977,14 @@ export class AgentEngine {
     loaded: Set<string>;
     excludeTools?: Set<string>;
     allowTools?: Set<string>;
+    // Task B4: turn()'s own once-per-turn `/ultracode` decision (see its doc comment there),
+    // threaded down so the per-round pins computation below can pin Workflow for EVERY round of
+    // this turn, not just round 0 (buildInstructionsFull's own once-per-turn call already pins it
+    // there too — both seams need the SAME fixed value). Only the main-thread caller (turn()) ever
+    // sets this; every spawn/resume call site below omits it, so a child thread never pins Workflow
+    // via this path (childExcludeTools' own literal exclusion of WORKFLOW_TOOL is the belt-and-
+    // braces backstop regardless, per Task A4/B2/B3).
+    ultracodeActive?: boolean;
     // 4h-i (CC parity: Agent.max_turns): a per-thread override of MAX_TOOL_ITERATIONS. Only the
     // spawn bridge (below) ever passes this — main-thread callers (turn()) never set it, so the
     // main thread's bound is unchanged (MAX_TOOL_ITERATIONS, 24). A child's effective bound is
@@ -1776,8 +2083,10 @@ export class AgentEngine {
       // bridges, a bg task started/exited) must be visible to the VERY NEXT round's specs() AND
       // to that round's tool-call dispatch below, not just the next turn. `loaded` is NEVER
       // mutated here — see the loadedTools NOTE above. Reused for every executeCall/
-      // requestApproval invocation triggered by THIS round's calls, further down.
-      const pins = tsEnabled ? this.pinnedTools(sessionId, meta, cwd) : new Set<string>();
+      // requestApproval invocation triggered by THIS round's calls, further down. `opts
+      // .ultracodeActive` (Task B4) is NOT recomputed per round like the rest of this Set — it's
+      // the one fixed-for-the-whole-turn value turn() already decided, just applied at this seam too.
+      const pins = tsEnabled ? this.pinnedTools(sessionId, meta, cwd, opts.ultracodeActive) : new Set<string>();
       const effectiveLoaded = pins.size ? new Set([...loaded, ...pins]) : loaded;
 
       for await (const ev of this.cfg.provider.provider.streamTurn({
@@ -2247,7 +2556,20 @@ export class AgentEngine {
           // the main thread's own exclusion, not a new authorization boundary (the bridge's
           // `meta.mode === "dispatch"` gate above already denies it functionally either way).
           const childDepth = opts.depth + 1;
-          const childExcludeTools = new Set(["ask_user", "exit_plan_mode", "enter_plan_mode", "send_message", "task_stop", "agent_list", "agent_output", "skill_write", SESSION_SPAWN_TOOL]);
+          // Task B-gatefix Part 3 (from B3's own report, "concern" #1): a plain spawn_agent child is
+          // a THREAD, not a session — it shares its parent's `meta` byte-for-byte (childMeta above is
+          // often the exact same object), so re-running `workflowToolAllowed(childMeta, childCwd)`
+          // here would just repeat the PARENT's own session-level verdict (often `true`, for a
+          // workflows-enabled top-level session) — it can't see that THIS thread isn't the top-level
+          // MAIN thread. Workflow is scoped "top-level interactive code session ONLY"
+          // (workflowToolAllowed's own doc comment above), and `childDepth` here is ALWAYS >= 1
+          // (never MAIN_THREAD, which only ever runs at depth 0) — so WORKFLOW_TOOL is excluded
+          // UNCONDITIONALLY for every spawn_agent child, keyed on THREAD identity, not on any
+          // session-level gate. Defense-in-depth: even a provider that ignored specs() and called it
+          // anyway would still be rejected by the launch gate's own `isWorkflowLaunch`/
+          // `!!this.cfg.workflows` checks — but that's belt-and-braces; this is "top-level only"
+          // correctness (a plain subagent should never even see the tool is callable).
+          const childExcludeTools = new Set(["ask_user", "exit_plan_mode", "enter_plan_mode", "send_message", "task_stop", "agent_list", "agent_output", "skill_write", SESSION_SPAWN_TOOL, WORKFLOW_TOOL]);
           if (childDepth >= maxDepth) childExcludeTools.add("spawn_agent");
           // 4h-ii-b Task 1: instructionsFull is computed ONCE here — hoisted out of the bg and
           // sync closures below, which used to each build their own copy independently — so it
@@ -2256,7 +2578,11 @@ export class AgentEngine {
           // childPolicy, sessionId) is already known at this point in the bridge either way, so
           // this is purely a hoist: same value, computed earlier, not a behavior change.
           const childLoaded = new Set<string>();
-          const instructionsFull = this.buildInstructionsFull(def.instructions, childCwd, childLoaded, childPolicy, sessionId);
+          // Task B-gatefix Part 3: excludeDeferred keeps WORKFLOW_TOOL out of "# Deferred tools"
+          // text too (buildInstructionsFull's own doc comment above) — not just out of specs()
+          // (childExcludeTools just above) — so a spawn_agent child is never even told the tool
+          // exists, matching the MAIN thread's own excludeWorkflow treatment in turn().
+          const instructionsFull = this.buildInstructionsFull(def.instructions, childCwd, childLoaded, childPolicy, sessionId, new Set([WORKFLOW_TOOL]));
           // 4h-ii-b Task 1: everything a future `resume` (Task 3) needs to re-run THIS child
           // EXCEPT input/signal — captured now, at spawn time, from the exact values this bridge
           // already computed to start the child's own live run below. Stored on the registry
@@ -2728,6 +3054,13 @@ export class AgentEngine {
         // and the bridge (setCwd + git + same-turn cwd + worktree_* events) would NEVER run outside
         // `auto` policy — see task-4-report.md for the bug writeup.
         const isWorktree = (call.name === "enter_worktree" || call.name === "exit_worktree") && !!this.cfg.worktrees;
+        // Task B2: same "bridge instead of executeCall's placeholder" shape as isWorktree just
+        // above — both are MUTATING (gate.ts), so `decision` here can be "ask" (default policy) or
+        // "allow" (accept-edits/auto/bypass, or an approved ask card); the branch below handles
+        // both, exactly mirroring isWorktree's own ask-vs-allow split. Absent cfg.workflows → false,
+        // so the call falls through every branch below to the final default (executeCall → the
+        // tool's own placeholder run(), tools/workflow.ts).
+        const isWorkflowLaunch = call.name === WORKFLOW_TOOL && !!this.cfg.workflows;
         // `cwd` is typed `string` (never undefined here), so this ternary is only a defensive
         // guard against an empty string — repoRootFor("") would realpath-fail and fall back to the
         // DAEMON's own process.cwd(), a wrong and misleading project root. `projectRoot: null`
@@ -3005,6 +3338,29 @@ export class AgentEngine {
             outcome = this.runWorktreeBridge(call, sessionId, threadId, cwd, onCwd);
           }
           if (newCwd !== undefined) cwd = newCwd;
+        } else if (isWorkflowLaunch) {
+          // Task B2: the SAME ask-vs-allow split as isWorktree just above — "allow" launches
+          // directly; "ask" waits on the SAME ApprovalBroker every other mutating tool uses, and
+          // passes the bridge itself as requestApproval's onApprove action, so an APPROVED call
+          // launches — it never falls through to executeCall's placeholder run() (tools/workflow.ts).
+          // `decision === "deny"` (plan mode) was already handled by the FIRST branch of this whole
+          // if/else-if chain, well above — this branch is never reached for a denied call.
+          // Task B-gatefix (user decision 2026-07-22, CC-parity): `decision` reaches "allow" here
+          // ONLY under `bypass` now — gate.ts cards (returns "ask") a Workflow launch under
+          // ask/dont-ask/accept-edits/auto alike (a dedicated special-case for auto; the plain
+          // MUTATING fallthrough for the rest), reversing B2's original accept-edits/auto free pass.
+          // This ternary's SHAPE didn't need to change at all — it already branched on `decision`, so
+          // gate.ts's corrected verdicts flow straight through: every policy but bypass now takes the
+          // card path below. (Investigated gating this via the AI reviewer instead, mirroring the
+          // auto-policy bash/fs/external branches further down this same loop — see gate.ts's own
+          // doc comment on why that was rejected in favor of this card-based fallback.)
+          outcome = decision === "ask"
+            ? await this.requestApproval(call, cwd, sessionId, threadId, signal, {
+                timeoutMs: this.approvalTimeoutFor(meta),
+                summary: approvalCardSummary(call),
+                // no denialMessage → the helper defaults to `denied by ${res.by}` (unchanged behavior)
+              }, loaded, async () => this.runWorkflowBridge(call, sessionId), pins, rootsOverride, visionCapable)
+            : await this.runWorkflowBridge(call, sessionId);
         } else if (dirGrant) {
           // Out-of-project write/edit under `ask` (the auto/accept-edits/bypass cases were ALL
           // pre-granted + nulled above, so they never reach this branch): ONE grant-flavored card
@@ -3553,6 +3909,49 @@ export class AgentEngine {
     return outcome;
   }
 
+  /** Workflows: bridges a workflow script's agent() call to the SAME SubagentManager/runThread path
+   *  spawn_agent uses. The child runs at accept-edits (Global Constraints — the launch gate on the
+   *  Workflow tool call itself is the human's one consent point) and is EXCLUDED from the Workflow
+   *  tool (nesting depth 1) AND from spawn_agent itself (M3 review fix): a workflow's agent()
+   *  fan-out is bounded by the run's own semaphore + totalCap, but a workflow-spawned child that
+   *  called spawn_agent would nest a grandchild subtree that counts against the global
+   *  SubagentManager pool without ever counting against THIS run's totalCap — the run's caps must
+   *  stay authoritative over everything it spawns, direct or nested. Returns a plain {ok,result} the
+   *  WorkflowRuntime posts back over the bridge. Never throws — SubagentManager.run never throws
+   *  (subagents.ts). */
+  async runWorkflowAgent(
+    sessionId: string, prompt: string, opts: { label?: string; model?: string; schema?: unknown } | undefined, signal: AbortSignal,
+  ): Promise<{ ok: boolean; result: string }> {
+    if (!this.cfg.subagents || !this.cfg.agents) return { ok: false, result: "subagents are not available in this session" };
+    const meta = this.cfg.store.meta(sessionId);
+    const cwd = meta.cwd;
+    if (!cwd) return { ok: false, result: "session has no working directory" };
+    const agentType = opts?.label ?? "general-purpose";
+    const def = this.cfg.agents.resolve(agentType, cwd);
+    const childCwd = cwd;
+    const childPolicy: SessionApprovalPolicy = "accept-edits";
+    const childMeta = { ...meta, approvalPolicy: childPolicy };
+    const childId = "wfa_" + randomUUID().slice(0, 8); // same minting shape as the spawn bridge (engine.ts: "th_" + randomUUID().slice(0,8))
+    const childLoaded = new Set<string>();
+    const instructionsFull = this.buildInstructionsFull(def.instructions, childCwd, childLoaded, childPolicy, sessionId);
+    const childExcludeTools = new Set(["ask_user", "exit_plan_mode", "enter_plan_mode", "send_message", "task_stop", "agent_list", "agent_output", "skill_write", SESSION_SPAWN_TOOL, WORKFLOW_TOOL, "spawn_agent"]);
+    this.registerThread(sessionId, { threadId: childId, parentThreadId: MAIN_THREAD, agentType, status: "running" });
+    this.emit(sessionId, { type: "thread_started", sessionId, threadId: childId, parentThreadId: MAIN_THREAD, agentType, prompt, description: opts?.label });
+    const result = await this.cfg.subagents.run(async (childSignal, progress) => this.runThread({
+      sessionId, threadId: childId, instructionsFull,
+      input: [{ type: "message", role: "user", content: prompt }],
+      cwd: childCwd, model: opts?.model ?? this.cfg.provider.model, meta: childMeta, depth: 1,
+      signal: AbortSignal.any([childSignal, signal]),
+      loaded: childLoaded, excludeTools: childExcludeTools, allowTools: def.allowTools, onProgress: progress,
+    }));
+    const stopReason = result.ok ? result.value.stopReason : result.stalled ? "stalled" : "error";
+    this.emit(sessionId, { type: "thread_completed", sessionId, threadId: childId, stopReason });
+    this.completeThread(sessionId, childId, stopReason);
+    if (!result.ok) return { ok: false, result: this.subagentFailureText(agentType, result, sessionId, childId) };
+    if (result.value.stopReason === "error") return { ok: false, result: `workflow agent (${agentType}) failed: ${result.value.errorMessage ?? "provider error"}` };
+    return { ok: true, result: result.value.finalText || "the agent finished without a final message" };
+  }
+
   /** phase 5e T3: class-off flag — T4 threads settings.reviewerClasses into cfg; until then a
    *  caller sets cfg.reviewerClasses directly (see its own doc comment). Absent object OR absent
    *  per-class key → enabled; only an EXPLICIT `false` disables that class. hot-settings T2:
@@ -4007,6 +4406,53 @@ export class AgentEngine {
       output: "Plan mode ON — read-only tools only; present your plan with exit_plan_mode when ready.",
       isError: false,
     };
+  }
+
+  /** Task B2: the Workflow tool's bridge — wired ONLY when cfg.workflows is set (see the
+   *  `isWorkflowLaunch` guard at the call site); otherwise the tool falls through to executeCall's
+   *  placeholder run (tools/workflow.ts). Called from BOTH decisions the gate can produce for a
+   *  MUTATING tool: directly when `decision === "allow"` (accept-edits/auto/bypass, gate.ts), and as
+   *  `requestApproval`'s `onApprove` action when `decision === "ask"` — see the dispatch loop above
+   *  (mirrors runWorktreeBridge's own two call sites just below).
+   *
+   *  Background by default (omitted or `run_in_background !== false`): `runtime.launch(...)` is
+   *  synchronous (it only spawns the child process and returns its runId — the script itself runs
+   *  independently), so this returns `{runId,status:"running"}` immediately; the run's own
+   *  completion later drives `notifyWorkflowCompletion` via the daemon's onEvent wiring, entirely
+   *  off-turn. `run_in_background:false` additionally `await`s `runtime.await(runId)` and returns
+   *  the result/error INLINE as this call's own tool_result — `inlineWorkflowRuns` (this class' own
+   *  field, above) brackets that await so notifyWorkflowCompletion (which WILL still fire — the
+   *  runtime has no concept of "this caller is already waiting inline") skips this runId entirely
+   *  instead of persisting a duplicate task_notification for a result the model is about to receive
+   *  as this exact call's answer. */
+  private async runWorkflowBridge(
+    call: { callId: string; name: string; argsJson: string },
+    sessionId: string,
+  ): Promise<{ output: string; isError: boolean }> {
+    const workflows = this.cfg.workflows!;
+    let parsed: { script?: unknown; args?: unknown; name?: unknown; run_in_background?: unknown } = {};
+    try { parsed = JSON.parse(call.argsJson || "{}"); } catch { /* defensive: empty script rejected below */ }
+    const script = typeof parsed.script === "string" ? parsed.script : "";
+    if (!script) return { output: "invalid arguments for Workflow: script", isError: true };
+    // Zod's own `.min(1).max(64)` (tools/workflow.ts) governs the real schema path; this bridge
+    // hand-parses argsJson BEFORE that ever runs (same reason every other bridge in this file does
+    // — spawn_agent's model/description checks, session_spawn's dir/prompt checks, above), so a
+    // provider that ignored the declared schema still gets a sane fallback: an out-of-range/wrong-
+    // type `name` is simply dropped (undefined), same as omitting it — never a thrown/rejected call.
+    const name = typeof parsed.name === "string" && parsed.name.length >= 1 && parsed.name.length <= 64
+      ? parsed.name
+      : undefined;
+    const runInBackground = parsed.run_in_background !== false; // default true — CC parity: background unless explicitly opted out
+    const runId = workflows.launch({ sessionId, source: script, args: parsed.args, name });
+    if (runInBackground) return { output: JSON.stringify({ runId, status: "running" }), isError: false };
+    this.inlineWorkflowRuns.add(runId);
+    try {
+      const view = await workflows.await(runId);
+      if (view.status === "completed") return { output: view.result ?? "", isError: false };
+      return { output: view.error ?? `workflow ${view.status}`, isError: true };
+    } finally {
+      this.inlineWorkflowRuns.delete(runId);
+    }
   }
 
   /** enter_worktree/exit_worktree's bridge — wired ONLY when cfg.worktrees is set (see the

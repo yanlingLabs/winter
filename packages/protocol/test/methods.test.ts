@@ -120,6 +120,16 @@ import {
   MemoryDeleteResult,
   MemoryAuditParams,
   MemoryAuditResult,
+  WorkflowListParams,
+  WorkflowListResult,
+  WorkflowRunViewSchema,
+  WorkflowSavedSchema,
+  WorkflowRunParams,
+  WorkflowRunResult,
+  WorkflowStopParams,
+  WorkflowStopResult,
+  WorkflowGetParams,
+  WorkflowGetResult,
   METHODS,
 } from "../src/methods";
 
@@ -926,5 +936,72 @@ describe("ApprovalPolicy — 6 modes (SP-policies)", () => {
   });
   test("default is ask", () => {
     expect(ApprovalPolicy.default("ask").parse(undefined)).toBe("ask");
+  });
+});
+
+describe("workflow RPCs (CC-parity phase 3, Track C Task C2)", () => {
+  const runView = {
+    runId: "wf_abc123", sessionId: "s_1", name: "nightly", status: "running" as const,
+    counts: { running: 1, completed: 2, total: 3 }, phase: "triage", startedAt: 1700000000000,
+  };
+
+  test("METHODS carries all four verbs", () => {
+    expect(METHODS.workflowList).toBe("workflow.list");
+    expect(METHODS.workflowRun).toBe("workflow.run");
+    expect(METHODS.workflowStop).toBe("workflow.stop");
+    expect(METHODS.workflowGet).toBe("workflow.get");
+  });
+
+  test("WorkflowRunViewSchema mirrors WorkflowRunView (workflows/types.ts) field-for-field; rejects a bogus status", () => {
+    expect(WorkflowRunViewSchema.parse(runView)).toEqual(runView);
+    const terminal = { ...runView, status: "completed" as const, result: "done" };
+    expect(WorkflowRunViewSchema.parse(terminal)).toEqual(terminal);
+    const failed = { ...runView, status: "failed" as const, error: "boom" };
+    expect(WorkflowRunViewSchema.parse(failed)).toEqual(failed);
+    expect(() => WorkflowRunViewSchema.parse({ ...runView, status: "bogus" })).toThrow();
+    // name/phase/result/error all optional — a bare minimal view still parses.
+    const minimal = { runId: "wf_x", sessionId: "s_1", status: "running" as const, counts: { running: 0, completed: 0, total: 0 }, startedAt: 0 };
+    expect(WorkflowRunViewSchema.parse(minimal)).toEqual(minimal);
+  });
+
+  test("WorkflowSavedSchema: name/description/source, all required strings", () => {
+    const saved = { name: "nightly", description: "nightly sweep", source: "user" };
+    expect(WorkflowSavedSchema.parse(saved)).toEqual(saved);
+    expect(() => WorkflowSavedSchema.parse({ name: "nightly", source: "user" })).toThrow();
+  });
+
+  test("workflow.list params: sessionId required, cwd optional; result is {running, saved}", () => {
+    expect(WorkflowListParams.parse({ sessionId: "s_1" })).toEqual({ sessionId: "s_1" });
+    expect(WorkflowListParams.parse({ sessionId: "s_1", cwd: "/tmp/proj" })).toEqual({ sessionId: "s_1", cwd: "/tmp/proj" });
+    expect(() => WorkflowListParams.parse({})).toThrow();
+    expect(() => WorkflowListParams.parse({ sessionId: "" })).toThrow();
+    const saved = { name: "nightly", description: "nightly sweep", source: "user" };
+    expect(WorkflowListResult.parse({ running: [runView], saved: [saved] })).toEqual({ running: [runView], saved: [saved] });
+    expect(WorkflowListResult.parse({ running: [], saved: [] })).toEqual({ running: [], saved: [] });
+  });
+
+  test("workflow.run params: sessionId required; name/script/args all optional (exactly-one-of is handler-enforced, not the wire schema); result is {runId, status:'running'}", () => {
+    expect(WorkflowRunParams.parse({ sessionId: "s_1" })).toEqual({ sessionId: "s_1" });
+    expect(WorkflowRunParams.parse({ sessionId: "s_1", name: "nightly" })).toEqual({ sessionId: "s_1", name: "nightly" });
+    expect(WorkflowRunParams.parse({ sessionId: "s_1", script: "return 1;" })).toEqual({ sessionId: "s_1", script: "return 1;" });
+    expect(WorkflowRunParams.parse({ sessionId: "s_1", script: "return 1;", args: { seed: 1 } }).args).toEqual({ seed: 1 });
+    expect(() => WorkflowRunParams.parse({})).toThrow();
+    expect(() => WorkflowRunParams.parse({ sessionId: "" })).toThrow();
+    expect(WorkflowRunResult.parse({ runId: "wf_1", status: "running" })).toEqual({ runId: "wf_1", status: "running" });
+    expect(() => WorkflowRunResult.parse({ runId: "wf_1", status: "completed" })).toThrow();
+  });
+
+  test("workflow.stop params/result: runId required; result is {ok:true, stopped}", () => {
+    expect(WorkflowStopParams.parse({ runId: "wf_1" })).toEqual({ runId: "wf_1" });
+    expect(() => WorkflowStopParams.parse({ runId: "" })).toThrow();
+    expect(() => WorkflowStopParams.parse({})).toThrow();
+    expect(WorkflowStopResult.parse({ ok: true, stopped: true })).toEqual({ ok: true, stopped: true });
+    expect(WorkflowStopResult.parse({ ok: true, stopped: false })).toEqual({ ok: true, stopped: false });
+  });
+
+  test("workflow.get params/result: runId required; result is {run: WorkflowRunView}", () => {
+    expect(WorkflowGetParams.parse({ runId: "wf_1" })).toEqual({ runId: "wf_1" });
+    expect(() => WorkflowGetParams.parse({})).toThrow();
+    expect(WorkflowGetResult.parse({ run: runView })).toEqual({ run: runView });
   });
 });

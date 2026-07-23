@@ -1,0 +1,13 @@
+{
+  "seq": 7,
+  "sessionId": "s_fixture",
+  "ts": 1781270000000,
+  "threadId": "main",
+  "type": "workflow_progress",
+  "runId": "wf_a1b2c3",
+  "phase": "synthesize",
+  "log": "merging findings",
+  "running": 3,
+  "completed": 17,
+  "total": 20
+}

@@ -410,6 +410,153 @@ describe("runners — mirror main.ts's routes", () => {
     await runCommand(ctx, "/memory");
     expect(notes).toEqual(["(no memory facts)"]);
   });
+
+  // CC-parity phase 3 (Workflows) Track C Task C4: /workflows mirrors `norma workflow`'s CLI shape
+  // (main.ts `case "workflow"`, C3) — no-arg lists saved (WorkflowStore, via workflowList's
+  // `.saved`) then running (`.running`) under a "running:" header; `run <name> [json]` / `stop
+  // <runId>` mirror /bg's sub-token dispatch, forwarding to client.workflowRun/workflowStop.
+  test("/workflows — lists saved workflows then running runs under a header", async () => {
+    const saved = [{ name: "triage", description: "triage inbox", source: "user" }];
+    const running = [{
+      runId: "run_1", sessionId: "sess-1", name: "triage", status: "running" as const,
+      counts: { running: 1, completed: 0, total: 2 }, startedAt: 0,
+    }];
+    const { client, calls } = makeClient({ workflowList: () => ({ saved, running }) });
+    const { ctx, notes } = makeCtx(client, { sessionId: "sess-1", cwd: "/my/proj" });
+    await runCommand(ctx, "/workflows");
+    expect(calls).toEqual([{ method: "workflowList", args: ["sess-1", "/my/proj"] }]);
+    expect(notes).toEqual(["triage (user) — triage inbox\nrunning:\nrun_1 triage · running"]);
+  });
+
+  test("/workflows list — the explicit sub-token lists identically to the bare form (mirrors /bg's default-to-list)", async () => {
+    const saved = [{ name: "triage", description: "triage inbox", source: "user" }];
+    const { client, calls } = makeClient({ workflowList: () => ({ saved, running: [] }) });
+    const { ctx, notes } = makeCtx(client, { sessionId: "sess-1", cwd: "/my/proj" });
+    await runCommand(ctx, "/workflows list");
+    expect(calls).toEqual([{ method: "workflowList", args: ["sess-1", "/my/proj"] }]);
+    expect(notes).toEqual(["triage (user) — triage inbox"]);
+  });
+
+  test("/workflows — an inline (unnamed) running run falls back to '(inline script)'", async () => {
+    const running = [{
+      runId: "run_2", sessionId: "sess-1", status: "running" as const,
+      counts: { running: 1, completed: 0, total: 1 }, startedAt: 0,
+    }];
+    const { client } = makeClient({ workflowList: () => ({ saved: [], running }) });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/workflows");
+    expect(notes).toEqual(["running:\nrun_2 (inline script) · running"]);
+  });
+
+  test("/workflows — empty (no saved, no running) note", async () => {
+    const { client } = makeClient({ workflowList: () => ({ saved: [], running: [] }) });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/workflows");
+    expect(notes).toEqual(["(no workflows)"]);
+  });
+
+  test("/workflows run <name> — mirrors the CLI's run route, reports the new runId", async () => {
+    const { client, calls } = makeClient({ workflowRun: () => ({ runId: "run_9", status: "running" }) });
+    const { ctx, notes } = makeCtx(client, { sessionId: "sess-4" });
+    await runCommand(ctx, "/workflows run triage");
+    expect(calls).toEqual([{ method: "workflowRun", args: [{ sessionId: "sess-4", name: "triage", args: undefined }] }]);
+    expect(notes).toEqual(["run_9 running"]);
+  });
+
+  test("/workflows run <name> <json> — JSON args are parsed and forwarded", async () => {
+    const { client, calls } = makeClient({ workflowRun: () => ({ runId: "run_9", status: "running" }) });
+    const { ctx } = makeCtx(client, { sessionId: "sess-4" });
+    await runCommand(ctx, '/workflows run triage {"files":["a"]}');
+    expect(calls).toEqual([{ method: "workflowRun", args: [{ sessionId: "sess-4", name: "triage", args: { files: ["a"] } }] }]);
+  });
+
+  test("/workflows run <name> <bad-json> — invalid JSON args is a note, no client call", async () => {
+    const { client, calls } = makeClient({ workflowRun: () => ({ runId: "run_9", status: "running" }) });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/workflows run triage {not-json}");
+    expect(calls).toEqual([]);
+    expect(notes[0]).toContain("invalid JSON args");
+  });
+
+  test("/workflows run — missing name is a usage note, no client call", async () => {
+    const { client, calls } = makeClient({ workflowRun: () => ({ runId: "x", status: "running" }) });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/workflows run");
+    expect(calls).toEqual([]);
+    expect(notes[0]).toContain("usage:");
+  });
+
+  test("/workflows stop <runId> — mirrors workflowStop, reports it stopped", async () => {
+    const { client, calls } = makeClient({ workflowStop: () => ({ ok: true, stopped: true }) });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/workflows stop run_9");
+    expect(calls).toEqual([{ method: "workflowStop", args: ["run_9"] }]);
+    expect(notes).toEqual(["stopped run_9"]);
+  });
+
+  test("/workflows stop <runId> — soft false (unknown/already-terminal) is reported, not an error", async () => {
+    const { client } = makeClient({ workflowStop: () => ({ ok: true, stopped: false }) });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/workflows stop run_stale");
+    expect(notes).toEqual(["run_stale was not running"]);
+  });
+
+  test("/workflows stop — missing runId is a usage note, no client call", async () => {
+    const { client, calls } = makeClient({ workflowStop: () => ({ ok: true, stopped: true }) });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/workflows stop");
+    expect(calls).toEqual([]);
+    expect(notes[0]).toContain("usage:");
+  });
+
+  test("/workflows bogus-sub — usage note, no client call", async () => {
+    const { client, calls } = makeClient({});
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/workflows bogus");
+    expect(calls).toEqual([]);
+    expect(notes[0]).toContain("usage:");
+  });
+});
+
+describe("runCommand — saved-workflow /name dispatch (CC-parity phase 3 Track C Task C4)", () => {
+  test("/<savedName> (not a registered command) runs it via client.workflowRun, reports the runId", async () => {
+    const { client, calls } = makeClient({ workflowRun: () => ({ runId: "run_7", status: "running" }) });
+    const { ctx, notes } = makeCtx(client, { sessionId: "sess-2" });
+    const handled = await runCommand(ctx, "/triage");
+    expect(handled).toBe(true);
+    expect(calls).toEqual([{ method: "workflowRun", args: [{ sessionId: "sess-2", name: "triage" }] }]);
+    expect(notes).toEqual(["run_7 running"]);
+  });
+
+  test("/<name> that is NEITHER a registered command NOR a resolvable workflow falls through to the ordinary 'Unknown command' note", async () => {
+    const { client, calls } = makeClient({
+      workflowRun: () => { throw new Error("unknown workflow: reallynotarealworkflow (code -32004)"); },
+    });
+    const { ctx, notes } = makeCtx(client);
+    const handled = await runCommand(ctx, "/reallynotarealworkflow");
+    expect(handled).toBe(true);
+    expect(calls).toEqual([{ method: "workflowRun", args: [{ sessionId: "sess-1", name: "reallynotarealworkflow" }] }]);
+    expect(notes).toEqual(["Unknown command: /reallynotarealworkflow — /help lists commands"]);
+  });
+
+  test("a registered command is NEVER shadowed by the workflow-name fallback, even if client.workflowRun is wired", async () => {
+    const { client, calls } = makeClient({
+      compact: () => ({ compacted: true, uptoSeq: 1, summaryChars: 10 }),
+      workflowRun: () => ({ runId: "should-not-be-called", status: "running" }),
+    });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/compact");
+    expect(calls).toEqual([{ method: "compact", args: ["sess-1"] }]);
+    expect(notes).toEqual(["compacted (through seq 1, 10 char summary)"]);
+  });
+
+  test("a client exposing no workflowRun at all (e.g. a bare fake) still yields the plain 'Unknown command' note — same as pre-workflow behavior", async () => {
+    const { client } = makeClient({});
+    const { ctx, notes } = makeCtx(client);
+    const handled = await runCommand(ctx, "/nope");
+    expect(handled).toBe(true);
+    expect(notes).toEqual(["Unknown command: /nope — /help lists commands"]);
+  });
 });
 
 describe("/model — mirrors `case \"model\"` (direct settings.json I/O under NORMA_HOME, no client)", () => {

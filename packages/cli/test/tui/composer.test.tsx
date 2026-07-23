@@ -1129,9 +1129,10 @@ describe("Composer — slash-command completion menu (Phase 3d T2)", () => {
     await wait();
     expect(seen.at(0)).toBe(0); // mount, no slash mode
 
-    stdin.write("/s"); // matches exactly 5 (status, sessions, skills prefix; routines, output-style fuzzy-match "s")
+    stdin.write("/s"); // matches exactly 6 (status, sessions, skills prefix; output-style, routines,
+    // workflows fuzzy-match "s" — Task C4 added /workflows, itself an "s"-fuzzy hit)
     await wait();
-    expect(seen.at(-1)).toBe(5);
+    expect(seen.at(-1)).toBe(6);
 
     stdin.write("\x1b"); // esc-dismiss — no InputState change, but the row count must still drop
     await wait();

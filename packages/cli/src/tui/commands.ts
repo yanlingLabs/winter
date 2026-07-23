@@ -272,6 +272,67 @@ async function runMemory(ctx: CommandCtx): Promise<void> {
   ctx.appendNote(formatMemoryList(facts).join("\n"));
 }
 
+/** CC-parity phase 3 (Workflows) Track C Task C4: mirrors `norma workflow`'s CLI shape
+ *  (workflow-cli.ts / main.ts `case "workflow"`, C3) inside the TUI. No sub-token -> list: saved
+ *  workflows (`client.workflowList`'s `.saved` — the same `WorkflowStore` scan the CLI's
+ *  file-direct `list` reads, C1) then running runs (`.running`) under a "running:" header — same
+ *  two-part shape as the CLI's own `list`, minus its best-effort existsSync(socketPath()) probe:
+ *  the TUI is always already attached to a live daemon, so `workflowList` is unconditional here.
+ *  Uses `ctx.cwd` (not `process.cwd()`) for the trust-gated project lookup — same substitution as
+ *  /skills, /mcp, /output-style above. `run <name> [json-args]` / `stop <runId>` mirror /bg's
+ *  sub-token dispatch (above): `run` forwards to `client.workflowRun` (the same call
+ *  `tryRunSavedWorkflow` below and the CLI's own `run` route make) and reports the new runId;
+ *  `stop` calls `client.workflowStop` and reports whether it actually stopped anything (mirrors
+ *  `workflowStop`'s soft `{ok,stopped}` contract, C2 — an unknown/already-terminal runId is not an
+ *  error, just a `stopped: false`). A missing sub-token defaults to "list" — same "a bare /bg reads
+ *  naturally as show me what's running" rationale runBg's own doc comment gives (an explicit
+ *  `/workflows list` is handled identically, not just the no-arg form). */
+async function runWorkflows(ctx: CommandCtx, argText: string): Promise<void> {
+  const tokens = argText.trim().length > 0 ? argText.trim().split(/\s+/) : [];
+  const sub = tokens[0] ?? "list";
+  const usage = "usage: /workflows [list | run <name> [json-args] | stop <runId>]";
+
+  if (sub === "list") {
+    const { saved, running } = await ctx.client.workflowList(ctx.sessionId, ctx.cwd);
+    if (saved.length === 0 && running.length === 0) { ctx.appendNote("(no workflows)"); return; }
+    const lines = saved.map((w) => `${w.name} (${w.source}) — ${w.description}`);
+    if (running.length > 0) {
+      lines.push("running:");
+      for (const r of running) lines.push(`${r.runId} ${r.name ?? "(inline script)"} · ${r.status}`);
+    }
+    ctx.appendNote(lines.join("\n"));
+    return;
+  }
+
+  if (sub === "run") {
+    const name = tokens[1];
+    if (!name) { ctx.appendNote(usage); return; }
+    const argsText = tokens.slice(2).join(" ");
+    let args: unknown;
+    if (argsText.length > 0) {
+      try {
+        args = JSON.parse(argsText);
+      } catch {
+        ctx.appendNote(`invalid JSON args: ${argsText}`);
+        return;
+      }
+    }
+    const { runId } = await ctx.client.workflowRun({ sessionId: ctx.sessionId, name, args });
+    ctx.appendNote(`${runId} running`);
+    return;
+  }
+
+  if (sub === "stop") {
+    const runId = tokens[1];
+    if (!runId) { ctx.appendNote(usage); return; }
+    const r = await ctx.client.workflowStop(runId);
+    ctx.appendNote(r.stopped ? `stopped ${runId}` : `${runId} was not running`);
+    return;
+  }
+
+  ctx.appendNote(usage);
+}
+
 // ---- registry -------------------------------------------------------------------------------
 
 export const COMMANDS: SlashCommand[] = [
@@ -289,6 +350,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "bg", args: "[list|peek|kill] [taskId]", description: "List/peek/kill background tasks", run: (ctx, argText) => runBg(ctx, argText) },
   { name: "routines", description: "List scheduled routines", run: (ctx) => runRoutines(ctx) },
   { name: "memory", description: "List saved memory facts (user scope)", run: (ctx) => runMemory(ctx) },
+  { name: "workflows", args: "[run <name> [json]|stop <runId>]", description: "List saved + running workflows", run: (ctx, argText) => runWorkflows(ctx, argText) },
 ];
 
 // ---- parse / filter / dispatch ---------------------------------------------------------------
@@ -348,15 +410,38 @@ export function helpText(): string {
   return [...cmdLines, "", `Keys: ${keys.join(" · ")}`].join("\n");
 }
 
-/** parse -> lookup -> run. Non-slash input: untouched, returns false. Unknown command: a note
- *  ("Unknown command: /x — /help lists commands") and true (handled). A runner that throws is
- *  caught here — `/${cmd} failed: ${message}` — a failing command must never crash the shell. */
+/** CC-parity phase 3 (Workflows) Track C Task C4: after a REGISTRY miss, `cmd` might name a SAVED
+ *  workflow rather than an unknown built-in — e.g. `/triage`, after a `norma workflow save
+ *  triage ...` (C3) or a Workflow-tool save (agent/tools/workflow.ts). `client.workflowRun`
+ *  resolves `name` server-side via `WorkflowStore` IN THE SESSION'S OWN cwd (protocol/methods.ts's
+ *  `WorkflowRunParams` doc comment) — same resolution chain `/workflows run <name>` above and the
+ *  CLI's own `run` route use, so this never duplicates that lookup locally. Returns false (and
+ *  appends NO note of its own) on ANY failure, INCLUDING the client not exposing `workflowRun` at
+ *  all: `runCommand` below only calls this once a registry miss has already happened, so a genuine
+ *  typo (`/nope`) must still fall through to the ordinary "Unknown command" note, never a raw
+ *  exception. */
+async function tryRunSavedWorkflow(ctx: CommandCtx, name: string): Promise<boolean> {
+  try {
+    const { runId } = await ctx.client.workflowRun({ sessionId: ctx.sessionId, name });
+    ctx.appendNote(`${runId} running`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** parse -> lookup -> run. Non-slash input: untouched, returns false. A REGISTRY miss falls back to
+ *  `tryRunSavedWorkflow` (a saved workflow named `cmd` — Task C4, above) before giving up; still no
+ *  match -> a note ("Unknown command: /x — /help lists commands") and true (handled). A runner that
+ *  throws is caught here — `/${cmd} failed: ${message}` — a failing command must never crash the
+ *  shell. */
 export async function runCommand(ctx: CommandCtx, text: string): Promise<boolean> {
   const parsed = parseSlashInput(text);
   if (!parsed) return false;
   const { cmd, argText } = parsed;
   const command = COMMANDS.find((c) => c.name === cmd);
   if (!command) {
+    if (await tryRunSavedWorkflow(ctx, cmd)) return true;
     ctx.appendNote(`Unknown command: /${cmd} — /help lists commands`);
     return true;
   }

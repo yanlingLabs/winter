@@ -26,6 +26,12 @@ import type { SessionEvent } from "@norma/protocol";
  *    task_notification, bg_task_*): main-/session-scoped, never a child-thread event.
  *  - plan_presented/plan_resolved: plan tools are excluded from every child (childExcludeTools),
  *    so these are main-thread-only today.
+ *  - workflow_started/_progress/_completed/_failed (CC-parity phase 3, Track D Task D1): the
+ *    Workflow tool is main-thread-only (engine.ts's workflowsEnabled gate — "Top-level interactive
+ *    CODE sessions only"), and daemon.ts's onEvent bridge always appends these with a hardcoded
+ *    `threadId: "main"` — they can never be a registered child thread's own event, so this is the
+ *    same "main-/session-scoped, never a child-thread event" bucket as session_created/checkpoint
+ *    above, not a reachability accident.
  */
 const TRANSCRIPT_INCLUDE = {
   // ---- written: the child thread's own conversation/tool flow ----
@@ -77,6 +83,11 @@ const TRANSCRIPT_INCLUDE = {
   plugin_tile_updated: false,
   shortcut_invoke: false,
   tile_action: false,
+  // CC-parity phase 3 (Workflows, Track D Task D1): main-thread-only — see the doc comment above.
+  workflow_started: false,
+  workflow_progress: false,
+  workflow_completed: false,
+  workflow_failed: false,
 } satisfies Record<SessionEvent["type"], boolean>;
 
 /**
