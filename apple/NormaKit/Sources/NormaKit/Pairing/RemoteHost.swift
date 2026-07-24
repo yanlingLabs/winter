@@ -2,6 +2,7 @@ import Foundation
 import IrohLib
 import NormaProtocol
 import NormaSessionKit
+import os
 
 /// Errors `RemoteHost` itself can throw — distinct from whatever `IrohListener.start`/
 /// `MacIdentity.loadOrCreate`/`KeychainToken.readRemoteToken` throw (those propagate unchanged).
@@ -44,19 +45,29 @@ public final class RemoteHost {
         /// `SignedRelayConfig`'s `config.relays` and "what this Mac's OWN listener should dial
         /// through" are allowed to differ, e.g. staging vs. production relay fleets).
         public var relayURLs: [String]
+        /// Reachability probe `start()` uses (CN-T1) to decide whether ANY custom relay in
+        /// `relayURLs` is actually alive before pinning the listener to the whole fleet — see
+        /// `start()`'s own "Relay selection" comment for the full three-regime precedence.
+        /// Defaulted to `defaultRelayProbe` so every construction site that predates this field
+        /// (production, every existing test) compiles and behaves unchanged. Tests inject a
+        /// scripted closure instead, so selection/fallback behavior is provable without the
+        /// probe ever touching a real network.
+        public var relayProbe: @Sendable (String) async -> Bool
 
         public init(
             storeDir: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".norma/remote", isDirectory: true),
             socketPath: String,
             hostLabel: String,
             relayConfig: SignedRelayConfig,
-            relayURLs: [String]
+            relayURLs: [String],
+            relayProbe: @escaping @Sendable (String) async -> Bool = RemoteHost.defaultRelayProbe
         ) {
             self.storeDir = storeDir
             self.socketPath = socketPath
             self.hostLabel = hostLabel
             self.relayConfig = relayConfig
             self.relayURLs = relayURLs
+            self.relayProbe = relayProbe
         }
     }
 
@@ -96,6 +107,13 @@ public final class RemoteHost {
     /// stack, populated from `identity.secret` the moment it does (see `start()`'s own comment on
     /// why this is a pure derivation rather than a read off the listener itself).
     public private(set) var macEndpointID: String?
+    /// The relay selection `start()` actually chose (CN-T1) — `.custom`/`.n0Default`, captured
+    /// the moment `start()` decides so tests can observe the outcome of the probe/fallback logic
+    /// without needing a `RelaySelection` accessor on `RemoteListener` itself (the `#if DEBUG`
+    /// scripted listener isn't a real `IrohListener` and exposes none of its bind arguments).
+    /// `nil` until a start has actually run; cleared on `stop()` like every other started-state
+    /// property here.
+    public private(set) var lastRelaySelection: RelaySelection?
 
     public init(config: Config, secretStore: EndpointSecretStore = KeychainEndpointSecretStore()) {
         self.config = config
@@ -171,6 +189,57 @@ public final class RemoteHost {
         stop()
     }
 
+    // MARK: - Relay selection (CN-T1)
+
+    /// `RemoteAccessCoordinator.swift`'s own loud-log idiom (`Logger(subsystem: "com.norma.app",
+    /// category: ...)`, `.fault` for "this needs a human's attention right now") — mirrored here,
+    /// not shared, since that type lives in the app target and `RemoteHost` (NormaKit) can't
+    /// import it.
+    private static let log = Logger(subsystem: "com.norma.app", category: "remote-host")
+
+    /// Default `Config.relayProbe` (CN-T1): "is anything answering at that URL at all" — a HEAD
+    /// request (GET fallback, since some HTTP servers don't implement HEAD) with a short timeout.
+    /// ANY response — 2xx, 4xx, 5xx, whatever — counts as reachable: this asks "is a listener up
+    /// there," never "is it healthy," so it can't be fooled into declaring an emergency by, say, a
+    /// relay that's alive but momentarily 503ing.
+    public static func defaultRelayProbe(_ urlString: String) async -> Bool {
+        guard let url = URL(string: urlString) else { return false }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 3
+        let session = URLSession(configuration: configuration)
+
+        var head = URLRequest(url: url)
+        head.httpMethod = "HEAD"
+        if let response = try? await session.data(for: head).1, response is HTTPURLResponse {
+            return true
+        }
+        var get = URLRequest(url: url)
+        get.httpMethod = "GET"
+        if let response = try? await session.data(for: get).1, response is HTTPURLResponse {
+            return true
+        }
+        return false
+    }
+
+    /// Probes every URL CONCURRENTLY (a TaskGroup, never a serial loop — serially probing N dead
+    /// relays at 3s each would take up to N*3s; this bounds total probe time to ~3s regardless of
+    /// fleet size) and resolves `true` the instant ANY one answers, cancelling the rest rather than
+    /// waiting out the slower/dead ones. Only `false` if every single probe comes back `false`.
+    private static func anyRelayReachable(_ urls: [String], probe: @escaping @Sendable (String) async -> Bool) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            for url in urls {
+                group.addTask { await probe(url) }
+            }
+            for await reachable in group {
+                if reachable {
+                    group.cancelAll()
+                    return true
+                }
+            }
+            return false
+        }
+    }
+
     private func start() async throws {
         let identity = try MacIdentity.loadOrCreate(store: secretStore)
         // Pure key derivation, no networking (`SecretKey.public()` is synchronous) — equals
@@ -181,14 +250,32 @@ public final class RemoteHost {
         // protocol.
         let macID = try SecretKey.fromBytes(bytes: identity.secret).public().description
 
-        // INTERIM (SP3.2): register this Mac's listener with n0's public production relay fleet so
-        // a phone on a DIFFERENT network (cellular) can reach this Mac behind home NAT — n0's
-        // relays are the rendezvous, and n0's pkarr/DNS discovery (part of `presetN0()`) publishes
-        // this Mac's home relay for the phone's bare-`macEndpointID` dial to resolve. This is a
-        // stopgap until Norma's own signed Oracle relay config is provisioned (SP2b T6): the moment
-        // `config.relayURLs` carries real Oracle relays, `.custom` takes precedence automatically;
-        // today it's empty, so `.n0Default` is the live cross-network rendezvous.
-        let relaySelection: RelaySelection = config.relayURLs.isEmpty ? .n0Default : .custom(config.relayURLs)
+        // Relay provenance: Release builds embed the signed Oracle relay config at build time
+        // (`apple/Norma/Resources/relay-config.signed.json`) and `RemoteAccessCoordinator.
+        // loadVerifiedRelayConfig` verifies it before this Mac ever sees it — `config.relayURLs`
+        // there is `signed.config.relays`. Debug builds never embed that resource at all, so
+        // `RemoteAccessCoordinator`'s own verification step falls back to `directOnlyFallback`
+        // (empty `relayConfig`/`relayURLs`) — the SAME path a Release build takes if verification
+        // ever fails. Either way `config.relayURLs` arrives here already resolved; `start()` never
+        // re-derives one from the other.
+        //
+        // Relay selection (CN-T1). Three regimes, in precedence order:
+        //   custom relays, ≥1 reachable  -> .custom(all)   (reachable-any wins; iroh handles
+        //                                                    per-relay failure among customs)
+        //   custom relays, ALL unreachable -> .n0Default    (EMERGENCY fallback — logged at
+        //                                                    fault level; this is an incident,
+        //                                                    not a mode: fix the fleet)
+        //   no custom relays (Debug builds never embed the signed config; Release verification
+        //   failure also lands here via directOnlyFallback) -> .n0Default, silent, as always.
+        let relaySelection: RelaySelection
+        if config.relayURLs.isEmpty {
+            relaySelection = .n0Default
+        } else if await Self.anyRelayReachable(config.relayURLs, probe: config.relayProbe) {
+            relaySelection = .custom(config.relayURLs)
+        } else {
+            Self.log.fault("EMERGENCY relay fallback: every custom relay unreachable (\(self.config.relayURLs.joined(separator: ", "), privacy: .public)) — homing on n0 public relays until the fleet recovers")
+            relaySelection = .n0Default
+        }
         let boundListener: RemoteListener
         #if DEBUG
         if let makeListener {
@@ -235,6 +322,7 @@ public final class RemoteHost {
         self.gateway = gateway
         self.pairingManager = manager
         self.macEndpointID = macID
+        self.lastRelaySelection = relaySelection
         self.runTask = Task { await gateway.run() }
     }
 
@@ -251,6 +339,7 @@ public final class RemoteHost {
         gateway = nil
         pairingManager = nil
         macEndpointID = nil
+        lastRelaySelection = nil
         runTask = nil
         // Belt-and-braces alongside `startIfNeeded`'s own `defer` — a stale in-flight handle must
         // never outlive a stop (a later `startIfNeeded` should start FRESH, not await a start

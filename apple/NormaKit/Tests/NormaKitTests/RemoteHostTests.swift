@@ -23,10 +23,14 @@ final class RemoteHostTests: XCTestCase {
     }
 
     @MainActor
-    private func makeHost(storeDir: URL) -> RemoteHost {
+    private func makeHost(
+        storeDir: URL,
+        relayURLs: [String] = [],
+        relayProbe: @escaping @Sendable (String) async -> Bool = RemoteHost.defaultRelayProbe
+    ) -> RemoteHost {
         let config = RemoteHost.Config(
             storeDir: storeDir, socketPath: "/tmp/norma-remote-host-tests-unused.sock",
-            hostLabel: "Test Mac", relayConfig: makeRelayConfig(), relayURLs: []
+            hostLabel: "Test Mac", relayConfig: makeRelayConfig(), relayURLs: relayURLs, relayProbe: relayProbe
         )
         return RemoteHost(
             config: config,
@@ -34,6 +38,23 @@ final class RemoteHostTests: XCTestCase {
             makeListener: { LoopbackListener() },
             makeDaemonFactory: { NormaClient(makeTransport: { ScriptedTransport() }, token: "test-token", clientName: "iphone-gateway") }
         )
+    }
+
+    /// `RelaySelection` (NormaSessionKit) isn't `Equatable` — these two pattern-match instead of
+    /// `XCTAssertEqual`, matching every other enum-with-payload assertion idiom in this test target.
+    private func assertN0Default(_ selection: RelaySelection?, file: StaticString = #filePath, line: UInt = #line) {
+        guard case .n0Default = selection else {
+            XCTFail("expected .n0Default, got \(String(describing: selection))", file: file, line: line)
+            return
+        }
+    }
+
+    private func assertCustom(_ selection: RelaySelection?, urls: [String], file: StaticString = #filePath, line: UInt = #line) {
+        guard case .custom(let got) = selection else {
+            XCTFail("expected .custom(\(urls)), got \(String(describing: selection))", file: file, line: line)
+            return
+        }
+        XCTAssertEqual(got, urls, file: file, line: line)
     }
 
     /// Seeds a device directly into the SAME on-disk store `RemoteHost` will construct its own
@@ -193,5 +214,59 @@ final class RemoteHostTests: XCTestCase {
         XCTAssertEqual(qr1.macEndpointID, qr2.macEndpointID, "both callers see the same (single) host identity")
         let macID = await host.macEndpointID
         XCTAssertNotNil(macID)
+    }
+
+    // MARK: - Relay selection (CN-T1): probe reachability, emergency n0 fallback
+
+    /// Contract (a): every custom relay unreachable -> the listener starts on `.n0Default`
+    /// (the EMERGENCY fallback), never silently hanging on a dead custom fleet. Every URL must
+    /// actually have been probed (not just the first) — `openPairingWindow()` force-starts at
+    /// zero paired devices, matching `test_openPairingWindow_forceStartsAtZeroDevices`'s own idiom.
+    func test_start_allCustomRelaysUnreachable_fallsBackToN0Default() async throws {
+        let calls = OSAllocatedUnfairLock<[String]>(initialState: [])
+        let relayURLs = ["https://relay-a.example/", "https://relay-b.example/"]
+        let host = await makeHost(storeDir: tempStoreDir(), relayURLs: relayURLs, relayProbe: { url in
+            calls.withLock { $0.append(url) }
+            return false
+        })
+
+        _ = try await host.openPairingWindow()
+
+        let selection = await host.lastRelaySelection
+        assertN0Default(selection)
+        XCTAssertEqual(Set(calls.withLock { $0 }), Set(relayURLs), "every custom relay must have been probed before declaring the fleet dead")
+    }
+
+    /// Contract (b): even ONE reachable custom relay wins the whole fleet — selection is
+    /// `.custom(all)`, not just the reachable URL. iroh itself handles per-relay failure among
+    /// customs; this probe's only job is "is the whole fleet dead," not picking a survivor.
+    func test_start_oneCustomRelayReachable_selectsAllCustomURLsNotJustTheReachableOne() async throws {
+        let relayURLs = ["https://relay-a.example/", "https://relay-b.example/", "https://relay-c.example/"]
+        let host = await makeHost(storeDir: tempStoreDir(), relayURLs: relayURLs, relayProbe: { url in
+            url == "https://relay-b.example/"
+        })
+
+        _ = try await host.openPairingWindow()
+
+        let selection = await host.lastRelaySelection
+        assertCustom(selection, urls: relayURLs)
+    }
+
+    /// Contract (c): no custom relays configured (Debug builds never embed the signed Oracle
+    /// config) -> `.n0Default`, and — critically — the probe closure is NEVER invoked. This is
+    /// the byte-identical-to-today path: a config with an empty `relayURLs` must not gain any new
+    /// network activity just because `relayProbe` now exists.
+    func test_start_noCustomRelays_usesN0DefaultAndNeverInvokesProbe() async throws {
+        let calls = OSAllocatedUnfairLock<Int>(initialState: 0)
+        let host = await makeHost(storeDir: tempStoreDir(), relayURLs: [], relayProbe: { _ in
+            calls.withLock { $0 += 1 }
+            return true
+        })
+
+        _ = try await host.openPairingWindow()
+
+        let selection = await host.lastRelaySelection
+        assertN0Default(selection)
+        XCTAssertEqual(calls.withLock { $0 }, 0, "empty relayURLs must stay byte-identical to today — the probe must never run")
     }
 }
