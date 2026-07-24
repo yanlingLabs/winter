@@ -590,6 +590,14 @@ if (guard.action === "abort") {
   process.exit(1);
 }
 
+// Tag BEFORE `gh release create` (both publish AND resume paths): gh auto-creates a missing
+// tag at the default-branch HEAD, which races the appcast commit pushed below — the v0.2.002
+// release failed its own final tag push against gh's auto-created one. Creating and pushing
+// the tag first pins the release to exactly this checkout's commit. Resume-safe: an existing
+// tag is just re-pushed (no-op when identical).
+if (!tagExists) sh(`git tag v${version}`);
+sh(`git push origin v${version}`);
+
 if (guard.action === "publish") {
   console.log(`Publishing v${version}...`);
   const notes = `Norma ${version}${BETA ? " (beta)" : ""}\n\nSigned Sparkle appcast entry: releases/appcast.xml.`;
@@ -635,14 +643,7 @@ if (appcastDirty) {
   console.log("  (resume) releases/appcast.xml already committed — nothing to do");
 }
 
-// Tag — resume-safe: skip creation if it already exists (e.g. a prior run tagged but failed
-// to push, or failed after tagging).
-if (!tagExists) {
-  sh(`git tag v${version}`);
-  sh(`git push origin v${version}`);
-} else {
-  console.log(`  (resume) tag v${version} already exists — skipping tag creation`);
-  sh(`git push origin v${version}`);
-}
+// Tag creation moved BEFORE `gh release create` (see comment there) — by this point the tag is
+// already on origin; nothing left to do for it here.
 
 console.log(`\nPublished v${version}: https://github.com/${GH_REPO}/releases/tag/v${version}\n`);
