@@ -317,7 +317,7 @@ public final class RemoteHost {
         } else if await Self.anyRelayReachable(config.relayURLs, probe: config.relayProbe) {
             relaySelection = .custom(config.relayURLs)
         } else {
-            Self.log.fault("EMERGENCY relay fallback: every custom relay unreachable (\(self.config.relayURLs.joined(separator: ", "), privacy: .public)) — homing on n0 public relays until the fleet recovers")
+            Self.log.fault("EMERGENCY relay fallback: every custom relay unreachable (\(self.config.relayURLs.joined(separator: ", "), privacy: .public)) — homing on n0 public relays. Custom relays are re-evaluated only at listener start: restart Norma once the fleet is back.")
             relaySelection = .n0Default
         }
         let boundListener: RemoteListener
