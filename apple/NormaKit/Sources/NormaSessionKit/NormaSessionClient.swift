@@ -386,6 +386,7 @@ public actor NormaSessionClient {
             case .rpcResponse: handleRpcResponse(env)
             case .error: handleErrorFrame(env)
             case .hello, .rpcRequest: break // phone→host kinds; never inbound
+            case .ping, .pong: break // keepalive (KA-T3 gives pong meaning; inert until then)
             }
             return
         }

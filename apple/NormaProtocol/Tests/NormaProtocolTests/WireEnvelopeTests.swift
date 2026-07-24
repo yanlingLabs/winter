@@ -234,4 +234,25 @@ final class WireEnvelopeTests: XCTestCase {
         let decoded = try JSONDecoder().decode(ServerHello.self, from: data)
         XCTAssertEqual(decoded, hello)
     }
+
+    // MARK: - Transport keepalive (KA-T1)
+
+    func testPingPongKindsRoundTrip() throws {
+        for kind in [WireKind.ping, WireKind.pong] {
+            let env = WireEnvelope(
+                v: 1, pairingEpoch: 3, hostID: "h", sessionID: nil, streamID: nil,
+                seq: nil, kind: kind, timestamp: 123, payload: Data())
+            let decoded = try WireFrame.decode(WireFrame.encode(env), expectedEpoch: 3)
+            XCTAssertEqual(decoded.kind, kind)
+            XCTAssertTrue(decoded.payload.isEmpty)
+        }
+    }
+
+    func testGenuinelyUnknownKindStillRejected() {
+        // The unknown-kind tripwire must survive the enum growth.
+        let json = #"{"v":1,"pairingEpoch":3,"hostID":"h","kind":"warble","timestamp":1,"payload":""}"#
+        XCTAssertThrowsError(try WireFrame.decode(Data(json.utf8), expectedEpoch: 3)) { error in
+            XCTAssertEqual(error as? WireError, WireError.unknownKind)
+        }
+    }
 }
