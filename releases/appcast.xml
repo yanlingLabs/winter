@@ -4,13 +4,6 @@
     <title>Norma</title>
     <!-- release items are appended by the release pipeline (Phase 6 sub-project D) -->
       <item>
-      <title>0.2.001</title>
-      <sparkle:version>0.2.001</sparkle:version>
-      <sparkle:shortVersionString>0.2.001</sparkle:shortVersionString>
-      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
-      <enclosure url="https://github.com/yanlingLabs/norma/releases/download/v0.2.001/Norma-0.2.001.zip" sparkle:edSignature="KWV3sVBqfRbEFS3FIK1xZXKnF6LL5PTUZvKIFR1BMQUYzA9y9zW62mBQgxXjr7sRRc3RRKE9SjKvbSKCJmN/Cg==" length="30056127" type="application/octet-stream"/>
-    </item>
-      <item>
       <title>0.2.002</title>
       <sparkle:version>0.2.002</sparkle:version>
       <sparkle:shortVersionString>0.2.002</sparkle:shortVersionString>
