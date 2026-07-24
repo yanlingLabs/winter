@@ -15,12 +15,17 @@ final class CliInstallerTests: XCTestCase {
         XCTAssertEqual(CliInstaller.plan(existingDestination: "/usr/local/bin/norma", isSymlink: true, symlinkTarget: target, expectedTarget: target), .alreadyInstalled)
     }
     func testPlanBrokenOrMovedSymlinkRepairs() {
-        XCTAssertEqual(CliInstaller.plan(existingDestination: "/usr/local/bin/norma", isSymlink: true, symlinkTarget: "/Applications/Old.app/x", expectedTarget: target), .repair)
+        XCTAssertEqual(CliInstaller.plan(existingDestination: "/usr/local/bin/norma", isSymlink: true, symlinkTarget: "/Volumes/Old/Norma.app/Contents/Resources/norma-core", expectedTarget: target), .repair)
     }
     func testPlanForeignFileRefused() {
         XCTAssertEqual(CliInstaller.plan(existingDestination: "/usr/local/bin/norma", isSymlink: false, symlinkTarget: nil, expectedTarget: target), .refuseForeign("/usr/local/bin/norma"))
     }
     func testSymlinkIntoAnyNormaAppCountsAsOursForRepair() {
         XCTAssertEqual(CliInstaller.plan(existingDestination: "/usr/local/bin/norma", isSymlink: true, symlinkTarget: "/somewhere/Norma.app/Contents/Resources/norma-core", expectedTarget: target), .repair)
+    }
+    func testPlanForeignSymlinkRefused() {
+        XCTAssertEqual(
+            CliInstaller.plan(existingDestination: "/usr/local/bin/norma", isSymlink: true, symlinkTarget: "/Users/me/mytools/norma", expectedTarget: target),
+            .refuseForeign("/usr/local/bin/norma"))
     }
 }

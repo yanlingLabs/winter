@@ -22,22 +22,30 @@ enum CliInstaller {
     static let linkPath = "/usr/local/bin/norma"
 
     static var expectedTarget: String {
-        Bundle.main.resourceURL!.appendingPathComponent("norma-core").path
+        // Belt-and-suspenders: `Bundle.main.resourceURL` is only nil for a malformed/non-bundle
+        // process, which never happens for a real, launched app bundle — unreachable in practice,
+        // but a guarded fallback costs nothing and can't crash.
+        guard let url = Bundle.main.resourceURL else { return "/Applications/Norma.app/Contents/Resources/norma-core" }
+        return url.appendingPathComponent("norma-core").path
     }
 
     /// Pure decision: what to do given the current state of the destination path.
     ///
-    /// `refuseForeign` fires ONLY for a non-symlink real file at `linkPath` — we never created
-    /// that, so we never touch it. ANY symlink there is presumed ours to manage: a dangling
-    /// symlink, one pointing at a stale/moved app location, or even a wholly unrelated target all
-    /// repair to the current `expectedTarget` (only WE would ever have put a symlink at this exact
-    /// path via `install()`, so there's no "foreign symlink" case to guard against — unlike a real
-    /// file, which could easily be a user's own script). Exact-match is the only thing that counts
-    /// as already installed.
+    /// Spec rule (dev/dist-split design §3): the installer refuses to overwrite a `norma` that is
+    /// not a symlink into a Norma.app — surfacing it instead of touching it. A non-symlink real
+    /// file at `linkPath` is unconditionally foreign (we never create plain files there). A symlink
+    /// is ours to repair ONLY when it points somewhere shaped like `Norma.app/Contents/Resources/
+    /// norma-core` — covering a stale/moved app location (old path, renamed volume) as well as an
+    /// exact-match already-installed link — never a symlink pointing anywhere else. A foreign
+    /// symlink (e.g. a user's own `norma -> ~/mytools/norma`) is user data we did not create and
+    /// must never silently delete; refusing + surfacing it is the only safe move.
     static func plan(existingDestination: String?, isSymlink: Bool, symlinkTarget: String?, expectedTarget: String) -> CliInstallAction {
         guard let dest = existingDestination else { return .install }
         guard isSymlink else { return .refuseForeign(dest) }
         if let target = symlinkTarget, target == expectedTarget { return .alreadyInstalled }
+        guard let target = symlinkTarget, target.contains("Norma.app/Contents/Resources/norma-core") else {
+            return .refuseForeign(dest)
+        }
         return .repair
     }
 
@@ -62,7 +70,12 @@ enum CliInstaller {
     static func install() -> CliInstallAction {
         let action = currentPlan()
         switch action {
-        case .alreadyInstalled, .refuseForeign: return action
+        case .alreadyInstalled: return action
+        case .refuseForeign(let path):
+            // Surfaces what the disabled menu title only alludes to ("see logs") — makes that
+            // claim actually true.
+            OrbDebug.log("CliInstaller: refusing to overwrite foreign norma at \(path) (not a symlink into a Norma.app)")
+            return action
         case .install, .repair:
             let fm = FileManager.default
             do {
