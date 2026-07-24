@@ -70,8 +70,8 @@ targets:
         CFBundleDisplayName: Norma
         CFBundleIdentifier: com.norma.app
         CFBundleIconFile: AppIcon
-        CFBundleShortVersionString: "0.2.001"
-        CFBundleVersion: "0.2.001"
+        CFBundleShortVersionString: "0.2.002"
+        CFBundleVersion: "0.2.002"
         LSUIElement: true
         LSMinimumSystemVersion: "26.0"
         NSPrincipalClass: NSApplication
@@ -124,6 +124,17 @@ targets:
           # quoting (quoted OTHER_SWIFT_FLAGS values reach swiftc with literal quotes and the
           # prefix silently fails to match).
           OTHER_SWIFT_FLAGS: -file-prefix-map $(HOME)=/builder
+          # The linker separately records absolute intermediate-object paths (N_OSO stabs in the
+          # symtab, for dSYM lookup) which -file-prefix-map cannot reach — verified as the last
+          # builder-path residue in release binaries. -oso_prefix strips that prefix at link time.
+          OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
+          # -oso_prefix does not cover the -add_ast_path records (N_AST stabs: absolute
+          # .swiftmodule paths for lldb). Release-config stripping removes ALL debug stabs
+          # (N_OSO + N_AST) from the product before signing — the belt to oso_prefix's braces.
+          # STRIP_STYLE debugging: debug symbols only; the dyld/export tables are untouched.
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
   NormaAppTests:
     type: bundle.unit-test
     platform: macOS
@@ -160,6 +171,16 @@ targets:
         # this identifier, but keeping the signed identifier in sync with the Label/mach-service
         # name avoids a needless mismatch. `-i com.norma.helper` explicitly sets it.
         OTHER_CODE_SIGN_FLAGS: -i com.norma.helper
+      configs:
+        Release:
+          # Same privacy set as the Norma target: compiler-recorded paths (file-prefix-map),
+          # linker OSO stabs (oso_prefix), and AST-path stabs (Release strip) must not carry
+          # the builder's home prefix.
+          OTHER_SWIFT_FLAGS: -file-prefix-map $(HOME)=/builder
+          OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
 schemes:
   Norma:
     build:
