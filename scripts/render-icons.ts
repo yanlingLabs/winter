@@ -1,6 +1,7 @@
 /** One-shot brand-asset renderer: assets/brand/*.svg -> app icns (dist solid / dev hollow) +
- *  menu-bar template PNG sets (idle + 12 rotated pulse frames for thinking/working, 1x/2x,
- *  black-on-transparent). Outputs are COMMITTED; this script re-runs only when the mark changes.
+ *  menu-bar template PNG sets (idle + 12 pulse frames each for thinking [whole-mark breathing] and
+ *  working [rotating comet-tail], 1x/2x, black-on-transparent). Outputs are COMMITTED; this script
+ *  re-runs only when the mark or the pulse math changes.
  *  Usage: bun run icons:render */
 import { Resvg } from "@resvg/resvg-js";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -13,157 +14,56 @@ const SUPPORT = join(ROOT, "apple", "Norma", "Support");
 const MENUBAR = join(ROOT, "apple", "Norma", "Resources", "MenuBar");
 
 const idleSvg = readFileSync(join(BRAND, "scale-burst.svg"), "utf8");
-const variants = {
-  thinking: readFileSync(join(BRAND, "scale-burst-thinking.svg"), "utf8"),
-  working: readFileSync(join(BRAND, "scale-burst-working.svg"), "utf8"),
-};
+const FRAMES = 12; // pulse frames per cycle (also the ray count — see rayPaths())
 
-/** Every <path .../> element, document order (the 12 rays). */
+/** Every <path .../> element, document order (the 12 rays). Loud-fail kept on the BASE mark
+ *  (idleSvg / its hollow dev twin) — every generated frame is built by re-tagging THESE paths with
+ *  a per-frame opacity, so a malformed base mark must still throw here rather than silently
+ *  render a wrong frame count. */
 function rayPaths(svg: string): string[] {
   const m = svg.match(/<path[^>]*\/>/g);
   if (!m || m.length !== 12) throw new Error(`expected 12 rays, got ${m?.length}`);
   return m;
 }
 
-/** Per-ray opacity (1 when unspecified).
- *
- *  ADAPTATION NOTE (verified shape differs from the brief's assumption): the brief's
- *  rayOpacities() assumed each <path> in the thinking/working variants carries a static
- *  opacity="0.x" attribute. The real source SVGs (yanling-scale-burst-{thinking,working}-v2.svg)
- *  instead encode the pulse purely via CSS: thinking uses four named @keyframes (a/b/c/d) keyed
- *  by a per-ray class, each dipping to a different minimum opacity; working uses one shared
- *  @keyframes "work" with per-ray `animation-delay` stagger (a travelling-phase pulse, matching
- *  its own <desc>: "a directional pulse travels across twelve independent rays"). A literal
- *  opacity="" attribute is never present, so the brief's regex would silently return 1 for every
- *  ray (all "pulse" frames pixel-identical to idle) — this is the ONE function adapted to read
- *  the real encoding instead. rayPaths(), frameSvg(), hollow(), appIconSvg(), writeIcns() and the
- *  overall pipeline are unchanged from the brief. */
-function rayOpacities(svg: string): number[] {
-  const paths = rayPaths(svg);
-  const styleMatch = svg.match(/<style>([\s\S]*?)<\/style>/);
-  if (!styleMatch) throw new Error("render-icons: no <style> block found in SVG — did the SVG format change?");
-  const style = styleMatch[1]!;
+/** menubar-anim REDESIGN NOTE: this used to be `rayOpacities(variantSvg)` — it parsed the CSS
+ *  @keyframes out of assets/brand/scale-burst-{thinking,working}.svg and derived one STATIC
+ *  per-ray opacity value per state, which `frameSvg` then rotated by k rays per frame. The math
+ *  was verified wrong: rotating a 12-ray pattern built from a 4-period keyframe curve (thinking's
+ *  named a/b/c/d dips) means every individual ray cycles through the WHOLE dip range roughly once
+ *  every 4 frames — at 80ms/frame that's a brightness flip ~3x/second, which reads as shimmer or
+ *  vanishing, not a pulse (compounded for "working" by its near-invisible [1,.95,.88,.81,.82]
+ *  range). The functions below replace that entirely with a pure per-frame formula — they no
+ *  longer read or derive anything from the variant SVGs' CSS keyframes at all. */
 
-  /** Extract the content of a named @keyframes block by brace-depth balance (not by hunting for
-   *  a literal adjacent "}}", which over-reads when the SVG pretty-prints the block's closing
-   *  brace on its own line — it then keeps matching into the next @-rule). Returns null when the
-   *  name simply isn't declared at all (a legitimate case: e.g. the "working" variant has no
-   *  per-letter @keyframes, only a shared "work" one — callers fall back accordingly). Throws if
-   *  a block IS found but doesn't look like a real keyframes body, since that means the balance
-   *  scan or the assumed SVG shape is wrong, not that the animation is absent. */
-  function keyframesBlock(name: string): string | null {
-    const startMarker = `@keyframes ${name}{`;
-    const start = style.indexOf(startMarker);
-    if (start === -1) return null;
-    let depth = 1;
-    let i = start + startMarker.length;
-    for (; i < style.length; i++) {
-      if (style[i] === "{") depth++;
-      else if (style[i] === "}") {
-        depth--;
-        if (depth === 0) break;
-      }
-    }
-    if (depth !== 0) {
-      throw new Error(
-        `render-icons: @keyframes ${name} block in <style> never closes (brace depth never returns to 0) — did the SVG format change?`,
-      );
-    }
-    const block = style.slice(start + startMarker.length, i);
-    if (block.includes("@")) {
-      throw new Error(
-        `render-icons: @keyframes ${name} block bled into a following @-rule (captured text contains "@") — did the SVG format change?`,
-      );
-    }
-    if (!/[0-9%,]+\{/.test(block)) {
-      throw new Error(
-        `render-icons: @keyframes ${name} block in <style> contains no percentage stop (e.g. "50%{...}") — did the SVG format change?`,
-      );
-    }
-    return block;
-  }
-
-  /** Parse a named @keyframes block into sorted {pct, op} stops (only steps that state an
-   *  explicit opacity — CSS interpolates the omitted ones from their neighbors). Returns [] only
-   *  when the name isn't declared at all (see keyframesBlock); throws if the block exists but not
-   *  one of its stops states an opacity, since silently returning [] there would make callers fall
-   *  back to a flat, pulse-less default instead of failing loud. */
-  function keyframeStops(name: string): { pct: number; op: number }[] {
-    const block = keyframesBlock(name);
-    if (block === null) return [];
-    const out: { pct: number; op: number }[] = [];
-    for (const stop of block.matchAll(/([0-9%,]+)\{([^}]*)\}/g)) {
-      const opM = stop[2]!.match(/opacity:([0-9.]+)/);
-      if (!opM) continue;
-      for (const pctStr of stop[1]!.split(",")) out.push({ pct: Number(pctStr.replace("%", "")), op: Number(opM[1]) });
-    }
-    if (!out.length) {
-      throw new Error(
-        `render-icons: @keyframes ${name} block in <style> has no stop with an explicit opacity — did the SVG format change?`,
-      );
-    }
-    return out.sort((a, b) => a.pct - b.pct);
-  }
-
-  /** Linear-interpolate a keyframe curve at a given percent (wraps at 100%). */
-  function sampleAt(stops: { pct: number; op: number }[], pct: number): number {
-    if (!stops.length) {
-      throw new Error("render-icons: sampleAt called with no keyframe stops — did the SVG format change?");
-    }
-    const p = ((pct % 100) + 100) % 100;
-    for (let i = 0; i < stops.length; i++) {
-      const a = stops[i]!;
-      const b = stops[(i + 1) % stops.length]!;
-      const span = ((b.pct - a.pct + 100) % 100) || 100;
-      const d = ((p - a.pct) % 100 + 100) % 100;
-      if (d <= span) return a.op + ((b.op - a.op) * d) / span;
-    }
-    return stops[0]!.op;
-  }
-
-  return paths.map((p) => {
-    const direct = p.match(/opacity="([0-9.]+)"/);
-    if (direct) return Number(direct[1]); // original brief shape, kept for forward-compat
-    const cls = p.match(/class="p ([a-z]) p(\d+)"/);
-    if (!cls) {
-      throw new Error(
-        `render-icons: ray <path> missing expected class="p <letter> p<index>" attribute — did the SVG format change? (${p.slice(0, 80)})`,
-      );
-    }
-    const [, letter, idxStr] = cls;
-    const letterStops = keyframeStops(letter!);
-    if (letterStops.length) return Math.min(...letterStops.map((s) => s.op)); // thinking: each ray-class's dip depth
-    // No letter-keyed keyframe (working): derive this ray's own phase from its animation-delay
-    // against the single shared "work" curve — a real per-ray snapshot at t=0.
-    const delayM = style.match(new RegExp(`\\.p${idxStr}\\{[^}]*?animation-delay:(-?[0-9.]+)s`));
-    if (!delayM) {
-      throw new Error(`render-icons: no animation-delay found for .p${idxStr} in <style> — did the SVG format change?`);
-    }
-    const delay = Number(delayM[1]);
-    const durM = style.match(/animation:\s*work\s+([0-9.]+)s/);
-    if (!durM) {
-      throw new Error(`render-icons: no "animation: work <duration>s" declaration found in <style> — did the SVG format change?`);
-    }
-    const duration = Number(durM[1]);
-    const workStops = keyframeStops("work");
-    if (!workStops.length) {
-      throw new Error(`render-icons: @keyframes work not found in <style> — did the SVG format change?`);
-    }
-    return sampleAt(workStops, (-delay / duration) * 100);
-  });
+/** thinking: whole-mark breathing. Every ray shares ONE opacity for frame k — a smooth cosine ease
+ *  1.0 -> 0.45 -> 1.0 across the FRAMES-frame cycle (paired with a slower 0.15s/frame cadence in
+ *  MenuBarController: FRAMES * 0.15s ≈ 1.8s per full breath). */
+function thinkingOpacities(k: number): number[] {
+  const v = 0.45 + 0.55 * (0.5 + 0.5 * Math.cos((2 * Math.PI * k) / FRAMES));
+  return Array(FRAMES).fill(v);
 }
 
-/** Rebuild a variant SVG with the opacity PATTERN rotated by k rays (spinner pulse frame k),
- *  applied onto the idle geometry so every frame shares identical paths. */
-function frameSvg(base: string, opacities: number[], k: number): string {
+/** working: rotating comet-tail. A smooth 12-stop opacity gradient around the ring — the ray at
+ *  the "head" (ray (k + FRAMES - 1) % FRAMES) is brightest (1.0), the one dimmest is a full turn
+ *  behind it (0.35) — and the head advances by exactly one ray per frame, so it reads as genuine
+ *  rotation (paired with a faster 0.10s/frame cadence in MenuBarController: FRAMES * 0.10s ≈ 1.2s
+ *  per revolution — working is meant to read "busier" than thinking). */
+function workingOpacities(k: number): number[] {
+  return Array.from({ length: FRAMES }, (_, i) => 0.35 + 0.65 * (((i - k + FRAMES) % FRAMES) / (FRAMES - 1)));
+}
+
+/** Rebuild a variant SVG by applying a per-ray opacity array (ray i -> opacities[i]) onto the idle
+ *  geometry, so every generated frame shares identical paths with the idle mark. */
+function frameSvg(base: string, opacities: number[]): string {
   const paths = rayPaths(base);
-  const rotated = paths.map((p, i) => {
-    const o = opacities[(i + k) % opacities.length]!;
+  const applied = paths.map((p, i) => {
+    const o = opacities[i]!;
     const clean = p.replace(/ ?opacity="[0-9.]+"/, "");
     return o >= 1 ? clean : clean.replace("<path", `<path opacity="${o}"`);
   });
   let out = base;
-  for (let i = 0; i < paths.length; i++) out = out.replace(paths[i]!, rotated[i]!);
+  for (let i = 0; i < paths.length; i++) out = out.replace(paths[i]!, applied[i]!);
   return out;
 }
 
@@ -212,9 +112,9 @@ for (const [prefix, mark] of [["mb", idleSvg], ["mb-dev", hollow(idleSvg)]] as c
   writeFileSync(join(MENUBAR, `${prefix}-idle.png`), renderPng(mark, 18));
   writeFileSync(join(MENUBAR, `${prefix}-idle@2x.png`), renderPng(mark, 36));
   for (const state of ["thinking", "working"] as const) {
-    const opacities = rayOpacities(variants[state]);
-    for (let k = 0; k < 12; k++) {
-      const f = frameSvg(mark, opacities, k);
+    for (let k = 0; k < FRAMES; k++) {
+      const opacities = state === "thinking" ? thinkingOpacities(k) : workingOpacities(k);
+      const f = frameSvg(mark, opacities);
       writeFileSync(join(MENUBAR, `${prefix}-${state}-${k}.png`), renderPng(f, 18));
       writeFileSync(join(MENUBAR, `${prefix}-${state}-${k}@2x.png`), renderPng(f, 36));
     }
