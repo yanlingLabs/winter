@@ -252,10 +252,13 @@ final class RemoteHostTests: XCTestCase {
         assertCustom(selection, urls: relayURLs)
     }
 
-    /// Contract (c): no custom relays configured (Debug builds never embed the signed Oracle
-    /// config) -> `.n0Default`, and — critically — the probe closure is NEVER invoked. This is
-    /// the byte-identical-to-today path: a config with an empty `relayURLs` must not gain any new
-    /// network activity just because `relayProbe` now exists.
+    /// Contract (c): no custom relays configured (the ONLY route to this in practice is the
+    /// bundled signed config being missing/corrupt/unverifiable — CN-T1 review: EVERY build
+    /// config, Debug included, embeds and verifies the same signed Oracle relay list; see
+    /// `RemoteHost.start()`'s own "Relay provenance" comment) -> `.n0Default`, and — critically —
+    /// the probe closure is NEVER invoked. This is the byte-identical-to-today path: a config with
+    /// an empty `relayURLs` must not gain any new network activity just because `relayProbe` now
+    /// exists.
     func test_start_noCustomRelays_usesN0DefaultAndNeverInvokesProbe() async throws {
         let calls = OSAllocatedUnfairLock<Int>(initialState: 0)
         let host = await makeHost(storeDir: tempStoreDir(), relayURLs: [], relayProbe: { _ in
@@ -268,5 +271,53 @@ final class RemoteHostTests: XCTestCase {
         let selection = await host.lastRelaySelection
         assertN0Default(selection)
         XCTAssertEqual(calls.withLock { $0 }, 0, "empty relayURLs must stay byte-identical to today — the probe must never run")
+    }
+
+    // MARK: - Probe timing bound (CN-T1 review: whole-probe ≤3s contract, not ~6s)
+
+    /// CN-T1 review: `defaultRelayProbe` used to try HEAD, and only on a THROWN/failed attempt
+    /// fall back to a SEQUENTIAL GET — each sharing the same 3s per-request timeout, so a
+    /// black-holed host (both hang out their full timeout) cost ~6s, double the documented ≤3s
+    /// "declare the whole fleet dead" contract on exactly the emergency path this feature exists
+    /// for. The fix races HEAD and GET via `RemoteHost.raceProbes` instead of running them
+    /// sequentially; this test pins that TIMING bound directly, with `Task.sleep`-based fakes
+    /// standing in for two equally-slow (both "dead") requests — no real networking, since
+    /// URLSession's own timeout behavior against a black-holed host isn't practically
+    /// unit-testable (would need a live, reliably-unreachable server). `raceProbes` is `internal`
+    /// (not `private`) in RemoteHost.swift specifically so this test can reach it.
+    func test_raceProbes_boundedByTheSlowerOfTwoConcurrentProbes_notTheirSum() async throws {
+        let probeDelayNanos: UInt64 = 200_000_000 // 0.2s — stands in for a full per-request timeout
+        let bothDead: @Sendable () async -> Bool = {
+            try? await Task.sleep(nanoseconds: probeDelayNanos)
+            return false
+        }
+
+        let start = DispatchTime.now()
+        let reachable = await RemoteHost.raceProbes(bothDead, bothDead)
+        let elapsedNanos = DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds
+
+        XCTAssertFalse(reachable, "both probes report dead — the race must resolve false")
+        XCTAssertLessThan(
+            elapsedNanos, probeDelayNanos * 3 / 2,
+            "two probes raced CONCURRENTLY must resolve in ~one probe's duration, not the sum of both — a sequential HEAD-then-GET fallback would blow this bound to ~2x"
+        )
+    }
+
+    /// Complements the bound above: racing must actually pick the WINNER, not just "whichever
+    /// finishes bounds the total time." A fast-reachable probe raced against a slow-dead one must
+    /// resolve `true` quickly, without waiting out the slow one.
+    func test_raceProbes_resolvesTrueAssoonAsEitherProbeSucceeds() async throws {
+        let fastReachable: @Sendable () async -> Bool = { true }
+        let slowDead: @Sendable () async -> Bool = {
+            try? await Task.sleep(nanoseconds: 2_000_000_000) // 2s — must NOT be waited out
+            return false
+        }
+
+        let start = DispatchTime.now()
+        let reachable = await RemoteHost.raceProbes(fastReachable, slowDead)
+        let elapsedNanos = DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds
+
+        XCTAssertTrue(reachable)
+        XCTAssertLessThan(elapsedNanos, 500_000_000, "a reachable probe must win immediately, not wait for the slow dead one to also finish")
     }
 }

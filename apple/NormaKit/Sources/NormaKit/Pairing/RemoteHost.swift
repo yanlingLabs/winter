@@ -112,8 +112,10 @@ public final class RemoteHost {
     /// without needing a `RelaySelection` accessor on `RemoteListener` itself (the `#if DEBUG`
     /// scripted listener isn't a real `IrohListener` and exposes none of its bind arguments).
     /// `nil` until a start has actually run; cleared on `stop()` like every other started-state
-    /// property here.
-    public private(set) var lastRelaySelection: RelaySelection?
+    /// property here. `internal`, not `public` (CN-T1 review — narrowed: zero consumers outside
+    /// NormaKit; `RemoteHostTests` reaches it via `@testable import NormaKit`, which needs no
+    /// more than `internal` visibility).
+    private(set) var lastRelaySelection: RelaySelection?
 
     public init(config: Config, secretStore: EndpointSecretStore = KeychainEndpointSecretStore()) {
         self.config = config
@@ -198,27 +200,61 @@ public final class RemoteHost {
     private static let log = Logger(subsystem: "com.norma.app", category: "remote-host")
 
     /// Default `Config.relayProbe` (CN-T1): "is anything answering at that URL at all" — a HEAD
-    /// request (GET fallback, since some HTTP servers don't implement HEAD) with a short timeout.
-    /// ANY response — 2xx, 4xx, 5xx, whatever — counts as reachable: this asks "is a listener up
-    /// there," never "is it healthy," so it can't be fooled into declaring an emergency by, say, a
-    /// relay that's alive but momentarily 503ing.
+    /// request RACED against a GET fallback (some HTTP servers don't implement HEAD), both sharing
+    /// the same 3s per-request timeout, first HTTP response of either wins. ANY response — 2xx,
+    /// 4xx, 5xx, whatever — counts as reachable: this asks "is a listener up there," never "is it
+    /// healthy," so it can't be fooled into declaring an emergency by, say, a relay that's alive
+    /// but momentarily 503ing.
+    ///
+    /// CN-T1 review fix: HEAD and GET used to run SEQUENTIALLY (GET only attempted after HEAD's
+    /// own `try?` gave up) — a black-holed host that never answers either one cost ~2x the 3s
+    /// per-request timeout, ~6s, double the documented ≤3s "declare the whole fleet dead" contract
+    /// on exactly the emergency path this feature exists for. Racing them via `raceProbes` bounds
+    /// the WHOLE per-URL probe to the same 3s the individual requests are already configured with.
     public static func defaultRelayProbe(_ urlString: String) async -> Bool {
         guard let url = URL(string: urlString) else { return false }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 3
         let session = URLSession(configuration: configuration)
 
-        var head = URLRequest(url: url)
-        head.httpMethod = "HEAD"
-        if let response = try? await session.data(for: head).1, response is HTTPURLResponse {
-            return true
+        return await raceProbes({
+            var head = URLRequest(url: url)
+            head.httpMethod = "HEAD"
+            if let response = try? await session.data(for: head).1, response is HTTPURLResponse {
+                return true
+            }
+            return false
+        }, {
+            var get = URLRequest(url: url)
+            get.httpMethod = "GET"
+            if let response = try? await session.data(for: get).1, response is HTTPURLResponse {
+                return true
+            }
+            return false
+        })
+    }
+
+    /// Races two async probes and resolves `true` the instant EITHER does, cancelling the other —
+    /// never waits for both. `defaultRelayProbe` uses this to race its HEAD and GET attempts so a
+    /// single dead host costs one shared 3s timeout, not two sequential ones (CN-T1 review — see
+    /// `defaultRelayProbe`'s own doc comment for the ~6s bug this fixes).
+    ///
+    /// `internal`, not `private`: this is the one piece of the probe's TIMING contract that's
+    /// actually unit-testable without real networking — `RemoteHostTests` pins the bound directly
+    /// with `Task.sleep`-based fake probes (a real black-holed-host test would need a live server
+    /// and wouldn't be reliable in CI); `@testable import NormaKit` reaches it from there.
+    static func raceProbes(_ first: @escaping @Sendable () async -> Bool, _ second: @escaping @Sendable () async -> Bool) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await first() }
+            group.addTask { await second() }
+            for await reachable in group {
+                if reachable {
+                    group.cancelAll()
+                    return true
+                }
+            }
+            return false
         }
-        var get = URLRequest(url: url)
-        get.httpMethod = "GET"
-        if let response = try? await session.data(for: get).1, response is HTTPURLResponse {
-            return true
-        }
-        return false
     }
 
     /// Probes every URL CONCURRENTLY (a TaskGroup, never a serial loop — serially probing N dead
@@ -250,14 +286,21 @@ public final class RemoteHost {
         // protocol.
         let macID = try SecretKey.fromBytes(bytes: identity.secret).public().description
 
-        // Relay provenance: Release builds embed the signed Oracle relay config at build time
-        // (`apple/Norma/Resources/relay-config.signed.json`) and `RemoteAccessCoordinator.
-        // loadVerifiedRelayConfig` verifies it before this Mac ever sees it — `config.relayURLs`
-        // there is `signed.config.relays`. Debug builds never embed that resource at all, so
-        // `RemoteAccessCoordinator`'s own verification step falls back to `directOnlyFallback`
-        // (empty `relayConfig`/`relayURLs`) — the SAME path a Release build takes if verification
-        // ever fails. Either way `config.relayURLs` arrives here already resolved; `start()` never
-        // re-derives one from the other.
+        // Relay provenance: EVERY build config — Debug ("Norma Dev") included — embeds the
+        // production-signed Oracle relay config at build time (`apple/Norma/Resources/
+        // relay-config.signed.json`) and `RemoteAccessCoordinator.loadVerifiedRelayConfig`
+        // verifies it before this Mac ever sees it — `config.relayURLs` there is
+        // `signed.config.relays`. Verified against project.yml + the generated pbxproj (CN-T1
+        // review): the `Resources` build phase that carries this file is NOT configuration-gated
+        // (unlike the Release-only "Embed norma-core" script), and `RelayConfigTrust` carries no
+        // `#if DEBUG` gate either — so a Debug build embeds and successfully verifies the exact
+        // SAME signed relay list as Release. `directOnlyFallback` (empty `relayConfig`/
+        // `relayURLs`) fires only if that resource is missing, unreadable, malformed, or fails
+        // signature verification — never merely because a build happens to be Debug. Practical
+        // consequence: every build, Debug included, now probes the PRODUCTION relay hosts at
+        // `start()` below — deliberate: a dev Mac should exercise the same fallback behavior a
+        // shipped one would, not silently diverge from it. Either way `config.relayURLs` arrives
+        // here already resolved; `start()` never re-derives one from the other.
         //
         // Relay selection (CN-T1). Three regimes, in precedence order:
         //   custom relays, ≥1 reachable  -> .custom(all)   (reachable-any wins; iroh handles
@@ -265,8 +308,9 @@ public final class RemoteHost {
         //   custom relays, ALL unreachable -> .n0Default    (EMERGENCY fallback — logged at
         //                                                    fault level; this is an incident,
         //                                                    not a mode: fix the fleet)
-        //   no custom relays (Debug builds never embed the signed config; Release verification
-        //   failure also lands here via directOnlyFallback) -> .n0Default, silent, as always.
+        //   no custom relays (verification failure on ANY build config — resource missing,
+        //   unreadable, malformed, or unverifiable — lands here via directOnlyFallback; there is
+        //   no Debug-only route) -> .n0Default, silent, as always.
         let relaySelection: RelaySelection
         if config.relayURLs.isEmpty {
             relaySelection = .n0Default

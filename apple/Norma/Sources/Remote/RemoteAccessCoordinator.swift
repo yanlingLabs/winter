@@ -27,8 +27,16 @@ final class RemoteAccessCoordinator {
     private static let log = Logger(subsystem: "com.norma.app", category: "relay-config")
 
     /// The safe, pre-Task-6 default: direct connections only, exactly as if no relay fleet
-    /// existed — used both when the bundled resource is entirely absent (e.g. a Debug build,
-    /// which never embeds it) and as the fallback for any verification failure below.
+    /// existed — the fallback for any verification failure below (resource missing, unreadable,
+    /// malformed JSON, or a signature that doesn't verify). NOT a Debug-vs-Release distinction:
+    /// verified against project.yml + the generated pbxproj (CN-T1 review) — the `Resources`
+    /// build phase that carries `relay-config.signed.json` is NOT configuration-gated (unlike the
+    /// Release-only "Embed norma-core" script), and `RelayConfigTrust` carries no `#if DEBUG` gate
+    /// either — so a Debug build ("Norma Dev") embeds and successfully verifies the exact SAME
+    /// signed Oracle relay list as Release, and only lands here if verification actually fails.
+    /// Practical consequence: every build, Debug included, now probes the production relay hosts
+    /// at `RemoteHost.start()` — deliberate: a dev Mac should exercise the same fallback behavior
+    /// a shipped one would, rather than silently diverging from it.
     private static let directOnlyFallback: (relayConfig: SignedRelayConfig, relayURLs: [String]) = (
         relayConfig: SignedRelayConfig(config: RelayConfig(version: 1, relays: []), sig: Data()),
         relayURLs: []
