@@ -99,9 +99,18 @@ enum CliInstaller {
     }
 
     /// True when a WORKING `norma` resolves anywhere on PATH (covers brew's cask-linked binary).
-    static func normaOnPath() -> Bool {
-        let path = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/local/bin:/opt/homebrew/bin:/usr/bin"
-        return path.split(separator: ":").contains { dir in
+    ///
+    /// DD branch review (I2): a GUI app launched via LaunchServices does NOT inherit the user's
+    /// shell PATH — it gets LaunchServices' own minimal `/usr/bin:/bin:/usr/sbin:/sbin`, which
+    /// never contains brew's `/opt/homebrew/bin` (Apple Silicon) or `/usr/local/bin` (Intel /
+    /// legacy). Reading `env PATH` alone therefore made the "already on PATH, skip the offer"
+    /// check dead in production: `PATH` is always PRESENT (never nil), so the old `?? "…"` fallback
+    /// — sized for the nil case — never actually ran. Fixed by always scanning PATH's own dirs
+    /// PLUS the hardcoded brew locations, regardless of what PATH already contains.
+    static func normaOnPath(pathVar: String? = ProcessInfo.processInfo.environment["PATH"], extraDirs: [String] = ["/usr/local/bin", "/opt/homebrew/bin"]) -> Bool {
+        let pathDirs = (pathVar ?? "").split(separator: ":").map(String.init)
+        let dirs = Set(pathDirs + extraDirs)
+        return dirs.contains { dir in
             FileManager.default.isExecutableFile(atPath: "\(dir)/norma")
         }
     }

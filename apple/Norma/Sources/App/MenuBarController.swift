@@ -84,6 +84,13 @@ final class MenuBarController {
     private var activity: MenuBarActivity = .idle
     private var frame = 0
     private var pulseTimer: Timer?
+    // DD branch review (I1): the single-writer flag for the Sparkle staged-update badge. Every
+    // icon writer now routes through `applyCurrentFrame()` below — `setUpdateBadge(_:)` no longer
+    // touches `statusItem?.button?.image` directly, so the activity pulse timer (every ~80ms while
+    // non-idle) can never clobber a staged badge back to the plain activity icon, and clearing the
+    // badge composes with whatever activity/idle state is current instead of resetting to a fixed
+    // placeholder.
+    private var updateBadged = false
 
     /// Pure + testable: the asset name for a given activity/frame/profile-prefix. `frame` wraps
     /// mod 12 (Task 3's 12-frame `mb-thinking-0..11`/`mb-working-0..11` sets); `.idle` ignores
@@ -115,10 +122,31 @@ final class MenuBarController {
         return image
     }
 
-    /// Applies the current `activity`/`frame` as the status item's image.
-    private func applyCurrentFrame() {
-        let name = Self.imageName(for: activity, frame: frame, prefix: AppProfile.menuBarAssetPrefix)
-        statusItem?.button?.image = templateImage(named: name)
+    /// Test seam (DD branch review, I1): pure, mirrors `imageName(for:frame:prefix:)`'s existing
+    /// testable posture — the resource/symbol NAME `applyCurrentFrame()` will render right now,
+    /// derived from instance state only, no Bundle/AppKit lookup involved. `internal` (not
+    /// `private`), same testability posture as `statusItem`/`stateItem` above.
+    var currentImageName: String {
+        updateBadged ? "arrow.down.circle.fill" : Self.imageName(for: activity, frame: frame, prefix: AppProfile.menuBarAssetPrefix)
+    }
+
+    /// Applies the current icon state as the status item's image — the SOLE writer of
+    /// `statusItem?.button?.image` (DD branch review, I1). When a Sparkle staged-update badge is
+    /// active it wins outright (no attempt to compose it with the activity glyph); otherwise this
+    /// renders the same activity/idle template image as before. Every state change that used to
+    /// write the image directly (`setActivity`, `setUpdateBadge`) now calls this instead, so the
+    /// 80ms activity pulse timer can never clobber a staged badge, and clearing the badge restores
+    /// whatever activity/idle asset is actually current rather than a fixed placeholder. `internal`
+    /// (not `private`) so `MenuBarEntryPointsTests` can invoke it directly as a stand-in for the
+    /// real pulse Timer's next tick, without waiting on a live Timer.
+    func applyCurrentFrame() {
+        guard !updateBadged else {
+            statusItem?.button?.image = NSImage(
+                systemSymbolName: currentImageName,
+                accessibilityDescription: "Norma — update ready")
+            return
+        }
+        statusItem?.button?.image = templateImage(named: currentImageName)
     }
 
     /// Menu-bar status feed sink (Task DD-T5): wired to `AppModel.onActivityChange` at the
@@ -277,19 +305,43 @@ final class MenuBarController {
     /// item is first mounted (dist builds only) and again right after `didInstallCli()` fires, so
     /// the title always reflects the freshest on-disk state.
     private func refreshCliInstallItem() {
-        switch CliInstaller.currentPlan() {
+        applyCliInstallState(CliInstaller.currentPlan())
+    }
+
+    /// DD branch review (m4): `isEnabled = false` alone does not stop a menu item's action from
+    /// firing via `NSApp.sendAction`/a direct `target`/`action` invocation — same lesson as
+    /// `setEngineFailed`'s enabled/disabled halves above — so the two disabled states also clear
+    /// `target`/`action`, and the two enabled states restore them (idempotent: `install()` already
+    /// sets `target = self` once before this first runs).
+    ///
+    /// Factored out of `refreshCliInstallItem()` (which feeds it the real, environment-dependent
+    /// `CliInstaller.currentPlan()`) so `MenuBarEntryPointsTests` can drive every `CliInstallAction`
+    /// case directly and deterministically, without depending on whatever `/usr/local/bin/norma`
+    /// happens to be on the test host, and without needing the dist-only mounting branch in
+    /// `install()` (compile-time unreachable from this Debug-config xctest host) to have run.
+    /// `internal` (not `private`), same testability posture as `applyCurrentFrame()` above.
+    func applyCliInstallState(_ action: CliInstallAction) {
+        switch action {
         case .install:
             cliInstallItem.title = "Install norma Command"
             cliInstallItem.isEnabled = true
+            cliInstallItem.target = self
+            cliInstallItem.action = #selector(didInstallCli)
         case .repair:
             cliInstallItem.title = "Repair norma Command"
             cliInstallItem.isEnabled = true
+            cliInstallItem.target = self
+            cliInstallItem.action = #selector(didInstallCli)
         case .alreadyInstalled:
             cliInstallItem.title = "norma Command Installed ✓"
             cliInstallItem.isEnabled = false
+            cliInstallItem.target = nil
+            cliInstallItem.action = nil
         case .refuseForeign:
             cliInstallItem.title = "norma Command: foreign file — see logs"
             cliInstallItem.isEnabled = false
+            cliInstallItem.target = nil
+            cliInstallItem.action = nil
         }
     }
 
@@ -314,14 +366,10 @@ final class MenuBarController {
 
     /// Sparkle T4: Show/hide the staged-update line (inserted above the pre-quit separator).
     ///
-    /// Known collision (DD-T5 whole-branch review item, not fixed here): this and
-    /// `setUpdateBadge(_:)` below write `statusItem?.button?.image` directly, with no coordination
-    /// against DD-T5's activity-driven `applyCurrentFrame()`. Because the activity pulse timer ticks
-    /// every ~80ms whenever activity is non-idle, a staged-update badge set here is clobbered back to
-    /// the plain activity icon essentially immediately and stays invisible for as long as any
-    /// activity keeps ticking — this is a near-certain routine collision whenever a staged update
-    /// coincides with activity, not a rare race. Icon-state coordination (a merged/priority model
-    /// across the two writers) is deferred to the whole-branch review.
+    /// DD branch review (I1), fixed: `setUpdateBadge(_:)` below no longer writes the status image
+    /// directly — it flips `updateBadged` and routes through `applyCurrentFrame()`, the single
+    /// writer every icon change now shares with DD-T5's activity pulse. No more collision between
+    /// the two.
     func setUpdateStaged(_ staged: Bool, version: String?) {
         guard let menu = statusItem?.menu else { return }
         let present = menu.items.contains(updateItem)
@@ -335,11 +383,13 @@ final class MenuBarController {
         }
     }
 
-    /// Sparkle T4: >24h staged: swap the status icon to a badged variant. No dialog, ever.
+    /// Sparkle T4: >24h staged: badge the status icon. No dialog, ever. Routes through
+    /// `applyCurrentFrame()` (DD branch review, I1) rather than writing the image itself, so the
+    /// badge survives the activity pulse timer and clearing it (`badged == false`) correctly
+    /// restores the current activity/idle asset instead of a fixed placeholder.
     func setUpdateBadge(_ badged: Bool) {
-        statusItem?.button?.image = NSImage(
-            systemSymbolName: badged ? "arrow.down.circle.fill" : "circle.circle",
-            accessibilityDescription: "Norma")
+        updateBadged = badged
+        applyCurrentFrame()
     }
 
     @objc private func didToggleOrb() { toggleOrb() }
