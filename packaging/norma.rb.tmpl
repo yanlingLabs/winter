@@ -21,6 +21,8 @@ cask "norma" do
     strategy :github_latest
   end
 
+  depends_on arch: :arm64
+
   auto_updates true
 
   app "Norma.app"
