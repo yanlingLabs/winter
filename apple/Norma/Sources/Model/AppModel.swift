@@ -53,6 +53,11 @@ final class AppModel: ObservableObject {
     /// Task 4 (2f): fired once per successful connect (mirrors `onConnected` above) — the seam
     /// `PeripheralProvider.advertiseIfConnected()` hangs off (spec §A4: "advertises on connect").
     var onClientConnected: (() -> Void)?
+    /// Menu-bar status feed (Task DD-T5). Fired on MainActor only when the derived
+    /// `MenuBarActivity` value CHANGES — see `handle(_ ev:)`'s derive-and-publish step at the
+    /// single point every event flows through.
+    var onActivityChange: ((MenuBarActivity) -> Void)?
+    private var menuBarActivity: MenuBarActivity = .idle
 
     init(makeTransport: @escaping @Sendable () -> NormaTransport, token: String, clientName: String = "orb") {
         self.makeTransport = makeTransport
@@ -318,6 +323,19 @@ final class AppModel: ObservableObject {
             if s == .connected { onClientConnected?() }
         case .unknown:
             break // newer daemon event — orb has nothing to render for it
+        }
+        // Task DD-T5: menu-bar activity derivation — the single point every event flows through,
+        // deliberately BEFORE/independent of the focused-session filtering above (that filtering
+        // exists to gate `session.apply`'s reducer, not this). Multi-session nuance: if this
+        // AppModel's feed carries events from more than one session, this is a naive last-event-
+        // wins derivation across all of them — accepted for v1 (single-user menu bar; per-session
+        // tracking would need its own state and is left for a future pass/whole-branch review).
+        if case .session(let e) = ev {
+            let nextActivity = MenuBarActivity.next(after: menuBarActivity, event: e)
+            if nextActivity != menuBarActivity {
+                menuBarActivity = nextActivity
+                onActivityChange?(nextActivity)
+            }
         }
     }
 

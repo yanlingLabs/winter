@@ -74,6 +74,69 @@ final class MenuBarController {
     let updateItem = NSMenuItem(title: "Update ready — Restart Now", action: #selector(didInstallUpdate), keyEquivalent: "")
     private var panicMounted = false
 
+    // MARK: - Task DD-T5: live activity icon (idle/thinking/working, rotating pulse frames)
+
+    private var activity: MenuBarActivity = .idle
+    private var frame = 0
+    private var pulseTimer: Timer?
+
+    /// Pure + testable: the asset name for a given activity/frame/profile-prefix. `frame` wraps
+    /// mod 12 (Task 3's 12-frame `mb-thinking-0..11`/`mb-working-0..11` sets); `.idle` ignores
+    /// `frame` entirely (one static asset, no pulse).
+    nonisolated static func imageName(for activity: MenuBarActivity, frame: Int, prefix: String) -> String {
+        switch activity {
+        case .idle: return "\(prefix)-idle"
+        case .thinking: return "\(prefix)-thinking-\(frame % 12)"
+        case .working: return "\(prefix)-working-\(frame % 12)"
+        }
+    }
+
+    /// Loads a Task 3 menu-bar asset by name. RUNTIME-VERIFIED bundle layout (DD-T5): the built
+    /// product's `Contents/Resources` has NEITHER a `MenuBar/` subdirectory (the `Resources` source
+    /// in `project.yml` is a plain xcodegen GROUP, not a folder reference, so Xcode's Copy Bundle
+    /// Resources phase flattens every file straight into `Resources/`) NOR a bare `.png` per name —
+    /// `COMBINE_HIDPI_IMAGES` (macOS default) merges each `name.png`/`name@2x.png` pair into a
+    /// single multi-representation `name.tiff` at build time. Confirmed by inspecting both Debug
+    /// and Release `Norma.app/Contents/Resources` under DerivedData: e.g. `mb-idle.tiff`,
+    /// `mb-dev-working-3.tiff`, no `MenuBar/` directory anywhere. `Bundle.image(forResource:)` is
+    /// exactly AppKit's documented answer to this (`NSImage.h`: "Neither [pathForImageResource:/
+    /// URLForImageResource:] can return images with multiple representations in different files...
+    /// The above [imageForResource:] method is generally preferred") — a single lookup, no
+    /// extension, that resolves the combined TIFF and picks the right representation for the
+    /// screen's backing scale.
+    private func templateImage(named name: String) -> NSImage? {
+        guard let image = Bundle.main.image(forResource: name) else { return nil }
+        image.isTemplate = true
+        return image
+    }
+
+    /// Applies the current `activity`/`frame` as the status item's image.
+    private func applyCurrentFrame() {
+        let name = Self.imageName(for: activity, frame: frame, prefix: AppProfile.menuBarAssetPrefix)
+        statusItem?.button?.image = templateImage(named: name)
+    }
+
+    /// Menu-bar status feed sink (Task DD-T5): wired to `AppModel.onActivityChange` at the
+    /// AppDelegate join point. Resets to frame 0 on every activity change (a fresh transition
+    /// restarts the pulse rather than continuing mid-cycle); the timer only runs while non-idle
+    /// (Global Constraint: idle = zero timers, zero CPU) and is torn down/rebuilt on every call so
+    /// a `.thinking` -> `.working` transition (no idle in between) doesn't leave two timers running.
+    func setActivity(_ new: MenuBarActivity) {
+        activity = new
+        frame = 0
+        pulseTimer?.invalidate()
+        pulseTimer = nil
+        applyCurrentFrame()
+        guard new != .idle else { return }
+        pulseTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.frame += 1
+                self.applyCurrentFrame()
+            }
+        }
+    }
+
     init(
         statusLine: @escaping () -> String,
         toggleOrb: @escaping () -> Void,
@@ -113,7 +176,6 @@ final class MenuBarController {
     func install() {
         guard statusItem == nil else { return }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = NSImage(systemSymbolName: "circle.circle", accessibilityDescription: "Norma")
 
         let menu = NSMenu()
         stateItem.isEnabled = false
@@ -150,6 +212,9 @@ final class MenuBarController {
         panicItem.attributedTitle = NSAttributedString(
             string: panicItem.title, attributes: [.foregroundColor: NSColor.systemRed]
         )
+        // Task DD-T5: initial image — the idle template asset, replacing the old SF Symbol
+        // placeholder that used to sit here (`NSImage(systemSymbolName: "circle.circle", ...)`).
+        applyCurrentFrame()
         refresh()
     }
 

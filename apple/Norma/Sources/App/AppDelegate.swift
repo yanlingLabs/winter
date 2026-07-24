@@ -807,6 +807,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mb.install()
         menuBar = mb
 
+        // Task DD-T5: the live activity icon — `AppModel.handle(_:)` derives `MenuBarActivity`
+        // from the event stream at the single point every event flows through and fires this hook
+        // only on value change; the menu bar owns frame-cycling/timer lifecycle from there. Same
+        // decoupled-closure wiring posture as `onStagedChange`/`onBadgeChange` right below.
+        model.onActivityChange = { [weak self] activity in
+            self?.menuBar?.setActivity(activity)
+        }
+
         // Sparkle T4: hook the idle gate's staged/badge callbacks to the menu bar. Installed here
         // (after `menuBar = mb`) rather than right where the coordinator is constructed earlier in
         // this method — order is safe either way since staging can only happen after an update
