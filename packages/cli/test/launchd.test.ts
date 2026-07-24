@@ -100,4 +100,47 @@ describe("launchd profile label", () => {
     expect(dist).toContain("<string>com.norma.core</string>");
     expect(dist).not.toContain("com.norma.core.dev");
   });
+
+  // DD branch review (I3): NORMA_PROFILE must ride along in the plist's own EnvironmentVariables
+  // for a dev-profile install (otherwise a launchd-installed dev daemon resolves
+  // `keychainService()` to the dist Keychain literal despite living in ~/.norma-dev — silent
+  // credential cross-contamination), and the dist plist must stay byte-identical to before this
+  // fix (no new key at all, not even an empty one).
+  test("dev plist carries NORMA_PROFILE=dev; dist plist never mentions NORMA_PROFILE", () => {
+    const dev = renderPlist({ binaryPath: "/x/norma-core", normaHome: "/tmp/h", profile: "dev" });
+    expect(dev).toContain("<key>NORMA_PROFILE</key><string>dev</string>");
+
+    const dist = renderPlist({ binaryPath: "/x/norma-core", normaHome: "/tmp/h", profile: "dist" });
+    expect(dist).not.toContain("NORMA_PROFILE");
+  });
+
+  // Byte-identity proof: the dist plist output must be EXACTLY what renderPlist produced before
+  // this fix, character for character — not just "doesn't contain NORMA_PROFILE". Passes
+  // `profile: "dist"` explicitly (rather than relying on ambient `NORMA_PROFILE` env resolution)
+  // so this assertion can never flake against another test's env mutation.
+  test("dist plist is byte-identical to the pre-fix output", () => {
+    const xml = renderPlist({ binaryPath: "/usr/local/bin/norma", normaHome: "/Users/me/.norma", profile: "dist" });
+    expect(xml).toBe(
+      `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.norma.core</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/norma</string>
+    <string>daemon</string>
+    <string>run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>NORMA_HOME</key><string>/Users/me/.norma</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/me/.norma/logs/core.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/me/.norma/logs/core.err.log</string>
+</dict>
+</plist>
+`
+    );
+  });
 });

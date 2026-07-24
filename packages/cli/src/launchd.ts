@@ -24,7 +24,17 @@ function xmlEscape(s: string): string {
 
 export function renderPlist(opts: { binaryPath: string; normaHome: string; profile?: NormaProfile }): string {
   const home = xmlEscape(opts.normaHome);
-  const label = launchdLabel(opts.profile);
+  const profile = opts.profile ?? resolveNormaProfile();
+  const label = launchdLabel(profile);
+  // DD branch review (I3): a launchd-installed DEV daemon must carry NORMA_PROFILE=dev into its
+  // environment, or `packages/core/src/auth/secret-store.ts`'s module-load-time
+  // `keychainService()` resolves to the DIST literal (`com.norma.core`) despite running out of
+  // `~/.norma-dev` — silent credential cross-contamination between profiles. The dist plist must
+  // stay BYTE-IDENTICAL to before this fix (no new key, no whitespace drift) — only "dev" adds
+  // the extra `<key>`/`<string>` pair to the EnvironmentVariables dict.
+  const envVars = profile === "dev"
+    ? `<dict><key>NORMA_HOME</key><string>${home}</string><key>NORMA_PROFILE</key><string>dev</string></dict>`
+    : `<dict><key>NORMA_HOME</key><string>${home}</string></dict>`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -37,7 +47,7 @@ export function renderPlist(opts: { binaryPath: string; normaHome: string; profi
     <string>run</string>
   </array>
   <key>EnvironmentVariables</key>
-  <dict><key>NORMA_HOME</key><string>${home}</string></dict>
+  ${envVars}
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>${xmlEscape(join(opts.normaHome, "logs", "core.out.log"))}</string>

@@ -22,5 +22,8 @@ final class AppProfileTests: XCTestCase {
         AppProfile.bootstrapEnvironment()
         XCTAssertEqual(ProcessInfo.processInfo.environment["NORMA_HOME"], "/tmp/dd-apptest-home")
         unsetenv("NORMA_HOME")
+        // DD branch review rider: leave NORMA_PROFILE exactly as clean as NORMA_HOME above — this
+        // test process's env must not leak a stray NORMA_PROFILE into whichever test runs next.
+        unsetenv("NORMA_PROFILE")
     }
 }
