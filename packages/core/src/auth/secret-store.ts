@@ -1,12 +1,13 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { keychainService } from "../profile";
 
 export interface SecretStore {
   get(name: string): Promise<string | null>;
   set(name: string, value: string): Promise<void>;
 }
 
-const SERVICE = "com.norma.core";
+const SERVICE = keychainService();
 
 /** Production store: macOS Keychain via Bun.secrets. */
 export class KeychainSecretStore implements SecretStore {
