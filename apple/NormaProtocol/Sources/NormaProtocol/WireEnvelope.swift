@@ -41,6 +41,11 @@ public struct WireEnvelope: Codable, Equatable, Sendable {
 
 public enum WireKind: String, Codable, Sendable {
     case rpcRequest, rpcResponse, event, hello, helloAck, error
+    /// Transport keepalive (spec 2026-07-24): phone-initiated liveness solicitation. The gateway
+    /// echoes `.pong`; an OLD gateway answers with its invalid-envelope error frame instead —
+    /// EITHER inbound frame proves the path (liveness = any inbound frame, so no capability
+    /// negotiation is needed). The daemon never sees these.
+    case ping, pong
 }
 
 public enum WireError: Error, Equatable {

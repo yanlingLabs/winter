@@ -634,6 +634,15 @@ public actor Gateway {
             return
         }
 
+        // Transport keepalive (KA-T2): answer pings before any rpc machinery — cheap, un-throttled
+        // (never reaches the token bucket), and proof-of-path for the phone's liveness watchdog.
+        // Inbound .pong is nonsensical (gateway never pings) — ignore, don't error.
+        if envelope.kind == .ping {
+            await send(conn, epoch: session.epoch, kind: .pong, sessionID: nil, streamID: nil, seq: nil, payload: Data())
+            return
+        }
+        if envelope.kind == .pong { return }
+
         guard envelope.kind == .rpcRequest else {
             await sendGatewayError(conn, epoch: session.epoch, id: .null, sessionID: envelope.sessionID, message: "expected rpcRequest frame, got \(envelope.kind)")
             return

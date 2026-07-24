@@ -22,8 +22,14 @@ func out(_ s: String) {
 // MARK: - Arg parsing (no dependency — mirrors `norma-probe`'s own hand-rolled `ProbeArgs` posture)
 
 let usage = """
-usage: norma-fake-phone pair --qr <base64url|-> [--attach]
+usage: norma-fake-phone pair --qr <base64url|-> [--attach] [--mute]
        norma-fake-phone probe-relay --url <relay-url>
+
+  --attach   after pairing, attach to the live event stream (session.list + NDJSON events)
+  --mute     (KA-T3, requires --attach) once live, go silent: swallow every inbound event
+             (nothing printed) and send nothing of our own, including no keepalive pings —
+             simulates a phone that has gone unresponsive while the connection stays open, for
+             manually exercising the counterparty's tolerance of a silent-but-connected peer
 """
 
 let rawArgs = Array(CommandLine.arguments.dropFirst())
@@ -68,6 +74,7 @@ guard rawArgs.first == "pair" else { out(usage); exit(2) }
 
 var qrArg: String?
 var attach = false
+var mute = false
 var index = 1
 while index < rawArgs.count {
     switch rawArgs[index] {
@@ -77,6 +84,8 @@ while index < rawArgs.count {
         qrArg = rawArgs[index]
     case "--attach":
         attach = true
+    case "--mute":
+        mute = true
     default:
         out("unknown argument: \(rawArgs[index])\n\(usage)"); exit(2)
     }
@@ -84,6 +93,7 @@ while index < rawArgs.count {
 }
 
 guard let qrArg else { out("missing required --qr <base64url|->\n\(usage)"); exit(2) }
+guard !mute || attach else { out("--mute requires --attach\n\(usage)"); exit(2) }
 
 let qrString: String
 if qrArg == "-" {
@@ -193,7 +203,10 @@ Task {
             // stable across re-pairs).
             clientInstanceID: "norma-fake-phone",
             clock: { Int(Date().timeIntervalSince1970 * 1000) },
-            idgen: { UUID().uuidString }
+            idgen: { UUID().uuidString },
+            // KA-T3 `--mute`: an always-false `isActive` means the client's own liveness watchdog
+            // never sends a ping either — a truly silent phone, not merely one that stops printing.
+            isActive: { !mute }
         )
 
         let serverHello = try await client.handshake(resumes: [])
@@ -202,10 +215,16 @@ Task {
         let list = try await client.send(method: "session.list", params: .object([:]))
         printJSON(list)
 
+        if mute {
+            out("muted: swallowing inbound events, sending nothing further (connection stays open)")
+        }
+
         // Keep streaming whatever arrives next (replay-then-live push events) as NDJSON, until the
         // connection closes or this process is killed (Ctrl-C) — a dev observation tool, not a
-        // one-shot round trip.
+        // one-shot round trip. Muted: still drain the stream (so replay bookkeeping/cursors keep
+        // advancing normally), just swallow every event instead of printing it.
         for await envelope in client.events {
+            guard !mute else { continue }
             printEnvelope(envelope)
         }
     } catch {

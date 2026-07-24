@@ -38,5 +38,7 @@
 	<string>https://updates.yanlinglabs.com/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>mmce2Wik1c09oXqBvWp+DjsfwtSAdpaCCDkJ98sgAtg=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>3600</integer>
 </dict>
 </plist>

@@ -109,6 +109,34 @@ final class NormaSessionClientTests: XCTestCase {
         )
     }
 
+    // MARK: - KA-T3: heartbeat test infra
+
+    /// Thread-safe mutable "now" the test advances explicitly — the same seam
+    /// `PairingManagerTests.TestClock` uses (a per-file copy: this codebase's convention for a
+    /// tiny test-only double rather than a shared one). Every OTHER test in this file passes the
+    /// frozen `clock: { 0 }` above, which never crosses any `HeartbeatConfig` threshold — that's
+    /// what keeps every pre-existing construction site's outbound-frame-count assertions
+    /// unaffected by the new watchdog defaulting to `.production`.
+    private final class TestClock: @unchecked Sendable {
+        private let box = OSAllocatedUnfairLock<Int>(initialState: 0)
+        var now: Int {
+            get { box.withLock { $0 } }
+            set { box.withLock { $0 = newValue } }
+        }
+    }
+
+    private func makeHeartbeatClient(
+        conn: ScriptedRemoteConn, cursors: CursorStore = InMemoryCursorStore(),
+        clock: TestClock, heartbeat: HeartbeatConfig,
+        isActive: @escaping @Sendable () -> Bool = { true }
+    ) -> NormaSessionClient {
+        NormaSessionClient(
+            conn: conn, hostID: "mac-host", epoch: epoch, cursors: cursors,
+            clientInstanceID: "phone-under-test", clock: { clock.now }, idgen: { UUID().uuidString },
+            firstFrameDeadline: 2, heartbeat: heartbeat, isActive: isActive
+        )
+    }
+
     /// T4-review minor 1's double: reads delegate to a real in-memory store, every `advance`
     /// throws — a stand-in for a persistently failing `FileCursorStore` (disk full / bad perms).
     private struct ThrowingAdvanceCursorStore: CursorStore {
@@ -608,5 +636,195 @@ final class NormaSessionClientTests: XCTestCase {
         XCTAssertTrue(page.envelopes.isEmpty)
         XCTAssertNil(page.oldestSeq)
         XCTAssertFalse(page.hasMore)
+    }
+
+    // MARK: - KA-T3: client heartbeat (lastInboundAt watchdog)
+
+    /// Baseline: after `quietMs` of silence the watchdog sends exactly one `.ping`; advancing
+    /// further but still short of `quietMs + secondWindowMs` does not draw a second one.
+    func testQuietLinkPingsAtThreshold() async throws {
+        let conn = ScriptedRemoteConn()
+        let clock = TestClock()
+        let cfg = HeartbeatConfig(quietMs: 100, secondWindowMs: 100, graceMs: 50, tickMs: 10)
+        let client = makeHeartbeatClient(conn: conn, clock: clock, heartbeat: cfg)
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+        _ = try await waitOutbound(conn, count: 1) // [hello]
+
+        clock.now += 100 // == quietMs
+        let out = try await waitOutbound(conn, count: 2) // [hello, ping]
+        XCTAssertEqual(decodeOutbound(out[1]).kind, .ping)
+        XCTAssertTrue(decodeOutbound(out[1]).payload.isEmpty)
+
+        clock.now += 50 // still < quietMs + secondWindowMs (200)
+        try await Task.sleep(nanoseconds: 40_000_000) // several ticks elapse
+        XCTAssertEqual(conn.outbound.count, 2, "no second ping until the full second window elapses")
+    }
+
+    /// ANY inbound frame — even one shaped like an OLD gateway's generic error reply to a `.ping`
+    /// it doesn't understand, not a `.pong` — counts as liveness and resets the window. Config is
+    /// deliberately asymmetric (`quietMs` >> `secondWindowMs + graceMs`) so the OLD (unreset)
+    /// schedule's close deadline can be crossed while the FRESH (reset) schedule's own next
+    /// threshold is still comfortably in the future — the two outcomes are unambiguous at the same
+    /// clock value: a buggy unreset impl would have closed by then, a correct one has done nothing.
+    func testAnyInboundFrameResetsTheWindow() async throws {
+        let conn = ScriptedRemoteConn()
+        let clock = TestClock()
+        let cfg = HeartbeatConfig(quietMs: 100, secondWindowMs: 20, graceMs: 10, tickMs: 10)
+        let client = makeHeartbeatClient(conn: conn, clock: clock, heartbeat: cfg)
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+        _ = try await waitOutbound(conn, count: 1) // [hello]
+
+        clock.now += 100 // quiet → first ping
+        _ = try await waitOutbound(conn, count: 2) // [hello, ping]
+
+        // The OLD-gateway reply shape: a generic `.error` frame, not a `.pong` — still proves the
+        // path is alive. Give the actor a moment to actually process it (real time, not the fake
+        // clock) before advancing further, so the reset is durably applied first.
+        conn.enqueueInbound(serverFrame(kind: .error, payload: Data()))
+        try await Task.sleep(nanoseconds: 30_000_000)
+
+        // Past the OLD (unreset) close deadline (quiet >= 100 + 20 + 10 = 130 from the ORIGINAL
+        // t=0, i.e. clock >= 130) — a buggy impl that failed to reset would have closed by now.
+        // The reset schedule's own next threshold (a fresh ping at quiet >= 100 from the reset
+        // point, i.e. clock >= 200) is still far off.
+        clock.now += 40 // clock == 140
+        try await Task.sleep(nanoseconds: 60_000_000) // several ticks elapse
+        XCTAssertFalse(conn.isClosed, "the reset must prevent closing on the stale (unreset) schedule")
+        XCTAssertEqual(conn.outbound.count, 2, "no second ping and no close until a FRESH quiet period elapses")
+    }
+
+    /// Two full silent windows (a ping, then silence past the second window, then silence past
+    /// grace) declare the path dead by closing OUR side of the connection — never a bespoke error.
+    /// Downstream, this must be indistinguishable from an ordinary socket death: the pending rpc
+    /// waiter resumes with `.connectionClosed` and the events stream finishes.
+    func testTwoSilentWindowsCloseTheConnection() async throws {
+        let conn = ScriptedRemoteConn()
+        let clock = TestClock()
+        let cfg = HeartbeatConfig(quietMs: 50, secondWindowMs: 50, graceMs: 20, tickMs: 10)
+        let client = makeHeartbeatClient(conn: conn, clock: clock, heartbeat: cfg)
+        let (events, evTask) = drain(client.events)
+        defer { evTask.cancel() } // no-op once it finishes naturally below; safety net otherwise
+
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+        let sendTask = Task { try await client.send(method: "session.list", params: .object([:])) }
+        _ = try await waitOutbound(conn, count: 2) // [hello, session.list request] — pending rpc parked
+
+        clock.now += 50 // quietMs → ping 1
+        _ = try await waitOutbound(conn, count: 3)
+
+        clock.now += 50 // secondWindowMs → ping 2
+        _ = try await waitOutbound(conn, count: 4)
+
+        clock.now += 20 // graceMs → nothing heard from either solicitation: the path is dead
+        try await waitUntil({ conn.isClosed }, "conn.close() to fire after two unanswered pings")
+
+        do {
+            _ = try await sendTask.value
+            XCTFail("the pending rpc waiter should have resumed with connectionClosed")
+        } catch {
+            XCTAssertEqual(error as? SessionClientError, .connectionClosed)
+        }
+        _ = await evTask.value // the events AsyncStream finished naturally (handleClose ran)
+        XCTAssertTrue(events.items.isEmpty, "no .ping/.pong ever surfaces as a SessionEnvelope")
+    }
+
+    /// A genuinely streaming link (inbound events arriving well inside every quiet window) never
+    /// draws a ping, across several windows' worth of elapsed time.
+    func testStreamingLinkNeverPings() async throws {
+        let conn = ScriptedRemoteConn()
+        let clock = TestClock()
+        let cfg = HeartbeatConfig(quietMs: 50, secondWindowMs: 50, graceMs: 20, tickMs: 10)
+        let client = makeHeartbeatClient(conn: conn, clock: clock, heartbeat: cfg)
+        conn.enqueueInbound(helloAckFrame(verdicts: [.upToDate(sessionID: "s1", highWatermark: 0)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0)])
+        _ = try await waitOutbound(conn, count: 1) // [hello]
+
+        // 9 events at 20ms(-equivalent-clock) spacing (< quietMs) span > 3 quiet windows in total.
+        for i in 1...9 {
+            clock.now += 20
+            conn.enqueueInbound(eventFrame(session: "s1", seq: i))
+            try await Task.sleep(nanoseconds: 15_000_000) // let it land + a watchdog tick pass
+        }
+        XCTAssertEqual(conn.outbound.count, 1, "no ping ever fires while genuinely streaming")
+    }
+
+    /// A backgrounded client (`isActive: { false }`) never pings and never closes on staleness —
+    /// that judgment belongs to conn-keep (background lifecycle), not this watchdog.
+    func testInactiveClientNeverPings() async throws {
+        let conn = ScriptedRemoteConn()
+        let clock = TestClock()
+        let cfg = HeartbeatConfig(quietMs: 20, secondWindowMs: 20, graceMs: 10, tickMs: 10)
+        let client = makeHeartbeatClient(conn: conn, clock: clock, heartbeat: cfg, isActive: { false })
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+        _ = try await waitOutbound(conn, count: 1) // [hello]
+
+        clock.now += 10_000 // quiet "forever" relative to every threshold
+        try await Task.sleep(nanoseconds: 100_000_000) // many ticks elapse
+        XCTAssertEqual(conn.outbound.count, 1, "an inactive client must never ping")
+        XCTAssertFalse(conn.isClosed, "and must never close on staleness while inactive")
+    }
+
+    /// `.pong` is consumed silently: it never surfaces on `client.events`, but its arrival still
+    /// counts as liveness — observable indirectly as "no ping at what would have been the old
+    /// (unreset) deadline". Same asymmetric-config trick as `testAnyInboundFrameResetsTheWindow`.
+    func testPongIsConsumedSilently() async throws {
+        let conn = ScriptedRemoteConn()
+        let clock = TestClock()
+        let cfg = HeartbeatConfig(quietMs: 100, secondWindowMs: 20, graceMs: 10, tickMs: 10)
+        let client = makeHeartbeatClient(conn: conn, clock: clock, heartbeat: cfg)
+        let (events, evTask) = drain(client.events)
+        defer { evTask.cancel() }
+
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+        _ = try await waitOutbound(conn, count: 1) // [hello]
+
+        clock.now += 100 // quiet → ping
+        _ = try await waitOutbound(conn, count: 2)
+
+        conn.enqueueInbound(serverFrame(kind: .pong, payload: Data()))
+        try await Task.sleep(nanoseconds: 30_000_000) // let the actor consume it (real time)
+
+        XCTAssertTrue(events.items.isEmpty, "a .pong must never surface on the events stream")
+
+        // The OLD (unreset) 2nd-ping deadline is quiet >= 100 + 20 = 120 from the ORIGINAL t=0,
+        // i.e. clock >= 120. The pong's arrival reset lastInboundAt, so nothing fires here — the
+        // fresh cycle's own next threshold (clock >= 200) is still far off.
+        clock.now += 25 // clock == 125
+        try await Task.sleep(nanoseconds: 40_000_000)
+        XCTAssertEqual(conn.outbound.count, 2, "the pong reset lastInboundAt: no 2nd ping at the stale deadline")
+    }
+
+    /// Branch review (Important): a LEGAL custom config with `secondWindowMs: .max` ("ping once,
+    /// never escalate") must never crash. Pre-fix, `heartbeatTick`'s threshold comparisons summed
+    /// config fields directly (`cfg.quietMs + cfg.secondWindowMs`) — once `pingsSinceInbound`
+    /// reached 1, EVERY subsequent tick evaluated `50 + Int.max` to decide the second-ping branch,
+    /// an Int overflow TRAP (not a catchable Swift error) that killed the process outright. Drives
+    /// past the first ping, then advances the clock far past every real-world deadline and ticks
+    /// repeatedly: must observe exactly one ping ever, no crash, no close.
+    func testMaxSecondWindowConfigNeverOverflows() async throws {
+        let conn = ScriptedRemoteConn()
+        let clock = TestClock()
+        let cfg = HeartbeatConfig(quietMs: 50, secondWindowMs: .max, graceMs: 0, tickMs: 10)
+        let client = makeHeartbeatClient(conn: conn, clock: clock, heartbeat: cfg)
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+        _ = try await waitOutbound(conn, count: 1) // [hello]
+
+        clock.now += 50 // == quietMs → first (and, per this config, ONLY EVER) ping
+        _ = try await waitOutbound(conn, count: 2) // [hello, ping]
+
+        // Advance the clock far past any real-world deadline and let MANY ticks elapse — pre-fix,
+        // the very next tick after the first ping traps regardless of `quiet`'s value (the
+        // overflow is in the config-field addition itself), so surviving this at all is the point.
+        clock.now += 1_000_000_000
+        try await Task.sleep(nanoseconds: 150_000_000) // ~15 ticks at tickMs=10
+
+        XCTAssertEqual(conn.outbound.count, 2, "secondWindowMs: .max must mean 'never' — exactly one ping, ever")
+        XCTAssertFalse(conn.isClosed, "a config that never reaches its second window must never close")
     }
 }

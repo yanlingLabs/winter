@@ -2,6 +2,30 @@ import Foundation
 import os
 import NormaProtocol
 
+/// Transport-keepalive tuning (KA-T3). The client pings the host after `quietMs` of silence; if
+/// that first ping draws no inbound frame within `secondWindowMs`, it pings again; if THAT also
+/// draws nothing within `graceMs`, the path is declared dead. `tickMs` is just the watchdog's poll
+/// cadence — production wakes once a second to check elapsed quiet time against a wall clock, not
+/// a per-tick deadline of its own. `.disabled` parks the watchdog at an effectively-never-fires
+/// cadence for tests that want zero heartbeat noise without threading `isActive: { false }`
+/// through every call site.
+public struct HeartbeatConfig: Sendable {
+    public let quietMs: Int
+    public let secondWindowMs: Int
+    public let graceMs: Int
+    public let tickMs: Int
+
+    public static let production = HeartbeatConfig(quietMs: 5000, secondWindowMs: 5000, graceMs: 2000, tickMs: 1000)
+    public static let disabled = HeartbeatConfig(quietMs: .max, secondWindowMs: .max, graceMs: .max, tickMs: 60_000)
+
+    public init(quietMs: Int, secondWindowMs: Int, graceMs: Int, tickMs: Int) {
+        self.quietMs = quietMs
+        self.secondWindowMs = secondWindowMs
+        self.graceMs = graceMs
+        self.tickMs = tickMs
+    }
+}
+
 /// The phone-side session client (SP3 Task 4): the resume / idempotency / approval state machine
 /// the `norma-fake-phone` CLI currently hand-rolls, promoted to a tested, reusable actor. It owns
 /// one `RemoteConn`, drives the `ClientHello` → `helloAck` → stream wire dance, and turns the raw
@@ -40,6 +64,15 @@ public actor NormaSessionClient {
     /// limit — on overflow the stream surfaces a gap (forcing a snapshot resume) instead.
     /// Injectable small for tests; production default 10_000.
     private let liveBufferCap: Int
+
+    /// Transport-keepalive tuning (KA-T3) — see `HeartbeatConfig`. Defaults to `.production` so
+    /// every pre-existing call site keeps behaving exactly as before (a frozen/no-op test clock
+    /// never crosses `quietMs`, so no spurious ping ever fires).
+    private let heartbeat: HeartbeatConfig
+    /// Gates whether the watchdog is allowed to ping/close at all — background app state is
+    /// conn-keep's domain, not this client's; a backgrounded phone must never ping or declare its
+    /// own path dead. Defaults to always-active.
+    private let isActive: @Sendable () -> Bool
 
     /// Informational `ClientHello.appBuild` — a fixed module identifier (the gateway never keys on
     /// it; a real app would thread its build string through).
@@ -91,6 +124,19 @@ public actor NormaSessionClient {
     private var readLoopTask: Task<Void, Never>?
     private var closed = false
 
+    /// KA-T3 liveness watchdog state. `lastInboundAt` is stamped from ANY inbound frame (even one
+    /// that fails to decode) at the TOP of `handleFrame`, before decode — arrival of bytes on the
+    /// wire is liveness proof regardless of what they turn out to mean. Initialized properly when
+    /// the read loop starts (see `startReadLoopIfNeeded`); the `0` here is never observed since the
+    /// watchdog task only ever starts alongside the read loop.
+    private var lastInboundAt: Int = 0
+    /// How many un-answered pings have gone out since the last inbound frame of ANY kind. Reset to
+    /// 0 the instant anything arrives (see `handleFrame`).
+    private var pingsSinceInbound = 0
+    /// The watchdog Task — same lifecycle as `readLoopTask` (started beside it in
+    /// `startReadLoopIfNeeded`, cancelled in `handleClose`).
+    private var heartbeatTask: Task<Void, Never>?
+
     /// Parked `handshake` waiter, resumed by the read loop on `helloAck` (or by the deadline).
     private var helloWaiter: CheckedContinuation<ServerHello, Error>?
     /// The resumes `handshake` sent — read when recording verdicts to recover each stream's id.
@@ -130,7 +176,9 @@ public actor NormaSessionClient {
         clock: @escaping @Sendable () -> Int,
         idgen: @escaping @Sendable () -> String,
         firstFrameDeadline: Double = 10,
-        liveBufferCap: Int = 10_000
+        liveBufferCap: Int = 10_000,
+        heartbeat: HeartbeatConfig = .production,
+        isActive: @escaping @Sendable () -> Bool = { true }
     ) {
         self.conn = conn
         self.hostID = hostID
@@ -141,6 +189,8 @@ public actor NormaSessionClient {
         self.idgen = idgen
         self.firstFrameDeadline = firstFrameDeadline
         self.liveBufferCap = liveBufferCap
+        self.heartbeat = heartbeat
+        self.isActive = isActive
 
         var ec: AsyncStream<SessionEnvelope>.Continuation!
         self.events = AsyncStream { ec = $0 }
@@ -362,6 +412,9 @@ public actor NormaSessionClient {
 
     private func startReadLoopIfNeeded() {
         guard readLoopTask == nil, !closed else { return }
+        // The watchdog measures quiet time from THIS moment, not from init — a client constructed
+        // well before its first `handshake`/`send` call must not appear instantly stale.
+        lastInboundAt = clock()
         // The reader Task owns a local iterator (`for await`) over `conn.inbound` — the sole
         // consumer — and hops to the actor per frame. Keeping the iterator out of actor storage
         // sidesteps the "mutating async next() on actor-isolated property" restriction.
@@ -372,9 +425,64 @@ public actor NormaSessionClient {
             }
             await self?.handleClose()
         }
+        startHeartbeatIfNeeded()
+    }
+
+    /// KA-T3: the client-initiated liveness watchdog. Same lifecycle as `readLoopTask` — started
+    /// here (this method's only caller is `startReadLoopIfNeeded`, itself called from every place
+    /// that used to start the read loop alone) and cancelled in `handleClose`.
+    private func startHeartbeatIfNeeded() {
+        guard heartbeatTask == nil, !closed else { return }
+        let tickMs = heartbeat.tickMs // immutable config — capture once, no actor hop in the loop
+        heartbeatTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(tickMs) * 1_000_000)
+                await self?.heartbeatTick()
+            }
+        }
+    }
+
+    /// One watchdog poll. Silent while backgrounded (`!isActive()`) or already closed — background
+    /// app state is conn-keep's domain, not this client's. Two un-answered pings past `graceMs`
+    /// declares the path dead by closing OUR side: `conn.close()` ends `conn.inbound`, the read
+    /// loop's `for await` exits, `handleClose()` runs — EXACTLY the shape of an ordinary socket
+    /// death, so the caller's existing reconnect/backoff path recovers it with no new signal.
+    private func heartbeatTick() {
+        guard !closed, isActive() else { return }
+        let quiet = clock() - lastInboundAt
+        let cfg = heartbeat
+
+        // Overflow-proof threshold math (branch review): compare by SUBTRACTING the
+        // already-elapsed budget stage from `quiet` instead of SUMMING config fields into the
+        // comparison — a legal custom config may hold `.max` (e.g. `secondWindowMs: .max` to ping
+        // once and never escalate), and `cfg.quietMs + cfg.secondWindowMs` traps on Int overflow
+        // the moment both operands are anywhere near that range. `quiet` is real elapsed
+        // wall-clock ms — always non-negative and small — so `quiet - cfg.quietMs` never
+        // overflows (worst case `0 - .max`, which is representable: `Int.min` has one MORE
+        // magnitude than `-Int.max`). Every subsequent subtraction only fires once its guard has
+        // proven the left-hand side is itself bounded and non-negative, so a possibly-`.max`
+        // config value is only ever compared against, never added to another possibly-`.max`
+        // value.
+        let pastQuiet = quiet - cfg.quietMs
+
+        if pingsSinceInbound >= 2, pastQuiet >= cfg.secondWindowMs, pastQuiet - cfg.secondWindowMs >= cfg.graceMs {
+            conn.close()
+            return
+        }
+        if (pingsSinceInbound == 0 && quiet >= cfg.quietMs)
+            || (pingsSinceInbound == 1 && pastQuiet >= cfg.secondWindowMs) {
+            pingsSinceInbound += 1
+            Task { await self.sendEnvelope(kind: .ping, sessionID: nil, streamID: nil, seq: nil, payload: Data()) }
+        }
     }
 
     private func handleFrame(_ frame: Data) {
+        // KA-T3: liveness = ANY inbound frame, decoded or not — stamped BEFORE decode so even an
+        // undecodable frame proves the path is alive (this is how an OLD gateway's invalid-envelope
+        // error-frame reply to our `.ping` still counts, same as a real `.pong` would).
+        lastInboundAt = clock()
+        pingsSinceInbound = 0
+
         // Strict decode is the common path: live/replay/rpc/helloAck frames are all stamped with
         // OUR epoch. A malformed / stale-epoch frame here is otherwise skipped (the connection stays
         // usable) — the gateway is the authority on framing; a corrupt inbound frame is not this
@@ -386,6 +494,8 @@ public actor NormaSessionClient {
             case .rpcResponse: handleRpcResponse(env)
             case .error: handleErrorFrame(env)
             case .hello, .rpcRequest: break // phone→host kinds; never inbound
+            case .ping: break // the host never pings the phone today; inert if it ever did
+            case .pong: break // arrival already counted above (liveness); never surfaces on `events`
             }
             return
         }
@@ -404,6 +514,7 @@ public actor NormaSessionClient {
     private func handleClose() {
         guard !closed else { return }
         closed = true
+        heartbeatTask?.cancel()
         let waiters = pending
         pending = [:]
         for (_, cont) in waiters { cont.resume(throwing: SessionClientError.connectionClosed) }
