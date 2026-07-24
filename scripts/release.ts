@@ -54,7 +54,7 @@
 import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { ROOT, readCanonical } from "./version-lib";
+import { FORMAT, ROOT, readCanonical } from "./version-lib";
 import {
   GH_REPO,
   appcastInsertPlan,
@@ -148,8 +148,16 @@ const pre = preflight({
       return out === "" ? null : `working tree not clean — commit or stash changes before releasing`;
     },
     tag: () => {
-      const out = probe(`git tag -l v${preVersion}`).stdout.trim();
-      return out === "" ? null : `tag v${preVersion} already exists — bump the version or delete the stale tag`;
+      // Check the tag for the version this run will actually RELEASE: preVersion under
+      // --no-bump, else the post-bump next patch. Checking v<preVersion> unconditionally made
+      // every second bumping release fail — after a successful release the tree legitimately
+      // sits at the last-released version, whose tag always exists. (Patch 999 rollover is
+      // bump-version's concern; the guard then re-checks conservatively on the raw string.)
+      const m = preVersion.match(FORMAT);
+      const releasing =
+        NO_BUMP || !m ? preVersion : `${m[1]}.${m[2]}.${String(Number(m[3]) + 1).padStart(3, "0")}`;
+      const out = probe(`git tag -l v${releasing}`).stdout.trim();
+      return out === "" ? null : `tag v${releasing} already exists — bump the version or delete the stale tag`;
     },
   },
 });
