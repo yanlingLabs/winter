@@ -84,8 +84,8 @@ targets:
         CFBundleDisplayName: "$(NORMA_APP_NAME)"
         CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
         CFBundleIconFile: "$(NORMA_APP_ICON)"
-        CFBundleShortVersionString: "0.2.003"
-        CFBundleVersion: "0.2.003"
+        CFBundleShortVersionString: "0.2.004"
+        CFBundleVersion: "0.2.004"
         LSUIElement: true
         LSMinimumSystemVersion: "26.0"
         NSPrincipalClass: NSApplication
