@@ -193,6 +193,13 @@ console.log(
 if (!NO_BUMP) {
   console.log("Bumping version...");
   console.log(sh(`bun run version:bump`).trim());
+  if (!DRY_RUN) {
+    // Commit the bump immediately (v0.2.003 postmortem: a real bumping release left VERSION +
+    // stamped files dirty on main through publish — repo/artifact version drift until noticed).
+    // Safe to add -A: preflight guarantees the tree was clean, so the only dirt IS the bump.
+    sh(`git add -A`);
+    sh(`git commit -m "chore(release): v${readCanonical()}"`);
+  }
 } else {
   console.log(`--no-bump: staying on ${preVersion}`);
 }
