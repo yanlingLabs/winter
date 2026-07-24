@@ -255,6 +255,55 @@ describe("App (fullscreen shell)", () => {
     expect(lastFrame() ?? "").not.toContain("WHEEL-UNSTUCK");
   });
 
+  // tui-mouse — rapid trackpad scroll batches many SGR reports into ONE `stdin.read()`/"input"
+  // chunk. bottomBarRows(idle, no tasks/agents) = 4, so viewH = (24-1) - 4 = 19 at the 24-row
+  // fallback; 40 pushed lines -> max scrollTop 21, stuck at the bottom (scrollTop 21, lines
+  // W-21..W-39 visible) before any wheel input.
+  test("(k2) batched SGR reports: 3 concatenated wheel-up reports in ONE chunk scroll exactly 3 steps, nothing leaks to the composer", async () => {
+    const bridge = makeEventBridge();
+    for (let i = 0; i < 40; i++) bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: `W-${i}` }));
+    const client = fakeClient();
+    const { stdin, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+    await wait();
+
+    stdin.write(WHEEL_UP.repeat(3)); // 3 batched reports in a single raw chunk
+    await wait();
+    const frame = lastFrame() ?? "";
+    expect(count(frame, "64;10;5")).toBe(0); // no raw mouse bytes anywhere (not the composer)
+
+    // Each of the 3 reports fired its own wheel step (-3 each = -9 total): scrollTop 21 -> 12, so
+    // the top visible line is W-12 and W-31 (visible only at a shallower scroll) is NOT.
+    expect(frame).toContain("W-12");
+    expect(frame).not.toContain("W-31");
+
+    // The composer buffer is empty (mouse was swallowed): Enter submits nothing.
+    stdin.write("\r");
+    await wait();
+    expect(client.calls).toEqual([]);
+  });
+
+  test("(k3) a report split across two stdin chunks is swallowed and scrolls exactly one step, nothing leaks to the composer", async () => {
+    const bridge = makeEventBridge();
+    for (let i = 0; i < 40; i++) bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: `W-${i}` }));
+    const client = fakeClient();
+    const { stdin, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+    await wait();
+
+    stdin.write("\x1b[<64;10;5"); // report split before the terminating 'M'
+    await wait();
+    expect(lastFrame() ?? "").toContain("W-21"); // not yet scrolled — nothing fires on a partial report
+
+    stdin.write("M"); // completes the report
+    await wait();
+    const frame = lastFrame() ?? "";
+    expect(count(frame, "64;10;5")).toBe(0); // no raw mouse bytes anywhere (not the composer)
+    expect(frame).toContain("W-18"); // scrolled exactly ONE step (21 -> 18), not zero and not double
+
+    stdin.write("\r");
+    await wait();
+    expect(client.calls).toEqual([]);
+  });
+
   test("(l) resize: the frame re-renders to the new terminal height", async () => {
     const prev = (process.stdout as unknown as { rows?: number }).rows;
     const { lastFrame } = render(<App client={fakeClient()} bridge={makeEventBridge()} {...baseProps} />);

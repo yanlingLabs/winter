@@ -5,6 +5,7 @@ import {
   enableMouseTracking,
   disableMouseTracking,
   parseMouseInput,
+  createMouseReportFilter,
 } from "../../src/tui/alt-screen";
 
 // The PagerSpike (T1 scaffold) was removed in Phase 3b Task 7 once the real ctrl+o pager landed —
@@ -63,5 +64,73 @@ describe("parseMouseInput", () => {
     expect(parseMouseInput("\x1b[<64;10")).toEqual({ isMouse: false });
     expect(parseMouseInput("\x1b[<")).toEqual({ isMouse: false });
     expect(parseMouseInput("\x1b[64;10;5M")).toEqual({ isMouse: false }); // missing '<'
+  });
+});
+
+// tui-mouse — a single stdin `readable` chunk can hold MANY batched SGR reports (rapid trackpad
+// scroll), or a report can be split across two separate chunks (a read boundary lands mid-report).
+// `parseMouseInput`'s ^...$-anchored regex only ever recognizes a chunk that IS exactly one report,
+// so either case previously fell through as `{isMouse: false}` for the WHOLE chunk, leaking the raw
+// SGR bytes into the composer as literal text. `createMouseReportFilter` is the stateful, chunk-level
+// fix: loop-consume every complete report in a chunk, buffer a bounded trailing partial across
+// chunks, and return only genuine non-mouse text as `literal`.
+describe("createMouseReportFilter — batched/split SGR reports", () => {
+  test("a single chunk containing 3 concatenated wheel-up reports yields 3 wheel events and NO literal text", () => {
+    const consume = createMouseReportFilter();
+    const chunk = "\x1b[<64;10;5M".repeat(3);
+    const { literal, wheelEvents } = consume(chunk);
+    expect(literal).toBe("");
+    expect(wheelEvents).toEqual([{ dir: "up" }, { dir: "up" }, { dir: "up" }]);
+  });
+
+  test("mixed batch: wheel-up, wheel-down, and a non-wheel button report all in one chunk", () => {
+    const consume = createMouseReportFilter();
+    const chunk = "\x1b[<64;10;5M" + "\x1b[<65;11;6M" + "\x1b[<0;12;7M";
+    const { literal, wheelEvents } = consume(chunk);
+    expect(literal).toBe(""); // the button report is swallowed too, just carries no wheel event
+    expect(wheelEvents).toEqual([{ dir: "up" }, { dir: "down" }]);
+  });
+
+  test("a report split across two chunks completes on the second chunk with exactly one wheel event", () => {
+    const consume = createMouseReportFilter();
+    const first = consume("\x1b[<64;10;5"); // missing the trailing 'M'
+    expect(first.literal).toBe("");
+    expect(first.wheelEvents).toEqual([]); // not yet complete — nothing fires early
+    const second = consume("M");
+    expect(second.literal).toBe("");
+    expect(second.wheelEvents).toEqual([{ dir: "up" }]);
+  });
+
+  test("a report split mid-number across two chunks still completes correctly", () => {
+    const consume = createMouseReportFilter();
+    const first = consume("\x1b[<64;1");
+    expect(first.literal).toBe("");
+    expect(first.wheelEvents).toEqual([]);
+    const second = consume("0;5M");
+    expect(second.literal).toBe("");
+    expect(second.wheelEvents).toEqual([{ dir: "up" }]);
+  });
+
+  test("genuine typed text is untouched when there is no mouse report at all", () => {
+    const consume = createMouseReportFilter();
+    expect(consume("hello world")).toEqual({ literal: "hello world", wheelEvents: [] });
+    expect(consume("[<64;10;5M")).toEqual({ literal: "[<64;10;5M", wheelEvents: [] }); // no real ESC byte
+  });
+
+  test("literal text before/after a mouse report in the same chunk survives, report is stripped", () => {
+    const consume = createMouseReportFilter();
+    const { literal, wheelEvents } = consume("ab" + "\x1b[<64;10;5M" + "cd");
+    expect(literal).toBe("abcd");
+    expect(wheelEvents).toEqual([{ dir: "up" }]);
+  });
+
+  test("a buffered partial that turns out not to be a mouse report is flushed as literal (bounded)", () => {
+    const consume = createMouseReportFilter();
+    const first = consume("\x1b[<64;1"); // looks like a valid in-progress prefix so far
+    expect(first.literal).toBe("");
+    // Next chunk breaks the numeric grammar — this was never going to become a report.
+    const second = consume("x");
+    expect(second.literal).toBe("\x1b[<64;1x");
+    expect(second.wheelEvents).toEqual([]);
   });
 });
