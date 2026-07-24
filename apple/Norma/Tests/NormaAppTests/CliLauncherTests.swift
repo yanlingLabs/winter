@@ -6,11 +6,15 @@ import XCTest
 /// end-of-2e live-gate item.
 @MainActor
 final class CliLauncherTests: XCTestCase {
-    func testWrapperScriptContent() {
-        XCTAssertEqual(
-            CliLauncher.wrapperScript(repoRoot: "/Users/x/Norma v2"),
-            "#!/bin/sh\nexec /usr/bin/env bun \"/Users/x/Norma v2/packages/cli/src/main.ts\" \"$@\"\n"
-        )
+    func testWrapperScriptSetsDevEnvironment() {
+        let script = CliLauncher.wrapperScript(repoRoot: "/repo")
+        XCTAssertEqual(script, """
+        #!/bin/sh
+        export NORMA_HOME="${NORMA_HOME:-$HOME/.norma-dev}"
+        export NORMA_PROFILE="${NORMA_PROFILE:-dev}"
+        exec /usr/bin/env bun "/repo/packages/cli/src/main.ts" "$@"
+
+        """)
     }
 
     func testInstallPathFallsBackToLocalBin() throws {
@@ -20,12 +24,27 @@ final class CliLauncherTests: XCTestCase {
         // fallback branch: point `home` at tmp and use a FileManager where /opt/homebrew/bin is
         // "absent" — simulate by asserting the pure suffix logic instead:
         let fallback = CliLauncher.wrapperInstallPath(fileManager: AbsentBrewFileManager(), home: tmp)
-        XCTAssertEqual(fallback.path, tmp.appendingPathComponent(".local/bin/norma").path)
+        XCTAssertEqual(fallback.path, tmp.appendingPathComponent(".local/bin/norma-dev").path)
+    }
+
+    func testRemoveLegacyNormaWrapperOnlyRemovesOurWrapper() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("dd-legacy-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let legacy = dir.appendingPathComponent("norma")
+        try Data("#!/bin/sh\nexec /usr/bin/env bun \"/old/packages/cli/src/main.ts\" \"$@\"\n".utf8).write(to: legacy)
+        CliLauncher.removeLegacyNormaWrapper(besides: dir.appendingPathComponent("norma-dev"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path), "our old wrapper is removed")
+
+        let foreign = dir.appendingPathComponent("norma")
+        try Data("#!/bin/sh\necho user-owned\n".utf8).write(to: foreign)
+        CliLauncher.removeLegacyNormaWrapper(besides: dir.appendingPathComponent("norma-dev"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: foreign.path), "a foreign `norma` is NEVER touched")
     }
 
     func testEnsureWrapperWritesOnceAndRewritesOnDrift() throws {
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
-        let launcher = CliLauncher(installPathOverride: tmp.appendingPathComponent("bin/norma"))
+        let launcher = CliLauncher(installPathOverride: tmp.appendingPathComponent("bin/norma-dev"))
         launcher.repoRoot = "/repo/a"
         let p1 = try launcher.ensureWrapper()
         let bytes1 = try Data(contentsOf: p1)

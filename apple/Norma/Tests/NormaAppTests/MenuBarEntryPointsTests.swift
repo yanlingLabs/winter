@@ -55,6 +55,24 @@ final class MenuBarEntryPointsTests: XCTestCase {
 
     // MARK: - Menu shape / order
 
+    // MARK: - DD-T7: dist-only CLI installer item
+
+    /// `MenuBarController.install()`'s dist branch (`cliInstallItem`, "Install norma Command") is
+    /// compile-time unreachable from this xctest host — it always builds under the Debug config,
+    /// so `AppProfile.isDev` is always `true` here and only the dev branch (`openCliItem`) ever
+    /// mounts. That dist item is exercised at the live gate instead; here we assert the DEV side
+    /// of the same `if AppProfile.isDev { … } else { … }` branch — the norma-dev CLI item is
+    /// present, and the dist-only title never leaks into the dev menu.
+    func testDevMenuContainsNormaDevCliItemNotDistInstallItem() {
+        let controller = makeController()
+        controller.install()
+
+        let titles = controller.statusItem?.menu?.items.map(\.title) ?? []
+
+        XCTAssertTrue(titles.contains("Open CLI"), "dev builds must mount the norma-dev CLI item")
+        XCTAssertFalse(titles.contains("Install norma Command"), "the dist-only installer item must never appear in a dev build's menu")
+    }
+
     func testMenuContainsOpenCliAndOpenNormaAppAfterSummonField() {
         let controller = makeController()
         controller.install()
@@ -422,6 +440,91 @@ final class MenuBarEntryPointsTests: XCTestCase {
         NSApp.sendAction(controller.stateItem.action!, to: controller.stateItem.target, from: controller.stateItem)
 
         XCTAssertEqual(restarted, 1)
+    }
+
+    // MARK: - DD branch review (I1): single-writer icon (badge vs. activity collision)
+
+    /// The exact DD-T5/Sparkle-T4 collision this review item fixed: a badge set while activity is
+    /// non-idle must survive a subsequent frame tick (the real pulse Timer fires every ~80ms).
+    /// `applyCurrentFrame()` stands in for that tick — same posture as calling any other internal
+    /// seam directly in this file.
+    func testUpdateBadgeSurvivesAnActivityFrameTick() {
+        let controller = makeController()
+        controller.install()
+        controller.setActivity(.thinking) // non-idle: the pulse timer would be running for real
+        controller.setUpdateBadge(true)
+        XCTAssertEqual(controller.currentImageName, "arrow.down.circle.fill")
+
+        controller.applyCurrentFrame() // stand-in for the pulse timer's next tick
+        XCTAssertEqual(controller.currentImageName, "arrow.down.circle.fill", "the badge must survive an activity frame tick, not get clobbered back to the activity glyph")
+    }
+
+    /// Clearing the badge while idle must restore the idle BRAND asset name — never the retired
+    /// `circle.circle` SF Symbol placeholder `setUpdateBadge(false)` used to reset to.
+    func testUpdateBadgeClearedWhileIdleRestoresIdleBrandAssetNotTheStub() {
+        let controller = makeController()
+        controller.install()
+        controller.setUpdateBadge(true)
+        XCTAssertEqual(controller.currentImageName, "arrow.down.circle.fill")
+
+        controller.setUpdateBadge(false)
+        XCTAssertEqual(controller.currentImageName, MenuBarController.imageName(for: .idle, frame: 0, prefix: AppProfile.menuBarAssetPrefix))
+        XCTAssertNotEqual(controller.currentImageName, "circle.circle", "must never fall back to the retired SF-symbol stub")
+    }
+
+    /// `setUpdateStaged(false, ...)` calls `setUpdateBadge(false)` internally — this end-to-end
+    /// path (rather than calling `setUpdateBadge` directly) must produce the same non-stub result.
+    func testSetUpdateStagedFalseClearsBadgeToIdleBrandAsset() {
+        let controller = makeController()
+        controller.install()
+        controller.setUpdateStaged(true, version: "0.2.002")
+        controller.setUpdateBadge(true)
+
+        controller.setUpdateStaged(false, version: nil)
+
+        XCTAssertEqual(controller.currentImageName, MenuBarController.imageName(for: .idle, frame: 0, prefix: AppProfile.menuBarAssetPrefix))
+    }
+
+    // MARK: - DD branch review (m4): cliInstallItem's disabled states actually disable
+
+    /// Both disabled states (already-installed, foreign-refused) must clear `target`/`action` too,
+    /// not just flip `isEnabled` — `isEnabled = false` alone does not stop a direct
+    /// `NSApp.sendAction`/`target`/`action` invocation from firing (`setEngineFailed`'s own
+    /// precedent above hits the same lesson).
+    func testCliInstallItemDisabledStatesClearTargetAndAction() {
+        let controller = makeController()
+        controller.install()
+
+        controller.applyCliInstallState(.alreadyInstalled)
+        XCTAssertFalse(controller.cliInstallItem.isEnabled)
+        XCTAssertNil(controller.cliInstallItem.target)
+        XCTAssertNil(controller.cliInstallItem.action)
+
+        controller.applyCliInstallState(.refuseForeign("/usr/local/bin/norma"))
+        XCTAssertFalse(controller.cliInstallItem.isEnabled)
+        XCTAssertNil(controller.cliInstallItem.target)
+        XCTAssertNil(controller.cliInstallItem.action)
+    }
+
+    /// The two enabled states (install, repair) must (re)wire `target`/`action` — proving a
+    /// transition FROM a disabled state back to an enabled one actually restores clickability, not
+    /// just that a fresh item starts wired.
+    func testCliInstallItemEnabledStatesRestoreTargetAndAction() {
+        let controller = makeController()
+        controller.install()
+        controller.applyCliInstallState(.alreadyInstalled) // disable first
+        XCTAssertNil(controller.cliInstallItem.target)
+
+        controller.applyCliInstallState(.install)
+        XCTAssertTrue(controller.cliInstallItem.isEnabled)
+        XCTAssertNotNil(controller.cliInstallItem.target)
+        XCTAssertNotNil(controller.cliInstallItem.action)
+
+        controller.applyCliInstallState(.alreadyInstalled)
+        controller.applyCliInstallState(.repair)
+        XCTAssertTrue(controller.cliInstallItem.isEnabled)
+        XCTAssertNotNil(controller.cliInstallItem.target)
+        XCTAssertNotNil(controller.cliInstallItem.action)
     }
 
     // MARK: - Lifecycle T4: "Launch Norma at login" checkbox

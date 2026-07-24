@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveNormaHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess } from "@norma/core";
+import { resolveNormaHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, resolveNormaProfile } from "@norma/core";
 import type { Settings } from "@norma/core";
 import { METHODS, type ApprovalPolicy, type Task } from "@norma/protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
@@ -999,7 +999,8 @@ if (import.meta.main) {
   }
   case "ping": {
     const c = await connect("cli-ping");
-    console.log(`${AQUA}◍ norma-core is up${RESET} ${DIM}(${socketPath()})${RESET}`);
+    const profileTag = resolveNormaProfile() === "dev" ? " (dev)" : "";
+    console.log(`${AQUA}◍ norma-core is up${profileTag}${RESET} ${DIM}(${socketPath()})${RESET}`);
     c.close();
     break;
   }
@@ -1014,7 +1015,8 @@ if (import.meta.main) {
     const c = await connect("cli-status");
     const s = await c.daemonStatus();
     const provider = s.provider ? `${s.provider.id} (${s.provider.model})` : "(none configured)";
-    console.log(`${AQUA}norma-core v${s.version}${RESET} ${DIM}up ${formatElapsed(s.uptimeMs)} · ${s.socketPath}${RESET}`);
+    const profileTag = resolveNormaProfile() === "dev" ? " (dev)" : "";
+    console.log(`${AQUA}norma-core v${s.version}${profileTag}${RESET} ${DIM}up ${formatElapsed(s.uptimeMs)} · ${s.socketPath}${RESET}`);
     console.log(`${DIM}provider: ${provider} · sessions: ${s.sessionsCount} · plugins: ${s.pluginsCount}${RESET}`);
     c.close();
     break;
@@ -1458,7 +1460,8 @@ if (import.meta.main) {
     break;
   }
   case "login": {
-    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, OPENAI_API_KEY_SECRET, WEB_SEARCH_API_KEY_SECRET } = await import("@norma/core");
+    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, OPENAI_API_KEY_SECRET, WEB_SEARCH_API_KEY_SECRET, profileDisplayName } = await import("@norma/core");
+    console.log(`${AQUA}${profileDisplayName()} login${RESET}`);
     const secrets = new KeychainSecretStore();
     if (process.argv.includes("--api-key")) {
       const key = (await readSecret("Paste your OpenAI API key: ")).trim();

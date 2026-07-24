@@ -19,6 +19,9 @@ targets:
     sources:
       - path: Sources
       - path: Support/AppIcon.icns
+      # DD-T4: dev icon bundles alongside dist; the config-selected CFBundleIconFile
+      # ($(NORMA_APP_ICON)) picks AppIcon (dist) / AppIconDev (dev) at build time.
+      - path: Support/AppIconDev.icns
       - path: HelperShared
       # SP2b Task 6: the production-signed relay config, embedded as a bundle resource and
       # verified at load (RemoteAccessCoordinator.loadVerifiedRelayConfig) against
@@ -39,7 +42,16 @@ targets:
           DEST_LAUNCHD="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/LaunchDaemons"
           mkdir -p "${DEST_MACOS}" "${DEST_LAUNCHD}"
           cp "${BUILT_PRODUCTS_DIR}/NormaHelper" "${DEST_MACOS}/NormaHelper"
-          cp "${SRCROOT}/HelperResources/com.norma.helper.plist" "${DEST_LAUNCHD}/com.norma.helper.plist"
+          # DD-T4: rewrite the launchd plist's Label + MachServices to the profile-correct value
+          # (dist: com.norma.helper; dev: com.norma.helper.dev) so a dev build's helper daemon
+          # registers under a DISTINCT service and never collides with an installed dist helper.
+          # The OUTPUT FILENAME stays `com.norma.helper.plist` because the app resolves the daemon
+          # by FILENAME (HelperClient: `SMAppService.daemon(plistName: "com.norma.helper.plist")`) —
+          # only the plist CONTENTS carry the per-config Label. In Release the sed is a byte-for-byte
+          # no-op (HELPER_LABEL == com.norma.helper), keeping the dist output identical to the old cp.
+          HELPER_LABEL="com.norma.helper"
+          if [ "${CONFIGURATION}" != "Release" ]; then HELPER_LABEL="com.norma.helper.dev"; fi
+          sed "s/com\.norma\.helper/${HELPER_LABEL}/g" "${SRCROOT}/HelperResources/com.norma.helper.plist" > "${DEST_LAUNCHD}/com.norma.helper.plist"
       - name: Embed norma-core
         basedOnDependencyAnalysis: false
         script: |
@@ -66,10 +78,12 @@ targets:
     info:
       path: Support/Info.plist
       properties:
-        CFBundleName: Norma
-        CFBundleDisplayName: Norma
-        CFBundleIdentifier: com.norma.app
-        CFBundleIconFile: AppIcon
+        # DD-T4: identity carried by config-selected build settings (base = dist, Debug override =
+        # dev). Release resolves these to the byte-stable dist literals Norma/com.norma.app/AppIcon.
+        CFBundleName: "$(NORMA_APP_NAME)"
+        CFBundleDisplayName: "$(NORMA_APP_NAME)"
+        CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
+        CFBundleIconFile: "$(NORMA_APP_ICON)"
         CFBundleShortVersionString: "0.2.002"
         CFBundleVersion: "0.2.002"
         LSUIElement: true
@@ -112,7 +126,16 @@ targets:
         SWIFT_VERSION: "5.9"
         MACOSX_DEPLOYMENT_TARGET: "26.0"
         SWIFT_OBJC_BRIDGING_HEADER: Support/NormaBridge.h
+        # DD-T4: dist identity is the base; the Debug config overrides all three for dev. Info.plist
+        # keys above reference these ($(NORMA_APP_NAME)/$(NORMA_APP_ICON)/$(PRODUCT_BUNDLE_IDENTIFIER)).
+        PRODUCT_BUNDLE_IDENTIFIER: com.norma.app
+        NORMA_APP_NAME: Norma
+        NORMA_APP_ICON: AppIcon
       configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.norma.app.dev
+          NORMA_APP_NAME: Norma Dev
+          NORMA_APP_ICON: AppIconDev
         Release:
           # Privacy defense-in-depth: remap the builder's home prefix in compiler-recorded paths
           # (debug info, coverage, index data) so none of them can surface in shipped bits.
@@ -169,9 +192,13 @@ targets:
         # (com.norma.helper) — SMAppService/launchd match the daemon by that Label, and
         # HelperServiceDelegate's code-signing requirement pins the CONNECTING peer's team, not
         # this identifier, but keeping the signed identifier in sync with the Label/mach-service
-        # name avoids a needless mismatch. `-i com.norma.helper` explicitly sets it.
+        # name avoids a needless mismatch. `-i com.norma.helper` explicitly sets it (Release/base);
+        # DD-T4's Debug config overrides it to `-i com.norma.helper.dev` to match the dev Label the
+        # embed script seds into the launchd plist and the `#if DEBUG` normaHelperMachServiceName.
         OTHER_CODE_SIGN_FLAGS: -i com.norma.helper
       configs:
+        Debug:
+          OTHER_CODE_SIGN_FLAGS: -i com.norma.helper.dev
         Release:
           # Same privacy set as the Norma target: compiler-recorded paths (file-prefix-map),
           # linker OSO stabs (oso_prefix), and AST-path stabs (Release strip) must not carry

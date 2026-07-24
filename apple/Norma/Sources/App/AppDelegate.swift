@@ -432,6 +432,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         guard !Self.isRunningUnitTests else { return }
+        // DD-T4: stamp NORMA_HOME + NORMA_PROFILE into this process's env BEFORE the first
+        // `NormaPaths` read (which happens inside `boot()` — `supervisor.start()`'s socket probe,
+        // `AppModel.production()`), so the app, NormaKit, and every spawned child (the bundled
+        // `norma-core` daemon inherits our env via `Process`'s nil-environment default) resolve one
+        // identity. `setenv(…, 0)` never overwrites an explicit env, so tests/power users still win.
+        // Placed AFTER the unit-test guard so the xctest host launch never stamps `~/.norma-dev`.
+        AppProfile.bootstrapEnvironment()
         _ = boot()
     }
 
@@ -469,7 +476,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `!isRunningUnitTests` posture as the daemon supervisor's real spawn path and every other
         // real-side-effect construction in this method; `updaterDepsOverride` (nil in production)
         // lets a test drive `UpdaterCoordinator` directly without ever touching this controller.
+        // DD-T4: Sparkle is DIST-ONLY. Only the CONSTRUCTION is gated `#if !DEBUG` (the property
+        // declarations + `import Sparkle` stay in both configs) so a dev build never starts an
+        // updater against the production feed — matching the dev/dist identity split. The existing
+        // `!isRunningUnitTests` gate stays too (no updater from the xctest host).
         if !Self.isRunningUnitTests {
+            #if !DEBUG
             // Sparkle T4: live `activeTurns` wiring — `appModel` doesn't exist yet at this point in
             // boot() (it's constructed further down), but the closure only evaluates it lazily at
             // poll time, long after `appModel` is set, so construction order here doesn't matter.
@@ -485,6 +497,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller.updater.automaticallyDownloadsUpdates = true
             updaterCoordinator = coordinator
             updaterController = controller
+            #endif
         }
 
         // AX permission: stickiness needs it; ask once, run degraded until granted.
@@ -794,6 +807,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mb.install()
         menuBar = mb
 
+        // Task DD-T5: the live activity icon — `AppModel.handle(_:)` derives `MenuBarActivity`
+        // from the event stream at the single point every event flows through and fires this hook
+        // only on value change; the menu bar owns frame-cycling/timer lifecycle from there. Same
+        // decoupled-closure wiring posture as `onStagedChange`/`onBadgeChange` right below.
+        model.onActivityChange = { [weak self] activity in
+            self?.menuBar?.setActivity(activity)
+        }
+
         // Sparkle T4: hook the idle gate's staged/badge callbacks to the menu bar. Installed here
         // (after `menuBar = mb`) rather than right where the coordinator is constructed earlier in
         // this method — order is safe either way since staging can only happen after an update
@@ -833,6 +854,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Refresh the menu state line periodically (cheap; 2b has no binding plumbing to NSMenu).
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak mb] _ in
             Task { @MainActor in mb?.refresh() }
+        }
+        // DD-T7: dist-only first-launch offer for the `norma` command — late in launch, after the
+        // menu exists (`mb.install()` above), gated `!isRunningUnitTests` the same way as every
+        // other real-side-effect call in this method (Sparkle's updater construction, the AX
+        // prompt, etc.) since `offerOnFirstLaunchIfNeeded()` can show a real modal `NSAlert`.
+        if !Self.isRunningUnitTests {
+            CliInstaller.offerOnFirstLaunchIfNeeded()
         }
         return true
     }

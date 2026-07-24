@@ -19,6 +19,14 @@ import Foundation
 }
 
 /// Stable mach service name shared by the helper's `NSXPCListener` and the app's
-/// `NSXPCConnection`. Must match the `MachServices` key in `HelperResources/com.norma.helper.plist`
-/// and that plist's `Label` (both `com.norma.helper`).
+/// `NSXPCConnection`. Must match the `MachServices` key in the embedded launchd plist and that
+/// plist's `Label` — both are `sed`-rewritten to this same value per build config by the app
+/// target's "Embed NormaHelper" script (dist: `com.norma.helper`; dev: `com.norma.helper.dev`).
+///
+/// This file compiles into BOTH the app and the helper, so the `#if DEBUG` branch keeps the two
+/// sides in lockstep as long as they build in the same configuration — which the scheme guarantees.
+#if DEBUG
+let normaHelperMachServiceName = "com.norma.helper.dev"
+#else
 let normaHelperMachServiceName = "com.norma.helper"
+#endif

@@ -53,6 +53,11 @@ final class AppModel: ObservableObject {
     /// Task 4 (2f): fired once per successful connect (mirrors `onConnected` above) — the seam
     /// `PeripheralProvider.advertiseIfConnected()` hangs off (spec §A4: "advertises on connect").
     var onClientConnected: (() -> Void)?
+    /// Menu-bar status feed (Task DD-T5). Fired on MainActor only when the derived
+    /// `MenuBarActivity` value CHANGES — see `handle(_ ev:)`'s derive-and-publish step at the
+    /// single point every event flows through.
+    var onActivityChange: ((MenuBarActivity) -> Void)?
+    private var menuBarActivity: MenuBarActivity = .idle
 
     init(makeTransport: @escaping @Sendable () -> NormaTransport, token: String, clientName: String = "orb") {
         self.makeTransport = makeTransport
@@ -318,6 +323,23 @@ final class AppModel: ObservableObject {
             if s == .connected { onClientConnected?() }
         case .unknown:
             break // newer daemon event — orb has nothing to render for it
+        }
+        // Task DD-T5: menu-bar activity derivation. Scoped to the FOCUSED session only, not
+        // independent of the filtering above: every path that reaches this point already satisfies
+        // `e.sessionId == focusedSessionId` — either via the `guard` above (which `return`s out of
+        // `handle` entirely, not just the switch, for events from any other session) or via the
+        // equivalent check inside the `sessionCreated` branch (both of its early `return`s exit
+        // `handle` before this point too). On `refocus(onto:)` (below), the model sets
+        // `focusedSessionId` and then `client.attach(sessionId:, fromSeq: 0)` triggers a full replay
+        // of the newly-focused session's events through this same `handle`, so `menuBarActivity`
+        // reconverges to that session's true terminal state on every focus switch — self-healing;
+        // it can never wedge on stale state from a session that's no longer focused.
+        if case .session(let e) = ev {
+            let nextActivity = MenuBarActivity.next(after: menuBarActivity, event: e)
+            if nextActivity != menuBarActivity {
+                menuBarActivity = nextActivity
+                onActivityChange?(nextActivity)
+            }
         }
     }
 

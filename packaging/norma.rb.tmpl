@@ -26,4 +26,5 @@ cask "norma" do
   auto_updates true
 
   app "Norma.app"
+  binary "#{appdir}/Norma.app/Contents/Resources/norma-core", target: "norma"
 end

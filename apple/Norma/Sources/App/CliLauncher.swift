@@ -1,15 +1,16 @@
 import Foundation
 
-/// 2e-iv Task 1: installs a thin `norma` shell wrapper on `$PATH` and opens it in Terminal.app
+/// 2e-iv Task 1: installs a thin `norma-dev` shell wrapper on `$PATH` and opens it in Terminal.app
 /// via `open -a Terminal <path>`, so the CLI runs as a normal Terminal-owned process instead of
 /// as a child of the (Automation-permission-gated) menu-bar app — no TCC prompt either way.
 ///
-/// ⚠️ DEV-MODE ONLY. This whole class exists because there is no packaged `norma` binary yet:
-/// the wrapper script `exec`s `bun` straight against `packages/cli/src/main.ts` out of a live
-/// repo checkout (see `wrapperScript(repoRoot:)`). Phase 3's npm/compiled packaging ships a real
-/// `norma` executable and this auto-installer — wrapper generation, the repoRoot/#filePath
-/// ancestry hack, all of it — gets DELETED, not merely disabled. If you are reading this in
-/// Phase 3+ and `CliLauncher` still exists, that is a bug.
+/// DEV-MODE ONLY (dev/dist split, Task 6): the wrapper script `exec`s `bun` straight against
+/// `packages/cli/src/main.ts` out of a live repo checkout (see `wrapperScript(repoRoot:)`), and
+/// bakes the dev profile's env (`NORMA_HOME`/`NORMA_PROFILE`) into the script itself — a Terminal
+/// launched via `open -a` does not inherit this app's process env, so the wrapper cannot rely on
+/// `AppProfile.bootstrapEnvironment()` having already run in its shell. Call sites gate this
+/// class's use on `AppProfile.isDev`; the distribution app's `norma` command is a separate,
+/// packaged-binary story (Task 7).
 @MainActor
 final class CliLauncher {
     /// Test seam: when set, `ensureWrapper()` writes here instead of computing
@@ -48,9 +49,16 @@ final class CliLauncher {
         #endif
     }
 
-    /// Pure: the wrapper script's exact byte content for a given repo checkout.
+    /// Pure: the norma-dev wrapper's exact byte content. Sets the dev profile env (respecting
+    /// explicit overrides) then execs the checkout CLI via bun.
     static func wrapperScript(repoRoot: String) -> String {
-        "#!/bin/sh\nexec /usr/bin/env bun \"\(repoRoot)/packages/cli/src/main.ts\" \"$@\"\n"
+        """
+        #!/bin/sh
+        export NORMA_HOME="${NORMA_HOME:-$HOME/.norma-dev}"
+        export NORMA_PROFILE="${NORMA_PROFILE:-dev}"
+        exec /usr/bin/env bun "\(repoRoot)/packages/cli/src/main.ts" "$@"
+
+        """
     }
 
     /// Where the wrapper gets installed: prefer Homebrew's `bin` (already on most macOS devs'
@@ -64,9 +72,21 @@ final class CliLauncher {
         var isDirectory: ObjCBool = false
         let brewBinExists = fileManager.fileExists(atPath: brewBinPath, isDirectory: &isDirectory)
         if brewBinExists && fileManager.isWritableFile(atPath: brewBinPath) {
-            return URL(fileURLWithPath: brewBinPath).appendingPathComponent("norma")
+            return URL(fileURLWithPath: brewBinPath).appendingPathComponent("norma-dev")
         }
-        return home.appendingPathComponent(".local/bin/norma")
+        return home.appendingPathComponent(".local/bin/norma-dev")
+    }
+
+    /// One-time migration: earlier dev builds installed the wrapper AS `norma`, which now
+    /// belongs to the DISTRIBUTION app's symlink. Removes a sibling `norma` iff its content
+    /// proves it was our bun wrapper (starts with the historical exec line) — a user-owned or
+    /// dist-owned `norma` is never touched.
+    static func removeLegacyNormaWrapper(besides installPath: URL) {
+        let legacy = installPath.deletingLastPathComponent().appendingPathComponent("norma")
+        guard let content = try? String(contentsOf: legacy, encoding: .utf8),
+              content.hasPrefix("#!/bin/sh\nexec /usr/bin/env bun \""),
+              content.contains("/packages/cli/src/main.ts\" \"$@\"") else { return }
+        try? FileManager.default.removeItem(at: legacy)
     }
 
     /// Writes the wrapper script iff it's missing or its bytes have drifted from what
@@ -75,6 +95,7 @@ final class CliLauncher {
     /// rewrites the file nor touches its mtime. Returns the resolved install path either way.
     func ensureWrapper() throws -> URL {
         let path = installPathOverride ?? Self.wrapperInstallPath()
+        Self.removeLegacyNormaWrapper(besides: path)
         let directory = path.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
