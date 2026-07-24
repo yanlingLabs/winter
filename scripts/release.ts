@@ -205,6 +205,9 @@ sh(`xcodegen generate`, APPLE_DIR);
 console.log("Building Release (Developer ID, org team 37N77U9RSZ, hardened runtime)...");
 sh(
   `xcodebuild -project Norma.xcodeproj -scheme Norma -destination 'platform=macOS' -configuration Release ` +
+    // arm64-only: IrohLib ships no x86_64 slice (universal link fails), and the macOS 26 floor
+    // leaves no supported Intel audience anyway.
+    `ARCHS=arm64 ` +
     `DEVELOPMENT_TEAM=${TEAM_ID} CODE_SIGN_IDENTITY="Developer ID Application" CODE_SIGN_STYLE=Manual ` +
     `OTHER_CODE_SIGN_FLAGS="--timestamp" ENABLE_HARDENED_RUNTIME=YES CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO ` +
     `-derivedDataPath "${dd}" build`,

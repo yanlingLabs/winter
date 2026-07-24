@@ -24,7 +24,7 @@ final class PairingRouterTests: XCTestCase {
 
     private func makeManager(store: PairingStore, clock: @escaping @Sendable () -> Int = { 1_700_000_000 }) -> PairingManager {
         PairingManager(
-            store: store, macEndpointID: "mac-router-test", hostLabel: "Alex's Mac",
+            store: store, macEndpointID: "mac-router-test", hostLabel: "Test Mac",
             relayConfig: makeRelayConfig(), clock: clock, rng: { Data(repeating: 0xAB, count: $0) },
             sleepHook: instantSleepHook
         )

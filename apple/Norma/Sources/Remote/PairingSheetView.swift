@@ -124,7 +124,7 @@ struct PairingSheetView: View {
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-            TextField("Device name", text: $label, prompt: Text("e.g. Alex's iPhone"))
+            TextField("Device name", text: $label, prompt: Text("e.g. My iPhone"))
                 .textFieldStyle(.roundedBorder)
             HStack {
                 Button("Deny", role: .destructive) {

@@ -172,11 +172,11 @@ final class PairingSheetModelTests: XCTestCase {
             return false
         }
 
-        await h.model.confirmTapped(label: "Alex's iPhone")
-        XCTAssertEqual(h.confirmedLabels.value, ["Alex's iPhone"], "confirmTapped must call through to the injected confirm ceremony")
+        await h.model.confirmTapped(label: "Test iPhone")
+        XCTAssertEqual(h.confirmedLabels.value, ["Test iPhone"], "confirmTapped must call through to the injected confirm ceremony")
 
         let record = PairRecord(
-            phoneEndpointID: "phone-1", label: "Alex's iPhone", createdAt: 1_000,
+            phoneEndpointID: "phone-1", label: "Test iPhone", createdAt: 1_000,
             caps: ["sessions"], pairingEpoch: 1, lastSeenAt: 1_000
         )
         h.eventsContinuation.yield(.completed(record: record))

@@ -34,7 +34,7 @@ final class PairingManagerTests: XCTestCase {
 
     private func makeManager(store: PairingStore, clock: @escaping @Sendable () -> Int) -> PairingManager {
         PairingManager(
-            store: store, macEndpointID: "mac-1", hostLabel: "Alex's Mac",
+            store: store, macEndpointID: "mac-1", hostLabel: "Test Mac",
             relayConfig: makeRelayConfig(), clock: clock, rng: { Data(repeating: 0xAB, count: $0) },
             sleepHook: instantSleepHook
         )

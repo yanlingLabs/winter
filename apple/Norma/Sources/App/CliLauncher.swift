@@ -31,12 +31,21 @@ final class CliLauncher {
     /// Five `deletingLastPathComponent()` hops strip, in order: the filename itself, `App`,
     /// `Sources`, `Norma`, `apple` — leaving `<repoRoot>`. DEV-mode only (see class doc); tests
     /// never rely on this default, they set `repoRoot` explicitly.
+    ///
+    /// Debug-only: `#filePath` embeds the builder's absolute home path in the binary, and
+    /// `-file-prefix-map` does not remap `#filePath` literals — so Release compiles the literal
+    /// out entirely (the checkout path is meaningless in an installed app anyway; the wrapper
+    /// then points at a nonexistent path exactly as it did when installed on any other machine).
     private static var defaultRepoRoot: String {
+        #if DEBUG
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<5 {
             url = url.deletingLastPathComponent()
         }
         return url.path
+        #else
+        return "/norma-dev-checkout-unavailable"
+        #endif
     }
 
     /// Pure: the wrapper script's exact byte content for a given repo checkout.

@@ -112,6 +112,18 @@ targets:
         SWIFT_VERSION: "5.9"
         MACOSX_DEPLOYMENT_TARGET: "26.0"
         SWIFT_OBJC_BRIDGING_HEADER: Support/NormaBridge.h
+      configs:
+        Release:
+          # Privacy defense-in-depth: remap the builder's home prefix in compiler-recorded paths
+          # (debug info, coverage, index data) so none of them can surface in shipped bits.
+          # NOTE: this flag does NOT remap `#filePath` literals (verified empirically — the
+          # literal survives the map); the one functional `#filePath` (CliLauncher.defaultRepoRoot)
+          # is compiled out of Release at the source (`#if DEBUG`) instead. The release-artifact
+          # name scan in the release flow is the actual gate.
+          # $(HOME), not $(SRCROOT): the home prefix has no spaces, so the flag needs no inner
+          # quoting (quoted OTHER_SWIFT_FLAGS values reach swiftc with literal quotes and the
+          # prefix silently fails to match).
+          OTHER_SWIFT_FLAGS: -file-prefix-map $(HOME)=/builder
   NormaAppTests:
     type: bundle.unit-test
     platform: macOS

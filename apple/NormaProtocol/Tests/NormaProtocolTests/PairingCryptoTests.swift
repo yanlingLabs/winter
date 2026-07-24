@@ -61,7 +61,7 @@ struct PairingCryptoTests {
         let cfg = SignedRelayConfig(config: RelayConfig(version: 1, relays: ["https://relay-1.yanlinglabs.com."]), sig: Data(repeating: 7, count: 64))
         // No SP3.2c hints (older/loopback shape): macRelayURL defaults nil, macDirectAddresses [].
         let qr = QRPayload(v: 1, pairID: tPairID, pairSecret: tSecret, expiresAt: 1_800_000_000,
-            macEndpointID: "mac1", relayConfig: cfg, alpn: "computer.norma.rpc/1", hostLabel: "Alex's Mac")
+            macEndpointID: "mac1", relayConfig: cfg, alpn: "computer.norma.rpc/1", hostLabel: "Test Mac")
         let s = qr.encodeBase64URL()
         #expect(!s.contains("+") && !s.contains("/") && !s.contains("="))
         let decoded = try QRPayload.decode(base64URL: s)
@@ -75,7 +75,7 @@ struct PairingCryptoTests {
     @Test func qrPayloadRoundTripsAddressHints() throws {
         let cfg = SignedRelayConfig(config: RelayConfig(version: 1, relays: ["https://relay-1.yanlinglabs.com."]), sig: Data(repeating: 7, count: 64))
         let qr = QRPayload(v: 1, pairID: tPairID, pairSecret: tSecret, expiresAt: 1_800_000_000,
-            macEndpointID: "mac1", relayConfig: cfg, alpn: "computer.norma.rpc/1", hostLabel: "Alex's Mac",
+            macEndpointID: "mac1", relayConfig: cfg, alpn: "computer.norma.rpc/1", hostLabel: "Test Mac",
             macRelayURL: "https://use1-1.relay.iroh.network./",
             macDirectAddresses: ["192.168.1.9:53421", "[fe80::1]:53421"])
         let decoded = try QRPayload.decode(base64URL: qr.encodeBase64URL())
@@ -88,7 +88,7 @@ struct PairingCryptoTests {
     @Test func qrPayloadRoundTripsRelayOnlyNoDirectAddrs() throws {
         let cfg = SignedRelayConfig(config: RelayConfig(version: 1, relays: []), sig: Data(repeating: 7, count: 64))
         let qr = QRPayload(v: 1, pairID: tPairID, pairSecret: tSecret, expiresAt: 1_800_000_000,
-            macEndpointID: "mac1", relayConfig: cfg, alpn: "computer.norma.rpc/1", hostLabel: "Alex's Mac",
+            macEndpointID: "mac1", relayConfig: cfg, alpn: "computer.norma.rpc/1", hostLabel: "Test Mac",
             macRelayURL: "https://use1-1.relay.iroh.network./", macDirectAddresses: [])
         let decoded = try QRPayload.decode(base64URL: qr.encodeBase64URL())
         #expect(decoded == qr)
@@ -125,7 +125,7 @@ struct PairingCryptoTests {
         let map = CBORValue.map([
             ("alpn", .text("computer.norma.rpc/1")),
             ("expiresAt", .uint(expiresAt)),
-            ("hostLabel", .text("Alex's Mac")),
+            ("hostLabel", .text("Test Mac")),
             ("macEndpointID", .text("mac1")),
             ("pairID", .bytes(pairID ?? tPairID)),
             ("pairSecret", .bytes(tSecret)),

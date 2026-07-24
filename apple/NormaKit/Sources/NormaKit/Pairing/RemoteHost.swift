@@ -35,7 +35,7 @@ public final class RemoteHost {
         public var storeDir: URL
         /// The daemon's own unix socket — `NormaClient`'s `UnixSocketTransport` target.
         public var socketPath: String
-        /// Shown to the phone during pairing (`PairAccepted`/QR display) — e.g. "Alex's Mac".
+        /// Shown to the phone during pairing (`PairAccepted`/QR display) — e.g. "My Mac".
         public var hostLabel: String
         /// The signed relay list handed to a pairing phone inside its QR payload.
         public var relayConfig: SignedRelayConfig
