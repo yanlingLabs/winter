@@ -798,4 +798,33 @@ final class NormaSessionClientTests: XCTestCase {
         try await Task.sleep(nanoseconds: 40_000_000)
         XCTAssertEqual(conn.outbound.count, 2, "the pong reset lastInboundAt: no 2nd ping at the stale deadline")
     }
+
+    /// Branch review (Important): a LEGAL custom config with `secondWindowMs: .max` ("ping once,
+    /// never escalate") must never crash. Pre-fix, `heartbeatTick`'s threshold comparisons summed
+    /// config fields directly (`cfg.quietMs + cfg.secondWindowMs`) — once `pingsSinceInbound`
+    /// reached 1, EVERY subsequent tick evaluated `50 + Int.max` to decide the second-ping branch,
+    /// an Int overflow TRAP (not a catchable Swift error) that killed the process outright. Drives
+    /// past the first ping, then advances the clock far past every real-world deadline and ticks
+    /// repeatedly: must observe exactly one ping ever, no crash, no close.
+    func testMaxSecondWindowConfigNeverOverflows() async throws {
+        let conn = ScriptedRemoteConn()
+        let clock = TestClock()
+        let cfg = HeartbeatConfig(quietMs: 50, secondWindowMs: .max, graceMs: 0, tickMs: 10)
+        let client = makeHeartbeatClient(conn: conn, clock: clock, heartbeat: cfg)
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+        _ = try await waitOutbound(conn, count: 1) // [hello]
+
+        clock.now += 50 // == quietMs → first (and, per this config, ONLY EVER) ping
+        _ = try await waitOutbound(conn, count: 2) // [hello, ping]
+
+        // Advance the clock far past any real-world deadline and let MANY ticks elapse — pre-fix,
+        // the very next tick after the first ping traps regardless of `quiet`'s value (the
+        // overflow is in the config-field addition itself), so surviving this at all is the point.
+        clock.now += 1_000_000_000
+        try await Task.sleep(nanoseconds: 150_000_000) // ~15 ticks at tickMs=10
+
+        XCTAssertEqual(conn.outbound.count, 2, "secondWindowMs: .max must mean 'never' — exactly one ping, ever")
+        XCTAssertFalse(conn.isClosed, "a config that never reaches its second window must never close")
+    }
 }

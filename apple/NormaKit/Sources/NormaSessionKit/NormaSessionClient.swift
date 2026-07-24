@@ -451,12 +451,26 @@ public actor NormaSessionClient {
         guard !closed, isActive() else { return }
         let quiet = clock() - lastInboundAt
         let cfg = heartbeat
-        if pingsSinceInbound >= 2, quiet >= cfg.quietMs + cfg.secondWindowMs + cfg.graceMs {
+
+        // Overflow-proof threshold math (branch review): compare by SUBTRACTING the
+        // already-elapsed budget stage from `quiet` instead of SUMMING config fields into the
+        // comparison — a legal custom config may hold `.max` (e.g. `secondWindowMs: .max` to ping
+        // once and never escalate), and `cfg.quietMs + cfg.secondWindowMs` traps on Int overflow
+        // the moment both operands are anywhere near that range. `quiet` is real elapsed
+        // wall-clock ms — always non-negative and small — so `quiet - cfg.quietMs` never
+        // overflows (worst case `0 - .max`, which is representable: `Int.min` has one MORE
+        // magnitude than `-Int.max`). Every subsequent subtraction only fires once its guard has
+        // proven the left-hand side is itself bounded and non-negative, so a possibly-`.max`
+        // config value is only ever compared against, never added to another possibly-`.max`
+        // value.
+        let pastQuiet = quiet - cfg.quietMs
+
+        if pingsSinceInbound >= 2, pastQuiet >= cfg.secondWindowMs, pastQuiet - cfg.secondWindowMs >= cfg.graceMs {
             conn.close()
             return
         }
         if (pingsSinceInbound == 0 && quiet >= cfg.quietMs)
-            || (pingsSinceInbound == 1 && quiet >= cfg.quietMs + cfg.secondWindowMs) {
+            || (pingsSinceInbound == 1 && pastQuiet >= cfg.secondWindowMs) {
             pingsSinceInbound += 1
             Task { await self.sendEnvelope(kind: .ping, sessionID: nil, streamID: nil, seq: nil, payload: Data()) }
         }
