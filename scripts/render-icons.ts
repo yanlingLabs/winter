@@ -1,0 +1,161 @@
+/** One-shot brand-asset renderer: assets/brand/*.svg -> app icns (dist solid / dev hollow) +
+ *  menu-bar template PNG sets (idle + 12 rotated pulse frames for thinking/working, 1x/2x,
+ *  black-on-transparent). Outputs are COMMITTED; this script re-runs only when the mark changes.
+ *  Usage: bun run icons:render */
+import { Resvg } from "@resvg/resvg-js";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { join } from "node:path";
+
+const ROOT = join(import.meta.dir, "..");
+const BRAND = join(ROOT, "assets", "brand");
+const SUPPORT = join(ROOT, "apple", "Norma", "Support");
+const MENUBAR = join(ROOT, "apple", "Norma", "Resources", "MenuBar");
+
+const idleSvg = readFileSync(join(BRAND, "scale-burst.svg"), "utf8");
+const variants = {
+  thinking: readFileSync(join(BRAND, "scale-burst-thinking.svg"), "utf8"),
+  working: readFileSync(join(BRAND, "scale-burst-working.svg"), "utf8"),
+};
+
+/** Every <path .../> element, document order (the 12 rays). */
+function rayPaths(svg: string): string[] {
+  const m = svg.match(/<path[^>]*\/>/g);
+  if (!m || m.length !== 12) throw new Error(`expected 12 rays, got ${m?.length}`);
+  return m;
+}
+
+/** Per-ray opacity (1 when unspecified).
+ *
+ *  ADAPTATION NOTE (verified shape differs from the brief's assumption): the brief's
+ *  rayOpacities() assumed each <path> in the thinking/working variants carries a static
+ *  opacity="0.x" attribute. The real source SVGs (yanling-scale-burst-{thinking,working}-v2.svg)
+ *  instead encode the pulse purely via CSS: thinking uses four named @keyframes (a/b/c/d) keyed
+ *  by a per-ray class, each dipping to a different minimum opacity; working uses one shared
+ *  @keyframes "work" with per-ray `animation-delay` stagger (a travelling-phase pulse, matching
+ *  its own <desc>: "a directional pulse travels across twelve independent rays"). A literal
+ *  opacity="" attribute is never present, so the brief's regex would silently return 1 for every
+ *  ray (all "pulse" frames pixel-identical to idle) — this is the ONE function adapted to read
+ *  the real encoding instead. rayPaths(), frameSvg(), hollow(), appIconSvg(), writeIcns() and the
+ *  overall pipeline are unchanged from the brief. */
+function rayOpacities(svg: string): number[] {
+  const paths = rayPaths(svg);
+  const styleMatch = svg.match(/<style>([\s\S]*?)<\/style>/);
+  const style = styleMatch ? styleMatch[1]! : "";
+
+  /** Parse a named @keyframes block into sorted {pct, op} stops (only steps that state an
+   *  explicit opacity — CSS interpolates the omitted ones from their neighbors). */
+  function keyframeStops(name: string): { pct: number; op: number }[] {
+    const m = style.match(new RegExp(`@keyframes ${name}\\{([\\s\\S]*?)\\}\\}`));
+    if (!m) return [];
+    const out: { pct: number; op: number }[] = [];
+    for (const block of m[1]!.matchAll(/([0-9%,]+)\{([^}]*)\}/g)) {
+      const opM = block[2]!.match(/opacity:([0-9.]+)/);
+      if (!opM) continue;
+      for (const pctStr of block[1]!.split(",")) out.push({ pct: Number(pctStr.replace("%", "")), op: Number(opM[1]) });
+    }
+    return out.sort((a, b) => a.pct - b.pct);
+  }
+
+  /** Linear-interpolate a keyframe curve at a given percent (wraps at 100%). */
+  function sampleAt(stops: { pct: number; op: number }[], pct: number): number {
+    if (!stops.length) return 1;
+    const p = ((pct % 100) + 100) % 100;
+    for (let i = 0; i < stops.length; i++) {
+      const a = stops[i]!;
+      const b = stops[(i + 1) % stops.length]!;
+      const span = ((b.pct - a.pct + 100) % 100) || 100;
+      const d = ((p - a.pct) % 100 + 100) % 100;
+      if (d <= span) return a.op + ((b.op - a.op) * d) / span;
+    }
+    return stops[0]!.op;
+  }
+
+  return paths.map((p) => {
+    const direct = p.match(/opacity="([0-9.]+)"/);
+    if (direct) return Number(direct[1]); // original brief shape, kept for forward-compat
+    const cls = p.match(/class="p ([a-z]) p(\d+)"/);
+    if (!cls) return 1;
+    const [, letter, idxStr] = cls;
+    const letterStops = keyframeStops(letter!);
+    if (letterStops.length) return Math.min(...letterStops.map((s) => s.op)); // thinking: each ray-class's dip depth
+    // No letter-keyed keyframe (working): derive this ray's own phase from its animation-delay
+    // against the single shared "work" curve — a real per-ray snapshot at t=0.
+    const delayM = style.match(new RegExp(`\\.p${idxStr}\\{[^}]*?animation-delay:(-?[0-9.]+)s`));
+    const delay = delayM ? Number(delayM[1]) : 0;
+    const durM = style.match(/animation:\s*work\s+([0-9.]+)s/);
+    const duration = durM ? Number(durM[1]) : 1;
+    const workStops = keyframeStops("work");
+    if (!workStops.length) return 1;
+    return sampleAt(workStops, (-delay / duration) * 100);
+  });
+}
+
+/** Rebuild a variant SVG with the opacity PATTERN rotated by k rays (spinner pulse frame k),
+ *  applied onto the idle geometry so every frame shares identical paths. */
+function frameSvg(base: string, opacities: number[], k: number): string {
+  const paths = rayPaths(base);
+  const rotated = paths.map((p, i) => {
+    const o = opacities[(i + k) % opacities.length]!;
+    const clean = p.replace(/ ?opacity="[0-9.]+"/, "");
+    return o >= 1 ? clean : clean.replace("<path", `<path opacity="${o}"`);
+  });
+  let out = base;
+  for (let i = 0; i < paths.length; i++) out = out.replace(paths[i]!, rotated[i]!);
+  return out;
+}
+
+/** Hollow variant: same rays, stroke-only. */
+function hollow(svg: string): string {
+  return svg.replace('<g fill="#000">', '<g fill="none" stroke="#000" stroke-width="7" stroke-linejoin="miter">');
+}
+
+function renderPng(svg: string, px: number): Buffer {
+  return Buffer.from(new Resvg(svg, { fitTo: { mode: "width", value: px } }).render().asPng());
+}
+
+/** App icon tile: light rounded-rect (radius 22.37% — Apple's squircle approximation), mark at
+ *  68% centered. Composed in SVG so resvg does all rasterizing. */
+function appIconSvg(mark: string, size: number): string {
+  const inner = mark
+    .replace(/<svg[^>]*>/, "")
+    .replace("</svg>", "");
+  const r = Math.round(size * 0.2237);
+  const markSize = size * 0.68;
+  const offset = (size - markSize) / 2;
+  const scale = markSize / 240;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+  <rect x="0" y="0" width="${size}" height="${size}" rx="${r}" fill="#FAFAF7"/>
+  <g transform="translate(${offset},${offset}) scale(${scale})">${inner}</g>
+</svg>`;
+}
+
+function writeIcns(markSvg: string, outIcns: string, tmpName: string) {
+  const iconset = join(ROOT, "out", `${tmpName}.iconset`);
+  rmSync(iconset, { recursive: true, force: true });
+  mkdirSync(iconset, { recursive: true });
+  for (const s of [16, 32, 128, 256, 512]) {
+    writeFileSync(join(iconset, `icon_${s}x${s}.png`), renderPng(appIconSvg(markSvg, s), s));
+    writeFileSync(join(iconset, `icon_${s}x${s}@2x.png`), renderPng(appIconSvg(markSvg, s * 2), s * 2));
+  }
+  execSync(`iconutil -c icns "${iconset}" -o "${outIcns}"`);
+  rmSync(iconset, { recursive: true, force: true });
+}
+
+mkdirSync(MENUBAR, { recursive: true });
+writeIcns(idleSvg, join(SUPPORT, "AppIcon.icns"), "AppIcon");
+writeIcns(hollow(idleSvg), join(SUPPORT, "AppIconDev.icns"), "AppIconDev");
+
+for (const [prefix, mark] of [["mb", idleSvg], ["mb-dev", hollow(idleSvg)]] as const) {
+  writeFileSync(join(MENUBAR, `${prefix}-idle.png`), renderPng(mark, 18));
+  writeFileSync(join(MENUBAR, `${prefix}-idle@2x.png`), renderPng(mark, 36));
+  for (const state of ["thinking", "working"] as const) {
+    const opacities = rayOpacities(variants[state]);
+    for (let k = 0; k < 12; k++) {
+      const f = frameSvg(mark, opacities, k);
+      writeFileSync(join(MENUBAR, `${prefix}-${state}-${k}.png`), renderPng(f, 18));
+      writeFileSync(join(MENUBAR, `${prefix}-${state}-${k}@2x.png`), renderPng(f, 36));
+    }
+  }
+}
+console.log("icons rendered");
