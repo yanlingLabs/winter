@@ -23,10 +23,14 @@ final class RemoteHostTests: XCTestCase {
     }
 
     @MainActor
-    private func makeHost(storeDir: URL) -> RemoteHost {
+    private func makeHost(
+        storeDir: URL,
+        relayURLs: [String] = [],
+        relayProbe: @escaping @Sendable (String) async -> Bool = RemoteHost.defaultRelayProbe
+    ) -> RemoteHost {
         let config = RemoteHost.Config(
             storeDir: storeDir, socketPath: "/tmp/norma-remote-host-tests-unused.sock",
-            hostLabel: "Test Mac", relayConfig: makeRelayConfig(), relayURLs: []
+            hostLabel: "Test Mac", relayConfig: makeRelayConfig(), relayURLs: relayURLs, relayProbe: relayProbe
         )
         return RemoteHost(
             config: config,
@@ -34,6 +38,23 @@ final class RemoteHostTests: XCTestCase {
             makeListener: { LoopbackListener() },
             makeDaemonFactory: { NormaClient(makeTransport: { ScriptedTransport() }, token: "test-token", clientName: "iphone-gateway") }
         )
+    }
+
+    /// `RelaySelection` (NormaSessionKit) isn't `Equatable` — these two pattern-match instead of
+    /// `XCTAssertEqual`, matching every other enum-with-payload assertion idiom in this test target.
+    private func assertN0Default(_ selection: RelaySelection?, file: StaticString = #filePath, line: UInt = #line) {
+        guard case .n0Default = selection else {
+            XCTFail("expected .n0Default, got \(String(describing: selection))", file: file, line: line)
+            return
+        }
+    }
+
+    private func assertCustom(_ selection: RelaySelection?, urls: [String], file: StaticString = #filePath, line: UInt = #line) {
+        guard case .custom(let got) = selection else {
+            XCTFail("expected .custom(\(urls)), got \(String(describing: selection))", file: file, line: line)
+            return
+        }
+        XCTAssertEqual(got, urls, file: file, line: line)
     }
 
     /// Seeds a device directly into the SAME on-disk store `RemoteHost` will construct its own
@@ -193,5 +214,110 @@ final class RemoteHostTests: XCTestCase {
         XCTAssertEqual(qr1.macEndpointID, qr2.macEndpointID, "both callers see the same (single) host identity")
         let macID = await host.macEndpointID
         XCTAssertNotNil(macID)
+    }
+
+    // MARK: - Relay selection (CN-T1): probe reachability, emergency n0 fallback
+
+    /// Contract (a): every custom relay unreachable -> the listener starts on `.n0Default`
+    /// (the EMERGENCY fallback), never silently hanging on a dead custom fleet. Every URL must
+    /// actually have been probed (not just the first) — `openPairingWindow()` force-starts at
+    /// zero paired devices, matching `test_openPairingWindow_forceStartsAtZeroDevices`'s own idiom.
+    func test_start_allCustomRelaysUnreachable_fallsBackToN0Default() async throws {
+        let calls = OSAllocatedUnfairLock<[String]>(initialState: [])
+        let relayURLs = ["https://relay-a.example/", "https://relay-b.example/"]
+        let host = await makeHost(storeDir: tempStoreDir(), relayURLs: relayURLs, relayProbe: { url in
+            calls.withLock { $0.append(url) }
+            return false
+        })
+
+        _ = try await host.openPairingWindow()
+
+        let selection = await host.lastRelaySelection
+        assertN0Default(selection)
+        XCTAssertEqual(Set(calls.withLock { $0 }), Set(relayURLs), "every custom relay must have been probed before declaring the fleet dead")
+    }
+
+    /// Contract (b): even ONE reachable custom relay wins the whole fleet — selection is
+    /// `.custom(all)`, not just the reachable URL. iroh itself handles per-relay failure among
+    /// customs; this probe's only job is "is the whole fleet dead," not picking a survivor.
+    func test_start_oneCustomRelayReachable_selectsAllCustomURLsNotJustTheReachableOne() async throws {
+        let relayURLs = ["https://relay-a.example/", "https://relay-b.example/", "https://relay-c.example/"]
+        let host = await makeHost(storeDir: tempStoreDir(), relayURLs: relayURLs, relayProbe: { url in
+            url == "https://relay-b.example/"
+        })
+
+        _ = try await host.openPairingWindow()
+
+        let selection = await host.lastRelaySelection
+        assertCustom(selection, urls: relayURLs)
+    }
+
+    /// Contract (c): no custom relays configured (the ONLY route to this in practice is the
+    /// bundled signed config being missing/corrupt/unverifiable — CN-T1 review: EVERY build
+    /// config, Debug included, embeds and verifies the same signed Oracle relay list; see
+    /// `RemoteHost.start()`'s own "Relay provenance" comment) -> `.n0Default`, and — critically —
+    /// the probe closure is NEVER invoked. This is the byte-identical-to-today path: a config with
+    /// an empty `relayURLs` must not gain any new network activity just because `relayProbe` now
+    /// exists.
+    func test_start_noCustomRelays_usesN0DefaultAndNeverInvokesProbe() async throws {
+        let calls = OSAllocatedUnfairLock<Int>(initialState: 0)
+        let host = await makeHost(storeDir: tempStoreDir(), relayURLs: [], relayProbe: { _ in
+            calls.withLock { $0 += 1 }
+            return true
+        })
+
+        _ = try await host.openPairingWindow()
+
+        let selection = await host.lastRelaySelection
+        assertN0Default(selection)
+        XCTAssertEqual(calls.withLock { $0 }, 0, "empty relayURLs must stay byte-identical to today — the probe must never run")
+    }
+
+    // MARK: - Probe timing bound (CN-T1 review: whole-probe ≤3s contract, not ~6s)
+
+    /// CN-T1 review: `defaultRelayProbe` used to try HEAD, and only on a THROWN/failed attempt
+    /// fall back to a SEQUENTIAL GET — each sharing the same 3s per-request timeout, so a
+    /// black-holed host (both hang out their full timeout) cost ~6s, double the documented ≤3s
+    /// "declare the whole fleet dead" contract on exactly the emergency path this feature exists
+    /// for. The fix races HEAD and GET via `RemoteHost.raceProbes` instead of running them
+    /// sequentially; this test pins that TIMING bound directly, with `Task.sleep`-based fakes
+    /// standing in for two equally-slow (both "dead") requests — no real networking, since
+    /// URLSession's own timeout behavior against a black-holed host isn't practically
+    /// unit-testable (would need a live, reliably-unreachable server). `raceProbes` is `internal`
+    /// (not `private`) in RemoteHost.swift specifically so this test can reach it.
+    func test_raceProbes_boundedByTheSlowerOfTwoConcurrentProbes_notTheirSum() async throws {
+        let probeDelayNanos: UInt64 = 200_000_000 // 0.2s — stands in for a full per-request timeout
+        let bothDead: @Sendable () async -> Bool = {
+            try? await Task.sleep(nanoseconds: probeDelayNanos)
+            return false
+        }
+
+        let start = DispatchTime.now()
+        let reachable = await RemoteHost.raceProbes(bothDead, bothDead)
+        let elapsedNanos = DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds
+
+        XCTAssertFalse(reachable, "both probes report dead — the race must resolve false")
+        XCTAssertLessThan(
+            elapsedNanos, probeDelayNanos * 3 / 2,
+            "two probes raced CONCURRENTLY must resolve in ~one probe's duration, not the sum of both — a sequential HEAD-then-GET fallback would blow this bound to ~2x"
+        )
+    }
+
+    /// Complements the bound above: racing must actually pick the WINNER, not just "whichever
+    /// finishes bounds the total time." A fast-reachable probe raced against a slow-dead one must
+    /// resolve `true` quickly, without waiting out the slow one.
+    func test_raceProbes_resolvesTrueAssoonAsEitherProbeSucceeds() async throws {
+        let fastReachable: @Sendable () async -> Bool = { true }
+        let slowDead: @Sendable () async -> Bool = {
+            try? await Task.sleep(nanoseconds: 2_000_000_000) // 2s — must NOT be waited out
+            return false
+        }
+
+        let start = DispatchTime.now()
+        let reachable = await RemoteHost.raceProbes(fastReachable, slowDead)
+        let elapsedNanos = DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds
+
+        XCTAssertTrue(reachable)
+        XCTAssertLessThan(elapsedNanos, 500_000_000, "a reachable probe must win immediately, not wait for the slow dead one to also finish")
     }
 }
