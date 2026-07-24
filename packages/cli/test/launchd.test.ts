@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { renderPlist, LAUNCHD_LABEL, migrateFromLaunchdAgent } from "../src/launchd";
+import { renderPlist, LAUNCHD_LABEL, migrateFromLaunchdAgent, launchdLabel } from "../src/launchd";
 
 describe("renderPlist", () => {
   test("contains label, program arguments, keepalive, and log paths", () => {
@@ -45,6 +45,23 @@ describe("migrateFromLaunchdAgent", () => {
     expect(removedPath).toBe(fakePath);
   });
 
+  test("keeps the historical literal label regardless of NORMA_PROFILE", async () => {
+    const prev = process.env.NORMA_PROFILE;
+    process.env.NORMA_PROFILE = "dev";
+    let bootoutLabel: string | undefined;
+    try {
+      await migrateFromLaunchdAgent({
+        plistPath: fakePath,
+        exists: (p) => p === fakePath,
+        bootout: async (label) => { bootoutLabel = label; },
+        remove: () => {},
+      });
+    } finally {
+      if (prev === undefined) delete process.env.NORMA_PROFILE; else process.env.NORMA_PROFILE = prev;
+    }
+    expect(bootoutLabel).toBe("com.norma.core");
+  });
+
   test("no-ops when the plist is absent: no bootout, no remove call, never throws", async () => {
     let bootoutCalled = false;
     let removeCalled = false;
@@ -67,5 +84,20 @@ describe("migrateFromLaunchdAgent", () => {
       bootout: async () => { throw new Error("launchctl bootout failed"); },
       remove: () => { throw new Error("unlink failed"); },
     })).resolves.toBeUndefined();
+  });
+});
+
+describe("launchd profile label", () => {
+  test("label derives from profile, dist literal unchanged", () => {
+    expect(launchdLabel("dist")).toBe("com.norma.core");
+    expect(launchdLabel("dev")).toBe("com.norma.core.dev");
+  });
+
+  test("renderPlist embeds the profile label", () => {
+    const dev = renderPlist({ binaryPath: "/x/norma-core", normaHome: "/tmp/h", profile: "dev" });
+    expect(dev).toContain("<string>com.norma.core.dev</string>");
+    const dist = renderPlist({ binaryPath: "/x/norma-core", normaHome: "/tmp/h", profile: "dist" });
+    expect(dist).toContain("<string>com.norma.core</string>");
+    expect(dist).not.toContain("com.norma.core.dev");
   });
 });

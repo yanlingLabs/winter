@@ -1,24 +1,35 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { writeFileSync, unlinkSync, existsSync } from "node:fs";
+import { resolveNormaProfile, type NormaProfile } from "@norma/core";
 
+/** Kept ONLY for the legacy teardown of the historical dist agent (`migrateFromLaunchdAgent`
+ *  below) — never used for new installs. Active call sites derive the label from the current
+ *  profile via `launchdLabel()` instead. */
 export const LAUNCHD_LABEL = "com.norma.core";
 
+/** Resolves the profile at CALL time (default param, not a module-level snapshot) so a settings
+ *  change mid-process — or simply different callers under different envs — is always honored. */
+export function launchdLabel(profile: NormaProfile = resolveNormaProfile()): string {
+  return profile === "dev" ? "com.norma.core.dev" : "com.norma.core";
+}
+
 export function plistPath(): string {
-  return join(homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+  return join(homedir(), "Library", "LaunchAgents", `${launchdLabel()}.plist`);
 }
 
 function xmlEscape(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-export function renderPlist(opts: { binaryPath: string; normaHome: string }): string {
+export function renderPlist(opts: { binaryPath: string; normaHome: string; profile?: NormaProfile }): string {
   const home = xmlEscape(opts.normaHome);
+  const label = launchdLabel(opts.profile);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>${LAUNCHD_LABEL}</string>
+  <key>Label</key><string>${label}</string>
   <key>ProgramArguments</key>
   <array>
     <string>${xmlEscape(opts.binaryPath)}</string>
@@ -45,18 +56,18 @@ async function launchctl(...args: string[]): Promise<{ ok: boolean; out: string 
 export async function installDaemon(binaryPath: string, normaHome: string): Promise<void> {
   writeFileSync(plistPath(), renderPlist({ binaryPath, normaHome }));
   const uid = process.getuid!();
-  await launchctl("bootout", `gui/${uid}/${LAUNCHD_LABEL}`); // ignore failures: may not be loaded
+  await launchctl("bootout", `gui/${uid}/${launchdLabel()}`); // ignore failures: may not be loaded
   const res = await launchctl("bootstrap", `gui/${uid}`, plistPath());
   if (!res.ok) throw new Error(`launchctl bootstrap failed: ${res.out}`);
 }
 
 export async function uninstallDaemon(): Promise<void> {
-  await launchctl("bootout", `gui/${process.getuid!()}/${LAUNCHD_LABEL}`);
+  await launchctl("bootout", `gui/${process.getuid!()}/${launchdLabel()}`);
   if (existsSync(plistPath())) unlinkSync(plistPath());
 }
 
 export async function daemonStatus(): Promise<string> {
-  const res = await launchctl("print", `gui/${process.getuid!()}/${LAUNCHD_LABEL}`);
+  const res = await launchctl("print", `gui/${process.getuid!()}/${launchdLabel()}`);
   return res.ok ? "loaded" : "not loaded";
 }
 
@@ -76,7 +87,11 @@ export interface MigrateLaunchdDeps {
  * installed (fresh installs, or a machine already migrated). NEVER throws: a failed bootout/unlink
  * (e.g. permissions, already gone) must not block the app from starting. */
 export async function migrateFromLaunchdAgent(deps: MigrateLaunchdDeps = {}): Promise<void> {
-  const path = deps.plistPath ?? plistPath();
+  // Deliberately NOT `plistPath()` — that now resolves the CURRENT profile's label/path, but this
+  // teardown targets the historical dist-only agent, which predates profiles and was always filed
+  // under the literal `com.norma.core` regardless of what profile is running today (mirrors the
+  // Swift `LaunchdMigrationDeps.live` hardcoding the same literal independently).
+  const path = deps.plistPath ?? join(homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
   const exists = deps.exists ?? existsSync;
   const remove = deps.remove ?? unlinkSync;
   const bootout = deps.bootout ?? (async (label: string) => {
