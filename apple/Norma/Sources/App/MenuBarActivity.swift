@@ -15,11 +15,14 @@ import NormaProtocol
 /// Adaptation note (reasoning-delta type string): the brief guessed a `"reasoning_summary_delta"`
 /// case alongside `assistant_delta`. NormaProtocol's `SessionEvent` has no dedicated reasoning-delta
 /// variant at all — the daemon's opaque provider reasoning item (`reasoning_item` on the wire,
-/// `encrypted_content`/`itemJson`) is deliberately NOT mirrored as a distinct Swift case; it decodes
-/// via the `Discriminator` switch's default/unknown path into `NormaClient`'s `.unknownEvent` ->
-/// `NormaEvent.unknown`, per CLAUDE.md's "provider `encrypted_content`/`reasoning_item.itemJson` is
-/// opaque... never log it" contract. So "reasoning streaming" never reaches this function at all;
-/// "assistant streaming" is `.assistantDelta` alone.
+/// `encrypted_content`/`itemJson`) is deliberately NOT mirrored as a distinct Swift case: there is no
+/// `Discriminator` case for `"reasoning_item"` at all, so `Discriminator(rawValue:)` simply fails for
+/// it, `SessionEvent.init(from:)` throws, and NormaKit's `parseServerLine`'s `try?` catches that
+/// throw, producing `.unknownEvent` -> `NormaEvent.unknown` — it never becomes a `SessionEvent`
+/// (there is no "default/unknown path" within a `SessionEvent` switch to speak of). This lines up
+/// with CLAUDE.md's "provider `encrypted_content`/`reasoning_item.itemJson` is opaque... never log
+/// it" contract. So "reasoning streaming" never reaches this function at all; "assistant streaming"
+/// is `.assistantDelta` alone.
 enum MenuBarActivity: Equatable {
     case idle, thinking, working
 

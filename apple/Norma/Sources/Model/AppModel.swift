@@ -324,12 +324,16 @@ final class AppModel: ObservableObject {
         case .unknown:
             break // newer daemon event — orb has nothing to render for it
         }
-        // Task DD-T5: menu-bar activity derivation — the single point every event flows through,
-        // deliberately BEFORE/independent of the focused-session filtering above (that filtering
-        // exists to gate `session.apply`'s reducer, not this). Multi-session nuance: if this
-        // AppModel's feed carries events from more than one session, this is a naive last-event-
-        // wins derivation across all of them — accepted for v1 (single-user menu bar; per-session
-        // tracking would need its own state and is left for a future pass/whole-branch review).
+        // Task DD-T5: menu-bar activity derivation. Scoped to the FOCUSED session only, not
+        // independent of the filtering above: every path that reaches this point already satisfies
+        // `e.sessionId == focusedSessionId` — either via the `guard` above (which `return`s out of
+        // `handle` entirely, not just the switch, for events from any other session) or via the
+        // equivalent check inside the `sessionCreated` branch (both of its early `return`s exit
+        // `handle` before this point too). On `refocus(onto:)` (below), the model sets
+        // `focusedSessionId` and then `client.attach(sessionId:, fromSeq: 0)` triggers a full replay
+        // of the newly-focused session's events through this same `handle`, so `menuBarActivity`
+        // reconverges to that session's true terminal state on every focus switch — self-healing;
+        // it can never wedge on stale state from a session that's no longer focused.
         if case .session(let e) = ev {
             let nextActivity = MenuBarActivity.next(after: menuBarActivity, event: e)
             if nextActivity != menuBarActivity {

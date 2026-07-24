@@ -277,6 +277,15 @@ final class MenuBarController {
     }
 
     /// Sparkle T4: Show/hide the staged-update line (inserted above the pre-quit separator).
+    ///
+    /// Known collision (DD-T5 whole-branch review item, not fixed here): this and
+    /// `setUpdateBadge(_:)` below write `statusItem?.button?.image` directly, with no coordination
+    /// against DD-T5's activity-driven `applyCurrentFrame()`. Because the activity pulse timer ticks
+    /// every ~80ms whenever activity is non-idle, a staged-update badge set here is clobbered back to
+    /// the plain activity icon essentially immediately and stays invisible for as long as any
+    /// activity keeps ticking — this is a near-certain routine collision whenever a staged update
+    /// coincides with activity, not a rare race. Icon-state coordination (a merged/priority model
+    /// across the two writers) is deferred to the whole-branch review.
     func setUpdateStaged(_ staged: Bool, version: String?) {
         guard let menu = statusItem?.menu else { return }
         let present = menu.items.contains(updateItem)
