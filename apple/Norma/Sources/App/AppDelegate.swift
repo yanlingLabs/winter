@@ -60,10 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `registerDetachedWindow`'s `onClosed`). `openDashboard()` below is what enforces the
     /// "second invocation focuses the existing window" contract off this single stored ref.
     private(set) var dashboardWindow: DashboardWindowController?
-    /// SP2b T5: owns this Mac's `RemoteHost` (lazily — nothing starts until a pairing window is
-    /// actually requested). Constructed unconditionally in `boot()` (cheap — it does no I/O of
-    /// its own; only touching its `RemoteHost` does), same posture as `peripheralProvider`/
-    /// `helperClient`.
+    /// SP2b T5: owns this Mac's `RemoteHost` (lazily constructed — nothing starts until either a
+    /// pairing window is requested or, autostart follow-up below, this Mac already has ≥1 paired
+    /// device). Constructed unconditionally in `boot()` (cheap — it does no I/O of its own; only
+    /// touching its `RemoteHost` does), same posture as `peripheralProvider`/`helperClient`.
     private(set) var remoteAccessCoordinator: RemoteAccessCoordinator?
     /// The pairing sheet's singleton window controller — same one-shot-latch/registry-removal
     /// convention as `dashboardWindow`: nil until first opened, nil'd again via `onClosed`.
@@ -554,6 +554,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `lazy var`, untouched until a pairing window is actually requested) — safe
         // unconditionally, same posture as `HelperClient()`/`LoginItemController` above.
         remoteAccessCoordinator = RemoteAccessCoordinator()
+
+        // Autostart follow-up (CN combined-review Important 2): start the remote listener NOW if
+        // this Mac already has ≥1 paired device — `RemoteHost.startIfNeeded()`'s own gate
+        // (`deviceCount > 0 || pairingWindowRequested`) makes this a no-op (one cheap
+        // `PairingStore.all()` read) for a Mac nobody has ever paired a phone with. Without this,
+        // the ONLY thing that ever started the listener was the "Pair a Device…" menu action, so a
+        // paired phone lost its connection on every Mac relaunch (reboot, quit, hourly Sparkle
+        // auto-update) until a human reopened that menu — defeating cross-network durability far
+        // more often than any relay outage. Gated `!isRunningUnitTests`, same posture as every
+        // other real-side-effect call in this method (Sparkle's updater construction,
+        // `helper.register()`, `CliInstaller.offerOnFirstLaunchIfNeeded()` below); fire-and-forget
+        // (`Task`) — nothing else in `boot()` depends on this completing, and both dev/dist
+        // profiles autostart identically, each against its own `NORMA_HOME`/pairing store.
+        if !Self.isRunningUnitTests {
+            Task { [weak self] in
+                await self?.remoteAccessCoordinator?.startRemoteAccessIfPaired()
+            }
+        }
 
         model.onPeripheralEvent = { [weak peripheral, weak hardware] event in
             await peripheral?.handle(event)

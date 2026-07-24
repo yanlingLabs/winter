@@ -3,10 +3,14 @@ import os
 import NormaKit
 import NormaProtocol
 
-/// Owns this Mac's `RemoteHost` (SP2b's whole phone-pairing/remote-access stack) LAZILY — nothing
-/// about it starts until the user explicitly opens "Pair a Device…" or "Paired Devices…" from the
-/// menu bar (`MenuBarController.pairDeviceItem`/`pairedDevicesItem`, wired in `AppDelegate`).
-/// Mirrors `DaemonSupervisor`'s own `@MainActor` convention (`apple/Norma/Sources/App/
+/// Owns this Mac's `RemoteHost` (SP2b's whole phone-pairing/remote-access stack) LAZILY — the
+/// `RemoteHost` itself isn't constructed until first touched. What actually STARTS the stack is
+/// either the user explicitly opening "Pair a Device…"/"Paired Devices…" from the menu bar
+/// (`MenuBarController.pairDeviceItem`/`pairedDevicesItem`, wired in `AppDelegate`), or — autostart
+/// follow-up, CN combined-review Important 2 — `startRemoteAccessIfPaired()` below, called once
+/// from `AppDelegate.boot()` at launch so an already-paired phone doesn't need a human to reopen
+/// that menu after every Mac relaunch (reboot, quit, hourly Sparkle auto-update). Mirrors
+/// `DaemonSupervisor`'s own `@MainActor` convention (`apple/Norma/Sources/App/
 /// DaemonSupervisor.swift`): a UI-facing controller, single-threaded by construction.
 ///
 /// `socketPath`/the home directory `storeDir` derives from both come from `NormaPaths` — the
@@ -80,6 +84,41 @@ final class RemoteAccessCoordinator {
             relayURLs: relay.relayURLs
         ))
     }()
+
+    /// The only production initializer — `host` above resolves lazily to the real, verified-relay-
+    /// config-backed `RemoteHost` the first time anything touches it.
+    init() {}
+
+    #if DEBUG
+    /// Test-only seam (autostart follow-up): injects an already-constructed `RemoteHost` directly,
+    /// bypassing `loadVerifiedRelayConfig()`/the production `Config` entirely — a plain assignment
+    /// to the `lazy var` above skips its initializer expression, exactly like `RemoteHost`'s own
+    /// `#if DEBUG` test-only init (RemoteHost.swift) skips binding a real `IrohListener`.
+    /// `RemoteAccessCoordinatorTests` builds that injected `RemoteHost` via `@testable import
+    /// NormaKit`, reusing `RemoteHostTests`' own `makeListener`/`makeDaemonFactory` scripted seam
+    /// so `startRemoteAccessIfPaired()` can be proven without ever touching a real iroh listener or
+    /// the Keychain (CLAUDE.md: tests must never touch live Keychain/network).
+    init(host: RemoteHost) {
+        self.host = host
+    }
+    #endif
+
+    /// Autostart follow-up (CN combined-review Important 2, verified): `RemoteHost.startIfNeeded()`
+    /// used to have exactly ONE production caller — `makePairingSheetModel()` below, reached only
+    /// via the user opening "Pair a Device…" from the menu. Consequence: after ANY Mac app relaunch
+    /// (reboot, quit, hourly Sparkle auto-update), an already-paired phone couldn't reconnect until
+    /// a human reopened that menu — defeating cross-network durability far more often than any
+    /// relay outage. Called ONCE from `AppDelegate.boot()` at launch (gated `!isRunningUnitTests`,
+    /// same posture as every other real-side-effect call there); delegates straight to
+    /// `RemoteHost.startIfNeeded()`, whose own gate (`deviceCount > 0 || pairingWindowRequested`)
+    /// makes this a no-op — one cheap `PairingStore.all()` read, no iroh listener bind, no Keychain
+    /// touch — on a Mac nobody has ever paired a phone with. Errors are swallowed (`try?`): a
+    /// failed autostart (e.g. a bad iroh bind) just leaves the phone unreachable until the user
+    /// opens the pairing window manually, exactly today's behavior — nothing else in `boot()`
+    /// depends on this succeeding.
+    func startRemoteAccessIfPaired() async {
+        try? await host.startIfNeeded()
+    }
 
     /// Force-starts the stack (even at zero paired devices — that's the whole point of opening a
     /// pairing window) and returns a fresh `PairingSheetModel` bound to the resulting ceremony.
