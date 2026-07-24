@@ -186,8 +186,13 @@ final class MenuBarController {
         summonFieldItem.target = self
         menu.addItem(summonFieldItem)
         menu.addItem(.separator())
-        openCliItem.target = self
-        menu.addItem(openCliItem)
+        // DD-T6: the dev-only `norma-dev` wrapper installer/launcher — dist builds never mount
+        // this item, so `CliLauncher.openCli()`/`ensureWrapper()` can never fire there. Dist's
+        // own CLI story (a packaged `norma` symlink, no wrapper install) is Task 7.
+        if AppProfile.isDev {
+            openCliItem.target = self
+            menu.addItem(openCliItem)
+        }
         openNormaAppItem.target = self
         menu.addItem(openNormaAppItem)
         dashboardItem.target = self
