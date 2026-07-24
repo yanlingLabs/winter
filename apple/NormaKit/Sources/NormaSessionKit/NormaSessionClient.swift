@@ -2,27 +2,11 @@ import Foundation
 import os
 import NormaProtocol
 
-/// The phone-side session client (SP3 Task 4): the resume / idempotency / approval state machine
-/// the `norma-fake-phone` CLI currently hand-rolls, promoted to a tested, reusable actor. It owns
-/// one `RemoteConn`, drives the `ClientHello` → `helloAck` → stream wire dance, and turns the raw
-/// frame stream into an ordered, deduplicated, gap-aware `SessionEnvelope` feed the UI consumes.
-///
-/// **Why an actor.** Swift 6 strict concurrency: every piece of mutable state (the rpc-correlation
-/// table, the per-stream replay bookkeeping, the inbound iterator) lives behind the actor's
-/// isolation, so there is never a lock held across an `await`. A single background read loop is the
-/// SOLE owner of the inbound iterator and mutates all frame-derived state in frame order; the public
-/// `send`/`answerApproval`/`pendingApprovals`/`handshake` methods only register continuations the
-/// read loop later resumes. Emitted values (`SessionEnvelope`, `GapSignal`, `ServerHello`) are
-/// immutable.
-///
-/// **Framing.** `RemoteConn` is frame-oriented — one whole `WireFrame`-encoded envelope per
-/// `inbound` element / `send(_:)` call. The concrete iroh conn owns the `LengthPrefix` byte framing
-/// internally; this client never touches it (matching the gateway's own posture).
 /// Transport-keepalive tuning (KA-T3). The client pings the host after `quietMs` of silence; if
 /// that first ping draws no inbound frame within `secondWindowMs`, it pings again; if THAT also
 /// draws nothing within `graceMs`, the path is declared dead. `tickMs` is just the watchdog's poll
 /// cadence — production wakes once a second to check elapsed quiet time against a wall clock, not
-/// a per-tick deadline of its own. `.disabled` parks the watchdog at a effectively-never-fires
+/// a per-tick deadline of its own. `.disabled` parks the watchdog at an effectively-never-fires
 /// cadence for tests that want zero heartbeat noise without threading `isActive: { false }`
 /// through every call site.
 public struct HeartbeatConfig: Sendable {
@@ -42,6 +26,22 @@ public struct HeartbeatConfig: Sendable {
     }
 }
 
+/// The phone-side session client (SP3 Task 4): the resume / idempotency / approval state machine
+/// the `norma-fake-phone` CLI currently hand-rolls, promoted to a tested, reusable actor. It owns
+/// one `RemoteConn`, drives the `ClientHello` → `helloAck` → stream wire dance, and turns the raw
+/// frame stream into an ordered, deduplicated, gap-aware `SessionEnvelope` feed the UI consumes.
+///
+/// **Why an actor.** Swift 6 strict concurrency: every piece of mutable state (the rpc-correlation
+/// table, the per-stream replay bookkeeping, the inbound iterator) lives behind the actor's
+/// isolation, so there is never a lock held across an `await`. A single background read loop is the
+/// SOLE owner of the inbound iterator and mutates all frame-derived state in frame order; the public
+/// `send`/`answerApproval`/`pendingApprovals`/`handshake` methods only register continuations the
+/// read loop later resumes. Emitted values (`SessionEnvelope`, `GapSignal`, `ServerHello`) are
+/// immutable.
+///
+/// **Framing.** `RemoteConn` is frame-oriented — one whole `WireFrame`-encoded envelope per
+/// `inbound` element / `send(_:)` call. The concrete iroh conn owns the `LengthPrefix` byte framing
+/// internally; this client never touches it (matching the gateway's own posture).
 public actor NormaSessionClient {
     // MARK: - Injected dependencies
 
