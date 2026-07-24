@@ -35,6 +35,12 @@ bun src/main.ts daemon run           # headless daemon
 bun src/main.ts -p "hello"           # one-shot prompt (separate terminal)
 bun src/main.ts                      # interactive TUI (Ink)
 
+# Dev profile: the Debug app is "Norma Dev" (com.norma.app.dev) on ~/.norma-dev; the global
+# `norma-dev` command (installed by the dev app's menu) is an env-setting bun wrapper. The
+# distribution app owns `norma` (symlink installed from the app / brew). Explicit NORMA_HOME
+# always wins over both defaults.
+NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run   # dev daemon (or: norma-dev daemon run)
+
 # Versioning — never edit versions by hand; VERSION file (#.#.### format) is canonical
 bun run version:bump                 # +0.0.001 (also --minor / --major)
 bun run version:sync                 # restamp package.jsons/plists from VERSION
