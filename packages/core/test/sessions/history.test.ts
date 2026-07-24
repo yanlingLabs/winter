@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionEvent } from "@norma/protocol";
 import { SessionStore } from "../../src/sessions/store";
-import { HISTORY_EVENT_TYPES, readHistoryPage } from "../../src/sessions/history";
+import { HISTORY_EVENT_TYPES, readHistoryPage, capEventForTest, WHOLE_EVENT_CEILING } from "../../src/sessions/history";
 
 describe("readHistoryPage", () => {
   let home: string | undefined;
@@ -24,14 +24,14 @@ describe("readHistoryPage", () => {
     return { store, sessionId };
   }
 
-  test("the allowlist is exactly the 8 persisted foldable types", () => {
+  test("the allowlist is exactly the 10 persisted foldable types", () => {
     // Widening cast: HISTORY_EVENT_TYPES is a ReadonlySet<SessionEvent["type"]>, so the plain
     // string[] literal below (not a member of that narrower union type) would otherwise fail
     // toEqual's generic inference (bound to the `expect(...)` receiver's type) under tsc.
     expect([...HISTORY_EVENT_TYPES].sort() as string[]).toEqual(
       [
         "agent_error", "approval_requested", "approval_resolved", "assistant_message",
-        "tool_call", "tool_result", "turn_completed", "user_message",
+        "question_asked", "question_resolved", "tool_call", "tool_result", "turn_completed", "user_message",
       ].sort(),
     );
     // Security: the opaque reasoning_item is NOT allowlisted.
@@ -179,5 +179,102 @@ describe("readHistoryPage", () => {
   test("unknown session propagates the store's Error (handler maps NOT_FOUND)", () => {
     const { store } = boot();
     expect(() => readHistoryPage(store, { sessionId: "s_does_not_exist" })).toThrow("unknown session");
+  });
+
+  test("DEEP CAP: a giant NESTED string (question option description) is truncated with the marker", () => {
+    const { store, sessionId } = boot();
+    const big = "q".repeat(70 * 1024); // > 64 KiB, nested two levels down
+    store.append(sessionId, {
+      type: "question_asked", sessionId, threadId: "main", callId: "q1",
+      questions: [{
+        question: "Pick one", header: "Choice", multiSelect: false,
+        options: [{ label: "A", description: big }, { label: "B" }],
+      }],
+    });
+    const p1 = readHistoryPage(store, { sessionId });
+    const p2 = readHistoryPage(store, { sessionId });
+    const q1 = p1.events.find((e) => e.type === "question_asked") as any;
+    const desc = q1.questions[0].options[0].description as string;
+    expect(desc).toContain(`…[truncated by history: ${70 * 1024} bytes total]`);
+    expect(Buffer.byteLength(desc, "utf8")).toBeLessThan(65 * 1024);
+    expect(q1.questions[0].options[1].label).toBe("B"); // small nested strings untouched
+    expect(JSON.stringify(p1.events)).toBe(JSON.stringify(p2.events)); // deep determinism
+  });
+
+  test("DEEP CAP: no-op events keep the same reference shape (no gratuitous copies)", () => {
+    const { store, sessionId } = boot();
+    store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: "small", clientName: "cli" });
+    const page = readHistoryPage(store, { sessionId });
+    // Behavioral proxy for the same-reference no-op: the event round-trips byte-identically.
+    expect(page.events[0]!.type).toBe("user_message");
+    expect((page.events[0] as any).text).toBe("small");
+  });
+
+  test("question events appear in pages, ascending, resolved carries answers/by", () => {
+    const { store, sessionId } = boot();
+    store.append(sessionId, {
+      type: "question_asked", sessionId, threadId: "main", callId: "q1",
+      questions: [{ question: "Deploy?", header: "Deploy", multiSelect: false,
+        options: [{ label: "Yes" }, { label: "No" }] }],
+    });
+    store.append(sessionId, {
+      type: "question_resolved", sessionId, threadId: "main", callId: "q1",
+      answers: { "Deploy?": "Yes" }, by: "cli",
+    });
+    const page = readHistoryPage(store, { sessionId });
+    expect(page.events.map((e) => e.type)).toEqual(["question_asked", "question_resolved"]);
+    const resolved = page.events[1] as any;
+    expect(resolved.answers["Deploy?"]).toBe("Yes");
+    expect(resolved.by).toBe("cli");
+  });
+
+  test("DEEP CAP (unit): capEventForTest walks arrays and objects at any depth", () => {
+    const big = "z".repeat(70 * 1024);
+    const event = {
+      type: "question_asked", sessionId: "s", threadId: "main", callId: "q", seq: 1, ts: 1,
+      questions: [{
+        question: "Q", header: "H", multiSelect: false,
+        options: [{ label: "A", description: big }, { label: "B" }],
+      }],
+    } as any;
+    const capped = capEventForTest(event, 64 * 1024) as any;
+    expect(capped.questions[0].options[0].description).toContain("…[truncated by history:");
+    expect(capped).not.toBe(event); // copy on change
+    // Sibling untouched by the change elsewhere in the spine keeps its original reference.
+    expect(capped.questions[0].options[1]).toBe(event.questions[0].options[1]);
+    const small = { type: "user_message", sessionId: "s", threadId: "main", text: "ok", seq: 2, ts: 1 } as any;
+    expect(capEventForTest(small, 64 * 1024)).toBe(small); // SAME reference on no-op
+  });
+
+  test("WHOLE-EVENT CEILING: a question_asked with many large options serializes under the ceiling, structure intact, deterministic", () => {
+    const { store, sessionId } = boot();
+    // 4 questions x 4 options, each description > 64 KiB — every description survives the
+    // per-string pass at ~70 KiB (under outputCap would shrink it, but here it's already over),
+    // so the aggregate is ~16 x 70 KiB (well over a MiB) before the whole-event ceiling kicks in.
+    const big = "d".repeat(70 * 1024);
+    const questions = Array.from({ length: 4 }, (_, qi) => ({
+      question: `Question number ${qi}`, header: `Q${qi}`, multiSelect: false,
+      options: Array.from({ length: 4 }, (_, oi) => ({ label: `opt${qi}-${oi}`, description: big })),
+    }));
+    store.append(sessionId, { type: "question_asked", sessionId, threadId: "main", callId: "q1", questions });
+    const p1 = readHistoryPage(store, { sessionId });
+    const p2 = readHistoryPage(store, { sessionId });
+    const q1 = p1.events.find((e) => e.type === "question_asked") as any;
+    // Aggregate is bounded under the ceiling (and far under the phone transport's 1 MiB hard
+    // frame limit) even though 16 independently-64KiB-capped descriptions would otherwise total
+    // several MiB and ride the newest-event floor straight past the page byte budget.
+    expect(Buffer.byteLength(JSON.stringify(q1), "utf8")).toBeLessThan(WHOLE_EVENT_CEILING);
+    // Structure intact: all 4 questions and all 4 options per question survive — strings
+    // shortened, not dropped.
+    expect(q1.questions.length).toBe(4);
+    for (const q of q1.questions) {
+      expect(q.options.length).toBe(4);
+      for (const o of q.options) {
+        expect(typeof o.description).toBe("string");
+        expect(o.description.length).toBeGreaterThan(0);
+      }
+    }
+    // Page determinism: two reads of the same page are byte-identical.
+    expect(JSON.stringify(p1.events)).toBe(JSON.stringify(p2.events));
   });
 });

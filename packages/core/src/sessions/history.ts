@@ -1,8 +1,10 @@
 import type { SessionEvent } from "@norma/protocol";
 import type { SessionStore } from "./store";
 
-/** The 8 persisted, phone-foldable event types history is allowed to return. Allowlist, never a
- *  denylist: an unknown future type stays out until deliberately added. `reasoning_item` (opaque
+/** The 10 persisted, phone-foldable event types history is allowed to return. Allowlist, never a
+ *  denylist: an unknown future type stays out until deliberately added — and adding one REQUIRES
+ *  re-checking the per-event cap covers its large strings (capJson bounds strings at ANY depth,
+ *  which is what admitted question_asked's nested options[].description). `reasoning_item` (opaque
  *  encrypted_content), harness_attached/detached, lifecycle, checkpoint, workflow_*, plugin/lease
  *  events are excluded by construction. assistant_delta is transient (never on disk) and so can
  *  never appear here either. */
@@ -15,6 +17,8 @@ export const HISTORY_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<Se
   "approval_requested",
   "approval_resolved",
   "agent_error",
+  "question_asked",
+  "question_resolved",
 ]);
 
 /** Truncates `value` to `cap` UTF-8 bytes (backed off to a char boundary) plus a deterministic
@@ -31,30 +35,81 @@ function capString(value: string, cap: number): string {
   return `${head}\n…[truncated by history: ${bytes} bytes total]`;
 }
 
-/** Generalized per-event cap (branch review — replaces the old tool_result-only `capToolResult`):
- *  truncates EVERY top-level string property of `event` whose UTF-8 byte length exceeds `outputCap`
- *  via `capString`, not just `tool_result.output`. Without this, a single oversized OTHER event (a
- *  multi-MiB `user_message.text` paste, a `tool_call.argsJson` embedding a whole file,
- *  `assistant_message.text`, `agent_error.message`, …) would ride the newest-event floor (below)
- *  into an RPC frame the phone transport treats as fatal (silent connection kill, unrecoverable on
- *  refetch). Type-agnostic by design: a FUTURE allowlisted type with a large string field is
- *  automatically covered; short identifier fields (type/callId/threadId/by/toolName/etc.) are
- *  nowhere near the cap and pass through untouched. Pure and deterministic — refetches are
- *  byte-stable. Returns the SAME reference when nothing needed capping (the common case, preserving
- *  the original single-field behavior byte-for-byte); otherwise a shallow copy (object spread) — the
- *  input is never mutated. */
-function capEvent(event: SessionEvent, outputCap: number): SessionEvent {
-  const record = event as unknown as Record<string, unknown>;
-  let out: Record<string, unknown> | undefined;
-  for (const key of Object.keys(record)) {
-    const value = record[key];
-    if (typeof value !== "string") continue;
-    const capped = capString(value, outputCap);
-    if (capped === value) continue; // within budget — this field alone never triggers a copy
-    if (!out) out = { ...record };
-    out[key] = capped;
+/** Recursively caps every string ANYWHERE in a JSON tree (object values, array elements, any
+ *  depth) via `capString`. Returns the SAME reference when nothing under it changed (the common
+ *  no-op case — preserving the original flat behavior byte-for-byte and copy-for-copy); copies
+ *  only the spine that actually changed. Pure and deterministic — refetches stay byte-stable.
+ *  This closes the session-history branch review's forward-warning: the old walk bounded only
+ *  TOP-LEVEL strings, so a nested large string (e.g. question_asked's options[].description)
+ *  could ride the newest-event floor into an oversized frame. */
+function capJson(value: unknown, cap: number): unknown {
+  if (typeof value === "string") return capString(value, cap);
+  if (Array.isArray(value)) {
+    let out: unknown[] | undefined;
+    for (let i = 0; i < value.length; i++) {
+      const capped = capJson(value[i], cap);
+      if (capped !== value[i]) {
+        if (!out) out = [...value];
+        out[i] = capped;
+      }
+    }
+    return out ?? value;
   }
-  return (out ?? event) as unknown as SessionEvent;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    let out: Record<string, unknown> | undefined;
+    for (const key of Object.keys(record)) {
+      const capped = capJson(record[key], cap);
+      if (capped !== record[key]) {
+        if (!out) out = { ...record };
+        out[key] = capped;
+      }
+    }
+    return out ?? value;
+  }
+  return value; // number | boolean | null — nothing to cap
+}
+
+/** Whole-event serialized-size ceiling, enforced AFTER the per-string cap (`capJson`/`outputCap`,
+ *  e.g. 64 KiB per string). Per-string capping bounds each string but not the aggregate: a
+ *  schema-valid `question_asked` can carry up to 4 questions (question+header) plus 4 options per
+ *  question (label+description+preview) — dozens of independently-64-KiB-capped strings, several
+ *  MiB in the worst case. `readHistoryPage`'s newest-event floor ALWAYS includes the newest
+ *  allowlisted event regardless of the page byte budget, so an oversized event here bypasses that
+ *  budget entirely and hits the phone transport's hard 1 MiB frame limit — silently dropping the
+ *  connection right when the user opens the phone to answer a question. 160 KiB sits well under
+ *  that 1 MiB limit (headroom for JSON-escaping/structural overhead) and far above the 64 KiB
+ *  single-string cap, so ordinary events (a handful of strings) never trigger the second pass. */
+export const WHOLE_EVENT_CEILING = 160 * 1024;
+
+/** Counts every string leaf in a JSON tree (mirrors `capJson`'s walk) — sizes the tighter
+ *  per-string cap used to bring an event under `WHOLE_EVENT_CEILING`. */
+function countStrings(value: unknown): number {
+  if (typeof value === "string") return 1;
+  if (Array.isArray(value)) {
+    let n = 0;
+    for (const v of value) n += countStrings(v);
+    return n;
+  }
+  if (value !== null && typeof value === "object") {
+    let n = 0;
+    for (const v of Object.values(value as Record<string, unknown>)) n += countStrings(v);
+    return n;
+  }
+  return 0;
+}
+
+function capEvent(event: SessionEvent, outputCap: number): SessionEvent {
+  const capped = capJson(event, outputCap);
+  const size = Buffer.byteLength(JSON.stringify(capped), "utf8");
+  if (size <= WHOLE_EVENT_CEILING) return capped as SessionEvent;
+  // The per-string pass left the aggregate over the ceiling (e.g. a question_asked with many
+  // large options) — re-run the deep cap against the ORIGINAL event with a tighter per-string cap
+  // sized to the event's string count. Pure: depends only on `event` + the two constants, so
+  // refetching the same page stays byte-stable (page determinism).
+  const stringCount = Math.max(1, countStrings(event));
+  const tighterCap = Math.max(1, Math.floor(WHOLE_EVENT_CEILING / stringCount));
+  return capJson(event, tighterCap) as SessionEvent;
 }
 
 export function readHistoryPage(
@@ -89,3 +144,7 @@ export function readHistoryPage(
   const hasMore = filtered.some((e) => e.seq < (oldestSeq ?? upper));
   return { events: kept, hasMore, oldestSeq };
 }
+
+/** Test-only export of the deep cap (the page-level tests can't reach a nested-string event until
+ *  question_asked joins the allowlist in the next commit). */
+export const capEventForTest = capEvent;
