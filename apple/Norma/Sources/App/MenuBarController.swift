@@ -45,6 +45,11 @@ final class MenuBarController {
     private let orbItem = NSMenuItem(title: "Hide Orb", action: #selector(didToggleOrb), keyEquivalent: "o")
     private let summonFieldItem = NSMenuItem(title: "Summon Field", action: #selector(didSummonField), keyEquivalent: "")
     let openCliItem = NSMenuItem(title: "Open CLI", action: #selector(didOpenCli), keyEquivalent: "")
+    // DD-T7: the dist-only CLI installer item, mounted instead of `openCliItem` when
+    // `!AppProfile.isDev`. Title/enabled state is state-driven (`refreshCliInstallItem()`), not
+    // fixed at construction like the other items above — `install()` mounts it, and its own action
+    // handler re-derives the title after `CliInstaller.install()` runs.
+    let cliInstallItem = NSMenuItem(title: "Install norma Command", action: #selector(didInstallCli), keyEquivalent: "")
     let openNormaAppItem = NSMenuItem(title: "Open Norma App", action: #selector(didOpenNormaApp), keyEquivalent: "")
     // Task 5 (2f-ii): the Dashboard entry — same section/adjacency convention as `openCliItem`/
     // `openNormaAppItem` (2e-iv), mirrored exactly.
@@ -192,6 +197,11 @@ final class MenuBarController {
         if AppProfile.isDev {
             openCliItem.target = self
             menu.addItem(openCliItem)
+        } else {
+            // DD-T7: dist's counterpart at the exact same menu slot.
+            cliInstallItem.target = self
+            menu.addItem(cliInstallItem)
+            refreshCliInstallItem()
         }
         openNormaAppItem.target = self
         menu.addItem(openNormaAppItem)
@@ -262,6 +272,27 @@ final class MenuBarController {
         orbItem.title = visible ? "Hide Orb" : "Show Orb"
     }
 
+    /// DD-T7: titles/enables `cliInstallItem` from `CliInstaller.currentPlan()` — a read-only
+    /// probe, so calling this never installs or repairs anything by itself. Called once when the
+    /// item is first mounted (dist builds only) and again right after `didInstallCli()` fires, so
+    /// the title always reflects the freshest on-disk state.
+    private func refreshCliInstallItem() {
+        switch CliInstaller.currentPlan() {
+        case .install:
+            cliInstallItem.title = "Install norma Command"
+            cliInstallItem.isEnabled = true
+        case .repair:
+            cliInstallItem.title = "Repair norma Command"
+            cliInstallItem.isEnabled = true
+        case .alreadyInstalled:
+            cliInstallItem.title = "norma Command Installed ✓"
+            cliInstallItem.isEnabled = false
+        case .refuseForeign:
+            cliInstallItem.title = "norma Command: foreign file — see logs"
+            cliInstallItem.isEnabled = false
+        }
+    }
+
     /// Task 4 (2f): mounts (inserts, right above the pre-Quit separator) or unmounts (removes) the
     /// red panic item as the active-lease count crosses zero — a true add/remove, unlike
     /// `setOrbVisible`'s title-flip, since the item must not exist at all while nothing is leased.
@@ -314,6 +345,13 @@ final class MenuBarController {
     @objc private func didToggleOrb() { toggleOrb() }
     @objc private func didSummonField() { summonField() }
     @objc private func didOpenCli() { openCli() }
+    // DD-T7: dist's counterpart to `didOpenCli()` — installs/repairs the `norma` symlink, then
+    // re-titles the item from the fresh post-install state (no full menu teardown/rebuild needed,
+    // same "re-derive and reassign" posture as `refresh()`'s `loginItemItem.state` sync).
+    @objc private func didInstallCli() {
+        CliInstaller.install()
+        refreshCliInstallItem()
+    }
     @objc private func didOpenNormaApp() { openNormaApp() }
     @objc private func didOpenDashboard() { openDashboard() }
     @objc private func didOpenPluginManager() { openPluginManager() }

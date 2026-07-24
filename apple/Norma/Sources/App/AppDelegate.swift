@@ -855,6 +855,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak mb] _ in
             Task { @MainActor in mb?.refresh() }
         }
+        // DD-T7: dist-only first-launch offer for the `norma` command — late in launch, after the
+        // menu exists (`mb.install()` above), gated `!isRunningUnitTests` the same way as every
+        // other real-side-effect call in this method (Sparkle's updater construction, the AX
+        // prompt, etc.) since `offerOnFirstLaunchIfNeeded()` can show a real modal `NSAlert`.
+        if !Self.isRunningUnitTests {
+            CliInstaller.offerOnFirstLaunchIfNeeded()
+        }
         return true
     }
 

@@ -55,6 +55,24 @@ final class MenuBarEntryPointsTests: XCTestCase {
 
     // MARK: - Menu shape / order
 
+    // MARK: - DD-T7: dist-only CLI installer item
+
+    /// `MenuBarController.install()`'s dist branch (`cliInstallItem`, "Install norma Command") is
+    /// compile-time unreachable from this xctest host — it always builds under the Debug config,
+    /// so `AppProfile.isDev` is always `true` here and only the dev branch (`openCliItem`) ever
+    /// mounts. That dist item is exercised at the live gate instead; here we assert the DEV side
+    /// of the same `if AppProfile.isDev { … } else { … }` branch — the norma-dev CLI item is
+    /// present, and the dist-only title never leaks into the dev menu.
+    func testDevMenuContainsNormaDevCliItemNotDistInstallItem() {
+        let controller = makeController()
+        controller.install()
+
+        let titles = controller.statusItem?.menu?.items.map(\.title) ?? []
+
+        XCTAssertTrue(titles.contains("Open CLI"), "dev builds must mount the norma-dev CLI item")
+        XCTAssertFalse(titles.contains("Install norma Command"), "the dist-only installer item must never appear in a dev build's menu")
+    }
+
     func testMenuContainsOpenCliAndOpenNormaAppAfterSummonField() {
         let controller = makeController()
         controller.install()
