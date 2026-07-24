@@ -157,16 +157,24 @@ export interface OCIResponse<T = unknown> {
 }
 
 /**
- * One signed OCI IaaS API call. `path` is the request-target (e.g. `/20160918/vcns?...`).
+ * One signed OCI API call. `path` is the request-target (e.g. `/20160918/vcns?...`).
  * `body`, if present, is JSON-encoded and signed per `signRequest`'s bodied-request path.
+ *
+ * `service`: OCI splits its API across per-service hosts. Everything this toolkit touches lives
+ * on `iaas.*` EXCEPT `ListAvailabilityDomains`, which is an Identity API operation served only
+ * from `identity.*` — calling it on the iaas host returns a permanent 404 NotAuthorizedOrNotFound
+ * (the bug behind provision.ts's long-misdiagnosed "fresh-tenancy provisioning lag" failure:
+ * it was never lag, the request was simply aimed at the wrong host). The signer already covers
+ * any host generically via the `host` header.
  */
 export async function ociRequest<T = unknown>(
   cfg: OCIConfig,
   method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
-  body?: unknown
+  body?: unknown,
+  service: "iaas" | "identity" = "iaas"
 ): Promise<OCIResponse<T>> {
-  const url = new URL(`https://iaas.${cfg.region}.oraclecloud.com${path}`);
+  const url = new URL(`https://${service}.${cfg.region}.oraclecloud.com${path}`);
   const bodyText = body !== undefined ? JSON.stringify(body) : undefined;
   const headers = signRequest(cfg, method, url, bodyText);
   const res = await fetch(url, { method, headers, body: bodyText });

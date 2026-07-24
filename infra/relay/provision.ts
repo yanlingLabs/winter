@@ -378,13 +378,15 @@ async function findUbuntuImage(cfg: OCIConfig): Promise<{ id: string; displayNam
 // Step 6: Availability domain
 // ---------------------------------------------------------------------------
 
-async function firstAvailabilityDomain(cfg: OCIConfig): Promise<string> {
+async function allAvailabilityDomains(cfg: OCIConfig): Promise<string[]> {
   const compartmentId = rootCompartmentId(cfg);
   if (DRY_RUN) {
     log(`[dry-run] GET /20160918/availabilityDomains?compartmentId=${compartmentId}`);
-    return "<dry-run-AD-1>";
+    return ["<dry-run-AD-1>"];
   }
-  const res = await ociRequest(cfg, "GET", `/20160918/availabilityDomains?compartmentId=${compartmentId}`);
+  // Identity API, not IaaS — ListAvailabilityDomains only exists on the identity host (the
+  // 2026-07-18 run's "provisioning lag" diagnosis was wrong: iaas.* 404s this path forever).
+  const res = await ociRequest(cfg, "GET", `/20160918/availabilityDomains?compartmentId=${compartmentId}`, undefined, "identity");
   if (res.status !== 200) {
     throw new Error(
       `GET /availabilityDomains -> ${res.status}: ${res.raw.slice(0, 300)}\n` +
@@ -395,7 +397,9 @@ async function firstAvailabilityDomain(cfg: OCIConfig): Promise<string> {
   }
   const ads = res.json as any[];
   if (!ads[0]?.name) throw new Error("tenancy has no availability domains?");
-  return ads[0].name;
+  // ALL ADs, launch-order: E2.1.Micro Always-Free capacity comes and goes per-AD (a launch that
+  // enters TERMINATING is the out-of-capacity signature) — ensureInstance walks this list.
+  return ads.map((a) => a.name);
 }
 
 // ---------------------------------------------------------------------------
@@ -419,7 +423,7 @@ async function ensureInstance(
   cfg: OCIConfig,
   name: string,
   domain: string,
-  availabilityDomain: string,
+  availabilityDomains: string[],
   imageId: string,
   subnetId: string,
   sshPublicKey: string
@@ -441,29 +445,70 @@ async function ensureInstance(
     return existing;
   }
   const userData = Buffer.from(renderCloudInit(domain), "utf8").toString("base64");
-  log(`Launching instance "${name}" (${SHAPE}, Ubuntu 24.04, AD=${availabilityDomain})...`);
-  const created = await ociRequest(cfg, "POST", "/20160918/instances", {
-    availabilityDomain,
-    compartmentId,
-    shape: SHAPE,
-    displayName: name,
-    sourceDetails: { sourceType: "image", imageId },
-    createVnicDetails: {
-      subnetId,
-      assignPublicIp: true,
-      assignIpv6Ip: true,
-      hostnameLabel: name,
-    },
-    metadata: {
-      ssh_authorized_keys: sshPublicKey,
-      user_data: userData,
-    },
-  });
-  if (created.status !== 200 && created.status !== 201) {
-    throw new Error(`POST /instances (${name}) -> ${created.status}: ${created.raw.slice(0, 500)}`);
+  // Always-Free E2.1.Micro capacity is per-AD and fluctuates: a launch that OCI accepts but
+  // immediately drives to TERMINATING is the out-of-capacity signature (observed live
+  // 2026-07-24). Walk every AD before giving up; the TERMINATED husk left behind shares the
+  // display name but findByDisplayName filters TERMINATING/TERMINATED, so re-runs stay clean.
+  for (const [adIndex, availabilityDomain] of availabilityDomains.entries()) {
+    log(`Launching instance "${name}" (${SHAPE}, Ubuntu 24.04, AD=${availabilityDomain})...`);
+    const created = await ociRequest(cfg, "POST", "/20160918/instances", {
+      availabilityDomain,
+      compartmentId,
+      shape: SHAPE,
+      displayName: name,
+      sourceDetails: { sourceType: "image", imageId },
+      createVnicDetails: {
+        subnetId,
+        assignPublicIp: true,
+        assignIpv6Ip: true,
+        hostnameLabel: name,
+      },
+      metadata: {
+        ssh_authorized_keys: sshPublicKey,
+        user_data: userData,
+      },
+    });
+    if (created.status !== 200 && created.status !== 201) {
+      // Observed live 2026-07-24: Always-Free E2.1.Micro launches are only AUTHORIZED in the
+      // tenancy's home AD — a non-home AD rejects the POST itself with 404 NotAuthorizedOrNotFound
+      // (vs the home AD, which accepts then terminates when out of capacity). Treat that as
+      // "this AD is not available to us" and keep walking; anything else is fatal.
+      const moreAds = adIndex < availabilityDomains.length - 1;
+      if (created.status === 404 && moreAds) {
+        log(`  ${name}: AD ${availabilityDomain} refused the launch (404 — Always-Free not authorized in this AD) -- trying next AD...`);
+        continue;
+      }
+      if (created.status === 404) {
+        throw new Error(
+          `${name}: no availability domain would take the launch — the home AD is out of ` +
+            `${SHAPE} Always-Free capacity and the others refuse free-tier launches (404). ` +
+            `Capacity fluctuates hourly -- re-run later; the script is idempotent.`
+        );
+      }
+      throw new Error(`POST /instances (${name}) -> ${created.status}: ${created.raw.slice(0, 500)}`);
+    }
+    const instance = created.json as any;
+    try {
+      return await pollUntil(cfg, `/20160918/instances/${instance.id}`, "RUNNING", name, 10 * 60_000);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const capacityKill = /TERMINAT/i.test(msg);
+      const moreAds = adIndex < availabilityDomains.length - 1;
+      if (capacityKill && moreAds) {
+        log(`  ${name}: AD ${availabilityDomain} has no ${SHAPE} capacity (instance terminated) -- trying next AD...`);
+        continue;
+      }
+      if (capacityKill) {
+        throw new Error(
+          `${name}: every availability domain (${availabilityDomains.join(", ")}) is out of ` +
+            `${SHAPE} Always-Free capacity right now. Capacity fluctuates hourly -- re-run this ` +
+            `script later; it is idempotent and will pick up exactly here.`
+        );
+      }
+      throw e;
+    }
   }
-  const instance = created.json as any;
-  return pollUntil(cfg, `/20160918/instances/${instance.id}`, "RUNNING", name, 10 * 60_000);
+  throw new Error(`${name}: no availability domains to try`);
 }
 
 async function fetchInstanceAddresses(cfg: OCIConfig, instanceId: string): Promise<{ ipv4: string; ipv6: string }> {
@@ -568,13 +613,13 @@ async function main(): Promise<void> {
   const subnet = await ensureSubnet(cfg, vcn);
   const image = await findUbuntuImage(cfg);
   log(`Ubuntu image: ${image.displayName} (${image.id})`);
-  const ad = await firstAvailabilityDomain(cfg);
-  log(`Availability domain: ${ad}`);
+  const ads = await allAvailabilityDomains(cfg);
+  log(`Availability domains (launch order): ${ads.join(", ")}`);
 
   const addrs: Record<string, { ipv4: string; ipv6: string }> = {};
   for (const [i, name] of INSTANCE_NAMES.entries()) {
     const domain = `${RELAY_HOSTNAMES[i]}.${DOMAIN_BASE}`;
-    const instance = await ensureInstance(cfg, name, domain, ad, image.id, subnet.id, ssh.publicKey);
+    const instance = await ensureInstance(cfg, name, domain, ads, image.id, subnet.id, ssh.publicKey);
     if (DRY_RUN) {
       addrs[name] = { ipv4: "<dry-run-ipv4>", ipv6: "<dry-run-ipv6>" };
       continue;
