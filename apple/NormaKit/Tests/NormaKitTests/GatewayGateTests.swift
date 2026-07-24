@@ -500,6 +500,81 @@ final class GatewayGateTests: XCTestCase {
         await live.close()
     }
 
+    // MARK: - KA-T2: transport keepalive — gateway answers .ping with .pong pre-rpc, ignores inbound .pong
+
+    func pingFrame(epoch: Int = 1) throws -> Data {
+        encodeEnvelope(kind: .ping, payload: Data(), epoch: epoch)
+    }
+
+    func pongFrame(epoch: Int = 1) throws -> Data {
+        encodeEnvelope(kind: .pong, payload: Data(), epoch: epoch)
+    }
+
+    func testPingDrawsPongPreRpc_NeverReachesDaemonOrRateLimiter() async throws {
+        let daemonTransport = ScriptedTransport()
+        let listener = LoopbackListener()
+        let gateway = Gateway(
+            listener: listener,
+            daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
+            hostID: "host-test",
+            directory: InMemoryDirectory(peerID: "peer-stub")
+        )
+        let runTask = Task { await gateway.run() }
+        defer { runTask.cancel() }
+
+        let conn = ScriptedRemoteConn()
+        listener.simulateConnection(conn)
+        conn.enqueueInbound(try helloFrame(clientInstanceID: "phone-ping", resumes: []))
+        try await feedDaemonHelloResponse(daemonTransport)
+        _ = try await waitForOutbound(conn, count: 1) // helloAck
+        let baselineSent = daemonTransport.sent.count
+
+        conn.enqueueInbound(try pingFrame())
+        let out = try await waitForOutbound(conn, count: 2)
+        let reply = try decodeEnvelope(out[1])
+        XCTAssertEqual(reply.kind, .pong, "a ping must draw exactly one pong")
+        XCTAssertTrue(reply.payload.isEmpty, "the pong payload must be empty")
+        XCTAssertNil(reply.sessionID)
+        XCTAssertNil(reply.streamID)
+        XCTAssertNil(reply.seq)
+
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(daemonTransport.sent.count, baselineSent, "a ping must never reach the daemon or rpc parser")
+    }
+
+    func testInboundPongIsIgnored_ConnectionStillServesRpcAfterward() async throws {
+        let daemonTransport = ScriptedTransport()
+        let listener = LoopbackListener()
+        let gateway = Gateway(
+            listener: listener,
+            daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
+            hostID: "host-test",
+            directory: InMemoryDirectory(peerID: "peer-stub")
+        )
+        let runTask = Task { await gateway.run() }
+        defer { runTask.cancel() }
+
+        let conn = ScriptedRemoteConn()
+        listener.simulateConnection(conn)
+        conn.enqueueInbound(try helloFrame(clientInstanceID: "phone-pong", resumes: []))
+        try await feedDaemonHelloResponse(daemonTransport)
+        _ = try await waitForOutbound(conn, count: 1) // helloAck
+
+        conn.enqueueInbound(try pongFrame())
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(conn.outbound.count, 1, "an inbound pong must draw no reply — no error frame, no extra frame")
+        XCTAssertFalse(conn.isClosed, "an inbound pong must not close the connection")
+
+        // The connection still serves a normal rpc afterward.
+        conn.enqueueInbound(try rpcRequestFrame(id: 1, method: "session.list", params: nil))
+        let lines = try await waitForSent(daemonTransport, count: 2) // hello + this request
+        let daemonId = decodeLine(lines[1])["id"] as! Int
+        daemonTransport.feed(#"{"jsonrpc":"2.0","id":\#(daemonId),"result":{"sessions":[]}}"#)
+        let out = try await waitForOutbound(conn, count: 2)
+        let resp = try decodeEnvelope(out[1])
+        XCTAssertEqual(resp.kind, .rpcResponse, "the connection must still serve a normal rpc after an ignored pong")
+    }
+
     // MARK: - G7: the Swift remote allowlist is EXACTLY the twelve names (cross-language tripwire)
 
     func testG7_RemoteAllowlistIsExactlyTheTwelveNames() {
