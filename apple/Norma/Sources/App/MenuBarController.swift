@@ -103,6 +103,20 @@ final class MenuBarController {
         }
     }
 
+    /// menubar-anim: per-state pulse cadence — pure + testable, same posture as `imageName` above.
+    /// `.idle` is `nil` (Global Constraint: idle runs zero timers). `.thinking`'s whole-mark
+    /// breathing reads best slower (12 frames * 0.15s ≈ 1.8s per full breath); `.working`'s
+    /// rotating comet-tail is meant to read "busier", so it runs faster (12 frames * 0.10s ≈ 1.2s
+    /// per revolution) — see scripts/render-icons.ts's `thinkingOpacities`/`workingOpacities` doc
+    /// comments for the frame math these cadences are paired with.
+    nonisolated static func pulseInterval(for activity: MenuBarActivity) -> TimeInterval? {
+        switch activity {
+        case .idle: return nil
+        case .thinking: return 0.15
+        case .working: return 0.10
+        }
+    }
+
     /// Loads a Task 3 menu-bar asset by name. RUNTIME-VERIFIED bundle layout (DD-T5): the built
     /// product's `Contents/Resources` has NEITHER a `MenuBar/` subdirectory (the `Resources` source
     /// in `project.yml` is a plain xcodegen GROUP, not a folder reference, so Xcode's Copy Bundle
@@ -154,14 +168,17 @@ final class MenuBarController {
     /// restarts the pulse rather than continuing mid-cycle); the timer only runs while non-idle
     /// (Global Constraint: idle = zero timers, zero CPU) and is torn down/rebuilt on every call so
     /// a `.thinking` -> `.working` transition (no idle in between) doesn't leave two timers running.
+    /// menubar-anim: the cadence is now PER-STATE (`pulseInterval(for:)` above) instead of a single
+    /// fixed 0.08s for every activity — thinking's whole-mark breathing runs slower than working's
+    /// rotating comet-tail (see that function's doc comment for the exact numbers/rationale).
     func setActivity(_ new: MenuBarActivity) {
         activity = new
         frame = 0
         pulseTimer?.invalidate()
         pulseTimer = nil
         applyCurrentFrame()
-        guard new != .idle else { return }
-        pulseTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
+        guard let interval = Self.pulseInterval(for: new) else { return }
+        pulseTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.frame += 1

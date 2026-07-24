@@ -58,4 +58,13 @@ final class MenuBarActivityTests: XCTestCase {
         XCTAssertEqual(MenuBarController.imageName(for: .thinking, frame: 3, prefix: "mb"), "mb-thinking-3")
         XCTAssertEqual(MenuBarController.imageName(for: .working, frame: 13, prefix: "mb-dev"), "mb-dev-working-1") // frame wraps mod 12
     }
+
+    // menubar-anim: per-state pulse cadence — thinking (whole-mark breathing) is slower than
+    // working (rotating comet-tail), and idle runs no timer at all (nil ⇒ Global Constraint: idle
+    // = zero timers, zero CPU — see `setActivity`'s `guard new != .idle` in MenuBarController).
+    func testPulseInterval() {
+        XCTAssertNil(MenuBarController.pulseInterval(for: .idle))
+        XCTAssertEqual(MenuBarController.pulseInterval(for: .thinking), 0.15)
+        XCTAssertEqual(MenuBarController.pulseInterval(for: .working), 0.10)
+    }
 }
