@@ -96,6 +96,11 @@ targets:
         SUPublicEDKey: "mmce2Wik1c09oXqBvWp+DjsfwtSAdpaCCDkJ98sgAtg="
         SUEnableAutomaticChecks: true
         SUAutomaticallyUpdate: true
+        # Sparkle's default scheduled-check interval is 86400s (24h) — far too slow for the
+        # current release cadence. 3600 is Sparkle's minimum for scheduled checks; the idle gate
+        # (UpdaterCoordinator) still controls WHEN a staged update may relaunch, so an hourly
+        # check never interrupts active work.
+        SUScheduledCheckInterval: 3600
     # Empty entitlements (release-pipeline T1 audit, both variants launch-tested on a
     # throwaway NORMA_HOME with Developer ID + hardened runtime + CODE_SIGN_INJECT_
     # BASE_ENTITLEMENTS=NO): `com.apple.security.cs.disable-library-validation` was
