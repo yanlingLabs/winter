@@ -2086,6 +2086,58 @@ export class AgentEngine {
     // and the belt-and-braces reject agree on the exact same number. hot-settings T2: getter
     // read fresh per thread — `?? 5` is the SAME default the pre-getter code applied.
     const maxDepth = this.cfg.subagentMaxDepth?.() ?? 5;
+    // CM CLOSING branch review (the fourth seam): is `name` actually part of THIS thread's tool
+    // surface? Literally the two filters the provider-facing `specs()` call below already applies
+    // (`.filter(!excludeTools.has).filter(!allowTools || allowTools.has)`), extracted as a predicate
+    // so the DEDICATED BRIDGES can consult it too.
+    //
+    // 77ee7857 threaded `excludeTools`/`allowTools` through three seams — the deferred-index TEXT,
+    // `specs()`, and `executeCall`. But three call names never reach `executeCall` at all: they are
+    // intercepted EARLIER, by bridges gated only on CONFIG PRESENCE (`cfg.subagents && cfg.agents`,
+    // `!!cfg.worktrees`, `!!cfg.workflows`) — the spawn_agent gather below, and `isWorktree` /
+    // `isWorkflowLaunch` in the per-call dispatch loop. The review PROVED the consequence by probe:
+    // a `mode:"chat"` session (allowTools = CHAT_ALLOW_TOOLS = {ask_user}) whose provider emitted an
+    // off-list `spawn_agent` got a real child thread with the FULL registry
+    // (read/ls/glob/grep/write/edit/spawn_agent/ToolSearch — the child's toolset comes from
+    // `def.allowTools`, undefined, minus `childExcludeTools`; the PARENT's allowlist was never
+    // consulted), which then wrote a file to disk. One off-list call turned a session whose entire
+    // product promise is "structurally cannot touch the machine" into a recursively spawn-capable
+    // agent rooted at its cwd.
+    //
+    // Gating the three sites on `offered()` needs NO new rejection path: an off-list name simply
+    // falls through to the per-call loop and hits the `executeCall` guard that already exists, so it
+    // gets the same `tool <name> is not available in this session` isError result every other
+    // off-list call gets — and, for Workflow, no approval card on the way there either (gate.ts
+    // cards a launch under `auto`, so the pre-fix leak also asked the human to authorize it).
+    //
+    // NOT a behavior change for the modes that legitimately use these bridges:
+    //   - code: `excludeTools` is {session_spawn} (+Workflow when `workflowToolAllowed` is false) and
+    //     never lists spawn_agent or the worktree tools, so `offered()` is true for all three and the
+    //     gathers/branches are byte-identical. The Workflow launch CARD is unaffected for the same
+    //     reason — the card only ever fires for a Workflow call that was OFFERED; when Workflow is in
+    //     excludeTools the provider never receives it in `specs()` NOR in the deferred index, so such
+    //     a call could only be hallucinated, and refusing it is correct.
+    //   - dispatch: DISPATCH_ALLOW_TOOLS lists NONE of spawn_agent/enter_worktree/exit_worktree/
+    //     Workflow, so for dispatch this only tightens calls the provider is never offered. Dispatch
+    //     orchestrates via `session_spawn`, which IS on that allowlist (so `offered()` is true) and
+    //     whose own bridge is `meta.mode === "dispatch"`-gated rather than config-gated — deliberately
+    //     NOT one of the three sites, and untouched here.
+    //   - a spawn_agent CHILD with a restricted agent def (`tools:` frontmatter → `def.allowTools`,
+    //     agents.ts): a def that doesn't list spawn_agent/enter_worktree can no longer reach those
+    //     bridges. That is the tightening `allowTools` always meant, previously unenforced at these
+    //     three seams only. `runWorkflowAgent`'s children already list "spawn_agent" in their own
+    //     `childExcludeTools`, so this closes that bridge bypass for free.
+    //
+    // TWO consumers, and only one of them is strictly load-bearing:
+    //   1. the `spawnCalls` gather below — REQUIRED. It runs BEFORE the per-call dispatch loop, so no
+    //      in-loop guard can protect it.
+    //   2. the in-loop `!offered(call.name)` rejection (just above `gate.evaluate`) — the general
+    //      chokepoint, which also keeps an off-list call from ever reaching an APPROVAL CARD.
+    // `isWorktree`/`isWorkflowLaunch` also read `offered()`. Behind (2) that is belt-and-braces —
+    // same relationship the `spawn_agent && depth >= maxDepth` reject in the loop has to the gather's
+    // own depth check — kept because each is attached to ITS OWN bridge and so survives any future
+    // reordering of the loop's guards, which is exactly the class of mistake that produced this bug.
+    const offered = (name: string): boolean => !excludeTools?.has(name) && (!allowTools || allowTools.has(name));
     // 4h-ii-b Task 4 (SM3): delete THIS child thread's steer queue when its runThread terminates,
     // so a send_message that landed but wasn't drained before the child finished can't resurface
     // when the SAME threadId is later resumed (resume reuses the threadId; its round-top drain
@@ -2256,8 +2308,11 @@ export class AgentEngine {
       // send_message, Site 2 for normal calls). Consulted by firePostTool so a blocked call — which
       // NEVER ran — gets no post-tool observe. Round-scoped (a fresh Set per provider round).
       const hookBlockedCallIds = new Set<string>();
+      // CM closing review (the fourth seam): `&& offered(c.name)` — see `offered`'s own doc comment
+      // above. Without it this gather was the ONE place a thread's allowTools/excludeTools was never
+      // consulted before a child thread (with its OWN, unrelated toolset) was created.
       const spawnCalls = this.cfg.subagents && this.cfg.agents && opts.depth < maxDepth
-        ? calls.filter((c) => c.name === "spawn_agent")
+        ? calls.filter((c) => c.name === "spawn_agent" && offered(c.name))
         : [];
       // 4h-ii-b Task 4 (SM1 + SM6, CC SendMessage): message a subagent by agentId/name. DEPTH-0
       // ONLY — only the main thread orchestrates in v1 (no agent-to-agent messaging), belt-and-
@@ -3100,6 +3155,35 @@ export class AgentEngine {
           input.push({ type: "tool_result", callId: call.callId, output: outcome.output, isError: outcome.isError });
           continue;
         }
+        // CM closing review (the fourth seam, second half): reject a call this thread was never
+        // OFFERED — here, BEFORE `gate.evaluate` and therefore before ANY approval branch, rather
+        // than only at executeCall (77ee7857) at the far end of the dispatch chain. Same rejection
+        // TEXT as executeCall's guard (which stays, as the backstop for requestApproval's onApprove
+        // closures, reviewAndDispatch, and any future caller) — this only moves WHEN it fires.
+        //
+        // Why it has to move: `executeCall` is the LAST link. Every branch between the gate and it
+        // can card the human first — and does. An off-list `Workflow` in a chat session hits gate.ts's
+        // bespoke auto-policy case ("ask"), and an off-list `write`/`bash` in a chat session under
+        // `ask` policy hits the generic ask branch: both would show the user of a session whose whole
+        // promise is "no access to this machine" an approval card offering exactly that, only to
+        // refuse the call after they approved it. A tool that was never offered must be refused
+        // without consulting anyone.
+        //
+        // Placed AFTER the deferred-builtin guard directly above, deliberately: for a tool that is
+        // BOTH off-list and deferred-unloaded (e.g. `lsp` in a chat session), "load its schema via
+        // ToolSearch first" stays the answer — the pre-existing message, pinned by
+        // test/agent/chat-mode-allowlist.test.ts. This guard owns the calls that guard doesn't:
+        // non-deferred names (spawn_agent), and every name when ToolSearch is disabled in settings.
+        //
+        // Skipping the pre-tool hook (below) for a refused call is the same contract the deferral
+        // guard above already has, and matches `hookBlockedCallIds`' own rule: hooks never observe a
+        // call that never ran.
+        if (!offered(call.name)) {
+          outcome = { output: `tool ${call.name} is not available in this session`, isError: true };
+          this.emit(sessionId, { type: "tool_result", sessionId, threadId, callId: call.callId, output: outcome.output, isError: outcome.isError });
+          input.push({ type: "tool_result", callId: call.callId, output: outcome.output, isError: outcome.isError });
+          continue;
+        }
         let decision = this.cfg.gate.evaluate(call.name, meta.approvalPolicy);
         // Worktree tools are MUTATING (gate.ts), so under `ask` policy (the DEFAULT) `decision` is
         // "ask", not "allow" — checked here, BEFORE the generic `decision === "ask"` branch below,
@@ -3107,14 +3191,25 @@ export class AgentEngine {
         // the generic one would run executeCall on approval (the tool's own placeholder run()),
         // and the bridge (setCwd + git + same-turn cwd + worktree_* events) would NEVER run outside
         // `auto` policy — see task-4-report.md for the bug writeup.
-        const isWorktree = (call.name === "enter_worktree" || call.name === "exit_worktree") && !!this.cfg.worktrees;
+        // CM closing review (the fourth seam): `&& offered(call.name)` — a worktree tool this thread
+        // was never offered must not reach the bridge (which creates a real git worktree and switches
+        // the session's cwd). Belt-and-braces behind the loop-level `!offered` rejection above, which
+        // already `continue`s for such a call — see `offered`'s doc comment in runThread.
+        const isWorktree = (call.name === "enter_worktree" || call.name === "exit_worktree") && !!this.cfg.worktrees && offered(call.name);
         // Task B2: same "bridge instead of executeCall's placeholder" shape as isWorktree just
         // above — both are MUTATING (gate.ts), so `decision` here can be "ask" (default policy) or
         // "allow" (accept-edits/auto/bypass, or an approved ask card); the branch below handles
         // both, exactly mirroring isWorktree's own ask-vs-allow split. Absent cfg.workflows → false,
         // so the call falls through every branch below to the final default (executeCall → the
         // tool's own placeholder run(), tools/workflow.ts).
-        const isWorkflowLaunch = call.name === WORKFLOW_TOOL && !!this.cfg.workflows;
+        // CM closing review (the fourth seam): `&& offered(call.name)` — same belt-and-braces
+        // treatment as isWorktree just above. This does NOT weaken the user-decided launch gate: the
+        // card fires from THIS branch's own `decision === "ask"` path, which is only ever reached for
+        // a Workflow call the thread was OFFERED. When Workflow is in `excludeTools` (or off an
+        // allowTools list) the provider receives it in neither `specs()` nor the deferred index, so
+        // such a call is necessarily hallucinated — and it is now refused (by the loop-level guard
+        // above) rather than carded. See `offered`'s doc comment in runThread.
+        const isWorkflowLaunch = call.name === WORKFLOW_TOOL && !!this.cfg.workflows && offered(call.name);
         // `cwd` is typed `string` (never undefined here), so this ternary is only a defensive
         // guard against an empty string — repoRootFor("") would realpath-fail and fall back to the
         // DAEMON's own process.cwd(), a wrong and misleading project root. `projectRoot: null`
