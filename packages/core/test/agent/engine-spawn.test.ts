@@ -27,6 +27,7 @@ import { SubagentManager } from "../../src/agent/subagents";
 import { BackgroundAgentRegistry } from "../../src/agent/bg-agent-registry";
 import { WorktreeManager } from "../../src/agent/worktree";
 import { sessionTmpDir } from "../../src/agent/session-tmp";
+import { CHAT_ONLY_TOOLS } from "../../src/agent/chat-prompt";
 import type { LspManager } from "../../src/agent/lsp/manager";
 import type { ModelInfo, Provider, ProviderEvent, TurnRequest } from "../../src/providers/types";
 import { stubRegistry } from "./engine-reviewer.test"; // SP-policies Task 7: stub `bash` tool for the escalation tests' discriminating observable
@@ -294,6 +295,37 @@ describe("AgentEngine: spawn_agent bridge (1d-iv T5)", () => {
     expect(names).not.toContain("exit_plan_mode");
     // sanity: the child DOES see ordinary tools (e.g. read/write) — the excludeTools filter is targeted
     expect(names).toContain("write");
+  });
+
+  // B1-T3 fix round 2, Minor 2: a spawn_agent child only ever exists inside a CODE session (this
+  // harness's setup() never registers AskQuestion, so a specs()-filter assertion via names would
+  // pass vacuously whether or not it's actually excluded — same reasoning workflow-agent.test.ts's
+  // own M3 comment gives for spying on runThread directly instead). Spies on the private
+  // `runThread` and reads the REAL `excludeTools` Set the spawn bridge built, keyed off the fact
+  // that `childExcludeTools` unconditionally contains "ask_user" (the main thread's own excludeTools
+  // never does) — a call-independent way to find the child's call without depending on array
+  // index/ordering. Pins CHAT_ONLY_TOOLS's presence in `childExcludeTools` (engine.ts, the
+  // spawn_agent bridge) the same way the maxDepth:1 test above pins spawn_agent/ask_user/
+  // exit_plan_mode by name — nothing previously caught a future edit silently dropping the
+  // `...CHAT_ONLY_TOOLS` spread from this specific Set.
+  test("a spawn_agent child's excludeTools includes every CHAT_ONLY_TOOLS name (chat-only tools never reach a code session's spawned child)", async () => {
+    const { engine, sessionId } = setup([
+      [spawnCall("s1", "do X"), done("tool_calls")],
+      text("child final report"),
+    ]);
+    const runThreadSpy = spyOn(engine as unknown as { runThread: (...args: unknown[]) => unknown }, "runThread");
+    try {
+      await engine.runTurn(sessionId);
+      const childCall = runThreadSpy.mock.calls.find(
+        (c) => (c as [{ excludeTools?: Set<string> }])[0].excludeTools?.has("ask_user"),
+      ) as [{ excludeTools?: Set<string> }] | undefined;
+      expect(childCall).toBeDefined();
+      for (const name of CHAT_ONLY_TOOLS) {
+        expect(childCall![0].excludeTools?.has(name)).toBe(true);
+      }
+    } finally {
+      runThreadSpy.mockRestore();
+    }
   });
 
   test("policy inheritance: parent in plan mode → child's write tool_call is denied (block message)", async () => {

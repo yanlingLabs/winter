@@ -257,7 +257,10 @@ public enum SessionEvent: Codable, Equatable, Sendable {
 
     public struct Question: Codable, Equatable, Sendable {
         public let question: String
-        public let header: String
+        /// Optional since Slice B1 — chat's `AskQuestion` emits a simplified card with no header
+        /// chip. `nil` is the signal for "simplified": no chip, no per-option descriptions, no
+        /// notes affordance (see PendingCards.swift).
+        public let header: String?
         public let options: [QuestionOption]
         public let multiSelect: Bool
     }

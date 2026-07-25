@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -309,9 +309,72 @@ describe("web_search tool", () => {
     const dir = tmp();
     const out = await r.execute("web_search", { query: "norma agent" }, { cwd: dir, roots: [dir], sessionId: "s1", tmpDir: dir });
     expect(out.isError).toBe(true);
-    expect(out.output).toBe("web_search needs an API key — store one with: norma login --web-search-key <key> (Brave Search API)");
+    // Branch review FIX 6: no `<key>` placeholder — the CLI's `--web-search-key` branch ignores a
+    // positional value and prompts via readSecret regardless, so the OLD wording ("norma login
+    // --web-search-key <key> ...") described a command that doesn't do what it implies.
+    expect(out.output).toBe("web_search needs an API key — store one with: norma login --web-search-key (Brave Search API)");
     expect(audited.length).toBe(1);
     expect(audited[0]).toMatchObject({ kind: "network", tool: "web_search", query: "norma agent", outcome: "no_key" });
+  });
+
+  // Branch review FIX 1 (Important/security): the identical twin of chat's Search key leak — Bun's
+  // REAL fetch (not an injected fake) embeds an invalid header's VALUE verbatim in its own error
+  // text. Unlike chat's Search, web_search's output is remote-reachable (a code session can be
+  // driven from a phone), so this leak matters even more here.
+  test("a stray U+200B in the Brave key never leaks into the tool result, through Bun's REAL fetch", async () => {
+    const r = new ToolRegistry();
+    const audited: Record<string, unknown>[] = [];
+    const leakyKey = "SUPER_SECRET_BRAVE_KEY​"; // trailing U+200B — .trim() does not strip it
+    registerWebTools(r, { audit: (l) => audited.push(l), secret: fakeSecret(leakyKey) }); // no fetchFn override
+    const dir = tmp();
+    const out = await r.execute("web_search", { query: "x" }, { cwd: dir, roots: [dir], sessionId: "s1", tmpDir: dir });
+    expect(out.isError).toBe(true);
+    expect(out.output).not.toContain(leakyKey);
+    expect(out.output).not.toContain("SUPER_SECRET_BRAVE_KEY");
+    expect(JSON.stringify(audited)).not.toContain(leakyKey);
+  });
+
+  // --- final re-review must-fix: search.ts's identical twin (see its comment for full reasoning)
+  // — the ORIGINAL FIX 1 redirected the raw detail to console.error and called it done, but
+  // ~/.norma/logs/core.err.log (where launchd.ts sends the daemon's stderr) is deliberately
+  // agent-readable, so the key must be redacted before it's logged, not just before it's returned.
+  // Short, obviously-fake token (not a realistic-looking secret) — asserts on absence only.
+  test("the key is redacted from the console.error line too — a useful diagnostic survives", async () => {
+    const r = new ToolRegistry();
+    const fakeToken = "tok-b1-zwsp​"; // trailing U+200B, same artifact as the test above
+    registerWebTools(r, { secret: fakeSecret(fakeToken) }); // no fetchFn override — real global fetch
+    const dir = tmp();
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await r.execute("web_search", { query: "x" }, { cwd: dir, roots: [dir], sessionId: "s1", tmpDir: dir });
+      const stderrText = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(stderrText).not.toContain(fakeToken);
+      expect(stderrText).not.toContain("tok-b1");
+      // Still diagnostic: an operator can tell this is an invalid-header failure, not a DNS one.
+      expect(stderrText).toContain("invalid value");
+      expect(stderrText).toContain("<redacted>");
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  test("a genuine network failure (key never appears in the underlying message) keeps its real diagnostic in stderr — redaction is a no-op, not a blanket scrub", async () => {
+    const r = new ToolRegistry();
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      registerWebTools(r, {
+        secret: fakeSecret("clean-ascii-key"),
+        fetchFn: (async () => {
+          throw new Error("getaddrinfo ENOTFOUND api.search.brave.com");
+        }) as unknown as typeof fetch,
+      });
+      const dir = tmp();
+      await r.execute("web_search", { query: "x" }, { cwd: dir, roots: [dir], sessionId: "s1", tmpDir: dir });
+      const stderrText = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(stderrText).toContain("ENOTFOUND");
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 
   test("no secret accessor at all (deps.secret undefined) behaves identically to no key stored", async () => {

@@ -158,7 +158,11 @@ export const QuestionOptionSchema = z.object({
   preview: z.string().optional(),
 });
 export const QuestionSchema = z.object({
-  question: z.string().min(1), header: z.string().min(1).max(12),
+  // `header` is the ≤12-char chip shown above a question in multi-question cards. OPTIONAL since
+  // Slice B1: chat's `AskQuestion` emits a deliberately simplified card (question + labels + Other,
+  // no chip, no per-option description, no notes), and a header-less question is a genuinely
+  // different SHAPE — not a rendering trick. Absent ⟹ simplified card; see PendingCards.swift.
+  question: z.string().min(1), header: z.string().min(1).max(12).optional(),
   options: z.array(QuestionOptionSchema).min(2).max(4), multiSelect: z.boolean(),
 });
 export const TaskSchema = z.object({

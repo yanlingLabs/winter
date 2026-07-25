@@ -295,6 +295,26 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   METHODS.sessionHistory,
 ]);
 
+/** Chat mode Slice B1 Task 1: chat sessions are Mac-local until Slice C ships the phone's chat
+ *  surface. Enforced DAEMON-side, not by a phone-side list filter, because Slice B1 Task 2 makes
+ *  `QuestionSchema.header` optional — a decoder change in Swift. A phone on the current kit tag
+ *  decodes `header` as a non-optional `String` and would fail on a header-less question. A
+ *  client-side filter protects only phones that update; this protects every phone, including one
+ *  that never updates. Same reasoning as the relay-config anti-rollback rule. Used by every
+ *  REMOTE_ALLOWED_METHODS handler that takes a bare `sessionId` and could target a chat session:
+ *  session.attach/send/history/interrupt (Slice B1 brief's four verbs) PLUS approval.respond,
+ *  approval.list, and ask_user.respond — all three also carry a caller-supplied `sessionId` with no
+ *  other mode check, and ask_user.respond in particular is exactly the RPC the AskQuestion tool
+ *  (this same slice, Task 2+) resolves through. Remove when Slice C ships chat to the phone. */
+function assertRemoteMayUseSession(store: SessionStore, role: string | undefined | null, sessionId: string): void {
+  if (role !== "remote") return;
+  let mode: string | undefined;
+  try { mode = store.meta(sessionId).mode; } catch { return; } // unknown id → let the handler's own error win
+  if (mode === "chat") {
+    throw new RpcFailure(ERR.INVALID_PARAMS, "chat sessions are not available to remote clients yet");
+  }
+}
+
 /** Maps a failed `PluginSupervisor.invoke()` result to the message a `throw new Error(...)` in
  *  `tool.register`'s bridged `run()` turns into an isError tool_result (ToolRegistry.execute's
  *  catch path) — see that handler below. */
@@ -679,8 +699,14 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         }
         return { sessionId, trusted };
       }
-      case METHODS.sessionList:
-        return { sessions: opts.store.list() };
+      case METHODS.sessionList: {
+        const sessions = opts.store.list();
+        // Chat mode Slice B1 Task 1: chat sessions are invisible to remote — see
+        // assertRemoteMayUseSession's doc comment for why this is daemon-side, not phone-side.
+        return socket.data.authedRole === "remote"
+          ? { sessions: sessions.filter((s) => s.mode !== "chat") }
+          : { sessions };
+      }
       case METHODS.sessionDispatch: {
         parseParams(SessionDispatchParams, params);
         // Get-or-create is atomic here: the lookup+create sequence is synchronous (bun:sqlite,
@@ -694,6 +720,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionAttach: {
         const p = parseParams(SessionAttachParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
         const hubClient: HubClient = {
           clientName: socket.data.clientName,
           deliver(event: SessionEvent): boolean {
@@ -712,6 +739,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionHistory: {
         const p = parseParams(SessionHistoryParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
         try {
           return readHistoryPage(opts.store, { sessionId: p.sessionId, beforeSeq: p.beforeSeq, limit: p.limit });
         } catch (e) {
@@ -721,6 +749,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionSend: {
         const p = parseParams(SessionSendParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
         if (!socket.data.hubClient) throw new RpcFailure(ERR.NOT_FOUND, "attach to the session first");
         const seq = hub.send(socket.data.hubClient, p.sessionId, p.text);
         // Fire-and-forget: the response returns immediately and turn events stream separately.
@@ -738,6 +767,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionInterrupt: {
         const p = parseParams(SessionInterruptParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
         if (!opts.engine) return { ok: true, wasRunning: false };
         return { ok: true, ...opts.engine.interrupt(p.sessionId) };
       }
@@ -820,6 +850,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.approvalRespond: {
         const p = parseParams(ApprovalRespondParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
         // SP-approvals Task 5: BEFORE resolving, look up the pending approval's stored options via
         // Task 4's `pendingMeta` — a non-consuming read (see its own doc comment), so this lookup
         // can never itself count as an answer for the `resolve()` call right below. Gated on
@@ -856,10 +887,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // SP3 T4b: queryable pending-approval state (remote-allowlisted so a phone can render live
         // approval cards it missed in the replay window). No broker (agent disabled) → no pending.
         const p = parseParams(ApprovalListParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
         return { pending: opts.broker?.list(p.sessionId) ?? [] };
       }
       case METHODS.askUserRespond: {
         const p = parseParams(AskUserRespondParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
         return opts.questions?.respond(p.sessionId, p.callId, p.answers, socket.data.clientName, p.notes) ?? { ok: true, alreadyResolved: true };
       }
       case METHODS.taskList: {

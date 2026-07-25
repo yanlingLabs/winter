@@ -16,6 +16,7 @@ import { registerSessionSpawnTool } from "../../src/agent/tools/session-spawn";
 import { registerSkillWriteTool } from "../../src/agent/tools/skill-write";
 import { registerPushNotificationTool } from "../../src/agent/tools/push-notification";
 import { registerAskUserTool } from "../../src/agent/tools/ask-user";
+import { registerAskQuestionTool } from "../../src/agent/tools/ask-question";
 import { registerWebTools } from "../../src/agent/tools/web";
 import { registerLspTools } from "../../src/agent/tools/lsp";
 import { LspManager } from "../../src/agent/lsp/manager";
@@ -54,6 +55,9 @@ function setup(script: ProviderEvent[][], opts: { mode?: "code" | "dispatch" | "
   registerSessionSpawnTool(registry);
   registerPushNotificationTool(registry);
   registerAskUserTool(registry);
+  // B1-T3: chat's own AskQuestion — CHAT_ALLOW_TOOLS is now {AskQuestion}, not {ask_user}. Must be
+  // registered here or a chat turn's offered toolset would be (wrongly) empty below.
+  registerAskQuestionTool(registry);
   registerWebTools(registry);
   const assemblerHome = mkdtempSync(join(tmpdir(), "norma-dispatch-toolset-actx-"));
   const assemblerTrust = new TrustStore(join(assemblerHome, "trust.json"));
@@ -164,12 +168,12 @@ describe("dispatch mode: toolset + system prompt", () => {
 });
 
 describe("chat mode (Slice A): toolset + system prompt + memory", () => {
-  test("a chat turn offers ONLY ask_user — no hands", async () => {
+  test("a chat turn offers ONLY AskQuestion — no hands", async () => {
     const { engine, sessionId, provider } = setup([text("ok")], { mode: "chat" });
     await engine.runTurn(sessionId);
     const names = new Set((provider.requests[0]?.tools ?? []).map((t) => t.name));
 
-    expect(names).toEqual(new Set(["ask_user"]));
+    expect(names).toEqual(new Set(["AskQuestion"])); // B1-T3: was {ask_user} pre-rename
     for (const forbidden of ["write", "edit", "bash", "read", "glob", "grep", "ls", "lsp", "session_spawn"]) {
       expect(names.has(forbidden)).toBe(false);
     }

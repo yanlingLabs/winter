@@ -16,6 +16,11 @@ export type SessionApprovalPolicy = "plan" | "dont-ask" | "ask" | "accept-edits"
 // question_asked event and blocks on the QuestionBroker (no fs/process mutation — the human is
 // the approval, so a gate prompt on top would double-ask); the task tools (registered in a later
 // task) only maintain in-memory/session task state and emit task_updated.
+// AskQuestion (B1-T3, chat's simplified question tool) is the SAME class as ask_user for the
+// SAME reason: it only emits question_asked/blocks on the QuestionBroker, never touches fs/
+// process state. Without this it would fall through to the unclassified "always ask" branch below
+// — which ignores policy entirely — and every chat question would card for approval even under
+// `auto` (chat's own default), double-asking the human to approve asking them something.
 // exit_plan_mode is read-only too: it only presents a plan for approval (no fs/process mutation)
 // — it must stay allowed under "plan" policy or the model could never exit plan mode.
 // spawn_agent is read-only too: allowed in ALL modes, including plan — it's orchestration (launching
@@ -68,7 +73,7 @@ export type SessionApprovalPolicy = "plan" | "dont-ask" | "ask" | "accept-edits"
 // something, which defeats the point (CC's own PushNotification prompts no approval either). Must
 // stay allowed under `plan` too — flagging a decision/finish is exactly the kind of thing a
 // planning session should still be able to do.
-const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification"]);
+const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "AskQuestion", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification"]);
 // `computer` (Phase 5 CU) is MUTATING: a computer-use action drives real mouse/keyboard/screen, so
 // it must pass the gate on EVERY call (spec §4.6: "every CU action passes the permission gate") —
 // ask → per-action approval card, auto → allow, plan → deny (CU makes changes). Note this is the
@@ -133,7 +138,23 @@ const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_workt
 // engine.ts's dangerous-domain floor (webFetchGate) is keyed on a plain `call.name === "web_fetch"`
 // string check, entirely decoupled from how this file organizes its sets; nothing about THIS class
 // boundary is what "lets" that check exist or run.
-const NETWORK = new Set(["web_fetch", "web_search"]);
+//
+// B1-T5: `Search` (chat's Exa-backed web search) joins this class too, deliberately — NOT
+// READ_ONLY, unlike its sibling task-3 tool AskQuestion. AskQuestion is READ_ONLY because it only
+// blocks on the QuestionBroker (a human answering is not a thing that needs gating); Search
+// performs real network egress to a third-party endpoint and returns attacker-reachable page text
+// as tool output — the SAME risk shape web_search already has, not the "no side effect at all"
+// shape of AskQuestion/read/glob/grep. It is not MUTATING either, for the same reason web_fetch/
+// web_search aren't: it never touches an arbitrary fs/process path, only ever calls the ONE fixed
+// Exa endpoint with a caller-supplied QUERY STRING, never a caller-directed URL — so, exactly like
+// web_search's own reasoning above, it can never be pointed at an attacker's exfiltration endpoint
+// the way an open `url` parameter could. That is what makes it safe to fold into NETWORK's
+// unconditional "allow" rather than inventing a stricter class of its own: the one thing that
+// would justify a floor (a caller-chosen destination) is exactly what Search's schema doesn't
+// have. Ending up "read-only in practice" is a consequence of that argument, not the reason for
+// it — the classification is about what the tool COULD be pointed at, not what it happens to do
+// today.
+const NETWORK = new Set(["web_fetch", "web_search", "Search"]);
 // skill_write (phase 5c Task 2) gets a NEW class, strictly stricter than MUTATING: "ask" under
 // BOTH `ask` AND `auto` (a card on EVERY call — no policy setting silences it), "deny" under
 // `plan`. THE SKETCH PIN (phase-5-intelligence-design-sketch.md §5c): "a skill is standing

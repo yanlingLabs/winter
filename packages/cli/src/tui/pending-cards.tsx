@@ -186,7 +186,10 @@ interface LegacyOption {
   preview?: string;
 }
 interface LegacyQuestion {
-  header: string;
+  // Optional since Chat mode Slice B1 — chat's `AskQuestion` omits it for its simplified card
+  // (`header === undefined` is the wire signal; see `packages/protocol/src/events.ts`'s
+  // `QuestionSchema`). code mode's `ask_user` always sends one.
+  header?: string;
   question: string;
   options: LegacyOption[];
   multiSelect: boolean;
@@ -271,7 +274,7 @@ function QuestionCard({ pending, onAnswer }: { pending: Extract<PendingCard, { k
   return (
     <Box flexDirection="column">
       <Text>
-        {q.header} — {q.question}
+        {q.header !== undefined ? `${q.header} — ` : ""}{q.question}
       </Text>
       {optionLines.map((line, i) => (
         <Text key={i}>{line}</Text>

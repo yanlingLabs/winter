@@ -1,0 +1,22 @@
+{
+  "type": "question_asked",
+  "sessionId": "s_1",
+  "threadId": "t_1",
+  "seq": 30,
+  "ts": 1700000000020,
+  "callId": "call_3",
+  "questions": [
+    {
+      "question": "Which tier should I compare against?",
+      "multiSelect": false,
+      "options": [
+        {
+          "label": "Free"
+        },
+        {
+          "label": "Pro"
+        }
+      ]
+    }
+  ]
+}

@@ -194,6 +194,20 @@ describe("PermissionGate v1", () => {
     expect(g.evaluate("web_fetch", "ask")).not.toBe(g.evaluate("bash", "ask"));
   });
 
+  // B1-T5: `Search` (chat's Exa-backed web search) joins NETWORK too — deliberately, not READ_ONLY
+  // (unlike Task 3's AskQuestion, which is read-only because it only blocks on a human answer).
+  // Search makes a real outbound request to a third-party endpoint and returns attacker-reachable
+  // page text as tool output — same risk shape as web_fetch/web_search, not the "no side effect"
+  // shape of AskQuestion/read/glob/grep. See gate.ts's own doc comment above the NETWORK set for
+  // the fuller "no caller-directed URL" argument for why it doesn't need a stricter class.
+  test("Search is gate-classed NETWORK too: allow under EVERY policy (ask/auto/plan), matching web_fetch/web_search", () => {
+    const g = new PermissionGate();
+    for (const p of ["plan", "auto", "ask"] as const) {
+      expect(g.evaluate("Search", p)).toBe("allow");
+      expect(g.evaluate("Search", p)).toBe(g.evaluate("web_search", p));
+    }
+  });
+
   // T1 (file-based memory) note: memory_read/memory_write/memory_delete are DELETED (design doc
   // `2026-07-15-file-based-memory-design.md`) — a memory-fact read/write now goes through the
   // plain read/write/edit tools, already covered by their own tests elsewhere in this file.
@@ -242,12 +256,13 @@ describe("PermissionGate v1", () => {
   // dedicated test just below for its pinned auto/accept-edits verdicts.
   test("guard: no existing tool joined ALWAYS_ASK — every previously classified tool still allows under auto", () => {
     const classified = [
-      // READ_ONLY
-      "read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification",
+      // READ_ONLY ("AskQuestion" added B1-T3; branch-review FIX 3 closed the gap where this
+      // completeness guard's own list omitted it even though gate.ts's real READ_ONLY set has it)
+      "read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "AskQuestion", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification",
       // MUTATING ("Workflow" excluded — see this test's own doc comment above)
       "write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule",
-      // NETWORK + externals
-      "web_fetch", "web_search", "mcp__x__y", "plugin__x__y",
+      // NETWORK + externals (B1-T5 adds "Search" here)
+      "web_fetch", "web_search", "Search", "mcp__x__y", "plugin__x__y",
     ];
     for (const t of classified) expect(gate.evaluate(t, "auto")).toBe("allow");
   });

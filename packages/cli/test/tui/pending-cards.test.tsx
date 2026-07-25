@@ -485,4 +485,48 @@ describe("PendingCards — question (ask_user)", () => {
     expect(frame).toContain("3) Other (type your answer)");
     expect(frame).toContain("choose (number or text):"); // trailing space trimmed by Ink's frame buffer
   });
+
+  // Chat mode Slice B1 Task 4: chat's `AskQuestion` omits `header` entirely (the wire signal for
+  // its simplified card — Task 2 made `header` optional). `{q.header} — {q.question}` in JSX
+  // renders `undefined`'s children as nothing, but the literal " — " text between them survives —
+  // a header-less question must not show that stray leading "— ".
+  describe("header-less question (Slice B1 simplified card)", () => {
+    const headerlessQuestion = {
+      question: "Which tier should I compare against?",
+      options: [{ label: "Free" }, { label: "Pro" }],
+      multiSelect: false,
+    };
+
+    test("(f1) frame shows the question with no stray '— ' prefix and no literal 'undefined'", async () => {
+      const card: PendingCard = { kind: "question", callId: "q7", questions: [headerlessQuestion] };
+      const { lastFrame } = render(<PendingCards pending={card} onApprove={() => {}} onAnswer={() => {}} onPlan={() => {}} />);
+      await wait();
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("Which tier should I compare against?");
+      expect(frame).not.toContain("undefined");
+      expect(frame).not.toContain("—");
+    });
+
+    test("(f2) a code-mode (headered) question is unchanged: header + ' — ' + question both render", async () => {
+      const card: PendingCard = { kind: "question", callId: "q8", questions: [twoOptionQuestion] };
+      const { lastFrame } = render(<PendingCards pending={card} onApprove={() => {}} onAnswer={() => {}} onPlan={() => {}} />);
+      await wait();
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("Approach — Which approach?");
+    });
+
+    test("(f3) answering still works for a header-less question", async () => {
+      const calls: unknown[] = [];
+      const card: PendingCard = { kind: "question", callId: "q9", questions: [headerlessQuestion] };
+      const { stdin } = render(<PendingCards pending={card} onApprove={() => {}} onAnswer={(id, payload) => calls.push([id, payload])} onPlan={() => {}} />);
+      await wait();
+      stdin.write("1");
+      await wait();
+      stdin.write("\r"); // answer -> note
+      await wait();
+      stdin.write("\r"); // blank note -> done
+      await wait();
+      expect(calls).toEqual([["q9", { answers: { "Which tier should I compare against?": "Free" } }]]);
+    });
+  });
 });

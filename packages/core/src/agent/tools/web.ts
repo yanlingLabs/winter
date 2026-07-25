@@ -310,8 +310,10 @@ export function registerWebTools(r: ToolRegistry, deps: WebToolDeps = {}): void 
         const key = (await deps.secret?.(WEB_SEARCH_API_KEY_SECRET)) ?? null;
         if (!key) {
           outcome = "no_key";
+          // No `<key>` placeholder (branch review FIX 6): the CLI's --web-search-key branch
+          // ignores a positional argv value and always PROMPTS via readSecret.
           throw new Error(
-            "web_search needs an API key — store one with: norma login --web-search-key <key> (Brave Search API)",
+            "web_search needs an API key — store one with: norma login --web-search-key (Brave Search API)",
           );
         }
 
@@ -331,7 +333,22 @@ export function registerWebTools(r: ToolRegistry, deps: WebToolDeps = {}): void 
             throw new Error(`request timed out searching for ${query}`);
           }
           outcome = "network_error";
-          throw new Error(`fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+          // FIX 1's identical twin (branch review): Bun's real fetch embeds an invalid header's
+          // VALUE verbatim in its own error text (confirmed live against the Brave
+          // `X-Subscription-Token` header, same as Search's `x-api-key`) — and unlike chat's
+          // Search, this tool's output is remote-reachable (a code session is drivable from a
+          // phone), so the leak matters even more here.
+          //
+          // Whole-branch re-review FIX (search.ts's identical twin — see its comment for the full
+          // reasoning): stderr is NOT operator-only — launchd.ts redirects it to
+          // ~/.norma/logs/core.err.log, which the daemon's own read/grep tools can open (only
+          // dirs.runDir is denied). Redact the literal key substring before logging; `replaceAll`
+          // is sufficient — verified live that Bun embeds the rejected header value byte-for-byte,
+          // with no escaping, across every char class that reaches this catch.
+          const rawMessage = e instanceof Error ? e.message : String(e);
+          const safeMessage = rawMessage.replaceAll(key, "<redacted>");
+          console.error(`web_search: network error (${name || "Error"}) — ${safeMessage}`);
+          throw new Error("web_search failed: could not reach the search service");
         }
 
         if (res.status !== 200) {

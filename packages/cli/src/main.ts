@@ -292,6 +292,38 @@ export function formatResumeHint(sessionId: string): string {
   return `${DIM}\nResume this session with:\n  norma resume ${sessionId}\n${RESET}`;
 }
 
+// Chat mode Slice B1 Task 4: the TTY question_asked handler's per-question headline. `header` is
+// OPTIONAL since Slice B1 — chat's `AskQuestion` omits it for its simplified card (`header === nil`
+// is the wire signal, see `packages/protocol/src/events.ts`'s `QuestionSchema`). A bare template
+// literal (`${AQUA}${q.header}${RESET} — ${q.question}`) interpolates the literal string
+// "undefined" for a header-less question, giving "undefined — Which tier?". header-present output
+// is byte-identical to before this feature (only the header segment takes AQUA, same as always);
+// header-less just colors the question itself, with no "— " prefix. Pure + exported (mirrors
+// `formatResumeHint` above) so this is unit-testable without a TTY/readline round-trip.
+export function formatQuestionHeadlineLine(header: string | undefined, question: string): string {
+  return header ? `${AQUA}${header}${RESET} — ${question}` : `${AQUA}${question}${RESET}`;
+}
+
+// Branch review (chat-mode Slice B1, FIX 1 — defense in depth): a stored API key containing a
+// non-printable or non-ASCII character can make Bun's real `fetch` throw with the header's VALUE
+// embedded verbatim in its own error text (confirmed live against both Exa's `x-api-key` and
+// Brave's `X-Subscription-Token` headers) — that text would otherwise become model-visible tool
+// output AND land in the session JSONL. `readSecret`'s `.trim()` does NOT strip Unicode category
+// Cf codepoints like U+200B (zero-width space) — the single most common artifact of copying a
+// token off a web page — so this checks every character explicitly rather than trusting trim.
+// Pure + exported (mirrors `formatQuestionHeadlineLine` above) so it's unit-testable without a
+// stdin/readSecret round-trip. Returns an explanatory message (not just "invalid") or null when
+// the key is clean printable ASCII (0x20-0x7e).
+export function invisibleKeyCharWarning(key: string): string | null {
+  for (const ch of key) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (cp < 0x20 || cp > 0x7e) {
+      return "that key contains a non-printable or non-ASCII character — often a stray invisible character (like a zero-width space) picked up when copying from a web page. Copy it again and re-paste.";
+    }
+  }
+  return null;
+}
+
 // Turn-watching runner (2e-iii-b Task 6 — refactored from the former `runHeadlessAgent`). Wires
 // the client, the pinned-block/event machinery, the raw control-key listener, and the stall
 // watchdog ONCE, then either runs a SINGLE turn and exits (chat:false — `-p`, `resume id text`,
@@ -649,7 +681,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
           const answers: Record<string, string> = {};
           const notes: Record<string, string> = {}; // Task 3 (CC parity): optional per-question free-text note
           for (const q of e.questions) {
-            emit(`\n${AQUA}${q.header}${RESET} — ${q.question}\n`);
+            emit(`\n${formatQuestionHeadlineLine(q.header, q.question)}\n`);
             // Task 3: each option's numbered line, plus (when present) its `preview` rendered as
             // extra indented "┆"-rail lines right under it — formatOptionLines is pure/TTY-only
             // (questions.ts); every returned line still goes through emit() so the pinned block's
@@ -1460,12 +1492,24 @@ if (import.meta.main) {
     break;
   }
   case "login": {
-    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, OPENAI_API_KEY_SECRET, WEB_SEARCH_API_KEY_SECRET, profileDisplayName } = await import("@norma/core");
+    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, OPENAI_API_KEY_SECRET, WEB_SEARCH_API_KEY_SECRET, EXA_API_KEY_SECRET, profileDisplayName } = await import("@norma/core");
     console.log(`${AQUA}${profileDisplayName()} login${RESET}`);
     const secrets = new KeychainSecretStore();
     if (process.argv.includes("--api-key")) {
       const key = (await readSecret("Paste your OpenAI API key: ")).trim();
       if (!key.startsWith("sk-")) { console.error("that does not look like an API key"); process.exit(1); }
+      // Fold-in (chat-mode Slice B1 final re-review, same class as FIX 1 above, worse sink): this
+      // is the ONE key-entry path that predates invisibleKeyCharWarning and therefore lacked it —
+      // --web-search-key and --exa-key below already reject before ever reaching a fetch header.
+      // This is prevention at the input boundary only: OpenAICompatibleProvider's OWN error-handling
+      // sink for an invalid header (confirmed live: `Header '14' has invalid value: 'Bearer
+      // ...'`) is untouched here and remains a follow-up — that message flows through
+      // engine.ts into an `agent_error` SessionEvent PERSISTED to the session JSONL, and can become
+      // a parent-model-visible tool_result via a dispatched child's errorMessage. Catching a bad key
+      // at `norma login` time is strictly better than fixing it after the fact, but does not make
+      // the provider sink itself safe against a key that reaches it some other way.
+      const invisibleWarning = invisibleKeyCharWarning(key);
+      if (invisibleWarning) { console.error(invisibleWarning); process.exit(1); }
       await secrets.set(OPENAI_API_KEY_SECRET, key);
       console.log(`${AQUA}API key stored in Keychain${RESET} — set provider type in ~/.norma/settings.json (openai-compatible)`);
       break;
@@ -1477,8 +1521,24 @@ if (import.meta.main) {
     if (process.argv.includes("--web-search-key")) {
       const key = (await readSecret("Paste your Brave Search API key: ")).trim();
       if (!key) { console.error("that does not look like an API key"); process.exit(1); }
+      // Branch review FIX 1 (defense in depth): reject before it ever reaches a fetch header.
+      const invisibleWarning = invisibleKeyCharWarning(key);
+      if (invisibleWarning) { console.error(invisibleWarning); process.exit(1); }
       await secrets.set(WEB_SEARCH_API_KEY_SECRET, key);
       console.log(`${AQUA}Brave Search API key stored in Keychain${RESET} — web_search is ready to use`);
+      break;
+    }
+    // B1-T5: Search's Exa API key. Same shape as the --web-search-key branch above — chat's
+    // Search tool and code's web_search each keep their own keychain secret so the two can never
+    // be confused for one another.
+    if (process.argv.includes("--exa-key")) {
+      const key = (await readSecret("Paste your Exa API key: ")).trim();
+      if (!key) { console.error("that does not look like an API key"); process.exit(1); }
+      // Branch review FIX 1 (defense in depth): reject before it ever reaches a fetch header.
+      const invisibleWarning = invisibleKeyCharWarning(key);
+      if (invisibleWarning) { console.error(invisibleWarning); process.exit(1); }
+      await secrets.set(EXA_API_KEY_SECRET, key);
+      console.log(`${AQUA}Exa API key stored in Keychain${RESET} — Search is ready to use in Chat`);
       break;
     }
     const tokens = await runLoginFlow({
@@ -1756,7 +1816,7 @@ if (import.meta.main) {
   routines [list] | routines create "<spec>" [--policy auto|plan] -- <prompt>
     | routines delete <id> | routines enable <id> | routines disable <id>       manage scheduled routines
   memory [list] [--project] | show <name> [--project] | rm <name> [--project]  manage saved memory facts
-  login [--api-key] [--web-search-key] | logout | provider | provider-smoke [--prompt <text>]
+  login [--api-key] [--web-search-key] [--exa-key] | logout | provider | provider-smoke [--prompt <text>]
   init                                            generate/update NORMA.md by surveying the project
   -p "<prompt>" [--auto|--plan] [--trust|--no-trust]   headless agent turn (asks for tool approval unless --auto/--plan)`);
   }
