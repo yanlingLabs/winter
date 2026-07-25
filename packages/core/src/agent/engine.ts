@@ -3163,11 +3163,15 @@ export class AgentEngine {
         //
         // Why it has to move: `executeCall` is the LAST link. Every branch between the gate and it
         // can card the human first — and does. An off-list `Workflow` in a chat session hits gate.ts's
-        // bespoke auto-policy case ("ask"), and an off-list `write`/`bash` in a chat session under
-        // `ask` policy hits the generic ask branch: both would show the user of a session whose whole
-        // promise is "no access to this machine" an approval card offering exactly that, only to
-        // refuse the call after they approved it. A tool that was never offered must be refused
-        // without consulting anyone.
+        // bespoke auto-policy case ("ask"), and an off-list `bash` (or an OUT-OF-ROOT `write`) in a
+        // chat session under `ask` policy hits the generic ask branch: both would show the user of a
+        // session whose whole promise is "no access to this machine" an approval card offering exactly
+        // that, only to refuse the call after they approved it. A tool that was never offered must be
+        // refused without consulting anyone.
+        //
+        // (An IN-PROJECT `write` under `ask` is the one that never carded even before this guard —
+        // the permission rules allow it silently, so executeCall's guard alone was enough for it.
+        // Verified by probe in the closing review; the three above are the ones that really carded.)
         //
         // Placed AFTER the deferred-builtin guard directly above, deliberately: for a tool that is
         // BOTH off-list and deferred-unloaded (e.g. `lsp` in a chat session), "load its schema via
