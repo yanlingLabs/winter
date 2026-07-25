@@ -310,8 +310,10 @@ export function registerWebTools(r: ToolRegistry, deps: WebToolDeps = {}): void 
         const key = (await deps.secret?.(WEB_SEARCH_API_KEY_SECRET)) ?? null;
         if (!key) {
           outcome = "no_key";
+          // No `<key>` placeholder (branch review FIX 6): the CLI's --web-search-key branch
+          // ignores a positional argv value and always PROMPTS via readSecret.
           throw new Error(
-            "web_search needs an API key — store one with: norma login --web-search-key <key> (Brave Search API)",
+            "web_search needs an API key — store one with: norma login --web-search-key (Brave Search API)",
           );
         }
 
@@ -331,7 +333,13 @@ export function registerWebTools(r: ToolRegistry, deps: WebToolDeps = {}): void 
             throw new Error(`request timed out searching for ${query}`);
           }
           outcome = "network_error";
-          throw new Error(`fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+          // FIX 1's identical twin (branch review): Bun's real fetch embeds an invalid header's
+          // VALUE verbatim in its own error text (confirmed live against the Brave
+          // `X-Subscription-Token` header, same as Search's `x-api-key`) — and unlike chat's
+          // Search, this tool's output is remote-reachable (a code session is drivable from a
+          // phone), so the leak matters even more here. Detail goes to stderr only.
+          console.error(`web_search: network error — ${e instanceof Error ? e.message : String(e)}`);
+          throw new Error("web_search failed: could not reach the search service");
         }
 
         if (res.status !== 200) {

@@ -101,6 +101,79 @@ describe("Search (Exa)", () => {
   test("EXA_API_KEY_SECRET is the exported keychain-secret name Search and `norma login --exa-key` share", () => {
     expect(EXA_API_KEY_SECRET).toBe("exa-api-key");
   });
+
+  // --- FIX 6: day-one no-key UX --------------------------------------------------------------
+  test("description mentions the key requirement, so the model doesn't hedge then burn a round discovering no_key (mirrors web_search's description)", () => {
+    const { r } = setup();
+    const spec = r.specs(null).find((s) => s.name === "Search");
+    expect(spec?.description).toContain("norma login --exa-key");
+  });
+
+  test("the no-key message is the command that ACTUALLY works — no <key> placeholder (the CLI ignores a positional value and prompts instead)", async () => {
+    const { r } = setup({ secret: null });
+    const out = await r.execute("Search", { query: "x" }, ctx());
+    expect(out.output).toBe("Search needs an API key — store one with: norma login --exa-key (from exa.ai)");
+  });
+
+  // --- FIX 1: the Exa key must never reach the tool result (branch review, Important/security) ---
+  test("a stray U+200B in the key never leaks into the tool result, through Bun's REAL fetch (not an injected fake) — the header-validation leak", async () => {
+    const r = new ToolRegistry();
+    const audits: Record<string, unknown>[] = [];
+    // U+200B (zero-width space) is the most common copy-paste artifact from a web page; .trim()
+    // does NOT strip it (Unicode category Cf, not whitespace). No fetchFn override below — this
+    // drives the REAL global fetch, whose header validation throws with the header's VALUE
+    // embedded verbatim (confirmed live: `Header 'x-api-key' has invalid value: '...'`) BEFORE any
+    // byte reaches the network (a local TypeError from header construction, not a connection).
+    const leakyKey = "SUPER_SECRET_EXA_KEY​";
+    registerSearchTool(r, { audit: (l) => audits.push(l), secret: async () => leakyKey });
+    const out = await r.execute("Search", { query: "x" }, ctx());
+    expect(out.isError).toBe(true);
+    expect(out.output).not.toContain(leakyKey);
+    expect(out.output).not.toContain("SUPER_SECRET_EXA_KEY");
+    expect(JSON.stringify(audits)).not.toContain(leakyKey);
+  });
+
+  // --- FIX 4: redirects must not carry the key to a second, uncontrolled origin ----------------
+  test("fetch is called with redirect: 'manual' — a 3xx response is treated as http_error, never auto-followed with the key attached", async () => {
+    let capturedInit: RequestInit | undefined;
+    const { r } = setup({
+      fetchFn: (async (_url: string, init?: RequestInit) => {
+        capturedInit = init;
+        return new Response(null, { status: 302, headers: { location: "https://attacker.example/collect" } });
+      }) as typeof fetch,
+    });
+    const out = await r.execute("Search", { query: "x" }, ctx());
+    expect(capturedInit?.redirect).toBe("manual");
+    expect(out.isError).toBe(true);
+    expect(out.output).toBe("search failed: HTTP 302");
+  });
+
+  // --- FIX 5: malformed response shapes must not mislabel the audit outcome -------------------
+  describe("malformed response shapes are parse_error, never a mislabeled ok/network_error with leaked TypeError text", () => {
+    test('results as a non-array string ("str") -> parse_error, not ok', async () => {
+      const { r, audits } = setup({ fetchFn: (async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ results: "str" }), { status: 200 })) as typeof fetch });
+      const out = await r.execute("Search", { query: "x" }, ctx());
+      expect(out.isError).toBe(true);
+      expect(audits.at(-1)).toMatchObject({ outcome: "parse_error" });
+      expect(out.output).not.toContain("is not a function");
+    });
+
+    test("results as a plain object ({}) -> parse_error, not network_error", async () => {
+      const { r, audits } = setup({ fetchFn: (async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ results: {} }), { status: 200 })) as typeof fetch });
+      const out = await r.execute("Search", { query: "x" }, ctx());
+      expect(out.isError).toBe(true);
+      expect(audits.at(-1)).toMatchObject({ outcome: "parse_error" });
+      expect(out.output).not.toContain("slice is not a function");
+    });
+
+    test("results array containing null ([null]) -> parse_error, not ok", async () => {
+      const { r, audits } = setup({ fetchFn: (async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ results: [null] }), { status: 200 })) as typeof fetch });
+      const out = await r.execute("Search", { query: "x" }, ctx());
+      expect(out.isError).toBe(true);
+      expect(audits.at(-1)).toMatchObject({ outcome: "parse_error" });
+      expect(out.output).not.toContain("Cannot read properties");
+    });
+  });
 });
 
 // --- gate.ts classification, exercised end to end through the real engine -----------------------

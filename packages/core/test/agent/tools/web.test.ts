@@ -309,9 +309,29 @@ describe("web_search tool", () => {
     const dir = tmp();
     const out = await r.execute("web_search", { query: "norma agent" }, { cwd: dir, roots: [dir], sessionId: "s1", tmpDir: dir });
     expect(out.isError).toBe(true);
-    expect(out.output).toBe("web_search needs an API key — store one with: norma login --web-search-key <key> (Brave Search API)");
+    // Branch review FIX 6: no `<key>` placeholder — the CLI's `--web-search-key` branch ignores a
+    // positional value and prompts via readSecret regardless, so the OLD wording ("norma login
+    // --web-search-key <key> ...") described a command that doesn't do what it implies.
+    expect(out.output).toBe("web_search needs an API key — store one with: norma login --web-search-key (Brave Search API)");
     expect(audited.length).toBe(1);
     expect(audited[0]).toMatchObject({ kind: "network", tool: "web_search", query: "norma agent", outcome: "no_key" });
+  });
+
+  // Branch review FIX 1 (Important/security): the identical twin of chat's Search key leak — Bun's
+  // REAL fetch (not an injected fake) embeds an invalid header's VALUE verbatim in its own error
+  // text. Unlike chat's Search, web_search's output is remote-reachable (a code session can be
+  // driven from a phone), so this leak matters even more here.
+  test("a stray U+200B in the Brave key never leaks into the tool result, through Bun's REAL fetch", async () => {
+    const r = new ToolRegistry();
+    const audited: Record<string, unknown>[] = [];
+    const leakyKey = "SUPER_SECRET_BRAVE_KEY​"; // trailing U+200B — .trim() does not strip it
+    registerWebTools(r, { audit: (l) => audited.push(l), secret: fakeSecret(leakyKey) }); // no fetchFn override
+    const dir = tmp();
+    const out = await r.execute("web_search", { query: "x" }, { cwd: dir, roots: [dir], sessionId: "s1", tmpDir: dir });
+    expect(out.isError).toBe(true);
+    expect(out.output).not.toContain(leakyKey);
+    expect(out.output).not.toContain("SUPER_SECRET_BRAVE_KEY");
+    expect(JSON.stringify(audited)).not.toContain(leakyKey);
   });
 
   test("no secret accessor at all (deps.secret undefined) behaves identically to no key stored", async () => {

@@ -256,8 +256,9 @@ describe("PermissionGate v1", () => {
   // dedicated test just below for its pinned auto/accept-edits verdicts.
   test("guard: no existing tool joined ALWAYS_ASK — every previously classified tool still allows under auto", () => {
     const classified = [
-      // READ_ONLY
-      "read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification",
+      // READ_ONLY ("AskQuestion" added B1-T3; branch-review FIX 3 closed the gap where this
+      // completeness guard's own list omitted it even though gate.ts's real READ_ONLY set has it)
+      "read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "AskQuestion", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification",
       // MUTATING ("Workflow" excluded — see this test's own doc comment above)
       "write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule",
       // NETWORK + externals (B1-T5 adds "Search" here)

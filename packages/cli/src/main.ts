@@ -304,6 +304,26 @@ export function formatQuestionHeadlineLine(header: string | undefined, question:
   return header ? `${AQUA}${header}${RESET} — ${question}` : `${AQUA}${question}${RESET}`;
 }
 
+// Branch review (chat-mode Slice B1, FIX 1 — defense in depth): a stored API key containing a
+// non-printable or non-ASCII character can make Bun's real `fetch` throw with the header's VALUE
+// embedded verbatim in its own error text (confirmed live against both Exa's `x-api-key` and
+// Brave's `X-Subscription-Token` headers) — that text would otherwise become model-visible tool
+// output AND land in the session JSONL. `readSecret`'s `.trim()` does NOT strip Unicode category
+// Cf codepoints like U+200B (zero-width space) — the single most common artifact of copying a
+// token off a web page — so this checks every character explicitly rather than trusting trim.
+// Pure + exported (mirrors `formatQuestionHeadlineLine` above) so it's unit-testable without a
+// stdin/readSecret round-trip. Returns an explanatory message (not just "invalid") or null when
+// the key is clean printable ASCII (0x20-0x7e).
+export function invisibleKeyCharWarning(key: string): string | null {
+  for (const ch of key) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (cp < 0x20 || cp > 0x7e) {
+      return "that key contains a non-printable or non-ASCII character — often a stray invisible character (like a zero-width space) picked up when copying from a web page. Copy it again and re-paste.";
+    }
+  }
+  return null;
+}
+
 // Turn-watching runner (2e-iii-b Task 6 — refactored from the former `runHeadlessAgent`). Wires
 // the client, the pinned-block/event machinery, the raw control-key listener, and the stall
 // watchdog ONCE, then either runs a SINGLE turn and exits (chat:false — `-p`, `resume id text`,
@@ -1489,6 +1509,9 @@ if (import.meta.main) {
     if (process.argv.includes("--web-search-key")) {
       const key = (await readSecret("Paste your Brave Search API key: ")).trim();
       if (!key) { console.error("that does not look like an API key"); process.exit(1); }
+      // Branch review FIX 1 (defense in depth): reject before it ever reaches a fetch header.
+      const invisibleWarning = invisibleKeyCharWarning(key);
+      if (invisibleWarning) { console.error(invisibleWarning); process.exit(1); }
       await secrets.set(WEB_SEARCH_API_KEY_SECRET, key);
       console.log(`${AQUA}Brave Search API key stored in Keychain${RESET} — web_search is ready to use`);
       break;
@@ -1499,6 +1522,9 @@ if (import.meta.main) {
     if (process.argv.includes("--exa-key")) {
       const key = (await readSecret("Paste your Exa API key: ")).trim();
       if (!key) { console.error("that does not look like an API key"); process.exit(1); }
+      // Branch review FIX 1 (defense in depth): reject before it ever reaches a fetch header.
+      const invisibleWarning = invisibleKeyCharWarning(key);
+      if (invisibleWarning) { console.error(invisibleWarning); process.exit(1); }
       await secrets.set(EXA_API_KEY_SECRET, key);
       console.log(`${AQUA}Exa API key stored in Keychain${RESET} — Search is ready to use in Chat`);
       break;

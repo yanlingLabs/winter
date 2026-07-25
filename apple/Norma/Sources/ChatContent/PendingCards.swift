@@ -143,6 +143,13 @@ func questionAllowsNotes(_ q: SessionEvent.Question) -> Bool { !questionIsSimpli
 /// FIRST question's `header` (a batch ask's later questions render their own `question` text
 /// inline in the body — see `PendingQuestionBody`); a plan card's title is fixed (the plan text
 /// itself, not a header field, is the body).
+///
+/// Branch review FIX 2: for a SIMPLIFIED (header-less) question card, `showsCardTitleRow` below
+/// suppresses this function's only call site entirely — `QuestionBlock.body` already renders
+/// `question.question` unconditionally, so also putting it in the title row duplicated it (and did
+/// so with no `.lineLimit` and no length cap: `question` has none, unlike `header`'s ≤12 chars).
+/// This function's header-less fallback is kept CORRECT regardless (it is simply unreached for
+/// that card type today) — do not delete it or let it regress to an empty string.
 func cardTitle(_ interaction: PendingInteraction) -> String {
     switch interaction {
     case .approval(_, let toolName, _, _, _, _):
@@ -155,6 +162,17 @@ func cardTitle(_ interaction: PendingInteraction) -> String {
     case .plan:
         return "Plan for approval"
     }
+}
+
+/// Whether the card's OWN title row (glyph + `cardTitle`) renders at all. False ONLY for a
+/// simplified (header-less) question card — approval/plan cards and code mode's headered question
+/// cards are unaffected (title row shown, byte-identical to before this fix). Extracted as a pure,
+/// exported predicate (mirrors `questionIsSimplified`/`questionShowsHeaderChip` above) so the fix
+/// is unit-testable without mounting a view, and so `PendingCard.body`'s gate and any test asserting
+/// it read the exact same decision.
+func showsCardTitleRow(_ interaction: PendingInteraction) -> Bool {
+    guard case .question(_, let questions, _) = interaction, let first = questions.first else { return true }
+    return !questionIsSimplified(first)
 }
 
 /// Phase 5e T5: reviewer text is model-summarized input riding a NEW client-facing surface —
@@ -195,13 +213,18 @@ private struct PendingCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Text(cardGlyph(interaction))
-                    .foregroundStyle(.secondary)
-                Text(cardTitle(interaction))
-                    .foregroundStyle(.primary)
+            // Branch review FIX 2: a simplified (header-less) question card suppresses this whole
+            // row — the question already renders exactly once in the body (QuestionBlock's
+            // unconditional Text(question.question)); showing it here too would duplicate it.
+            if showsCardTitleRow(interaction) {
+                HStack(spacing: 6) {
+                    Text(cardGlyph(interaction))
+                        .foregroundStyle(.secondary)
+                    Text(cardTitle(interaction))
+                        .foregroundStyle(.primary)
+                }
+                .font(.system(size: 13, weight: .semibold))
             }
-            .font(.system(size: 13, weight: .semibold))
 
             cardBody
 

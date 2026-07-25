@@ -29,6 +29,20 @@ interface ExaSearchResponse {
   results?: Array<{ title?: string; url?: string; text?: string }>;
 }
 
+/** Shape-checks a parsed Exa response body just enough to safely index into it — NOT full schema
+ *  validation, just a guarantee that `results` is either absent or an array of non-null objects,
+ *  so the `.slice`/`.map`/`x.title` chain below can never throw a raw TypeError that (a) leaks
+ *  internal detail (e.g. "results.map is not a function") into the model-visible tool_result, and
+ *  (b) gets mislabeled outcome="ok" in the audit line, since that exception fires AFTER `outcome`
+ *  is set to "ok" (branch review FIX 5: `results:"str"` -> ok, `results:{}` -> network_error,
+ *  `results:[null]` -> ok — all three should be `parse_error`, the outcome that already exists for
+ *  exactly this). */
+function isValidExaResults(value: unknown): value is Array<{ title?: string; url?: string; text?: string }> | undefined {
+  if (value === undefined) return true;
+  if (!Array.isArray(value)) return false;
+  return value.every((item) => item !== null && typeof item === "object");
+}
+
 /**
  * Chat's Exa-backed web search (B1-T5). Verified live against Exa's docs before writing this file
  * (task-5-report.md carries the full transcript): `POST https://api.exa.ai/search`, auth via the
@@ -41,7 +55,7 @@ export function registerSearchTool(r: ToolRegistry, deps: SearchToolDeps = {}): 
   r.register({
     name: "Search",
     description:
-      "Search the web and get back results WITH an excerpt of each page, in a single fast call. Use it freely whenever a fact might be newer than you are, or when the user asks about something current. Cite the URL when you use what it returns.",
+      "Search the web and get back results WITH an excerpt of each page, in a single fast call. Use it freely whenever a fact might be newer than you are, or when the user asks about something current. Cite the URL when you use what it returns. Requires a stored Exa API key (norma login --exa-key).",
     // Deliberately NOT `deferred: true` (unlike code's web_search): CHAT_ALLOW_TOOLS contains no
     // ToolSearch, so a deferred Search could never have its schema loaded — it would appear in
     // chat's instructions and be permanently uncallable. That is the pre-existing dispatch-
@@ -57,7 +71,10 @@ export function registerSearchTool(r: ToolRegistry, deps: SearchToolDeps = {}): 
         const key = (await deps.secret?.(EXA_API_KEY_SECRET)) ?? null;
         if (!key) {
           outcome = "no_key";
-          throw new Error("Search needs an API key — store one with: norma login --exa-key <key> (from exa.ai)");
+          // No `<key>` placeholder (branch review FIX 6): the CLI's --exa-key branch ignores a
+          // positional argv value and always PROMPTS via readSecret — a message implying
+          // otherwise would walk a user into pasting their key into shell history for nothing.
+          throw new Error("Search needs an API key — store one with: norma login --exa-key (from exa.ai)");
         }
         const count = Math.min(Math.max(max_results ?? DEFAULT_RESULTS, 1), MAX_RESULTS);
         const fetchFn = deps.fetchFn ?? fetch;
@@ -77,6 +94,13 @@ export function registerSearchTool(r: ToolRegistry, deps: SearchToolDeps = {}): 
               numResults: count,
               contents: { text: { maxCharacters: EXCERPT_CHARS } },
             }),
+            // FIX 4: Exa's search endpoint should never redirect. Without this, fetch's default
+            // `follow` behavior would carry the `x-api-key` header to whatever a 3xx response's
+            // `Location` points at from hop 2 onward — a destination no longer under Exa's
+            // control. `manual` turns any 3xx into a plain non-200 response, handled by the
+            // `res.status !== 200` branch below as `http_error` (web_fetch's followRedirects
+            // already uses this same pattern with its own per-hop SSRF guard).
+            redirect: "manual",
             signal,
           });
         } catch (e) {
@@ -86,7 +110,14 @@ export function registerSearchTool(r: ToolRegistry, deps: SearchToolDeps = {}): 
             throw new Error(`search timed out for ${query}`);
           }
           outcome = "network_error";
-          throw new Error(`search failed: ${e instanceof Error ? e.message : String(e)}`);
+          // FIX 1 (security, Important): NEVER interpolate the caught exception's message here.
+          // Bun's real fetch embeds an invalid header's VALUE verbatim in its own error text
+          // (confirmed live: a stray U+200B in a copy-pasted key produces `Header 'x-api-key' has
+          // invalid value: '...'`), and this string becomes the tool_result — appended in
+          // plaintext to the session JSONL AND sent to the model provider. The detail goes to
+          // stderr (operator-visible only) instead; the model/log only ever see a static message.
+          console.error(`Search: network error — ${e instanceof Error ? e.message : String(e)}`);
+          throw new Error("search failed: could not reach the search service");
         }
 
         if (res.status !== 200) {
@@ -100,6 +131,11 @@ export function registerSearchTool(r: ToolRegistry, deps: SearchToolDeps = {}): 
         } catch (e) {
           outcome = "parse_error";
           throw new Error(`search failed: could not parse response (${e instanceof Error ? e.message : String(e)})`);
+        }
+
+        if (!isValidExaResults(data.results)) {
+          outcome = "parse_error";
+          throw new Error("search failed: malformed response from search service");
         }
 
         const results = (data.results ?? []).slice(0, count);

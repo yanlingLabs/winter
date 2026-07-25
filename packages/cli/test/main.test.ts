@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatQuestionHeadlineLine, formatResumeHint, routeCliInvocation, type CliRoute } from "../src/main";
+import { formatQuestionHeadlineLine, formatResumeHint, invisibleKeyCharWarning, routeCliInvocation, type CliRoute } from "../src/main";
 
 // Pure arg-routing table test (final-review Findings 3+4). `routeCliInvocation` is the ONLY piece
 // of the bare/--auto/--plan/-p/resume dispatch that's cheaply unit-testable without a real
@@ -126,5 +126,35 @@ describe("formatQuestionHeadlineLine (Slice B1 Task 4 — CLI one-line question 
   test("header absent -> no stray '— ' prefix left over from the header segment", () => {
     const line = formatQuestionHeadlineLine(undefined, "A?");
     expect(line).not.toContain("—");
+  });
+});
+
+// Branch review (chat-mode Slice B1, FIX 1 — defense in depth): `norma login --exa-key` /
+// `--web-search-key` must reject a key carrying a non-printable or non-ASCII character BEFORE it
+// ever reaches a fetch header, since Bun's real fetch embeds an invalid header's VALUE verbatim in
+// its own error text (confirmed live against both Exa's and Brave's auth headers — see
+// search.test.ts/web.test.ts's own FIX-1 tests). `.trim()` does NOT strip U+200B (Cf category, not
+// whitespace) — the most common copy-paste artifact. Every "bad" char below is spelled with an
+// explicit \u escape (not a literal invisible character) so the test source stays legible.
+describe("invisibleKeyCharWarning (branch review FIX 1 — `norma login --exa-key`/`--web-search-key`)", () => {
+  test("a clean printable-ASCII key -> null (no warning)", () => {
+    expect(invisibleKeyCharWarning("sk-exa-abc123XYZ_-")).toBeNull();
+  });
+
+  test("trailing U+200B (zero-width space) -> warns", () => {
+    expect(invisibleKeyCharWarning("SUPER_SECRET_EXA_KEY​")).not.toBeNull();
+  });
+
+  test("en dash, emoji, newline, carriage return, NUL -> all warn (the review's full repro list)", () => {
+    const bads = ["a\u2013b", "a\u{1F642}b", "a\nb", "a\rb", "a\u0000b"];
+    for (const bad of bads) {
+      expect(invisibleKeyCharWarning(bad)).not.toBeNull();
+    }
+  });
+
+  test("the warning explains WHAT happened rather than just 'invalid'", () => {
+    const msg = invisibleKeyCharWarning("bad​key");
+    expect(msg).toContain("invisible character");
+    expect(msg).toContain("copying from a web page");
   });
 });
