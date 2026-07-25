@@ -1724,25 +1724,35 @@ export class AgentEngine {
   // in-turn exit_plan_mode approval (which mutates `meta.approvalPolicy` for the REST of this
   // turn) does not retroactively add/remove this reminder mid-turn.
   //
-  // Task B3: `excludeDeferred` (optional — every pre-B3 caller/call site omits it, unchanged
-  // behavior) strips named tools from the DEFERRED-INDEX TEXT LISTING below, same names as
-  // whatever the caller ALSO excludes from specs() via runThread's own `excludeTools` — Workflow is
-  // registered `deferred:true` (B2), so excluding it from specs() alone leaves it still ADVERTISED
-  // in "# Deferred tools" (deferredIndex() and specs() are two independent seams over the same
+  // Task B3 / CM branch review (Important 1): `excludeTools`/`allowTools` (optional — every
+  // pre-B3 caller/call site omitted a filter entirely, unchanged behavior for them) filter the
+  // DEFERRED-INDEX TEXT LISTING below with EXACTLY the same two-filter shape runThread's own
+  // provider-facing specs() call uses just below in this file (`.filter(!excludeTools.has) .filter
+  // (!allowTools || allowTools.has)`) — so the textual listing can never advertise a tool the
+  // thread's actual toolset doesn't offer. This SUBSUMES the old Workflow-only special case
+  // (`excludeDeferred: new Set([WORKFLOW_TOOL])`): turn() below now folds `excludeWorkflow` into
+  // the SAME `excludeTools`/`allowTools` pair it already builds for runThread's own call — one
+  // shared value, not a separate `{Workflow}` Set stacked on top. Workflow is registered
+  // `deferred:true` (B2), so excluding it from specs() alone used to leave it still ADVERTISED in
+  // "# Deferred tools" (deferredIndex() and specs() are two independent seams over the same
   // registry — see registry.ts's own doc comment on isDeferred), which would tell the model a tool
-  // exists that calling it will then just reject. turn() (the main thread's own Workflow gating) and,
-  // since Task B-gatefix Part 3, the plain spawn_agent bridge below BOTH pass this now — a spawned
-  // child thread is NEVER the top-level MAIN thread `workflowToolAllowed` gates for (see that
-  // bridge's own doc comment on `childExcludeTools`). runWorkflowAgent's own child creation still
-  // doesn't need to: its childExcludeTools literal already excludes WORKFLOW_TOOL from specs()
-  // (Task A4) — the load-bearing enforcement — and this file's "Files" scope doesn't extend the same
-  // textual-listing polish to that already-excluded, already-safe path.
+  // exists that calling it will then just reject; the general filter covers that case for free, and
+  // ALSO closes the review's actual finding — chat's block previously advertised
+  // push_notification/web_fetch/web_search/skill_write/lsp even though CHAT_ALLOW_TOOLS is just
+  // {ask_user}, and dispatch's block advertised skill_write/lsp outside DISPATCH_ALLOW_TOOLS too.
+  // The plain spawn_agent bridge below still passes its own literal `{Workflow}` as `excludeTools`
+  // (a spawned child thread is NEVER the top-level MAIN thread `workflowToolAllowed` gates for —
+  // see that bridge's own doc comment on `childExcludeTools`) — unchanged value, just renamed.
+  // runWorkflowAgent's own child creation still passes neither: its childExcludeTools literal
+  // already excludes WORKFLOW_TOOL from specs() (Task A4) — the load-bearing enforcement — and this
+  // file's "Files" scope doesn't extend the same textual-listing polish to that already-excluded,
+  // already-safe path.
   // Task B4: `ultracodeActive` (optional — every pre-B4 caller/call site omits it, unchanged
   // behavior) is turn()'s own once-per-turn `/ultracode` decision (see its doc comment there),
   // threaded straight through to `pinnedTools` (pins Workflow for the turn) AND appended as an
   // authorization <system-reminder> below, mirroring the "# Plan mode" block's own
   // append-onto-instructionsFull shape.
-  private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: SessionApprovalPolicy, sessionId: string, excludeDeferred?: Set<string>, ultracodeActive?: boolean): string {
+  private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: SessionApprovalPolicy, sessionId: string, excludeTools?: Set<string>, allowTools?: Set<string>, ultracodeActive?: boolean): string {
     const tsEnabled = this.toolSearchEnabled(cwd);
     const deferThreshold = this.toolSearchThreshold(cwd);
     // Pins computed HERE, at instructionsFull's own once-per-turn/thread cadence (see this
@@ -1752,7 +1762,9 @@ export class AgentEngine {
     const pins = tsEnabled ? this.pinnedTools(sessionId, { approvalPolicy: policy }, cwd, ultracodeActive) : new Set<string>();
     const effectiveLoaded = pins.size ? new Set([...loaded, ...pins]) : loaded;
     const deferred = tsEnabled
-      ? this.cfg.registry.deferredIndex(cwd, effectiveLoaded, deferThreshold, tsEnabled, this.toolSearchDeferExternals(cwd)).filter((d) => !excludeDeferred?.has(d.name))
+      ? this.cfg.registry.deferredIndex(cwd, effectiveLoaded, deferThreshold, tsEnabled, this.toolSearchDeferExternals(cwd))
+          .filter((d) => !excludeTools?.has(d.name))
+          .filter((d) => !allowTools || allowTools.has(d.name))
       : [];
     let instructionsFull = deferred.length
       ? base + "\n\n# Deferred tools\nThe following tools exist but their schemas are NOT loaded — calling them directly fails. Load schemas first with the ToolSearch tool (query \"select:<name>\" or keywords), then call them normally.\n" + deferred.map((d) => `- ${d.name} — ${d.description}`).join("\n")
@@ -1786,6 +1798,13 @@ export class AgentEngine {
     // Dispatch and Chat both read the SHARED assistant bucket (Dreaming's `_assistant`); only code
     // sessions get the cwd-resolved project MEMDIR — see memoryBucket below.
     const isAssistantBucket = isDispatch || isChat;
+    // CM branch review (Important 1 follow-on): whether the `Skill` tool is offered to THIS
+    // thread — dispatch's DISPATCH_ALLOW_TOOLS and chat's CHAT_ALLOW_TOOLS (both below) never list
+    // it, so the assembler's "## Available capabilities" block must not tell the model to "call the
+    // `Skill` tool" when there's no such tool for it. Code sessions never exclude "Skill" (their own
+    // excludeTools, built alongside `toolAccess` below, is always {session_spawn, Workflow?}), so
+    // this only ever differs for dispatch/chat.
+    const skillToolOffered = isDispatch ? DISPATCH_ALLOW_TOOLS.has("Skill") : isChat ? CHAT_ALLOW_TOOLS.has("Skill") : true;
     // Resolved ONCE per turn (spec: "changing models must NOT require a daemon restart") — a
     // settings.json edit mid-turn does not retroactively change THIS turn's model, only the
     // NEXT one's, mirroring how `instructions`/`instructionsFull` below are also computed once
@@ -1826,6 +1845,7 @@ export class AgentEngine {
       // the normal base and no override, so it would otherwise inherit the user's active style — e.g.
       // "learning" would leave TODO(human) gaps in autonomous work no human reviews. Exclude it here.
       skipOutputStyle: meta.origin === "dispatch-child",
+      skillToolOffered,
     });
     // NOTE (correctness-critical): `loaded` MUST be THE ONE LIVE SET for this session — never a
     // snapshot/copy. It's read here to build specs()/deferredIndex() for round 0, and the SAME
@@ -1876,7 +1896,22 @@ export class AgentEngine {
       else this.ultracodeToggle.add(sessionId);
     }
     const ultracodeActive = ultracodeGateOpen && (ultracodeTrigger?.task !== undefined || this.ultracodeToggle.has(sessionId));
-    const instructionsFull = this.buildInstructionsFull(instructions, cwd, loaded, meta.approvalPolicy, sessionId, excludeWorkflow ? new Set([WORKFLOW_TOOL]) : undefined, ultracodeActive);
+    // CM branch review (Important 1 + Important 2 prep): the ONE excludeTools/allowTools pair for
+    // THIS thread — dispatch gets DISPATCH_ALLOW_TOOLS, chat gets CHAT_ALLOW_TOOLS (both allowlist
+    // shapes), a plain code session gets session_spawn excluded (plus Workflow when
+    // `excludeWorkflow`). Computed ONCE and reused for THREE seams that must never disagree: the
+    // deferred-index TEXT filter (buildInstructionsFull, just below — this SUBSUMES the old
+    // Workflow-only `excludeDeferred` special case, see that method's own doc comment), the
+    // provider-facing specs() filter (runThread's own `.filter(excludeTools).filter(allowTools)`,
+    // unchanged shape — just now fed by this shared value instead of a THIRD inline ternary), and
+    // (4h-ii Important 2) executeCall's own new allowTools/excludeTools rejection below, via
+    // runThread's opts.
+    const toolAccess: { excludeTools?: Set<string>; allowTools?: Set<string> } = isDispatch
+      ? { allowTools: DISPATCH_ALLOW_TOOLS }
+      : isChat
+      ? { allowTools: CHAT_ALLOW_TOOLS }
+      : { excludeTools: new Set([SESSION_SPAWN_TOOL, ...(excludeWorkflow ? [WORKFLOW_TOOL] : [])]) };
+    const instructionsFull = this.buildInstructionsFull(instructions, cwd, loaded, meta.approvalPolicy, sessionId, toolAccess.excludeTools, toolAccess.allowTools, ultracodeActive);
     // Auto-compact BEFORE historyInput is built, so a triggered compaction's checkpoint is
     // reflected in this turn's input. A compaction failure degrades to a normal (uncompacted)
     // turn rather than breaking it. Uses THIS turn's resolved model (sel.model), not the boot
@@ -1965,8 +2000,10 @@ export class AgentEngine {
       // session fails workflowToolAllowed — only reachable in the final `else` (plain code) branch:
       // a dispatch or chat session already takes its own allowTools branch instead, and neither
       // DISPATCH_ALLOW_TOOLS nor CHAT_ALLOW_TOOLS ever lists "Workflow" (workflowToolAllowed's own
-      // doc comment above), so it's excluded there regardless of this Set.
-      ...(isDispatch ? { allowTools: DISPATCH_ALLOW_TOOLS } : isChat ? { allowTools: CHAT_ALLOW_TOOLS } : { excludeTools: new Set([SESSION_SPAWN_TOOL, ...(excludeWorkflow ? [WORKFLOW_TOOL] : [])]) }),
+      // doc comment above), so it's excluded there regardless of this Set. `toolAccess` (computed
+      // once, above, alongside buildInstructionsFull's own call) IS this exact object — no longer
+      // rebuilt inline here.
+      ...toolAccess,
     });
   }
 
@@ -3350,7 +3387,7 @@ export class AgentEngine {
               timeoutMs: this.approvalTimeoutFor(meta),
               summary: approvalCardSummary(call),
               // no denialMessage → the helper defaults to `denied by ${res.by}` (unchanged behavior)
-            }, loaded, async () => this.runWorktreeBridge(call, sessionId, threadId, cwd, onCwd), pins, rootsOverride, visionCapable);
+            }, loaded, async () => this.runWorktreeBridge(call, sessionId, threadId, cwd, onCwd), pins, rootsOverride, visionCapable, excludeTools, allowTools);
           } else {
             outcome = this.runWorktreeBridge(call, sessionId, threadId, cwd, onCwd);
           }
@@ -3376,7 +3413,7 @@ export class AgentEngine {
                 timeoutMs: this.approvalTimeoutFor(meta),
                 summary: approvalCardSummary(call),
                 // no denialMessage → the helper defaults to `denied by ${res.by}` (unchanged behavior)
-              }, loaded, async () => this.runWorkflowBridge(call, sessionId), pins, rootsOverride, visionCapable)
+              }, loaded, async () => this.runWorkflowBridge(call, sessionId), pins, rootsOverride, visionCapable, excludeTools, allowTools)
             : await this.runWorkflowBridge(call, sessionId);
         } else if (dirGrant) {
           // Out-of-project write/edit under `ask` (the auto/accept-edits/bypass cases were ALL
@@ -3411,8 +3448,8 @@ export class AgentEngine {
           }, loaded, async () => {
             const failure = this.mkdirForOneShotGrant(grant.dir);
             if (failure) return { output: failure, isError: true };
-            return this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, oneShot, visionCapable);
-          }, pins, rootsOverride, visionCapable);
+            return this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, oneShot, visionCapable, excludeTools, allowTools);
+          }, pins, rootsOverride, visionCapable, excludeTools, allowTools);
         } else if (call.name === "bash" && bashEscalation.dangerouslyDisableSandbox && !unsandboxedRuleAllowed && meta.approvalPolicy !== "bypass") {
           // SP-policies Task 11: the sandbox-escape gate. Reworked from SP-approvals' always-card
           // floor into a mode split. `!unsandboxedRuleAllowed` guards it because a BashUnsandboxed
@@ -3451,12 +3488,12 @@ export class AgentEngine {
             catch { v = { verdict: "error", reason: "reviewer unavailable — manual approval required" }; }
             this.emit(sessionId, { type: "tool_review", sessionId, threadId, toolName: call.name, verdict: v.verdict, reason: sanitizeReviewText(v.reason, 300), summary: sanitizeReviewText(approvalCardSummary(call), 160) });
             if (v.verdict === "safe") {
-              outcome = await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable);
+              outcome = await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, excludeTools, allowTools);
             } else {
               outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
                 timeoutMs: this.approvalTimeoutFor(meta), summary: approvalCardSummary(call),
                 reviewerReason: sanitizeReviewText(v.reason, 300), options: escapeOptions,
-              }, loaded, undefined, pins, rootsOverride, visionCapable);
+              }, loaded, undefined, pins, rootsOverride, visionCapable, excludeTools, allowTools);
             }
           } else {
             // ask / accept-edits (or auto with no reviewer configured): human card; the reviewer, when
@@ -3468,7 +3505,7 @@ export class AgentEngine {
             outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
               timeoutMs: this.approvalTimeoutFor(meta), summary: approvalCardSummary(call),
               reviewerReason, options: escapeOptions,
-            }, loaded, undefined, pins, rootsOverride, visionCapable);
+            }, loaded, undefined, pins, rootsOverride, visionCapable, excludeTools, allowTools);
           }
         } else if (decision === "ask") {
           outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
@@ -3487,7 +3524,7 @@ export class AgentEngine {
             // Bash(<prefix>:*) rule covers a matching call regardless of allowNetwork, by design —
             // spec: "a persisted rule then covers matching network calls silently").
             options: approvalOptionsFor(call),
-          }, loaded, undefined, pins, rootsOverride, visionCapable);
+          }, loaded, undefined, pins, rootsOverride, visionCapable, excludeTools, allowTools);
         } else if (webFetchCard && meta.approvalPolicy !== "bypass") {
           // SP-approvals Task 10: web_fetch's dangerous-domain floor fires here — reached under
           // EVERY policy (`decision` is unconditionally "allow" for web_fetch now, gate.ts), not
@@ -3515,7 +3552,7 @@ export class AgentEngine {
               timeoutMs: this.approvalTimeoutFor(meta),
               summary: webFetchCard.summary,
               options: webFetchCard.options,
-            }, loaded, undefined, pins, rootsOverride, visionCapable);
+            }, loaded, undefined, pins, rootsOverride, visionCapable, excludeTools, allowTools);
           }
         } else if (call.name === "exit_plan_mode" && this.cfg.plans && meta.approvalPolicy === "plan") {
           outcome = await this.runPlanBridge(call, sessionId, threadId, meta);
@@ -3559,11 +3596,11 @@ export class AgentEngine {
           if (command && bashLooksSafe(command, this.cfg.reviewerAllow?.(cwd) ?? [])) {
             // Static bypass — reviewer.review() never runs, so NO tool_review event (phase 5e T2:
             // observability covers actual reviewer invocations, not every gate decision).
-            outcome = await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable);
+            outcome = await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, excludeTools, allowTools);
           } else {
             outcome = await this.reviewAndDispatch(
               { class: "bash", command, justification }, `${call.name} ${command}`,
-              call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, meta,
+              call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, meta, excludeTools, allowTools,
             );
           }
         } else if (
@@ -3588,10 +3625,10 @@ export class AgentEngine {
             const precis = fsWritePrecis(call, resolved);
             outcome = await this.reviewAndDispatch(
               { class: "fs", precis }, precis,
-              call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, meta,
+              call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, meta, excludeTools, allowTools,
             );
           } else {
-            outcome = await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable);
+            outcome = await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, excludeTools, allowTools);
           }
         } else if (
           decision === "allow" && isExternalToolName(call.name) && this.cfg.reviewer &&
@@ -3602,10 +3639,10 @@ export class AgentEngine {
           const precis = externalPrecis(call);
           outcome = await this.reviewAndDispatch(
             { class: "external", precis }, precis,
-            call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, meta,
+            call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, meta, excludeTools, allowTools,
           );
         } else {
-          outcome = await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable);
+          outcome = await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, excludeTools, allowTools);
         }
 
         this.emit(sessionId, { type: "tool_result", sessionId, threadId, callId: call.callId, output: outcome.output, isError: outcome.isError });
@@ -4045,6 +4082,12 @@ export class AgentEngine {
     // unsafe/errored), so it must never hand a dispatch child the SHORTEST window. `meta.origin`
     // is all this needs (mirrors approvalTimeoutFor's own signature).
     meta: { origin?: string },
+    // CM branch review (Important 2): forwarded unchanged to both the "safe" verdict's own
+    // executeCall call AND the escalation's requestApproval call below — see executeCall's own doc
+    // comment on these two params. `meta` (just above) is required and these must stay optional, so
+    // they're appended after it rather than living next to `loaded`/`pins`.
+    excludeTools?: Set<string>,
+    allowTools?: Set<string>,
   ): Promise<{ output: string; isError: boolean; deniedByHuman?: boolean }> {
     // "error" (phase 5e T2): review() THREW (fail-closed) — distinct from a genuine "unsafe"
     // verdict for tool_review observability, though both escalate identically.
@@ -4063,7 +4106,7 @@ export class AgentEngine {
       summary: sanitizeReviewText(toolSummary, 160),
     });
     if (v.verdict === "safe") {
-      return await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable);
+      return await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, excludeTools, allowTools);
     }
     // Whole-branch fix wave: env can still WIDEN a dispatch child's window beyond 10 minutes, but
     // never narrows it below that floor (same "env widens, never narrows the child floor" contract
@@ -4085,7 +4128,7 @@ export class AgentEngine {
       summary: approvalCardSummary(call),
       reviewerReason: sanitizeReviewText(v.reason, 300),
       denialMessage,
-    }, loaded, undefined, pins, rootsOverride, visionCapable);
+    }, loaded, undefined, pins, rootsOverride, visionCapable, excludeTools, allowTools);
   }
 
   /** write-permission-flow (task 24): apply an out-of-root write/edit grant — mkdir the directory
@@ -4300,6 +4343,12 @@ export class AgentEngine {
     // Computer use (Phase 5 CU): forwarded to the default onApprove's executeCall so an approved
     // `computer` screenshot under `ask` policy still sees the model's vision capability.
     visionCapable?: boolean,
+    // CM branch review (Important 2): forwarded to the default onApprove's executeCall, same as
+    // `loaded`/`pins`/`rootsOverride`/`visionCapable` above — a caller that passes its OWN
+    // `onApprove` (the worktree/workflow bridges) doesn't need it there, but still supplies it for
+    // signature uniformity (mirrors `pins`' own doc comment on this exact pattern).
+    excludeTools?: Set<string>,
+    allowTools?: Set<string>,
   ): Promise<{ output: string; isError: boolean; deniedByHuman?: boolean }> {
     // issuedAt/expiresAt computed ONCE and threaded to BOTH the broker (so approval.list surfaces
     // the same deadline) and the emitted event — keeping list().expiresAt === event.expiresAt for
@@ -4322,7 +4371,7 @@ export class AgentEngine {
     const res = await waiting;
     this.emit(sessionId, { type: "approval_resolved", sessionId, threadId, callId: call.callId, approved: res.approved, by: res.by });
     if (res.approved) {
-      return await (onApprove ? onApprove() : this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable));
+      return await (onApprove ? onApprove() : this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, excludeTools, allowTools));
     }
     // An EXPLICIT human denial (any `by` other than the broker's "timeout") ends the turn and
     // hands control back to the user (Claude Code parity) — see the caller's `deniedByHuman`
@@ -4584,7 +4633,33 @@ export class AgentEngine {
     // runThread's per-thread `visionCapable` (and through requestApproval's default onApprove). Set
     // on ctx.visionCapable so the `computer` tool's screenshot action can refuse a non-vision model.
     visionCapable?: boolean,
+    // CM branch review (Important 2): the CALLING THREAD's `excludeTools`/`allowTools` — runThread's
+    // own `opts.excludeTools`/`opts.allowTools` (the SAME values that already filter the
+    // provider-facing specs() list, runThread's own `.filter` pair, and buildInstructionsFull's
+    // deferred-index text, above), forwarded straight through by every call site in this file
+    // (reviewAndDispatch and requestApproval's default onApprove included — see their own doc
+    // comments). Before this fix, ONLY the deferral check and the permission gate stood between a
+    // provider ignoring its own offered tool list and a live side effect: a chat session
+    // (CHAT_ALLOW_TOOLS = {ask_user}) whose provider called `write` anyway reached this method with
+    // NOTHING checking `write` against what was actually offered, and the file landed on disk. The
+    // check below closes that — same rejection SHAPE as the deferral check above it in the dispatch
+    // loop (isDeferredBuiltin), so a client can't distinguish "deferred, load it first" from "not on
+    // your list at all" by string-matching alone, but the OUTPUT TEXT is deliberately distinct
+    // ("not available in this session" vs. "is deferred") so a legitimate caller debugging a
+    // rejected call can tell which failure mode it hit.
+    excludeTools?: Set<string>,
+    allowTools?: Set<string>,
   ): Promise<{ output: string; isError: boolean }> {
+    // CM branch review (Important 2): reject BEFORE any other work — no args parsing, no roots
+    // resolution, no registry.execute() — for a call the thread's own allowTools/excludeTools never
+    // offered. This is a HARDENING, not a new capability: every legitimate call already arrives here
+    // named EXACTLY what specs() advertised (the provider chose it FROM that list), so this can only
+    // ever fire for a call the provider made up or copied from a DIFFERENT thread's tool list (the
+    // two probes this review proved: an off-list `write`, and an off-list `ToolSearch` that would
+    // otherwise have chained into loading+calling `lsp`).
+    if (excludeTools?.has(call.name) || (allowTools && !allowTools.has(call.name))) {
+      return Promise.resolve({ output: `tool ${call.name} is not available in this session`, isError: true });
+    }
     let args: unknown;
     try { args = call.argsJson.length ? JSON.parse(call.argsJson) : {}; }
     catch { return Promise.resolve({ output: `tool arguments were not valid JSON`, isError: true }); }

@@ -135,7 +135,16 @@ export class ContextAssembler {
     };
   }
 
-  assemble(input: { cwd: string | null; loadedSkills?: string[]; basePromptOverride?: string; memoryBucket?: "project" | "assistant"; skipOutputStyle?: boolean }): string {
+  assemble(input: {
+    cwd: string | null; loadedSkills?: string[]; basePromptOverride?: string; memoryBucket?: "project" | "assistant"; skipOutputStyle?: boolean;
+    // CM branch review (Important 1 follow-on): whether the `Skill` tool is actually offered to
+    // THIS thread — undefined/true (every pre-existing caller) is byte-identical to before this
+    // field existed. `false` (chat/dispatch's own narrow allowlists never include "Skill" —
+    // engine.ts's turn()) suppresses the "call the `Skill` tool" header below: telling the model to
+    // call a tool it doesn't have is exactly the kind of machine-touching-capability leak this
+    // review found in the DEFERRED-tools text (buildInstructionsFull), just for the skills list.
+    skillToolOffered?: boolean;
+  }): string {
     const cwd = input.cwd;
     const trusted = cwd ? this.trust.isTrusted(cwd) : false;
     // Dispatch mode (Phase 7, spec §7): the coordinator gets its OWN base prompt — swapped in
@@ -246,11 +255,17 @@ export class ContextAssembler {
     }
 
     const metas = this.skills.list({ cwd });
+    // CM branch review (Important 1 follow-on): only advertise "call the `Skill` tool" when it's
+    // actually offered — `skillToolOffered !== false` keeps every pre-existing caller (which never
+    // passes this field) byte-identical. When it's explicitly false AND there are skills to have
+    // listed, the whole capabilities section collapses to nothing below (capLines.length stays 1)
+    // rather than dangling on an empty "## Available capabilities" header with no body.
+    const skillToolOffered = input.skillToolOffered !== false;
     const capLines: string[] = ["## Available capabilities"];
-    if (metas.length) {
+    if (metas.length && skillToolOffered) {
       capLines.push("### Skills — call the `Skill` tool with a skill name to load its full instructions before using it");
       for (const m of metas) capLines.push(`- **${m.name}** — ${m.description}`);
-    } else {
+    } else if (!metas.length) {
       capLines.push("No skills are installed.");
     }
     const loaded = (input.loadedSkills ?? [])
@@ -260,7 +275,7 @@ export class ContextAssembler {
       capLines.push("### Loaded skills");
       for (const s of loaded) capLines.push(`#### ${s.name}\n${s.body}`);
     }
-    sections.push(capLines.join("\n"));
+    if (capLines.length > 1) sections.push(capLines.join("\n"));
 
     return sections.join("\n\n");
   }
