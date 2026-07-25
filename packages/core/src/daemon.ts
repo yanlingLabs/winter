@@ -41,6 +41,7 @@ import { registerSkillWriteTool } from "./agent/tools/skill-write";
 import { MemoryStore } from "./agent/memory";
 import { registerScheduleTool } from "./agent/tools/schedule";
 import { registerWebTools } from "./agent/tools/web";
+import { registerSearchTool } from "./agent/tools/search";
 import { registerComputerTool } from "./agent/tools/computer";
 import { ComputerUseService } from "./agent/computer-use";
 import { McpManager } from "./agent/mcp/manager";
@@ -546,6 +547,10 @@ export async function startDaemon(opts: {
     // built at the top of startDaemon) `norma login --web-search-key` writes into — one
     // SecretStore instance, one Keychain, no separate store to keep in sync.
     registerWebTools(registry, { audit: (line) => audit.append(line), secret: (name) => secrets.get(name) });
+    // B1-T5: Search — chat's Exa-backed one-call web search (results + page excerpts in a single
+    // request). Same `audit`/`secrets` instances as registerWebTools just above; its own keychain
+    // secret (EXA_API_KEY_SECRET) is `norma login --exa-key`'s write target, never web_search's.
+    registerSearchTool(registry, { audit: (line) => audit.append(line), secret: (name) => secrets.get(name) });
     const agents = new AgentStore({
       normaHome, trust: trustStore, baseInstructions: SYSTEM_PROMPT,
       plugins: { disabled: settings?.plugins?.disabled ?? [] },

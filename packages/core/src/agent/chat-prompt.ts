@@ -12,6 +12,9 @@ export const CHAT_SYSTEM_PROMPT = [
   "If something needs the user's files, code, or terminal, say so plainly and point at the mode that can do it (Code for a project, Dispatch to coordinate work).",
   "Never guess at file contents or command output. You cannot see them.",
   "",
+  "# Looking things up",
+  "You can Search the web. Do it whenever a fact might have changed since you were trained, or the user asks about something current — do not guess and do not hedge about not knowing. Say where a fact came from.",
+  "",
   "# Asking",
   "When a choice is genuinely the user's to make, use AskQuestion rather than assuming.",
 ].join("\n");
@@ -24,11 +27,11 @@ export const CHAT_SYSTEM_PROMPT = [
  *  duplicate names, so the chat variants carry their own names and code's are untouched.
  *  Nothing that touches the filesystem, the shell, or the machine may ever join. (B1-T3:
  *  `AskQuestion` replaces `ask_user` here; B1-T5 adds `Search`.) */
-export const CHAT_ALLOW_TOOLS: Set<string> = new Set(["AskQuestion"]);
+export const CHAT_ALLOW_TOOLS: Set<string> = new Set(["AskQuestion", "Search"]);
 
 /** Chat's OWN tools — the ones that exist only because chat needs a different shape than code's
  *  (AskQuestion vs ask_user; Task 5 adds Search vs web_search). Code mode's toolAccess is an
  *  EXCLUDElist, not an allowlist, so without naming them here every registered tool is offered to
  *  code sessions and these would ride along — handing code two question tools with different card
  *  shapes. Dispatch needs no entry: it uses an allowlist and simply omits them. */
-export const CHAT_ONLY_TOOLS: ReadonlySet<string> = new Set(["AskQuestion"]);
+export const CHAT_ONLY_TOOLS: ReadonlySet<string> = new Set(["AskQuestion", "Search"]);

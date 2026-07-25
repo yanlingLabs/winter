@@ -1472,7 +1472,7 @@ if (import.meta.main) {
     break;
   }
   case "login": {
-    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, OPENAI_API_KEY_SECRET, WEB_SEARCH_API_KEY_SECRET, profileDisplayName } = await import("@norma/core");
+    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, OPENAI_API_KEY_SECRET, WEB_SEARCH_API_KEY_SECRET, EXA_API_KEY_SECRET, profileDisplayName } = await import("@norma/core");
     console.log(`${AQUA}${profileDisplayName()} login${RESET}`);
     const secrets = new KeychainSecretStore();
     if (process.argv.includes("--api-key")) {
@@ -1491,6 +1491,16 @@ if (import.meta.main) {
       if (!key) { console.error("that does not look like an API key"); process.exit(1); }
       await secrets.set(WEB_SEARCH_API_KEY_SECRET, key);
       console.log(`${AQUA}Brave Search API key stored in Keychain${RESET} — web_search is ready to use`);
+      break;
+    }
+    // B1-T5: Search's Exa API key. Same shape as the --web-search-key branch above — chat's
+    // Search tool and code's web_search each keep their own keychain secret so the two can never
+    // be confused for one another.
+    if (process.argv.includes("--exa-key")) {
+      const key = (await readSecret("Paste your Exa API key: ")).trim();
+      if (!key) { console.error("that does not look like an API key"); process.exit(1); }
+      await secrets.set(EXA_API_KEY_SECRET, key);
+      console.log(`${AQUA}Exa API key stored in Keychain${RESET} — Search is ready to use in Chat`);
       break;
     }
     const tokens = await runLoginFlow({
@@ -1768,7 +1778,7 @@ if (import.meta.main) {
   routines [list] | routines create "<spec>" [--policy auto|plan] -- <prompt>
     | routines delete <id> | routines enable <id> | routines disable <id>       manage scheduled routines
   memory [list] [--project] | show <name> [--project] | rm <name> [--project]  manage saved memory facts
-  login [--api-key] [--web-search-key] | logout | provider | provider-smoke [--prompt <text>]
+  login [--api-key] [--web-search-key] [--exa-key] | logout | provider | provider-smoke [--prompt <text>]
   init                                            generate/update NORMA.md by surveying the project
   -p "<prompt>" [--auto|--plan] [--trust|--no-trust]   headless agent turn (asks for tool approval unless --auto/--plan)`);
   }

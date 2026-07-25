@@ -19,6 +19,7 @@ import { registerSkillTools } from "../../src/agent/tools/skill";
 import { registerPushNotificationTool } from "../../src/agent/tools/push-notification";
 import { registerAskUserTool } from "../../src/agent/tools/ask-user";
 import { registerAskQuestionTool } from "../../src/agent/tools/ask-question";
+import { registerSearchTool } from "../../src/agent/tools/search";
 import { registerWebTools } from "../../src/agent/tools/web";
 import { registerLspTools } from "../../src/agent/tools/lsp";
 import { registerToolSearchTool } from "../../src/agent/tools/toolsearch";
@@ -70,6 +71,10 @@ function setup(script: ProviderEvent[][], opts: { mode?: "code" | "dispatch" | "
   registerPushNotificationTool(registry);
   registerAskUserTool(registry);
   registerAskQuestionTool(registry);
+  registerSearchTool(registry); // B1-T5: CHAT_ALLOW_TOOLS now also lists "Search" — register it in
+  // this file's full-surface harness too, or the "offered exactly AskQuestion" assertion below
+  // would pass vacuously (nothing to prove Search rides along) rather than actually re-verifying
+  // the updated allowlist.
   registerWebTools(registry);
   registerToolSearchTool(registry);
 
@@ -183,11 +188,11 @@ describe("AskQuestion — the simplified chat card", () => {
     expect(result.output).toContain("Pro");
   });
 
-  test("a chat turn is offered exactly AskQuestion — ask_user is gone", async () => {
+  test("a chat turn is offered exactly AskQuestion and Search — ask_user is gone", async () => {
     const { engine, sessionId, provider } = setup([text("hello")], { mode: "chat" });
     await engine.runTurn(sessionId);
     const offered = (provider.requests[0]?.tools ?? []).map((t) => t.name).sort();
-    expect(offered).toEqual(["AskQuestion"]);
+    expect(offered).toEqual(["AskQuestion", "Search"]);
   });
 
   test("off-list ask_user in a chat session is refused (Slice A's guard covers the rename)", async () => {
@@ -202,12 +207,18 @@ describe("AskQuestion — the simplified chat card", () => {
     expect(result.output).toContain("not available in this session");
   });
 
-  test("code mode still has ask_user and NOT AskQuestion", async () => {
+  test("code mode still has ask_user and NOT AskQuestion, and NOT Search either", async () => {
     const { engine, sessionId, provider } = setup([text("hello")], { mode: "code" });
     await engine.runTurn(sessionId);
     const offered = (provider.requests[0]?.tools ?? []).map((t) => t.name);
     expect(offered).toContain("ask_user");
     expect(offered).not.toContain("AskQuestion");
+    // B1-T5: this file's harness now also registers Search (registerSearchTool above) — code mode
+    // must still exclude it via CHAT_ONLY_TOOLS, same as AskQuestion (this harness's `toolSearch:
+    // { enabled: () => undefined }` keeps built-in deferral active, which is why web_search itself
+    // doesn't show up here either — deferred, not excluded; that's covered by web.test.ts, not
+    // this file).
+    expect(offered).not.toContain("Search");
   });
 
   // Fix round 1: the exclusion above must be SURGICAL — code's real toolset (read/write/bash/
@@ -232,5 +243,8 @@ describe("AskQuestion — the simplified chat card", () => {
     await engine.runTurn(sessionId);
     const offered = (provider.requests[0]?.tools ?? []).map((t) => t.name);
     expect(offered).not.toContain("AskQuestion");
+    // B1-T5: same story for Search — DISPATCH_ALLOW_TOOLS is an allowlist that never names it.
+    expect(DISPATCH_ALLOW_TOOLS.has("Search")).toBe(false);
+    expect(offered).not.toContain("Search");
   });
 });
