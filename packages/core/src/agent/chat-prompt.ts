@@ -31,4 +31,4 @@ export const CHAT_ALLOW_TOOLS: Set<string> = new Set(["AskQuestion"]);
  *  EXCLUDElist, not an allowlist, so without naming them here every registered tool is offered to
  *  code sessions and these would ride along — handing code two question tools with different card
  *  shapes. Dispatch needs no entry: it uses an allowlist and simply omits them. */
-export const CHAT_ONLY_TOOLS: Set<string> = new Set(["AskQuestion"]);
+export const CHAT_ONLY_TOOLS: ReadonlySet<string> = new Set(["AskQuestion"]);
