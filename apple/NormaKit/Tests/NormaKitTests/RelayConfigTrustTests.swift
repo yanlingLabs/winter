@@ -44,13 +44,16 @@ final class RelayConfigTrustTests: XCTestCase {
         XCTAssertEqual(accepted, signed.config)
     }
 
-    func testBundledConfigContainsBothProductionRelaysInTrailingDotForm() throws {
+    /// ND-T1: the relay fleet has no launch capacity (Oracle drought) — the bundled config is a
+    /// deliberate version-2 bump to an EMPTY relay list, so `RemoteHost` homes on iroh's public n0
+    /// relays via the designed silent path (empty `relayURLs` -> `.n0Default`, already pinned by
+    /// `RemoteHostTests`). The own fleet returns later via another config version bump alone — no
+    /// code change. The signing key itself does NOT rotate for this bump (still
+    /// `RelayConfigTrust.productionPublicKey`), which the sibling verify test above already covers.
+    func testBundledConfigIsVersionTwoWithEmptyRelays() throws {
         let signed = try loadBundledSignedConfig()
-        XCTAssertEqual(signed.config.version, 1)
-        XCTAssertEqual(signed.config.relays, [
-            "https://relay-1.yanlinglabs.com./",
-            "https://relay-2.yanlinglabs.com./",
-        ])
+        XCTAssertEqual(signed.config.version, 2)
+        XCTAssertTrue(signed.config.relays.isEmpty)
     }
 
     /// A tampered config (even a single byte) must NOT verify — the negative-space complement to

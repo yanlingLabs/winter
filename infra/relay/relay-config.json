@@ -1,7 +1,4 @@
 {
-  "version": 1,
-  "relays": [
-    "https://relay-1.yanlinglabs.com./",
-    "https://relay-2.yanlinglabs.com./"
-  ]
+  "version": 2,
+  "relays": []
 }

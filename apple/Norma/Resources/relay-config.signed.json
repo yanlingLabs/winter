@@ -1,11 +1,8 @@
 {
   "config": {
-    "version": 1,
-    "relays": [
-      "https://relay-1.yanlinglabs.com./",
-      "https://relay-2.yanlinglabs.com./"
-    ]
+    "version": 2,
+    "relays": []
   },
-  "sig": "Y4MMUzqPaXhn8Pzhsm5CL5Bh4pk1SwSNUA9iKyiE3HX5fcBbj5pJAPrhhT88GNOfqgXIeJKhUrmpDy6JsegLBw==",
+  "sig": "8Bd8cUTFpynA7X/w+Vqmgr1VhiOol05uYwLZUM5FqRvdB3Tw3aNapGVjRLswJaHiLPWpMvnnPULrpOr0QlEFCg==",
   "publicKey": "BVlZ2wxJtDMWXo+9O8SE/6F9/+ggV5yhE0mL+EuSb5Y="
 }
