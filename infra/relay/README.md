@@ -159,3 +159,10 @@ per-conn figure and the extrapolated 10k total here once the `--n 200` run exist
 ### Upgrade drill
 
 _Pending — see `upgrade-drill.md`._
+
+## ⚠️ Version 2 flip (2026-07-25) — never revert
+
+`relay-config.signed.json` v2 (empty list, n0-first) shipped in 0.2.005. Anti-rollback means any
+device that has accepted v2 SILENTLY ignores v1 forever — when the Oracle fleet (or any fleet)
+returns, ship it as **version 3 or higher**. Never `git revert` the v2 commit: it restores a
+validly-signed v1 that deployed phones will ignore with zero symptoms.
