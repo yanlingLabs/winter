@@ -27,7 +27,9 @@ export const SessionCreatedEvent = Base.extend({
   // index rebuild would null out `mode` and mint a second dispatch session, orphaning the
   // original's whole conversation history. Additive/optional — older-shaped events still parse;
   // absent means "code" (same convention as SessionRow.mode/opts.mode elsewhere).
-  mode: z.enum(["code", "dispatch"]).optional(),
+  // Chat Mode Slice A: "chat" added — a conversation with no filesystem/shell access that shares
+  // dispatch's _assistant memory bucket but, unlike dispatch, is NOT a singleton (many chats).
+  mode: z.enum(["code", "dispatch", "chat"]).optional(),
 });
 
 export const HarnessAttachedEvent = Base.extend({

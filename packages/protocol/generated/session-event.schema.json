@@ -30,7 +30,8 @@
           "type": "string",
           "enum": [
             "code",
-            "dispatch"
+            "dispatch",
+            "chat"
           ]
         }
       },
