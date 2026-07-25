@@ -34,6 +34,7 @@ import { resolveModelAlias } from "./model-aliases";
 import type { LspManager } from "./lsp/manager";
 import { autoDiagnosticsSuffix, AUTO_DIAG_TOOL_NAMES } from "./lsp/auto-diagnostics";
 import { DISPATCH_ALLOW_TOOLS, DISPATCH_SYSTEM_PROMPT } from "./dispatch-prompt";
+import { CHAT_ALLOW_TOOLS, CHAT_SYSTEM_PROMPT } from "./chat-prompt";
 import type { DispatchChildren } from "./dispatch-children";
 import type { WorkflowRuntime } from "../workflows/runtime";
 
@@ -1777,6 +1778,13 @@ export class AgentEngine {
     // createSession (Task 2) and never changes mid-session, so this is safe to read once per turn
     // like everything else built from `meta` below (sel.model, instructions, instructionsFull).
     const isDispatch = meta.mode === "dispatch";
+    // Chat mode (Chat Mode Slice A, CM-T2): a conversation session with no hands — same
+    // once-per-turn-read reasoning as isDispatch just above (meta.mode is set once at
+    // createSession and never changes mid-session).
+    const isChat = meta.mode === "chat";
+    // Dispatch and Chat both read the SHARED assistant bucket (Dreaming's `_assistant`); only code
+    // sessions get the cwd-resolved project MEMDIR — see memoryBucket below.
+    const isAssistantBucket = isDispatch || isChat;
     // Resolved ONCE per turn (spec: "changing models must NOT require a daemon restart") — a
     // settings.json edit mid-turn does not retroactively change THIS turn's model, only the
     // NEXT one's, mirroring how `instructions`/`instructionsFull` below are also computed once
@@ -1806,11 +1814,12 @@ export class AgentEngine {
     const instructions = this.cfg.assembler.assemble({
       cwd,
       loadedSkills: [...(this.loadedSkills.get(sessionId) ?? [])],
-      basePromptOverride: isDispatch ? DISPATCH_SYSTEM_PROMPT : undefined,
-      // Dreaming (Phase 7b): dispatch sessions load the shared `_assistant` memory bucket INSTEAD
-      // of the cwd-resolved project MEMDIR (ContextAssembler's memoryBucket branch) — every other
-      // caller keeps today's "project" behavior byte-for-byte.
-      memoryBucket: isDispatch ? "assistant" : "project",
+      basePromptOverride: isDispatch ? DISPATCH_SYSTEM_PROMPT : isChat ? CHAT_SYSTEM_PROMPT : undefined,
+      // Dreaming (Phase 7b) + Chat Mode Slice A (CM-T2): dispatch AND chat sessions load the
+      // shared `_assistant` memory bucket INSTEAD of the cwd-resolved project MEMDIR (ContextAssembler's
+      // memoryBucket branch) — every other caller (plain code sessions) keeps today's "project"
+      // behavior byte-for-byte.
+      memoryBucket: isAssistantBucket ? "assistant" : "project",
       // Output styles are main-conversation only. The dispatch COORDINATOR is already excluded by its
       // basePromptOverride above, but a dispatch CHILD (origin:"dispatch-child") runs mode:"code" with
       // the normal base and no override, so it would otherwise inherit the user's active style — e.g.
@@ -1939,17 +1948,19 @@ export class AgentEngine {
       // applied the SAME value at round 0's own pins computation; this covers every later round of
       // this same turn too.
       ultracodeActive,
-      // Dispatch (Phase 7) Task 4: a dispatch session gets the allowTools whitelist (which already
-      // includes session_spawn — dispatch-prompt.ts); a code session instead gets session_spawn
-      // explicitly EXCLUDED (SESSION_SPAWN_TOOL's own doc comment above) — never both fields at
-      // once (excludeTools would filter session_spawn OUT before allowTools ever got a chance to
-      // filter it back IN, for a dispatch session that somehow had both set).
+      // Dispatch (Phase 7) Task 4 + Chat Mode Slice A (CM-T2): a dispatch session gets the
+      // DISPATCH_ALLOW_TOOLS whitelist (which already includes session_spawn — dispatch-prompt.ts);
+      // a chat session gets the far narrower CHAT_ALLOW_TOOLS whitelist (chat-prompt.ts — ask_user
+      // only, this slice); a code session instead gets session_spawn explicitly EXCLUDED
+      // (SESSION_SPAWN_TOOL's own doc comment above) — never more than one of allowTools/excludeTools
+      // at once (excludeTools would filter session_spawn OUT before allowTools ever got a chance to
+      // filter it back IN, for a dispatch/chat session that somehow had both set).
       // Task B3: `excludeWorkflow` folds WORKFLOW_TOOL into the SAME excludeTools Set whenever this
-      // session fails workflowToolAllowed — only reachable in the `else` (non-dispatch) branch: a
-      // dispatch session already takes the allowTools branch instead, and DISPATCH_ALLOW_TOOLS
-      // never lists "Workflow" (workflowToolAllowed's own doc comment above), so it's excluded
-      // there regardless of this Set.
-      ...(isDispatch ? { allowTools: DISPATCH_ALLOW_TOOLS } : { excludeTools: new Set([SESSION_SPAWN_TOOL, ...(excludeWorkflow ? [WORKFLOW_TOOL] : [])]) }),
+      // session fails workflowToolAllowed — only reachable in the final `else` (plain code) branch:
+      // a dispatch or chat session already takes its own allowTools branch instead, and neither
+      // DISPATCH_ALLOW_TOOLS nor CHAT_ALLOW_TOOLS ever lists "Workflow" (workflowToolAllowed's own
+      // doc comment above), so it's excluded there regardless of this Set.
+      ...(isDispatch ? { allowTools: DISPATCH_ALLOW_TOOLS } : isChat ? { allowTools: CHAT_ALLOW_TOOLS } : { excludeTools: new Set([SESSION_SPAWN_TOOL, ...(excludeWorkflow ? [WORKFLOW_TOOL] : [])]) }),
     });
   }
 
