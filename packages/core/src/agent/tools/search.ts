@@ -110,13 +110,29 @@ export function registerSearchTool(r: ToolRegistry, deps: SearchToolDeps = {}): 
             throw new Error(`search timed out for ${query}`);
           }
           outcome = "network_error";
-          // FIX 1 (security, Important): NEVER interpolate the caught exception's message here.
-          // Bun's real fetch embeds an invalid header's VALUE verbatim in its own error text
-          // (confirmed live: a stray U+200B in a copy-pasted key produces `Header 'x-api-key' has
-          // invalid value: '...'`), and this string becomes the tool_result — appended in
-          // plaintext to the session JSONL AND sent to the model provider. The detail goes to
-          // stderr (operator-visible only) instead; the model/log only ever see a static message.
-          console.error(`Search: network error — ${e instanceof Error ? e.message : String(e)}`);
+          // FIX 1 (security, Important): NEVER interpolate the caught exception's message into the
+          // tool_result. Bun's real fetch embeds an invalid header's VALUE verbatim in its own
+          // error text (confirmed live: a stray U+200B in a copy-pasted key produces `Header
+          // 'x-api-key' has invalid value: '...'`) — that string must never become the
+          // model-visible/session-JSONL tool_result. The model/log only ever see a static message.
+          //
+          // Whole-branch re-review FIX (was: redirect the raw detail to console.error and call it
+          // done): stderr is NOT operator-only here. `launchd.ts` redirects the daemon's stderr to
+          // `~/.norma/logs/core.err.log`, and that directory is DELIBERATELY agent-readable
+          // (daemon.ts denies only `dirs.runDir` to the read/grep tools) — so the raw key would
+          // still land somewhere Norma's own tools can open it, just one hop removed. Redact the
+          // literal key substring out of the message before it ever reaches this log line.
+          //
+          // `replaceAll` is sufficient: verified live (bun 1.3.14) that Bun's fetch embeds the
+          // rejected header value in `e.message` byte-for-byte, with no escaping/normalization —
+          // plain ASCII, U+200B, CR, LF, CRLF, NUL and BOM all round-tripped as an EXACT substring
+          // in testing, at both short and realistic key lengths (no truncation observed either).
+          // No transformation that would defeat a literal match was found for the cases that
+          // actually reach this catch block (a couple of other control chars, e.g. tab/DEL, don't
+          // trigger Bun's header-value rejection at all, so they never reach this code path).
+          const rawMessage = e instanceof Error ? e.message : String(e);
+          const safeMessage = rawMessage.replaceAll(key, "<redacted>");
+          console.error(`Search: network error (${name || "Error"}) — ${safeMessage}`);
           throw new Error("search failed: could not reach the search service");
         }
 

@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, spyOn } from "bun:test";
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -131,6 +131,51 @@ describe("Search (Exa)", () => {
     expect(out.output).not.toContain(leakyKey);
     expect(out.output).not.toContain("SUPER_SECRET_EXA_KEY");
     expect(JSON.stringify(audits)).not.toContain(leakyKey);
+  });
+
+  // --- final re-review must-fix: the ORIGINAL FIX 1 redirected the raw detail to console.error and
+  // called it done — but stderr is NOT operator-only. launchd.ts redirects the daemon's stderr to
+  // ~/.norma/logs/core.err.log, and that directory is deliberately agent-readable (daemon.ts denies
+  // only dirs.runDir to the read/grep tools), so the raw key would still land somewhere Norma's own
+  // tools can open it. The key must be redacted out of the line actually written to stderr. Drives
+  // the REAL global fetch (no fetchFn override) — same header-validation TypeError as the test
+  // above, this time asserting on what console.error was called with. Uses a short, obviously-fake
+  // token (not a realistic-looking secret) and asserts on absence, per this task's own constraint
+  // against training eyes to accept key-shaped strings in CI logs.
+  test("the key is redacted from the console.error line too — a useful diagnostic survives", async () => {
+    const r = new ToolRegistry();
+    const fakeToken = "tok-b1-zwsp​"; // trailing U+200B, same artifact as the test above
+    registerSearchTool(r, { secret: async () => fakeToken });
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await r.execute("Search", { query: "x" }, ctx());
+      const stderrText = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(stderrText).not.toContain(fakeToken);
+      expect(stderrText).not.toContain("tok-b1");
+      // Still diagnostic: an operator can tell this is an invalid-header failure, not a DNS one.
+      expect(stderrText).toContain("invalid value");
+      expect(stderrText).toContain("<redacted>");
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  test("a genuine network failure (key never appears in the underlying message) keeps its real diagnostic in stderr — redaction is a no-op, not a blanket scrub", async () => {
+    const r = new ToolRegistry();
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      registerSearchTool(r, {
+        secret: async () => "clean-ascii-key",
+        fetchFn: (async () => {
+          throw new Error("getaddrinfo ENOTFOUND api.exa.ai");
+        }) as unknown as typeof fetch,
+      });
+      await r.execute("Search", { query: "x" }, ctx());
+      const stderrText = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(stderrText).toContain("ENOTFOUND");
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 
   // --- FIX 4: redirects must not carry the key to a second, uncontrolled origin ----------------

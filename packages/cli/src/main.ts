@@ -1498,6 +1498,18 @@ if (import.meta.main) {
     if (process.argv.includes("--api-key")) {
       const key = (await readSecret("Paste your OpenAI API key: ")).trim();
       if (!key.startsWith("sk-")) { console.error("that does not look like an API key"); process.exit(1); }
+      // Fold-in (chat-mode Slice B1 final re-review, same class as FIX 1 above, worse sink): this
+      // is the ONE key-entry path that predates invisibleKeyCharWarning and therefore lacked it —
+      // --web-search-key and --exa-key below already reject before ever reaching a fetch header.
+      // This is prevention at the input boundary only: OpenAICompatibleProvider's OWN error-handling
+      // sink for an invalid header (confirmed live: `Header '14' has invalid value: 'Bearer
+      // ...'`) is untouched here and remains a follow-up — that message flows through
+      // engine.ts into an `agent_error` SessionEvent PERSISTED to the session JSONL, and can become
+      // a parent-model-visible tool_result via a dispatched child's errorMessage. Catching a bad key
+      // at `norma login` time is strictly better than fixing it after the fact, but does not make
+      // the provider sink itself safe against a key that reaches it some other way.
+      const invisibleWarning = invisibleKeyCharWarning(key);
+      if (invisibleWarning) { console.error(invisibleWarning); process.exit(1); }
       await secrets.set(OPENAI_API_KEY_SECRET, key);
       console.log(`${AQUA}API key stored in Keychain${RESET} — set provider type in ~/.norma/settings.json (openai-compatible)`);
       break;

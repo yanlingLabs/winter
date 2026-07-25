@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -332,6 +332,49 @@ describe("web_search tool", () => {
     expect(out.output).not.toContain(leakyKey);
     expect(out.output).not.toContain("SUPER_SECRET_BRAVE_KEY");
     expect(JSON.stringify(audited)).not.toContain(leakyKey);
+  });
+
+  // --- final re-review must-fix: search.ts's identical twin (see its comment for full reasoning)
+  // — the ORIGINAL FIX 1 redirected the raw detail to console.error and called it done, but
+  // ~/.norma/logs/core.err.log (where launchd.ts sends the daemon's stderr) is deliberately
+  // agent-readable, so the key must be redacted before it's logged, not just before it's returned.
+  // Short, obviously-fake token (not a realistic-looking secret) — asserts on absence only.
+  test("the key is redacted from the console.error line too — a useful diagnostic survives", async () => {
+    const r = new ToolRegistry();
+    const fakeToken = "tok-b1-zwsp​"; // trailing U+200B, same artifact as the test above
+    registerWebTools(r, { secret: fakeSecret(fakeToken) }); // no fetchFn override — real global fetch
+    const dir = tmp();
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await r.execute("web_search", { query: "x" }, { cwd: dir, roots: [dir], sessionId: "s1", tmpDir: dir });
+      const stderrText = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(stderrText).not.toContain(fakeToken);
+      expect(stderrText).not.toContain("tok-b1");
+      // Still diagnostic: an operator can tell this is an invalid-header failure, not a DNS one.
+      expect(stderrText).toContain("invalid value");
+      expect(stderrText).toContain("<redacted>");
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  test("a genuine network failure (key never appears in the underlying message) keeps its real diagnostic in stderr — redaction is a no-op, not a blanket scrub", async () => {
+    const r = new ToolRegistry();
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      registerWebTools(r, {
+        secret: fakeSecret("clean-ascii-key"),
+        fetchFn: (async () => {
+          throw new Error("getaddrinfo ENOTFOUND api.search.brave.com");
+        }) as unknown as typeof fetch,
+      });
+      const dir = tmp();
+      await r.execute("web_search", { query: "x" }, { cwd: dir, roots: [dir], sessionId: "s1", tmpDir: dir });
+      const stderrText = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(stderrText).toContain("ENOTFOUND");
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 
   test("no secret accessor at all (deps.secret undefined) behaves identically to no key stored", async () => {
