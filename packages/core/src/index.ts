@@ -42,6 +42,7 @@ export { registerBackgroundTools } from "./agent/tools/background";
 export { registerWebTools, WEB_SEARCH_API_KEY_SECRET, type WebToolDeps } from "./agent/tools/web";
 export { registerToolSearchTool } from "./agent/tools/toolsearch";
 export { registerAskUserTool } from "./agent/tools/ask-user";
+export { registerAskQuestionTool } from "./agent/tools/ask-question";
 export { registerPlanTool } from "./agent/tools/plan";
 export { registerWorkflowTool } from "./agent/tools/workflow";
 export { registerPushNotificationTool } from "./agent/tools/push-notification";

@@ -23,6 +23,7 @@ import { registerBackgroundTools } from "./agent/tools/background";
 import { registerSkillTools } from "./agent/tools/skill";
 import { registerToolSearchTool } from "./agent/tools/toolsearch";
 import { registerAskUserTool } from "./agent/tools/ask-user";
+import { registerAskQuestionTool } from "./agent/tools/ask-question";
 import { registerTaskTools } from "./agent/tools/tasks";
 import { registerPlanTool } from "./agent/tools/plan";
 import { registerWorkflowTool } from "./agent/tools/workflow";
@@ -526,6 +527,7 @@ export async function startDaemon(opts: {
     questions = new QuestionBroker();
     taskStore = new TaskStore();
     registerAskUserTool(registry);
+    registerAskQuestionTool(registry);
     registerTaskTools(registry, { tasks: taskStore });
     plans = new PlanBroker();
     registerPlanTool(registry, { deferred: true });

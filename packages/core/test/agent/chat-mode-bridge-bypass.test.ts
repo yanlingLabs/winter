@@ -9,6 +9,7 @@ import { ToolRegistry } from "../../src/agent/tools/registry";
 import { registerReadTools } from "../../src/agent/tools/fs-read";
 import { registerWriteTools } from "../../src/agent/tools/fs-write";
 import { registerAskUserTool } from "../../src/agent/tools/ask-user";
+import { registerAskQuestionTool } from "../../src/agent/tools/ask-question";
 import { registerBashTool } from "../../src/agent/tools/bash";
 import { registerSpawnAgentTool } from "../../src/agent/tools/spawn";
 import { registerToolSearchTool } from "../../src/agent/tools/toolsearch";
@@ -129,6 +130,10 @@ function setup(
   registerReadTools(registry);
   registerWriteTools(registry);
   registerAskUserTool(registry);
+  // B1-T3: CHAT_ALLOW_TOOLS is now {AskQuestion}, not {ask_user} — this harness's `allOfferedTools`
+  // assertions below pin the exact chat toolset, so AskQuestion must be registered here too or a
+  // chat turn's offered list would be (wrongly) empty rather than proving the allowlist itself.
+  registerAskQuestionTool(registry);
   registerBashTool(registry);
   registerSpawnAgentTool(registry);
   registerToolSearchTool(registry);
@@ -238,7 +243,7 @@ describe("CM closing review: bridged calls obey the thread's toolset (the fourth
     // (3) The child TOOLSET never materialised: every provider round in this turn was offered
     //     exactly CHAT_ALLOW_TOOLS. Pre-fix this array also contained
     //     read/ls/glob/grep/write/edit/spawn_agent/... — the reviewer's "CHILD tools:" line.
-    expect(allOfferedTools(provider)).toEqual(["ask_user"]);
+    expect(allOfferedTools(provider)).toEqual(["AskQuestion"]); // B1-T3: was ["ask_user"] pre-rename
     // (4) The call was refused by the SAME executeCall guard 77ee7857 already added — no new
     //     rejection path, and no approval card on the way there.
     const result = toolResultFor(events, "sp1");
@@ -264,7 +269,7 @@ describe("CM closing review: bridged calls obey the thread's toolset (the fourth
     expect(events.some((e) => e.type === "worktree_entered")).toBe(false);
     expect(worktrees.active(sessionId)).toBeUndefined();
     expect(store.meta(sessionId).cwd).toBe(cwd); // the bridge's setCwd never ran
-    expect(allOfferedTools(provider)).toEqual(["ask_user"]);
+    expect(allOfferedTools(provider)).toEqual(["AskQuestion"]); // B1-T3: was ["ask_user"] pre-rename
     const result = toolResultFor(events, "e1");
     expect(result.isError).toBe(true);
     expect(result.output).toBe("tool enter_worktree is not available in this session");
@@ -286,7 +291,7 @@ describe("CM closing review: bridged calls obey the thread's toolset (the fourth
     expect(CHAT_ALLOW_TOOLS.has("Workflow")).toBe(false); // sanity
     expect(workflowLaunches).toEqual([]);
     expect(events.some((e) => e.type === "approval_requested")).toBe(false);
-    expect(allOfferedTools(provider)).toEqual(["ask_user"]);
+    expect(allOfferedTools(provider)).toEqual(["AskQuestion"]); // B1-T3: was ["ask_user"] pre-rename
     const result = toolResultFor(events, "wf1");
     expect(result.isError).toBe(true);
     expect(result.output).toBe("tool Workflow is not available in this session");

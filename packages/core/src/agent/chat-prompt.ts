@@ -13,13 +13,15 @@ export const CHAT_SYSTEM_PROMPT = [
   "Never guess at file contents or command output. You cannot see them.",
   "",
   "# Asking",
-  "When a choice is genuinely the user's to make, use ask_user rather than assuming.",
+  "When a choice is genuinely the user's to make, use AskQuestion rather than assuming.",
 ].join("\n");
 
 // Declared as `Set<string>` (not `ReadonlySet<string>`) to match runThread's existing `allowTools?:
 // Set<string>` option (engine.ts) — the NAME LIST is the invariant this constant pins, not the
 // container type.
-/** The chat toolset, by REGISTERED tool name. Slice A is deliberately minimal — chat-specific
- *  web_search / web_fetch / simplified ask_user arrive in Slice B and are the ONLY additions
- *  planned. Nothing that touches the filesystem, the shell, or the machine may ever join. */
-export const CHAT_ALLOW_TOOLS: Set<string> = new Set(["ask_user"]);
+/** The chat toolset, by REGISTERED tool name. Chat's own tools are deliberately separate from
+ *  code's (`ask_user`, `web_search`, `web_fetch`) — the registry is per-daemon and rejects
+ *  duplicate names, so the chat variants carry their own names and code's are untouched.
+ *  Nothing that touches the filesystem, the shell, or the machine may ever join. (B1-T3:
+ *  `AskQuestion` replaces `ask_user` here; B1-T5 adds `Search`.) */
+export const CHAT_ALLOW_TOOLS: Set<string> = new Set(["AskQuestion"]);

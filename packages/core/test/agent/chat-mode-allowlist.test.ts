@@ -47,7 +47,7 @@ import type { ProviderEvent } from "../../src/providers/types";
  *
  * Important 1 (instructions leak): chat's assembled instructions advertised deferred tools
  * (push_notification/web_fetch/web_search/skill_write/lsp) and a "call the Skill tool" header even
- * though CHAT_ALLOW_TOOLS is just {ask_user} — directly contradicting the base prompt's own "no
+ * though CHAT_ALLOW_TOOLS is just {AskQuestion} (B1-T3: was {ask_user} pre-rename) — directly contradicting the base prompt's own "no
  * access to this machine" claim.
  *
  * Important 2 (execution leak): `executeCall` applied the deferral check and the permission gate,
@@ -143,7 +143,7 @@ describe("CM branch review Important 1: chat's instructions never advertise mach
     for (const name of ["lsp", "skill_write", "web_fetch", "web_search", "push_notification"]) {
       expect(instructions).not.toContain(name);
     }
-    // CHAT_ALLOW_TOOLS is just {ask_user}, which is never deferred — the filtered deferred index
+    // CHAT_ALLOW_TOOLS is just {AskQuestion} (B1-T3), which is never deferred — the filtered deferred index
     // is empty, so buildInstructionsFull never emits the section header at all.
     expect(instructions).not.toContain("# Deferred tools");
   });
