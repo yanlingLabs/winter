@@ -413,7 +413,7 @@ private struct QuestionBlock: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if showsHeader {
-                Text(question.header)
+                Text(question.header ?? "")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
             }

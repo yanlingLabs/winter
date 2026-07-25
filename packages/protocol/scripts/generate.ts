@@ -55,6 +55,11 @@ const fixtures: Record<string, unknown> = {
   question_with_preview: { type: "question_asked", sessionId: "s_1", threadId: "t_1", seq: 28, ts: 1700000000018, callId: "call_2",
     questions: [{ question: "Which layout?", header: "Layout", multiSelect: false,
       options: [{ label: "Sidebar", description: "nav on the left", preview: "┌──┬────┐\n│▮ │    │\n└──┴────┘" }, { label: "Topbar" }] }] },
+  // Slice B1: chat's AskQuestion emits a SIMPLIFIED card — no `header` chip, no per-option
+  // `description`, single-select. A dedicated fixture so Swift round-trips a header-less question.
+  question_simplified: { type: "question_asked", sessionId: "s_1", threadId: "t_1", seq: 30, ts: 1700000000020, callId: "call_3",
+    questions: [{ question: "Which tier should I compare against?", multiSelect: false,
+      options: [{ label: "Free" }, { label: "Pro" }] }] },
   // CC AskUserQuestion parity: per-answer `notes` ("press n to add notes") is optional/additive —
   // a dedicated fixture (distinct from question_resolved above) so Swift round-trips a
   // question_resolved carrying notes.

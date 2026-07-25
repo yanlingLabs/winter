@@ -965,7 +965,6 @@
             },
             "required": [
               "question",
-              "header",
               "options",
               "multiSelect"
             ],
