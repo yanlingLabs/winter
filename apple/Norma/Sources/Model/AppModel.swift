@@ -59,7 +59,17 @@ final class AppModel: ObservableObject {
     var onActivityChange: ((MenuBarActivity) -> Void)?
     private var menuBarActivity: MenuBarActivity = .idle
 
-    init(makeTransport: @escaping @Sendable () -> NormaTransport, token: String, clientName: String = "orb") {
+    /// orb-scope Part 2: the Mac app's own harness registers under this clientName — every
+    /// `user_message` the orb/field surface itself sends (via `sendOrSteer`'s `client.send` path,
+    /// a genuine new-turn submit) carries it verbatim (daemon: `hub.send` stamps
+    /// `clientName: client.clientName` off the connection's own registered identity,
+    /// `packages/core/src/sessions/hub.ts`). Named here (not just inlined as the init default
+    /// below) so `SessionReducer`'s `lastTurnWasOrbInitiated` derivation
+    /// (`SessionModel.swift`) has ONE source of truth to compare against instead of a second,
+    /// independently-drifting literal.
+    static let ownClientName = "orb"
+
+    init(makeTransport: @escaping @Sendable () -> NormaTransport, token: String, clientName: String = AppModel.ownClientName) {
         self.makeTransport = makeTransport
         self.token = token
         self.clientName = clientName
@@ -301,8 +311,16 @@ final class AppModel: ObservableObject {
         case .session(let e):
             if case .sessionCreated(let v) = e {
                 if v.sessionId == selfCreatedSessionId { selfCreatedSessionId = nil; return }
-                if v.sessionId != focusedSessionId {
-                    await refocus(onto: v.sessionId) // most-recent focus (spec §4.4, 2b subset)
+                // orb-scope fix: the orb/field is a DISPATCH-mode surface only. The daemon
+                // broadcasts session_created to EVERY authed harness (not just attachments), and
+                // remote/phone-originated creates — and CLI/TUI ones — are always mode "code"
+                // (protocol contract: mode ABSENT means "code", packages/protocol/src/events.ts).
+                // A code session must never steal the orb's focus; it still flows to the
+                // directory/session-list observer (composed separately in `feed.onEvent`, ahead of
+                // this `handle` call) so the sidebar keeps updating — only the FOCUS action is
+                // gated here. Only a genuine dispatch-singleton create earns an automatic refocus.
+                if v.mode == "dispatch", v.sessionId != focusedSessionId {
+                    await refocus(onto: v.sessionId) // most-recent focus (spec §4.4, 2b subset), dispatch-only
                     return
                 }
             }
@@ -352,9 +370,13 @@ final class AppModel: ObservableObject {
         await refocus(onto: sessionId)
     }
 
+    /// orb-scope fix: on connect/reconnect the orb only auto-focuses the newest DISPATCH session —
+    /// code sessions (CLI/TUI/phone) never summon the field this way either. No dispatch session
+    /// existing yet is the correct pre-first-summon state (`focusedSessionId` stays nil);
+    /// `ensureFocusedSession()` mints the dispatch singleton on the first deliberate summon/submit.
     private func focusNewestSession() async {
-        guard let sessions = try? await client.listSessions(), !sessions.isEmpty else { return }
-        let newest = sessions.max(by: { $0.createdAt < $1.createdAt })!
+        guard let sessions = try? await client.listSessions() else { return }
+        guard let newest = sessions.filter({ $0.mode == "dispatch" }).max(by: { $0.createdAt < $1.createdAt }) else { return }
         await refocus(onto: newest.sessionId)
     }
 
@@ -370,8 +392,16 @@ final class AppModel: ObservableObject {
             // Target vanished or transport hiccuped: reconcile with NormaKit's ground truth
             // (attach() rolled its state back), then fall back to the newest surviving session.
             focusedSessionId = await client.attachedSession
+            // orb-scope review (Important 1): this fallback is a THIRD focus-acquisition site and
+            // was mode-blind — same dispatch-only filter as `focusNewestSession()` and the
+            // `sessionCreated` handler above, in the same `== "dispatch"` direction (fails closed on
+            // an unknown future mode value, never an implicit `!= "code"`). Without it, a daemon
+            // restart or transport hiccup mid-refocus could fall back onto a phone/CLI-created CODE
+            // session — reopening the orb-dispatch-only bug in a narrow, harder-to-hit form. Staying
+            // unfocused when no dispatch session survives (the `let newest = ...` fails) is the
+            // correct outcome, matching the pre-first-summon state elsewhere.
             if let sessions = try? await client.listSessions(),
-               let newest = sessions.max(by: { $0.createdAt < $1.createdAt }),
+               let newest = sessions.filter({ $0.mode == "dispatch" }).max(by: { $0.createdAt < $1.createdAt }),
                newest.sessionId != sessionId {
                 session.reset()
                 focusedSessionId = newest.sessionId

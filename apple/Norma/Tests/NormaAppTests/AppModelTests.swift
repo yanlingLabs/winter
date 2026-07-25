@@ -83,7 +83,11 @@ final class AppModelTests: XCTestCase {
         let startTask = Task { await model.start() }
         defer { startTask.cancel(); model.stop() }
 
-        await answerHandshake(t, sessions: #"[{"sessionId":"s_old","scope":"global","createdAt":1,"lastSeq":9},{"sessionId":"s_new","scope":"global","createdAt":2,"lastSeq":0}]"#)
+        // orb-scope fix: focusNewestSession() now selects the newest DISPATCH session only — both
+        // rows here are tagged "dispatch" so this test keeps exercising its original intent (pick
+        // by createdAt) unchanged; the mode-filtering itself gets its own dedicated coverage below
+        // (testFocusNewestSessionPicksNewestDispatchOverNewerCode / …WithNoDispatchSession).
+        await answerHandshake(t, sessions: #"[{"sessionId":"s_old","scope":"global","createdAt":1,"lastSeq":9,"mode":"dispatch"},{"sessionId":"s_new","scope":"global","createdAt":2,"lastSeq":0,"mode":"dispatch"}]"#)
         // attach must target s_new (newest createdAt), fromSeq 0
         await waitUntilSent(t, 3)
         let attach = lineJSON(t.sent[2])
@@ -106,7 +110,9 @@ final class AppModelTests: XCTestCase {
         let startTask = Task { await model.start() }
         defer { startTask.cancel(); model.stop() }
 
-        await answerHandshake(t, sessions: #"[{"sessionId":"s_a","scope":"global","createdAt":1,"lastSeq":0}]"#)
+        // orb-scope fix: s_a is tagged dispatch so the INITIAL focus still lands here (this test's
+        // subject is the SUBSEQUENT session_created-for-s_b refocus, not the initial attach).
+        await answerHandshake(t, sessions: #"[{"sessionId":"s_a","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]"#)
         await waitUntilSent(t, 3)
         let attachA = lineJSON(t.sent[2])
         t.feed(#"{"jsonrpc":"2.0","id":\#(attachA["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
@@ -116,7 +122,10 @@ final class AppModelTests: XCTestCase {
         // FIRST session.attach was the initial s_a attach above — a directory-refresh session.list
         // may also land somewhere in between (2e-iii Task 5), but session.attach itself still
         // only fires twice total.
-        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session_created","seq":1,"sessionId":"s_b","ts":5,"scope":"global"}}"#)
+        // orb-scope fix: refocus-on-create is now gated to mode "dispatch" — this event is tagged
+        // as such so this test keeps proving the (still-supported) dispatch-create refocus path;
+        // the code/absent-mode "must NOT refocus" cases get their own dedicated tests below.
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session_created","seq":1,"sessionId":"s_b","ts":5,"scope":"global","mode":"dispatch"}}"#)
         let attachB = await waitUntilMethod(t, "session.attach", occurrence: 2)
         XCTAssertEqual((attachB["params"] as? [String: Any])?["sessionId"] as? String, "s_b")
         t.feed(#"{"jsonrpc":"2.0","id":\#(attachB["id"] as! Int),"result":{"ok":true,"lastSeq":1}}"#)
@@ -171,7 +180,9 @@ final class AppModelTests: XCTestCase {
         let model = AppModel(makeTransport: { t }, token: "tok")
         let startTask = Task { await model.start() }
         defer { startTask.cancel(); model.stop() }
-        await answerHandshake(t, sessions: #"[{"sessionId":"s_1","scope":"global","createdAt":1,"lastSeq":0}]"#)
+        // orb-scope fix: s_1 tagged dispatch so the initial focus (this test's real subject is
+        // send/steer/interrupt behavior, unrelated to mode-filtering) lands as before.
+        await answerHandshake(t, sessions: #"[{"sessionId":"s_1","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]"#)
         await waitUntilSent(t, 3)
         let attach = lineJSON(t.sent[2])
         t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
@@ -201,7 +212,9 @@ final class AppModelTests: XCTestCase {
         let model = AppModel(makeTransport: { t }, token: "tok")
         let startTask = Task { await model.start() }
         defer { startTask.cancel(); model.stop() }
-        await answerHandshake(t, sessions: #"[{"sessionId":"s_1","scope":"global","createdAt":1,"lastSeq":0}]"#)
+        // orb-scope fix: s_1 tagged dispatch so the initial focus (this test's real subject is
+        // send/steer/interrupt behavior, unrelated to mode-filtering) lands as before.
+        await answerHandshake(t, sessions: #"[{"sessionId":"s_1","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]"#)
         await waitUntilSent(t, 3)
         let attach = lineJSON(t.sent[2])
         t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
@@ -233,7 +246,9 @@ final class AppModelTests: XCTestCase {
         let model = AppModel(makeTransport: { t }, token: "tok")
         let startTask = Task { await model.start() }
         defer { startTask.cancel(); model.stop() }
-        await answerHandshake(t, sessions: #"[{"sessionId":"s_1","scope":"global","createdAt":1,"lastSeq":0}]"#)
+        // orb-scope fix: s_1 tagged dispatch so the initial focus (this test's real subject is
+        // send/steer/interrupt behavior, unrelated to mode-filtering) lands as before.
+        await answerHandshake(t, sessions: #"[{"sessionId":"s_1","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]"#)
         await waitUntilSent(t, 3)
         let attach = lineJSON(t.sent[2])
         t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
@@ -256,7 +271,9 @@ final class AppModelTests: XCTestCase {
         let model = AppModel(makeTransport: { t }, token: "tok")
         let startTask = Task { await model.start() }
         defer { startTask.cancel(); model.stop() }
-        await answerHandshake(t, sessions: #"[{"sessionId":"s_old","scope":"global","createdAt":1,"lastSeq":0}]"#)
+        // orb-scope fix: s_old is tagged dispatch so the initial focus lands here as before — this
+        // test's subject is the fresh-session-after-detach flow, not the initial-attach filtering.
+        await answerHandshake(t, sessions: #"[{"sessionId":"s_old","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]"#)
         await waitUntilSent(t, 3)
         let attachOld = lineJSON(t.sent[2])
         t.feed(#"{"jsonrpc":"2.0","id":\#(attachOld["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
@@ -299,5 +316,112 @@ final class AppModelTests: XCTestCase {
         await waitUntil { model.session.state.status == .idle }
         XCTAssertEqual(model.session.state.status, .idle) // connected, nothing to attach
         XCTAssertEqual(t.sent.count, 2) // hello + list only, no attach
+    }
+
+    // MARK: - orb-scope: the orb/field is a DISPATCH-mode surface only. Code sessions (phone/CLI/
+    // TUI) must never steal the orb's focus — the daemon broadcasts session_created to EVERY
+    // authed harness, and remote/phone/CLI creates are always mode "code" (protocol contract:
+    // mode ABSENT means "code", packages/protocol/src/events.ts).
+
+    /// A CODE-mode session_created (e.g. a phone-originated Code session) must never refocus the
+    /// orb away from whatever it's already following. The directory/session-list observer is
+    /// composed separately in `feed.onEvent` — BEFORE `handle(ev)` even runs — so it still sees
+    /// the event and refreshes; this proves the fix gates only the FOCUS action, not the side-
+    /// observer fan-out the sidebar/dashboard depend on.
+    func testSessionCreatedCodeModeNeverRefocusesButDirectorySeesIt() async throws {
+        let t = AppScriptedTransport()
+        let model = AppModel(makeTransport: { t }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        await answerHandshake(t, sessions: #"[{"sessionId":"s_a","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]"#)
+        await waitUntilSent(t, 3)
+        let attachA = lineJSON(t.sent[2])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attachA["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        await waitUntil { model.session.state.status == .idle }
+        XCTAssertEqual(model.focusedSessionId, "s_a")
+
+        // A phone/CLI Code session is created elsewhere — must NOT summon the orb's field.
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session_created","seq":1,"sessionId":"s_phone","ts":5,"scope":"global","mode":"code"}}"#)
+
+        // The directory's own unconditional refresh (SessionDirectory.handle's sessionCreated
+        // case) still fires — answer its session.list re-fetch and confirm the row lands.
+        let relist = await waitUntilMethod(t, "session.list", occurrence: 2)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(relist["id"] as! Int),"result":{"sessions":[{"sessionId":"s_a","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"},{"sessionId":"s_phone","scope":"global","createdAt":5,"lastSeq":0,"mode":"code"}]}}"#)
+        await waitUntil { model.directory.rows.contains { $0.sessionId == "s_phone" } }
+        XCTAssertTrue(model.directory.rows.contains { $0.sessionId == "s_phone" }, "the side-observer (directory/session list) must still see the code session")
+
+        // settle: focus must never have moved off s_a — no second session.attach.
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(model.focusedSessionId, "s_a", "a code-mode session_created must never steal the orb's focus")
+        let attaches = t.sent.filter { lineJSON($0)["method"] as? String == "session.attach" }
+        XCTAssertEqual(attaches.count, 1, "no refocus attach for the code session: \(t.sent)")
+    }
+
+    /// Pins the subtle half of the protocol contract: mode ABSENT means "code" — must be treated
+    /// identically to an explicit "code", never as an implicit dispatch. (packages/protocol/
+    /// src/events.ts: "absent means code, same convention as SessionRow.mode/opts.mode elsewhere".)
+    func testSessionCreatedAbsentModeNeverRefocuses() async throws {
+        let t = AppScriptedTransport()
+        let model = AppModel(makeTransport: { t }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        await answerHandshake(t, sessions: #"[{"sessionId":"s_a","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]"#)
+        await waitUntilSent(t, 3)
+        let attachA = lineJSON(t.sent[2])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attachA["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        await waitUntil { model.session.state.status == .idle }
+        XCTAssertEqual(model.focusedSessionId, "s_a")
+
+        // No "mode" key at all in this event — unlike the explicit-"code" test above.
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session_created","seq":1,"sessionId":"s_absent","ts":5,"scope":"global"}}"#)
+
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(model.focusedSessionId, "s_a", "mode-absent session_created must be treated as code — never refocus")
+        let attaches = t.sent.filter { lineJSON($0)["method"] as? String == "session.attach" }
+        XCTAssertEqual(attaches.count, 1, "no refocus attach for the mode-absent session: \(t.sent)")
+    }
+
+    /// `focusNewestSession()` (fired from `feed.onAttach` on every connect/reconnect) must pick the
+    /// newest DISPATCH session, ignoring a newer code one entirely.
+    func testFocusNewestSessionPicksNewestDispatchOverNewerCode() async throws {
+        let t = AppScriptedTransport()
+        let model = AppModel(makeTransport: { t }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        // s_code is NEWER overall (createdAt 9) but mode "code" — must be skipped entirely.
+        // s_dispatch is older (createdAt 3) but the only dispatch session — must win.
+        await answerHandshake(t, sessions: #"[{"sessionId":"s_dispatch","scope":"global","createdAt":3,"lastSeq":0,"mode":"dispatch"},{"sessionId":"s_code","scope":"global","createdAt":9,"lastSeq":0,"mode":"code"}]"#)
+
+        let attach = await waitUntilMethod(t, "session.attach")
+        XCTAssertEqual((attach["params"] as? [String: Any])?["sessionId"] as? String, "s_dispatch", "must attach the newest DISPATCH session, not the newest overall")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        await waitUntil { model.focusedSessionId == "s_dispatch" }
+        XCTAssertEqual(model.focusedSessionId, "s_dispatch")
+
+        // settle: no second attach targeting s_code may trail in.
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        let attaches = t.sent.filter { lineJSON($0)["method"] as? String == "session.attach" }
+        XCTAssertEqual(attaches.count, 1, "no attach to the newer code session: \(t.sent)")
+    }
+
+    /// No dispatch session exists yet — the correct pre-first-summon state is `focusedSessionId ==
+    /// nil` (never falling back to the newest CODE session). `ensureFocusedSession()` mints the
+    /// dispatch singleton on the first deliberate summon/submit; that is out of scope here.
+    func testFocusNewestSessionStaysUnfocusedWithNoDispatchSession() async throws {
+        let t = AppScriptedTransport()
+        let model = AppModel(makeTransport: { t }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        await answerHandshake(t, sessions: #"[{"sessionId":"s_code1","scope":"global","createdAt":1,"lastSeq":0,"mode":"code"},{"sessionId":"s_code2","scope":"global","createdAt":2,"lastSeq":0,"mode":"code"}]"#)
+        await waitUntil { model.session.state.status == .idle } // connected, nothing to attach
+
+        XCTAssertNil(model.focusedSessionId, "no dispatch session exists yet — pre-first-summon state")
+        // settle: confirm no attach ever fires.
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(t.sent.count, 2, "hello + list only, no attach when no dispatch session exists: \(t.sent)")
     }
 }

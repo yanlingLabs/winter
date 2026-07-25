@@ -208,6 +208,40 @@ struct OrbSessionState: Equatable {
         attachedClients.contains { $0.hasPrefix("cli") }
     }
 
+    /// orb-scope Part 2: the `clientName` of the `user_message` that STARTED the most recently
+    /// begun exchange — i.e. who initiated the turn that is currently running, or that just
+    /// completed. Set on a genuine new-turn `userMessage` (`SessionReducer`'s "new exchange" branch
+    /// below) whose `clientName` is a real originating surface/client, never one of the engine's own
+    /// bookkeeping sentinels (`"steer"`, and — belt-and-braces — `"send_message"`/`"resume"`; see
+    /// `isEngineSentinelClientName`'s doc). orb-scope review (Important 2) CORRECTION: a mid-turn
+    /// steer does NOT reliably fold into the already-open exchange — the engine emits
+    /// `assistant_message` PER ROUND (`packages/core/src/agent/engine.ts:2152`), so in any
+    /// multi-round tool-using turn the current exchange's `reply` is already non-empty by the time a
+    /// steer arrives, and the reducer's fold condition (`reply.isEmpty`) then takes the "new
+    /// exchange" branch instead. What actually guarantees this field survives a mid-turn steer is
+    /// the sentinel guard on the stamp itself, not the fold: a steer's clientName is always the
+    /// engine's own `"steer"` sentinel (`engine.ts`'s `steer()`), which the guard refuses to stamp,
+    /// so the field is simply left holding whatever it already held. Deliberately never cleared on
+    /// `turn_completed` — it stays put as "the last known origin" until the NEXT turn's own
+    /// genuine-origin user_message overwrites it, which is exactly the value
+    /// `GlassRootView.handleTurnCompleted()` needs to read at the moment a turn just finished.
+    /// Chosen over a local app-side flag (e.g. armed on `AppModel.sendOrSteer`, mirroring
+    /// `OrbWindowController.collapseOnTurnStart`) because this is daemon-persisted, per-turn data:
+    /// it survives a reconnect or an app relaunch mid-turn via the ordinary full-replay-from-seq-0
+    /// path (`AppModel.refocus`), where an in-memory flag would simply be gone.
+    var lastTurnOriginClientName: String? = nil
+
+    /// True when the most recently started turn was submitted by THIS Mac app's own orb/field
+    /// surface (`AppModel.ownClientName`) — false for a phone-relayed send (`"iphone-gateway"`,
+    /// the Mac-side gateway's own harness identity, `RemoteHost.swift`), a scheduled routine
+    /// (`"routine"`), a CLI harness, or any other origin. Drives
+    /// `GlassRootView.handleTurnCompleted()`'s auto-reveal gate (orb-scope Part 2): a dispatch
+    /// turn the user started somewhere else finishes quietly — the unread indicator is the only
+    /// signal, no auto-expand.
+    var lastTurnWasOrbInitiated: Bool {
+        lastTurnOriginClientName == AppModel.ownClientName
+    }
+
     /// Interrupt-feedback gate polish: true exactly when the MOST RECENT `turn_completed(main)`
     /// carried `stopReason == "aborted"` (an Esc-interrupt) — false for any other stop reason
     /// ("end_turn", tool-limit, etc.) and cleared back to false the instant the NEXT turn starts.
@@ -261,6 +295,16 @@ enum SessionReducer {
                 s.queuedSteers.append(v.text)
             } else {
                 s.exchanges.append(Exchange(prompt: v.text, reply: ""))
+                // orb-scope Part 2 / Important-2 fix: a NEW exchange is exactly a new-turn start —
+                // stamp who initiated it, UNLESS `clientName` is one of the engine's OWN bookkeeping
+                // sentinels (never a real originating surface/client) — see
+                // `isEngineSentinelClientName`'s doc for the reachability analysis of each one. When
+                // guarded, `lastTurnOriginClientName` simply keeps whatever it already held (the
+                // prior turn's origin, or `nil` pre-first-turn) — there is no honest value to stamp
+                // from a sentinel, and guessing would be worse than staying put.
+                if !isEngineSentinelClientName(v.clientName) {
+                    s.lastTurnOriginClientName = v.clientName
+                }
             }
         case .turnStarted(let v) where v.threadId == mainThread:
             s.turnRunning = true
@@ -586,6 +630,34 @@ enum SessionReducer {
                 : .approvalNeeded(count: s.pendingInteractions.count)
         }
         return s
+    }
+
+    /// Important-2 fix (orb-scope review): `clientName` values the ENGINE stamps onto a
+    /// `user_message` IT synthesizes/relays on someone ELSE's behalf — never a real originating
+    /// surface/client's own self-declared identity (`"orb"`, `"iphone-gateway"`, `"routine"`, any
+    /// `"cli-*"`). Criterion: if the value identifies the ENGINE rather than an originating
+    /// surface/client, it belongs here. Decided per literal, grepped straight off
+    /// `packages/core/src/agent/engine.ts`:
+    ///   - `"steer"` (`engine.steer()`, line ~1049) — stamped UNCONDITIONALLY on every steer,
+    ///     whether it queues into a running turn or starts a fresh one when idle. REACHABLE at
+    ///     `threadId == mainThread` — this is the literal the reported bug rides in on (a mid-turn
+    ///     steer in a multi-round tool-using turn, where `assistant_message` already arrived for an
+    ///     earlier round, falls into the reducer's "new exchange" branch above).
+    ///   - `"send_message"` (`runThread`'s child-thread steer drain, line ~2065) and `"resume"`
+    ///     (`resumeAgent`, line ~3795) — both stamped ONLY on a CHILD thread's events per their own
+    ///     doc comments in `engine.ts` (`latestMainUserMessage`'s doc: "a child thread's own
+    ///     'send_message'/'resume'-clientName events... are never candidates" for anything
+    ///     MAIN_THREAD-scoped). Neither can reach this `mainThread`-scoped branch today — listed
+    ///     anyway (belt-and-braces, mirroring this codebase's own redundant-condition style
+    ///     elsewhere, e.g. `workflowToolAllowed`'s doc in `engine.ts`) so a future engine change that
+    ///     ever DID surface one on the main thread fails closed instead of silently corrupting the
+    ///     origin.
+    /// Genuine cross-client sends are deliberately NOT listed and MUST keep overwriting:
+    /// `"iphone-gateway"` (the phone's Mac-side gateway harness), `"routine"` (a scheduled routine),
+    /// any `"cli-*"` (the CLI's own `connect(name:)` identities), and `"orb"` itself — each of these
+    /// is a real new turn origin, not the engine talking to itself.
+    private static func isEngineSentinelClientName(_ clientName: String) -> Bool {
+        ["steer", "send_message", "resume"].contains(clientName)
     }
 
     private static func resolvePending(_ state: OrbSessionState, callId: String) -> OrbSessionState {
