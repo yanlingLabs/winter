@@ -83,7 +83,9 @@ final class PolicyMenuTests: XCTestCase {
         let model = AppModel(makeTransport: { t }, token: "tok")
         let startTask = Task { await model.start() }
         defer { startTask.cancel(); model.stop() }
-        await answerHandshake(t, sessions: #"[{"sessionId":"s_1","scope":"global","createdAt":1,"lastSeq":0}]"#)
+        // orb-scope fix: s_1 tagged dispatch so the initial connect-time focus (unrelated to this
+        // test's subject) still lands as before.
+        await answerHandshake(t, sessions: #"[{"sessionId":"s_1","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]"#)
         await waitUntilSent(t, 3)
         let attach = lineJSON(t.sent[2])
         t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)

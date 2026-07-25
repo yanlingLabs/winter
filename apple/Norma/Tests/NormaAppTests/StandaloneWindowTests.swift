@@ -118,7 +118,10 @@ final class StandaloneWindowTests: XCTestCase {
         await waitUntilSent(t, 2)
         let list = lineJSON(t.sent[1])
         XCTAssertEqual(list["method"] as? String, "session.list")
-        t.feed(#"{"jsonrpc":"2.0","id":\#(list["id"] as! Int),"result":{"sessions":[{"sessionId":"s_old","scope":"global","createdAt":1,"lastSeq":0}]}}"#)
+        // orb-scope fix: s_old tagged dispatch so `focusNewestSession()`'s connect-time filtering
+        // still auto-attaches it here — this test's subject is the create/attach-failure handling,
+        // not mode-filtering.
+        t.feed(#"{"jsonrpc":"2.0","id":\#(list["id"] as! Int),"result":{"sessions":[{"sessionId":"s_old","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]}}"#)
         // session.attach(s_old) — establishes the REAL prior focus
         await waitUntilSent(t, 3)
         let attachOld = lineJSON(t.sent[2])
@@ -177,7 +180,10 @@ final class StandaloneWindowTests: XCTestCase {
         await waitUntilSent(t, 2)
         let list = lineJSON(t.sent[1])
         XCTAssertEqual(list["method"] as? String, "session.list")
-        t.feed(#"{"jsonrpc":"2.0","id":\#(list["id"] as! Int),"result":{"sessions":[{"sessionId":"s_old","scope":"global","createdAt":1,"lastSeq":0}]}}"#)
+        // orb-scope fix: s_old tagged dispatch so `focusNewestSession()`'s connect-time filtering
+        // still auto-attaches it here — this test's subject is the create/attach-failure handling,
+        // not mode-filtering.
+        t.feed(#"{"jsonrpc":"2.0","id":\#(list["id"] as! Int),"result":{"sessions":[{"sessionId":"s_old","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]}}"#)
         // session.attach(s_old) — establishes the REAL prior focus
         await waitUntilSent(t, 3)
         let attachOld = lineJSON(t.sent[2])
