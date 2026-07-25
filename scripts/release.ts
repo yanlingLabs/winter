@@ -562,6 +562,30 @@ writeFileSync(caskOutPath, caskRendered);
 console.log(`Cask rendered: ${caskOutPath} (sha256 ${dmgSha256})`);
 
 // ---------------------------------------------------------------------------
+// 11b. Identity gate on the BUILT ARTIFACTS. Git hooks cannot see these — a .app
+//      and a rendered cask never enter the repo — and the leaks that actually
+//      happened (absolute build paths in Mach-O debug stabs, 0.2.001) lived
+//      exactly here. Runs in dry-run too: a rehearsal that skipped the gate would
+//      defeat the purpose.
+//
+//      The patterns deliberately live OUTSIDE this repo, in the local-only guard
+//      (~/norma-private/git-hooks/name-guard.sh) — putting them in a tracked file
+//      would publish the very strings this gate exists to keep out. Consequence:
+//      the gate FAILS CLOSED when the guard is absent. That is intended; a machine
+//      without the guard must not cut a release.
+// ---------------------------------------------------------------------------
+const nameGuard = join(process.env.HOME ?? "", "norma-private/git-hooks/name-guard.sh");
+if (!existsSync(nameGuard)) {
+  fail(
+    `identity gate unavailable: ${nameGuard} not found.\n` +
+      `  This machine cannot cut a release without the local-only name guard.\n` +
+      `  (It is intentionally not in this repo — see the comment above this check.)`,
+  );
+}
+console.log("Gate: identity scan of built artifacts...");
+sh(`"${nameGuard}" artifacts "${app}" "${caskOutPath}"`);
+
+// ---------------------------------------------------------------------------
 // 12. Publish tail. Guards run FIRST (tag + gh release existence, re-checked HERE against the
 //     actual post-bump `version` — not preflight's pre-bump snapshot — so a version bump
 //     landing on a stale tag/release still aborts loudly instead of double-publishing).
