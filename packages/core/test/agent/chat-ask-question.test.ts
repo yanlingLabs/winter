@@ -33,6 +33,7 @@ import { ContextAssembler } from "../../src/agent/context";
 import { TrustStore } from "../../src/agent/trust";
 import { SkillStore } from "../../src/agent/skills";
 import { Compactor } from "../../src/agent/compactor";
+import { DISPATCH_ALLOW_TOOLS } from "../../src/agent/dispatch-prompt";
 import type { ProviderEvent } from "../../src/providers/types";
 
 /**
@@ -201,10 +202,35 @@ describe("AskQuestion — the simplified chat card", () => {
     expect(result.output).toContain("not available in this session");
   });
 
-  test("code mode still has ask_user", async () => {
+  test("code mode still has ask_user and NOT AskQuestion", async () => {
     const { engine, sessionId, provider } = setup([text("hello")], { mode: "code" });
     await engine.runTurn(sessionId);
     const offered = (provider.requests[0]?.tools ?? []).map((t) => t.name);
     expect(offered).toContain("ask_user");
+    expect(offered).not.toContain("AskQuestion");
+  });
+
+  // Fix round 1: the exclusion above must be SURGICAL — code's real toolset (read/write/bash/
+  // ask_user at minimum) must be completely unaffected by CHAT_ONLY_TOOLS being folded into
+  // engine.ts's code-mode excludeTools. Guards against a blanket exclusion that clips more than
+  // just the chat-only names.
+  test("code mode's offered toolset is otherwise unaffected — read/write/bash/ask_user all still present", async () => {
+    const { engine, sessionId, provider } = setup([text("hello")], { mode: "code" });
+    await engine.runTurn(sessionId);
+    const offered = (provider.requests[0]?.tools ?? []).map((t) => t.name);
+    for (const expected of ["read", "write", "bash", "ask_user"]) {
+      expect(offered).toContain(expected);
+    }
+  });
+
+  // Fix round 1: dispatch is unaffected by construction (DISPATCH_ALLOW_TOOLS is an allowlist that
+  // simply never names AskQuestion) — asserted directly rather than assumed, per the coordinator's
+  // instruction, and cross-checked against the live offered toolset too.
+  test("dispatch is unaffected: DISPATCH_ALLOW_TOOLS never lists AskQuestion, and a dispatch turn is never offered it", async () => {
+    expect(DISPATCH_ALLOW_TOOLS.has("AskQuestion")).toBe(false);
+    const { engine, sessionId, provider } = setup([text("hello")], { mode: "dispatch" });
+    await engine.runTurn(sessionId);
+    const offered = (provider.requests[0]?.tools ?? []).map((t) => t.name);
+    expect(offered).not.toContain("AskQuestion");
   });
 });

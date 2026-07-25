@@ -25,3 +25,10 @@ export const CHAT_SYSTEM_PROMPT = [
  *  Nothing that touches the filesystem, the shell, or the machine may ever join. (B1-T3:
  *  `AskQuestion` replaces `ask_user` here; B1-T5 adds `Search`.) */
 export const CHAT_ALLOW_TOOLS: Set<string> = new Set(["AskQuestion"]);
+
+/** Chat's OWN tools — the ones that exist only because chat needs a different shape than code's
+ *  (AskQuestion vs ask_user; Task 5 adds Search vs web_search). Code mode's toolAccess is an
+ *  EXCLUDElist, not an allowlist, so without naming them here every registered tool is offered to
+ *  code sessions and these would ride along — handing code two question tools with different card
+ *  shapes. Dispatch needs no entry: it uses an allowlist and simply omits them. */
+export const CHAT_ONLY_TOOLS: Set<string> = new Set(["AskQuestion"]);
