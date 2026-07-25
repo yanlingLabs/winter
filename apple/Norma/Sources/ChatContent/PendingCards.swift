@@ -120,6 +120,25 @@ func questionFocusedPreview(_ question: SessionEvent.Question, selected: Set<Int
     return question.options.first?.preview
 }
 
+/// A header-less question is chat's SIMPLIFIED card (Slice B1): question + labels + Other, nothing
+/// else. `header == nil` is the wire signal — chat's `AskQuestion` omits it, code's `ask_user`
+/// always sends one (see `SessionEvent.Question.header`'s own doc in NormaProtocol).
+func questionIsSimplified(_ q: SessionEvent.Question) -> Bool { q.header == nil }
+
+/// The ≤12-char chip only ever made sense as a disambiguator between questions in a multi-question
+/// card. Previously this was `questions.count > 1` alone at the call site — correct for code mode
+/// by ARITHMETIC (`AskQuestion` always emits exactly one question, so the chip was already
+/// suppressed), but it would show an empty/blank chip for a header-less question that somehow rode
+/// in a multi-question card. Gate on BOTH, so the suppression is by INTENT, not coincidence.
+func questionShowsHeaderChip(_ q: SessionEvent.Question, questionCount: Int) -> Bool {
+    questionCount > 1 && q.header != nil
+}
+
+/// Notes ("Add a note (optional)") are a code-mode (`ask_user`) affordance; chat's simplified card
+/// has none. Do NOT delete the notes code itself — code mode still relies on it; this only gates
+/// whether it's shown.
+func questionAllowsNotes(_ q: SessionEvent.Question) -> Bool { !questionIsSimplified(q) }
+
 /// Per-kind card header text. Approval names the tool; a question card titles itself after its
 /// FIRST question's `header` (a batch ask's later questions render their own `question` text
 /// inline in the body — see `PendingQuestionBody`); a plan card's title is fixed (the plan text
@@ -129,7 +148,10 @@ func cardTitle(_ interaction: PendingInteraction) -> String {
     case .approval(_, let toolName, _, _, _, _):
         return "Approval needed — \(toolName)"
     case .question(_, let questions, _):
-        return questions.first?.header ?? ""
+        // A header-less card (Slice B1's simplified `AskQuestion`) must not render an EMPTY title
+        // bar — fall back to the question text itself, same signal `questionIsSimplified` reads.
+        guard let first = questions.first else { return "" }
+        return first.header ?? first.question
     case .plan:
         return "Plan for approval"
     }
@@ -342,7 +364,7 @@ private struct PendingQuestionBody: View {
                 QuestionBlock(
                     index: index,
                     question: question,
-                    showsHeader: questions.count > 1,
+                    showsHeader: questionShowsHeaderChip(question, questionCount: questions.count),
                     selected: selections[index] ?? [],
                     otherText: otherTexts[index] ?? "",
                     isOtherExpanded: otherExpanded.contains(index),
@@ -436,7 +458,12 @@ private struct QuestionBlock: View {
             }
 
             otherRow
-            noteRow
+            // Notes are a code-mode (`ask_user`) affordance; chat's simplified (header-less) card
+            // has none (Slice B1). The note state/callback wiring itself is untouched — this only
+            // gates whether the field is SHOWN, so code mode's notes keep working unchanged.
+            if questionAllowsNotes(question) {
+                noteRow
+            }
         }
     }
 

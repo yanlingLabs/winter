@@ -292,6 +292,18 @@ export function formatResumeHint(sessionId: string): string {
   return `${DIM}\nResume this session with:\n  norma resume ${sessionId}\n${RESET}`;
 }
 
+// Chat mode Slice B1 Task 4: the TTY question_asked handler's per-question headline. `header` is
+// OPTIONAL since Slice B1 — chat's `AskQuestion` omits it for its simplified card (`header === nil`
+// is the wire signal, see `packages/protocol/src/events.ts`'s `QuestionSchema`). A bare template
+// literal (`${AQUA}${q.header}${RESET} — ${q.question}`) interpolates the literal string
+// "undefined" for a header-less question, giving "undefined — Which tier?". header-present output
+// is byte-identical to before this feature (only the header segment takes AQUA, same as always);
+// header-less just colors the question itself, with no "— " prefix. Pure + exported (mirrors
+// `formatResumeHint` above) so this is unit-testable without a TTY/readline round-trip.
+export function formatQuestionHeadlineLine(header: string | undefined, question: string): string {
+  return header ? `${AQUA}${header}${RESET} — ${question}` : `${AQUA}${question}${RESET}`;
+}
+
 // Turn-watching runner (2e-iii-b Task 6 — refactored from the former `runHeadlessAgent`). Wires
 // the client, the pinned-block/event machinery, the raw control-key listener, and the stall
 // watchdog ONCE, then either runs a SINGLE turn and exits (chat:false — `-p`, `resume id text`,
@@ -649,7 +661,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
           const answers: Record<string, string> = {};
           const notes: Record<string, string> = {}; // Task 3 (CC parity): optional per-question free-text note
           for (const q of e.questions) {
-            emit(`\n${AQUA}${q.header}${RESET} — ${q.question}\n`);
+            emit(`\n${formatQuestionHeadlineLine(q.header, q.question)}\n`);
             // Task 3: each option's numbered line, plus (when present) its `preview` rendered as
             // extra indented "┆"-rail lines right under it — formatOptionLines is pure/TTY-only
             // (questions.ts); every returned line still goes through emit() so the pinned block's

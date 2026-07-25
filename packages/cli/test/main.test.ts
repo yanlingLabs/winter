@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatResumeHint, routeCliInvocation, type CliRoute } from "../src/main";
+import { formatQuestionHeadlineLine, formatResumeHint, routeCliInvocation, type CliRoute } from "../src/main";
 
 // Pure arg-routing table test (final-review Findings 3+4). `routeCliInvocation` is the ONLY piece
 // of the bare/--auto/--plan/-p/resume dispatch that's cheaply unit-testable without a real
@@ -102,5 +102,29 @@ describe("formatResumeHint (Phase 3c Task 5 — the dim post-exit resume hint)",
   test("no trailing newline is added beyond the one already in the spec string (process.stdout.write, not console.log)", () => {
     const hint = formatResumeHint("x");
     expect(hint.endsWith("\n\x1b[0m")).toBe(true); // ends with the required "\n" then the RESET code — no EXTRA "\n"
+  });
+});
+
+// Chat mode Slice B1 Task 4: the question_asked TTY handler's one-line headline. Extracted as a
+// pure/exported helper (same "no readline/TTY round-trip" convention as formatResumeHint above) so
+// the header-less (Slice B1 simplified card) fix is unit-testable — this line otherwise lives
+// inside an async IIFE nested in the event-handling loop, with no other test seam.
+describe("formatQuestionHeadlineLine (Slice B1 Task 4 — CLI one-line question headline)", () => {
+  const AQUA = "\x1b[38;2;53;214;232m";
+  const RESET = "\x1b[0m";
+
+  test("header present -> byte-identical to the pre-Slice-B1 template literal (regression pin)", () => {
+    expect(formatQuestionHeadlineLine("Tier", "Which tier?")).toBe(`${AQUA}Tier${RESET} — Which tier?`);
+  });
+
+  test("header absent (Slice B1 simplified card) -> just the colored question, no 'undefined' literal", () => {
+    const line = formatQuestionHeadlineLine(undefined, "Which tier should I compare against?");
+    expect(line).not.toContain("undefined");
+    expect(line).toBe(`${AQUA}Which tier should I compare against?${RESET}`);
+  });
+
+  test("header absent -> no stray '— ' prefix left over from the header segment", () => {
+    const line = formatQuestionHeadlineLine(undefined, "A?");
+    expect(line).not.toContain("—");
   });
 });

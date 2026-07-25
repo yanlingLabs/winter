@@ -31,12 +31,11 @@ export function registerAskQuestionTool(r: ToolRegistry): void {
       if (!ctx.ask) return NO_ANSWER();
       // `header` and per-option `description` are omitted ON PURPOSE (not set to undefined —
       // never assigned as keys at all): Task 2 made `Question.header` optional specifically so a
-      // header-less question is a genuinely different SHAPE for a client to key off of. As of
-      // this task, the Mac client does NOT yet do that keying — PendingCards.swift's `cardTitle`
-      // still reads `questions.first?.header ?? ""`, so a header-less single question renders an
-      // EMPTY title bar today, not yet a deliberately simplified card. That rendering work
-      // (title-bar suppression, chip suppression, notes-affordance hiding) is Task 4's, not done
-      // here — this tool only needs the field genuinely absent so Task 4 has something to key off.
+      // header-less question is a genuinely different SHAPE for a client to key off of. Task 4
+      // made the Mac client (PendingCards.swift's `cardTitle`/`questionShowsHeaderChip`/
+      // `questionAllowsNotes`), the CLI one-liner (main.ts's `formatQuestionHeadlineLine`), and the
+      // TUI card (pending-cards.tsx's `QuestionCard`) all key off that absence — no chip, no
+      // per-option descriptions, no notes affordance, and no empty/broken title on any surface.
       const res = await ctx.ask([{ question, options, multiSelect: false }]);
       if ("timedOut" in res) return NO_ANSWER();
       return `User answered: ${res.answers[question] ?? "(no answer)"}`;
