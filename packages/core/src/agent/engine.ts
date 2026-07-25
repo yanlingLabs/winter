@@ -69,17 +69,16 @@ const SESSION_SPAWN_TOOL = "session_spawn";
 // B4's pin all read the SAME literal, with no `Workflow`/`workflow` casing drift between them.
 const WORKFLOW_TOOL = "Workflow";
 
-// Task B3: is this session a chat/cowork session (as opposed to the top-level interactive CODE
-// session the Workflow tool is gated to)? Always false today — SessionStore.createSession's own
-// `mode` param is typed `"code" | "dispatch"` (sessions/store.ts) and session_spawn's own
-// `type==="cowork"` branch (this file's dispatch loop, below) rejects it pre-launch ("type 'cowork'
-// is not yet available — use 'code'"), so no session anywhere can carry a chat/cowork identity yet.
-// Kept as an explicit named predicate (rather than inlining `false` into workflowToolAllowed below)
-// so the ONE place that needs a real check, whenever either mode ships, is THIS function's body —
-// workflowToolAllowed itself already excludes them correctly the day that lands, no gating logic
-// to revisit at the call site.
-function isChatOrCowork(_meta: { mode?: string }): boolean {
-  return false;
+// Task B3 (real since CM-T2 shipped chat mode; CM-T2b made this predicate match): is this session a
+// chat/cowork session (as opposed to the top-level interactive CODE session the Workflow tool is
+// gated to)? `mode === "chat"` is a genuine session identity today — SessionStore.createSession's
+// own `mode` param is typed `"code" | "dispatch" | "chat"` (sessions/store.ts), and session.create
+// passes it straight through. `mode === "cowork"` is kept even though no session can carry it yet —
+// session_spawn's own `type==="cowork"` branch (this file's dispatch loop, below) still rejects it
+// pre-launch ("type 'cowork' is not yet available — use 'code'") — so this predicate stays correct
+// the day cowork ships too, no gating logic to revisit at either call site below.
+function isChatOrCowork(meta: { mode?: string }): boolean {
+  return meta.mode === "chat" || meta.mode === "cowork";
 }
 
 // Task B4 (/ultracode): the fixed clientName sentinels the ENGINE ITSELF stamps onto a
@@ -1689,8 +1688,10 @@ export class AgentEngine {
    *   - `meta.origin !== "dispatch-child"` — a session_spawn-created child session (a full session
    *     in its own right, mode:"code", origin:"dispatch-child" stamped at createSession) — see
    *     ContextAssembler's own skipOutputStyle check just below in turn() for the identical signal.
-   *   - `!isChatOrCowork(meta)` — always true today (see that function's own doc comment); kept so
-   *     this predicate is already correct the day a real chat/cowork mode ships.
+   *   - `!isChatOrCowork(meta)` — excludes a chat session (mode:"chat", real since chat shipped —
+   *     its own base prompt already says "no access to this machine"; the deferred-tools index must
+   *     not contradict that by listing Workflow) and, the day it ships, a cowork session too (see
+   *     that function's own doc comment).
    *  Does NOT need to separately exclude a workflow-spawned agent or a plain spawn_agent child:
    *  neither is a SESSION (both are child THREADS sharing this same session's `meta`, hence this
    *  same session-level answer) — runWorkflowAgent's own `childExcludeTools` (Task A4) already
@@ -1841,11 +1842,16 @@ export class AgentEngine {
     // workflows.keywordTrigger (B1), independent of (but overlapping with) workflowToolAllowed's
     // own gate just above. Every condition re-checked directly here (not just via `excludeWorkflow`)
     // so this reads as a self-contained formula against the spec: `workflowsEnabled(cwd) &&
-    // keywordTriggerEnabled(cwd) && human-origin`, where human-origin itself is `meta.mode !==
-    // "dispatch"` (isDispatch, computed above) AND `meta.origin` names neither a dispatch nor a
-    // routine session (belt-and-braces alongside workflowToolAllowed's own identical
+    // keywordTriggerEnabled(cwd) && !isChatOrCowork(meta) && human-origin`, where human-origin itself
+    // is `meta.mode !== "dispatch"` (isDispatch, computed above) AND `meta.origin` names neither a
+    // dispatch nor a routine session (belt-and-braces alongside workflowToolAllowed's own identical
     // dispatch-child check — see its doc comment for why that redundancy is deliberate) AND the
     // driving message's `clientName` is a real interactive harness (isHumanOriginClientName).
+    // `!isChatOrCowork(meta)` (real since chat shipped, CM-T2b) is belt-and-braces alongside
+    // workflowToolAllowed's own identical exclusion above: even though a chat session's allowTools
+    // (CHAT_ALLOW_TOOLS) already keeps Workflow off the provider-visible tool list regardless of this
+    // gate, the gate must ALSO stay closed so ULTRACODE_REMINDER — "...USE the Workflow tool..." — is
+    // never injected into a chat session's instructions, telling the model to use a tool it doesn't have.
     const latestUserMessage = this.latestMainUserMessage(sessionId);
     const ultracodeGateOpen = this.cfg.workflowsEnabled?.(cwd) !== false
       && this.cfg.keywordTriggerEnabled?.(cwd) !== false

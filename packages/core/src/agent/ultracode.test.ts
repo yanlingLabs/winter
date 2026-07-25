@@ -42,6 +42,19 @@ test("a dispatch-child session's origin never triggers /ultracode (tool already 
   expect(h.lastInstructions()).not.toMatch(/opted into workflow orchestration/i);
 });
 
+// CM-T2b: a chat session's own allowTools (CHAT_ALLOW_TOOLS) already keeps Workflow out of the
+// PROVIDER-visible tool list unconditionally (engine.ts's allowTools filter applies regardless of
+// this gate) — lastVisibleTools() below is a sanity check on that pre-existing invariant, not the
+// regression this test guards. The real leak was the gate itself: isChatOrCowork(meta) must be true
+// for a chat session so ultracodeGateOpen stays false and ULTRACODE_REMINDER ("...USE the Workflow
+// tool...") is never injected into instructions telling the model to use a tool absent from its list.
+test("/ultracode <task> is inert in a chat session (no pin, no reminder)", async () => {
+  const h = await makeUltracodeHarness({ workflowsEnabled: true, keywordTrigger: true, mode: "chat" });
+  await h.sendHuman("/ultracode do a big thing");
+  expect(h.lastVisibleTools()).not.toContain("Workflow");
+  expect(h.lastInstructions()).not.toMatch(/opted into workflow orchestration/i);
+});
+
 test("the session-wide auto-orchestrate toggle persists the reminder across turns until turned off", async () => {
   const h = await makeUltracodeHarness({ workflowsEnabled: true, keywordTrigger: true });
   await h.sendHuman("/ultracode"); // bare — flips the toggle on

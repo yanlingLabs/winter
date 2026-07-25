@@ -16,6 +16,15 @@ test("Workflow is NOT offered to a dispatch-child session", async () => {
   expect(await deferredIndexFor({ origin: "dispatch-child", mode: "code" })).not.toContain("Workflow");
 });
 
+// CM-T2b: chat's own base prompt tells the model "you have no access to this machine" (chat-prompt.ts's
+// CHAT_SYSTEM_PROMPT) — the "# Deferred tools" text must not contradict that by listing Workflow.
+// isChatOrCowork(meta) is the ONE predicate excludeWorkflow depends on for this; a chat session must
+// exclude it from the deferred index the same way a dispatch-child session already does, above.
+test("Workflow is NOT offered (deferred index) in a chat session, even when workflows.enabled", async () => {
+  const { deferredIndexFor } = await makeGatingHarness({ workflowsEnabled: true });
+  expect(await deferredIndexFor({ origin: undefined, mode: "chat" })).not.toContain("Workflow");
+});
+
 // Task B-gatefix Part 3 (from B3's own report, "concern" #1): `workflowToolAllowed` is a
 // SESSION-level predicate (keyed on `meta`), which a plain `spawn_agent` CHILD THREAD shares
 // byte-for-byte with its parent — so even inside a top-level, workflows-enabled CODE session (where
