@@ -36,8 +36,8 @@ final class SessionModelTests: XCTestCase {
     func assistantMessage(_ text: String, seq: Int = 5, thread: String = "main") -> SessionEvent {
         ev(#"{"type":"assistant_message","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"\#(thread)","text":"\#(text)"}"#)
     }
-    func userMessage(_ text: String, seq: Int = 1, thread: String = "main") -> SessionEvent {
-        ev(#"{"type":"user_message","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"\#(thread)","text":"\#(text)","clientName":"cli"}"#)
+    func userMessage(_ text: String, seq: Int = 1, thread: String = "main", clientName: String = "cli") -> SessionEvent {
+        ev(#"{"type":"user_message","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"\#(thread)","text":"\#(text)","clientName":"\#(clientName)"}"#)
     }
     func harnessAttached(_ clientName: String, seq: Int = 1) -> SessionEvent {
         ev(#"{"type":"harness_attached","seq":\#(seq),"sessionId":"s","ts":0,"clientName":"\#(clientName)"}"#)
@@ -689,6 +689,77 @@ final class SessionModelTests: XCTestCase {
         s = SessionReducer.reduce(s, harnessDetached("cli-status", seq: 6))
         XCTAssertTrue(s.attachedClients.isEmpty)
         XCTAssertFalse(s.cliAttached)
+    }
+
+    // MARK: - orb-scope Part 2: `lastTurnOriginClientName`/`lastTurnWasOrbInitiated` — which
+    // client's `user_message` started the most recently begun turn.
+
+    func testNewExchangeStampsOriginClientName() {
+        var s = OrbSessionState()
+        XCTAssertNil(s.lastTurnOriginClientName)
+        XCTAssertFalse(s.lastTurnWasOrbInitiated)
+        s = SessionReducer.reduce(s, userMessage("hi", seq: 1, clientName: "orb"))
+        XCTAssertEqual(s.lastTurnOriginClientName, "orb")
+        XCTAssertTrue(s.lastTurnWasOrbInitiated)
+    }
+
+    /// The phone's dispatch mode relays through the Mac's own gateway harness, clientName
+    /// "iphone-gateway" (`RemoteHost.swift`) — never "orb", so never orb-initiated.
+    func testPhoneRelayedOriginIsNotOrbInitiated() {
+        var s = OrbSessionState()
+        s = SessionReducer.reduce(s, userMessage("hi from phone", seq: 1, clientName: "iphone-gateway"))
+        XCTAssertEqual(s.lastTurnOriginClientName, "iphone-gateway")
+        XCTAssertFalse(s.lastTurnWasOrbInitiated)
+    }
+
+    /// A scheduled routine's turn (`packages/core/src/routines/runner.ts` stamps clientName
+    /// "routine") is likewise never orb-initiated.
+    func testRoutineOriginIsNotOrbInitiated() {
+        var s = OrbSessionState()
+        s = SessionReducer.reduce(s, userMessage("scheduled run", seq: 1, clientName: "routine"))
+        XCTAssertEqual(s.lastTurnOriginClientName, "routine")
+        XCTAssertFalse(s.lastTurnWasOrbInitiated)
+    }
+
+    /// A mid-turn steer (turn already running, current exchange's reply still empty) folds into
+    /// the OPEN exchange rather than starting a new one — it must NOT overwrite the turn's
+    /// original origin, even when the steer carries a different clientName (steers are actually
+    /// always attributed the engine's fixed "steer" sentinel regardless of caller, but the
+    /// reducer's own fold condition — not clientName — is what decides this, so a differently
+    /// named steer proves the fold path itself is what's guarding the field, not a clientName
+    /// coincidence).
+    func testMidTurnSteerDoesNotOverwriteOrigin() {
+        var s = OrbSessionState()
+        s = SessionReducer.reduce(s, turnStarted(seq: 1)) // turnRunning = true, no reply yet
+        s = SessionReducer.reduce(s, userMessage("first", seq: 2, clientName: "orb"))
+        XCTAssertEqual(s.lastTurnOriginClientName, "orb")
+        s = SessionReducer.reduce(s, userMessage("steer text", seq: 3, clientName: "iphone-gateway"))
+        // Still folded into the same open exchange, origin untouched.
+        XCTAssertEqual(s.exchanges.count, 1)
+        XCTAssertEqual(s.lastTurnOriginClientName, "orb")
+        XCTAssertTrue(s.lastTurnWasOrbInitiated)
+    }
+
+    /// The field is read at `turn_completed` time (`GlassRootView.handleTurnCompleted()`) — it
+    /// must still hold the ORIGINATING clientName once the turn finishes, not get cleared.
+    func testOriginSurvivesTurnCompleted() {
+        var s = OrbSessionState()
+        s = SessionReducer.reduce(s, userMessage("hi", seq: 1, clientName: "orb"))
+        s = SessionReducer.reduce(s, turnCompleted(seq: 2))
+        XCTAssertEqual(s.lastTurnOriginClientName, "orb")
+        XCTAssertTrue(s.lastTurnWasOrbInitiated)
+    }
+
+    /// A brand-new turn's user_message OVERWRITES the previous turn's origin — each turn is judged
+    /// on its own initiator, not whoever started an earlier one.
+    func testNextTurnOverwritesPreviousOrigin() {
+        var s = OrbSessionState()
+        s = SessionReducer.reduce(s, userMessage("first turn", seq: 1, clientName: "orb"))
+        s = SessionReducer.reduce(s, turnCompleted(seq: 2))
+        XCTAssertTrue(s.lastTurnWasOrbInitiated)
+        s = SessionReducer.reduce(s, userMessage("second turn", seq: 3, clientName: "routine"))
+        XCTAssertEqual(s.lastTurnOriginClientName, "routine")
+        XCTAssertFalse(s.lastTurnWasOrbInitiated)
     }
 
     // MARK: - task-30 (push-notification track): `SessionModel.apply`'s notification-posting seam.

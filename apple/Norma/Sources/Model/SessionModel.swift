@@ -208,6 +208,34 @@ struct OrbSessionState: Equatable {
         attachedClients.contains { $0.hasPrefix("cli") }
     }
 
+    /// orb-scope Part 2: the `clientName` of the `user_message` that STARTED the most recently
+    /// begun exchange — i.e. who initiated the turn that is currently running, or that just
+    /// completed. Set ONLY on a genuine new-turn `userMessage` (`SessionReducer`'s "new exchange"
+    /// branch below); a mid-turn steer folds into the already-open exchange and leaves this
+    /// untouched, so it always reflects the turn's ORIGINAL initiator, never whoever most
+    /// recently steered it (steers are attributed a fixed `"steer"` sentinel by the engine
+    /// regardless of caller anyway — `packages/core/src/agent/engine.ts`'s `steer()` — so they
+    /// couldn't identify a real client even if this field did track them). Deliberately never
+    /// cleared on `turn_completed` — it stays put as "the last known origin" until the NEXT
+    /// turn's own user_message overwrites it, which is exactly the value
+    /// `GlassRootView.handleTurnCompleted()` needs to read at the moment a turn just finished.
+    /// Chosen over a local app-side flag (e.g. armed on `AppModel.sendOrSteer`, mirroring
+    /// `OrbWindowController.collapseOnTurnStart`) because this is daemon-persisted, per-turn data:
+    /// it survives a reconnect or an app relaunch mid-turn via the ordinary full-replay-from-seq-0
+    /// path (`AppModel.refocus`), where an in-memory flag would simply be gone.
+    var lastTurnOriginClientName: String? = nil
+
+    /// True when the most recently started turn was submitted by THIS Mac app's own orb/field
+    /// surface (`AppModel.ownClientName`) — false for a phone-relayed send (`"iphone-gateway"`,
+    /// the Mac-side gateway's own harness identity, `RemoteHost.swift`), a scheduled routine
+    /// (`"routine"`), a CLI harness, or any other origin. Drives
+    /// `GlassRootView.handleTurnCompleted()`'s auto-reveal gate (orb-scope Part 2): a dispatch
+    /// turn the user started somewhere else finishes quietly — the unread indicator is the only
+    /// signal, no auto-expand.
+    var lastTurnWasOrbInitiated: Bool {
+        lastTurnOriginClientName == AppModel.ownClientName
+    }
+
     /// Interrupt-feedback gate polish: true exactly when the MOST RECENT `turn_completed(main)`
     /// carried `stopReason == "aborted"` (an Esc-interrupt) — false for any other stop reason
     /// ("end_turn", tool-limit, etc.) and cleared back to false the instant the NEXT turn starts.
@@ -261,6 +289,10 @@ enum SessionReducer {
                 s.queuedSteers.append(v.text)
             } else {
                 s.exchanges.append(Exchange(prompt: v.text, reply: ""))
+                // orb-scope Part 2: a NEW exchange is exactly a new-turn start — stamp who
+                // initiated it. See `lastTurnOriginClientName`'s own doc for why the steer-fold
+                // branch above deliberately does NOT reach this line.
+                s.lastTurnOriginClientName = v.clientName
             }
         case .turnStarted(let v) where v.threadId == mainThread:
             s.turnRunning = true

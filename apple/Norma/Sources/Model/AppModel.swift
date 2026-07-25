@@ -59,7 +59,17 @@ final class AppModel: ObservableObject {
     var onActivityChange: ((MenuBarActivity) -> Void)?
     private var menuBarActivity: MenuBarActivity = .idle
 
-    init(makeTransport: @escaping @Sendable () -> NormaTransport, token: String, clientName: String = "orb") {
+    /// orb-scope Part 2: the Mac app's own harness registers under this clientName — every
+    /// `user_message` the orb/field surface itself sends (via `sendOrSteer`'s `client.send` path,
+    /// a genuine new-turn submit) carries it verbatim (daemon: `hub.send` stamps
+    /// `clientName: client.clientName` off the connection's own registered identity,
+    /// `packages/core/src/sessions/hub.ts`). Named here (not just inlined as the init default
+    /// below) so `SessionReducer`'s `lastTurnWasOrbInitiated` derivation
+    /// (`SessionModel.swift`) has ONE source of truth to compare against instead of a second,
+    /// independently-drifting literal.
+    static let ownClientName = "orb"
+
+    init(makeTransport: @escaping @Sendable () -> NormaTransport, token: String, clientName: String = AppModel.ownClientName) {
         self.makeTransport = makeTransport
         self.token = token
         self.clientName = clientName

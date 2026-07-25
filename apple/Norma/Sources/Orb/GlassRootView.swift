@@ -239,6 +239,13 @@ struct GlassRootView: View {
     /// there is nothing extra to arrive for a field the user is already looking at.
     private func handleTurnCompleted() {
         guard controller.surface == .orb else { return }
+        let cliAttachedToFocused = session.state.cliAttached
+        let frontmostIsTerminal = frontmostApplicationIsTerminal()
+        // orb-scope Part 2: was the turn that just finished initiated by THIS orb's own submit
+        // path, or somewhere else (the phone's dispatch mode, a scheduled routine)? See
+        // `SessionModel.lastTurnWasOrbInitiated`'s doc for the daemon-carried `clientName` signal
+        // this reads.
+        let orbInitiated = session.state.lastTurnWasOrbInitiated
         // gate-feedback-1 FIX A: suppressed OUTRIGHT — no expand, no unread-blink either — when a
         // CLI harness is attached to THIS orb's own focused session AND the frontmost app is a
         // terminal. Rationale: the user is chatting with this exact session from their terminal
@@ -248,11 +255,28 @@ struct GlassRootView: View {
         // the visible-panel calm-gate. Manual summon (`OrbWindowController.toggleField()` — 4-finger
         // tap / hotkey / menu, `AppDelegate.swift`) never calls this method at all, so it is
         // completely unaffected by this guard.
+        //
+        // orb-scope Part 2: `isAutoRevealSuppressed` now ORs a SECOND, independent reason in
+        // (`!orbInitiated`) — a dispatch turn started elsewhere never auto-expands either. The two
+        // reasons diverge on the unread mark though: the CLI/terminal case is TOTAL silence
+        // (unchanged from before Part 2 — nothing here even looks at `hasUnread`, exactly as
+        // before), while a merely-not-orb-initiated turn has nothing else showing its reply on the
+        // Mac, so the unread indicator must still fire — it's the user's only signal, per the
+        // explicit product decision behind this fix. That distinction can't live inside the single
+        // suppressed Bool the predicate returns (by design — the whole point of the predicate is
+        // one testable outcome), so it's re-derived from the same two locals right below, not a
+        // second suppression check.
         guard !isAutoRevealSuppressed(
-            cliAttachedToFocused: session.state.cliAttached,
-            frontmostIsTerminal: frontmostApplicationIsTerminal()
+            cliAttachedToFocused: cliAttachedToFocused,
+            frontmostIsTerminal: frontmostIsTerminal,
+            orbInitiated: orbInitiated
         ) else {
-            OrbDebug.log("answer arrived: suppressed (CLI attached to focused session + frontmost terminal)")
+            if cliAttachedToFocused && frontmostIsTerminal {
+                OrbDebug.log("answer arrived: suppressed (CLI attached to focused session + frontmost terminal)")
+            } else {
+                adapter.hasUnread = true
+                OrbDebug.log("answer arrived: suppressed (turn not orb-initiated) — marked unread")
+            }
             return
         }
         // Final-review I1: never auto-expand a HIDDEN panel (menu "Hide Orb") — expanding an
@@ -274,13 +298,19 @@ struct GlassRootView: View {
     }
 }
 
-/// gate-feedback-1 FIX A: the pure suppression table behind `handleTurnCompleted()`'s terminal-chat
-/// guard above, extracted so `AutoRevealSuppressionTests` can drive it directly. Suppressed ONLY
-/// when BOTH conditions hold — a CLI harness attached to the orb's focused session is not enough
-/// on its own (the user might be looking at something else entirely), and a terminal being
-/// frontmost is not enough on its own (nothing attached there means no redundant reply visible).
-func isAutoRevealSuppressed(cliAttachedToFocused: Bool, frontmostIsTerminal: Bool) -> Bool {
-    cliAttachedToFocused && frontmostIsTerminal
+/// gate-feedback-1 FIX A / orb-scope Part 2: the pure suppression table behind
+/// `handleTurnCompleted()`'s auto-expand guard above, extracted so `AutoRevealSuppressionTests`
+/// can drive it directly. Suppressed when EITHER holds:
+///   - `!orbInitiated` (orb-scope Part 2): the turn that just completed wasn't started from this
+///     orb's own submit path (phone dispatch, a scheduled routine, ...) — auto-reveal is reserved
+///     for the user's own summon→type→answer loop, not turns they started somewhere else.
+///   - BOTH `cliAttachedToFocused` and `frontmostIsTerminal` (gate-feedback-1 FIX A, pre-existing,
+///     untouched): a CLI harness attached to the orb's focused session is not enough on its own
+///     (the user might be looking at something else entirely), and a terminal being frontmost is
+///     not enough on its own (nothing attached there means no redundant reply visible) — only
+///     together do they mean the reply is already visible in the terminal chat.
+func isAutoRevealSuppressed(cliAttachedToFocused: Bool, frontmostIsTerminal: Bool, orbInitiated: Bool) -> Bool {
+    !orbInitiated || (cliAttachedToFocused && frontmostIsTerminal)
 }
 
 /// gate-feedback-1 FIX A: `shouldAutoExpand` composes the suppression table above with the
@@ -289,8 +319,8 @@ func isAutoRevealSuppressed(cliAttachedToFocused: Bool, frontmostIsTerminal: Boo
 /// than inlining `!isAutoRevealSuppressed(...) && calm`) so a test can assert the composed
 /// decision directly without re-deriving the `&&`. Suppression wins outright: `calm` is never even
 /// consulted once suppressed.
-func shouldAutoExpand(calm: Bool, cliAttachedToFocused: Bool, frontmostIsTerminal: Bool) -> Bool {
-    guard !isAutoRevealSuppressed(cliAttachedToFocused: cliAttachedToFocused, frontmostIsTerminal: frontmostIsTerminal) else {
+func shouldAutoExpand(calm: Bool, cliAttachedToFocused: Bool, frontmostIsTerminal: Bool, orbInitiated: Bool) -> Bool {
+    guard !isAutoRevealSuppressed(cliAttachedToFocused: cliAttachedToFocused, frontmostIsTerminal: frontmostIsTerminal, orbInitiated: orbInitiated) else {
         return false
     }
     return calm
