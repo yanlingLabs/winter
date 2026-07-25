@@ -38,7 +38,15 @@ const VCN_CIDR = "10.0.0.0/16";
 const SUBNET_NAME = "norma-relay-subnet";
 const SUBNET_CIDR = "10.0.1.0/24";
 const IGW_NAME = "norma-relay-igw";
-const SHAPE = "VM.Standard.E2.1.Micro";
+// A1.Flex (Ampere ARM), 1 OCPU / 6 GB per relay — 2 relays fit comfortably inside the
+// Always-Free allowance (4 OCPUs / 24 GB total) at $0. Switched from VM.Standard.E2.1.Micro
+// 2026-07-25: the free x86 micro pool was starved for 18+ hours in AD-1 (the only AD that
+// authorizes free-tier micros) while this PAYG tenancy's A1 limit is 250 cores in EVERY AD
+// (verified via the Limits API). A1.Flex requires shapeConfig on launch (see ensureInstance)
+// and the aarch64 iroh-relay asset (IROH_RELAY_ARCH below).
+const SHAPE = "VM.Standard.A1.Flex";
+const SHAPE_OCPUS = 1;
+const SHAPE_MEMORY_GB = 6;
 const INSTANCE_NAMES = ["norma-relay-1", "norma-relay-2"] as const;
 const DOMAIN_BASE = "yanlinglabs.com";
 const RELAY_HOSTNAMES = ["relay-1", "relay-2"] as const;
@@ -53,7 +61,11 @@ const IROH_RELAY_VERSION = "1.0.2";
 // downloaded release asset during this task (not copied from anywhere) -- baked into cloud-init
 // so a compromised/rotated release asset fails the boot's checksum check loudly instead of
 // silently installing different binaries.
-const IROH_RELAY_SHA256 = "3d6c37a66f8b21da620f9d83ce4682639aa2de9910bbf1e8e7981cf8478964ea";
+// aarch64-unknown-linux-musl (A1.Flex is ARM). Computed directly from the downloaded release
+// asset 2026-07-25 (same discipline as the original x86 hash — never copied from a checksums
+// file). The x86_64 hash it replaced: 3d6c37a66f8b21da620f9d83ce4682639aa2de9910bbf1e8e7981cf8478964ea.
+const IROH_RELAY_SHA256 = "9a548087f7b1f3a25f5c932790bc0836dd3cb6ffb28d6104b63d18478ed2c51d";
+const IROH_RELAY_ARCH = "aarch64";
 // The QUIC address-discovery ("QAD") port iroh-relay's own code pins as its default
 // (`DEFAULT_RELAY_QUIC_PORT` in iroh-relay/src/defaults.rs, tag v1.0.2) -- NOT 3478 (traditional
 // STUN); iroh-relay's own protocol is QUIC-native, not RFC 5389 STUN. Confirmed by reading the
@@ -366,9 +378,9 @@ async function findUbuntuImage(cfg: OCIConfig): Promise<{ id: string; displayNam
   const res = await ociRequest(cfg, "GET", path);
   if (res.status !== 200) throw new Error(`GET /images -> ${res.status}: ${res.raw.slice(0, 500)}`);
   const images = res.json as any[];
-  // AMD (x86_64) build only -- E2.1.Micro is an AMD shape; the images list is
-  // shape-filtered already, but Canonical publishes separate aarch64/x86_64 image lines under
-  // the same OS/version, and the `shape` filter is the authoritative disambiguator here.
+  // Canonical publishes separate aarch64/x86_64 image lines under the same OS/version; the
+  // `shape` filter is the authoritative arch disambiguator (A1.Flex -> aarch64 images), so
+  // this needs no arch logic of its own.
   const newest = images[0];
   if (!newest) throw new Error("no Canonical Ubuntu 24.04 image found compatible with " + SHAPE);
   return { id: newest.id, displayName: newest.displayName };
@@ -412,6 +424,7 @@ function renderCloudInit(domain: string): string {
     .replaceAll("{DOMAIN}", domain)
     .replaceAll("{IROH_RELAY_VERSION}", IROH_RELAY_VERSION)
     .replaceAll("{IROH_RELAY_SHA256}", IROH_RELAY_SHA256)
+    .replaceAll("{IROH_RELAY_ARCH}", IROH_RELAY_ARCH)
     .replaceAll("{QUIC_ADDR_DISCOVERY_PORT}", String(QUIC_ADDR_DISCOVERY_PORT));
 }
 
@@ -455,6 +468,9 @@ async function ensureInstance(
       availabilityDomain,
       compartmentId,
       shape: SHAPE,
+      // Flex shapes REQUIRE an explicit size (fixed shapes like the old E2.1.Micro reject the
+      // field's absence gracefully but flex launches 400 without it).
+      shapeConfig: { ocpus: SHAPE_OCPUS, memoryInGBs: SHAPE_MEMORY_GB },
       displayName: name,
       sourceDetails: { sourceType: "image", imageId },
       createVnicDetails: {

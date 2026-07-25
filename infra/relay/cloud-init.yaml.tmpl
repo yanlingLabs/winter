@@ -120,7 +120,7 @@ runcmd:
 
   # --- fetch + sha256-verify + install the pinned iroh-relay binary ---
   - mkdir -p /tmp/iroh-relay-install
-  - curl -fL -o /tmp/iroh-relay-install/iroh-relay.tar.gz "https://github.com/n0-computer/iroh/releases/download/v{IROH_RELAY_VERSION}/iroh-relay-v{IROH_RELAY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+  - curl -fL -o /tmp/iroh-relay-install/iroh-relay.tar.gz "https://github.com/n0-computer/iroh/releases/download/v{IROH_RELAY_VERSION}/iroh-relay-v{IROH_RELAY_VERSION}-{IROH_RELAY_ARCH}-unknown-linux-musl.tar.gz"
   - echo "{IROH_RELAY_SHA256}  /tmp/iroh-relay-install/iroh-relay.tar.gz" | sha256sum -c -
   - tar xzf /tmp/iroh-relay-install/iroh-relay.tar.gz -C /tmp/iroh-relay-install
   - install -o root -g root -m 0755 /tmp/iroh-relay-install/iroh-relay /usr/local/bin/iroh-relay
