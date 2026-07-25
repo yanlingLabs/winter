@@ -392,8 +392,16 @@ final class AppModel: ObservableObject {
             // Target vanished or transport hiccuped: reconcile with NormaKit's ground truth
             // (attach() rolled its state back), then fall back to the newest surviving session.
             focusedSessionId = await client.attachedSession
+            // orb-scope review (Important 1): this fallback is a THIRD focus-acquisition site and
+            // was mode-blind — same dispatch-only filter as `focusNewestSession()` and the
+            // `sessionCreated` handler above, in the same `== "dispatch"` direction (fails closed on
+            // an unknown future mode value, never an implicit `!= "code"`). Without it, a daemon
+            // restart or transport hiccup mid-refocus could fall back onto a phone/CLI-created CODE
+            // session — reopening the orb-dispatch-only bug in a narrow, harder-to-hit form. Staying
+            // unfocused when no dispatch session survives (the `let newest = ...` fails) is the
+            // correct outcome, matching the pre-first-summon state elsewhere.
             if let sessions = try? await client.listSessions(),
-               let newest = sessions.max(by: { $0.createdAt < $1.createdAt }),
+               let newest = sessions.filter({ $0.mode == "dispatch" }).max(by: { $0.createdAt < $1.createdAt }),
                newest.sessionId != sessionId {
                 session.reset()
                 focusedSessionId = newest.sessionId

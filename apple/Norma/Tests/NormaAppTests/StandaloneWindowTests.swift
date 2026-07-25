@@ -223,4 +223,123 @@ final class StandaloneWindowTests: XCTestCase {
         XCTAssertTrue(delegate.detachedWindows.isEmpty, "a successful create whose follow-up attach fails must never spawn a window on the reverted-to prior session")
         XCTAssertEqual(model.focusedSessionId, "s_old", "reconciled focus after the failed attach must be the rolled-back prior session, not the never-attached new one")
     }
+
+    // MARK: - Important-1 fix (orb-scope review): refocus(onto:)'s catch/error-recovery fallback
+    // is a THIRD focus-acquisition site and was mode-blind. The relist fixture two tests above
+    // (line ~220) already feeds this exact catch path two UNMODED (= code, "absent means code")
+    // sessions — it just never happened to prove the mode filter itself, since neither of that
+    // scenario's candidates was tagged "dispatch". These two tests drive `refocus`'s catch path
+    // directly (via the public `focusSession(_:)` wrapper, bypassing the standalone-window/
+    // session.dispatch machinery entirely — orthogonal to what's under test here) and pin the mode
+    // filter's two required outcomes.
+
+    /// A daemon restart / transport hiccup mid-refocus (`session.attach` throws) must NEVER fall
+    /// back onto a CODE session, even when that code session is the NEWEST one overall by
+    /// `createdAt` — the exact shape of the pre-fix bug (`sessions.max(by: createdAt)` with no mode
+    /// filter at all).
+    func testRefocusCatchPathNeverFallsBackToCodeSession() async throws {
+        let factory = RecordingTransportFactory()
+        let model = AppModel(makeTransport: { factory.make() }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        await waitUntil { !factory.made.isEmpty }
+        let t = factory.made[0]
+
+        // hello
+        await waitUntilSent(t, 1)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(lineJSON(t.sent[0])["id"] as! Int),"result":{"ok":true}}"#)
+        // session.list: one prior DISPATCH session already exists.
+        await waitUntilSent(t, 2)
+        let list = lineJSON(t.sent[1])
+        XCTAssertEqual(list["method"] as? String, "session.list")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(list["id"] as! Int),"result":{"sessions":[{"sessionId":"s_old","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]}}"#)
+        // session.attach(s_old) — establishes the real prior focus.
+        await waitUntilSent(t, 3)
+        let attachOld = lineJSON(t.sent[2])
+        XCTAssertEqual(attachOld["method"] as? String, "session.attach")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attachOld["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        await waitUntil { model.focusedSessionId == "s_old" }
+
+        // Drive refocus(onto:) directly, targeting a session that will fail to attach — the exact
+        // scenario ("target vanished or transport hiccuped") the catch path exists for.
+        let refocusTask = Task { await model.focusSession("s_target") }
+        await waitUntilSent(t, 4)
+        let attachTarget = lineJSON(t.sent[3])
+        XCTAssertEqual(attachTarget["method"] as? String, "session.attach")
+        XCTAssertEqual((attachTarget["params"] as? [String: Any])?["sessionId"] as? String, "s_target")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attachTarget["id"] as! Int),"error":{"code":1,"message":"boom"}}"#)
+
+        // catch: reconcile to attachedSession (rolled back to "s_old"), then re-list. The re-list's
+        // NEWEST OVERALL session is a CODE-mode one ("s_phone_code", createdAt 99) — the pre-fix
+        // bug would attach onto THIS. The only DISPATCH-mode entry left is "s_old" itself.
+        await waitUntilSent(t, 5)
+        let relist = lineJSON(t.sent[4])
+        XCTAssertEqual(relist["method"] as? String, "session.list")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(relist["id"] as! Int),"result":{"sessions":[{"sessionId":"s_old","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"},{"sessionId":"s_phone_code","scope":"global","createdAt":99,"lastSeq":0,"mode":"code"}]}}"#)
+
+        // Filtered-to-dispatch newest is "s_old" itself (the already-reconciled focus, but not
+        // equal to the failed target "s_target") — refocus's own pre-existing, untouched-by-this-fix
+        // retry logic re-attaches it. The assertion that matters: it targets "s_old", never
+        // "s_phone_code".
+        await waitUntilSent(t, 6)
+        let retryAttach = lineJSON(t.sent[5])
+        XCTAssertEqual(retryAttach["method"] as? String, "session.attach")
+        XCTAssertEqual((retryAttach["params"] as? [String: Any])?["sessionId"] as? String, "s_old", "must retry onto the surviving DISPATCH session, never the newer CODE one")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(retryAttach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+
+        await refocusTask.value
+        XCTAssertEqual(model.focusedSessionId, "s_old", "must never land on the newer CODE session after a failed attach")
+    }
+
+    /// Companion to the above: when the catch path's dispatch-filtered newest is a genuinely
+    /// DIFFERENT surviving session (not just the already-reconciled prior focus), the retry must
+    /// still land there — the mode filter fails closed only against CODE sessions, it must never
+    /// break the legitimate recovery path onto a real surviving DISPATCH session.
+    func testRefocusCatchPathRecoversOntoSurvivingDispatchSession() async throws {
+        let factory = RecordingTransportFactory()
+        let model = AppModel(makeTransport: { factory.make() }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        await waitUntil { !factory.made.isEmpty }
+        let t = factory.made[0]
+
+        // hello
+        await waitUntilSent(t, 1)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(lineJSON(t.sent[0])["id"] as! Int),"result":{"ok":true}}"#)
+        // session.list: one prior DISPATCH session already exists.
+        await waitUntilSent(t, 2)
+        let list = lineJSON(t.sent[1])
+        XCTAssertEqual(list["method"] as? String, "session.list")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(list["id"] as! Int),"result":{"sessions":[{"sessionId":"s_old","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]}}"#)
+        // session.attach(s_old) — establishes the real prior focus.
+        await waitUntilSent(t, 3)
+        let attachOld = lineJSON(t.sent[2])
+        XCTAssertEqual(attachOld["method"] as? String, "session.attach")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attachOld["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        await waitUntil { model.focusedSessionId == "s_old" }
+
+        let refocusTask = Task { await model.focusSession("s_target") }
+        await waitUntilSent(t, 4)
+        let attachTarget = lineJSON(t.sent[3])
+        XCTAssertEqual((attachTarget["params"] as? [String: Any])?["sessionId"] as? String, "s_target")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attachTarget["id"] as! Int),"error":{"code":1,"message":"boom"}}"#)
+
+        // Re-list: "s_old" (the reconciled focus) is GONE from this list entirely now — only a
+        // DIFFERENT surviving dispatch session ("s_dispatch2") and a newer CODE session remain.
+        await waitUntilSent(t, 5)
+        let relist = lineJSON(t.sent[4])
+        XCTAssertEqual(relist["method"] as? String, "session.list")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(relist["id"] as! Int),"result":{"sessions":[{"sessionId":"s_dispatch2","scope":"global","createdAt":5,"lastSeq":0,"mode":"dispatch"},{"sessionId":"s_code_newer","scope":"global","createdAt":99,"lastSeq":0,"mode":"code"}]}}"#)
+
+        await waitUntilSent(t, 6)
+        let retryAttach = lineJSON(t.sent[5])
+        XCTAssertEqual(retryAttach["method"] as? String, "session.attach")
+        XCTAssertEqual((retryAttach["params"] as? [String: Any])?["sessionId"] as? String, "s_dispatch2", "must recover onto the surviving DISPATCH session, ignoring the newer CODE one")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(retryAttach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+
+        await refocusTask.value
+        XCTAssertEqual(model.focusedSessionId, "s_dispatch2", "recovery must land on the surviving dispatch session")
+    }
 }

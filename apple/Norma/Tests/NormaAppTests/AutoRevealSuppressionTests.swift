@@ -148,4 +148,68 @@ final class AutoRevealSuppressionTests: XCTestCase {
             )
         }
     }
+
+    // MARK: - Minor 5: suppressionMarksUnread — the extracted "which suppression reason" predicate
+
+    /// Total silence (no unread mark) only when BOTH cli/terminal conditions hold — the
+    /// gate-feedback-1 FIX A case, unchanged since before orb-scope Part 2.
+    func testCliAndTerminalBothTrueDoesNotMarkUnread() {
+        XCTAssertFalse(suppressionMarksUnread(cliAttachedToFocused: true, frontmostIsTerminal: true, orbInitiated: false))
+        XCTAssertFalse(suppressionMarksUnread(cliAttachedToFocused: true, frontmostIsTerminal: true, orbInitiated: true))
+    }
+
+    /// Every other combination marks unread — this is the branch a not-orb-initiated turn actually
+    /// takes (nothing else on the Mac shows the reply).
+    func testAnyOtherCombinationMarksUnread() {
+        XCTAssertTrue(suppressionMarksUnread(cliAttachedToFocused: false, frontmostIsTerminal: false, orbInitiated: false))
+        XCTAssertTrue(suppressionMarksUnread(cliAttachedToFocused: true, frontmostIsTerminal: false, orbInitiated: false))
+        XCTAssertTrue(suppressionMarksUnread(cliAttachedToFocused: false, frontmostIsTerminal: true, orbInitiated: false))
+    }
+
+    /// Full 2×2×2 truth table, spelled out explicitly — the drift tripwire this extraction exists
+    /// for (mirrors `isAutoRevealSuppressed`'s own duplicated clause, kept in lockstep by sharing
+    /// the same `cliAttachedToFocused && frontmostIsTerminal` sub-expression via this one function).
+    func testSuppressionMarksUnreadFullTruthTable() {
+        let cases: [(cli: Bool, terminal: Bool, orbInitiated: Bool, expected: Bool)] = [
+            (false, false, false, true),
+            (true,  false, false, true),
+            (false, true,  false, true),
+            (true,  true,  false, false),
+            (false, false, true,  true),
+            (true,  false, true,  true),
+            (false, true,  true,  true),
+            (true,  true,  true,  false),
+        ]
+        for c in cases {
+            XCTAssertEqual(
+                suppressionMarksUnread(cliAttachedToFocused: c.cli, frontmostIsTerminal: c.terminal, orbInitiated: c.orbInitiated),
+                c.expected,
+                "cli=\(c.cli) terminal=\(c.terminal) orbInitiated=\(c.orbInitiated)"
+            )
+        }
+    }
+
+    // MARK: - Minor 4: hasReadableReply — the non-empty-reply gate
+
+    func testNoExchangesHasNoReadableReply() {
+        XCTAssertFalse(hasReadableReply(in: []))
+    }
+
+    func testLastExchangeWithEmptyReplyHasNoReadableReply() {
+        XCTAssertFalse(hasReadableReply(in: [Exchange(prompt: "hi", reply: "")]))
+    }
+
+    func testLastExchangeWithNonEmptyReplyHasReadableReply() {
+        XCTAssertTrue(hasReadableReply(in: [Exchange(prompt: "hi", reply: "hello back")]))
+    }
+
+    /// Only the LAST exchange matters — an earlier one having text doesn't make an empty-reply
+    /// tail exchange "readable".
+    func testOnlyLastExchangeIsConsulted() {
+        let exchanges = [
+            Exchange(prompt: "first", reply: "answered"),
+            Exchange(prompt: "second", reply: ""),
+        ]
+        XCTAssertFalse(hasReadableReply(in: exchanges))
+    }
 }
