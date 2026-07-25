@@ -301,8 +301,16 @@ final class AppModel: ObservableObject {
         case .session(let e):
             if case .sessionCreated(let v) = e {
                 if v.sessionId == selfCreatedSessionId { selfCreatedSessionId = nil; return }
-                if v.sessionId != focusedSessionId {
-                    await refocus(onto: v.sessionId) // most-recent focus (spec §4.4, 2b subset)
+                // orb-scope fix: the orb/field is a DISPATCH-mode surface only. The daemon
+                // broadcasts session_created to EVERY authed harness (not just attachments), and
+                // remote/phone-originated creates — and CLI/TUI ones — are always mode "code"
+                // (protocol contract: mode ABSENT means "code", packages/protocol/src/events.ts).
+                // A code session must never steal the orb's focus; it still flows to the
+                // directory/session-list observer (composed separately in `feed.onEvent`, ahead of
+                // this `handle` call) so the sidebar keeps updating — only the FOCUS action is
+                // gated here. Only a genuine dispatch-singleton create earns an automatic refocus.
+                if v.mode == "dispatch", v.sessionId != focusedSessionId {
+                    await refocus(onto: v.sessionId) // most-recent focus (spec §4.4, 2b subset), dispatch-only
                     return
                 }
             }
@@ -352,9 +360,13 @@ final class AppModel: ObservableObject {
         await refocus(onto: sessionId)
     }
 
+    /// orb-scope fix: on connect/reconnect the orb only auto-focuses the newest DISPATCH session —
+    /// code sessions (CLI/TUI/phone) never summon the field this way either. No dispatch session
+    /// existing yet is the correct pre-first-summon state (`focusedSessionId` stays nil);
+    /// `ensureFocusedSession()` mints the dispatch singleton on the first deliberate summon/submit.
     private func focusNewestSession() async {
-        guard let sessions = try? await client.listSessions(), !sessions.isEmpty else { return }
-        let newest = sessions.max(by: { $0.createdAt < $1.createdAt })!
+        guard let sessions = try? await client.listSessions() else { return }
+        guard let newest = sessions.filter({ $0.mode == "dispatch" }).max(by: { $0.createdAt < $1.createdAt }) else { return }
         await refocus(onto: newest.sessionId)
     }
 
