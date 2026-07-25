@@ -646,6 +646,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // get-or-create — session.create rejects the mode outright rather than silently minting a
         // second one (there must only ever be one).
         if (p.mode === "dispatch") throw new RpcFailure(ERR.INVALID_PARAMS, "dispatch sessions are created via session.dispatch, not session.create");
+        // Chat (slice A) is Mac-local for now: the phone gets chat in a later slice, together with
+        // its own engine and sync. Until then a remote caller may only mint code sessions.
+        if (p.mode === "chat" && socket.data.authedRole === "remote") {
+          throw new RpcFailure(ERR.INVALID_PARAMS, "remote callers may not create chat sessions yet");
+        }
         // SP3.4 hardening: the phone never picks a working directory or approval policy — the
         // spec's "the phone does not browse the Mac's filesystem" is enforced here, not just
         // convention. Local/harness callers are unchanged. Checked against the RAW wire params
@@ -661,7 +666,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // sessions default to the home directory (the same value session.dispatch uses). Scoped to
         // the remote role so local/harness callers keep today's semantics (omitted cwd stays unset).
         const cwd = p.cwd ?? (socket.data.authedRole === "remote" ? homedir() : undefined);
-        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy: p.approvalPolicy, origin: p.origin });
+        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy: p.approvalPolicy, origin: p.origin, mode: p.mode });
         const trusted = cwd ? (opts.trust?.isTrusted(cwd) ?? false) : false;
         // Broadcast the session_created event to every authed harness (not just attachments —
         // a brand-new session has none) so other harnesses can offer to follow (spec §4.4).

@@ -49,7 +49,7 @@ import { SubagentManager } from "./subagents";
 export async function makeGatingHarness(opts: {
   workflowsEnabled: boolean;
 }): Promise<{
-  deferredIndexFor: (meta: { origin?: string; mode?: "code" | "dispatch" }) => Promise<string>;
+  deferredIndexFor: (meta: { origin?: string; mode?: "code" | "dispatch" | "chat" }) => Promise<string>;
 }> {
   const home = mkdtempSync(join(tmpdir(), "norma-workflow-gating-home-"));
   const cwd = mkdtempSync(join(tmpdir(), "norma-workflow-gating-cwd-"));
@@ -84,7 +84,7 @@ export async function makeGatingHarness(opts: {
     workflowsEnabled: () => opts.workflowsEnabled,
   });
 
-  const deferredIndexFor = async (meta: { origin?: string; mode?: "code" | "dispatch" }): Promise<string> => {
+  const deferredIndexFor = async (meta: { origin?: string; mode?: "code" | "dispatch" | "chat" }): Promise<string> => {
     const sessionId = store.createSession("global", { cwd, approvalPolicy: "auto", origin: meta.origin, mode: meta.mode });
     await engine.runTurn(sessionId);
     return provider.requests[provider.requests.length - 1]?.instructions ?? "";

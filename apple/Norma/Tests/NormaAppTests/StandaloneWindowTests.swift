@@ -342,4 +342,59 @@ final class StandaloneWindowTests: XCTestCase {
         await refocusTask.value
         XCTAssertEqual(model.focusedSessionId, "s_dispatch2", "recovery must land on the surviving dispatch session")
     }
+
+    /// Chat Mode Slice A (CM-T3): site 3's mode filter is the SAME `mode == "dispatch"` positive
+    /// match as sites 1/2 — a CHAT session, even the newest overall by `createdAt`, must never win
+    /// the catch path's fallback either. Same shape as `testRefocusCatchPathNeverFallsBackToCodeSession`
+    /// just above, chat instead of code — evidence that all three orb-scope gates hold unchanged
+    /// for the new mode value.
+    func testRefocusCatchPathNeverFallsBackToChatSession() async throws {
+        let factory = RecordingTransportFactory()
+        let model = AppModel(makeTransport: { factory.make() }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        await waitUntil { !factory.made.isEmpty }
+        let t = factory.made[0]
+
+        // hello
+        await waitUntilSent(t, 1)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(lineJSON(t.sent[0])["id"] as! Int),"result":{"ok":true}}"#)
+        // session.list: one prior DISPATCH session already exists.
+        await waitUntilSent(t, 2)
+        let list = lineJSON(t.sent[1])
+        XCTAssertEqual(list["method"] as? String, "session.list")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(list["id"] as! Int),"result":{"sessions":[{"sessionId":"s_old","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]}}"#)
+        // session.attach(s_old) — establishes the real prior focus.
+        await waitUntilSent(t, 3)
+        let attachOld = lineJSON(t.sent[2])
+        XCTAssertEqual(attachOld["method"] as? String, "session.attach")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attachOld["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        await waitUntil { model.focusedSessionId == "s_old" }
+
+        // Drive refocus(onto:) directly, targeting a session that will fail to attach.
+        let refocusTask = Task { await model.focusSession("s_target") }
+        await waitUntilSent(t, 4)
+        let attachTarget = lineJSON(t.sent[3])
+        XCTAssertEqual(attachTarget["method"] as? String, "session.attach")
+        XCTAssertEqual((attachTarget["params"] as? [String: Any])?["sessionId"] as? String, "s_target")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attachTarget["id"] as! Int),"error":{"code":1,"message":"boom"}}"#)
+
+        // catch: reconcile to attachedSession (rolled back to "s_old"), then re-list. The re-list's
+        // NEWEST OVERALL session is a CHAT-mode one ("s_chat_newer", createdAt 99) — a mode-blind
+        // bug would attach onto THIS. The only DISPATCH-mode entry left is "s_old" itself.
+        await waitUntilSent(t, 5)
+        let relist = lineJSON(t.sent[4])
+        XCTAssertEqual(relist["method"] as? String, "session.list")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(relist["id"] as! Int),"result":{"sessions":[{"sessionId":"s_old","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"},{"sessionId":"s_chat_newer","scope":"global","createdAt":99,"lastSeq":0,"mode":"chat"}]}}"#)
+
+        await waitUntilSent(t, 6)
+        let retryAttach = lineJSON(t.sent[5])
+        XCTAssertEqual(retryAttach["method"] as? String, "session.attach")
+        XCTAssertEqual((retryAttach["params"] as? [String: Any])?["sessionId"] as? String, "s_old", "must retry onto the surviving DISPATCH session, never the newer CHAT one")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(retryAttach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+
+        await refocusTask.value
+        XCTAssertEqual(model.focusedSessionId, "s_old", "must never land on the newer CHAT session after a failed attach")
+    }
 }

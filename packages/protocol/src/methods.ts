@@ -43,7 +43,9 @@ export const SessionCreateParams = z.object({
   // Dispatch (Phase 7): "code" (default) | "dispatch". The handler REJECTS "dispatch" — the
   // singleton is minted only by session.dispatch. Accepted here so the wire shape documents the
   // axis; passing "code" is a no-op.
-  mode: z.enum(["code", "dispatch"]).optional(),
+  // Chat Mode Slice A: "chat" added — additive, NOT a singleton (many chat sessions may exist).
+  // The handler rejects it for remote callers only (Mac-local for this slice).
+  mode: z.enum(["code", "dispatch", "chat"]).optional(),
 });
 export const SessionCreateResult = z.object({ sessionId: z.string(), trusted: z.boolean() });
 

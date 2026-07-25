@@ -134,3 +134,75 @@ describe("session.dispatch get-or-create RPC (Phase 7 dispatch mode Task 2)", ()
     c.close();
   });
 });
+
+// Chat Mode Slice A Task 1: chat becomes a third session.create mode value — additive alongside
+// code (default) and dispatch (still rejected here, singleton minted only via session.dispatch).
+// Same bare-IPC-server harness shape as the dispatch describe block above (own SessionStore +
+// TokenAuthority), extended with the remote token (remote-role.test.ts's boot() pattern) since
+// slice A keeps chat Mac-local: a remote caller may not mint one yet.
+describe("chat mode (Chat Mode Slice A Task 1)", () => {
+  let stop: (() => void) | undefined;
+
+  afterEach(() => { stop?.(); stop = undefined; });
+
+  async function boot(): Promise<{ store: SessionStore; socketPath: string; harnessToken: string; remoteToken: string }> {
+    const home = mkdtempSync(join(tmpdir(), "norma-chat-mode-"));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store });
+    stop = () => { server.stop(); store.close(); };
+    return { store, socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote };
+  }
+
+  test("session.create mints a chat session and PERSISTS the mode", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "chat-tester");
+
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", mode: "chat" });
+    expect(res.error).toBeUndefined();
+    const created = store.read(res.result.sessionId, 0)[0] as any;
+    expect(created.type).toBe("session_created");
+    expect(created.mode).toBe("chat"); // today mode is parsed then DISCARDED — this is the gap
+    c.close();
+  });
+
+  test("session.create still rejects dispatch (singleton rule intact)", async () => {
+    const { socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "chat-tester");
+
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", mode: "dispatch" });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error.message).toContain("session.dispatch");
+    c.close();
+  });
+
+  test("chat is NOT a singleton — two creates make two sessions", async () => {
+    const { socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "chat-tester");
+
+    const a = await c.request(METHODS.sessionCreate, { scope: "global", mode: "chat" });
+    const b = await c.request(METHODS.sessionCreate, { scope: "global", mode: "chat" });
+    expect(a.error).toBeUndefined();
+    expect(b.error).toBeUndefined();
+    expect(a.result.sessionId).not.toBe(b.result.sessionId);
+    c.close();
+  });
+
+  test("a REMOTE caller may not create a chat session (slice A: remote stays code-only)", async () => {
+    const { socketPath, remoteToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(remoteToken, "iphone-gateway", "remote");
+
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", mode: "chat" });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error.message).toContain("remote callers may not create chat sessions yet");
+    c.close();
+  });
+});

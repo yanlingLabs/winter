@@ -37,7 +37,7 @@ export async function makeUltracodeHarness(opts: {
   /** Session-creation overrides for the human-origin gate's OTHER signal (meta.origin/meta.mode) —
    *  default undefined/undefined, a plain top-level code session. */
   origin?: string;
-  mode?: "code" | "dispatch";
+  mode?: "code" | "dispatch" | "chat";
 }): Promise<{
   sendHuman: (text: string) => Promise<void>;
   sendNonHuman: (text: string, clientName?: string) => Promise<void>;

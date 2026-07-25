@@ -38,7 +38,7 @@ import type { ProviderEvent } from "../../src/providers/types";
 // SESSION_SPAWN_TOOL exclusion) — so the "does NOT include"/"does include" assertions below in
 // BOTH directions are actually exercising the allowTools/excludeTools filters, not a vacuous
 // absence.
-function setup(script: ProviderEvent[][], opts: { mode?: "code" | "dispatch" } = {}) {
+function setup(script: ProviderEvent[][], opts: { mode?: "code" | "dispatch" | "chat" } = {}) {
   const home = mkdtempSync(join(tmpdir(), "norma-dispatch-toolset-"));
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-dispatch-toolset-cwd-")));
   const store = new SessionStore(home);
@@ -160,5 +160,64 @@ describe("dispatch mode: toolset + system prompt", () => {
     const codeInstructions = codeHarness.provider.requests[0]?.instructions ?? "";
     expect(codeInstructions).not.toContain("Assistant memory index");
     expect(codeInstructions).not.toContain("alex");
+  });
+});
+
+describe("chat mode (Slice A): toolset + system prompt + memory", () => {
+  test("a chat turn offers ONLY ask_user — no hands", async () => {
+    const { engine, sessionId, provider } = setup([text("ok")], { mode: "chat" });
+    await engine.runTurn(sessionId);
+    const names = new Set((provider.requests[0]?.tools ?? []).map((t) => t.name));
+
+    expect(names).toEqual(new Set(["ask_user"]));
+    for (const forbidden of ["write", "edit", "bash", "read", "glob", "grep", "ls", "lsp", "session_spawn"]) {
+      expect(names.has(forbidden)).toBe(false);
+    }
+  });
+
+  test("a chat turn uses the chat base prompt, not Dispatch's or code's", async () => {
+    const { engine, sessionId, provider } = setup([text("ok")], { mode: "chat" });
+    await engine.runTurn(sessionId);
+    const instructions = provider.requests[0]?.instructions ?? "";
+    expect(instructions).toContain("Chat mode");
+    expect(instructions).not.toContain("Dispatch mode");
+    expect(instructions).not.toContain("file tool paths are relative to it");
+  });
+
+  test("a chat turn assembles the ASSISTANT memory bucket, not the project one (mirrors dispatch)", async () => {
+    const chatHarness = setup([text("ok")], { mode: "chat" });
+    mkdirSync(assistantMemoryDirFor({ normaHome: chatHarness.assemblerHome }), { recursive: true });
+    writeFileSync(
+      join(assistantMemoryDirFor({ normaHome: chatHarness.assemblerHome }), "MEMORY.md"),
+      "- [alex](alex.md) — builds Norma\n",
+    );
+    await chatHarness.engine.runTurn(chatHarness.sessionId);
+    const chatInstructions = chatHarness.provider.requests[0]?.instructions ?? "";
+    expect(chatInstructions).toContain("Assistant memory index");
+    expect(chatInstructions).toContain("alex");
+    expect(chatInstructions).not.toContain("Project memory index");
+  });
+
+  test("code and dispatch turns are byte-unchanged by chat's arrival (regression)", async () => {
+    const dispatchHarness = setup([text("ok")], { mode: "dispatch" });
+    await dispatchHarness.engine.runTurn(dispatchHarness.sessionId);
+    const dispatchNames = new Set((dispatchHarness.provider.requests[0]?.tools ?? []).map((t) => t.name));
+    for (const n of dispatchNames) expect(DISPATCH_ALLOW_TOOLS.has(n)).toBe(true);
+    expect(dispatchNames.has("bash")).toBe(true);
+    expect(dispatchNames.has("session_spawn")).toBe(true);
+    const dispatchInstructions = dispatchHarness.provider.requests[0]?.instructions ?? "";
+    expect(dispatchInstructions).toContain("Dispatch mode");
+
+    const codeHarness = setup([text("ok")], { mode: "code" });
+    await codeHarness.engine.runTurn(codeHarness.sessionId);
+    const codeNames = new Set((codeHarness.provider.requests[0]?.tools ?? []).map((t) => t.name));
+    for (const expected of ["write", "edit", "lsp", "spawn_agent", "skill_write", "notebook_edit", "bash", "read"]) {
+      expect(codeNames.has(expected)).toBe(true);
+    }
+    expect(codeNames.has("session_spawn")).toBe(false);
+    const codeInstructions = codeHarness.provider.requests[0]?.instructions ?? "";
+    expect(codeInstructions).toContain("file tool paths are relative to it");
+    expect(codeInstructions).not.toContain("Dispatch mode");
+    expect(codeInstructions).not.toContain("Chat mode");
   });
 });

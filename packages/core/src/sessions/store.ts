@@ -191,7 +191,7 @@ export class SessionStore {
 
   createSession(
     scope: string,
-    opts: { cwd?: string; approvalPolicy?: SessionApprovalPolicy; origin?: string; mode?: "code" | "dispatch"; parentSessionId?: string } = {},
+    opts: { cwd?: string; approvalPolicy?: SessionApprovalPolicy; origin?: string; mode?: "code" | "dispatch" | "chat"; parentSessionId?: string } = {},
   ): string {
     if (!SCOPE_RE.test(scope)) throw new Error(`invalid scope: ${scope}`);
     const sessionId = `s_${randomBytes(6).toString("hex")}`;

@@ -210,7 +210,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// body instead of duplicating it. `nil` (every pre-existing caller) keeps the original
     /// behavior — centered on the main screen — now computed via the shared pure
     /// `centeredStandaloneFrame` instead of the inline midX/midY math this method used before.
-    private func openSessionInNewDetachedWindow(_ sessionId: String, frame: NSRect? = nil) {
+    /// Chat Mode Slice A (CM-T3): `title` widened from a fixed `"Norma"` to a defaulted parameter —
+    /// every PRE-EXISTING caller (orb's child-status circles, the sidebars' ⌘-click, the Dashboard
+    /// SessionsPane row click) keeps the exact same "Norma" fallback, unchanged; `openChat()` below
+    /// is the first caller to pass something else (the session's own title, or "Chat").
+    private func openSessionInNewDetachedWindow(_ sessionId: String, frame: NSRect? = nil, title: String = "Norma") {
         guard let model = appModel,
               let (feed, session) = model.makeDetachedFeed(sessionId: sessionId) else {
             OrbDebug.log("openSessionInNewDetachedWindow: no appModel or makeDetachedFeed nil — spawn aborted")
@@ -218,7 +222,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let resolvedFrame = frame ?? centeredStandaloneFrame(visibleFrame: visible)
-        spawnDetachedWindow(feed: feed, session: session, frame: resolvedFrame, title: "Norma")
+        spawnDetachedWindow(feed: feed, session: session, frame: resolvedFrame, title: title)
+    }
+
+    /// Chat Mode Slice A (CM-T3): pure decision helper for the "Chat" menu entry — the newest
+    /// `mode == "chat"` row's id, or `nil` meaning "create one". Same shape as `AppModel.
+    /// focusNewestSession()`'s own dispatch-only filter (`sessions.filter { $0.mode == "dispatch" }
+    /// .max(by: createdAt)`), scoped to chat instead — deliberately free of any client/MainActor
+    /// dependency (a plain `[SessionSummary]` in, `String?` out) so it's directly unit-testable
+    /// without a scripted transport.
+    nonisolated static func chatSessionToOpen(in rows: [SessionSummary]) -> String? {
+        rows.filter { $0.mode == "chat" }.max(by: { $0.createdAt < $1.createdAt })?.sessionId
+    }
+
+    /// Chat Mode Slice A (CM-T3): the detached chat window's title — the session's own title,
+    /// trimmed, falling back to "Chat" for a session with none yet (a freshly created one, or an
+    /// existing one the daemon hasn't titled). Same trim-and-fallback shape as `SessionsPane.
+    /// sessionDisplayTitle`, just chat's own fallback text instead of "New session" — kept
+    /// separate rather than reused since the two callers want different defaults.
+    nonisolated static func chatWindowTitle(_ title: String?) -> String {
+        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "Chat" : trimmed
+    }
+
+    /// Chat Mode Slice A (CM-T3): the menu bar's "Chat" entry. Lists sessions FRESH via `client.
+    /// listSessions()` rather than trusting `model.directory.rows` — that directory only refreshes
+    /// on a session-lifecycle broadcast or a SwiftUI sidebar's own `.task { await directory.
+    /// refresh() }` (`SessionSidebar`/`SessionsPane`), neither of which this plain AppKit menu
+    /// click can rely on having happened (e.g. right after a fresh launch, before any window has
+    /// ever been opened, `rows` is still empty). Opens the newest existing chat session
+    /// (`chatSessionToOpen`'s pure decision) via the same detached-window machinery as every other
+    /// spawn path, or creates one when none exists yet.
+    func openChat() {
+        guard let model = appModel else {
+            OrbDebug.log("openChat: no appModel — spawn aborted")
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            let rows = (try? await model.client.listSessions())?.map {
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId)
+            } ?? []
+            if let sid = Self.chatSessionToOpen(in: rows) {
+                let title = rows.first { $0.sessionId == sid }?.title
+                self.openSessionInNewDetachedWindow(sid, title: Self.chatWindowTitle(title))
+                return
+            }
+            await self.createAndOpenChat()
+        }
+    }
+
+    /// Chat Mode Slice A (CM-T3): the menu bar's "New Chat" entry — ALWAYS creates a fresh chat
+    /// session via `session.create({mode:"chat"})`, regardless of any existing chat session
+    /// (unlike "Chat" above, which opens the newest one when one exists). Chat sessions are never
+    /// the dispatch singleton — `session.create`, never `session.dispatch`.
+    func newChat() {
+        guard appModel != nil else {
+            OrbDebug.log("newChat: no appModel — spawn aborted")
+            return
+        }
+        Task { [weak self] in await self?.createAndOpenChat() }
+    }
+
+    /// Shared create+open body for `newChat()` and `openChat()`'s "no chat session exists yet"
+    /// path. Same `scope`/`cwd`/`approvalPolicy` as the sidebars' own "+ New session"
+    /// (`DetachedWindowController.newSession()`) — a plain, trusted-home-directory session — plus
+    /// `mode: "chat"`. A freshly created session never has a title yet, so `chatWindowTitle(nil)`
+    /// resolves straight to the "Chat" fallback.
+    private func createAndOpenChat() async {
+        guard let model = appModel,
+              let created = try? await model.client.createSession(scope: "global", cwd: NSHomeDirectory(), approvalPolicy: "auto", mode: "chat") else {
+            OrbDebug.log("createAndOpenChat: session.create(mode: chat) failed — spawn aborted")
+            return
+        }
+        openSessionInNewDetachedWindow(created.sessionId, title: Self.chatWindowTitle(nil))
     }
 
     /// Task 2 (2e-iv): the menu bar's "Open Norma App" entry (`NSMenuItem` wiring is Task 3) — a
@@ -801,6 +878,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             openCli: { [weak self] in self?.cliLauncher.openCli() },
             openNormaApp: { [weak self] in self?.openStandaloneNormaWindow() },
+            openNewChat: { [weak self] in self?.newChat() },
+            openChat: { [weak self] in self?.openChat() },
             openDashboard: { [weak self] in self?.openDashboard() },
             openPluginManager: { [weak self] in self?.openPluginManager() },
             openPairDevice: { [weak self] in self?.openPairDevice() },
