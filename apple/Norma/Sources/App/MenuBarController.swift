@@ -7,6 +7,10 @@ final class MenuBarController {
     private let summonField: () -> Void
     private let openCli: () -> Void
     private let openNormaApp: () -> Void
+    // Chat Mode Slice A (CM-T3): the "New Chat"/"Chat" entries — same decoupled-closure posture as
+    // every other action in this initializer.
+    private let openNewChat: () -> Void
+    private let openChat: () -> Void
     private let openDashboard: () -> Void
     private let openPluginManager: () -> Void
     // SP2b T5: the two Remote-pairing entry points — same decoupled-closure posture as every
@@ -51,6 +55,10 @@ final class MenuBarController {
     // handler re-derives the title after `CliInstaller.install()` runs.
     let cliInstallItem = NSMenuItem(title: "Install norma Command", action: #selector(didInstallCli), keyEquivalent: "")
     let openNormaAppItem = NSMenuItem(title: "Open Norma App", action: #selector(didOpenNormaApp), keyEquivalent: "")
+    // Chat Mode Slice A (CM-T3): "New Chat"/"Chat" — same adjacency/testability posture as
+    // `openNormaAppItem` (2e-iv precedent), placed right after it.
+    let newChatItem = NSMenuItem(title: "New Chat", action: #selector(didNewChat), keyEquivalent: "")
+    let chatItem = NSMenuItem(title: "Chat", action: #selector(didChat), keyEquivalent: "")
     // Task 5 (2f-ii): the Dashboard entry — same section/adjacency convention as `openCliItem`/
     // `openNormaAppItem` (2e-iv), mirrored exactly.
     let dashboardItem = NSMenuItem(title: "Dashboard…", action: #selector(didOpenDashboard), keyEquivalent: "")
@@ -193,6 +201,8 @@ final class MenuBarController {
         summonField: @escaping () -> Void,
         openCli: @escaping () -> Void,
         openNormaApp: @escaping () -> Void,
+        openNewChat: @escaping () -> Void,
+        openChat: @escaping () -> Void,
         openDashboard: @escaping () -> Void,
         openPluginManager: @escaping () -> Void,
         openPairDevice: @escaping () -> Void,
@@ -210,6 +220,8 @@ final class MenuBarController {
         self.summonField = summonField
         self.openCli = openCli
         self.openNormaApp = openNormaApp
+        self.openNewChat = openNewChat
+        self.openChat = openChat
         self.openDashboard = openDashboard
         self.openPluginManager = openPluginManager
         self.openPairDevice = openPairDevice
@@ -250,6 +262,10 @@ final class MenuBarController {
         }
         openNormaAppItem.target = self
         menu.addItem(openNormaAppItem)
+        newChatItem.target = self
+        menu.addItem(newChatItem)
+        chatItem.target = self
+        menu.addItem(chatItem)
         dashboardItem.target = self
         menu.addItem(dashboardItem)
         pluginManagerItem.target = self
@@ -420,6 +436,8 @@ final class MenuBarController {
         refreshCliInstallItem()
     }
     @objc private func didOpenNormaApp() { openNormaApp() }
+    @objc private func didNewChat() { openNewChat() }
+    @objc private func didChat() { openChat() }
     @objc private func didOpenDashboard() { openDashboard() }
     @objc private func didOpenPluginManager() { openPluginManager() }
     @objc private func didOpenPairDevice() { openPairDevice() }

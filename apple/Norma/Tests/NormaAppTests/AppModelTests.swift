@@ -383,6 +383,69 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(attaches.count, 1, "no refocus attach for the mode-absent session: \(t.sent)")
     }
 
+    /// Chat Mode Slice A (CM-T3), REGRESSION and load-bearing: a CHAT-mode `session_created` (e.g.
+    /// the menu bar's "New Chat"/"Chat" creating one, or a chat session opened from elsewhere) must
+    /// never refocus the orb either — same contract as the CODE-mode test above, just for the new
+    /// mode value. Site 1 of the three orb-scope gates (`sessionCreated`'s `v.mode == "dispatch"`
+    /// check) is a POSITIVE match on "dispatch" only, so "chat" already falls through it exactly
+    /// like "code" always has — this test is the evidence, not a code change.
+    func testSessionCreatedChatModeNeverRefocusesButDirectorySeesIt() async throws {
+        let t = AppScriptedTransport()
+        let model = AppModel(makeTransport: { t }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        await answerHandshake(t, sessions: #"[{"sessionId":"s_a","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]"#)
+        await waitUntilSent(t, 3)
+        let attachA = lineJSON(t.sent[2])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attachA["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        await waitUntil { model.session.state.status == .idle }
+        XCTAssertEqual(model.focusedSessionId, "s_a")
+
+        // A chat session is created (e.g. "New Chat" from the menu bar) — must NOT summon the
+        // orb's field.
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session_created","seq":1,"sessionId":"s_chat","ts":5,"scope":"global","mode":"chat"}}"#)
+
+        // The directory's own unconditional refresh still fires — answer its session.list
+        // re-fetch and confirm the row lands, same side-observer proof as the code-mode test.
+        let relist = await waitUntilMethod(t, "session.list", occurrence: 2)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(relist["id"] as! Int),"result":{"sessions":[{"sessionId":"s_a","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"},{"sessionId":"s_chat","scope":"global","createdAt":5,"lastSeq":0,"mode":"chat"}]}}"#)
+        await waitUntil { model.directory.rows.contains { $0.sessionId == "s_chat" } }
+        XCTAssertTrue(model.directory.rows.contains { $0.sessionId == "s_chat" }, "the side-observer (directory/session list) must still see the chat session")
+
+        // settle: focus must never have moved off s_a — no second session.attach.
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(model.focusedSessionId, "s_a", "a chat-mode session_created must never steal the orb's focus")
+        let attaches = t.sent.filter { lineJSON($0)["method"] as? String == "session.attach" }
+        XCTAssertEqual(attaches.count, 1, "no refocus attach for the chat session: \(t.sent)")
+    }
+
+    /// Chat Mode Slice A (CM-T3): site 2 (`focusNewestSession()`'s own `mode == "dispatch"` filter)
+    /// — a chat session, even the newest overall, must never win the connect-time auto-focus. Same
+    /// shape as `testFocusNewestSessionPicksNewestDispatchOverNewerCode` just above, chat instead
+    /// of code.
+    func testFocusNewestSessionPicksNewestDispatchOverNewerChat() async throws {
+        let t = AppScriptedTransport()
+        let model = AppModel(makeTransport: { t }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        // s_chat is NEWER overall (createdAt 9) but mode "chat" — must be skipped entirely.
+        // s_dispatch is older (createdAt 3) but the only dispatch session — must win.
+        await answerHandshake(t, sessions: #"[{"sessionId":"s_dispatch","scope":"global","createdAt":3,"lastSeq":0,"mode":"dispatch"},{"sessionId":"s_chat","scope":"global","createdAt":9,"lastSeq":0,"mode":"chat"}]"#)
+
+        let attach = await waitUntilMethod(t, "session.attach")
+        XCTAssertEqual((attach["params"] as? [String: Any])?["sessionId"] as? String, "s_dispatch", "must attach the newest DISPATCH session, not the newest overall")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        await waitUntil { model.focusedSessionId == "s_dispatch" }
+        XCTAssertEqual(model.focusedSessionId, "s_dispatch")
+
+        // settle: no second attach targeting s_chat may trail in.
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        let attaches = t.sent.filter { lineJSON($0)["method"] as? String == "session.attach" }
+        XCTAssertEqual(attaches.count, 1, "no attach to the newer chat session: \(t.sent)")
+    }
+
     /// `focusNewestSession()` (fired from `feed.onAttach` on every connect/reconnect) must pick the
     /// newest DISPATCH session, ignoring a newer code one entirely.
     func testFocusNewestSessionPicksNewestDispatchOverNewerCode() async throws {

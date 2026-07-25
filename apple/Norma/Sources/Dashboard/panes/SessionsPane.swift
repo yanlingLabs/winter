@@ -84,6 +84,14 @@ struct SessionsPane: View {
                                             .bold()
                                             .foregroundStyle(.secondary)
                                     }
+                                    // Chat Mode Slice A (CM-T3): same badge treatment, beside the
+                                    // dispatch one — a chat session reads distinctly too.
+                                    if row.mode == "chat" {
+                                        Text("CHAT")
+                                            .font(.caption2)
+                                            .bold()
+                                            .foregroundStyle(.secondary)
+                                    }
                                     Text(sessionDisplayTitle(row.title))
                                         .font(.system(size: 13))
                                         .lineLimit(1)

@@ -213,11 +213,16 @@ extension NormaClient {
         }
     }
 
-    public func createSession(scope: String, cwd: String? = nil, approvalPolicy: String? = nil) async throws -> (sessionId: String, trusted: Bool) {
+    /// Chat Mode Slice A (CM-T3): `mode` is additive and defaults to `nil` (the daemon reads
+    /// absence as "code", `packages/protocol/src/methods.ts`'s `SessionCreateParams.mode`) — every
+    /// existing call site (the sidebar's "+ New session", `norma-probe`) is unaffected. The Mac
+    /// app's "New Chat"/"Chat" menu entries are the first callers to pass `mode: "chat"`.
+    public func createSession(scope: String, cwd: String? = nil, approvalPolicy: String? = nil, mode: String? = nil) async throws -> (sessionId: String, trusted: Bool) {
         let r = try await request("session.create", params: obj([
             "scope": .string(scope),
             "cwd": cwd.map { .string($0) },
             "approvalPolicy": approvalPolicy.map { .string($0) },
+            "mode": mode.map { .string($0) },
         ]))
         guard let id = r["sessionId"]?.stringValue, let trusted = r["trusted"]?.boolValue else {
             throw RpcError(code: -3, message: "invalid result from server for session.create")

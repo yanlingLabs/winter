@@ -17,6 +17,8 @@ final class MenuBarEntryPointsTests: XCTestCase {
     private func makeController(
         openCli: @escaping () -> Void = {},
         openNormaApp: @escaping () -> Void = {},
+        openNewChat: @escaping () -> Void = {},
+        openChat: @escaping () -> Void = {},
         openDashboard: @escaping () -> Void = {},
         openPluginManager: @escaping () -> Void = {},
         openPairDevice: @escaping () -> Void = {},
@@ -35,6 +37,8 @@ final class MenuBarEntryPointsTests: XCTestCase {
             summonField: {},
             openCli: openCli,
             openNormaApp: openNormaApp,
+            openNewChat: openNewChat,
+            openChat: openChat,
             openDashboard: openDashboard,
             openPluginManager: openPluginManager,
             openPairDevice: openPairDevice,
@@ -119,7 +123,16 @@ final class MenuBarEntryPointsTests: XCTestCase {
             return
         }
 
-        XCTAssertEqual(dashboardIdx, appIdx + 1, "Dashboard… must be adjacent to Open Norma App, no separator between them")
+        // Chat Mode Slice A (CM-T3): "New Chat"/"Chat" sit right after Open Norma App, adjacent
+        // to each other and to Dashboard… — same "no separator" posture as every other entry
+        // point in this run.
+        guard let newChatIdx = titles.firstIndex(of: "New Chat"),
+              let chatIdx = titles.firstIndex(of: "Chat") else {
+            return XCTFail("expected New Chat and Chat present, got \(titles)")
+        }
+        XCTAssertEqual(newChatIdx, appIdx + 1, "New Chat must be adjacent to Open Norma App, no separator between them")
+        XCTAssertEqual(chatIdx, newChatIdx + 1, "Chat must be adjacent to New Chat, no separator between them")
+        XCTAssertEqual(dashboardIdx, chatIdx + 1, "Dashboard… must be adjacent to Chat, no separator between them")
         // Phase 4d-iii Task 2: "Manage Plugins…" is adjacent to Dashboard…, same posture as
         // Dashboard… itself being adjacent to Open Norma App — no separator between them either.
         XCTAssertEqual(pluginManagerIdx, dashboardIdx + 1, "Manage Plugins… must be adjacent to Dashboard…, no separator between them")
@@ -226,6 +239,8 @@ final class MenuBarEntryPointsTests: XCTestCase {
         let titles = controller.statusItem?.menu?.items.map(\.title) ?? []
         XCTAssertEqual(titles.filter { $0 == "Open CLI" }.count, 1)
         XCTAssertEqual(titles.filter { $0 == "Open Norma App" }.count, 1)
+        XCTAssertEqual(titles.filter { $0 == "New Chat" }.count, 1)
+        XCTAssertEqual(titles.filter { $0 == "Chat" }.count, 1)
         XCTAssertEqual(titles.filter { $0 == "Dashboard…" }.count, 1)
         XCTAssertEqual(titles.filter { $0 == "Manage Plugins…" }.count, 1)
         XCTAssertEqual(titles.filter { $0 == "Pair a Device…" }.count, 1)
@@ -260,6 +275,52 @@ final class MenuBarEntryPointsTests: XCTestCase {
         NSApp.sendAction(item.action!, to: item.target, from: item)
 
         XCTAssertEqual(fired, 1)
+    }
+
+    // MARK: - Chat Mode Slice A (CM-T3): "New Chat"/"Chat"
+
+    func testNewChatItemFiresInjectedClosure() {
+        var fired = 0
+        let controller = makeController(openNewChat: { fired += 1 })
+        controller.install()
+
+        let item = controller.newChatItem
+        XCTAssertNotNil(item.target)
+        XCTAssertNotNil(item.action)
+        NSApp.sendAction(item.action!, to: item.target, from: item)
+
+        XCTAssertEqual(fired, 1)
+    }
+
+    func testChatItemFiresInjectedClosure() {
+        var fired = 0
+        let controller = makeController(openChat: { fired += 1 })
+        controller.install()
+
+        let item = controller.chatItem
+        XCTAssertNotNil(item.target)
+        XCTAssertNotNil(item.action)
+        NSApp.sendAction(item.action!, to: item.target, from: item)
+
+        XCTAssertEqual(fired, 1)
+    }
+
+    /// Firing "New Chat" must never fire "Chat" (and vice versa) — same independence guarantee as
+    /// `testOpenCliAndOpenNormaAppClosuresAreIndependent`.
+    func testNewChatAndChatClosuresAreIndependent() {
+        var newChatFired = 0
+        var chatFired = 0
+        let controller = makeController(
+            openNewChat: { newChatFired += 1 },
+            openChat: { chatFired += 1 }
+        )
+        controller.install()
+
+        let chatItem = controller.chatItem
+        NSApp.sendAction(chatItem.action!, to: chatItem.target, from: chatItem)
+
+        XCTAssertEqual(chatFired, 1)
+        XCTAssertEqual(newChatFired, 0)
     }
 
     /// Firing one item must never fire the other.

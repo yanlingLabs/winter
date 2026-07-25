@@ -52,6 +52,20 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertEqual(seq, 42)
     }
 
+    /// Chat Mode Slice A (CM-T3): `mode` is additive to `createSession` — omitted (the test above)
+    /// leaves the wire params exactly as before; passed, it round-trips onto `session.create`'s
+    /// `mode` field verbatim (the daemon's own `SessionCreateParams.mode` accepts "chat").
+    func testCreateSessionThreadsModeThrough() async throws {
+        let (client, t) = try await connected()
+
+        let (req, created) = try await roundTrip(t, sentIndex: 1, result: #"{"sessionId":"s_chat","trusted":false}"#) {
+            try await client.createSession(scope: "global", cwd: "/tmp/proj", approvalPolicy: "auto", mode: "chat")
+        }
+        XCTAssertEqual(req["method"] as? String, "session.create")
+        XCTAssertEqual((req["params"] as? [String: Any])?["mode"] as? String, "chat")
+        XCTAssertEqual(created.sessionId, "s_chat")
+    }
+
     func testRespondersAndControls() async throws {
         let (client, t) = try await connected()
         let cases: [(String, String, () async throws -> Void)] = [
