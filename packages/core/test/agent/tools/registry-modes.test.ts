@@ -60,4 +60,29 @@ describe("per-mode tool derivation", () => {
     r.register(def("lsp", { deferred: true }));
     expect(r.namesForMode("code", { builtinDeferral: false }).has("ToolSearch")).toBe(false);
   });
+
+  // R-T3 whole-branch review FIX 2: namesForMode excludes ToolSearch from the ordinary
+  // mode-membership pass and decides it purely via anyDeferred (:100) — but namesNotForMode used
+  // to have no equivalent exclusion, so a hypothetical future `modes` declaration on ToolSearch
+  // itself (it declares none today) would make it satisfy namesNotForMode("code")'s plain
+  // complement check and land in code's `excludeTools` (engine.ts runThread's toolAccess for a
+  // plain, non-dispatch/non-chat session) — stripping ToolSearch out of code mode ENTIRELY even
+  // though namesForMode("code") still (correctly) reports it eligible. Pins BOTH directions so the
+  // two functions can never again disagree about ToolSearch, regardless of what `modes` it might
+  // one day carry.
+  test("ToolSearch's own (hypothetical) modes field never feeds namesNotForMode — it always tracks namesForMode's anyDeferred decision instead", () => {
+    const r = new ToolRegistry();
+    // ToolSearch declares modes NOT including "code" — the exact landmine scenario probed by the
+    // review. Real ToolSearch declares no `modes` at all today; this is deliberately adversarial.
+    r.register(def("ToolSearch", { modes: ["chat"] }));
+    r.register(def("web_fetch", { modes: ["code"], deferred: true })); // gives code an eligible deferred tool
+    // Direction 1 (unaffected by this fix, pinned anyway so a regression here is caught too):
+    // namesForMode("code") still resolves ToolSearch as eligible via anyDeferred, ignoring
+    // ToolSearch's own declared modes entirely.
+    expect(r.namesForMode("code", { builtinDeferral: true }).has("ToolSearch")).toBe(true);
+    // Direction 2 (the actual fix): namesNotForMode("code") must NOT list ToolSearch as excluded —
+    // before FIX 2 this was `true`, which would strip ToolSearch out of code's excludeTools-shaped
+    // toolAccess in engine.ts.
+    expect(r.namesNotForMode("code").has("ToolSearch")).toBe(false);
+  });
 });

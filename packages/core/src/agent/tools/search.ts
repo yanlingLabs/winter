@@ -56,14 +56,18 @@ export function registerSearchTool(r: ToolRegistry, deps: SearchToolDeps = {}): 
     name: "Search",
     description:
       "Search the web and get back results WITH an excerpt of each page, in a single fast call. Use it freely whenever a fact might be newer than you are, or when the user asks about something current. Cite the URL when you use what it returns. Requires a stored Exa API key (norma login --exa-key).",
-    // Deliberately NOT `deferred: true` (unlike code's web_search): CHAT_ALLOW_TOOLS contains no
-    // ToolSearch, so a deferred Search could never have its schema loaded — it would appear in
-    // chat's instructions and be permanently uncallable. That is the pre-existing dispatch-
-    // allowlist bug (DISPATCH_ALLOW_TOOLS advertises web_fetch/web_search while omitting
-    // ToolSearch) — this file does not repeat it, and a named test pins the fix.
-    // R-T2: dispatch adoption is Task 3's own swap — declaring it here now is what makes that
-    // swap a one-line change later (dispatch-prompt.ts's system prompt still routes through
-    // web_search/web_fetch until then; this only affects the derived TOOLSET).
+    // Deliberately NOT `deferred: true` (unlike code's web_search): chat's derived toolset
+    // (registry.namesForMode("chat")) has no ToolSearch member unless something chat-eligible is
+    // itself deferred (nothing is), so a deferred Search here could never have its schema loaded —
+    // it would appear in chat's instructions and be permanently uncallable. That mirrors bug #7,
+    // the pre-existing dispatch-allowlist bug fixed by R-T2's `namesForMode` auto-ToolSearch
+    // addition (registry.ts): dispatch used to advertise web_fetch/web_search (both `deferred:
+    // true`) with no ToolSearch entry point of its own, making them permanently unloadable — this
+    // file does not repeat that, and a named test pins the fix.
+    // R-T3 (Task 3) went further and removed web_fetch/web_search from dispatch's `modes` entirely
+    // (web.ts) — dispatch now routes web lookups through THIS tool instead, not deferred, so it
+    // needs no ToolSearch round-trip and returns page excerpts in one call. dispatch-prompt.ts's
+    // DISPATCH_SYSTEM_PROMPT routing doctrine names "Search" explicitly, not web_search/web_fetch.
     modes: ["chat", "dispatch"],
     args: z.object({
       query: z.string().min(1),

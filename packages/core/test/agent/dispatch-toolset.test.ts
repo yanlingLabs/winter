@@ -54,7 +54,7 @@ function setup(script: ProviderEvent[][], opts: { mode?: "code" | "dispatch" | "
   registerSessionSpawnTool(registry);
   registerPushNotificationTool(registry);
   registerAskUserTool(registry);
-  // B1-T3: chat's own AskQuestion — CHAT_ALLOW_TOOLS is now {AskQuestion}, not {ask_user}. Must be
+  // B1-T3: chat's own AskQuestion — chat's allowlist is now {AskQuestion}, not {ask_user}. Must be
   // registered here or a chat turn's offered toolset would be (wrongly) empty below.
   registerAskQuestionTool(registry);
   registerWebTools(registry);

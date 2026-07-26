@@ -42,7 +42,7 @@ import type { ProviderEvent } from "../../src/providers/types";
  * notes, no multi-select). A SEPARATE tool rather than a mode-aware `ask_user` because
  * `ToolRegistry.register()` throws on duplicate names and the registry is built ONCE per daemon
  * (daemon.ts), not per session — per-session differentiation is purely name filtering
- * (CHAT_ALLOW_TOOLS).
+ * (registry.namesForMode("chat", ...)).
  *
  * Harness mirrors chat-mode-allowlist.test.ts's own `setup()` — same near-full production tool
  * surface, and the SAME production-shaped `toolSearch: { enabled: () => undefined }` (the config
@@ -70,7 +70,7 @@ function setup(script: ProviderEvent[][], opts: { mode?: "code" | "dispatch" | "
   registerPushNotificationTool(registry);
   registerAskUserTool(registry);
   registerAskQuestionTool(registry);
-  registerSearchTool(registry); // B1-T5: CHAT_ALLOW_TOOLS now also lists "Search" — register it in
+  registerSearchTool(registry); // B1-T5: chat's derived allowlist now also lists "Search" — register it in
   // this file's full-surface harness too, or the "offered exactly AskQuestion" assertion below
   // would pass vacuously (nothing to prove Search rides along) rather than actually re-verifying
   // the updated allowlist.

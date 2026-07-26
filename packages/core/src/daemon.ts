@@ -101,6 +101,15 @@ export interface RunningDaemon {
   // runtime change. Lets a Swift test harness (RealDaemon.swift) that spawns this via a `bun -e`
   // fixture print `d.tokens.remote` without a separate FileSecretStore read.
   tokens: { harness: string; admin: string; remote: string };
+  // R-T3 whole-branch review FIX 1: the SAME ToolRegistry instance every `register*Tool(s)` call
+  // inside the `if (agentProvider)` gate above populates (mirrored into `sharedRegistry`, then
+  // threaded to ipc/server.ts's `registry` option) — exposed here too so a test that boots a REAL
+  // daemon (temp NORMA_HOME + injected FakeProvider, same precedent as server.test.ts/
+  // remote-allowlist-parity.test.ts) can walk `registry.namesForMode(mode, ...)` against daemon.ts's
+  // ACTUAL registration path instead of a hand-picked mirror of it (see
+  // test/agent/mode-toolset-census.test.ts). `null` on a no-agentProvider daemon (opts.agentProvider
+  // === null), same "typed no-op" precedent as `sharedRegistry ?? undefined` a few lines below.
+  registry: ToolRegistry | null;
   stop(): void;
 }
 
@@ -1214,6 +1223,7 @@ export async function startDaemon(opts: {
   return {
     socketPath: dirs.socketPath,
     tokens,
+    registry: sharedRegistry,
     stop() {
       // lspManager: killAllNow() FIRST delivers a synchronous SIGTERM to every warm child (the real
       // shutdown protection — mcp/pluginSupervisor's stopAll are likewise synchronous kills), since

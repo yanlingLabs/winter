@@ -129,7 +129,7 @@ function setup(
   registerReadTools(registry);
   registerWriteTools(registry);
   registerAskUserTool(registry);
-  // B1-T3: CHAT_ALLOW_TOOLS is now {AskQuestion}, not {ask_user} — this harness's `allOfferedTools`
+  // B1-T3: chat's allowlist is now {AskQuestion}, not {ask_user} — this harness's `allOfferedTools`
   // assertions below pin the exact chat toolset, so AskQuestion must be registered here too or a
   // chat turn's offered list would be (wrongly) empty rather than proving the allowlist itself.
   registerAskQuestionTool(registry);

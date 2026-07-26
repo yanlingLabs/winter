@@ -110,10 +110,19 @@ export class ToolRegistry {
   }
 
   /** The complement of namesForMode — for code's exclude-shaped toolAccess, which must keep
-   *  admitting dynamically registered tools by default rather than enumerating them. */
+   *  admitting dynamically registered tools by default rather than enumerating them. Mirrors
+   *  namesForMode's own `d.name !== "ToolSearch"` exclusion (:100): ToolSearch's eligibility is
+   *  ALWAYS decided by namesForMode's anyDeferred check, never by whatever `modes` field ToolSearch
+   *  itself might carry (today it declares none). Without this exclusion here too, a future edit
+   *  that gave ToolSearch an explicit `modes` not including "code" would make ToolSearch satisfy
+   *  THIS function's ordinary complement check and land in code's `excludeTools` (engine.ts's
+   *  runThread toolAccess for a plain, non-dispatch/non-chat session) — silently stripping
+   *  ToolSearch out of code mode entirely and making every deferred tool in the daemon's primary
+   *  mode permanently unloadable, with namesForMode("code") still (correctly, per its own
+   *  anyDeferred logic) reporting ToolSearch as eligible the whole time. */
   namesNotForMode(mode: "code" | "dispatch" | "chat"): Set<string> {
     return new Set([...this.defs.values()]
-      .filter((d) => !(d.modes ?? ["code"]).includes(mode))
+      .filter((d) => d.name !== "ToolSearch" && !(d.modes ?? ["code"]).includes(mode))
       .map((d) => d.name));
   }
 
