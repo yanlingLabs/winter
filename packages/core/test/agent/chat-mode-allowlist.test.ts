@@ -169,25 +169,31 @@ describe("CM branch review: code/dispatch deferred blocks unchanged in kind (reg
     expect(instructions).toContain("call the `Skill` tool");
   });
 
-  test("a dispatch session's deferred block narrows to its own eligible tools: push_notification/web_fetch/web_search remain, lsp/skill_write drop out (this is the fix — dispatch's block previously over-advertised too)", async () => {
+  test("a dispatch session's deferred block narrows to its own eligible tools: push_notification remains, web_fetch/web_search/lsp/skill_write all drop out (R-T3: web_fetch/web_search are no longer dispatch-eligible at all — see dispatch-search.test.ts for the replacement, Search)", async () => {
     const { engine, sessionId, provider, registry } = setup([text("ok")], { mode: "dispatch" });
     await engine.runTurn(sessionId);
     const instructions = provider.requests[0]?.instructions ?? "";
     expect(instructions).toContain("# Deferred tools");
-    for (const name of ["push_notification", "web_fetch", "web_search"]) {
+    for (const name of ["push_notification"]) {
       expect(instructions).toContain(deferredBullet(name));
     }
-    for (const name of ["lsp", "skill_write"]) {
+    for (const name of ["lsp", "skill_write", "web_fetch", "web_search"]) {
       expect(instructions).not.toContain(deferredBullet(name));
     }
     // R-T2 fix-round-1: this was "Pre-existing, OUT OF SCOPE gap the review flagged (#7)... this
     // fix deliberately does not paper over" — pinning `DISPATCH_ALLOW_TOOLS.has("ToolSearch") ===
     // false` as the (undesired but accepted) status quo. R-T2's `namesForMode` DOES fix bug #7 for
     // real: a mode with any eligible `deferred:true` tool now always gets ToolSearch alongside it
-    // (dispatch has three here: push_notification/web_fetch/web_search, and `builtinDeferral: true`
-    // matches this harness's own production-shaped `toolSearch: { enabled: () => undefined }`,
-    // which IS active). So this now asserts the FIX, not the gap — `true`, not `false`.
-    expect(registry.namesForMode("dispatch", { builtinDeferral: true }).has("ToolSearch")).toBe(true);
+    // (dispatch has one here now — push_notification; web_fetch/web_search dropped out of
+    // dispatch's `modes` entirely in R-T3, they no longer contribute). So this now asserts the
+    // FIX, not the gap — `true`, not `false`.
+    //
+    // R-T3 review finding 3: read what the engine ACTUALLY resolved for this real turn instead of
+    // hand-feeding `builtinDeferral: true` into namesForMode directly — a literal here would keep
+    // passing even if this harness's own toolSearch wiring stopped being active, describing
+    // behavior a real turn no longer has. `provider.requests[...]` is the same real-resolution
+    // source every other assertion in this file already reads off.
+    expect((provider.requests[0]?.tools ?? []).some((t) => t.name === "ToolSearch")).toBe(true);
     // Dispatch's own Skills header ALSO drops — Skill was never dispatch-eligible either (a
     // same-shape, previously-latent instance of Important 1 this general fix closes for free).
     expect(registry.namesForMode("dispatch", { builtinDeferral: true }).has("Skill")).toBe(false);

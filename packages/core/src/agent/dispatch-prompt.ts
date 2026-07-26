@@ -5,7 +5,7 @@ export const DISPATCH_SYSTEM_PROMPT = [
   "You are Norma in Dispatch mode: the user's ambient coordinator on this Mac. You plan, delegate, monitor, and report — you are NOT a coding session.",
   "",
   "# Routing doctrine",
-  "Always use the narrowest capable tool, in this order: answer directly < web_search/web_fetch < read/glob/grep/ls < bash < computer < session_spawn.",
+  "Always use the narrowest capable tool, in this order: answer directly < Search < read/glob/grep/ls < bash < computer < session_spawn.",
   "Anything that CHANGES FILES routes to session_spawn — no exceptions. You have no write or edit tools; do not try to write files via bash either.",
   "bash is for inspection and glue: git status, running a script or build the user asked about — never file mutation.",
   "",
@@ -23,10 +23,21 @@ export const DISPATCH_SYSTEM_PROMPT = [
 // as two). It's gone — engine.ts's toolAccess for dispatch is now
 // `registry.namesForMode("dispatch", { builtinDeferral })` (registry.ts), derived live from each
 // tool def's own `modes` field (session-spawn.ts, task-stop.ts, computer.ts, fs-read.ts, bash.ts,
-// ask-user.ts, web.ts, push-notification.ts all carry `modes: ["code", "dispatch"]`; search.ts
-// carries `modes: ["chat", "dispatch"]`). The live toolset also now includes "ToolSearch" whenever
+// ask-user.ts, push-notification.ts all carry `modes: ["code", "dispatch"]`; search.ts carries
+// `modes: ["chat", "dispatch"]`). The live toolset also now includes "ToolSearch" whenever
 // ToolSearch deferral is active (bug #7's fix — a mode with any eligible deferred tool always gets
 // ToolSearch alongside it, registry.ts's `namesForMode`), which this constant never tracked. The
 // tests that used to import this constant for static sanity checks were rewritten to call
 // `registry.namesForMode(...)` directly against their own harness's registry instead (see
 // task-2-report.md, "Fix round 1").
+//
+// R-T3 (Task 3): the derivation above is what EXPOSED bug #7's other half — dispatch's toolset
+// historically had no ToolSearch entry point of its own, so its two `deferred: true` web tools
+// (web_fetch/web_search, web.ts) were advertised but permanently uncallable; a reviewer reproduced
+// the catch-22 end to end (ToolSearch itself refused as unavailable, then push_notification
+// refused as "deferred — load its schema via ToolSearch first"). push_notification staying
+// dispatch-eligible+deferred is what makes ToolSearch appear for dispatch at all (it is loadable
+// now); web_fetch/web_search are simply gone from dispatch's `modes` (web.ts, R-T3) — dispatch
+// routes web lookups through `Search` (search.ts) instead, which was already `modes: ["chat",
+// "dispatch"]` and NOT deferred, so it needs no ToolSearch round-trip and returns page excerpts in
+// one call (no fetch-the-result-url second step, unlike the old web_search+web_fetch pair).

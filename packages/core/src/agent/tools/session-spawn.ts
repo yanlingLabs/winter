@@ -22,10 +22,17 @@ export function registerSessionSpawnTool(r: ToolRegistry, opts: { models?: strin
   r.register({
     name: "session_spawn",
     // R-T2: dispatch's own orchestration verb — was DISPATCH_ALLOW_TOOLS's literal membership,
-    // now the single declaration site. Code eligibility is vestigial (SESSION_SPAWN_TOOL is
-    // ALWAYS added to code's excludeTools unconditionally in engine.ts, independent of this field)
-    // but kept for consistency with every other former-DISPATCH_ALLOW_TOOLS member.
-    modes: ["code", "dispatch"],
+    // now the single declaration site.
+    // R-T3 review finding 1: this used to read `["code", "dispatch"]` — "code eligibility is
+    // vestigial (SESSION_SPAWN_TOOL is ALWAYS added to code's excludeTools unconditionally in
+    // engine.ts, independent of this field) but kept for consistency" — which was exactly the
+    // class of drift this whole slice exists to remove: eligibility stated in two places that
+    // could disagree. Declared truthfully as dispatch-only now. engine.ts's hardcoded
+    // SESSION_SPAWN_TOOL exclusion for code stays as belt-and-braces: if a later task ever moves
+    // code from exclude-shaped toolAccess to an allow-shaped `namesForMode("code")` (chat and
+    // dispatch already are), this field alone would no longer keep session_spawn off code's
+    // toolset — the hardcoded exclusion is what still would.
+    modes: ["dispatch"],
     description: [
       "Spawn a full, first-class work session in a directory. The child is an ordinary code session:",
       "own transcript, visible in the session list, full tools. It runs asynchronously — you get a",

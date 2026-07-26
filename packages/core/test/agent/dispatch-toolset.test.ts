@@ -107,11 +107,14 @@ describe("dispatch mode: toolset + system prompt", () => {
     const names = new Set((provider.requests[0]?.tools ?? []).map((t) => t.name));
 
     expect(names.has("bash")).toBe(true);
-    expect(names.has("web_fetch")).toBe(true);
     // Task 4: session_spawn is now registered AND whitelisted — present for a dispatch session.
     expect(names.has("session_spawn")).toBe(true);
 
-    for (const excluded of ["write", "edit", "lsp", "spawn_agent", "skill_write", "notebook_edit"]) {
+    // R-T3: web_fetch/web_search dropped from dispatch's modes — they were `deferred: true` and
+    // dispatch (this harness) has no ToolSearch registered at all, so they were advertised here
+    // but could never actually be called (bug #7). Dispatch now uses Search (search.ts) instead;
+    // its own harness in mode-toolset-equivalence.test.ts / dispatch-search.test.ts pins that.
+    for (const excluded of ["write", "edit", "lsp", "spawn_agent", "skill_write", "notebook_edit", "web_fetch", "web_search"]) {
       expect(names.has(excluded)).toBe(false);
     }
   });

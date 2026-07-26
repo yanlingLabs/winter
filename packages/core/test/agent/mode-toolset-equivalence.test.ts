@@ -106,7 +106,13 @@ function harness(opts: { mode: "code" | "dispatch" | "chat"; extraTool?: string 
     // `provider.requests[...]` entry — never a constant.
     offered: (): string[] => {
       const specNames = provider.requests.flatMap((r) => (r.tools ?? []).map((t) => t.name));
-      const deferredNames = provider.requests.flatMap((r) => [...(r.instructions ?? "").matchAll(/^- (\S+) —/gm)].map((m) => m[1]!));
+      // R-T3: negative lookahead excludes the "## Available capabilities" skills bullets
+      // (`- **name** — description`, context.ts) — a code session's Skills listing shares the
+      // same `- X — ` bullet shape as the "# Deferred tools" section but is a DIFFERENT list
+      // (available skills, not deferred tools); without excluding the bold form here, this test's
+      // new exact-toEqual pins below would spuriously fail the moment any built-in skill (e.g.
+      // `writing-skills`) is present, for a reason that has nothing to do with mode eligibility.
+      const deferredNames = provider.requests.flatMap((r) => [...(r.instructions ?? "").matchAll(/^- (?!\*\*)(\S+) —/gm)].map((m) => m[1]!));
       return [...new Set([...specNames, ...deferredNames])];
     },
   };
@@ -128,6 +134,31 @@ describe("mode toolsets are unchanged by the derivation refactor", () => {
       expect(offered).toContain(t);
     }
     for (const t of ["Search", "AskQuestion", "session_spawn"]) expect(offered).not.toContain(t);
+  });
+
+  // R-T3 review finding 2: a reviewer proved by mutation that a tool wrongly declaring
+  // `modes: ["code","dispatch"]` joins dispatch with the entire suite green — equally true before
+  // this refactor, so not a regression, but the decision is now spread across a dozen tool files
+  // instead of one reviewable literal (the old DISPATCH_ALLOW_TOOLS/CHAT_ALLOW_TOOLS constants).
+  // These two pin the EXACT set this harness's full production surface resolves to, so a stray
+  // `modes` entry on ANY tool file trips an exact-equality failure here, not just a subset check.
+  test("dispatch is offered EXACTLY this set (R-T3: web_fetch/web_search dropped, Search kept)", async () => {
+    const h = harness({ mode: "dispatch" });
+    await h.turn("hi");
+    expect(h.offered().sort()).toEqual([
+      "Search", "ToolSearch", "ask_user", "bash", "computer", "glob", "grep", "ls",
+      "push_notification", "read", "session_spawn", "task_stop",
+    ].sort());
+  });
+
+  test("code is offered EXACTLY this set", async () => {
+    const h = harness({ mode: "code" });
+    await h.turn("hi");
+    expect(h.offered().sort()).toEqual([
+      "ToolSearch", "ask_user", "bash", "computer", "edit", "glob", "grep", "ls",
+      "notebook_edit", "push_notification", "read", "spawn_agent", "task_stop",
+      "web_fetch", "web_search", "write",
+    ].sort());
   });
 
   test("a modes-less tool registered fresh reaches code but NOT chat or dispatch", async () => {
