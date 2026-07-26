@@ -9,6 +9,8 @@ import { ToolRegistry } from "../../src/agent/tools/registry";
 import { registerReadTools } from "../../src/agent/tools/fs-read";
 import { registerWriteTools } from "../../src/agent/tools/fs-write";
 import { registerAskUserTool } from "../../src/agent/tools/ask-user";
+import { registerAskQuestionTool } from "../../src/agent/tools/ask-question";
+import { registerSearchTool } from "../../src/agent/tools/search";
 import { registerPlanTool } from "../../src/agent/tools/plan";
 import { registerSpawnAgentTool } from "../../src/agent/tools/spawn";
 import { registerToolSearchTool } from "../../src/agent/tools/toolsearch";
@@ -27,7 +29,6 @@ import { SubagentManager } from "../../src/agent/subagents";
 import { BackgroundAgentRegistry } from "../../src/agent/bg-agent-registry";
 import { WorktreeManager } from "../../src/agent/worktree";
 import { sessionTmpDir } from "../../src/agent/session-tmp";
-import { CHAT_ONLY_TOOLS } from "../../src/agent/chat-prompt";
 import type { LspManager } from "../../src/agent/lsp/manager";
 import type { ModelInfo, Provider, ProviderEvent, TurnRequest } from "../../src/providers/types";
 import { stubRegistry } from "./engine-reviewer.test"; // SP-policies Task 7: stub `bash` tool for the escalation tests' discriminating observable
@@ -88,6 +89,11 @@ export function setup(
   registerReadTools(registry);
   registerWriteTools(registry);
   registerAskUserTool(registry);
+  // R-T2 fix-round-1: registered so this harness matches the real daemon (daemon.ts always
+  // registers both), which is what makes `registry.namesNotForMode("code")` below a REAL check
+  // rather than one over an empty complement — see the exclusion-guard test's own updated comment.
+  registerAskQuestionTool(registry);
+  registerSearchTool(registry);
   registerPlanTool(registry);
   registerSpawnAgentTool(registry);
   const broker = new ApprovalBroker();
@@ -297,19 +303,23 @@ describe("AgentEngine: spawn_agent bridge (1d-iv T5)", () => {
     expect(names).toContain("write");
   });
 
-  // B1-T3 fix round 2, Minor 2: a spawn_agent child only ever exists inside a CODE session (this
-  // harness's setup() never registers AskQuestion, so a specs()-filter assertion via names would
-  // pass vacuously whether or not it's actually excluded — same reasoning workflow-agent.test.ts's
-  // own M3 comment gives for spying on runThread directly instead). Spies on the private
-  // `runThread` and reads the REAL `excludeTools` Set the spawn bridge built, keyed off the fact
-  // that `childExcludeTools` unconditionally contains "ask_user" (the main thread's own excludeTools
-  // never does) — a call-independent way to find the child's call without depending on array
-  // index/ordering. Pins CHAT_ONLY_TOOLS's presence in `childExcludeTools` (engine.ts, the
-  // spawn_agent bridge) the same way the maxDepth:1 test above pins spawn_agent/ask_user/
-  // exit_plan_mode by name — nothing previously caught a future edit silently dropping the
-  // `...CHAT_ONLY_TOOLS` spread from this specific Set.
-  test("a spawn_agent child's excludeTools includes every CHAT_ONLY_TOOLS name (chat-only tools never reach a code session's spawned child)", async () => {
-    const { engine, sessionId } = setup([
+  // B1-T3 fix round 2, Minor 2: a spawn_agent child only ever exists inside a CODE session. Spies
+  // on the private `runThread` and reads the REAL `excludeTools` Set the spawn bridge built, keyed
+  // off the fact that `childExcludeTools` unconditionally contains "ask_user" (the main thread's
+  // own excludeTools never does) — a call-independent way to find the child's call without
+  // depending on array index/ordering (same reasoning workflow-agent.test.ts's own M3 comment
+  // gives). Pins `registry.namesNotForMode("code")`'s presence in `childExcludeTools` (engine.ts,
+  // the spawn_agent bridge) the same way the maxDepth:1 test above pins spawn_agent/ask_user/
+  // exit_plan_mode by name — nothing previously caught a future edit silently dropping that spread
+  // from this specific Set.
+  //
+  // R-T2 fix-round-1: this harness's setup() NOW registers AskQuestion/Search (matching the real
+  // daemon), so `registry.namesNotForMode("code")` here is a REAL derived value — {AskQuestion,
+  // Search} — not read off the old CHAT_ONLY_TOOLS constant (now deleted). Reading it off the SAME
+  // registry instance the child bridge itself consulted is a stronger check than the old hardcoded
+  // import: it would also catch either tool's `modes` being edited wrong.
+  test("a spawn_agent child's excludeTools includes every chat-only tool name (chat-only tools never reach a code session's spawned child)", async () => {
+    const { engine, sessionId, registry } = setup([
       [spawnCall("s1", "do X"), done("tool_calls")],
       text("child final report"),
     ]);
@@ -320,7 +330,7 @@ describe("AgentEngine: spawn_agent bridge (1d-iv T5)", () => {
         (c) => (c as [{ excludeTools?: Set<string> }])[0].excludeTools?.has("ask_user"),
       ) as [{ excludeTools?: Set<string> }] | undefined;
       expect(childCall).toBeDefined();
-      for (const name of CHAT_ONLY_TOOLS) {
+      for (const name of registry.namesNotForMode("code")) {
         expect(childCall![0].excludeTools?.has(name)).toBe(true);
       }
     } finally {

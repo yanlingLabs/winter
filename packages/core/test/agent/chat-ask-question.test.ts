@@ -213,17 +213,17 @@ describe("AskQuestion — the simplified chat card", () => {
     expect(offered).toContain("ask_user");
     expect(offered).not.toContain("AskQuestion");
     // B1-T5: this file's harness now also registers Search (registerSearchTool above) — code mode
-    // must still exclude it via CHAT_ONLY_TOOLS, same as AskQuestion (this harness's `toolSearch:
-    // { enabled: () => undefined }` keeps built-in deferral active, which is why web_search itself
-    // doesn't show up here either — deferred, not excluded; that's covered by web.test.ts, not
-    // this file).
+    // must still exclude it (registry.namesNotForMode("code"), R-T2), same as AskQuestion (this
+    // harness's `toolSearch: { enabled: () => undefined }` keeps built-in deferral active, which is
+    // why web_search itself doesn't show up here either — deferred, not excluded; that's covered by
+    // web.test.ts, not this file).
     expect(offered).not.toContain("Search");
   });
 
   // Fix round 1: the exclusion above must be SURGICAL — code's real toolset (read/write/bash/
-  // ask_user at minimum) must be completely unaffected by CHAT_ONLY_TOOLS being folded into
-  // engine.ts's code-mode excludeTools. Guards against a blanket exclusion that clips more than
-  // just the chat-only names.
+  // ask_user at minimum) must be completely unaffected by registry.namesNotForMode("code") being
+  // folded into engine.ts's code-mode excludeTools. Guards against a blanket exclusion that clips
+  // more than just the chat-only names.
   test("code mode's offered toolset is otherwise unaffected — read/write/bash/ask_user all still present", async () => {
     const { engine, sessionId, provider } = setup([text("hello")], { mode: "code" });
     await engine.runTurn(sessionId);
@@ -243,10 +243,10 @@ describe("AskQuestion — the simplified chat card", () => {
   // web_search; declaring it on the tool now is what makes that swap a one-line change later), so
   // a dispatch turn IS newly offered "Search" post-flip. This is the intended, brief-anticipated
   // consequence of that tagging, not a regression — updated from the pre-R-T2 expectation
-  // (`not.toContain("Search")`), which pinned DISPATCH_ALLOW_TOOLS's old hand-maintained value, not
-  // real behavior. DISPATCH_ALLOW_TOOLS itself is now a frozen historical fixture (dispatch-
-  // prompt.ts's own doc comment) — kept only for other pinned regression tests, so this file stops
-  // reading it for anything but AskQuestion's (unaffected) exclusion.
+  // (`not.toContain("Search")`), which pinned the old DISPATCH_ALLOW_TOOLS constant's hand-
+  // maintained value, not real behavior. That constant (and CHAT_ALLOW_TOOLS/CHAT_ONLY_TOOLS) is
+  // deleted outright as of R-T2 fix-round-1 — this file never imported it directly, so nothing
+  // here needed touching for the deletion itself, only for this one behavioral consequence.
   test("dispatch never gets AskQuestion, but DOES now get Search (R-T2: search.ts declares dispatch eligibility)", async () => {
     const { engine, sessionId, provider } = setup([text("hello")], { mode: "dispatch" });
     await engine.runTurn(sessionId);

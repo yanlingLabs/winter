@@ -19,31 +19,12 @@ export const CHAT_SYSTEM_PROMPT = [
   "When a choice is genuinely the user's to make, use AskQuestion rather than assuming.",
 ].join("\n");
 
-// R-T2 (per-mode tool registry, Task 2 — "the flip"): engine.ts's OWN toolAccess no longer reads
-// either constant below — chat/dispatch's allowlists and code's exclude-derived complement are now
-// `ToolRegistry.namesForMode`/`namesNotForMode` (registry.ts), driven live off each tool def's own
-// `modes` field (search.ts: `modes: ["chat","dispatch"]`; ask-question.ts: `modes: ["chat"]`) —
-// declaring eligibility AT the tool instead of enumerating it in a THIRD place here.
-//
-// Both constants are kept, unchanged, ONLY because a handful of pre-existing regression tests
-// (chat-mode-allowlist.test.ts, chat-mode-bridge-bypass.test.ts, chat-ask-question.test.ts,
-// dispatch-toolset.test.ts — the isolation-test set this task's brief explicitly forbids editing)
-// import them directly for "sanity: the premise is real" checks against the CONSTANT's own
-// membership, not against a live turn's derived toolset — see task-2-report.md's "concerns" for
-// the full accounting of why deleting them (as R-T2's brief literally instructs) is not safe here.
-// Do not add new production reads of either — namesForMode("chat")/("dispatch") is the only
-// current source of truth for that.
-/** The chat toolset, by REGISTERED tool name, AS OF the pre-R-T2 hand-maintained list — frozen at
- *  its historical value for the tests above; do not add new tools here. Chat's own tools are
- *  deliberately separate from code's (`ask_user`, `web_search`, `web_fetch`) — the registry is
- *  per-daemon and rejects duplicate names, so the chat variants carry their own names and code's
- *  are untouched. (B1-T3: `AskQuestion` replaces `ask_user` here; B1-T5 adds `Search`.) */
-export const CHAT_ALLOW_TOOLS: Set<string> = new Set(["AskQuestion", "Search"]);
-
-/** Chat's OWN tools, AS OF the pre-R-T2 hand-maintained list — frozen at its historical value.
- *  Still read at engine.ts's TWO `childExcludeTools` sites (the spawn_agent bridge and
- *  runWorkflowAgent) — see task-2-report.md's "concerns" for why those two sites specifically were
- *  NOT flipped to `registry.namesNotForMode("code")` in this task (byte-identical in the real
- *  daemon, where AskQuestion/Search are always registered; only two test harnesses that omit them
- *  would diverge). turn()'s own toolAccess (the MAIN exclude-shaped seam) IS fully flipped. */
-export const CHAT_ONLY_TOOLS: ReadonlySet<string> = new Set(["AskQuestion", "Search"]);
+// R-T2 (per-mode tool registry, Task 2 — "the flip"): CHAT_ALLOW_TOOLS and CHAT_ONLY_TOOLS used to
+// live here as the hand-maintained source of truth for chat's toolset. Both are gone — engine.ts's
+// toolAccess (chat/dispatch allowlist, code's exclude-derived complement) and its two
+// childExcludeTools sites now all read `ToolRegistry.namesForMode`/`namesNotForMode` (registry.ts),
+// driven live off each tool def's own `modes` field (search.ts: `modes: ["chat","dispatch"]`;
+// ask-question.ts: `modes: ["chat"]`) — declaring eligibility AT the tool instead of enumerating it
+// in a THIRD place here. The handful of tests that used to import these constants for static
+// sanity checks were rewritten to call `registry.namesForMode(...)`/`namesNotForMode(...)` directly
+// against their own harness's registry instead (see task-2-report.md, "Fix round 1").

@@ -18,23 +18,15 @@ export const DISPATCH_SYSTEM_PROMPT = [
   "When a child needs a permission or has a question, the card appears HERE in this conversation — the user answers it here; never re-ask on the child's behalf. Unanswered permission requests auto-deny after 10 minutes and the child continues without them.",
 ].join("\n");
 
-// R-T2 (per-mode tool registry, Task 2 — "the flip"): engine.ts's toolAccess for dispatch is now
+// R-T2 (per-mode tool registry, Task 2 — "the flip"): DISPATCH_ALLOW_TOOLS used to live here as
+// the hand-maintained source of truth for dispatch's toolset (spec §7's 11 tools; `web` registers
+// as two). It's gone — engine.ts's toolAccess for dispatch is now
 // `registry.namesForMode("dispatch", { builtinDeferral })` (registry.ts), derived live from each
 // tool def's own `modes` field (session-spawn.ts, task-stop.ts, computer.ts, fs-read.ts, bash.ts,
-// ask-user.ts, web.ts, push-notification.ts all now carry `modes: ["code", "dispatch"]`) — not
-// this constant. Kept, frozen at its historical value, ONLY because chat-mode-allowlist.test.ts,
-// chat-mode-bridge-bypass.test.ts, chat-ask-question.test.ts, and dispatch-toolset.test.ts (the
-// isolation-test set this task's brief explicitly forbids editing) import it directly for "sanity:
-// the premise is real" checks against the CONSTANT itself, not a live turn's derived toolset — see
-// task-2-report.md's "concerns". Not read by production code anywhere anymore; do not add new
-// tools here — declare `modes` on the tool instead.
-/** The dispatch toolset, by REGISTERED tool name, AS OF the pre-R-T2 hand-maintained list (spec §7
- *  lists 11 tools; `web` registers as two) — frozen at its historical value for the tests above.
- *  The LIVE toolset now also includes "Search" and, whenever ToolSearch deferral is active,
- *  "ToolSearch" itself (bug #7's fix — a deferred tool's mode always gets ToolSearch alongside it,
- *  registry.ts's `namesForMode`); this constant intentionally does not track either addition. */
-export const DISPATCH_ALLOW_TOOLS: Set<string> = new Set([
-  "session_spawn", "task_stop", "computer",
-  "read", "ls", "glob", "grep",
-  "bash", "ask_user", "web_fetch", "web_search", "push_notification",
-]);
+// ask-user.ts, web.ts, push-notification.ts all carry `modes: ["code", "dispatch"]`; search.ts
+// carries `modes: ["chat", "dispatch"]`). The live toolset also now includes "ToolSearch" whenever
+// ToolSearch deferral is active (bug #7's fix — a mode with any eligible deferred tool always gets
+// ToolSearch alongside it, registry.ts's `namesForMode`), which this constant never tracked. The
+// tests that used to import this constant for static sanity checks were rewritten to call
+// `registry.namesForMode(...)` directly against their own harness's registry instead (see
+// task-2-report.md, "Fix round 1").
