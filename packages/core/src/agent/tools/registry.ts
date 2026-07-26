@@ -66,6 +66,12 @@ export interface ToolDefinition<S extends z.ZodTypeAny = z.ZodTypeAny> {
    *  the external mcp__/plugin__ count-trigger. Ignored for mcp__/plugin__ names — those defer
    *  purely off the external count (isExternalToolName), never off this flag. */
   deferred?: boolean;
+  /** Which session modes may see this tool. ABSENT MEANS `["code"]` — deliberately restrictive:
+   *  a newly registered tool can never silently appear in a hands-off mode (chat) or a
+   *  narrow one (dispatch). This is the single declaration site that replaces the old
+   *  CHAT_ONLY_TOOLS exclusion lists; dynamically registered mcp__/plugin__ tools take the
+   *  default and so stay code-only, matching their reachability today. */
+  modes?: Array<"code" | "dispatch" | "chat">;
   /** May throw — the registry converts throws into isError outcomes. */
   run(args: z.infer<S>, ctx: ToolContext): Promise<string> | string;
 }
@@ -78,6 +84,37 @@ export class ToolRegistry {
   register(def: ToolDefinition): void {
     if (this.defs.has(def.name)) throw new Error(`duplicate tool: ${def.name}`);
     this.defs.set(def.name, def);
+  }
+
+  /** Every tool eligible for `mode`, plus ToolSearch when any eligible tool is deferred.
+   *  Derived live from `defs` on every call — dynamically registered tools are included
+   *  immediately, and there is no cached set to invalidate. */
+  namesForMode(mode: "code" | "dispatch" | "chat", opts?: { builtinDeferral?: boolean }): Set<string> {
+    // ToolSearch is excluded from the ordinary mode-membership pass and decided purely by
+    // anyDeferred below — mirroring specs()'s `if (d.name === "ToolSearch") return
+    // toolSearchVisible` override (:153), which likewise replaces rather than ORs with the
+    // ordinary visibility check for that one name. Without this exclusion, a ToolSearch def
+    // registered with no explicit `modes` (the expected shape — nothing declares `modes` yet)
+    // would default to `["code"]` and become a trivial base member of "code" regardless of
+    // whether anything is actually deferred there, making builtinDeferral:false unable to hide it.
+    const eligible = [...this.defs.values()].filter((d) => d.name !== "ToolSearch" && (d.modes ?? ["code"]).includes(mode));
+    const names = new Set(eligible.map((d) => d.name));
+    // Bug #7, structurally: a deferred tool is uncallable without ToolSearch, so a mode that has
+    // one ALWAYS gets ToolSearch. Previously each mode's hand-written allowlist had to remember
+    // this, and dispatch's did not — advertising web_fetch/web_search/push_notification it could
+    // never load.
+    const anyDeferred = opts?.builtinDeferral === true
+      && eligible.some((d) => this.isDeferred(d, false, true));
+    if (anyDeferred && this.defs.has("ToolSearch")) names.add("ToolSearch");
+    return names;
+  }
+
+  /** The complement of namesForMode — for code's exclude-shaped toolAccess, which must keep
+   *  admitting dynamically registered tools by default rather than enumerating them. */
+  namesNotForMode(mode: "code" | "dispatch" | "chat"): Set<string> {
+    return new Set([...this.defs.values()]
+      .filter((d) => !(d.modes ?? ["code"]).includes(mode))
+      .map((d) => d.name));
   }
 
   /** External (mcp__/plugin__ — isExternalToolName) deferral trigger for a (cwd, threshold) pair:
