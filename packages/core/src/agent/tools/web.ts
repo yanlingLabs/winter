@@ -225,6 +225,13 @@ export function registerWebTools(r: ToolRegistry, deps: WebToolDeps = {}): void 
     // the 5MB read cap and 8192-byte preview are fixed constants (not caller-tunable), keeping the
     // SSRF/DoS posture uniform regardless of what a caller asks for.
     args: z.object({ url: z.string().min(1) }),
+    // R-T3: dispatch dropped (was ["code", "dispatch"], R-T2). `deferred: true` below meant this
+    // was advertised to dispatch but never callable — dispatch has no ToolSearch of its own to
+    // load it with (bug #7's other half; namesForMode only adds ToolSearch for a mode that has
+    // something ELSE eligible AND deferred — push_notification still qualifies, so ToolSearch
+    // still exists for dispatch, just never alongside a way to load this one). dispatch now uses
+    // Search (search.ts) instead — non-deferred, one-call excerpts, no catch-22.
+    modes: ["code"],
     deferred: true, // T1 machinery, per-def flag — same pattern as task_get
     async run({ url }, ctx) {
       let outcome = "network_error";
@@ -303,6 +310,7 @@ export function registerWebTools(r: ToolRegistry, deps: WebToolDeps = {}): void 
       // posture as web_fetch's fixed byte caps, just expressed as a result-count cap instead).
       max_results: z.number().int().positive().optional(),
     }),
+    modes: ["code"], // R-T3: dispatch dropped (was ["code", "dispatch"], R-T2) — see web_fetch's doc comment above
     deferred: true, // same class as web_fetch — rides ToolSearch deferral, not visible/callable until loaded
     async run({ query, max_results }, ctx) {
       let outcome = "network_error";

@@ -34,7 +34,6 @@ import { ContextAssembler } from "../../src/agent/context";
 import { TrustStore } from "../../src/agent/trust";
 import { SkillStore } from "../../src/agent/skills";
 import { Compactor } from "../../src/agent/compactor";
-import { DISPATCH_ALLOW_TOOLS } from "../../src/agent/dispatch-prompt";
 import type { ProviderEvent } from "../../src/providers/types";
 
 /**
@@ -43,7 +42,7 @@ import type { ProviderEvent } from "../../src/providers/types";
  * notes, no multi-select). A SEPARATE tool rather than a mode-aware `ask_user` because
  * `ToolRegistry.register()` throws on duplicate names and the registry is built ONCE per daemon
  * (daemon.ts), not per session — per-session differentiation is purely name filtering
- * (CHAT_ALLOW_TOOLS).
+ * (registry.namesForMode("chat", ...)).
  *
  * Harness mirrors chat-mode-allowlist.test.ts's own `setup()` — same near-full production tool
  * surface, and the SAME production-shaped `toolSearch: { enabled: () => undefined }` (the config
@@ -71,7 +70,7 @@ function setup(script: ProviderEvent[][], opts: { mode?: "code" | "dispatch" | "
   registerPushNotificationTool(registry);
   registerAskUserTool(registry);
   registerAskQuestionTool(registry);
-  registerSearchTool(registry); // B1-T5: CHAT_ALLOW_TOOLS now also lists "Search" — register it in
+  registerSearchTool(registry); // B1-T5: chat's derived allowlist now also lists "Search" — register it in
   // this file's full-surface harness too, or the "offered exactly AskQuestion" assertion below
   // would pass vacuously (nothing to prove Search rides along) rather than actually re-verifying
   // the updated allowlist.
@@ -214,17 +213,17 @@ describe("AskQuestion — the simplified chat card", () => {
     expect(offered).toContain("ask_user");
     expect(offered).not.toContain("AskQuestion");
     // B1-T5: this file's harness now also registers Search (registerSearchTool above) — code mode
-    // must still exclude it via CHAT_ONLY_TOOLS, same as AskQuestion (this harness's `toolSearch:
-    // { enabled: () => undefined }` keeps built-in deferral active, which is why web_search itself
-    // doesn't show up here either — deferred, not excluded; that's covered by web.test.ts, not
-    // this file).
+    // must still exclude it (registry.namesNotForMode("code"), R-T2), same as AskQuestion (this
+    // harness's `toolSearch: { enabled: () => undefined }` keeps built-in deferral active, which is
+    // why web_search itself doesn't show up here either — deferred, not excluded; that's covered by
+    // web.test.ts, not this file).
     expect(offered).not.toContain("Search");
   });
 
   // Fix round 1: the exclusion above must be SURGICAL — code's real toolset (read/write/bash/
-  // ask_user at minimum) must be completely unaffected by CHAT_ONLY_TOOLS being folded into
-  // engine.ts's code-mode excludeTools. Guards against a blanket exclusion that clips more than
-  // just the chat-only names.
+  // ask_user at minimum) must be completely unaffected by registry.namesNotForMode("code") being
+  // folded into engine.ts's code-mode excludeTools. Guards against a blanket exclusion that clips
+  // more than just the chat-only names.
   test("code mode's offered toolset is otherwise unaffected — read/write/bash/ask_user all still present", async () => {
     const { engine, sessionId, provider } = setup([text("hello")], { mode: "code" });
     await engine.runTurn(sessionId);
@@ -234,17 +233,25 @@ describe("AskQuestion — the simplified chat card", () => {
     }
   });
 
-  // Fix round 1: dispatch is unaffected by construction (DISPATCH_ALLOW_TOOLS is an allowlist that
-  // simply never names AskQuestion) — asserted directly rather than assumed, per the coordinator's
-  // instruction, and cross-checked against the live offered toolset too.
-  test("dispatch is unaffected: DISPATCH_ALLOW_TOOLS never lists AskQuestion, and a dispatch turn is never offered it", async () => {
-    expect(DISPATCH_ALLOW_TOOLS.has("AskQuestion")).toBe(false);
+  // Fix round 1: dispatch never gets AskQuestion (chat's own question tool stays chat-only by
+  // construction — ask-question.ts declares `modes: ["chat"]`, no "dispatch") — asserted directly
+  // rather than assumed, per the coordinator's instruction, and cross-checked against the live
+  // offered toolset too.
+  //
+  // R-T2 (per-mode tool registry, Task 2): Search is DELIBERATELY DIFFERENT here — search.ts now
+  // declares `modes: ["chat", "dispatch"]` (dispatch adoption is Task 3's own swap for web_fetch/
+  // web_search; declaring it on the tool now is what makes that swap a one-line change later), so
+  // a dispatch turn IS newly offered "Search" post-flip. This is the intended, brief-anticipated
+  // consequence of that tagging, not a regression — updated from the pre-R-T2 expectation
+  // (`not.toContain("Search")`), which pinned the old DISPATCH_ALLOW_TOOLS constant's hand-
+  // maintained value, not real behavior. That constant (and CHAT_ALLOW_TOOLS/CHAT_ONLY_TOOLS) is
+  // deleted outright as of R-T2 fix-round-1 — this file never imported it directly, so nothing
+  // here needed touching for the deletion itself, only for this one behavioral consequence.
+  test("dispatch never gets AskQuestion, but DOES now get Search (R-T2: search.ts declares dispatch eligibility)", async () => {
     const { engine, sessionId, provider } = setup([text("hello")], { mode: "dispatch" });
     await engine.runTurn(sessionId);
     const offered = (provider.requests[0]?.tools ?? []).map((t) => t.name);
     expect(offered).not.toContain("AskQuestion");
-    // B1-T5: same story for Search — DISPATCH_ALLOW_TOOLS is an allowlist that never names it.
-    expect(DISPATCH_ALLOW_TOOLS.has("Search")).toBe(false);
-    expect(offered).not.toContain("Search");
+    expect(offered).toContain("Search");
   });
 });

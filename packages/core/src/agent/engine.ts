@@ -33,8 +33,8 @@ import { SubagentTranscripts } from "./subagent-transcript";
 import { resolveModelAlias } from "./model-aliases";
 import type { LspManager } from "./lsp/manager";
 import { autoDiagnosticsSuffix, AUTO_DIAG_TOOL_NAMES } from "./lsp/auto-diagnostics";
-import { DISPATCH_ALLOW_TOOLS, DISPATCH_SYSTEM_PROMPT } from "./dispatch-prompt";
-import { CHAT_ALLOW_TOOLS, CHAT_ONLY_TOOLS, CHAT_SYSTEM_PROMPT } from "./chat-prompt";
+import { DISPATCH_SYSTEM_PROMPT } from "./dispatch-prompt";
+import { CHAT_SYSTEM_PROMPT } from "./chat-prompt";
 import type { DispatchChildren } from "./dispatch-children";
 import type { WorkflowRuntime } from "../workflows/runtime";
 
@@ -1682,7 +1682,7 @@ export class AgentEngine {
    *   - `workflowsEnabled(cwd) !== false` — the settings gate (workflowsEnabledFrom, settings.ts).
    *   - `meta.mode !== "dispatch"` — the dispatch COORDINATOR session itself is excluded; it isn't
    *     "the top-level interactive code session" the tool is scoped to, and it runs allowTools
-   *     (DISPATCH_ALLOW_TOOLS, dispatch-prompt.ts) which never lists "Workflow" anyway — this ANDs
+   *     (registry.namesForMode("dispatch", ...), registry.ts) which never lists "Workflow" anyway — this ANDs
    *     with that pre-existing exclusion rather than depending on it alone (belt-and-braces, same
    *     relationship SESSION_SPAWN_TOOL's own two exclusion sites have to each other).
    *   - `meta.origin !== "dispatch-child"` — a session_spawn-created child session (a full session
@@ -1738,8 +1738,10 @@ export class AgentEngine {
   // registry — see registry.ts's own doc comment on isDeferred), which would tell the model a tool
   // exists that calling it will then just reject; the general filter covers that case for free, and
   // ALSO closes the review's actual finding — chat's block previously advertised
-  // push_notification/web_fetch/web_search/skill_write/lsp even though CHAT_ALLOW_TOOLS is just
-  // {ask_user}, and dispatch's block advertised skill_write/lsp outside DISPATCH_ALLOW_TOOLS too.
+  // push_notification/web_fetch/web_search/skill_write/lsp even though chat's allowTools (then
+  // CHAT_ALLOW_TOOLS, now registry.namesForMode("chat", ...)) was just {ask_user} (today
+  // {AskQuestion, Search}), and dispatch's block advertised skill_write/lsp outside its own
+  // allowTools (registry.namesForMode("dispatch", ...)) too.
   // The plain spawn_agent bridge below still passes its own literal `{Workflow}` as `excludeTools`
   // (a spawned child thread is NEVER the top-level MAIN thread `workflowToolAllowed` gates for —
   // see that bridge's own doc comment on `childExcludeTools`) — unchanged value, just renamed.
@@ -1799,12 +1801,17 @@ export class AgentEngine {
     // sessions get the cwd-resolved project MEMDIR — see memoryBucket below.
     const isAssistantBucket = isDispatch || isChat;
     // CM branch review (Important 1 follow-on): whether the `Skill` tool is offered to THIS
-    // thread — dispatch's DISPATCH_ALLOW_TOOLS and chat's CHAT_ALLOW_TOOLS (both below) never list
-    // it, so the assembler's "## Available capabilities" block must not tell the model to "call the
-    // `Skill` tool" when there's no such tool for it. Code sessions never exclude "Skill" (their own
-    // excludeTools, built alongside `toolAccess` below, is always {session_spawn, Workflow?}), so
-    // this only ever differs for dispatch/chat.
-    const skillToolOffered = isDispatch ? DISPATCH_ALLOW_TOOLS.has("Skill") : isChat ? CHAT_ALLOW_TOOLS.has("Skill") : true;
+    // thread — dispatch's and chat's derived toolsets (R-T2: registry.namesForMode, replacing the
+    // old DISPATCH_ALLOW_TOOLS/CHAT_ALLOW_TOOLS constants) never list it (nothing declares `modes`
+    // including "Skill" for either), so the assembler's "## Available capabilities" block must not
+    // tell the model to "call the `Skill` tool" when there's no such tool for it. Code sessions
+    // never exclude "Skill" (their own excludeTools, built alongside `toolAccess` below, is always
+    // {session_spawn, Workflow?, ...namesNotForMode("code")}), so this only ever differs for
+    // dispatch/chat. `builtinDeferral` omitted here (unlike `toolAccess` below) — Skill's absence
+    // from either mode's set never depends on the deferred-trigger ToolSearch addition.
+    const skillToolOffered = isDispatch ? this.cfg.registry.namesForMode("dispatch").has("Skill")
+      : isChat ? this.cfg.registry.namesForMode("chat").has("Skill")
+      : true;
     // Resolved ONCE per turn (spec: "changing models must NOT require a daemon restart") — a
     // settings.json edit mid-turn does not retroactively change THIS turn's model, only the
     // NEXT one's, mirroring how `instructions`/`instructionsFull` below are also computed once
@@ -1869,7 +1876,7 @@ export class AgentEngine {
     // driving message's `clientName` is a real interactive harness (isHumanOriginClientName).
     // `!isChatOrCowork(meta)` (real since chat shipped, CM-T2b) is belt-and-braces alongside
     // workflowToolAllowed's own identical exclusion above: even though a chat session's allowTools
-    // (CHAT_ALLOW_TOOLS) already keeps Workflow off the provider-visible tool list regardless of this
+    // (registry.namesForMode("chat", ...)) already keeps Workflow off the provider-visible tool list regardless of this
     // gate, the gate must ALSO stay closed so ULTRACODE_REMINDER — "...USE the Workflow tool..." — is
     // never injected into a chat session's instructions, telling the model to use a tool it doesn't have.
     const latestUserMessage = this.latestMainUserMessage(sessionId);
@@ -1897,23 +1904,32 @@ export class AgentEngine {
     }
     const ultracodeActive = ultracodeGateOpen && (ultracodeTrigger?.task !== undefined || this.ultracodeToggle.has(sessionId));
     // CM branch review (Important 1 + Important 2 prep): the ONE excludeTools/allowTools pair for
-    // THIS thread — dispatch gets DISPATCH_ALLOW_TOOLS, chat gets CHAT_ALLOW_TOOLS (both allowlist
-    // shapes), a plain code session gets session_spawn excluded (plus Workflow when
-    // `excludeWorkflow`, plus CHAT_ONLY_TOOLS — B1-T3 fix-round-1: code's toolAccess is an
-    // EXCLUDElist, not an allowlist like chat/dispatch's, so a chat-only tool registered in the
-    // SAME shared per-daemon registry would otherwise ride along unnamed — see CHAT_ONLY_TOOLS's
-    // own doc comment in chat-prompt.ts). Computed ONCE and reused for THREE seams that must never
+    // THIS thread — dispatch and chat get an ALLOWLIST (registry.namesForMode, R-T2), a plain code
+    // session gets session_spawn excluded (plus Workflow when `excludeWorkflow`, plus
+    // registry.namesNotForMode("code") — R-T2's derived replacement for the old CHAT_ONLY_TOOLS
+    // constant: code's toolAccess is an EXCLUDElist, not an allowlist like chat/dispatch's, so a
+    // tool whose `modes` doesn't include "code" would otherwise ride along unnamed in the SAME
+    // shared per-daemon registry). Computed ONCE and reused for THREE seams that must never
     // disagree: the deferred-index TEXT filter (buildInstructionsFull, just below — this SUBSUMES
     // the old Workflow-only `excludeDeferred` special case, see that method's own doc comment), the
     // provider-facing specs() filter (runThread's own `.filter(excludeTools).filter(allowTools)`,
     // unchanged shape — just now fed by this shared value instead of a THIRD inline ternary), and
     // (4h-ii Important 2) executeCall's own new allowTools/excludeTools rejection below, via
     // runThread's opts.
+    // R-T2: the SAME resolved built-in-deferral flag specs() itself later receives (runThread's own
+    // `tsEnabled`, computed the identical way from the SAME `cwd`) — not a second source of truth,
+    // just read here too so a deferred tool's mode (dispatch, e.g. push_notification) always comes
+    // with ToolSearch alongside it (namesForMode's own anyDeferred addition; bug #7's fix).
+    const builtinDeferral = this.toolSearchEnabled(cwd);
     const toolAccess: { excludeTools?: Set<string>; allowTools?: Set<string> } = isDispatch
-      ? { allowTools: DISPATCH_ALLOW_TOOLS }
+      ? { allowTools: this.cfg.registry.namesForMode("dispatch", { builtinDeferral }) }
       : isChat
-      ? { allowTools: CHAT_ALLOW_TOOLS }
-      : { excludeTools: new Set([SESSION_SPAWN_TOOL, ...(excludeWorkflow ? [WORKFLOW_TOOL] : []), ...CHAT_ONLY_TOOLS]) };
+      ? { allowTools: this.cfg.registry.namesForMode("chat", { builtinDeferral }) }
+      : { excludeTools: new Set([
+          SESSION_SPAWN_TOOL,
+          ...(excludeWorkflow ? [WORKFLOW_TOOL] : []),
+          ...this.cfg.registry.namesNotForMode("code"),
+        ]) };
     const instructionsFull = this.buildInstructionsFull(instructions, cwd, loaded, meta.approvalPolicy, sessionId, toolAccess.excludeTools, toolAccess.allowTools, ultracodeActive);
     // Auto-compact BEFORE historyInput is built, so a triggered compaction's checkpoint is
     // reflected in this turn's input. A compaction failure degrades to a normal (uncompacted)
@@ -1993,16 +2009,17 @@ export class AgentEngine {
       // this same turn too.
       ultracodeActive,
       // Dispatch (Phase 7) Task 4 + Chat Mode Slice A (CM-T2): a dispatch session gets the
-      // DISPATCH_ALLOW_TOOLS whitelist (which already includes session_spawn — dispatch-prompt.ts);
-      // a chat session gets the far narrower CHAT_ALLOW_TOOLS whitelist (chat-prompt.ts — ask_user
-      // only, this slice); a code session instead gets session_spawn explicitly EXCLUDED
+      // registry.namesForMode("dispatch", ...) whitelist (which already includes session_spawn —
+      // session-spawn.ts's own `modes: ["dispatch"]`); a chat session gets the far narrower
+      // registry.namesForMode("chat", ...) whitelist ({AskQuestion, Search} today); a code session
+      // instead gets session_spawn explicitly EXCLUDED
       // (SESSION_SPAWN_TOOL's own doc comment above) — never more than one of allowTools/excludeTools
       // at once (excludeTools would filter session_spawn OUT before allowTools ever got a chance to
       // filter it back IN, for a dispatch/chat session that somehow had both set).
       // Task B3: `excludeWorkflow` folds WORKFLOW_TOOL into the SAME excludeTools Set whenever this
       // session fails workflowToolAllowed — only reachable in the final `else` (plain code) branch:
       // a dispatch or chat session already takes its own allowTools branch instead, and neither
-      // DISPATCH_ALLOW_TOOLS nor CHAT_ALLOW_TOOLS ever lists "Workflow" (workflowToolAllowed's own
+      // mode's derived whitelist (registry.namesForMode) ever lists "Workflow" (workflowToolAllowed's own
       // doc comment above), so it's excluded there regardless of this Set. `toolAccess` (computed
       // once, above, alongside buildInstructionsFull's own call) IS this exact object — no longer
       // rebuilt inline here.
@@ -2099,7 +2116,8 @@ export class AgentEngine {
     // intercepted EARLIER, by bridges gated only on CONFIG PRESENCE (`cfg.subagents && cfg.agents`,
     // `!!cfg.worktrees`, `!!cfg.workflows`) — the spawn_agent gather below, and `isWorktree` /
     // `isWorkflowLaunch` in the per-call dispatch loop. The review PROVED the consequence by probe:
-    // a `mode:"chat"` session (allowTools = CHAT_ALLOW_TOOLS = {ask_user}) whose provider emitted an
+    // a `mode:"chat"` session (allowTools = registry.namesForMode("chat", ...) — then
+    // CHAT_ALLOW_TOOLS = {ask_user}, today {AskQuestion, Search}) whose provider emitted an
     // off-list `spawn_agent` got a real child thread with the FULL registry
     // (read/ls/glob/grep/write/edit/spawn_agent/ToolSearch — the child's toolset comes from
     // `def.allowTools`, undefined, minus `childExcludeTools`; the PARENT's allowlist was never
@@ -2114,14 +2132,14 @@ export class AgentEngine {
     // cards a launch under `auto`, so the pre-fix leak also asked the human to authorize it).
     //
     // NOT a behavior change for the modes that legitimately use these bridges:
-    //   - code: `excludeTools` is {session_spawn, ...CHAT_ONLY_TOOLS} (+Workflow when
+    //   - code: `excludeTools` is {session_spawn, ...registry.namesNotForMode("code")} (+Workflow when
     //     `workflowToolAllowed` is false) and never lists spawn_agent or the worktree tools, so
     //     `offered()` is true for all three and the gathers/branches are byte-identical. The
     //     Workflow launch CARD is unaffected for the same
     //     reason — the card only ever fires for a Workflow call that was OFFERED; when Workflow is in
     //     excludeTools the provider never receives it in `specs()` NOR in the deferred index, so such
     //     a call could only be hallucinated, and refusing it is correct.
-    //   - dispatch: DISPATCH_ALLOW_TOOLS lists NONE of spawn_agent/enter_worktree/exit_worktree/
+    //   - dispatch: registry.namesForMode("dispatch", ...) lists NONE of spawn_agent/enter_worktree/exit_worktree/
     //     Workflow, so for dispatch this only tightens calls the provider is never offered. Dispatch
     //     orchestrates via `session_spawn`, which IS on that allowlist (so `offered()` is true) and
     //     whose own bridge is `meta.mode === "dispatch"`-gated rather than config-gated — deliberately
@@ -2665,7 +2683,7 @@ export class AgentEngine {
           // Dispatch (Phase 7) Task 4: session_spawn is excluded from EVERY spawn_agent child
           // UNCONDITIONALLY too (SESSION_SPAWN_TOOL's own doc comment above) — a spawn_agent
           // child only ever exists inside a CODE session (dispatch sessions can't spawn_agent at
-          // all — it's not in DISPATCH_ALLOW_TOOLS), so this is tool-list hygiene consistent with
+          // all — it's not in registry.namesForMode("dispatch", ...)), so this is tool-list hygiene consistent with
           // the main thread's own exclusion, not a new authorization boundary (the bridge's
           // `meta.mode === "dispatch"` gate above already denies it functionally either way).
           const childDepth = opts.depth + 1;
@@ -2682,11 +2700,13 @@ export class AgentEngine {
           // anyway would still be rejected by the launch gate's own `isWorkflowLaunch`/
           // `!!this.cfg.workflows` checks — but that's belt-and-braces; this is "top-level only"
           // correctness (a plain subagent should never even see the tool is callable).
-          // B1-T3 fix-round-1: CHAT_ONLY_TOOLS spread in alongside ask_user — a spawn_agent child
-          // only ever exists inside a CODE session (comment above), and this set is built
-          // independently of turn()'s own toolAccess exclude set, so it needs the SAME addition or
-          // a child would be offered AskQuestion even though its parent main thread excludes it.
-          const childExcludeTools = new Set(["ask_user", "exit_plan_mode", "enter_plan_mode", "send_message", "task_stop", "agent_list", "agent_output", "skill_write", SESSION_SPAWN_TOOL, WORKFLOW_TOOL, ...CHAT_ONLY_TOOLS]);
+          // B1-T3 fix-round-1 (R-T2 fix-round-1: registry.namesNotForMode("code") replaces the old
+          // CHAT_ONLY_TOOLS constant — see task-2-report.md, "Fix round 1") spread in alongside
+          // ask_user — a spawn_agent child only ever exists inside a CODE session (comment above),
+          // and this set is built independently of turn()'s own toolAccess exclude set, so it needs
+          // the SAME addition or a child would be offered AskQuestion/Search even though its parent
+          // main thread excludes them.
+          const childExcludeTools = new Set(["ask_user", "exit_plan_mode", "enter_plan_mode", "send_message", "task_stop", "agent_list", "agent_output", "skill_write", SESSION_SPAWN_TOOL, WORKFLOW_TOOL, ...this.cfg.registry.namesNotForMode("code")]);
           if (childDepth >= maxDepth) childExcludeTools.add("spawn_agent");
           // 4h-ii-b Task 1: instructionsFull is computed ONCE here — hoisted out of the bg and
           // sync closures below, which used to each build their own copy independently — so it
@@ -4095,10 +4115,12 @@ export class AgentEngine {
     const childId = "wfa_" + randomUUID().slice(0, 8); // same minting shape as the spawn bridge (engine.ts: "th_" + randomUUID().slice(0,8))
     const childLoaded = new Set<string>();
     const instructionsFull = this.buildInstructionsFull(def.instructions, childCwd, childLoaded, childPolicy, sessionId);
-    // B1-T3 fix-round-1: CHAT_ONLY_TOOLS spread in alongside ask_user — a workflow-spawned agent
-    // only ever exists inside a CODE session (Workflow is never offered to chat/dispatch), and
-    // this set is independent of turn()'s own toolAccess exclude set, so it needs the same addition.
-    const childExcludeTools = new Set(["ask_user", "exit_plan_mode", "enter_plan_mode", "send_message", "task_stop", "agent_list", "agent_output", "skill_write", SESSION_SPAWN_TOOL, WORKFLOW_TOOL, "spawn_agent", ...CHAT_ONLY_TOOLS]);
+    // B1-T3 fix-round-1 (R-T2 fix-round-1: registry.namesNotForMode("code") replaces the old
+    // CHAT_ONLY_TOOLS constant — see task-2-report.md, "Fix round 1") spread in alongside ask_user
+    // — a workflow-spawned agent only ever exists inside a CODE session (Workflow is never offered
+    // to chat/dispatch), and this set is independent of turn()'s own toolAccess exclude set, so it
+    // needs the same addition.
+    const childExcludeTools = new Set(["ask_user", "exit_plan_mode", "enter_plan_mode", "send_message", "task_stop", "agent_list", "agent_output", "skill_write", SESSION_SPAWN_TOOL, WORKFLOW_TOOL, "spawn_agent", ...this.cfg.registry.namesNotForMode("code")]);
     this.registerThread(sessionId, { threadId: childId, parentThreadId: MAIN_THREAD, agentType, status: "running" });
     this.emit(sessionId, { type: "thread_started", sessionId, threadId: childId, parentThreadId: MAIN_THREAD, agentType, prompt, description: opts?.label });
     const result = await this.cfg.subagents.run(async (childSignal, progress) => this.runThread({
@@ -4750,7 +4772,8 @@ export class AgentEngine {
     // (reviewAndDispatch and requestApproval's default onApprove included — see their own doc
     // comments). Before this fix, ONLY the deferral check and the permission gate stood between a
     // provider ignoring its own offered tool list and a live side effect: a chat session
-    // (CHAT_ALLOW_TOOLS = {ask_user}) whose provider called `write` anyway reached this method with
+    // (allowTools = registry.namesForMode("chat", ...) — then CHAT_ALLOW_TOOLS = {ask_user}, today
+    // {AskQuestion, Search}) whose provider called `write` anyway reached this method with
     // NOTHING checking `write` against what was actually offered, and the file landed on disk. The
     // check below closes that — same rejection SHAPE as the deferral check above it in the dispatch
     // loop (isDeferredBuiltin), so a client can't distinguish "deferred, load it first" from "not on

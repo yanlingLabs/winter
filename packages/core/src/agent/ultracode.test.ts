@@ -42,7 +42,7 @@ test("a dispatch-child session's origin never triggers /ultracode (tool already 
   expect(h.lastInstructions()).not.toMatch(/opted into workflow orchestration/i);
 });
 
-// CM-T2b: a chat session's own allowTools (CHAT_ALLOW_TOOLS) already keeps Workflow out of the
+// CM-T2b: a chat session's own allowTools (registry.namesForMode("chat", ...)) already keeps Workflow out of the
 // PROVIDER-visible tool list unconditionally (engine.ts's allowTools filter applies regardless of
 // this gate) — lastVisibleTools() below is a sanity check on that pre-existing invariant, not the
 // regression this test guards. The real leak was the gate itself: isChatOrCowork(meta) must be true

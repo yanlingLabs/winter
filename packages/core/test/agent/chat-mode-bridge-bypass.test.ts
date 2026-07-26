@@ -12,6 +12,7 @@ import { registerAskUserTool } from "../../src/agent/tools/ask-user";
 import { registerAskQuestionTool } from "../../src/agent/tools/ask-question";
 import { registerBashTool } from "../../src/agent/tools/bash";
 import { registerSpawnAgentTool } from "../../src/agent/tools/spawn";
+import { registerSessionSpawnTool } from "../../src/agent/tools/session-spawn";
 import { registerToolSearchTool } from "../../src/agent/tools/toolsearch";
 import { registerWorktreeTools } from "../../src/agent/tools/worktree";
 import { registerWorkflowTool } from "../../src/agent/tools/workflow";
@@ -27,8 +28,6 @@ import { Compactor } from "../../src/agent/compactor";
 import { AgentStore } from "../../src/agent/agents";
 import { SubagentManager } from "../../src/agent/subagents";
 import { WorktreeManager } from "../../src/agent/worktree";
-import { CHAT_ALLOW_TOOLS } from "../../src/agent/chat-prompt";
-import { DISPATCH_ALLOW_TOOLS } from "../../src/agent/dispatch-prompt";
 import type { WorkflowRuntime } from "../../src/workflows/runtime";
 import type { ProviderEvent } from "../../src/providers/types";
 
@@ -130,7 +129,7 @@ function setup(
   registerReadTools(registry);
   registerWriteTools(registry);
   registerAskUserTool(registry);
-  // B1-T3: CHAT_ALLOW_TOOLS is now {AskQuestion}, not {ask_user} — this harness's `allOfferedTools`
+  // B1-T3: chat's allowlist is now {AskQuestion}, not {ask_user} — this harness's `allOfferedTools`
   // assertions below pin the exact chat toolset, so AskQuestion must be registered here too or a
   // chat turn's offered list would be (wrongly) empty rather than proving the allowlist itself.
   registerAskQuestionTool(registry);
@@ -194,7 +193,7 @@ function setup(
     },
   }, sessionId, 0);
 
-  return { engine, store, sessionId, provider, cwd, events, worktrees, workflowLaunches };
+  return { engine, store, sessionId, provider, cwd, events, worktrees, workflowLaunches, registry };
 }
 
 const done = (reason: "end_turn" | "tool_calls"): ProviderEvent => ({ type: "done", stopReason: reason });
@@ -219,7 +218,7 @@ describe("CM closing review: bridged calls obey the thread's toolset (the fourth
     // Production-shaped deferral (`enabled` resolving undefined). spawn_agent is registered
     // NON-deferred by daemon.ts, so the dispatch loop's deferred-builtin guard has nothing to say
     // about it — this site is reachable under the DEFAULT settings, exactly as the reviewer proved.
-    const { engine, sessionId, provider, cwd, events } = setup(
+    const { engine, sessionId, provider, cwd, events, registry } = setup(
       [
         call("sp1", "spawn_agent", { prompt: "write a file", description: "pwn", run_in_background: false }),
         // Round 1 is the CHILD's own round if (and only if) the bridge fired. With the fix there is
@@ -235,13 +234,13 @@ describe("CM closing review: bridged calls obey the thread's toolset (the fourth
 
     await engine.runTurn(sessionId);
 
-    expect(CHAT_ALLOW_TOOLS.has("spawn_agent")).toBe(false); // sanity: the premise is real
+    expect(registry.namesForMode("chat").has("spawn_agent")).toBe(false); // sanity: the premise is real
     // (1) The ground truth: nothing was written, at any depth.
     expect(existsSync(join(cwd, "child-pwned.txt"))).toBe(false);
     // (2) No child thread ever materialised — the bridge is what emits thread_started.
     expect(events.some((e) => e.type === "thread_started")).toBe(false);
     // (3) The child TOOLSET never materialised: every provider round in this turn was offered
-    //     exactly CHAT_ALLOW_TOOLS. Pre-fix this array also contained
+    //     exactly chat's own toolset. Pre-fix this array also contained
     //     read/ls/glob/grep/write/edit/spawn_agent/... — the reviewer's "CHILD tools:" line.
     expect(allOfferedTools(provider)).toEqual(["AskQuestion"]); // B1-T3: was ["ask_user"] pre-rename
     // (4) The call was refused by the SAME executeCall guard 77ee7857 already added — no new
@@ -258,14 +257,14 @@ describe("CM closing review: bridged calls obey the thread's toolset (the fourth
     // deferred-builtin guard would reject an unloaded enter_worktree BEFORE `isWorktree` and mask
     // the bypass. Turning ToolSearch off is exactly the supported configuration in which this site
     // IS reachable, so that is where the regression must be pinned.
-    const { engine, store, sessionId, cwd, events, worktrees, provider } = setup(
+    const { engine, store, sessionId, cwd, events, worktrees, provider, registry } = setup(
       [call("e1", "enter_worktree", { name: "feat" }), text("ok")],
       { mode: "chat", toolSearchEnabled: false },
     );
 
     await engine.runTurn(sessionId);
 
-    expect(CHAT_ALLOW_TOOLS.has("enter_worktree")).toBe(false); // sanity
+    expect(registry.namesForMode("chat").has("enter_worktree")).toBe(false); // sanity
     expect(events.some((e) => e.type === "worktree_entered")).toBe(false);
     expect(worktrees.active(sessionId)).toBeUndefined();
     expect(store.meta(sessionId).cwd).toBe(cwd); // the bridge's setCwd never ran
@@ -281,14 +280,14 @@ describe("CM closing review: bridged calls obey the thread's toolset (the fourth
     // gate cards a Workflow launch under `auto` (gate.ts's bespoke case), so a no-hands chat session
     // would first show the human a card offering to launch an unbounded background agent swarm, and
     // then — on approval — actually launch it.
-    const { engine, sessionId, events, workflowLaunches, provider } = setup(
+    const { engine, sessionId, events, workflowLaunches, provider, registry } = setup(
       [call("wf1", "Workflow", { script: "export default async () => 'pwned';", name: "pwn" }), text("ok")],
       { mode: "chat", toolSearchEnabled: false },
     );
 
     await engine.runTurn(sessionId);
 
-    expect(CHAT_ALLOW_TOOLS.has("Workflow")).toBe(false); // sanity
+    expect(registry.namesForMode("chat").has("Workflow")).toBe(false); // sanity
     expect(workflowLaunches).toEqual([]);
     expect(events.some((e) => e.type === "approval_requested")).toBe(false);
     expect(allOfferedTools(provider)).toEqual(["AskQuestion"]); // B1-T3: was ["ask_user"] pre-rename
@@ -402,14 +401,24 @@ describe("CM closing review: the offered() gate does not narrow code or dispatch
     expect(toolResultFor(events, "wf1").isError).toBe(false);
   });
 
-  test("dispatch orchestrates via session_spawn, which the gate cannot touch — and the three bridged names were never in DISPATCH_ALLOW_TOOLS to begin with", () => {
+  test("dispatch orchestrates via session_spawn, which the gate cannot touch — and the three bridged names are never dispatch-eligible to begin with", () => {
     // Point 1 of the controller's verification list, as a literal assertion rather than prose: for a
     // dispatch session the three gated sites are a TIGHTENING of calls the provider is never offered,
-    // and its actual orchestration verb is untouched (session_spawn is on the allowlist AND is
+    // and its actual orchestration verb is untouched (session_spawn IS dispatch-eligible AND is
     // separately mode-gated, so `offered()` is true for it and its bridge is unaffected).
-    expect(DISPATCH_ALLOW_TOOLS.has("session_spawn")).toBe(true);
+    //
+    // R-T2 fix-round-1: reads each tool's own `modes` declaration (the real source of truth) via a
+    // small standalone registry, rather than the deleted DISPATCH_ALLOW_TOOLS constant — this test
+    // needs no engine/session at all, so it builds exactly the five defs the assertion cares about.
+    const registry = new ToolRegistry();
+    registerSessionSpawnTool(registry);
+    registerSpawnAgentTool(registry);
+    registerWorktreeTools(registry);
+    registerWorkflowTool(registry);
+    const dispatchNames = registry.namesForMode("dispatch");
+    expect(dispatchNames.has("session_spawn")).toBe(true);
     for (const n of ["spawn_agent", "enter_worktree", "exit_worktree", "Workflow"]) {
-      expect(DISPATCH_ALLOW_TOOLS.has(n)).toBe(false);
+      expect(dispatchNames.has(n)).toBe(false);
     }
   });
 });

@@ -6,6 +6,8 @@ import { spyOn } from "bun:test";
 import { SessionStore } from "../sessions/store";
 import { SessionHub } from "../sessions/hub";
 import { ToolRegistry } from "./tools/registry";
+import { registerAskQuestionTool } from "./tools/ask-question";
+import { registerSearchTool } from "./tools/search";
 import { PermissionGate } from "./gate";
 import { ApprovalBroker } from "./approvals";
 import { AgentEngine } from "./engine";
@@ -40,6 +42,7 @@ export async function makeWorkflowAgentHarness(opts: {
 }): Promise<{
   engine: AgentEngine;
   sessionId: string;
+  registry: ToolRegistry;
   toolsSeenByChild: (() => string[]) & { policy?: () => string | undefined };
 }> {
   const home = mkdtempSync(join(tmpdir(), "norma-workflow-agent-home-"));
@@ -54,6 +57,13 @@ export async function makeWorkflowAgentHarness(opts: {
     args: z.object({}),
     run: async () => "unused in these tests",
   });
+  // R-T2 fix-round-1: registered so this harness matches the real daemon (daemon.ts always
+  // registers both AskQuestion and Search), which is what makes
+  // `registry.namesNotForMode("code")` a REAL check in the "chat-only tools never reach a
+  // workflow-spawned child" test (workflow-agent.test.ts) rather than one over an empty
+  // complement — the old CHAT_ONLY_TOOLS constant this replaces is deleted.
+  registerAskQuestionTool(registry);
+  registerSearchTool(registry);
 
   const broker = new ApprovalBroker();
   const dirs = new SessionDirectories(() => [cwd]);
@@ -106,5 +116,5 @@ export async function makeWorkflowAgentHarness(opts: {
     return call?.[0]?.meta?.approvalPolicy;
   };
 
-  return { engine, sessionId, toolsSeenByChild };
+  return { engine, sessionId, registry, toolsSeenByChild };
 }

@@ -29,7 +29,6 @@ import { ContextAssembler, BASE_PROMPT } from "../../src/agent/context";
 import { TrustStore } from "../../src/agent/trust";
 import { SkillStore } from "../../src/agent/skills";
 import { Compactor } from "../../src/agent/compactor";
-import { DISPATCH_ALLOW_TOOLS } from "../../src/agent/dispatch-prompt";
 import { assistantMemoryDirFor } from "../../src/agent/memory-dir";
 import type { ProviderEvent } from "../../src/providers/types";
 
@@ -55,7 +54,7 @@ function setup(script: ProviderEvent[][], opts: { mode?: "code" | "dispatch" | "
   registerSessionSpawnTool(registry);
   registerPushNotificationTool(registry);
   registerAskUserTool(registry);
-  // B1-T3: chat's own AskQuestion — CHAT_ALLOW_TOOLS is now {AskQuestion}, not {ask_user}. Must be
+  // B1-T3: chat's own AskQuestion — chat's allowlist is now {AskQuestion}, not {ask_user}. Must be
   // registered here or a chat turn's offered toolset would be (wrongly) empty below.
   registerAskQuestionTool(registry);
   registerWebTools(registry);
@@ -96,18 +95,26 @@ const done = (reason: "end_turn" | "tool_calls"): ProviderEvent => ({ type: "don
 const text = (t: string): ProviderEvent[] => [{ type: "text_delta", delta: t }, { type: "usage", inputTokens: 10, outputTokens: 2 }, done("end_turn")];
 
 describe("dispatch mode: toolset + system prompt", () => {
-  test("dispatch session: provider-visible tools are a subset of DISPATCH_ALLOW_TOOLS, include session_spawn-eligible names, exclude write/edit/lsp/spawn_agent/skill_write/notebook_edit", async () => {
+  // R-T2 fix-round-1: dropped the `for (const n of names) expect(DISPATCH_ALLOW_TOOLS.has(n))
+  // .toBe(true)` subset check this test used to open with — `names` (the offered set) is now
+  // ITSELF filtered by `registry.namesForMode("dispatch", ...)` in production, so re-checking
+  // membership against that same derivation would be tautological (always true by construction),
+  // not an independent cross-check like it was against the old hand-maintained constant. The real
+  // invariants — which names are present/absent — are pinned by the explicit checks below instead.
+  test("dispatch session: provider-visible tools include session_spawn-eligible names, exclude write/edit/lsp/spawn_agent/skill_write/notebook_edit", async () => {
     const { engine, sessionId, provider } = setup([text("ok")], { mode: "dispatch" });
     await engine.runTurn(sessionId);
     const names = new Set((provider.requests[0]?.tools ?? []).map((t) => t.name));
 
-    for (const n of names) expect(DISPATCH_ALLOW_TOOLS.has(n)).toBe(true);
     expect(names.has("bash")).toBe(true);
-    expect(names.has("web_fetch")).toBe(true);
     // Task 4: session_spawn is now registered AND whitelisted — present for a dispatch session.
     expect(names.has("session_spawn")).toBe(true);
 
-    for (const excluded of ["write", "edit", "lsp", "spawn_agent", "skill_write", "notebook_edit"]) {
+    // R-T3: web_fetch/web_search dropped from dispatch's modes — they were `deferred: true` and
+    // dispatch (this harness) has no ToolSearch registered at all, so they were advertised here
+    // but could never actually be called (bug #7). Dispatch now uses Search (search.ts) instead;
+    // its own harness in mode-toolset-equivalence.test.ts / dispatch-search.test.ts pins that.
+    for (const excluded of ["write", "edit", "lsp", "spawn_agent", "skill_write", "notebook_edit", "web_fetch", "web_search"]) {
       expect(names.has(excluded)).toBe(false);
     }
   });
@@ -206,7 +213,9 @@ describe("chat mode (Slice A): toolset + system prompt + memory", () => {
     const dispatchHarness = setup([text("ok")], { mode: "dispatch" });
     await dispatchHarness.engine.runTurn(dispatchHarness.sessionId);
     const dispatchNames = new Set((dispatchHarness.provider.requests[0]?.tools ?? []).map((t) => t.name));
-    for (const n of dispatchNames) expect(DISPATCH_ALLOW_TOOLS.has(n)).toBe(true);
+    // R-T2 fix-round-1: same tautology as the test above — dropped the subset check against the
+    // now-deleted DISPATCH_ALLOW_TOOLS constant; the explicit presence/absence checks below are
+    // the real, non-circular invariants.
     expect(dispatchNames.has("bash")).toBe(true);
     expect(dispatchNames.has("session_spawn")).toBe(true);
     const dispatchInstructions = dispatchHarness.provider.requests[0]?.instructions ?? "";

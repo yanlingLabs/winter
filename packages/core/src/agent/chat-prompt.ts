@@ -19,19 +19,12 @@ export const CHAT_SYSTEM_PROMPT = [
   "When a choice is genuinely the user's to make, use AskQuestion rather than assuming.",
 ].join("\n");
 
-// Declared as `Set<string>` (not `ReadonlySet<string>`) to match runThread's existing `allowTools?:
-// Set<string>` option (engine.ts) — the NAME LIST is the invariant this constant pins, not the
-// container type.
-/** The chat toolset, by REGISTERED tool name. Chat's own tools are deliberately separate from
- *  code's (`ask_user`, `web_search`, `web_fetch`) — the registry is per-daemon and rejects
- *  duplicate names, so the chat variants carry their own names and code's are untouched.
- *  Nothing that touches the filesystem, the shell, or the machine may ever join. (B1-T3:
- *  `AskQuestion` replaces `ask_user` here; B1-T5 adds `Search`.) */
-export const CHAT_ALLOW_TOOLS: Set<string> = new Set(["AskQuestion", "Search"]);
-
-/** Chat's OWN tools — the ones that exist only because chat needs a different shape than code's
- *  (AskQuestion vs ask_user; Task 5 adds Search vs web_search). Code mode's toolAccess is an
- *  EXCLUDElist, not an allowlist, so without naming them here every registered tool is offered to
- *  code sessions and these would ride along — handing code two question tools with different card
- *  shapes. Dispatch needs no entry: it uses an allowlist and simply omits them. */
-export const CHAT_ONLY_TOOLS: ReadonlySet<string> = new Set(["AskQuestion", "Search"]);
+// R-T2 (per-mode tool registry, Task 2 — "the flip"): CHAT_ALLOW_TOOLS and CHAT_ONLY_TOOLS used to
+// live here as the hand-maintained source of truth for chat's toolset. Both are gone — engine.ts's
+// toolAccess (chat/dispatch allowlist, code's exclude-derived complement) and its two
+// childExcludeTools sites now all read `ToolRegistry.namesForMode`/`namesNotForMode` (registry.ts),
+// driven live off each tool def's own `modes` field (search.ts: `modes: ["chat","dispatch"]`;
+// ask-question.ts: `modes: ["chat"]`) — declaring eligibility AT the tool instead of enumerating it
+// in a THIRD place here. The handful of tests that used to import these constants for static
+// sanity checks were rewritten to call `registry.namesForMode(...)`/`namesNotForMode(...)` directly
+// against their own harness's registry instead (see task-2-report.md, "Fix round 1").

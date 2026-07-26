@@ -9,8 +9,9 @@ const NO_ANSWER = () => `No answer within ${ASK_TIMEOUT_S()}s — the user is no
  *  clean question + answer options with an Other field". A SEPARATE tool rather than a mode-aware
  *  schema on `ask_user` itself because `ToolRegistry.register()` throws on duplicate names
  *  (registry.ts) and the registry is built ONCE per daemon (daemon.ts), not per session —
- *  per-session differentiation is purely name filtering (CHAT_ALLOW_TOOLS vs code's registry-wide
- *  visibility), nothing else. That is the structural reason for the new name, not a style choice. */
+ *  per-session differentiation is purely name filtering (registry.namesForMode("chat", ...) vs
+ *  code's exclude-derived registry-wide visibility), nothing else. That is the structural reason
+ *  for the new name, not a style choice. */
 const AskQuestionArgs = z.object({
   question: z.string().min(1),
   options: z.array(z.object({ label: z.string().min(1) })).min(2).max(4),
@@ -24,8 +25,10 @@ export function registerAskQuestionTool(r: ToolRegistry): void {
       "Give 2-4 short, distinct option labels. Do NOT add an 'Other' option: the interface always offers a free-text 'Other' itself, so an option spelled 'Other' just wastes a slot. " +
       "Options are labels only — no descriptions. If you recommend one, put it first and append ' (Recommended)' to its label. " +
       "The user's answer is returned to you; if nobody answers in time you'll be told to proceed.",
-    // NOT deferred: CHAT_ALLOW_TOOLS contains no ToolSearch, so a deferred tool could never be
-    // loaded and would be permanently uncallable while still appearing in chat's instructions.
+    // NOT deferred: chat's derived toolset has no ToolSearch member unless something eligible for
+    // chat is itself deferred (none is), so a deferred tool here could never be loaded and would
+    // be permanently uncallable while still appearing in chat's instructions.
+    modes: ["chat"], // R-T2: was CHAT_ALLOW_TOOLS's literal membership
     args: AskQuestionArgs,
     async run({ question, options }: z.infer<typeof AskQuestionArgs>, ctx) {
       if (!ctx.ask) return NO_ANSWER();

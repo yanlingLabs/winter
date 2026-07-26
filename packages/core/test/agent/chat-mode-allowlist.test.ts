@@ -31,8 +31,6 @@ import { ContextAssembler } from "../../src/agent/context";
 import { TrustStore } from "../../src/agent/trust";
 import { SkillStore } from "../../src/agent/skills";
 import { Compactor } from "../../src/agent/compactor";
-import { DISPATCH_ALLOW_TOOLS } from "../../src/agent/dispatch-prompt";
-import { CHAT_ALLOW_TOOLS } from "../../src/agent/chat-prompt";
 import type { ProviderEvent } from "../../src/providers/types";
 
 /**
@@ -47,7 +45,8 @@ import type { ProviderEvent } from "../../src/providers/types";
  *
  * Important 1 (instructions leak): chat's assembled instructions advertised deferred tools
  * (push_notification/web_fetch/web_search/skill_write/lsp) and a "call the Skill tool" header even
- * though CHAT_ALLOW_TOOLS is just {AskQuestion} (B1-T3: was {ask_user} pre-rename) — directly contradicting the base prompt's own "no
+ * though chat's allowlist (registry.namesForMode("chat", ...)) is just {AskQuestion} (B1-T3: was
+ * {ask_user} pre-rename) — directly contradicting the base prompt's own "no
  * access to this machine" claim.
  *
  * Important 2 (execution leak): `executeCall` applied the deferral check and the permission gate,
@@ -115,7 +114,7 @@ function setup(script: ProviderEvent[][], opts: { mode?: "code" | "dispatch" | "
   const sessionId = store.createSession("global", { cwd, approvalPolicy: "auto", mode: opts.mode });
   const events: SessionEvent[] = [];
   hub.attach({ clientName: "test-observer", deliver: (e) => { events.push(e); return true; } }, sessionId, 0);
-  return { engine, store, sessionId, provider, cwd, events };
+  return { engine, store, sessionId, provider, cwd, events, registry };
 }
 
 const done = (reason: "end_turn" | "tool_calls"): ProviderEvent => ({ type: "done", stopReason: reason });
@@ -133,7 +132,7 @@ function toolResultFor(events: SessionEvent[], callId: string): Extract<SessionE
 }
 
 describe("CM branch review Important 1: chat's instructions never advertise machine-touching tools", () => {
-  test("RED (reviewer's own repro): a chat turn's instructions list no deferred tool outside CHAT_ALLOW_TOOLS, and the 'no access to this machine' claim goes unchallenged", async () => {
+  test("RED (reviewer's own repro): a chat turn's instructions list no deferred tool outside chat's allowlist, and the 'no access to this machine' claim goes unchallenged", async () => {
     const { engine, sessionId, provider } = setup([text("ok")], { mode: "chat" });
     await engine.runTurn(sessionId);
     const instructions = provider.requests[0]?.instructions ?? "";
@@ -143,16 +142,16 @@ describe("CM branch review Important 1: chat's instructions never advertise mach
     for (const name of ["lsp", "skill_write", "web_fetch", "web_search", "push_notification"]) {
       expect(instructions).not.toContain(name);
     }
-    // CHAT_ALLOW_TOOLS is just {AskQuestion} (B1-T3), which is never deferred — the filtered deferred index
+    // Chat's allowlist (registry.namesForMode("chat", ...)) contains no deferred tool — the filtered deferred index
     // is empty, so buildInstructionsFull never emits the section header at all.
     expect(instructions).not.toContain("# Deferred tools");
   });
 
-  test("context.ts fix: the Skills header ('call the Skill tool') is absent for chat — Skill isn't in CHAT_ALLOW_TOOLS", async () => {
-    const { engine, sessionId, provider } = setup([text("ok")], { mode: "chat" });
+  test("context.ts fix: the Skills header ('call the Skill tool') is absent for chat — Skill isn't chat-eligible", async () => {
+    const { engine, sessionId, provider, registry } = setup([text("ok")], { mode: "chat" });
     await engine.runTurn(sessionId);
     const instructions = provider.requests[0]?.instructions ?? "";
-    expect(CHAT_ALLOW_TOOLS.has("Skill")).toBe(false); // sanity: the premise this test exercises is real
+    expect(registry.namesForMode("chat").has("Skill")).toBe(false); // sanity: the premise this test exercises is real
     expect(instructions).not.toContain("call the `Skill` tool");
     expect(instructions).not.toContain("## Available capabilities");
   });
@@ -171,32 +170,41 @@ describe("CM branch review: code/dispatch deferred blocks unchanged in kind (reg
     expect(instructions).toContain("call the `Skill` tool");
   });
 
-  test("a dispatch session's deferred block narrows to DISPATCH_ALLOW_TOOLS: push_notification/web_fetch/web_search remain, lsp/skill_write drop out (this is the fix — dispatch's block previously over-advertised too)", async () => {
-    const { engine, sessionId, provider } = setup([text("ok")], { mode: "dispatch" });
+  test("a dispatch session's deferred block narrows to its own eligible tools: push_notification remains, web_fetch/web_search/lsp/skill_write all drop out (R-T3: web_fetch/web_search are no longer dispatch-eligible at all — see dispatch-search.test.ts for the replacement, Search)", async () => {
+    const { engine, sessionId, provider, registry } = setup([text("ok")], { mode: "dispatch" });
     await engine.runTurn(sessionId);
     const instructions = provider.requests[0]?.instructions ?? "";
     expect(instructions).toContain("# Deferred tools");
-    for (const name of ["push_notification", "web_fetch", "web_search"]) {
+    for (const name of ["push_notification"]) {
       expect(instructions).toContain(deferredBullet(name));
     }
-    for (const name of ["lsp", "skill_write"]) {
+    for (const name of ["lsp", "skill_write", "web_fetch", "web_search"]) {
       expect(instructions).not.toContain(deferredBullet(name));
     }
-    // Pre-existing, OUT OF SCOPE gap the review flagged (#7) and this fix deliberately does not
-    // paper over: DISPATCH_ALLOW_TOOLS lists push_notification/web_fetch/web_search as deferred
-    // entries, but NOT "ToolSearch" itself — so dispatch's own doctrine ("load schemas first with
-    // the ToolSearch tool") is unfulfillable for it. Documented here, not fixed.
-    expect(DISPATCH_ALLOW_TOOLS.has("ToolSearch")).toBe(false);
-    // Dispatch's own Skills header ALSO drops — DISPATCH_ALLOW_TOOLS never lists "Skill" either
-    // (a same-shape, previously-latent instance of Important 1 this general fix closes for free).
-    expect(DISPATCH_ALLOW_TOOLS.has("Skill")).toBe(false);
+    // R-T2 fix-round-1: this was "Pre-existing, OUT OF SCOPE gap the review flagged (#7)... this
+    // fix deliberately does not paper over" — pinning `DISPATCH_ALLOW_TOOLS.has("ToolSearch") ===
+    // false` as the (undesired but accepted) status quo. R-T2's `namesForMode` DOES fix bug #7 for
+    // real: a mode with any eligible `deferred:true` tool now always gets ToolSearch alongside it
+    // (dispatch has one here now — push_notification; web_fetch/web_search dropped out of
+    // dispatch's `modes` entirely in R-T3, they no longer contribute). So this now asserts the
+    // FIX, not the gap — `true`, not `false`.
+    //
+    // R-T3 review finding 3: read what the engine ACTUALLY resolved for this real turn instead of
+    // hand-feeding `builtinDeferral: true` into namesForMode directly — a literal here would keep
+    // passing even if this harness's own toolSearch wiring stopped being active, describing
+    // behavior a real turn no longer has. `provider.requests[...]` is the same real-resolution
+    // source every other assertion in this file already reads off.
+    expect((provider.requests[0]?.tools ?? []).some((t) => t.name === "ToolSearch")).toBe(true);
+    // Dispatch's own Skills header ALSO drops — Skill was never dispatch-eligible either (a
+    // same-shape, previously-latent instance of Important 1 this general fix closes for free).
+    expect(registry.namesForMode("dispatch", { builtinDeferral: true }).has("Skill")).toBe(false);
     expect(instructions).not.toContain("call the `Skill` tool");
   });
 });
 
 describe("CM branch review Important 2: off-list execution is refused, with no side effect", () => {
   test("RED (reviewer's own probe, inverted): a chat session's off-list `write` call is rejected before touching disk", async () => {
-    const { engine, sessionId, provider, cwd, events } = setup(
+    const { engine, sessionId, provider, cwd, events, registry } = setup(
       [
         [{ type: "tool_call", callId: "w1", name: "write", argsJson: JSON.stringify({ path: "pwned.txt", content: "not on my watch!" }) }, done("tool_calls")],
         text("ok"),
@@ -206,7 +214,7 @@ describe("CM branch review Important 2: off-list execution is refused, with no s
 
     await engine.runTurn(sessionId);
 
-    expect(CHAT_ALLOW_TOOLS.has("write")).toBe(false); // sanity: write really is off-list for chat
+    expect(registry.namesForMode("chat").has("write")).toBe(false); // sanity: write really is off-list for chat
     const result = toolResultFor(events, "w1");
     expect(result.isError).toBe(true);
     expect(result.output).toBe("tool write is not available in this session");
@@ -217,7 +225,7 @@ describe("CM branch review Important 2: off-list execution is refused, with no s
   });
 
   test("the ToolSearch -> lsp chain is refused at the FIRST off-list step: ToolSearch itself is rejected, so lsp is never marked loaded and stays permanently deferred", async () => {
-    const { engine, sessionId, events } = setup(
+    const { engine, sessionId, events, registry } = setup(
       [
         [{ type: "tool_call", callId: "ts1", name: "ToolSearch", argsJson: JSON.stringify({ query: "select:lsp" }) }, done("tool_calls")],
         [{ type: "tool_call", callId: "l1", name: "lsp", argsJson: JSON.stringify({ action: "diagnostics", file_path: "x.ts" }) }, done("tool_calls")],
@@ -228,8 +236,8 @@ describe("CM branch review Important 2: off-list execution is refused, with no s
 
     await engine.runTurn(sessionId);
 
-    expect(CHAT_ALLOW_TOOLS.has("ToolSearch")).toBe(false); // sanity
-    // Step 1: ToolSearch itself is off CHAT_ALLOW_TOOLS — refused by the NEW allowTools check in
+    expect(registry.namesForMode("chat").has("ToolSearch")).toBe(false); // sanity
+    // Step 1: ToolSearch itself is off chat's allowlist — refused by the NEW allowTools check in
     // executeCall (ToolSearch is not itself `deferred:true`, so it would otherwise have sailed
     // straight through the pre-existing deferral guard to registry.execute() and loaded lsp's
     // schema).

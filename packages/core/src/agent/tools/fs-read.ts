@@ -314,6 +314,7 @@ export function registerReadTools(r: ToolRegistry, opts: ReadToolsConfig = {}): 
       limit: z.number().int().positive().optional(),
       pages: z.string().min(1).optional(),
     }),
+    modes: ["code", "dispatch"], // R-T2: was DISPATCH_ALLOW_TOOLS's literal membership
     async run({ path, offset = 1, limit, pages }, ctx) {
       const { roots } = ctx;
       const target = isAbsolute(path) ? resolve(path) : resolve(roots[0]!, path);
@@ -346,6 +347,7 @@ export function registerReadTools(r: ToolRegistry, opts: ReadToolsConfig = {}): 
     description:
       "Lists files and directories in a given path (non-recursive, one level deep), anywhere on disk. `path` must be an absolute path, not a relative path. Optionally pass `ignore`, an array of glob patterns matched against entry names to exclude from the listing. Prefer `glob` or `grep` when you already know what you're looking for and want a targeted search rather than a full directory listing.",
     args: z.object({ path: z.string().min(1), ignore: z.array(z.string()).optional() }),
+    modes: ["code", "dispatch"], // R-T2: was DISPATCH_ALLOW_TOOLS's literal membership
     run({ path, ignore }) {
       if (!isAbsolute(path)) throw new Error(`path must be absolute: ${path}`);
       const target = resolve(path);
@@ -385,6 +387,7 @@ export function registerReadTools(r: ToolRegistry, opts: ReadToolsConfig = {}): 
     name: "glob",
     description: "List files matching a glob pattern (newline-separated, absolute paths). A relative pattern scans the session's directories; an absolute pattern (e.g. \"/Users/me/**/*.mp4\") may target anywhere on disk.",
     args: z.object({ pattern: z.string().min(1), budgetMs: z.number().int().positive().max(10_000).default(2000) }),
+    modes: ["code", "dispatch"], // R-T2: was DISPATCH_ALLOW_TOOLS's literal membership
     async run({ pattern, budgetMs }, { roots, tmpDir }) {
       const out = new Set<string>();
       const deadline = Date.now() + budgetMs;
@@ -413,6 +416,7 @@ export function registerReadTools(r: ToolRegistry, opts: ReadToolsConfig = {}): 
     name: "grep",
     description: "Search file contents with a regular expression. Returns file:line:text matches. `glob` scopes the search — a relative pattern stays within the session's directories; an absolute pattern may target anywhere on disk.",
     args: z.object({ pattern: z.string().min(1).max(256), glob: z.string().default("**/*"), budgetMs: z.number().int().positive().max(10_000).default(2000) }),
+    modes: ["code", "dispatch"], // R-T2: was DISPATCH_ALLOW_TOOLS's literal membership
     async run({ pattern, glob: g, budgetMs }, { cwd, roots, tmpDir }) {
       // Pattern is model-controlled: length-capped as a cheap ReDoS bound.
       // Full guard (linear-time engine or scan timeout) tracked in phase-1 carryover.
