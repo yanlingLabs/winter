@@ -30,6 +30,7 @@ export function registerPushNotificationTool(r: ToolRegistry): void {
       "Send the user a native desktop notification — use when a long-running task finishes or you need to flag a decision the user should look at soon, especially if they may not be watching this session right now. " +
       "message: the notification body (required, up to 500 chars). title: optional, up to 100 chars, defaults to \"Norma\".",
     args: PushNotificationArgs,
+    modes: ["code", "dispatch"], // R-T2: was DISPATCH_ALLOW_TOOLS's literal membership
     deferred: true,
     async run({ message, title }: z.infer<typeof PushNotificationArgs>, ctx) {
       if (!ctx.notify) return "notification not available in this session";

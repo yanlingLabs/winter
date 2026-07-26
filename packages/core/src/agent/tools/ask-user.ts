@@ -30,6 +30,7 @@ export function registerAskUserTool(r: ToolRegistry): void {
       "If you recommend an option, put it first and append ' (Recommended)' to its label. Use multiSelect: true when choices are not mutually exclusive. " +
       "The user's answers are returned; if no one answers in time you'll be told to proceed with your best judgment.",
     args: AskUserArgs,
+    modes: ["code", "dispatch"], // R-T2: was DISPATCH_ALLOW_TOOLS's literal membership
     async run({ questions }: z.infer<typeof AskUserArgs>, ctx) {
       if (!ctx.ask) return NO_ANSWER();
       const res = await ctx.ask(questions);

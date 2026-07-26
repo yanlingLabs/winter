@@ -48,6 +48,7 @@ export function registerTaskStopTool(
       "Stopping an already-finished agent is not an error — it just reports its current status. " +
       "In the dispatch session, child session ids are also stoppable.",
     args: z.object({ task_id: z.string().min(1) }),
+    modes: ["code", "dispatch"], // R-T2: was DISPATCH_ALLOW_TOOLS's literal membership
     deferred,
     run({ task_id }, { sessionId }) {
       const entry = bgAgents?.get(task_id, sessionId);

@@ -225,6 +225,7 @@ export function registerWebTools(r: ToolRegistry, deps: WebToolDeps = {}): void 
     // the 5MB read cap and 8192-byte preview are fixed constants (not caller-tunable), keeping the
     // SSRF/DoS posture uniform regardless of what a caller asks for.
     args: z.object({ url: z.string().min(1) }),
+    modes: ["code", "dispatch"], // R-T2: was DISPATCH_ALLOW_TOOLS's literal membership
     deferred: true, // T1 machinery, per-def flag — same pattern as task_get
     async run({ url }, ctx) {
       let outcome = "network_error";
@@ -303,6 +304,7 @@ export function registerWebTools(r: ToolRegistry, deps: WebToolDeps = {}): void 
       // posture as web_fetch's fixed byte caps, just expressed as a result-count cap instead).
       max_results: z.number().int().positive().optional(),
     }),
+    modes: ["code", "dispatch"], // R-T2: was DISPATCH_ALLOW_TOOLS's literal membership
     deferred: true, // same class as web_fetch — rides ToolSearch deferral, not visible/callable until loaded
     async run({ query, max_results }, ctx) {
       let outcome = "network_error";

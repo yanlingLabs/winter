@@ -215,6 +215,7 @@ export function registerComputerTool(
       "Ground actions on ax_snapshot elements (exact) before falling back to a screenshot. Requires Norma.app running with the relevant permissions granted.",
     args: ComputerArgs,
     rawParameters: RAW_PARAMETERS,
+    modes: ["code", "dispatch"], // R-T2: was DISPATCH_ALLOW_TOOLS's literal membership
     deferred,
     async run(args, ctx) {
       if (!ctx.computerUse) throw new Error("computer use is not available in this session");

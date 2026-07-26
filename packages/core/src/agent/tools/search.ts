@@ -61,6 +61,10 @@ export function registerSearchTool(r: ToolRegistry, deps: SearchToolDeps = {}): 
     // chat's instructions and be permanently uncallable. That is the pre-existing dispatch-
     // allowlist bug (DISPATCH_ALLOW_TOOLS advertises web_fetch/web_search while omitting
     // ToolSearch) — this file does not repeat it, and a named test pins the fix.
+    // R-T2: dispatch adoption is Task 3's own swap — declaring it here now is what makes that
+    // swap a one-line change later (dispatch-prompt.ts's system prompt still routes through
+    // web_search/web_fetch until then; this only affects the derived TOOLSET).
+    modes: ["chat", "dispatch"],
     args: z.object({
       query: z.string().min(1),
       max_results: z.number().int().positive().optional(),

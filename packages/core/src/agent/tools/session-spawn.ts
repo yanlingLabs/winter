@@ -21,6 +21,11 @@ export function registerSessionSpawnTool(r: ToolRegistry, opts: { models?: strin
     : "model: optional model override";
   r.register({
     name: "session_spawn",
+    // R-T2: dispatch's own orchestration verb — was DISPATCH_ALLOW_TOOLS's literal membership,
+    // now the single declaration site. Code eligibility is vestigial (SESSION_SPAWN_TOOL is
+    // ALWAYS added to code's excludeTools unconditionally in engine.ts, independent of this field)
+    // but kept for consistency with every other former-DISPATCH_ALLOW_TOOLS member.
+    modes: ["code", "dispatch"],
     description: [
       "Spawn a full, first-class work session in a directory. The child is an ordinary code session:",
       "own transcript, visible in the session list, full tools. It runs asynchronously — you get a",

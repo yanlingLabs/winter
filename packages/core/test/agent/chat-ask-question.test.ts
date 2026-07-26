@@ -34,7 +34,6 @@ import { ContextAssembler } from "../../src/agent/context";
 import { TrustStore } from "../../src/agent/trust";
 import { SkillStore } from "../../src/agent/skills";
 import { Compactor } from "../../src/agent/compactor";
-import { DISPATCH_ALLOW_TOOLS } from "../../src/agent/dispatch-prompt";
 import type { ProviderEvent } from "../../src/providers/types";
 
 /**
@@ -234,17 +233,25 @@ describe("AskQuestion — the simplified chat card", () => {
     }
   });
 
-  // Fix round 1: dispatch is unaffected by construction (DISPATCH_ALLOW_TOOLS is an allowlist that
-  // simply never names AskQuestion) — asserted directly rather than assumed, per the coordinator's
-  // instruction, and cross-checked against the live offered toolset too.
-  test("dispatch is unaffected: DISPATCH_ALLOW_TOOLS never lists AskQuestion, and a dispatch turn is never offered it", async () => {
-    expect(DISPATCH_ALLOW_TOOLS.has("AskQuestion")).toBe(false);
+  // Fix round 1: dispatch never gets AskQuestion (chat's own question tool stays chat-only by
+  // construction — ask-question.ts declares `modes: ["chat"]`, no "dispatch") — asserted directly
+  // rather than assumed, per the coordinator's instruction, and cross-checked against the live
+  // offered toolset too.
+  //
+  // R-T2 (per-mode tool registry, Task 2): Search is DELIBERATELY DIFFERENT here — search.ts now
+  // declares `modes: ["chat", "dispatch"]` (dispatch adoption is Task 3's own swap for web_fetch/
+  // web_search; declaring it on the tool now is what makes that swap a one-line change later), so
+  // a dispatch turn IS newly offered "Search" post-flip. This is the intended, brief-anticipated
+  // consequence of that tagging, not a regression — updated from the pre-R-T2 expectation
+  // (`not.toContain("Search")`), which pinned DISPATCH_ALLOW_TOOLS's old hand-maintained value, not
+  // real behavior. DISPATCH_ALLOW_TOOLS itself is now a frozen historical fixture (dispatch-
+  // prompt.ts's own doc comment) — kept only for other pinned regression tests, so this file stops
+  // reading it for anything but AskQuestion's (unaffected) exclusion.
+  test("dispatch never gets AskQuestion, but DOES now get Search (R-T2: search.ts declares dispatch eligibility)", async () => {
     const { engine, sessionId, provider } = setup([text("hello")], { mode: "dispatch" });
     await engine.runTurn(sessionId);
     const offered = (provider.requests[0]?.tools ?? []).map((t) => t.name);
     expect(offered).not.toContain("AskQuestion");
-    // B1-T5: same story for Search — DISPATCH_ALLOW_TOOLS is an allowlist that never names it.
-    expect(DISPATCH_ALLOW_TOOLS.has("Search")).toBe(false);
-    expect(offered).not.toContain("Search");
+    expect(offered).toContain("Search");
   });
 });

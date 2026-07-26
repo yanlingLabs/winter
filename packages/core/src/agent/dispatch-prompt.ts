@@ -18,10 +18,21 @@ export const DISPATCH_SYSTEM_PROMPT = [
   "When a child needs a permission or has a question, the card appears HERE in this conversation — the user answers it here; never re-ask on the child's behalf. Unanswered permission requests auto-deny after 10 minutes and the child continues without them.",
 ].join("\n");
 
-// Declared as `Set<string>` (not `ReadonlySet<string>`) to match runThread's existing `allowTools?:
-// Set<string>` option (engine.ts) — the NAME LIST is the invariant this constant pins, not the
-// container type.
-/** The dispatch toolset, by REGISTERED tool name (spec §7 lists 11 tools; `web` registers as two). */
+// R-T2 (per-mode tool registry, Task 2 — "the flip"): engine.ts's toolAccess for dispatch is now
+// `registry.namesForMode("dispatch", { builtinDeferral })` (registry.ts), derived live from each
+// tool def's own `modes` field (session-spawn.ts, task-stop.ts, computer.ts, fs-read.ts, bash.ts,
+// ask-user.ts, web.ts, push-notification.ts all now carry `modes: ["code", "dispatch"]`) — not
+// this constant. Kept, frozen at its historical value, ONLY because chat-mode-allowlist.test.ts,
+// chat-mode-bridge-bypass.test.ts, chat-ask-question.test.ts, and dispatch-toolset.test.ts (the
+// isolation-test set this task's brief explicitly forbids editing) import it directly for "sanity:
+// the premise is real" checks against the CONSTANT itself, not a live turn's derived toolset — see
+// task-2-report.md's "concerns". Not read by production code anywhere anymore; do not add new
+// tools here — declare `modes` on the tool instead.
+/** The dispatch toolset, by REGISTERED tool name, AS OF the pre-R-T2 hand-maintained list (spec §7
+ *  lists 11 tools; `web` registers as two) — frozen at its historical value for the tests above.
+ *  The LIVE toolset now also includes "Search" and, whenever ToolSearch deferral is active,
+ *  "ToolSearch" itself (bug #7's fix — a deferred tool's mode always gets ToolSearch alongside it,
+ *  registry.ts's `namesForMode`); this constant intentionally does not track either addition. */
 export const DISPATCH_ALLOW_TOOLS: Set<string> = new Set([
   "session_spawn", "task_stop", "computer",
   "read", "ls", "glob", "grep",

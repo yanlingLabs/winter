@@ -33,8 +33,12 @@ import { SubagentTranscripts } from "./subagent-transcript";
 import { resolveModelAlias } from "./model-aliases";
 import type { LspManager } from "./lsp/manager";
 import { autoDiagnosticsSuffix, AUTO_DIAG_TOOL_NAMES } from "./lsp/auto-diagnostics";
-import { DISPATCH_ALLOW_TOOLS, DISPATCH_SYSTEM_PROMPT } from "./dispatch-prompt";
-import { CHAT_ALLOW_TOOLS, CHAT_ONLY_TOOLS, CHAT_SYSTEM_PROMPT } from "./chat-prompt";
+import { DISPATCH_SYSTEM_PROMPT } from "./dispatch-prompt";
+// CHAT_ONLY_TOOLS: kept in production use at exactly the two childExcludeTools sites below (NOT
+// turn()'s own toolAccess, which is fully derived via registry.namesForMode/namesNotForMode — see
+// R-T2/task-2-report.md's "concerns" section for why those two sites alone still reference this
+// constant instead of the derived equivalent).
+import { CHAT_ONLY_TOOLS, CHAT_SYSTEM_PROMPT } from "./chat-prompt";
 import type { DispatchChildren } from "./dispatch-children";
 import type { WorkflowRuntime } from "../workflows/runtime";
 
@@ -1799,12 +1803,17 @@ export class AgentEngine {
     // sessions get the cwd-resolved project MEMDIR — see memoryBucket below.
     const isAssistantBucket = isDispatch || isChat;
     // CM branch review (Important 1 follow-on): whether the `Skill` tool is offered to THIS
-    // thread — dispatch's DISPATCH_ALLOW_TOOLS and chat's CHAT_ALLOW_TOOLS (both below) never list
-    // it, so the assembler's "## Available capabilities" block must not tell the model to "call the
-    // `Skill` tool" when there's no such tool for it. Code sessions never exclude "Skill" (their own
-    // excludeTools, built alongside `toolAccess` below, is always {session_spawn, Workflow?}), so
-    // this only ever differs for dispatch/chat.
-    const skillToolOffered = isDispatch ? DISPATCH_ALLOW_TOOLS.has("Skill") : isChat ? CHAT_ALLOW_TOOLS.has("Skill") : true;
+    // thread — dispatch's and chat's derived toolsets (R-T2: registry.namesForMode, replacing the
+    // old DISPATCH_ALLOW_TOOLS/CHAT_ALLOW_TOOLS constants) never list it (nothing declares `modes`
+    // including "Skill" for either), so the assembler's "## Available capabilities" block must not
+    // tell the model to "call the `Skill` tool" when there's no such tool for it. Code sessions
+    // never exclude "Skill" (their own excludeTools, built alongside `toolAccess` below, is always
+    // {session_spawn, Workflow?, ...namesNotForMode("code")}), so this only ever differs for
+    // dispatch/chat. `builtinDeferral` omitted here (unlike `toolAccess` below) — Skill's absence
+    // from either mode's set never depends on the deferred-trigger ToolSearch addition.
+    const skillToolOffered = isDispatch ? this.cfg.registry.namesForMode("dispatch").has("Skill")
+      : isChat ? this.cfg.registry.namesForMode("chat").has("Skill")
+      : true;
     // Resolved ONCE per turn (spec: "changing models must NOT require a daemon restart") — a
     // settings.json edit mid-turn does not retroactively change THIS turn's model, only the
     // NEXT one's, mirroring how `instructions`/`instructionsFull` below are also computed once
@@ -1897,23 +1906,32 @@ export class AgentEngine {
     }
     const ultracodeActive = ultracodeGateOpen && (ultracodeTrigger?.task !== undefined || this.ultracodeToggle.has(sessionId));
     // CM branch review (Important 1 + Important 2 prep): the ONE excludeTools/allowTools pair for
-    // THIS thread — dispatch gets DISPATCH_ALLOW_TOOLS, chat gets CHAT_ALLOW_TOOLS (both allowlist
-    // shapes), a plain code session gets session_spawn excluded (plus Workflow when
-    // `excludeWorkflow`, plus CHAT_ONLY_TOOLS — B1-T3 fix-round-1: code's toolAccess is an
-    // EXCLUDElist, not an allowlist like chat/dispatch's, so a chat-only tool registered in the
-    // SAME shared per-daemon registry would otherwise ride along unnamed — see CHAT_ONLY_TOOLS's
-    // own doc comment in chat-prompt.ts). Computed ONCE and reused for THREE seams that must never
+    // THIS thread — dispatch and chat get an ALLOWLIST (registry.namesForMode, R-T2), a plain code
+    // session gets session_spawn excluded (plus Workflow when `excludeWorkflow`, plus
+    // registry.namesNotForMode("code") — R-T2's derived replacement for the old CHAT_ONLY_TOOLS
+    // constant: code's toolAccess is an EXCLUDElist, not an allowlist like chat/dispatch's, so a
+    // tool whose `modes` doesn't include "code" would otherwise ride along unnamed in the SAME
+    // shared per-daemon registry). Computed ONCE and reused for THREE seams that must never
     // disagree: the deferred-index TEXT filter (buildInstructionsFull, just below — this SUBSUMES
     // the old Workflow-only `excludeDeferred` special case, see that method's own doc comment), the
     // provider-facing specs() filter (runThread's own `.filter(excludeTools).filter(allowTools)`,
     // unchanged shape — just now fed by this shared value instead of a THIRD inline ternary), and
     // (4h-ii Important 2) executeCall's own new allowTools/excludeTools rejection below, via
     // runThread's opts.
+    // R-T2: the SAME resolved built-in-deferral flag specs() itself later receives (runThread's own
+    // `tsEnabled`, computed the identical way from the SAME `cwd`) — not a second source of truth,
+    // just read here too so a deferred tool's mode (dispatch, e.g. push_notification) always comes
+    // with ToolSearch alongside it (namesForMode's own anyDeferred addition; bug #7's fix).
+    const builtinDeferral = this.toolSearchEnabled(cwd);
     const toolAccess: { excludeTools?: Set<string>; allowTools?: Set<string> } = isDispatch
-      ? { allowTools: DISPATCH_ALLOW_TOOLS }
+      ? { allowTools: this.cfg.registry.namesForMode("dispatch", { builtinDeferral }) }
       : isChat
-      ? { allowTools: CHAT_ALLOW_TOOLS }
-      : { excludeTools: new Set([SESSION_SPAWN_TOOL, ...(excludeWorkflow ? [WORKFLOW_TOOL] : []), ...CHAT_ONLY_TOOLS]) };
+      ? { allowTools: this.cfg.registry.namesForMode("chat", { builtinDeferral }) }
+      : { excludeTools: new Set([
+          SESSION_SPAWN_TOOL,
+          ...(excludeWorkflow ? [WORKFLOW_TOOL] : []),
+          ...this.cfg.registry.namesNotForMode("code"),
+        ]) };
     const instructionsFull = this.buildInstructionsFull(instructions, cwd, loaded, meta.approvalPolicy, sessionId, toolAccess.excludeTools, toolAccess.allowTools, ultracodeActive);
     // Auto-compact BEFORE historyInput is built, so a triggered compaction's checkpoint is
     // reflected in this turn's input. A compaction failure degrades to a normal (uncompacted)
@@ -2686,6 +2704,13 @@ export class AgentEngine {
           // only ever exists inside a CODE session (comment above), and this set is built
           // independently of turn()'s own toolAccess exclude set, so it needs the SAME addition or
           // a child would be offered AskQuestion even though its parent main thread excludes it.
+          // R-T2 (deliberately NOT flipped to registry.namesNotForMode("code") here — see
+          // task-2-report.md "concerns": engine-spawn.test.ts's own exclusion-guard test registers
+          // no AskQuestion/Search def at all, so the derived call would diverge from this literal
+          // ONLY in that (and workflow-agent.test.ts's) narrow test harness, never in the real
+          // daemon, where both are always registered — CHAT_ONLY_TOOLS's value is byte-identical
+          // to the derived one in production; this literal is kept solely to avoid touching that
+          // protected test).
           const childExcludeTools = new Set(["ask_user", "exit_plan_mode", "enter_plan_mode", "send_message", "task_stop", "agent_list", "agent_output", "skill_write", SESSION_SPAWN_TOOL, WORKFLOW_TOOL, ...CHAT_ONLY_TOOLS]);
           if (childDepth >= maxDepth) childExcludeTools.add("spawn_agent");
           // 4h-ii-b Task 1: instructionsFull is computed ONCE here — hoisted out of the bg and
@@ -4098,6 +4123,10 @@ export class AgentEngine {
     // B1-T3 fix-round-1: CHAT_ONLY_TOOLS spread in alongside ask_user — a workflow-spawned agent
     // only ever exists inside a CODE session (Workflow is never offered to chat/dispatch), and
     // this set is independent of turn()'s own toolAccess exclude set, so it needs the same addition.
+    // R-T2: deliberately NOT flipped here either — same reason as the spawn_agent bridge's own
+    // childExcludeTools above (see task-2-report.md "concerns"): workflow-agent.test.ts's own
+    // exclusion-guard test registers no AskQuestion/Search def, so only ITS harness (never the
+    // real daemon) would diverge from this literal.
     const childExcludeTools = new Set(["ask_user", "exit_plan_mode", "enter_plan_mode", "send_message", "task_stop", "agent_list", "agent_output", "skill_write", SESSION_SPAWN_TOOL, WORKFLOW_TOOL, "spawn_agent", ...CHAT_ONLY_TOOLS]);
     this.registerThread(sessionId, { threadId: childId, parentThreadId: MAIN_THREAD, agentType, status: "running" });
     this.emit(sessionId, { type: "thread_started", sessionId, threadId: childId, parentThreadId: MAIN_THREAD, agentType, prompt, description: opts?.label });
