@@ -5,7 +5,7 @@ import type { ApprovalOption, NewSessionEvent, Question, SessionEvent, Task } fr
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
 import type { Provider, ProviderEvent, TurnInputItem } from "../providers/types";
-import type { ToolRegistry } from "./tools/registry";
+import type { ToolRegistry, Mode } from "./tools/registry";
 import { isExternalToolName } from "./tools/registry";
 import type { PermissionGate, SessionApprovalPolicy } from "./gate";
 import type { ApprovalBroker } from "./approvals";
@@ -79,6 +79,22 @@ const WORKFLOW_TOOL = "Workflow";
 // the day cowork ships too, no gating logic to revisit at either call site below.
 function isChatOrCowork(meta: { mode?: string }): boolean {
   return meta.mode === "chat" || meta.mode === "cowork";
+}
+
+// D1-T2: resolves a session's REAL mode for registry.ts's per-mode `deferred` seams (specs()/
+// deferredIndex()/execute()/isDeferredBuiltin()) — `meta.mode` is stored as a loose `string`
+// (SessionStore's own column type), so this narrows it the same way isChatOrCowork/isDispatch
+// already do throughout this file: an explicit "dispatch"/"chat" wins, anything else (absent,
+// meaning a plain code session, or an unrecognized value) resolves to "code". Every real call site
+// that reaches registry.ts's deferral seams (buildInstructionsFull, runThread's specs()/
+// isDeferredBuiltin(), executeCall's ctx) must pass this through — an absent mode makes an
+// array-valued `deferred` fail-closed to DEFERRED in every mode, including code (isDeferred's own
+// doc comment, registry.ts), which would silently shrink a code session's toolset the moment any
+// tool declares one.
+function resolveMode(meta: { mode?: string }): Mode {
+  if (meta.mode === "dispatch") return "dispatch";
+  if (meta.mode === "chat") return "chat";
+  return "code";
 }
 
 // Task B4 (/ultracode): the fixed clientName sentinels the ENGINE ITSELF stamps onto a
@@ -1754,7 +1770,12 @@ export class AgentEngine {
   // threaded straight through to `pinnedTools` (pins Workflow for the turn) AND appended as an
   // authorization <system-reminder> below, mirroring the "# Plan mode" block's own
   // append-onto-instructionsFull shape.
-  private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: SessionApprovalPolicy, sessionId: string, excludeTools?: Set<string>, allowTools?: Set<string>, ultracodeActive?: boolean): string {
+  // D1-T2: `mode` (REQUIRED, not optional — every caller below knows its own mode) resolves an
+  // array-valued `deferred` at the deferredIndex() seam, mirroring specs()/execute()/
+  // isDeferredBuiltin() below. Threading it here is what keeps the "# Deferred tools" TEXT in sync
+  // with what specs() actually offers this same turn — an unthreaded mode would fail-closed
+  // (registry.ts's isDeferred doc comment) and silently advertise e.g. bash as deferred even in code.
+  private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: SessionApprovalPolicy, sessionId: string, mode: Mode, excludeTools?: Set<string>, allowTools?: Set<string>, ultracodeActive?: boolean): string {
     const tsEnabled = this.toolSearchEnabled(cwd);
     const deferThreshold = this.toolSearchThreshold(cwd);
     // Pins computed HERE, at instructionsFull's own once-per-turn/thread cadence (see this
@@ -1764,7 +1785,7 @@ export class AgentEngine {
     const pins = tsEnabled ? this.pinnedTools(sessionId, { approvalPolicy: policy }, cwd, ultracodeActive) : new Set<string>();
     const effectiveLoaded = pins.size ? new Set([...loaded, ...pins]) : loaded;
     const deferred = tsEnabled
-      ? this.cfg.registry.deferredIndex(cwd, effectiveLoaded, deferThreshold, tsEnabled, this.toolSearchDeferExternals(cwd))
+      ? this.cfg.registry.deferredIndex(cwd, effectiveLoaded, deferThreshold, tsEnabled, this.toolSearchDeferExternals(cwd), mode)
           .filter((d) => !excludeTools?.has(d.name))
           .filter((d) => !allowTools || allowTools.has(d.name))
       : [];
@@ -1930,7 +1951,11 @@ export class AgentEngine {
           ...(excludeWorkflow ? [WORKFLOW_TOOL] : []),
           ...this.cfg.registry.namesNotForMode("code"),
         ]) };
-    const instructionsFull = this.buildInstructionsFull(instructions, cwd, loaded, meta.approvalPolicy, sessionId, toolAccess.excludeTools, toolAccess.allowTools, ultracodeActive);
+    // D1-T2: `resolveMode(meta)` — turn()'s own isDispatch/isChat already read this exact field;
+    // reusing the shared resolver here keeps this call in lockstep with runThread's/executeCall's
+    // own mode resolution for the SAME session, so they can never resolve a different mode for one
+    // turn's instructions text vs. its provider-facing specs().
+    const instructionsFull = this.buildInstructionsFull(instructions, cwd, loaded, meta.approvalPolicy, sessionId, resolveMode(meta), toolAccess.excludeTools, toolAccess.allowTools, ultracodeActive);
     // Auto-compact BEFORE historyInput is built, so a triggered compaction's checkpoint is
     // reflected in this turn's input. A compaction failure degrades to a normal (uncompacted)
     // turn rather than breaking it. Uses THIS turn's resolved model (sel.model), not the boot
@@ -2221,8 +2246,14 @@ export class AgentEngine {
         model: opts.model,
         instructions: instructionsFull,
         input,
+        // D1-T2: `mode: resolveMode(meta)` — this thread's own `meta` (destructured from `opts`
+        // above; a spawned child's is its parent session's meta, same value runThread has used
+        // throughout this method already, e.g. the dispatchReg/sessionSpawnCalls gate below).
+        // Without this, an array-valued `deferred` would fail-closed to deferred for EVERY mode
+        // (registry.ts's isDeferred doc comment) — silently hiding bash/task_stop/computer/
+        // AskQuestion/send_message from code's own specs() the moment they declared one.
         tools: this.cfg.registry.specs(cwd, tsEnabled
-            ? { loaded: effectiveLoaded, deferThreshold, builtinDeferral: true, deferExternals: this.toolSearchDeferExternals(cwd) }
+            ? { loaded: effectiveLoaded, deferThreshold, builtinDeferral: true, deferExternals: this.toolSearchDeferExternals(cwd), mode: resolveMode(meta) }
             : undefined)
           .filter((s) => !excludeTools?.has(s.name))
           .filter((s) => !allowTools || allowTools.has(s.name)),
@@ -2719,7 +2750,11 @@ export class AgentEngine {
           // text too (buildInstructionsFull's own doc comment above) — not just out of specs()
           // (childExcludeTools just above) — so a spawn_agent child is never even told the tool
           // exists, matching the MAIN thread's own excludeWorkflow treatment in turn().
-          const instructionsFull = this.buildInstructionsFull(def.instructions, childCwd, childLoaded, childPolicy, sessionId, new Set([WORKFLOW_TOOL]));
+          // D1-T2: `mode: "code"` — literal, not resolved from `meta`. A spawn_agent child only
+          // ever exists inside a CODE session (this bridge's own childExcludeTools doc comment
+          // above: dispatch sessions can't spawn_agent at all — it's not in
+          // registry.namesForMode("dispatch", ...)), so this is never anything else.
+          const instructionsFull = this.buildInstructionsFull(def.instructions, childCwd, childLoaded, childPolicy, sessionId, "code", new Set([WORKFLOW_TOOL]));
           // 4h-ii-b Task 1: everything a future `resume` (Task 3) needs to re-run THIS child
           // EXCEPT input/signal — captured now, at spawn time, from the exact values this bridge
           // already computed to start the child's own live run below. Stored on the registry
@@ -3177,7 +3212,12 @@ export class AgentEngine {
         // `tsEnabled` arg is this round's SAME toolSearchEnabled() flag threaded through specs()/
         // executeCall above — when toolSearch is disabled it always returns false, so this guard
         // is a no-op then, preserving the pre-4g byte-identical invariant.
-        if (this.cfg.registry.isDeferredBuiltin(call.name, tsEnabled) && !effectiveLoaded.has(call.name)) {
+        // D1-T2: `resolveMode(meta)` — this thread's own `meta` (destructured above), the SAME
+        // value the specs() call earlier this round already resolved a mode from. Unthreaded, this
+        // would fail-closed to "deferred" for EVERY mode (registry.ts's isDeferred doc comment),
+        // rejecting e.g. a code session's own `bash` call the instant bash declared `deferred:
+        // ["dispatch"]` — exactly the silent, type-checked regression this task's brief warns about.
+        if (this.cfg.registry.isDeferredBuiltin(call.name, tsEnabled, resolveMode(meta)) && !effectiveLoaded.has(call.name)) {
           outcome = { output: `tool ${call.name} is deferred — load its schema via ToolSearch first`, isError: true };
           this.emit(sessionId, { type: "tool_result", sessionId, threadId, callId: call.callId, output: outcome.output, isError: outcome.isError });
           input.push({ type: "tool_result", callId: call.callId, output: outcome.output, isError: outcome.isError });
@@ -4114,7 +4154,10 @@ export class AgentEngine {
     const childMeta = { ...meta, approvalPolicy: childPolicy };
     const childId = "wfa_" + randomUUID().slice(0, 8); // same minting shape as the spawn bridge (engine.ts: "th_" + randomUUID().slice(0,8))
     const childLoaded = new Set<string>();
-    const instructionsFull = this.buildInstructionsFull(def.instructions, childCwd, childLoaded, childPolicy, sessionId);
+    // D1-T2: `mode: "code"` — literal. Workflow is never offered to chat/dispatch
+    // (workflowToolAllowed's own doc comment), so a workflow-spawned agent only ever exists inside
+    // a CODE session.
+    const instructionsFull = this.buildInstructionsFull(def.instructions, childCwd, childLoaded, childPolicy, sessionId, "code");
     // B1-T3 fix-round-1 (R-T2 fix-round-1: registry.namesNotForMode("code") replaces the old
     // CHAT_ONLY_TOOLS constant — see task-2-report.md, "Fix round 1") spread in alongside ask_user
     // — a workflow-spawned agent only ever exists inside a CODE session (Workflow is never offered
@@ -4908,6 +4951,12 @@ export class AgentEngine {
       deferThreshold: this.toolSearchThreshold(cwd),
       deferExternals: this.toolSearchDeferExternals(cwd),
       builtinDeferral: this.toolSearchEnabled(cwd),
+      // D1-T2: `mode: resolveMode(meta)` — `meta` was already re-read fresh above (this method's
+      // own `const meta = this.cfg.store.meta(sessionId)`, used for the ask-timeout branch). Without
+      // this, execute()'s own isDeferred check would fail-closed to "deferred" for every mode
+      // (registry.ts's doc comment), rejecting a call specs()/isDeferredBuiltin() upstream in THIS
+      // SAME round already decided was immediate — the three seams would disagree mid-turn.
+      mode: resolveMode(meta),
       ask,
       taskEvent,
       notify,

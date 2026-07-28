@@ -23,11 +23,11 @@ export const DISPATCH_SYSTEM_PROMPT = [
 // as two). It's gone — engine.ts's toolAccess for dispatch is now
 // `registry.namesForMode("dispatch", { builtinDeferral })` (registry.ts), derived live from each
 // tool def's own `modes` field (session-spawn.ts, task-stop.ts, computer.ts, fs-read.ts, bash.ts,
-// ask-user.ts, push-notification.ts all carry `modes: ["code", "dispatch"]`; search.ts carries
-// `modes: ["chat", "dispatch"]`). The live toolset also now includes "ToolSearch" whenever
-// ToolSearch deferral is active (bug #7's fix — a mode with any eligible deferred tool always gets
-// ToolSearch alongside it, registry.ts's `namesForMode`), which this constant never tracked. The
-// tests that used to import this constant for static sanity checks were rewritten to call
+// push-notification.ts all carry `modes: ["code", "dispatch"]`; search.ts carries `modes: ["chat",
+// "dispatch"]`). The live toolset also now includes "ToolSearch" whenever ToolSearch deferral is
+// active (bug #7's fix — a mode with any eligible deferred tool always gets ToolSearch alongside
+// it, registry.ts's `namesForMode`), which this constant never tracked. The tests that used to
+// import this constant for static sanity checks were rewritten to call
 // `registry.namesForMode(...)` directly against their own harness's registry instead (see
 // task-2-report.md, "Fix round 1").
 //
@@ -41,3 +41,12 @@ export const DISPATCH_SYSTEM_PROMPT = [
 // routes web lookups through `Search` (search.ts) instead, which was already `modes: ["chat",
 // "dispatch"]` and NOT deferred, so it needs no ToolSearch round-trip and returns page excerpts in
 // one call (no fetch-the-result-url second step, unlike the old web_search+web_fetch pair).
+//
+// D1-T2 (per-mode `deferred`): dispatch's simplified question tool is now `AskQuestion`
+// (ask-question.ts, `modes: ["chat", "dispatch"]`), not `ask_user` — `ask-user.ts` dropped
+// "dispatch" from its own `modes` in the same change, so dispatch no longer sees it at all (there
+// is no literal "ask_user" text anywhere in DISPATCH_SYSTEM_PROMPT above to fix — this comment
+// block was the only place still naming the file). `bash`/`task_stop`/`computer`/`AskQuestion`/
+// `send_message` are all now `deferred: ["dispatch"]` too — immediate in code (or, for AskQuestion,
+// immediate in chat), loadable via ToolSearch for dispatch specifically. `push_notification` is
+// UNCHANGED (`deferred: true` — every mode, deliberately untouched).

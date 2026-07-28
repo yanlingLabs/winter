@@ -28,6 +28,13 @@ export function registerSendMessageTool(r: ToolRegistry): void {
       "Delivery is fire-and-forget — you get back a confirmation immediately and are notified separately when a resumed agent finishes; it never blocks your turn. " +
       "to: the target agent's agentId or name (required); message: the text to deliver (required).",
     args: SendMessageArgs,
+    // D1-T2: deferred ONLY in dispatch — mirrors bash/task_stop/computer/AskQuestion. `modes` is
+    // still absent here (defaults to `["code"]`, registry.ts's own doc comment), so this is
+    // currently inert for dispatch (a mode a tool isn't eligible for can never be "deferred" for
+    // it either) — dispatch gains eligibility in a later task (session-targeted send_message),
+    // which is what actually makes this array meaningful there. Declaring it now is forward-safe:
+    // it changes nothing until that task also adds "dispatch" to `modes`.
+    deferred: ["dispatch"],
     run(_args: z.infer<typeof SendMessageArgs>) {
       return "send_message is not available in this session";
     },

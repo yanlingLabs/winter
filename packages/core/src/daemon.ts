@@ -530,7 +530,7 @@ export async function startDaemon(opts: {
     // read the daemon's own control-plane files through the tool the daemon itself hosts.
     registerReadTools(registry, { deniedPrefixes: [dirs.runDir] });
     registerWriteTools(registry);
-    registerBashTool(registry, { bgRegistry }); // bash itself is NEVER deferred — only its background-poll tool below (bash_output; task_stop, below, is the sole way to kill one)
+    registerBashTool(registry, { bgRegistry }); // D1-T2: bash is never deferred in code — bash.ts's own `deferred: ["dispatch"]` only rides ToolSearch deferral for the dispatch coordinator; its background-poll tool below (bash_output; task_stop, below, is the sole way to kill one) is unaffected
     registerBackgroundTools(registry, { bgRegistry }, { deferred: true });
     registerSkillTools(registry, { skills: skillStore });
     registerToolSearchTool(registry);
@@ -652,14 +652,17 @@ export async function startDaemon(opts: {
     // 4h-ii-c Task 2 (CC TaskStop): registered alongside spawn_agent/send_message — the SAME
     // `bgAgents`/`bgRegistry` instances the engine cfg gets below, so a stop here is visible to
     // the engine's own pin/completion-reminder bookkeeping. Unlike spawn_agent/send_message this
-    // is a PLAIN TOOL (no engine bridge — see task-stop.ts's own doc comment), deferred like
-    // bash_output (registerBackgroundTools above) — CC parity: one generic stop tool, no separate
-    // bash_kill (removed; task_stop's bash-unify path is now the only way to kill a bg bash task).
+    // is a PLAIN TOOL (no engine bridge — see task-stop.ts's own doc comment).
+    // D1-T2: `deferred: ["dispatch"]` — was `true` (deferred like bash_output/registerBackgroundTools
+    // above, in every mode). Narrowed to dispatch-only: task_stop stays immediate in code (CC
+    // parity: one generic stop tool, no separate bash_kill — removed; task_stop's bash-unify path
+    // is now the only way to kill a bg bash task) and now rides ToolSearch deferral ONLY for the
+    // dispatch coordinator, matching bash/computer/AskQuestion/send_message's identical treatment.
     // Dispatch (Phase 7) Task 5: `dispatch` closes over the `dispatchChildren` binding declared
     // further down (before `new AgentEngine(...)`) — safe (same later-assigned-closure shape as
     // `engine?.transcriptPathFor` a few lines below): this closure is only ever INVOKED at a real
     // task_stop call, long after boot finishes assigning it.
-    registerTaskStopTool(registry, { bgAgents, bgRegistry, deferred: true, dispatch: { stopChild: (caller, id) => dispatchChildren?.stopChild(caller, id) } });
+    registerTaskStopTool(registry, { bgAgents, bgRegistry, deferred: ["dispatch"], dispatch: { stopChild: (caller, id) => dispatchChildren?.stopChild(caller, id) } });
     // phase 5a Task 1: agent_list/agent_output — the read-only "collect your subagents"
     // counterpart to spawn_agent/send_message/task_stop above, same bgAgents instance so what
     // they report is exactly what the engine's own pin/completion bookkeeping sees. `deferred:
@@ -689,7 +692,9 @@ export async function startDaemon(opts: {
     let computerUse: ComputerUseService | undefined;
     if (settings?.computerUse?.enabled) {
       computerUse = new ComputerUseService({ broker: peripheral, heartbeatMs: settings?.peripheral?.heartbeatMs });
-      registerComputerTool(registry, { screenshotMaxDim: settings?.computerUse?.screenshotMaxDim });
+      // D1-T2: `deferred: ["dispatch"]` — immediate in code (unchanged), deferred only for the
+      // dispatch coordinator (matches the hot-toggle re-registration below, registerComputer).
+      registerComputerTool(registry, { screenshotMaxDim: settings?.computerUse?.screenshotMaxDim, deferred: ["dispatch"] });
     }
     // Phase 5 routines T3 (design doc §4): the agent-facing management surface over the SAME
     // `routineStore` instance the scheduler (below, past this gate's close) fires against —
@@ -1066,7 +1071,9 @@ export async function startDaemon(opts: {
       buildComputerService: (s) => new ComputerUseService({ broker: peripheral, heartbeatMs: s?.peripheral?.heartbeatMs }),
       registerComputer: (svc, s) => {
         computerUse = svc; // reassigns the SAME holder the `computerUse: () => computerUse` getter above reads
-        registerComputerTool(registry, { screenshotMaxDim: s?.computerUse?.screenshotMaxDim });
+        // D1-T2: same `deferred: ["dispatch"]` as the boot-time registration above — a hot toggle
+        // must not re-register computer with weaker (or different) deferral than boot gave it.
+        registerComputerTool(registry, { screenshotMaxDim: s?.computerUse?.screenshotMaxDim, deferred: ["dispatch"] });
       },
       teardownComputer: () => {
         // T4's drain (computerInFlight gate below) already waited out any in-flight `computer`

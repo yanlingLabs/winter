@@ -115,12 +115,22 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
     );
   });
 
+  // D1-T2: dispatch's set changes here — deliberately, not a mechanical re-baseline:
+  //   - REMOVED "ask_user": ask-user.ts drops "dispatch" from its own `modes` (dispatch now uses
+  //     AskQuestion's simplified, header-less question card instead).
+  //   - ADDED "AskQuestion": ask-question.ts gains "dispatch" in its `modes` (previously chat-only).
+  //   `namesForMode` reports MODE ELIGIBILITY, not live specs()-visibility — it does not care that
+  //   AskQuestion (like bash/task_stop/computer/send_message) is ALSO now `deferred: ["dispatch"]`
+  //   there; a deferred tool is still an eligible member of the mode's allowTools ceiling, only
+  //   hidden from a given round's specs() until ToolSearch-loaded. That's why bash/task_stop/
+  //   computer (unchanged `modes`) do NOT move here even though their deferred status did — this
+  //   list is still exactly 12 names, just AskQuestion in ask_user's old slot.
   test("dispatch mode is offered EXACTLY this set (12 tools)", async () => {
     const d = await boot();
     const offered = [...d.registry!.namesForMode("dispatch", { builtinDeferral: true })];
     expect(offered.sort()).toEqual(
       [
-        "Search", "ToolSearch", "ask_user", "bash", "computer", "glob", "grep", "ls",
+        "Search", "ToolSearch", "AskQuestion", "bash", "computer", "glob", "grep", "ls",
         "push_notification", "read", "session_spawn", "task_stop",
       ].sort(),
     );

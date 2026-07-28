@@ -4,14 +4,15 @@ import type { ToolRegistry } from "./registry";
 const ASK_TIMEOUT_S = () => Math.round(Number(process.env.NORMA_ASK_TIMEOUT_MS ?? 300_000) / 1000);
 const NO_ANSWER = () => `No answer within ${ASK_TIMEOUT_S()}s — the user is not available right now. Answer as best you can and say what you assumed.`;
 
-/** Chat's question tool (B1-T3). Deliberately smaller than code's `ask_user`: no header chip, no
- *  per-option description, no preview, no notes, no multi-select — the user asked for "just a
- *  clean question + answer options with an Other field". A SEPARATE tool rather than a mode-aware
- *  schema on `ask_user` itself because `ToolRegistry.register()` throws on duplicate names
- *  (registry.ts) and the registry is built ONCE per daemon (daemon.ts), not per session —
- *  per-session differentiation is purely name filtering (registry.namesForMode("chat", ...) vs
- *  code's exclude-derived registry-wide visibility), nothing else. That is the structural reason
- *  for the new name, not a style choice. */
+/** Chat's question tool (B1-T3), and — as of D1-T2 — dispatch's too (replacing `ask_user` there).
+ *  Deliberately smaller than code's `ask_user`: no header chip, no per-option description, no
+ *  preview, no notes, no multi-select — the user asked for "just a clean question + answer options
+ *  with an Other field". A SEPARATE tool rather than a mode-aware schema on `ask_user` itself
+ *  because `ToolRegistry.register()` throws on duplicate names (registry.ts) and the registry is
+ *  built ONCE per daemon (daemon.ts), not per session — per-session differentiation is purely name
+ *  filtering (registry.namesForMode("chat"|"dispatch", ...) vs code's exclude-derived
+ *  registry-wide visibility), nothing else. That is the structural reason for the new name, not a
+ *  style choice. */
 const AskQuestionArgs = z.object({
   question: z.string().min(1),
   options: z.array(z.object({ label: z.string().min(1) })).min(2).max(4),
@@ -25,10 +26,16 @@ export function registerAskQuestionTool(r: ToolRegistry): void {
       "Give 2-4 short, distinct option labels. Do NOT add an 'Other' option: the interface always offers a free-text 'Other' itself, so an option spelled 'Other' just wastes a slot. " +
       "Options are labels only — no descriptions. If you recommend one, put it first and append ' (Recommended)' to its label. " +
       "The user's answer is returned to you; if nobody answers in time you'll be told to proceed.",
-    // NOT deferred: chat's derived toolset has no ToolSearch member unless something eligible for
-    // chat is itself deferred (none is), so a deferred tool here could never be loaded and would
-    // be permanently uncallable while still appearing in chat's instructions.
-    modes: ["chat"], // R-T2: was CHAT_ALLOW_TOOLS's literal membership
+    // D1-T2: dispatch's simplified question card (replacing ask_user there — ask-user.ts drops
+    // "dispatch" from its own `modes` in the same change). `deferred: ["dispatch"]` — immediate in
+    // chat (unchanged: chat's derived toolset has no ToolSearch member unless something eligible
+    // for chat is itself deferred, which nothing is, so a chat-deferred tool would be permanently
+    // uncallable there — see the registry-deferred-modes fail-closed doc comment), deferred ONLY
+    // in dispatch, which DOES have ToolSearch (push_notification already rides it). This is the
+    // case that proves the per-mode `deferred` feature: the SAME tool immediate in one mode and
+    // deferred in another.
+    modes: ["chat", "dispatch"], // R-T2 base: CHAT_ALLOW_TOOLS's literal membership; D1-T2 adds dispatch
+    deferred: ["dispatch"],
     args: AskQuestionArgs,
     async run({ question, options }: z.infer<typeof AskQuestionArgs>, ctx) {
       if (!ctx.ask) return NO_ANSWER();

@@ -13,7 +13,11 @@ export function registerToolSearchTool(r: ToolRegistry): void {
       maxResults: z.number().int().positive().max(20).optional(),
     }),
     run({ query, maxResults }, ctx) {
-      const index = r.deferredIndex(ctx.cwd, ctx.loadedTools, ctx.deferThreshold, ctx.builtinDeferral, ctx.deferExternals);
+      // D1-T2: `ctx.mode` — the engine now sets this on every ToolContext it builds (executeCall's
+      // ctx literal, engine.ts). Without it, an array-valued `deferred` fails closed to "deferred"
+      // for every mode (registry.ts's isDeferred doc comment) — this call would then list e.g.
+      // `bash` as loadable from a CODE session too, even though it's already immediate there.
+      const index = r.deferredIndex(ctx.cwd, ctx.loadedTools, ctx.deferThreshold, ctx.builtinDeferral, ctx.deferExternals, ctx.mode);
       let matches: Array<{ name: string; description: string }>;
       if (query.startsWith("select:")) {
         const wanted = query.slice("select:".length).split(",").map((s: string) => s.trim()).filter(Boolean);

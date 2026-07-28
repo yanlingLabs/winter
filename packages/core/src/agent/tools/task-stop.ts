@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ToolRegistry } from "./registry";
+import type { Mode, ToolRegistry } from "./registry";
 import { guardAgentName, type BackgroundAgentRegistry } from "../bg-agent-registry";
 import type { BackgroundTaskRegistry } from "../bg-registry";
 
@@ -31,7 +31,15 @@ export function registerTaskStopTool(
   deps: {
     bgAgents?: BackgroundAgentRegistry;
     bgRegistry?: BackgroundTaskRegistry;
-    deferred?: boolean;
+    // D1-T2: widened from `boolean` to `boolean | Mode[]` (registry.ts's ToolDefinition.deferred) —
+    // ONE mechanism, not two. task_stop is the tool this slice's brief specifically flagged as
+    // already having a registration-time deferred flag; rather than ALSO hardcoding a definition-
+    // level array below (which would stack a second, conflicting source of truth on top of this
+    // caller-supplied one), this flag stays the single knob and daemon.ts's real registration now
+    // passes `["dispatch"]` instead of `true` — immediate in code, deferred only in dispatch.
+    // task-stop.test.ts's own pin-coverage test still passes a bare `true` here directly (exercising
+    // the per-round pin mechanism, independent of dispatch mode), which the widened type still accepts.
+    deferred?: boolean | Mode[];
     // Dispatch (Phase 7) Task 5: the dispatch session's own children are ALSO stoppable via
     // task_stop — inserted between the bgAgents and bgRegistry branches (agent ids keep
     // precedence over a dispatch child id; bash tasks stay last). Only the live dispatch session

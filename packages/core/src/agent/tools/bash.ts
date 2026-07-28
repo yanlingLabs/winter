@@ -30,6 +30,9 @@ export function registerBashTool(r: ToolRegistry, deps: { bgRegistry?: Backgroun
       dangerouslyDisableSandbox: z.boolean().optional(),
     }),
     modes: ["code", "dispatch"], // R-T2: was DISPATCH_ALLOW_TOOLS's literal membership
+    // D1-T2: immediate in code (unchanged), deferred ONLY in dispatch — the coordinator has to
+    // ToolSearch it first, same treatment as task_stop/computer/AskQuestion/send_message.
+    deferred: ["dispatch"],
     async run({ command, timeoutMs, runInBackground, allowNetwork, dangerouslyDisableSandbox }, { cwd, roots, tmpDir, sessionId, signal }) {
       if (runInBackground) {
         if (!deps.bgRegistry) throw new Error("background tasks are not available in this context");
