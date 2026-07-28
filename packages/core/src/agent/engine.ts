@@ -4963,6 +4963,15 @@ export class AgentEngine {
       computerUse: cuNow,
       attachImage,
       visionCapable,
+      // D1-T3: forwarded straight from THIS call's own `excludeTools`/`allowTools` params (runThread's
+      // opts, threaded through every call site in this file — see this method's own doc comment on
+      // them, just above). Additive only: absent for every caller that doesn't pass them, so this is
+      // byte-identical to before for a direct registry.execute() call (e.g. a unit test). ToolSearch
+      // (toolsearch.ts) is the one consumer today — it filters what it advertises/loads by these, so
+      // it can never offer a tool this thread's own early rejection (just above, `excludeTools?.has
+      // (call.name) || (allowTools && !allowTools.has(call.name))`) would refuse the very next round.
+      excludeTools,
+      allowTools,
     });
     // Auto-diagnostics after edit (lsp-consolidation T3): ONLY a SUCCESSFUL write/edit/
     // notebook_edit ever reaches this — `result.isError` gates it BEFORE any LSP call, so a

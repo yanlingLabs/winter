@@ -46,6 +46,19 @@ export interface ToolContext {
   // tool's screenshot action refuses when this is explicitly false (ax_snapshot still works); the
   // `read` tool refuses reading an image file the same way. Unset = unknown → not blocked.
   visionCapable?: boolean;
+  // D1-T3: the CALLING THREAD's own excludeTools/allowTools — engine.ts's executeCall already
+  // receives these (runThread's `toolAccess`, computed once in turn() from
+  // registry.namesForMode/namesNotForMode) and uses them for its own pre-dispatch rejection; this
+  // is the SAME pair, forwarded onto the ctx literal it builds for registry.execute so a tool
+  // (ToolSearch, specifically) can consult what THIS thread was actually offered. Never recomputed
+  // here or in toolsearch.ts — one source of truth, populated ONLY in engine.ts's executeCall.
+  // Semantics mirror runThread's own `offered()` predicate exactly: `!excludeTools?.has(name) &&
+  // (!allowTools || allowTools.has(name))`. Both absent (as for a direct registry.execute() call in
+  // a test, or code's own excludeTools-shaped access which never CLEARS ctx.excludeTools either)
+  // means "no restriction" — byte-identical to before this task for every caller that doesn't pass
+  // them.
+  excludeTools?: Set<string>;
+  allowTools?: Set<string>;
 }
 export interface ToolOutcome { output: string; isError: boolean }
 
