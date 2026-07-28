@@ -43,7 +43,7 @@ const PAGE_HTML =
   '<p>An ad: <a href="https://ads.doubleclick.net/pixel">ad1</a>.</p>' +
   '<p>A tag manager: <a href="https://www.googletagmanager.com/gtm.js">ad2</a>.</p>' +
   '<p>Analytics: <a href="https://www.google-analytics.com/analytics.js">ad3</a>.</p>' +
-  '<p>Meta pixel: <a href="https://www.facebook.com/tr?id=1">ad4</a>.</p>' +
+  '<p>Meta pixel: <a href="https://facebook.com/tr?id=1">ad4</a>.</p>' +
   '<p>Duplicate: <a href="https://other.com/x">dup of other site</a>.</p>' +
   '</body></html>';
 
@@ -61,6 +61,23 @@ describe("fetchCleanPage: clean + number determinism", () => {
     expect(page1.lines).toEqual(page2.lines);
     expect(page1.lines.length).toBeGreaterThan(0);
     expect(page1.title).toBe(page2.title);
+  });
+
+  // Fix round 1, Minor: a CRLF plain-text body must not leak a trailing "\r" onto every line but
+  // the last — those stray \r's would ride straight into citations and renderLines output for any
+  // .txt/code fetch (the non-HTML path skips htmlToText, which is the only place \r was ever being
+  // implicitly cleaned up for the HTML path).
+  test("a CRLF plain-text body splits into clean lines with no stray '\\r', and stays deterministic", async () => {
+    const body = "line one\r\nline two\r\nline three";
+    const { fetchFn: fetchFn1 } = scriptedFetch([{ status: 200, body, contentType: "text/plain" }]);
+    const { fetchFn: fetchFn2 } = scriptedFetch([{ status: 200, body, contentType: "text/plain" }]);
+
+    const page1 = await fetchCleanPage("https://example.com/notes.txt", new PageCache(), { fetchFn: fetchFn1, now: () => 0 });
+    const page2 = await fetchCleanPage("https://example.com/notes.txt", new PageCache(), { fetchFn: fetchFn2, now: () => 0 });
+
+    expect(page1.lines).toEqual(["line one", "line two", "line three"]);
+    for (const line of page1.lines) expect(line).not.toContain("\r");
+    expect(page1.lines).toEqual(page2.lines); // determinism holds for the non-HTML path too
   });
 });
 
@@ -97,6 +114,44 @@ describe("fetchCleanPage: links extraction", () => {
     const { fetchFn } = scriptedFetch([{ status: 200, body: html, contentType: "text/html" }]);
     const page = await fetchCleanPage("https://example.com/", new PageCache(), { fetchFn, now: () => 0 });
     expect(page.links).toEqual([{ href: "https://ok.com/", text: "ok" }]);
+  });
+});
+
+// --- fix round 1, Important: the ad-host filter must match the RESOLVED HOSTNAME (exact or
+// subdomain suffix for bare-host entries; exact host + path-prefix for the one host+path entry),
+// never a bare substring of hostname+pathname concatenated — a substring match let an unrelated
+// page whose PATH happens to contain an ad-host string (e.g. "doubleclick.net" appearing in
+// example.com's own path) get silently dropped as if it were the ad host itself. -----------------
+
+describe("ad-host filter: hostname-scoped matching (false-positive fix)", () => {
+  test("a legitimate link whose PATH merely contains 'doubleclick.net' survives (not an ad host)", async () => {
+    const html = '<a href="https://example.com/doubleclick.net.html">unrelated page</a>';
+    const { fetchFn } = scriptedFetch([{ status: 200, body: html, contentType: "text/html" }]);
+    const page = await fetchCleanPage("https://example.com/", new PageCache(), { fetchFn, now: () => 0 });
+    expect(page.links).toEqual([{ href: "https://example.com/doubleclick.net.html", text: "unrelated page" }]);
+  });
+
+  test("a legitimate link whose PATH merely contains 'facebook.com/tr' survives (not the Meta pixel)", async () => {
+    const html = '<a href="https://news.example.com/facebook.com/tr-scandal-article">news article</a>';
+    const { fetchFn } = scriptedFetch([{ status: 200, body: html, contentType: "text/html" }]);
+    const page = await fetchCleanPage("https://example.com/", new PageCache(), { fetchFn, now: () => 0 });
+    expect(page.links).toEqual([
+      { href: "https://news.example.com/facebook.com/tr-scandal-article", text: "news article" },
+    ]);
+  });
+
+  test("a real doubleclick.net SUBDOMAIN is still dropped", async () => {
+    const html = '<a href="https://stats.doubleclick.net/pixel">tracker</a><a href="https://ok.com/">ok</a>';
+    const { fetchFn } = scriptedFetch([{ status: 200, body: html, contentType: "text/html" }]);
+    const page = await fetchCleanPage("https://example.com/", new PageCache(), { fetchFn, now: () => 0 });
+    expect(page.links).toEqual([{ href: "https://ok.com/", text: "ok" }]);
+  });
+
+  test("a host that merely STARTS WITH 'doubleclick.net' text but isn't a subdomain (notdoubleclick.net) survives", async () => {
+    const html = '<a href="https://notdoubleclick.net/">not an ad host</a>';
+    const { fetchFn } = scriptedFetch([{ status: 200, body: html, contentType: "text/html" }]);
+    const page = await fetchCleanPage("https://example.com/", new PageCache(), { fetchFn, now: () => 0 });
+    expect(page.links).toEqual([{ href: "https://notdoubleclick.net/", text: "not an ad host" }]);
   });
 });
 

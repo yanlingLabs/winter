@@ -26,16 +26,35 @@ const DEFAULT_MAX_ENTRIES = 50;
 const DEFAULT_MAX_BYTES = 20 * 1024 * 1024; // 20MB soft cap — a handful of full pages (web.ts caps one fetch at 5MB)
 
 /** Fixed, small, NAMED seed list (USER DESIGN) — "no ads in the links list," not a full adblocker.
- *  Checked as a substring of the RESOLVED link's `hostname + pathname`, never the raw (possibly
- *  relative/unparsed) href: the three bare-hostname entries match regardless of path, and the one
- *  host+path entry (`facebook.com/tr`, Meta's pixel-tracking endpoint living on the ordinary
- *  `facebook.com` host) only matches that specific path so it doesn't drop every facebook.com link. */
+ *  Matched against the RESOLVED link's `hostname`/`pathname` (never a raw substring of the two
+ *  concatenated — that let an unrelated page whose PATH merely contained one of these strings,
+ *  e.g. `example.com/doubleclick.net.html`, get silently dropped as if it were the ad host itself;
+ *  fix round 1, Important). Two entry shapes, both host-scoped:
+ *   - a bare host (`doubleclick.net`, `googletagmanager.com`, `google-analytics.com`) matches the
+ *     resolved hostname EXACTLY or as a dot-bounded SUBDOMAIN (`stats.doubleclick.net` drops,
+ *     `notdoubleclick.net` does not — no bare substring check would tell those two apart);
+ *   - `host/path` (`facebook.com/tr`, Meta's pixel-tracking endpoint) matches only the EXACT host
+ *     `facebook.com` with a pathname starting `/tr` — scoped this tightly on purpose so it doesn't
+ *     drop unrelated facebook.com links, or any other host whose path merely mentions "facebook.com/tr". */
 export const AD_TRACKER_LINK_SUBSTRINGS = [
   "doubleclick.net",
   "googletagmanager.com",
   "google-analytics.com",
   "facebook.com/tr",
 ] as const;
+
+/** See `AD_TRACKER_LINK_SUBSTRINGS`'s doc comment for the two entry shapes this checks. */
+function isAdTrackerLink(resolved: URL): boolean {
+  const host = resolved.hostname.toLowerCase();
+  const path = resolved.pathname;
+  return AD_TRACKER_LINK_SUBSTRINGS.some((entry) => {
+    const slash = entry.indexOf("/");
+    if (slash === -1) return host === entry || host.endsWith(`.${entry}`);
+    const entryHost = entry.slice(0, slash);
+    const entryPath = entry.slice(slash); // keeps the leading "/"
+    return host === entryHost && path.startsWith(entryPath);
+  });
+}
 
 export interface CleanPage {
   url: string; // final resolved URL after redirects
@@ -159,8 +178,7 @@ function extractLinks(html: string, baseUrl: string): Array<{ href: string; text
       continue; // unparsable href — skip rather than fail the whole page
     }
     if (resolved.protocol !== "http:" && resolved.protocol !== "https:") continue; // mailto:, javascript:, ...
-    const checkTarget = `${resolved.hostname.toLowerCase()}${resolved.pathname}`;
-    if (AD_TRACKER_LINK_SUBSTRINGS.some((s) => checkTarget.includes(s))) continue;
+    if (isAdTrackerLink(resolved)) continue;
     const href = resolved.toString();
     if (seen.has(href)) continue;
     seen.add(href);
@@ -226,7 +244,10 @@ export async function fetchCleanPage(url: string, cache: PageCache, deps: PageCo
   let page: CleanPage;
   try {
     const isHtml = res.contentType.toLowerCase().includes("text/html");
-    const cleanedText = isHtml ? htmlToText(res.body) : res.body;
+    // Non-HTML path: htmlToText (the HTML path) already trims each line, which incidentally drops
+    // a trailing "\r" too — the raw-text path has no such step, so a CRLF body (any .txt/code
+    // fetch) would otherwise leak "\r" onto every line but the last (fix round 1, Minor).
+    const cleanedText = isHtml ? htmlToText(res.body) : res.body.replace(/\r\n/g, "\n");
     const title = isHtml ? extractTitle(res.body) : "-";
     const links = isHtml ? extractLinks(res.body, res.url) : [];
     page = { url: res.url, title, lines: cleanedText.split("\n"), links, fetchedAt: now, fromCache: false };
