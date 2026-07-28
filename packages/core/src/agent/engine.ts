@@ -2189,9 +2189,12 @@ export class AgentEngine {
     // so a send_message that landed but wasn't drained before the child finished can't resurface
     // when the SAME threadId is later resumed (resume reuses the threadId; its round-top drain
     // would otherwise pick up the stale entry). Called before EVERY terminal return below (the four
-    // returns: error, end_turn/aborted, deniedByHuman, cap). NO-OP for MAIN — the main thread never
-    // populates threadSteerQueue, so this leaves the byte-identical main path unchanged.
-    const cleanupThreadSteer = () => { if (threadId !== MAIN_THREAD) this.threadSteerQueue.delete(threadId); };
+    // returns: error, end_turn/aborted, deniedByHuman, cap).
+    // D1-T4: MAIN now ALSO populates threadSteerQueue — keyed by its OWN sessionId, not a thread
+    // id (see the send_message→session bridge below, and the round-top drain's MAIN branch) — so
+    // this must clean up THAT key for a MAIN thread, not stay a no-op. Session ids (`s_...`) and
+    // subagent thread ids (`th_...`) are disjoint namespaces, so the two never collide.
+    const cleanupThreadSteer = () => { this.threadSteerQueue.delete(threadId === MAIN_THREAD ? sessionId : threadId); };
 
     this.emit(sessionId, { type: "turn_started", sessionId, threadId });
 
@@ -2199,6 +2202,24 @@ export class AgentEngine {
       if (threadId === MAIN_THREAD) {
         const steers = this.steerQueue.get(sessionId);
         if (steers && steers.length) { for (const t of steers) input.push({ type: "message", role: "user", content: t }); steers.length = 0; }
+        // D1-T4 (send_message → session target): a message queued by ANOTHER session's
+        // send_message while THIS session's main thread was running lands here — via
+        // `sendToThread`, keyed by THIS session's own id rather than a subagent thread id (session
+        // ids and thread ids are disjoint namespaces, so this never collides with a real child
+        // thread's own queue). PERSISTED HERE, at drain time — never at send time — mirroring the
+        // child branch below exactly, so it lands strictly after the prior round's tool_result,
+        // never between a tool_call and its result (the same ordering guarantee sendToThread
+        // already gives subagent threads, deliberately NOT `steer()`'s different send-time-persist-
+        // plus-replay-repair shape, which is for a human interjecting into their OWN session and
+        // stays untouched here).
+        const crossSession = this.threadSteerQueue.get(sessionId);
+        if (crossSession && crossSession.length) {
+          for (const t of crossSession) {
+            this.emit(sessionId, { type: "user_message", sessionId, threadId, text: t, clientName: "send_message" });
+            input.push({ type: "message", role: "user", content: t });
+          }
+          crossSession.length = 0;
+        }
       } else {
         // 4h-ii-b Task 4 (SM2): CHILD threads drain their OWN per-thread steer queue here — a
         // SEPARATE parallel branch to the MAIN branch above (which is untouched). A send_message to
@@ -2322,7 +2343,13 @@ export class AgentEngine {
         // silently dropped) — `pending` reads the MAIN steerQueue for the main thread and this
         // child's threadSteerQueue for a child. For the MAIN thread this is byte-identical to the
         // prior `if (threadId === MAIN_THREAD) { const pending = steerQueue.get(sessionId); ... }`.
-        const pending = threadId === MAIN_THREAD ? this.steerQueue.get(sessionId) : this.threadSteerQueue.get(threadId);
+        // D1-T4: MAIN's own check additionally covers threadSteerQueue(sessionId) — a cross-session
+        // send_message (see the round-top drain's MAIN branch above) landing as THIS session's
+        // final round finishes must also continue-and-drain rather than be silently dropped, same
+        // contract steerQueue already has.
+        const pending = threadId === MAIN_THREAD
+          ? [...(this.steerQueue.get(sessionId) ?? []), ...(this.threadSteerQueue.get(sessionId) ?? [])]
+          : this.threadSteerQueue.get(threadId);
         if (stop !== "aborted" && pending && pending.length) { continue; }
         cleanupThreadSteer();
         this.emit(sessionId, { type: "turn_completed", sessionId, threadId, stopReason: stop === "aborted" ? "aborted" : "end_turn", ...usage });
@@ -2374,8 +2401,15 @@ export class AgentEngine {
       // send_message call's tool_result, so it never falls through to executeCall. Processed in a
       // simple `for` loop (not Promise.all): a running-target delivery is sync (sendToThread), a
       // finished-target resume is async (awaited), and there's no benefit to parallelizing them.
+      // D1-T4 review finding (R-slice ledger): this gather had NO `offered()` gate — unlike
+      // spawnCalls just above, it ran its refusal for every session including chat (which never has
+      // this tool), fired pre/post-tool hooks for a tool the session never had, and returned a
+      // non-canonical refusal. `&& offered(c.name)` closes that: a session where send_message isn't
+      // offered now falls through to the per-call loop's own `!offered(call.name)` guard (the
+      // canonical "tool X is not available in this session" message), exactly like every other
+      // off-list tool — and this bridge is only ever reachable when it genuinely was offered.
       const sendMessageOutcomes = new Map<string, { output: string; isError: boolean }>();
-      const sendMessageCalls = opts.depth === 0 ? calls.filter((c) => c.name === "send_message") : [];
+      const sendMessageCalls = opts.depth === 0 ? calls.filter((c) => c.name === "send_message" && offered(c.name)) : [];
       // Dispatch (Phase 7) Task 4: session_spawn calls in the DISPATCH session's main thread spawn
       // full first-class CHILD SESSIONS (DispatchChildren.spawnChild) — a completely separate
       // session with its own turn()/transcript, not a subagent THREAD nested under this one
@@ -3110,6 +3144,10 @@ export class AgentEngine {
       // dispatch loop below (read via `preOutcome`), so a send_message call never reaches
       // executeCall. `to`/`message` are hand-parsed from argsJson (string-only) BEFORE any zod
       // would run — same defensive shape as the spawn bridge — so a malformed call is a typed error.
+      // D1-T4: agent resolution below is UNCHANGED — `to` is resolved as an agent FIRST, preserving
+      // today's exact behavior (including the stale-name guard), so an agent named like a session id
+      // keeps its current meaning. Only when `to` resolves to NO agent does the `!target` branch now
+      // fall back to session resolution (see its own doc comment, right below `bgAgents.get`).
       for (const call of sendMessageCalls) {
         // [4f pre-tool — Site 1 (bridged)] FIRST statement, before any send_message work. Same
         // rationale as the spawn_agent bridge above: send_message is bridge-intercepted (its
@@ -3131,7 +3169,74 @@ export class AgentEngine {
         // spawn bridge's own `run_in_background && !bgAgents` guard.
         if (!this.cfg.bgAgents) { sendMessageOutcomes.set(call.callId, { output: "send_message is not available in this session", isError: true }); continue; }
         const target = this.cfg.bgAgents.get(to, sessionId);
-        if (!target) { sendMessageOutcomes.set(call.callId, { output: `no agent '${to}' to message`, isError: true }); continue; }
+        if (!target) {
+          // D1-T4 (dispatch-toolset): `to` didn't resolve as an agent — fall back to a SESSION
+          // target (a session_spawn'd first-class child; today only dispatch mints these, but
+          // authorization here is generic, not dispatch-specific — any session with a matching
+          // child could use it). Loops are STRUCTURALLY impossible by construction: authorization
+          // requires `parentSessionId === sessionId` — a direct parent EDGE, not ancestry (a
+          // grandchild's parent is its own spawner, never this session) — and spawn edges form a
+          // tree, so if A spawned B, A may message B but B can never message A (B's parentSessionId
+          // is A, never the reverse).
+          if (to === sessionId) {
+            sendMessageOutcomes.set(call.callId, { output: "cannot send_message to your own session", isError: true });
+            continue;
+          }
+          let targetMeta: ReturnType<SessionStore["meta"]> | undefined;
+          try { targetMeta = this.cfg.store.meta(to); }
+          catch {
+            // store.meta throws on an unknown id — caught here so the caller gets a typed refusal
+            // (matching the agent branch's own wording shape) instead of an unhandled exception.
+            sendMessageOutcomes.set(call.callId, { output: `no agent or session '${to}' to message`, isError: true });
+            continue;
+          }
+          if (targetMeta.parentSessionId !== sessionId) {
+            sendMessageOutcomes.set(call.callId, { output: `session '${to}' is not a session you spawned`, isError: true });
+            continue;
+          }
+          const wasRunning = this.isRunning(to);
+          // "already ended": SessionRow carries no stored terminal/ended status, and this task
+          // deliberately does not add one (do not invent a status field) — a session is always
+          // resumable by starting a fresh turn, same as `session.send`'s own handling (see the
+          // idle branch below). The one case that genuinely cannot be resumed sanely is a removed
+          // workspace — exactly the precedent `resumeThread`'s own removed-worktree guard
+          // establishes for AGENT children (see its own "T3 REVIEW" comment): reject up front
+          // rather than start a turn that will fail confusingly the moment any tool touches a
+          // directory that no longer exists. Only checked when idle — a currently-running target's
+          // in-flight turn already has whatever cwd it started with; that concern is orthogonal to
+          // queuing it a message.
+          if (!wasRunning && targetMeta.cwd && !existsSync(targetMeta.cwd)) {
+            sendMessageOutcomes.set(call.callId, {
+              output: `session '${to}' has already ended — its working directory (${targetMeta.cwd}) no longer exists; spawn a fresh session instead of messaging it`,
+              isError: true,
+            });
+            continue;
+          }
+          if (wasRunning) {
+            // RUNNING → queue-only, drained (and ONLY THEN persisted) at the target's own next
+            // round-top — reusing `sendToThread` verbatim, keyed by the TARGET's session id
+            // (session ids `s_...` and subagent thread ids `th_...` are disjoint namespaces, so
+            // this never collides with an in-flight subagent thread's own queue). This is the SAME
+            // ordering guarantee `sendToThread` already gives subagent threads (a message lands
+            // strictly after the prior round's tool_result, never between a tool_call and its
+            // result) — earned by a real bug (see `sendToThread`'s own doc comment) — deliberately
+            // NOT re-earned via `steer()`'s different (send-time-persist, replay-time-repaired)
+            // shape, which is for a human interjecting into their OWN session and stays untouched.
+            this.sendToThread(sessionId, to, message);
+          } else {
+            // IDLE → start a turn the same way the daemon's own `session.send` handling does
+            // (ipc/server.ts's `session.send` case): persist the user_message, then start a turn.
+            this.cfg.hub.append(to, { type: "user_message", sessionId: to, threadId: MAIN_THREAD, text: message, clientName: "send_message" });
+            void this.runTurn(to).catch((e) => console.error("send_message: session turn failed:", e));
+          }
+          sendMessageOutcomes.set(call.callId, {
+            output: wasRunning
+              ? `message queued for session '${to}' — it is running and will see this at its next round`
+              : `message delivered to session '${to}' — a new turn started`,
+            isError: false,
+          });
+          continue;
+        }
         // 4h-ii-b Task 5 (stale-name guard, CC v2.1.199 parity): only a BY-NAME resolution is
         // checked/tracked — `to !== target.agentId` is exactly that (get() tries the agentId map
         // FIRST, so a hit where `to` equals the returned entry's own agentId was resolved BY ID).

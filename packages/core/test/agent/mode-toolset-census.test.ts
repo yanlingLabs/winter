@@ -125,13 +125,19 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
   //   hidden from a given round's specs() until ToolSearch-loaded. That's why bash/task_stop/
   //   computer (unchanged `modes`) do NOT move here even though their deferred status did — this
   //   list is still exactly 12 names, just AskQuestion in ask_user's old slot.
-  test("dispatch mode is offered EXACTLY this set (12 tools)", async () => {
+  // D1-T4: ADDED "send_message" — send-message.ts's `modes` was absent (defaulting to `["code"]`,
+  //   registry.ts's own doc comment), which left its `deferred: ["dispatch"]` (set back in D1-T2)
+  //   INERT for dispatch: a mode a tool isn't eligible for can never be "deferred" for it either,
+  //   so dispatch's namesForMode simply never included it. Task 4 gives dispatch a real reason to
+  //   call send_message (messaging the sessions it spawns via session_spawn), so `modes` widened
+  //   to `["code", "dispatch"]` — making this list 13 names now, not a re-baseline of anything else.
+  test("dispatch mode is offered EXACTLY this set (13 tools)", async () => {
     const d = await boot();
     const offered = [...d.registry!.namesForMode("dispatch", { builtinDeferral: true })];
     expect(offered.sort()).toEqual(
       [
         "Search", "ToolSearch", "AskQuestion", "bash", "computer", "glob", "grep", "ls",
-        "push_notification", "read", "session_spawn", "task_stop",
+        "push_notification", "read", "send_message", "session_spawn", "task_stop",
       ].sort(),
     );
   });

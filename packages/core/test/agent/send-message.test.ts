@@ -334,7 +334,9 @@ describe("AgentEngine: send_message (4h-ii-b Task 4 — CC SendMessage parity)",
 
     const result = toolResult(events, "m1");
     expect(result).toMatchObject({ isError: true });
-    expect(result!.output).toBe("no agent 'ghost' to message");
+    // D1-T4: `to` now also falls back to session resolution when it isn't a known agent, so the
+    // wording widened to reflect BOTH attempts (store.meta("ghost") throws too — truly unknown).
+    expect(result!.output).toBe("no agent or session 'ghost' to message");
     expect(events.some((e) => e.type === "thread_started")).toBe(false);
     expect((provider as FakeProvider).requests.length).toBe(2); // only the parent's two rounds
   });
