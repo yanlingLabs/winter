@@ -294,6 +294,41 @@ describe("ReadPage: query (research hook) — T2 ships without T3", () => {
   });
 });
 
+// B2-T3 fix-round-1 CRITICAL: the reviewer proved plain ReadPage hangs identically to the research
+// runner on a stuck fetch (page-core.ts previously passed followRedirects no signal at all). The
+// fix lives entirely in page-core.ts's own default per-fetch timeout (page-core.test.ts's own
+// "per-fetch default timeout" describe block proves the mechanism) — this is the "ReadPage itself
+// inherits it" proof, forwarding a shrunk `timeoutMs` through the new ReadPageDeps field so the
+// test doesn't have to wait out the real 15s default.
+describe("ReadPage: a stuck fetch no longer hangs the tool (fix-round-1 CRITICAL)", () => {
+  function hangingUntilAborted(): typeof fetch {
+    return (async (_url: string, init?: RequestInit) => {
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) return;
+        const abort = () => {
+          const err = new Error("The operation was aborted.");
+          err.name = "AbortError";
+          reject(err);
+        };
+        if (signal.aborted) return abort();
+        signal.addEventListener("abort", abort, { once: true });
+      });
+    }) as unknown as typeof fetch;
+  }
+
+  test("a per-entry fetch that hangs until its signal fires resolves via the default timeout, well within the test's shrunken bound, as an isError:true entry-failure", async () => {
+    const r = new ToolRegistry();
+    registerReadPageTool(r, { cache: new PageCache(), fetchFn: hangingUntilAborted(), timeoutMs: 30 });
+
+    const start = Date.now();
+    const out = await r.execute("ReadPage", { pages: [{ url: "https://example.com/" }] }, ctx());
+    expect(Date.now() - start).toBeLessThan(1000);
+    expect(out.isError).toBe(true); // the sole entry failed -> whole batch isError (existing "one bad entry" contract)
+    expect(out.output.toLowerCase()).toContain("timed out");
+  });
+});
+
 describe("ReadPage via a real turn: not deferred, visible immediately (production-shaped harness)", () => {
   function harness(mode: "chat" | "dispatch" | "code") {
     const home = mkdtempSync(join(tmpdir(), "norma-readpage-turn-"));

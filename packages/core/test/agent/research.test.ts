@@ -11,9 +11,9 @@ import {
   RESEARCH_MAX_PAGES_DEFAULT,
   RESEARCH_MAX_PAGES_CEILING,
 } from "../../src/agent/research";
-import { registerReadPageTool } from "../../src/agent/tools/read-page";
+import { registerReadPageTool, READPAGE_PER_PAGE_CHAR_CAP, READPAGE_TOTAL_OUTPUT_CHAR_CAP } from "../../src/agent/tools/read-page";
 import { fetchCleanPage, PageCache } from "../../src/agent/tools/page-core";
-import { ToolRegistry } from "../../src/agent/tools/registry";
+import { ToolRegistry, type ToolContext } from "../../src/agent/tools/registry";
 import { registerAskQuestionTool } from "../../src/agent/tools/ask-question";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
@@ -90,6 +90,51 @@ class StallingProvider implements Provider {
     await new Promise<void>(() => {}); // never resolves, ignores req.signal entirely
     yield { type: "done", stopReason: "end_turn" }; // unreachable — documents intent only
   }
+}
+
+/** A provider whose streamTurn yields ONE tool_call and then the generator just ends — no `done`
+ *  event ever, matching the "ambiguous stream end with pending tool_calls" scenario (Minor 3). */
+class AbruptEndProvider implements Provider {
+  readonly id = "abrupt";
+  readonly requests: TurnRequest[] = [];
+  models() { return [{ id: "abrupt-1", family: "fake", contextWindow: 100_000, supportsVision: false }]; }
+  async *streamTurn(req: TurnRequest): AsyncIterable<ProviderEvent> {
+    this.requests.push(req);
+    yield { type: "tool_call", callId: "z1", name: "FetchPage", argsJson: JSON.stringify({ urls: ["https://example.com/x"] }) };
+    // generator ends here — no "done" event ever emitted.
+  }
+}
+
+/** A provider whose generator has a real `finally` block — proves Minor 5's iterator-close fix:
+ *  without it, `closed` stays false even after `runner.run()` resolves, because the runner never
+ *  calls `.next()` again after seeing "done" (the ordinary `for await` loop the engine itself uses
+ *  gets this for free; this hand-rolled loop does not, unless it explicitly calls `.return()`). */
+class FinallyTrackingProvider implements Provider {
+  readonly id = "finally-tracker";
+  readonly requests: TurnRequest[] = [];
+  closed = false;
+  models() { return [{ id: "ft-1", family: "fake", contextWindow: 100_000, supportsVision: false }]; }
+  async *streamTurn(req: TurnRequest): AsyncIterable<ProviderEvent> {
+    this.requests.push(req);
+    try {
+      yield { type: "text_delta", delta: "hi" };
+      yield { type: "done", stopReason: "end_turn" };
+    } finally {
+      this.closed = true;
+    }
+  }
+}
+
+/** A fetchFn that never settles under ANY circumstance — ignores its signal entirely, just like
+ *  StallingProvider does for the provider side. Proves research.ts's OWN explicit race
+ *  (`raceDeadline`) is what bounds a hung fetch, independent of whether the fetch would ever
+ *  cooperate with an AbortSignal (page-core.ts's own signal-based default timeout is a SEPARATE,
+ *  slower backstop — 15s by default — that a maximally adversarial double like this would defeat
+ *  on its own; research.ts must not depend on it alone). */
+const neverResolvingFetch: typeof fetch = (async () => new Promise<Response>(() => {})) as unknown as typeof fetch;
+
+function ctx(): ToolContext {
+  return { cwd: "/tmp", roots: ["/tmp"], sessionId: "s1" };
 }
 
 describe("research.ts: the isolation pin — FetchPage is the ONLY tool the sub-agent is ever offered", () => {
@@ -232,7 +277,7 @@ describe("research.ts: model fallback", () => {
     expect(provider.requests[1]!.model).toBe(RESEARCH_FALLBACK_MODEL);
   });
 
-  test("a second bad_request after the fallback was already used does NOT retry again — an honest failure report comes back instead", async () => {
+  test("a second bad_request after the fallback was already used does NOT retry again — the run REJECTS with an honest failure (fix-round-1 Minor 4: a failed run is isError:true, not a success-shaped string)", async () => {
     const { fetchFn } = urlFetch({ [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" } });
     const provider = new FakeProvider([
       [{ type: "error", code: "bad_request", message: `unknown model: ${RESEARCH_MODEL}` }],
@@ -240,23 +285,59 @@ describe("research.ts: model fallback", () => {
     ]);
     const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn });
 
-    const report = await runner.run({ url: SEED_URL, query: "q" }, {});
-
+    await expect(runner.run({ url: SEED_URL, query: "q" }, {})).rejects.toThrow(/bad_request/);
     expect(provider.requests.length).toBe(2); // no third attempt
-    expect(report.toLowerCase()).toContain("bad_request");
   });
 
-  test("a non-model error (rate_limit) never retries — the run resolves (never throws) with an honest failure report", async () => {
+  test("a non-model error (rate_limit) never retries — the run REJECTS (fix-round-1 Minor 4), never a resolved failure-shaped string", async () => {
     const { fetchFn } = urlFetch({ [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" } });
     const provider = new FakeProvider([
       [{ type: "error", code: "rate_limit", message: "slow down" }],
     ]);
     const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn });
 
-    const report = await runner.run({ url: SEED_URL, query: "q" }, {});
-
+    await expect(runner.run({ url: SEED_URL, query: "q" }, {})).rejects.toThrow(/rate_limit/);
     expect(provider.requests.length).toBe(1); // no retry
-    expect(report.toLowerCase()).toContain("rate_limit");
+  });
+
+  test("a context_length_exceeded bad_request (naming the model too) does NOT burn the fallback — fix-round-1 Minor 1", async () => {
+    const { fetchFn } = urlFetch({ [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" } });
+    const provider = new FakeProvider([
+      [{ type: "error", code: "bad_request", message: `context_length_exceeded: ${RESEARCH_MODEL}'s maximum context length is 128000 tokens` }],
+    ]);
+    const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn });
+
+    await expect(runner.run({ url: SEED_URL, query: "q" }, {})).rejects.toThrow(/context_length_exceeded/);
+    expect(provider.requests.length).toBe(1); // no retry — the fallback model can't fix a payload-size problem either
+  });
+
+  test("an auth error that merely happens to mention the model slug does NOT retry — fix-round-1 Minor 1", async () => {
+    const { fetchFn } = urlFetch({ [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" } });
+    const provider = new FakeProvider([
+      [{ type: "error", code: "auth", message: `invalid api key for ${RESEARCH_MODEL}` }],
+    ]);
+    const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn });
+
+    await expect(runner.run({ url: SEED_URL, query: "q" }, {})).rejects.toThrow(/invalid api key/);
+    expect(provider.requests.length).toBe(1); // no retry — naming the model isn't evidence of a model problem under an auth error
+  });
+
+  test("a provider error preserves an EARLIER round's own assistant text in the failure — fix-round-1 Minor 2 (a partial answer beats none)", async () => {
+    const { fetchFn } = urlFetch({
+      [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" },
+      "https://example.com/a": { status: 200, body: pageHtml("Page A"), contentType: "text/html" },
+    });
+    const provider = new FakeProvider([
+      [
+        { type: "text_delta", delta: "partial analysis so far." },
+        { type: "tool_call", callId: "f1", name: "FetchPage", argsJson: JSON.stringify({ urls: ["https://example.com/a"] }) },
+        done("tool_calls"),
+      ],
+      [{ type: "error", code: "rate_limit", message: "slow down" }],
+    ]);
+    const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn });
+
+    await expect(runner.run({ url: SEED_URL, query: "q" }, {})).rejects.toThrow(/partial analysis so far\./);
   });
 });
 
@@ -293,6 +374,134 @@ describe("research.ts: audit labeling — FetchPage-driven fetches are distingui
     const { fetchFn: fetchFn2 } = urlFetch({ [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" } });
     await fetchCleanPage(SEED_URL, new PageCache(), { fetchFn: fetchFn2, audit: (l) => auditedDefault.push(l) });
     expect(auditedDefault[0]?.tool).toBe("ReadPage");
+  });
+});
+
+describe("research.ts: an empty or ambiguous stream never reports success (fix-round-1 Minor 3)", () => {
+  test("[done end_turn] with no text at all fails honestly rather than returning an empty report as success", async () => {
+    const { fetchFn } = urlFetch({ [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" } });
+    const provider = new FakeProvider([[done("end_turn")]]); // no text_delta at all
+    const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn });
+
+    await expect(runner.run({ url: SEED_URL, query: "q" }, {})).rejects.toThrow(/no report was produced/);
+  });
+
+  test("a stream that ends abruptly with a pending tool_call and no done event fails honestly instead of silently dropping the call", async () => {
+    const { fetchFn } = urlFetch({ [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" } });
+    const provider = new AbruptEndProvider();
+    const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn });
+
+    await expect(runner.run({ url: SEED_URL, query: "q" }, {})).rejects.toThrow(/ended unexpectedly.*1 tool call/);
+  });
+});
+
+describe("research.ts: a failed run surfaces as isError:true through ReadPage, never isError:false (fix-round-1 Minor 4)", () => {
+  test("a non-retryable provider error, run through registerReadPageTool's query entry, is an isError:true tool result", async () => {
+    const cache = new PageCache();
+    const { fetchFn } = urlFetch({ [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" } });
+    const provider = new FakeProvider([[{ type: "error", code: "rate_limit", message: "slow down" }]]);
+    const runner = createResearchRunner({ provider, cache, fetchFn });
+    const r = new ToolRegistry();
+    registerReadPageTool(r, { cache, research: runner });
+
+    const out = await r.execute("ReadPage", { pages: [{ url: SEED_URL, query: "q" }] }, ctx());
+
+    expect(out.isError).toBe(true);
+    expect(out.output.toLowerCase()).toContain("rate_limit");
+  });
+});
+
+describe("research.ts: closes the round's provider iterator (fix-round-1 Minor 5)", () => {
+  test("a generator's own `finally` block runs even though the runner never calls next() again after seeing 'done'", async () => {
+    const { fetchFn } = urlFetch({ [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" } });
+    const provider = new FinallyTrackingProvider();
+    const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn });
+
+    await runner.run({ url: SEED_URL, query: "q" }, {});
+
+    expect(provider.closed).toBe(true);
+  });
+});
+
+describe("research.ts: the wall clock also bounds FETCHES, not just the provider stream (fix-round-1 CRITICAL)", () => {
+  test("a hanging SEED-page fetch resolves via the wall clock, with a partial report stating it timed out — nothing hangs", async () => {
+    const provider = new FakeProvider([text("unreachable")]); // never actually reached
+    const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn: neverResolvingFetch, wallClockMs: 50 });
+
+    const start = Date.now();
+    const report = await runner.run({ url: SEED_URL, query: "q" }, {});
+    expect(Date.now() - start).toBeLessThan(1500);
+    expect(report.toLowerCase()).toContain("timed out");
+  });
+
+  test("a hanging FetchPage-BATCH fetch resolves via the wall clock too", async () => {
+    const fetchFn = (async (url: string | URL) => {
+      if (String(url) === SEED_URL) {
+        return new Response(FIVE_LINE_HTML, { status: 200, headers: { "content-type": "text/html" } });
+      }
+      return new Promise<Response>(() => {}); // hangs forever for any other url, ignoring signal
+    }) as unknown as typeof fetch;
+    const provider = new FakeProvider([toolCall("f1", "FetchPage", { urls: ["https://example.com/a"] })]);
+    const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn, wallClockMs: 80 });
+
+    const start = Date.now();
+    const report = await runner.run({ url: SEED_URL, query: "q" }, {});
+    expect(Date.now() - start).toBeLessThan(1500);
+    expect(report.toLowerCase()).toContain("timed out");
+  });
+
+  test("the same guarantee holds calling through registerReadPageTool's query entry, not just the raw runner directly", async () => {
+    const cache = new PageCache();
+    const provider = new FakeProvider([]); // never actually gets to speak
+    const runner = createResearchRunner({ provider, cache, fetchFn: neverResolvingFetch, wallClockMs: 50 });
+    const r = new ToolRegistry();
+    registerReadPageTool(r, { cache, research: runner });
+
+    const start = Date.now();
+    const out = await r.execute("ReadPage", { pages: [{ url: SEED_URL, query: "q" }] }, ctx());
+    expect(Date.now() - start).toBeLessThan(1500);
+    expect(out.output.toLowerCase()).toContain("timed out");
+  });
+});
+
+describe("research.ts: the sub-agent's OWN context is capped too, not just the final report (fix-round-1 IMPORTANT)", () => {
+  test("a single huge fetched page is capped at READPAGE_PER_PAGE_CHAR_CAP inside the sub-agent's context, and says content was cut", async () => {
+    const hugeHtml = `<html><head><title>Huge</title></head><body><p>${"x".repeat(400_000)}</p></body></html>`;
+    const { fetchFn } = urlFetch({
+      [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" },
+      "https://example.com/huge": { status: 200, body: hugeHtml, contentType: "text/html" },
+    });
+    const provider = new FakeProvider([
+      toolCall("f1", "FetchPage", { urls: ["https://example.com/huge"] }),
+      text(`final. ${SEED_URL} lines:1-3`),
+    ]);
+    const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn });
+
+    await runner.run({ url: SEED_URL, query: "q" }, {});
+
+    const f1Result = toolResultsOf(provider.requests[1]!.input).find((r) => r.callId === "f1");
+    expect(f1Result!.output.length).toBeLessThanOrEqual(READPAGE_PER_PAGE_CHAR_CAP + 100);
+    expect(f1Result!.output.toLowerCase()).toContain("cut");
+  });
+
+  test("8 huge pages batched in ONE FetchPage call stay bounded at READPAGE_TOTAL_OUTPUT_CHAR_CAP — not the 2.4M-char blowup the reviewer measured", async () => {
+    const hugeHtml = `<html><head><title>Huge</title></head><body><p>${"x".repeat(300_000)}</p></body></html>`;
+    const urls = Array.from({ length: 8 }, (_, i) => `https://example.com/huge${i}`);
+    const responses: Record<string, Step> = { [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" } };
+    for (const u of urls) responses[u] = { status: 200, body: hugeHtml, contentType: "text/html" };
+    const { fetchFn } = urlFetch(responses);
+    const provider = new FakeProvider([
+      toolCall("f1", "FetchPage", { urls }),
+      text(`final. ${SEED_URL} lines:1-3`),
+    ]);
+    const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn });
+
+    await runner.run({ url: SEED_URL, query: "q", max_pages: 15 }, {});
+
+    const f1Result = toolResultsOf(provider.requests[1]!.input).find((r) => r.callId === "f1");
+    expect(f1Result!.output.length).toBeLessThanOrEqual(READPAGE_TOTAL_OUTPUT_CHAR_CAP + 200);
+    expect(f1Result!.output.toLowerCase()).toContain("truncated");
+    expect(f1Result!.output.toLowerCase()).toContain("cut");
   });
 });
 

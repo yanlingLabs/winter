@@ -76,6 +76,11 @@ export interface ReadPageDeps {
   now?: () => number;
   /** Task 3 wires this; absent (Task 2's shipped state) → every `query` entry is a no-op failure. */
   research?: ResearchRunner;
+  /** Test-only override of page-core's own default per-fetch timeout (DEFAULT_FETCH_TIMEOUT_MS) —
+   *  forwarded straight through to `fetchCleanPage` (fix-round-1 CRITICAL) so a test can prove
+   *  ReadPage itself no longer hangs on a stuck fetch without waiting out the real 15s default.
+   *  Production never sets this — every real call is bounded by page-core's own fixed default. */
+  timeoutMs?: number;
 }
 
 type EntryResult = { ok: boolean; text: string };
@@ -99,6 +104,7 @@ async function renderPage(entry: PageRequestT, deps: ReadPageDeps): Promise<Entr
       fetchFn: deps.fetchFn,
       now: deps.now,
       audit: deps.audit,
+      timeoutMs: deps.timeoutMs,
     });
     const rendered = renderLines(page, entry.lineStart, entry.lineEnd);
     const newlineIdx = rendered.indexOf("\n");

@@ -360,6 +360,63 @@ describe("fetchCleanPage: other outcome vocabulary parity with web.ts", () => {
   });
 });
 
+// B2-T3 fix-round-1 CRITICAL: fetchCleanPage previously called followRedirects with NO signal at
+// all — a fetchFn that never settles (a genuinely stuck connection, which DOES honor an
+// AbortSignal once one exists — unlike a maximally adversarial double) would hang fetchCleanPage
+// (and everything above it: ReadPage, the research runner) forever. The fix is a per-fetch default
+// timeout (mirrors web.ts's REQUEST_TIMEOUT_MS posture) that always applies even when the caller
+// supplies no signal of its own, combined (never replaced) with any caller-supplied signal.
+describe("fetchCleanPage: the per-fetch default timeout (fix-round-1 CRITICAL)", () => {
+  /** A fetchFn that behaves like a genuinely stuck (not merely slow) network connection: it never
+   *  resolves on its own, but DOES reject once its own signal fires — exactly what real `fetch()`
+   *  does against a real AbortSignal. This is what page-core's signal-only fix is meant to bound
+   *  (a maximally adversarial double that ignores signals entirely is research.ts's own problem to
+   *  guard against with an explicit race, proven separately in research.test.ts). */
+  function hangingUntilAborted(): typeof fetch {
+    return (async (_url: string, init?: RequestInit) => {
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) return; // would never resolve — shouldn't happen once fetchCleanPage always supplies one
+        const abort = () => {
+          const err = new Error("The operation was aborted.");
+          err.name = "AbortError";
+          reject(err);
+        };
+        if (signal.aborted) return abort();
+        signal.addEventListener("abort", abort, { once: true });
+      });
+    }) as unknown as typeof fetch;
+  }
+
+  test("a fetchFn that hangs until its signal fires still rejects within a caller-shrunk timeoutMs — no caller signal required", async () => {
+    const start = Date.now();
+    await expect(
+      fetchCleanPage("https://example.com/", new PageCache(), { fetchFn: hangingUntilAborted(), timeoutMs: 30 }),
+    ).rejects.toThrow(/timed out/);
+    expect(Date.now() - start).toBeLessThan(1000);
+  });
+
+  test("the thrown error carries outcome:'timeout' (PageCoreError), matching the same vocabulary an explicit-signal timeout already uses", async () => {
+    try {
+      await fetchCleanPage("https://example.com/", new PageCache(), { fetchFn: hangingUntilAborted(), timeoutMs: 30 });
+      throw new Error("expected fetchCleanPage to throw");
+    } catch (e) {
+      expect(e).toBeInstanceOf(PageCoreError);
+      expect((e as PageCoreError).outcome).toBe("timeout");
+    }
+  });
+
+  test("a caller-supplied signal is honored TOO (combined with, not replaced by, the default) — an early caller abort still rejects promptly", async () => {
+    const controller = new AbortController();
+    const fetchFn = hangingUntilAborted();
+    const promise = fetchCleanPage("https://example.com/", new PageCache(), { fetchFn, signal: controller.signal, timeoutMs: 5000 });
+    setTimeout(() => controller.abort(), 20);
+    const start = Date.now();
+    await expect(promise).rejects.toThrow(/timed out/);
+    expect(Date.now() - start).toBeLessThan(1000); // proves the CALLER's signal (not the 5s timeoutMs) is what fired
+  });
+});
+
 describe("AD_TRACKER_LINK_SUBSTRINGS", () => {
   test("is the fixed seed list named in the brief", () => {
     expect(AD_TRACKER_LINK_SUBSTRINGS).toEqual([

@@ -25,6 +25,13 @@ const DEFAULT_TTL_MS = 60 * 60 * 1000; // ~1h (USER DESIGN, task-1-brief.md)
 const DEFAULT_MAX_ENTRIES = 50;
 const DEFAULT_MAX_BYTES = 20 * 1024 * 1024; // 20MB soft cap — a handful of full pages (web.ts caps one fetch at 5MB)
 
+/** B2-T3 fix-round-1 CRITICAL: mirrors web.ts's `REQUEST_TIMEOUT_MS` — this module's own fetch
+ *  (`followRedirects`, below) used to be called with NO signal at all, so a stuck connection could
+ *  hang `fetchCleanPage` (and everything built on it — plain `ReadPage` and the research runner)
+ *  forever. Every call now gets a bound by default, combined with (never replaced by) any
+ *  caller-supplied signal — a caller that forgets to pass one is still bounded. */
+const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
+
 /** Fixed, small, NAMED seed list (USER DESIGN) — "no ads in the links list," not a full adblocker.
  *  Matched against the RESOLVED link's `hostname`/`pathname` (never a raw substring of the two
  *  concatenated — that let an unrelated page whose PATH merely contained one of these strings,
@@ -76,6 +83,14 @@ export interface PageCoreDeps {
    *  are byte-identical without passing this; the research runner passes "FetchPage" instead, so
    *  audit.jsonl can tell the two callers apart. */
   tool?: string;
+  /** Caller-supplied abort (e.g. research.ts's own wall-clock deadline signal) — combined
+   *  (`AbortSignal.any`) with this function's own default per-fetch timeout below, never a
+   *  replacement for it: a caller's signal can only narrow the bound, never widen it past
+   *  DEFAULT_FETCH_TIMEOUT_MS (or `timeoutMs`, if overridden). */
+  signal?: AbortSignal;
+  /** Test-only override of DEFAULT_FETCH_TIMEOUT_MS. Production never sets this — every real
+   *  caller is bounded by the fixed 15s default regardless of whether it also passes `signal`. */
+  timeoutMs?: number;
 }
 
 interface CacheEntry {
@@ -234,7 +249,12 @@ export async function fetchCleanPage(url: string, cache: PageCache, deps: PageCo
     return cached;
   }
 
-  const res = await followRedirects(url, { fetchFn: deps.fetchFn });
+  // fix-round-1 CRITICAL: always bounded, even when `deps.signal` is absent — see
+  // DEFAULT_FETCH_TIMEOUT_MS's own doc comment.
+  const timeoutSignal = AbortSignal.timeout(deps.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS);
+  const signal = deps.signal ? AbortSignal.any([deps.signal, timeoutSignal]) : timeoutSignal;
+
+  const res = await followRedirects(url, { fetchFn: deps.fetchFn, signal });
   if (!res.ok) {
     const outcome =
       res.kind === "ssrf"

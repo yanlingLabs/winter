@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Provider, ProviderEvent, TurnInputItem, ToolSpec } from "../providers/types";
 import { fetchCleanPage, renderLines, PageCoreError, type PageCache, type CleanPage } from "./tools/page-core";
+import { READPAGE_PER_PAGE_CHAR_CAP, READPAGE_TOTAL_OUTPUT_CHAR_CAP } from "./tools/read-page";
 
 /**
  * B2-T3: the ephemeral research sub-agent. A plain, radically reduced loop over
@@ -19,9 +20,11 @@ import { fetchCleanPage, renderLines, PageCoreError, type PageCache, type CleanP
  *   4. Unstoppable except by its own wall clock (`RESEARCH_WALL_CLOCK_MS`, injectable via
  *      `deps.wallClockMs` for tests) — there is no store/hub for an external task_stop/abort
  *      bridge to even find this run through. The wall clock is enforced by the loop's OWN race
- *      against every provider step (see `nextWithDeadline`), not merely by handing the provider an
- *      AbortSignal and hoping it cooperates — a provider that ignores its signal entirely still
- *      cannot hang this function past its deadline.
+ *      against every provider step AND every fetch (see `raceDeadline`), not merely by handing
+ *      the provider/fetch an AbortSignal and hoping it cooperates — fix-round-1 CRITICAL: a
+ *      provider or a fetchFn that ignores its signal entirely still cannot hang this function
+ *      past its deadline, because every await that could stall is raced against `deadline`
+ *      independently of whether the thing on the other end cooperates.
  *
  * `FetchPage` — this runner's ONLY tool — is a hand-rolled spec + direct dispatch right here, and
  * NEVER touches the daemon's shared ToolRegistry: mode-toolset-census.test.ts carries a forward
@@ -129,22 +132,40 @@ function clampMaxPages(requested: number | undefined): number {
   return Math.min(Math.max(Math.trunc(base) || 1, 1), RESEARCH_MAX_PAGES_CEILING);
 }
 
+/** Caps `text` to at most `cap` characters TOTAL (including `marker`) — never silently drops the
+ *  marker itself over the limit (the marker's length is reserved up front). Shared by the report
+ *  cap (below) and the per-page/per-batch caps (fix-round-1 IMPORTANT) — one truncation mechanism,
+ *  three cap sizes. */
+function capWithMarker(text: string, cap: number, marker: string): string {
+  if (text.length <= cap) return text;
+  return text.slice(0, Math.max(0, cap - marker.length)) + marker;
+}
+
 function capText(text: string): string {
-  if (text.length <= REPORT_CHAR_CAP) return text;
-  const marker = `\n[report truncated at ${REPORT_CHAR_CAP} chars]`;
-  return text.slice(0, Math.max(0, REPORT_CHAR_CAP - marker.length)) + marker;
+  return capWithMarker(text, REPORT_CHAR_CAP, `\n[report truncated at ${REPORT_CHAR_CAP} chars]`);
 }
 
 /** Renders one fetched page as the numbered section the model reads — same shape as ReadPage's own
  *  per-page section (url header, numbered lines, a `Links:` tail), so the model has the resolved
  *  url + line numbers it needs to build a `url lines:N-M` citation, and the outbound links it needs
- *  for its closing "Links found:" section. */
+ *  for its closing "Links found:" section.
+ *
+ *  fix-round-1 IMPORTANT: capped at READPAGE_PER_PAGE_CHAR_CAP (read-page.ts's own constant, reused
+ *  rather than re-invented — the sub-agent's own context deserves the exact same per-page ceiling
+ *  ReadPage already enforces for the main model). Before this fix, ONLY the final report (20k) was
+ *  capped — a single huge fetched page went into the NEXT provider request whole, uncapped; 8
+ *  such pages in one batch measured 2.4M chars in one tool_result. */
 function pageSection(page: CleanPage): string {
   const rendered = renderLines(page);
   const linksList = page.links.length
     ? page.links.map((l, i) => `${i + 1}. ${l.text || "(no text)"} (${l.href})`).join("\n")
     : "(none)";
-  return [page.url, rendered, "", "Links:", linksList].join("\n");
+  const section = [page.url, rendered, "", "Links:", linksList].join("\n");
+  return capWithMarker(
+    section,
+    READPAGE_PER_PAGE_CHAR_CAP,
+    `\n[page content truncated at ${READPAGE_PER_PAGE_CHAR_CAP} chars — the rest of this page's content was cut]`,
+  );
 }
 
 function recordLinks(state: RunState, page: CleanPage): void {
@@ -161,6 +182,14 @@ function buildSeedMessage(q: ResearchQuery, seed: CleanPage): string {
   return [`Research query: ${q.query}`, "", "Seed page:", pageSection(seed)].join("\n");
 }
 
+/** Prefixes `message` with `lastText` when there is any — fix-round-1 Minor 2: a failure that
+ *  happens on a LATER round must not discard an EARLIER round's own assistant text; a partial
+ *  answer beats none. Every throwing failure path below routes through this (and `capText`) so
+ *  none of them can silently drop prior text the way the original provider-error path did. */
+function failureMessage(lastText: string, message: string): string {
+  return lastText ? `${lastText}\n\n${message}` : message;
+}
+
 /** Handles ONE FetchPage tool call (a batch of 1-8 urls): fetches whatever the remaining budget
  *  allows, in the model's requested order, decrementing the budget by every url ATTEMPTED
  *  (success or failure alike — a bad url still costs a slot, or a model could spam invalid urls for
@@ -168,8 +197,20 @@ function buildSeedMessage(q: ResearchQuery, seed: CleanPage): string {
  *  section, exactly like ReadPage's own batch (read-page.ts's `renderPage` precedent) — one bad url
  *  in a batch must not fail the whole call. Always informational (isError:false is decided by the
  *  caller, not here) — a fetch failure or a budget exhaustion are both things the model should read
- *  and act on, never a hard tool error. */
-async function handleFetchPage(urls: string[], state: RunState, deps: ResearchDeps): Promise<string> {
+ *  and act on, never a hard tool error.
+ *
+ *  fix-round-1 CRITICAL: each fetch is raced against the SAME `deadline` the provider stream uses
+ *  (`raceDeadline`) — a stuck fetch inside a batch can no longer hang the whole run, independent of
+ *  whether the fetch itself would eventually honor `signal`. fix-round-1 IMPORTANT: the joined
+ *  output is capped at READPAGE_TOTAL_OUTPUT_CHAR_CAP (read-page.ts's own batch cap), same posture
+ *  as ReadPage's own batch response. */
+async function handleFetchPage(
+  urls: string[],
+  state: RunState,
+  deps: ResearchDeps,
+  signal: AbortSignal,
+  deadline: number,
+): Promise<string> {
   if (state.pagesRead >= state.maxPages) {
     return `page budget exhausted (${state.pagesRead} pages read)`;
   }
@@ -181,11 +222,16 @@ async function handleFetchPage(urls: string[], state: RunState, deps: ResearchDe
     toFetch.map(async (url) => {
       state.pagesRead++;
       try {
-        const page = await fetchCleanPage(url, deps.cache, {
-          fetchFn: deps.fetchFn, now: deps.now, audit: deps.audit, tool: FETCH_PAGE_TOOL_NAME,
-        });
-        recordLinks(state, page);
-        return pageSection(page);
+        const race = await raceDeadline(
+          fetchCleanPage(url, deps.cache, { fetchFn: deps.fetchFn, now: deps.now, audit: deps.audit, tool: FETCH_PAGE_TOOL_NAME, signal }),
+          deadline,
+        );
+        if (race.timedOut) {
+          state.notRead.push(url);
+          return `${url}: timed out`;
+        }
+        recordLinks(state, race.value);
+        return pageSection(race.value);
       } catch (e) {
         state.notRead.push(url);
         const message = e instanceof PageCoreError || e instanceof Error ? e.message : String(e);
@@ -198,36 +244,64 @@ async function handleFetchPage(urls: string[], state: RunState, deps: ResearchDe
     state.notRead.push(...skipped);
     sections.push(`page budget exhausted (${state.pagesRead} pages read) — not fetched: ${skipped.join(", ")}`);
   }
-  return sections.join("\n\n---\n\n");
+
+  return capWithMarker(
+    sections.join("\n\n---\n\n"),
+    READPAGE_TOTAL_OUTPUT_CHAR_CAP,
+    `\n\n[batch output truncated at ${READPAGE_TOTAL_OUTPUT_CHAR_CAP} chars — remaining pages' content was cut]`,
+  );
 }
 
-/** true when a provider error should trigger the ONE model-fallback retry: either the code itself
- *  reads as a bad request (the concrete case the brief pins: an unknown/deprecated model slug is
- *  always reported as bad_request), or the message plainly names the current model / reads as an
- *  unknown-model complaint even under some other code. Any other error (auth, rate_limit, server,
- *  network, or a bad_request that names neither) is NOT retried. */
+/** A context-length complaint is a `bad_request` too, but about the PAYLOAD, not the model choice
+ *  — must never burn the one fallback retry (especially now that huge payloads are POSSIBLE again
+ *  even after the IMPORTANT cap fix above, just bounded instead of unbounded). Checked first, ahead
+ *  of every other rule below, so it wins even when the message also happens to name the model
+ *  (a real "context length exceeded" message routinely does: "gpt-5.4-mini's maximum context
+ *  length is..."). */
+const CONTEXT_LENGTH_RE = /context.length|context_length_exceeded/;
+
+/** Phrases that read as a genuine unknown/unsupported-model complaint, independent of the error
+ *  `code` — this is the "or reads as unknown-model" half of the brief's trigger criteria. */
+const UNKNOWN_MODEL_RE = /unknown model|model not found|unsupported model|invalid model|model.{0,20}(deprecated|unavailable|unsupported)/;
+
+/** true when a provider error should trigger the ONE model-fallback retry. fix-round-1 Minor 1
+ *  NARROWED this from "any bad_request retries" (too broad — a context_length_exceeded, or an
+ *  unrelated malformed-arguments bad_request, would have wrongly burned the fallback) to: a
+ *  context-length complaint NEVER retries; a message that plainly reads as an unknown/unsupported-
+ *  model complaint always retries regardless of code; otherwise only a `bad_request` that also
+ *  names the CURRENT model retries (this repo's own provider layer reports a deprecated/unknown
+ *  model slug exactly this way — see providers/manager.ts's "deprecated/unavailable... falling
+ *  back to..." path). An error under some OTHER code (auth, rate_limit, ...) that merely happens to
+ *  mention the model string — e.g. an auth failure message that includes the model name — does
+ *  NOT retry: naming the model is only meaningful evidence of a model problem when the code itself
+ *  says the request was bad. */
 function looksLikeBadModelError(ev: Extract<ProviderEvent, { type: "error" }>, model: string): boolean {
-  if (ev.code === "bad_request") return true;
   const msg = ev.message.toLowerCase();
-  return msg.includes(model.toLowerCase()) || /unknown[\s_-]?model|model not found/.test(msg);
+  if (CONTEXT_LENGTH_RE.test(msg)) return false;
+  if (UNKNOWN_MODEL_RE.test(msg)) return true;
+  return ev.code === "bad_request" && msg.includes(model.toLowerCase());
 }
 
+/** Builds the (still-resolved, non-throwing) partial report for a budget/clock/round-limit
+ *  truncation — these three are NOT failures: the run may have gathered real content, and the
+ *  CRITICAL fix's own contract demands `run()` still RESOLVE (never reject) on a timeout so a
+ *  hung fetch/provider can't wedge the calling chat turn. Contrast `failureMessage`'s callers
+ *  (provider error / empty report / ambiguous stream end), which DO reject — see Minor 4. */
 function notReadReport(lastText: string, state: RunState, reason: string): string {
   const urls = [...new Set(state.notRead)];
   const list = urls.length ? ` Not read: ${urls.join(", ")}.` : "";
   const note = `${reason} (pages read: ${state.pagesRead}).${list}${linksSummary(state)}`;
-  return capText(lastText ? `${lastText}\n\n${note}` : note);
+  return capText(failureMessage(lastText, note));
 }
 
-/** Races ONE `iterator.next()` call against the (absolute) deadline — the mechanism that makes the
- *  wall clock a real guarantee rather than a polite request: even a provider that never resolves
- *  and never looks at its AbortSignal cannot keep this function waiting past `deadline`. The
- *  abandoned `next()` promise (if any) is left to resolve or never resolve on its own; nothing
- *  awaits it further. */
-async function nextWithDeadline(
-  iterator: AsyncIterator<ProviderEvent>,
-  deadline: number,
-): Promise<{ timedOut: true } | { timedOut: false; result: IteratorResult<ProviderEvent> }> {
+/** Races ONE promise against an absolute deadline — the mechanism that makes the wall clock a real
+ *  guarantee rather than a polite request: even something that never resolves and never looks at
+ *  an AbortSignal cannot keep the caller waiting past `deadline`. Used for BOTH the provider
+ *  stream's `iterator.next()` calls and (fix-round-1 CRITICAL) every `fetchCleanPage` call this
+ *  file makes — a rejection from `promise` propagates normally (this only intercepts the "never
+ *  settles" case, not real failures). The loser of the race (if `promise` itself never settles) is
+ *  simply abandoned — nothing awaits it further. */
+async function raceDeadline<T>(promise: Promise<T>, deadline: number): Promise<{ timedOut: true } | { timedOut: false; value: T }> {
   const remaining = deadline - Date.now();
   if (remaining <= 0) return { timedOut: true };
   let timer: ReturnType<typeof setTimeout>;
@@ -236,12 +310,19 @@ async function nextWithDeadline(
   });
   try {
     return await Promise.race([
-      iterator.next().then((result) => ({ timedOut: false as const, result })),
+      promise.then((value) => ({ timedOut: false as const, value })),
       timeout,
     ]);
   } finally {
     clearTimeout(timer!);
   }
+}
+
+async function nextWithDeadline(
+  iterator: AsyncIterator<ProviderEvent>,
+  deadline: number,
+): Promise<{ timedOut: true } | { timedOut: false; value: IteratorResult<ProviderEvent> }> {
+  return raceDeadline(iterator.next(), deadline);
 }
 
 async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal: AbortSignal | undefined): Promise<string> {
@@ -254,11 +335,24 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
   const state: RunState = { maxPages, pagesRead: 0, notRead: [], linksFound: new Map() };
 
   let seed: CleanPage;
-  try {
-    seed = await fetchCleanPage(q.url, deps.cache, { fetchFn: deps.fetchFn, now: deps.now, audit: deps.audit, tool: FETCH_PAGE_TOOL_NAME });
-  } catch (e) {
-    const message = e instanceof PageCoreError || e instanceof Error ? e.message : String(e);
-    return capText(`Research incomplete for "${q.query}": could not read the seed page ${q.url}: ${message}.`);
+  {
+    let race: { timedOut: true } | { timedOut: false; value: CleanPage };
+    try {
+      race = await raceDeadline(
+        fetchCleanPage(q.url, deps.cache, { fetchFn: deps.fetchFn, now: deps.now, audit: deps.audit, tool: FETCH_PAGE_TOOL_NAME, signal }),
+        deadline,
+      );
+    } catch (e) {
+      // A REAL fetch failure (SSRF refusal, http error, ...) — nothing was read at all, an
+      // honest failure (throws; see Minor 4 — never a silent isError:false "report"). Contrast
+      // the `timedOut` branch below, which the CRITICAL fix's own contract requires to RESOLVE.
+      const message = e instanceof PageCoreError || e instanceof Error ? e.message : String(e);
+      throw new Error(capText(`could not read the seed page ${q.url}: ${message}`));
+    }
+    if (race.timedOut) {
+      return notReadReport("", state, `Research timed out before finishing (could not read the seed page ${q.url} in time)`);
+    }
+    seed = race.value;
   }
   state.pagesRead = 1;
   recordLinks(state, seed);
@@ -292,8 +386,8 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
     while (true) {
       const step = await nextWithDeadline(iterator, deadline);
       if (step.timedOut) { hitDeadline = true; break; }
-      if (step.result.done) break;
-      const ev = step.result.value;
+      if (step.value.done) break;
+      const ev = step.value.value;
       if (ev.type === "text_delta") textBuf += ev.delta;
       else if (ev.type === "tool_call") calls.push(ev);
       else if (ev.type === "done") { stop = ev.stopReason; break; }
@@ -301,9 +395,28 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
       // reasoning_item/usage: deliberately ignored — no persistence, no hub, nothing to forward them to.
     }
 
+    // fix-round-1 Minor 5: close this round's provider iterator so a well-behaved generator's own
+    // `finally` block runs (the engine's real `for await` loop gets this for free; our hand-rolled
+    // while-loop above does not, since it never calls `.next()` again after seeing done/error). The
+    // hitDeadline case is the one exception: the `next()` we just abandoned may NEVER settle (a
+    // stalled provider that ignores its signal), and `.return()` on an iterator with a pending
+    // `.next()` waits for that `.next()` to settle first — awaiting it here would reintroduce
+    // exactly the hang this whole fix removes. Every other exit means the last `.next()` already
+    // settled, so `.return()` is safe to await.
+    if (hitDeadline) {
+      const r = iterator.return?.();
+      if (r && typeof (r as Promise<unknown>).catch === "function") (r as Promise<unknown>).catch(() => {});
+    } else {
+      try { await iterator.return?.(); } catch { /* best-effort cleanup only */ }
+    }
+
     if (hitDeadline || signal.aborted) {
       return notReadReport(lastText, state, "Research timed out before finishing");
     }
+
+    // Captured BEFORE the roundError check below (fix-round-1 Minor 2) — a LATER round's failure
+    // must not discard an EARLIER round's own assistant text (a partial answer beats none).
+    if (textBuf) lastText = textBuf;
 
     if (roundError) {
       if (!usedFallback && looksLikeBadModelError(roundError, model)) {
@@ -311,13 +424,28 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
         model = RESEARCH_FALLBACK_MODEL;
         continue; // retry the SAME round (input unchanged) with the fallback model
       }
-      return capText(`Research failed for "${q.query}": provider error (${roundError.code}): ${roundError.message}. Pages read: ${state.pagesRead}.${linksSummary(state)}`);
+      // fix-round-1 Minor 4: THROWS (rejects) rather than resolving with a failure-shaped string —
+      // read-page.ts's own runResearch already catches a rejected research.run() and surfaces it as
+      // an isError:true entry; resolving here made a failed run look like isError:false success.
+      throw new Error(capText(failureMessage(lastText, `provider error (${roundError.code}): ${roundError.message}. Pages read: ${state.pagesRead}.${linksSummary(state)}`)));
     }
-
-    if (textBuf) lastText = textBuf;
 
     if (stop !== "tool_calls" || calls.length === 0) {
       if (stop === "aborted") return notReadReport(lastText, state, "Research timed out before finishing");
+      if (stop === null) {
+        // fix-round-1 Minor 3: the provider's stream ended without ever emitting "done" — ambiguous
+        // and, if `calls` is non-empty, previously SILENTLY DROPPED those pending tool calls while
+        // reporting success. Now an honest failure that names what was pending, instead.
+        throw new Error(capText(failureMessage(
+          lastText,
+          `the provider stream ended unexpectedly${calls.length ? ` with ${calls.length} tool call(s) left unresolved` : ""} (pages read: ${state.pagesRead}).`,
+        )));
+      }
+      if (!lastText.trim()) {
+        // fix-round-1 Minor 3: `[done end_turn]` with no text previously returned "" as a SUCCESS
+        // report. An empty report is not a report.
+        throw new Error(capText(`no report was produced — the model finished with no text (pages read: ${state.pagesRead}).`));
+      }
       return capText(lastText); // model is done — its own text IS the report
     }
 
@@ -342,12 +470,13 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
         input.push({ type: "tool_result", callId: call.callId, output: "invalid FetchPage arguments — could not parse JSON", isError: true });
         continue;
       }
-      const output = await handleFetchPage(urls, state, deps);
+      const output = await handleFetchPage(urls, state, deps, signal, deadline);
       input.push({ type: "tool_result", callId: call.callId, output, isError: false });
     }
   }
 
-  // MAX_ROUNDS exhausted without a natural end_turn — the same truncated-report shape as a timeout.
+  // MAX_ROUNDS exhausted without a natural end_turn — the same truncated-report (resolved, not
+  // thrown) shape as a timeout.
   return notReadReport(lastText, state, "Research stopped after reaching its round limit");
 }
 
