@@ -3410,11 +3410,22 @@ export class AgentEngine {
         // the permission rules allow it silently, so executeCall's guard alone was enough for it.
         // Verified by probe in the closing review; the three above are the ones that really carded.)
         //
-        // Placed AFTER the deferred-builtin guard directly above, deliberately: for a tool that is
-        // BOTH off-list and deferred-unloaded (e.g. `lsp` in a chat session), "load its schema via
-        // ToolSearch first" stays the answer — the pre-existing message, pinned by
-        // test/agent/chat-mode-allowlist.test.ts. This guard owns the calls that guard doesn't:
-        // non-deferred names (spawn_agent), and every name when ToolSearch is disabled in settings.
+        // Placed AFTER the deferred-builtin guard directly above. Whole-branch review FIX 2
+        // INVERTED which guard wins for a tool that is BOTH off-list and deferred-unloaded (e.g.
+        // `lsp` in a chat session, `enter_worktree` in a chat session): the deferred-builtin guard
+        // used to fire unconditionally for such a tool, so "load its schema via ToolSearch first"
+        // was the answer (pinned, at the time, by test/agent/chat-mode-allowlist.test.ts and
+        // test/agent/chat-mode-bridge-bypass.test.ts). That ordering was disproven by evidence: for
+        // a mode that can never load the tool (chat has no ToolSearch) or whose ToolSearch reports
+        // it as no-match (an off-list tool in dispatch), that advice is unfollowable — the model's
+        // only next move is to call the tool again, hitting the SAME deferred-builtin guard again,
+        // an infinite loop reproduced verbatim against `web_search` in dispatch. The deferred-builtin
+        // guard is now ALSO `offered(call.name) &&`-gated, so it no longer fires at all for an
+        // off-list tool — such a call falls through to THIS guard instead and gets the terminal "is
+        // not available in this session" message (both pins above were updated to match). This guard
+        // owns every call the deferred-builtin guard doesn't: non-deferred off-list names
+        // (spawn_agent), any off-list name when ToolSearch is disabled in settings, and — as of FIX
+        // 2 — an off-list tool that IS deferred but was never offered to begin with.
         //
         // Skipping the pre-tool hook (below) for a refused call is the same contract the deferral
         // guard above already has, and matches `hookBlockedCallIds`' own rule: hooks never observe a
