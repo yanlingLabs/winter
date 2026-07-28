@@ -220,6 +220,16 @@ export class PermissionGate {
     // read-only/network classes, deny everything else outright" — never a card, matching "never
     // asks" literally rather than degrading to a stricter-but-still-asking policy.
     if (policy === "chat") {
+      // Minor 2 (fix round 1 review finding): enter_plan_mode/exit_plan_mode are READ_ONLY (no fs/
+      // process mutation of their own), so the blanket READ_ONLY/NETWORK allow just below would
+      // otherwise ALLOW them here. Denied explicitly instead: if either ever became chat-eligible,
+      // runEnterPlanBridge (engine.ts) would flip meta.approvalPolicy = "plan" MID-TURN and persist
+      // it via cfg.setPolicy — the model mutating chat's supposedly-immutable policy, bypassing the
+      // session.setPolicy RPC guard entirely (one-turn blast radius; turn()'s own turn-time
+      // resolution repairs it on the NEXT turn, but not this one). Unreachable today (neither tool
+      // is in chat's real allowlist, registry.namesForMode("chat")) — same defense-in-depth tier as
+      // this file's own "chat" branch just above.
+      if (toolName === "enter_plan_mode" || toolName === "exit_plan_mode") return "deny";
       return READ_ONLY.has(toolName) || NETWORK.has(toolName) ? "allow" : "deny";
     }
     // ALWAYS_ASK (skill_write): a card no policy silences — EXCEPT bypass (accepts everything) and

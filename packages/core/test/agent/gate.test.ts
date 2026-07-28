@@ -314,5 +314,19 @@ describe("PermissionGate v1", () => {
     test("an unrecognized/unclassified tool also DENIES under 'chat' (fail-closed, same direction as 'plan')", () => {
       expect(gate.evaluate("mystery", "chat")).toBe("deny");
     });
+
+    // Fix round 1, Minor 2 (reviewer finding): enter_plan_mode/exit_plan_mode are READ_ONLY
+    // (gate.ts's own set — no fs/process mutation), so the generic "chat" branch above would
+    // otherwise ALLOW them by falling into the READ_ONLY/NETWORK check. If either ever became
+    // chat-eligible, runEnterPlanBridge (engine.ts) would flip meta.approvalPolicy = "plan" MID-TURN
+    // and persist it via cfg.setPolicy — the model mutating chat's supposedly-immutable policy,
+    // bypassing the session.setPolicy RPC guard entirely (one-turn blast radius; turn()'s own
+    // turn-time resolution repairs it on the NEXT turn, but not this one). Unreachable today
+    // (neither tool is in chat's real allowlist), same defense-in-depth tier as the two unprompted
+    // fixes elsewhere in this slice (the deny-message accuracy + the BashUnsandboxed-rule exclusion).
+    test("enter_plan_mode/exit_plan_mode explicitly DENY under 'chat' despite being READ_ONLY — chat must never let the model flip its own fixed policy", () => {
+      expect(gate.evaluate("enter_plan_mode", "chat")).toBe("deny");
+      expect(gate.evaluate("exit_plan_mode", "chat")).toBe("deny");
+    });
   });
 });

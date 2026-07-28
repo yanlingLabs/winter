@@ -182,18 +182,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.syncDockPresence() // Lifecycle T3: demote once the LAST main window closes
         }
         // Task 5 (2e-iii): the (Task-6-mounted) sidebar's ⌘-click "open in a new window" — spawns
-        // ANOTHER detached window pinned to an explicit sessionId, via the SAME construction path
-        // `onWindowDetach`'s yellow-light spawn below uses, just parameterized by an id instead of
+        // ANOTHER detached window pinned to an explicit sessionId, parameterized by an id instead of
         // the currently-focused session. Every detached window (including ones spawned this way)
         // gets this same hook wired, so its OWN sidebar can keep opening further windows too.
+        //
+        // Plan-immunity (2026-07-28 design; fix round 1): routed through `openSessionInNewDetachedWindow`
+        // (was: a direct `spawnDetachedWindow` call, duplicating the feed/session lookup here) —
+        // that's the ONE place `isChat` now auto-derives from `model.directory.rows` when the
+        // caller doesn't already know the mode, which THIS door never does (the clicked row could
+        // be chat OR code). Passing `frame:` explicitly (this door's own offset-from-source
+        // positioning) still overrides the centered-fallback default, unchanged. This also makes
+        // `OrbWindowController.onOpenChild`'s own doc comment accurate again — it already claimed
+        // this door "uses `openSessionInNewDetachedWindow`", which wasn't true before this fix.
         controller.onOpenSessionDetached = { [weak self, weak controller] sessionId in
-            guard let self, let model = self.appModel,
-                  let (feed, session) = model.makeDetachedFeed(sessionId: sessionId) else {
-                OrbDebug.log("onOpenSessionDetached: no appModel or makeDetachedFeed nil — spawn aborted")
-                return
-            }
+            guard let self else { return }
             let sourceFrame = controller?.currentFrame ?? NSRect(origin: .zero, size: chatWindowDefaultSize)
-            self.spawnDetachedWindow(feed: feed, session: session, frame: sourceFrame.offsetBy(dx: 24, dy: -24), title: "Norma")
+            self.openSessionInNewDetachedWindow(sessionId, frame: sourceFrame.offsetBy(dx: 24, dy: -24), title: "Norma")
         }
     }
 
@@ -215,11 +219,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// SessionsPane row click) keeps the exact same "Norma" fallback, unchanged; `openChat()` below
     /// is the first caller to pass something else (the session's own title, or "Chat").
     ///
-    /// Plan-immunity (2026-07-28 design): `isChat`, defaulted `false` for the same reason `title`
-    /// defaults `"Norma"` — every PRE-EXISTING caller is unaffected; `createAndOpenChat()`/
-    /// `openChat()`'s reopen path below are the only ones that ever pass `true`. Threaded straight
-    /// to `DetachedWindowController.init` via `spawnDetachedWindow`.
-    private func openSessionInNewDetachedWindow(_ sessionId: String, frame: NSRect? = nil, title: String = "Norma", isChat: Bool = false) {
+    /// Plan-immunity (2026-07-28 design; fix round 1): `isChat: Bool? = nil` — `nil` (every
+    /// PRE-EXISTING caller: orb's child-status circles, sidebars' ⌘-click, the Dashboard SessionsPane
+    /// row click) means "derive it", via the SAME pure helper `DetachedWindowController.selectSession`
+    /// uses (`isChatSession(_:in:)`), off `model.directory.rows` — AppModel's own live session list,
+    /// independently refreshed by every session-lifecycle broadcast regardless of which window's
+    /// sidebar the caller's `sessionId` actually came from, so it reliably has the row by the time a
+    /// user could have clicked it anywhere. `createAndOpenChat()`/`openChat()`'s reopen path pass an
+    /// EXPLICIT `true` instead of relying on this derivation — they just created/confirmed the
+    /// session themselves and know its mode with certainty the directory's own async refresh cadence
+    /// can't beat. (Fix round 1, review finding: three doors — ⌘-click open-in-new-window, the
+    /// Dashboard's SessionsPane row click, and the orb's own sidebar — showed BOTH policy pickers
+    /// shown-but-broken for a chat session, since only the explicit-`true` callers were ever
+    /// threaded. This auto-derivation closes the ⌘-click and Dashboard doors at this ONE shared
+    /// choke point; the orb's OWN `WindowContentView` instance renders a SEPARATE adapter
+    /// [`OrbWindowController.fieldAdapter`], fixed at its sidebar's own `onSelect` wiring instead —
+    /// see that closure's own doc comment.)
+    private func openSessionInNewDetachedWindow(_ sessionId: String, frame: NSRect? = nil, title: String = "Norma", isChat: Bool? = nil) {
         guard let model = appModel,
               let (feed, session) = model.makeDetachedFeed(sessionId: sessionId) else {
             OrbDebug.log("openSessionInNewDetachedWindow: no appModel or makeDetachedFeed nil — spawn aborted")
@@ -227,7 +243,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let resolvedFrame = frame ?? centeredStandaloneFrame(visibleFrame: visible)
-        spawnDetachedWindow(feed: feed, session: session, frame: resolvedFrame, title: title, isChat: isChat)
+        let resolvedIsChat = isChat ?? DetachedWindowController.isChatSession(sessionId, in: model.directory.rows)
+        spawnDetachedWindow(feed: feed, session: session, frame: resolvedFrame, title: title, isChat: resolvedIsChat)
     }
 
     /// Chat Mode Slice A (CM-T3): pure decision helper for the "Chat" menu entry — the newest
@@ -743,10 +760,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // fresh session (the same create+focus primitive the detach path reuses); `onOpenDetached`
         // spawns a NEW detached window for an arbitrary session id (CARRIED ITEM 3 — no such path
         // existed before this task). `currentSessionId` reads `focusedSessionId` fresh each render.
+        //
+        // Plan-immunity (2026-07-28 design; fix round 1, review finding — door 3): `onSelect` ALSO
+        // calls `orb.updateIsChatSession` — see that method's own doc comment (OrbWindowController.swift)
+        // for why the orb needs this at all (a SEPARATE `FieldStateAdapter` from any
+        // `DetachedWindowController`'s own) and why the logic lives there, not inlined here (unit
+        // testability — this closure itself stays a thin, obviously-correct one-liner). Without it,
+        // selecting a chat row here would leave both policy pickers shown-but-broken on the morph
+        // window, exactly the state this whole slice refuses to ship. (Whether the orb's sidebar
+        // SHOULD be able to select a chat row at all — `focusSession`/`refocus` have no mode gate
+        // today — is a separate, larger question; see this task's own report for why that's carried
+        // forward rather than fixed here.)
         orb.sidebars = SidebarWiring(
             directory: model.directory,
             currentSessionId: { [weak model] in model?.focusedSessionId },
-            onSelect: { [weak model] sid in Task { await model?.focusSession(sid) } },
+            onSelect: { [weak model, weak orb] sid in
+                orb?.updateIsChatSession(for: sid, rows: model?.directory.rows ?? [])
+                Task { await model?.focusSession(sid) }
+            },
             onOpenDetached: { [weak self] sid in self?.openSessionInNewDetachedWindow(sid) },
             onNewSession: { [weak model] in Task { await model?.startFreshSessionAfterDetach() } }
         )

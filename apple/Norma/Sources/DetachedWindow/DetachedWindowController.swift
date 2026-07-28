@@ -275,13 +275,25 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Plan-immunity (2026-07-28 design): pure decision helper for `selectSession`'s in-place
-    /// `isChatSession` re-derivation — is the given session id chat-mode, per the directory's
-    /// currently-loaded rows? `false` (not chat) whenever the row isn't found (the directory hasn't
-    /// loaded it yet) — the conservative default, matching `FieldStateAdapter.isChatSession`'s own
-    /// `false` default. `nonisolated static`, no `self`/MainActor dependency, mirrors
-    /// `AppDelegate.chatSessionToOpen(in:)`'s own "pure decision helper, directly unit-testable"
-    /// shape.
+    /// Plan-immunity (2026-07-28 design; fix round 1, Minor 3 — comment corrected, default kept):
+    /// pure decision helper for `selectSession`'s in-place `isChatSession` re-derivation — is the
+    /// given session id chat-mode, per the directory's currently-loaded rows? `false` (not chat)
+    /// whenever the row isn't found (the directory hasn't loaded it yet).
+    ///
+    /// This is NOT "the conservative default" in any general safety sense — for a chat target that
+    /// isn't loaded yet, `false` is the WRONG direction (it shows a picker that cannot work, rather
+    /// than hiding one that could). It's kept anyway because it's the CORRECT answer for the one
+    /// real caller that actually reaches "not found" today: `newSession()` below calls
+    /// `selectSession(created.sessionId)` immediately after creating a plain session (no `mode`
+    /// param — always code), so the freshly minted id is NEVER in `directory.rows` yet, and `false`
+    /// is simply right, not a hedge. The sidebar's plain-click path (`selectSession`'s OTHER call
+    /// site) never hits "not found" in practice — the clicked row IS the directory's own row, so
+    /// it's always already loaded — making the "wrong" direction for a hypothetical unloaded chat
+    /// id unreachable rather than merely tolerated. Flipping the default to `true` would fix that
+    /// unreachable case at the cost of breaking the reachable one (every "+ New session" would
+    /// briefly show its picker hidden, since the fresh id isn't loaded either). `nonisolated
+    /// static`, no `self`/MainActor dependency, mirrors `AppDelegate.chatSessionToOpen(in:)`'s own
+    /// "pure decision helper, directly unit-testable" shape.
     nonisolated static func isChatSession(_ sessionId: String, in rows: [SessionSummary]) -> Bool {
         rows.first(where: { $0.sessionId == sessionId })?.mode == "chat"
     }
