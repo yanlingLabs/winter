@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { Provider, ProviderEvent, TurnInputItem, ToolSpec } from "../providers/types";
-import { fetchCleanPage, renderLines, PageCoreError, checkDangerousDomain, type PageCache, type CleanPage } from "./tools/page-core";
+import { fetchCleanPage, renderLines, PageCoreError, checkDangerousDomain, dangerousDomainRefusal, type PageCache, type CleanPage } from "./tools/page-core";
 import { READPAGE_PER_PAGE_CHAR_CAP, READPAGE_TOTAL_OUTPUT_CHAR_CAP } from "./tools/read-page";
 
 /**
@@ -134,15 +134,6 @@ export interface ResearchDeps {
   dangerousDomainsAdded?: (cwd?: string) => string[] | undefined;
 }
 
-/** Shared refusal text (matches read-page.ts's own `dangerousDomainRefusal` in shape, kept as a
- *  separate small copy here rather than a cross-import — see this module's own doc comment on why
- *  `research.ts` deliberately does not import from `read-page.ts`'s TYPES; this is plain string
- *  formatting, not a matcher, so there is nothing to "fork" by not sharing the function itself —
- *  the actual matching logic is ALWAYS `checkDangerousDomain`, imported from page-core.ts). */
-function dangerousDomainRefusal(url: string, match: { host: string; matchedEntry: string }, cannotAskReason: string): string {
-  return `${url}: refused — ${match.host} matches the dangerous-domain list (${match.matchedEntry}); ${cannotAskReason}`;
-}
-
 interface RunState {
   maxPages: number;
   pagesRead: number;
@@ -263,7 +254,7 @@ async function handleFetchPage(
       }
       try {
         const race = await raceDeadline(
-          fetchCleanPage(url, deps.cache, { fetchFn: deps.fetchFn, now: deps.now, audit: deps.audit, tool: FETCH_PAGE_TOOL_NAME, signal, origin: "research" }),
+          fetchCleanPage(url, deps.cache, { fetchFn: deps.fetchFn, now: deps.now, audit: deps.audit, tool: FETCH_PAGE_TOOL_NAME, signal, origin: "research", dangerousAdded }),
           deadline,
         );
         if (race.timedOut) {
@@ -393,7 +384,7 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
     let race: { timedOut: true } | { timedOut: false; value: CleanPage };
     try {
       race = await raceDeadline(
-        fetchCleanPage(q.url, deps.cache, { fetchFn: deps.fetchFn, now: deps.now, audit: deps.audit, tool: FETCH_PAGE_TOOL_NAME, signal, origin: "research" }),
+        fetchCleanPage(q.url, deps.cache, { fetchFn: deps.fetchFn, now: deps.now, audit: deps.audit, tool: FETCH_PAGE_TOOL_NAME, signal, origin: "research", dangerousAdded }),
         deadline,
       );
     } catch (e) {

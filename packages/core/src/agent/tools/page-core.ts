@@ -64,6 +64,18 @@ export function checkDangerousDomain(rawUrl: string, added: readonly string[] = 
   return matchedEntry ? { host, matchedEntry } : null;
 }
 
+/** Shared refusal-text shape for every `checkDangerousDomain` hit, wherever it fires — ReadPage's
+ *  own per-entry block (read-page.ts), the research runner's seed/batch blocks (research.ts), AND
+ *  (fix round 2, Minor 3 below) fetchCleanPage's own post-redirect re-check. Previously duplicated
+ *  ONE COPY EACH in read-page.ts and research.ts (deliberately, since research.ts's own module doc
+ *  comment explains why it doesn't import FROM read-page.ts) — moved here since a THIRD copy for
+ *  the redirect re-check would be one too many, and both existing callers already depend on this
+ *  file for `checkDangerousDomain` itself. Names the entry's url AND the matched list entry, so the
+ *  transcript reads as a deliberate policy block, never a network failure. */
+export function dangerousDomainRefusal(url: string, match: DangerousDomainMatch, cannotAskReason: string): string {
+  return `${url}: refused — ${match.host} matches the dangerous-domain list (${match.matchedEntry}); ${cannotAskReason}`;
+}
+
 const DEFAULT_TTL_MS = 60 * 60 * 1000; // ~1h (USER DESIGN, task-1-brief.md)
 const DEFAULT_MAX_ENTRIES = 50;
 // Important 3, whole-branch review (2026-07-28): the OLD 20MB total was ~4-5 research-sized (5MB
@@ -170,6 +182,16 @@ export interface PageCoreDeps {
    *  share instead of the user's, and can never evict a user's cached page (see PageCache's own doc
    *  comment for the eviction guarantee this produces). */
   origin?: PageOrigin;
+  /** Minor 3 fix (whole-branch review, fix round 2): the ALREADY-RESOLVED effective dangerous-
+   *  domain list (`SHIPPED_DANGEROUS_DOMAINS` ∪ `settings.permissions.dangerousDomains.added` for
+   *  this cwd) — both callers (read-page.ts's `renderPage`/`runResearch`, research.ts's
+   *  `runResearch`/`handleFetchPage`) already resolve this exact array ONCE for their own pre-fetch
+   *  `checkDangerousDomain(entry.url, ...)` check; passing the SAME array here lets `fetchCleanPage`
+   *  re-check the RESOLVED (post-redirect) host too — `checkDangerousDomain` on the CALLER-SUPPLIED
+   *  url only catches a url that directly IS a dangerous host, never one that merely redirects INTO
+   *  one. Absent → no user additions; the shipped list alone still applies to the redirect re-check
+   *  (still fail-safe, just narrower — matches every other dangerousAdded-absent caller's posture). */
+  dangerousAdded?: readonly string[];
 }
 
 interface CacheEntry {
@@ -196,16 +218,30 @@ function estimateBytes(page: CleanPage): number {
  *
  * Important 3 fix (whole-branch review): every entry is tagged with a `PageOrigin` ("user" —
  * `put`'s default when the argument is omitted, so every pre-fix call site is byte-identical — or
- * "research"). Eviction runs in TWO passes: first, RESEARCH-tagged entries alone are trimmed
- * (oldest-first, among themselves ONLY) until their own running byte total is back under
- * `maxBytes * researchByteShare` — this can NEVER touch a "user" entry, no matter how many research
- * entries exist or how full the cache gets. Second, the ordinary combined cap (entries count +
- * overall bytes, oldest-first across BOTH tags — unchanged from before this fix) trims whatever is
- * left. Because the first pass guarantees `researchBytes <= maxBytes * researchByteShare` BEFORE the
- * second pass ever runs, the second pass can only evict a "user" entry when the USER's OWN entries
- * alone exceed `maxBytes * (1 - researchByteShare)` — i.e. only the user's own reading activity can
- * evict the user's own entries; a research run's contribution is structurally capped below that
- * threshold and can never push a user entry out.
+ * "research"). Eviction runs in THREE passes, all origin-aware: (1) RESEARCH-tagged entries alone
+ * are trimmed (oldest-first, among themselves ONLY) until their own running byte total is back
+ * under `maxBytes * researchByteShare` — a proactive reservation, independent of whether the
+ * overall cap has been reached yet. (2) fix round 2 (whole-branch review, Important — the
+ * entry-COUNT trim was origin-BLIND): while EITHER the overall entry count or the overall byte
+ * total is still over its cap, evict the oldest RESEARCH-tagged entry — never a "user" one — until
+ * research entries run out or both caps are satisfied. (3) only once no research entries remain
+ * does the ordinary oldest-first-across-whatever's-left trim run (in practice this can only ever
+ * touch "user" entries, since pass 2 removes every research entry before pass 3 could reach one).
+ *
+ * PREVIOUSLY (fix round 1, corrected by fix round 2): this comment claimed a "user" entry could
+ * NEVER be evicted "no matter how many research entries exist" — that guarantee held for BYTES
+ * (pass 1) but NOT for entry COUNT, which pass 2 (as it existed then) evicted oldest-first across
+ * BOTH tags regardless of origin. Probed on production defaults: 1 user entry + 60 tiny research
+ * entries evicted the user's entry purely on COUNT pressure (entries.size 61 > maxEntries 50) with
+ * the byte budget nowhere near full — reachable in a single ReadPage call (8 `query` entries x the
+ * 15-page research clamp = 120 fetches). Fixed by making pass 2 origin-aware too, so the guarantee
+ * below is now actually true in both dimensions, not just the one it used to name.
+ *
+ * The guarantee this now produces, proven for both dimensions: a "user" entry is evicted ONLY once
+ * every "research" entry has already been removed — i.e., only the user's OWN reading activity
+ * (too many, or too large, of the user's own cached pages) can ever evict a user entry. No number
+ * or size of research-tagged entries can push one out, in either the byte or the entry-count
+ * dimension.
  */
 export class PageCache {
   private entries = new Map<string, CacheEntry>();
@@ -259,9 +295,10 @@ export class PageCache {
   }
 
   private evict(): void {
-    // Pass 1 — research's OWN reserved share: trim oldest RESEARCH entries until back under the
-    // cap, touching nothing tagged "user" no matter what. See this class's own doc comment for the
-    // arithmetic proof this makes a "user" eviction in pass 2 depend ONLY on the user's own bytes.
+    // Pass 1 — research's OWN reserved BYTE share: trim oldest RESEARCH entries until back under
+    // the cap, touching nothing tagged "user" no matter what. Proactive — runs even when the
+    // overall entries/bytes caps aren't close to being hit, so research's own footprint never
+    // creeps up on the user's reserved headroom.
     if (this.researchBytes > this.researchByteCap) {
       for (const [key, entry] of this.entries) {
         if (this.researchBytes <= this.researchByteCap) break;
@@ -271,8 +308,22 @@ export class PageCache {
         this.researchBytes -= entry.bytes;
       }
     }
-    // Pass 2 — the ordinary combined cap (entries count + overall bytes), oldest-first across BOTH
-    // tags, unchanged from before this fix.
+    // Pass 2 — fix round 2 (whole-branch review, Important): the ordinary combined cap (entries
+    // count + overall bytes) used to trim oldest-first across BOTH tags, origin-BLIND — a research
+    // run that pushed entries.size (not bytes) over maxEntries could evict a "user" entry even
+    // while nowhere near the byte cap (probed: 1 user + 60 tiny research entries on production
+    // defaults). Now origin-aware, mirroring pass 1's own preference: evict the oldest RESEARCH
+    // entry — never "user" — while either cap is still exceeded, until research entries run out.
+    for (const [key, entry] of this.entries) {
+      if (this.entries.size <= this.maxEntries && this.totalBytes <= this.maxBytes) break;
+      if (entry.origin !== "research") continue;
+      this.entries.delete(key);
+      this.totalBytes -= entry.bytes;
+      this.researchBytes -= entry.bytes;
+    }
+    // Pass 3 — only once every research entry is gone does a "user" entry become evictable: the
+    // ordinary oldest-first trim, now only ever reachable by the user's OWN entries (pass 2 above
+    // removes every research-tagged entry before this could touch one, as long as any remain).
     for (const [key, entry] of this.entries) {
       if (this.entries.size <= this.maxEntries && this.totalBytes <= this.maxBytes) break;
       this.entries.delete(key);
@@ -290,18 +341,104 @@ export class PageCache {
   // via the producer's own `cache.put` call inside `fetchCleanPage`) — this map only ever holds
   // promises that are CURRENTLY resolving, never a cached page itself.
   private inFlight = new Map<string, Promise<CleanPage>>();
+  // Minor 4 fix (whole-branch review, fix round 2): tracks every ORIGIN any caller has requested
+  // for a url's CURRENTLY in-flight fetch — the producer (created by whichever caller happened to
+  // be first) reads this back via `getEffectiveOrigin` right before it calls `cache.put`, so the
+  // STORED tag reflects every joiner's origin, not just the initiator's. "user" wins over
+  // "research" (a stronger claim on protection from eviction never loses to a weaker one).
+  private inFlightOrigins = new Map<string, Set<PageOrigin>>();
 
-  async dedupe(url: string, producer: () => Promise<CleanPage>): Promise<CleanPage> {
-    const existing = this.inFlight.get(url);
-    if (existing) return existing;
-    const promise = producer().finally(() => {
-      // Only clear OUR OWN entry — a stale delete could otherwise race a already-superseding entry
-      // in a pathological reentrant case (not expected here, but this is cheap and unambiguous).
-      if (this.inFlight.get(url) === promise) this.inFlight.delete(url);
-    });
-    this.inFlight.set(url, promise);
-    return promise;
+  /** `producer` receives a `getEffectiveOrigin()` callback (rather than a fixed origin) so it can
+   *  read the MERGED origin at the moment it actually calls `cache.put` — any joiner that attached
+   *  before that point (even if it started AFTER the producer itself) is reflected. `signal`, if
+   *  given, races only a JOINER's own return (see below for why the INITIATOR is deliberately
+   *  excluded from that race) — a caller-specific detach, never a cancellation of the shared
+   *  underlying fetch itself (which keeps running for every other waiter; see the module-level
+   *  `raceAbort` helper's own doc comment). */
+  async dedupe(
+    url: string,
+    origin: PageOrigin,
+    producer: (getEffectiveOrigin: () => PageOrigin) => Promise<CleanPage>,
+    signal?: AbortSignal,
+  ): Promise<CleanPage> {
+    const existingOrigins = this.inFlightOrigins.get(url);
+    const existingPromise = this.inFlight.get(url);
+    if (!existingOrigins || !existingPromise) {
+      // The INITIATOR: nothing to join, so this call CREATES the shared producer. Deliberately
+      // returned AS-IS, NOT wrapped in `raceAbort` — the initiator's own `signal` is already
+      // combined into the real fetch's own AbortSignal INSIDE `producer` (fetchCleanPage's
+      // `AbortSignal.any([deps.signal, timeoutSignal])`), which is what produces the nicely
+      // classified `PageCoreError(outcome:"timeout", ...)` on abort. Wrapping it in a SECOND,
+      // independent race against the identical signal would just race that classification: the
+      // outer wrapper's own listener can win first and reject with a generic "aborted" error
+      // instead, discarding the more specific one — a real regression this fix must not introduce.
+      const origins = new Set<PageOrigin>([origin]);
+      this.inFlightOrigins.set(url, origins);
+      const promise = producer(() => (origins.has("user") ? "user" : "research")).finally(() => {
+        // Only clear OUR OWN entry — a stale delete could otherwise race an already-superseding
+        // entry in a pathological reentrant case (not expected here, but this is cheap and
+        // unambiguous).
+        if (this.inFlight.get(url) === promise) {
+          this.inFlight.delete(url);
+          this.inFlightOrigins.delete(url);
+        }
+      });
+      this.inFlight.set(url, promise);
+      return promise;
+    }
+    // A JOINER: its own `signal` was never wired into anything before this fix — it simply
+    // returned the shared promise verbatim, so an abort had no way to detach it early. `raceAbort`
+    // is exactly (and only) that missing detach; the shared `existingPromise` itself is untouched,
+    // so the initiator and any OTHER joiners are unaffected.
+    existingOrigins.add(origin);
+    return raceAbort(existingPromise, signal);
   }
+}
+
+/** Races a per-CALLER `signal` against the (possibly SHARED, via `dedupe`) `promise` — if `signal`
+ *  fires first, THIS caller's own returned promise rejects promptly; the underlying `promise`
+ *  itself is left running untouched (other callers sharing it, via `dedupe`, are unaffected). A
+ *  real continuation is always attached to `promise` (never a bare `.catch` swallow), so its
+ *  eventual rejection — if the caller already detached via its own signal — is still "handled" and
+ *  never surfaces as an unhandled-rejection warning. Minor 4 fix (whole-branch review, fix round
+ *  2): before this, EVERY caller of `cache.dedupe` (joiner or not) simply returned the shared
+ *  promise directly — a joiner's own abort had no way to detach it from a still-pending shared
+ *  fetch; a joiner aborted at 50ms stayed pending until whatever bound the INITIATOR's own signal
+ *  happened to be (600ms in the reviewer's probe). */
+function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      reject(abortError(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
+function abortError(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  const err = new Error("The operation was aborted.");
+  err.name = "AbortError";
+  return err;
 }
 
 /** Own small title-extraction helper — NOT web.ts's private `extractTitle` (it isn't exported;
@@ -441,7 +578,14 @@ export async function fetchCleanPage(url: string, cache: PageCache, deps: PageCo
   // Critical 2 fold-in (whole-branch review): everything past the cache-miss check is wrapped in
   // `cache.dedupe` — see PageCache.dedupe's own doc comment. A single caller (no concurrent
   // duplicate in flight) is unaffected: `dedupe` just runs `producer` once, same as before this fix.
-  return cache.dedupe(url, async () => {
+  //
+  // Minor 4 fix (whole-branch review, fix round 2): `deps.origin ?? "user"` is THIS caller's own
+  // origin claim (merged with every other joiner's inside `dedupe`, "user" always winning); `getEffectiveOrigin`
+  // is read at `cache.put` time below, not captured up front, so a LATER joiner's origin still
+  // counts. `deps.signal` (this caller's OWN raw signal, before it gets combined with the default
+  // timeout just below) races only THIS caller's own return — a joiner that aborts detaches
+  // promptly without affecting the shared fetch other callers are waiting on.
+  return cache.dedupe(url, deps.origin ?? "user", async (getEffectiveOrigin) => {
     // fix-round-1 CRITICAL: always bounded, even when `deps.signal` is absent — see
     // DEFAULT_FETCH_TIMEOUT_MS's own doc comment.
     const timeoutSignal = AbortSignal.timeout(deps.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS);
@@ -483,6 +627,28 @@ export async function fetchCleanPage(url: string, cache: PageCache, deps: PageCo
       throw new PageCoreError(res.error, outcome);
     }
 
+    // Minor 3 fix (whole-branch review, fix round 2): checkDangerousDomain only ever ran on the
+    // CALLER-SUPPLIED url, before this function was even invoked (read-page.ts's renderPage/
+    // runResearch, research.ts's runResearch/handleFetchPage) — a SAFE url that redirects INTO a
+    // dangerous host sailed through untouched (probed: ReadPage("https://safe.example/go") -> 302
+    // -> https://transfer.sh/dropped fetched and rendered, isError:false). Can't undo the network
+    // egress that already happened (matches webFetchGate's own documented limit — the first hop
+    // already carried whatever the model put in the URL), but this stops the dangerous host's
+    // CONTENT from ever reaching the model or the cache: re-check the RESOLVED (post-redirect) host
+    // here, using the SAME already-resolved effective list the caller used for its own check.
+    const redirectedDangerous = checkDangerousDomain(res.url, deps.dangerousAdded ?? []);
+    if (redirectedDangerous) {
+      deps.audit?.({ kind: "network", tool, url, outcome: "dangerous_domain_redirect" });
+      throw new PageCoreError(
+        dangerousDomainRefusal(
+          res.url,
+          redirectedDangerous,
+          "no approval flow exists to ask for one, so a redirect into a known exfiltration/tunnel-provider host is blocked outright",
+        ),
+        "dangerous_domain_redirect",
+      );
+    }
+
     let page: CleanPage;
     try {
       const isHtml = res.contentType.toLowerCase().includes("text/html");
@@ -498,10 +664,10 @@ export async function fetchCleanPage(url: string, cache: PageCache, deps: PageCo
       throw new PageCoreError(`could not parse page content: ${e instanceof Error ? e.message : String(e)}`, "parse_error");
     }
 
-    cache.put(page, now, deps.origin);
+    cache.put(page, now, getEffectiveOrigin());
     deps.audit?.({ kind: "network", tool, url, outcome: "ok", fromCache: false });
     return page;
-  });
+  }, deps.signal);
 }
 
 /** Numbered `N→text` rendering (1-based line numbers), the whole page when no range is given.

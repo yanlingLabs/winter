@@ -90,12 +90,148 @@ export function ssrfGuard(raw: string): string | null {
   return null;
 }
 
+// Whole-branch review, Critical 2 follow-up (fix round 2): the five regexes below used to be the
+// textbook lazy-scan-to-a-required-later-token shape (`<script[\s\S]*?<\/script>`, and its
+// siblings for style/head/h1-h6/a) that page-core.ts's `extractLinks` was ALREADY fixed for (see
+// that file's own comment on `LINK_OPEN_RE`/`LINK_CLOSE_RE`) — but `htmlToText` itself, called
+// UNCONDITIONALLY on every HTML page `fetchCleanPage` (and `web_fetch`) fetches, still had the
+// identical shape in five places. Each `[\s\S]*?` rescans forward from EVERY open tag hunting for
+// its own closing token; with many opens and a distant/absent close, that is O(n^2) — and unlike
+// `extractLinks` (only reached when a page's LINKS are being extracted), `htmlToText` runs on the
+// FULL byte count of every HTML fetch, so this was the dominant cost (page-core.test.ts's own
+// comment on `extractLinks`'s "20,000 opens + 1 distant close" case measured 3836ms even with
+// `extractLinks` itself fixed — entirely from this function). Replaced with the same technique
+// `extractLinks` uses: opens and closes scanned SEPARATELY (single-pass regexes, neither with a
+// lazy-scan-to-a-later-token shape) and paired by a monotonic pointer that only advances forward —
+// O(n) total. `replacePairedTag` below is the shared mechanism for the four SAME-tag-name cases
+// (script/style/head/anchor); headings need their own `convertHeadings` because the original
+// regex's `\1` backreference means an `<h2>` open must pair with the SAME level's `</h2>` close,
+// not any heading level's — six independent per-level pointers, one shared "already consumed"
+// cursor (so a heading nested inside an already-matched span of ANY level is skipped, exactly like
+// the original combined regex's own lastIndex-jump behavior).
+// Deliberately BARE tokens (no `[^>]*>` requirement) for script/style/head — matching the ORIGINAL
+// regex's own shape exactly: `<script[\s\S]*?<\/script>` never required its OWN opening tag to be
+// terminated by a `>` at all (unlike headings/anchors below, whose original patterns DID require
+// `[^>]*>`); the lazy `[\s\S]*?` scans past ANY characters, including a stray `>` that happens to
+// belong to some other, unrelated markup, hunting only for the literal "</script>" text. A
+// differential fuzz run (html-to-text-differential.test.ts) caught a real byte-divergence class
+// from getting this wrong: an EARLIER version of this fix used `/<script[^>]*>/gi` here (mirroring
+// headings/anchors), which on deeply malformed input (an unterminated `<script` whose "own" `>`
+// turned out to belong to some LATER unrelated tag) paired differently than the original's
+// tag-oblivious lazy scan. Using the bare token instead reproduces the original's exact behavior,
+// including its own over-matching quirk (a tag merely STARTING WITH "script" also counts — the
+// original has the identical quirk, so this is faithful, not a regression).
+const SCRIPT_OPEN_RE = /<script/gi;
+const SCRIPT_CLOSE_RE = /<\/script>/gi;
+const STYLE_OPEN_RE = /<style/gi;
+const STYLE_CLOSE_RE = /<\/style>/gi;
+const HEAD_OPEN_RE = /<head/gi;
+const HEAD_CLOSE_RE = /<\/head>/gi;
+// Same open/close shape as page-core.ts's own LINK_OPEN_RE/LINK_CLOSE_RE (deliberately NOT
+// imported — that would be a reverse dependency, since page-core.ts already imports FROM this
+// file; a tiny disclosed duplication, same precedent as this file's own `extractTitle`/page-core's
+// separate copy).
+const ANCHOR_OPEN_RE = /<a\s[^>]*href="([^"]+)"[^>]*>/gi;
+const ANCHOR_CLOSE_RE = /<\/a>/gi;
+const HEADING_OPEN_RE = /<h([1-6])[^>]*>/gi;
+const HEADING_CLOSE_RE = /<\/h([1-6])>/gi;
+
+/** Linear (single monotonic pass) equivalent of
+ *  `html.replace(new RegExp(openSrc + "[\\s\\S]*?" + closeSrc, "gi"), render)` — see the comment
+ *  above this function's call sites for why. `openRe`/`closeRe` must both carry the `g` flag (their
+ *  `lastIndex` is reset and driven internally). Every open tag pairs with the FIRST closing tag
+ *  found anywhere after it; an open tag starting before the previously-matched pair's own close is
+ *  treated as nested/already-consumed (left as literal text, never separately matched) — the same
+ *  behavior the original lazy regex's own `lastIndex` jump produces (it never separately matches a
+ *  tag nested inside an already-consumed span either). An open tag with no closing tag anywhere
+ *  after it (and every later open, once closes are exhausted) is left as literal text, matching the
+ *  original regex's own "no match" outcome for that case. */
+function replacePairedTag(
+  html: string,
+  openRe: RegExp,
+  closeRe: RegExp,
+  render: (openMatch: RegExpExecArray, inner: string) => string,
+): string {
+  const closes: Array<{ start: number; end: number }> = [];
+  closeRe.lastIndex = 0;
+  let cm: RegExpExecArray | null;
+  while ((cm = closeRe.exec(html))) closes.push({ start: cm.index, end: cm.index + cm[0].length });
+
+  let out = "";
+  let cursor = 0;
+  let closePtr = 0;
+  openRe.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = openRe.exec(html))) {
+    const openStart = m.index;
+    const openEnd = openRe.lastIndex;
+    if (openStart < cursor) continue; // nested inside a previously-consumed span
+
+    while (closePtr < closes.length && closes[closePtr]!.start < openEnd) closePtr++;
+    if (closePtr >= closes.length) break; // no closing tag anywhere after this open (or any later one)
+
+    const close = closes[closePtr]!;
+    closePtr++;
+    out += html.slice(cursor, openStart);
+    out += render(m, html.slice(openEnd, close.start));
+    cursor = close.end;
+  }
+  out += html.slice(cursor);
+  return out;
+}
+
+/** `<h1-6>...</h(SAME LEVEL)>` — the one shape `replacePairedTag` can't handle directly, since the
+ *  original regex's `\1` backreference requires the CLOSE to be the same level as its OPEN. Six
+ *  independent per-level close-position lists (one linear scan total, bucketed by level) and six
+ *  independent per-level pointers, but ONE shared `cursor` across all levels — an open (of ANY
+ *  level) nested inside an already-matched span (of ANY level) is skipped, matching the original
+ *  combined regex's own behavior. An open whose OWN level has no more available closes is left as
+ *  literal (matching the original's "no match at this position" outcome) and scanning continues —
+ *  unlike `replacePairedTag`'s single-tag `break`, exhausting one level's closes does not mean
+ *  another level's opens can no longer match, so this never early-exits the whole scan. */
+function convertHeadings(html: string): string {
+  const closesByLevel: Record<string, number[]> = { "1": [], "2": [], "3": [], "4": [], "5": [], "6": [] };
+  HEADING_CLOSE_RE.lastIndex = 0;
+  let cm: RegExpExecArray | null;
+  while ((cm = HEADING_CLOSE_RE.exec(html))) closesByLevel[cm[1]!]!.push(cm.index);
+
+  const ptrs: Record<string, number> = { "1": 0, "2": 0, "3": 0, "4": 0, "5": 0, "6": 0 };
+  let out = "";
+  let cursor = 0;
+  HEADING_OPEN_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = HEADING_OPEN_RE.exec(html))) {
+    const level = m[1]!;
+    const openStart = m.index;
+    const openEnd = HEADING_OPEN_RE.lastIndex;
+    if (openStart < cursor) continue;
+
+    const list = closesByLevel[level]!;
+    let p = ptrs[level]!;
+    while (p < list.length && list[p]! < openEnd) p++;
+    ptrs[level] = p;
+    if (p >= list.length) continue; // this level's closes are exhausted — literal text, keep scanning (other levels may still match)
+
+    const closeStart = list[p]!;
+    ptrs[level] = p + 1;
+    out += html.slice(cursor, openStart);
+    const inner = html.slice(openEnd, closeStart);
+    out += `\n${"#".repeat(Number(level))} ${inner}\n`;
+    cursor = closeStart + `</h${level}>`.length;
+  }
+  out += html.slice(cursor);
+  return out;
+}
+
 export function htmlToText(html: string): string {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<head[\s\S]*?<\/head>/gi, "")
-    // structure worth keeping (user design): headings → #, links → text (url), list items → "- "
-    .replace(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi, (_m, n, t) => `\n${"#".repeat(Number(n))} ${t}\n`)
-    .replace(/<a\s[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi, (_m, href, t) => `${t} (${href})`)
+  let out = html;
+  out = replacePairedTag(out, SCRIPT_OPEN_RE, SCRIPT_CLOSE_RE, () => "");
+  out = replacePairedTag(out, STYLE_OPEN_RE, STYLE_CLOSE_RE, () => "");
+  out = replacePairedTag(out, HEAD_OPEN_RE, HEAD_CLOSE_RE, () => "");
+  // structure worth keeping (user design): headings → #, links → text (url), list items → "- "
+  out = convertHeadings(out);
+  out = replacePairedTag(out, ANCHOR_OPEN_RE, ANCHOR_CLOSE_RE, (m, inner) => `${inner} (${m[1]})`);
+  return out
     .replace(/<li\b[^>]*>/gi, "\n- ")
     .replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|h[1-6]|li|tr)>/gi, "\n")
     .replace(/<[^>]+>/g, "")

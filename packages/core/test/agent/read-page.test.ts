@@ -314,6 +314,28 @@ describe("ReadPage: dangerous-domain hard-block (Critical 1 fix, no card, ever)"
     expect(out.output).toContain("1→line one");
   });
 
+  // Minor 3 fix (whole-branch review, fix round 2), at the FULL TOOL level — the exact shape
+  // probed: ReadPage("https://safe.example/go") -> 302 -> https://transfer.sh/dropped used to be
+  // fetched and RENDERED, isError:false, with the header literally reading
+  // "resolved: https://transfer.sh/dropped". Proves page-core's redirect re-check reaches all the
+  // way through this tool, not just fetchCleanPage in isolation (page-core.test.ts's own describe
+  // block covers that layer directly).
+  test("a SAFE url that redirects INTO a dangerous host is refused at the ReadPage tool level too — never rendered, isError:true, no 'resolved: https://transfer.sh/...' header", async () => {
+    const { fetchFn } = scriptedFetch([
+      { status: 302, location: "https://transfer.sh/dropped" },
+      { status: 200, body: "<p>dropped content</p>", contentType: "text/html" },
+    ]);
+    const r = new ToolRegistry();
+    registerReadPageTool(r, { cache: new PageCache(), fetchFn });
+
+    const out = await r.execute("ReadPage", { pages: [{ url: "https://safe.example/go" }] }, ctx());
+    expect(out.isError).toBe(true);
+    expect(out.output).not.toContain("dropped content"); // the dangerous host's CONTENT never reached the model
+    expect(out.output).not.toContain("resolved: https://transfer.sh"); // no longer rendered as a successful resolution
+    expect(out.output).toContain("transfer.sh");
+    expect(out.output.toLowerCase()).toContain("dangerous");
+  });
+
   test("a query entry whose SEED url is dangerous is refused before research ever runs", async () => {
     let researchCalled = false;
     const stub: ResearchRunner = { async run() { researchCalled = true; return "REPORT"; } };
@@ -326,19 +348,163 @@ describe("ReadPage: dangerous-domain hard-block (Critical 1 fix, no card, ever)"
     expect(out.output).toContain("transfer.sh");
   });
 
-  test("EVERY policy the gate allows ReadPage under still hard-blocks — there is no card at all, ever (probed across the same policy set web_fetch cards under)", async () => {
-    // ReadPage's gate verdict is unconditionally "allow" under every policy (see the "gate
-    // classification" describe block above) — the hard-block below is enforced entirely INSIDE the
-    // tool, independent of policy, so it fires identically regardless of what policy a caller is
-    // under. This test proves that independence directly: same tool call, no policy plumbing
-    // involved at all, and the refusal is identical every time.
-    for (const _policy of ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"] as const) {
-      const r = new ToolRegistry();
-      registerReadPageTool(r, { cache: new PageCache() });
-      const out = await r.execute("ReadPage", { pages: [{ url: "https://transfer.sh/x" }] }, ctx());
-      expect(out.isError).toBe(true);
-      expect(out.output.toLowerCase()).toContain("dangerous");
+  // Nit fix (whole-branch review, fix round 2): the test THIS REPLACES iterated `_policy` and never
+  // used it — six identical `r.execute` calls with NO policy plumbing at all (`ToolRegistry.execute`
+  // has no concept of a session's approval policy; the loop variable was declared and discarded).
+  // The CLAIM ("every policy still hard-blocks, no card, ever") is true — proven elsewhere in this
+  // review through a real engine — but nothing in the old test itself could have caught a
+  // regression that made the hard-block policy-DEPENDENT, since it never drove a policy-aware path
+  // at all. Rewritten to drive a REAL session, REAL AgentEngine, and REAL PermissionGate per policy
+  // — a FakeProvider issues a genuine `ReadPage` tool_call at a dangerous URL, `engine.runTurn`
+  // actually runs the dispatch loop (gate -> ruleAllowed -> execute, the same path a card would fire
+  // from if one were going to), and the assertion counts `approval_requested` OFF THE REAL STORE —
+  // the same technique policy-modes-matrix.test.ts's own driveCell uses for web_fetch's card.
+  describe("EVERY policy the gate allows ReadPage under still hard-blocks — driven through a REAL session/engine per policy, zero approval cards (fix round 2 rewrite of a vacuous test)", () => {
+    function policyHarness(policy: "plan" | "dont-ask" | "ask" | "accept-edits" | "auto" | "bypass") {
+      const home = mkdtempSync(join(tmpdir(), "norma-readpage-policy-"));
+      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-readpage-policy-cwd-")));
+      const store = new SessionStore(home);
+      const hub = new SessionHub(store);
+      const registry = new ToolRegistry();
+      registerAskQuestionTool(registry);
+      registerSearchTool(registry);
+      registerReadPageTool(registry, { cache: new PageCache() });
+
+      const assemblerHome = mkdtempSync(join(tmpdir(), "norma-readpage-policy-actx-"));
+      const assemblerTrust = new TrustStore(join(assemblerHome, "trust.json"));
+      const skills = new SkillStore({ normaHome: assemblerHome, trust: assemblerTrust });
+      const broker = new ApprovalBroker();
+      const provider = new FakeProvider([
+        [
+          { type: "tool_call", callId: "c1", name: "ReadPage", argsJson: JSON.stringify({ pages: [{ url: "https://transfer.sh/x" }] }) },
+          { type: "done", stopReason: "tool_calls" },
+        ],
+        [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+      ] as ProviderEvent[][]);
+      const dirs = new SessionDirectories(() => [cwd]);
+      const assembler = new ContextAssembler({ normaHome: assemblerHome, trust: assemblerTrust, skills });
+      const compactor = new Compactor({ provider: { provider, model: "fake-1" }, store, hub });
+      const engine = new AgentEngine({
+        store, hub, registry, broker,
+        gate: new PermissionGate(),
+        provider: { provider, model: "fake-1" },
+        dirs, assembler, compactor,
+        toolSearch: { enabled: () => undefined },
+      });
+      const sessionId = store.createSession("global", { cwd, approvalPolicy: policy, mode: "chat" });
+      return { engine, sessionId, store };
     }
+
+    for (const policy of ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"] as const) {
+      test(`policy=${policy}: zero approval_requested events, ReadPage's tool_result is isError:true naming the dangerous entry`, async () => {
+        const { engine, sessionId, store } = policyHarness(policy);
+        await engine.runTurn(sessionId);
+
+        const events = store.read(sessionId);
+        expect(events.some((e) => e.type === "approval_requested")).toBe(false); // the drift tripwire this test exists for
+
+        const result = events.find((e) => e.type === "tool_result" && e.callId === "c1");
+        expect(result).toBeDefined();
+        if (result?.type !== "tool_result") throw new Error("expected a tool_result");
+        expect(result.isError).toBe(true);
+        expect(result.output.toLowerCase()).toContain("dangerous");
+        expect(result.output).toContain("transfer.sh");
+      });
+    }
+  });
+});
+
+// --- Minor 5 (whole-branch review, fix round 2): the hard-block above stops a FETCH to a
+// dangerous-domain url, but the Links: tail still advertised one — a page linking to
+// transfer.sh/drop rendered "1. grab (https://transfer.sh/drop)" in its Links: tail, which the
+// model then hit the hard block on. Exactly the half-measure the Search fold-in's own rationale
+// rejects (advertising a link the model can't read just has it try, fail, and possibly retry).
+// Strip dangerous-domain links from the rendered Links: TAIL the same way Search strips dangerous
+// results, stating the withheld count rather than a silent drop.
+//
+// SCOPE (coordinator's own words: "extending the same principle to the links tail is my call"):
+// this fixes the `Links:` TAIL specifically. The numbered BODY text above it is `htmlToText`'s own
+// `<a>` -> "text (href)" prose conversion (web.ts), a separate, much larger surface (redacting an
+// arbitrary substring out of the cleaned page's own numbered lines would touch the citation
+// contract's "byte-identical cleaned text" guarantee) — deliberately NOT touched here, so these
+// tests assert on the Links: SECTION specifically, not the whole output. ----------------------------
+describe("ReadPage: the Links: tail also strips dangerous-domain links (Minor 5 fix, fix round 2)", () => {
+  const PAGE_WITH_DANGEROUS_LINK =
+    "<html><head><title>Page</title></head><body><p>text</p>" +
+    '<p><a href="https://transfer.sh/drop">grab</a></p>' +
+    '<p><a href="https://ok.example.com/">safe link</a></p>' +
+    "</body></html>";
+
+  /** Isolates just the `Links:` tail section (everything after the "Links:\n" marker) so these
+   *  tests assert on exactly the surface this fix touches, not the numbered body text above it
+   *  (which legitimately still contains the raw `<a>` rendering — out of scope, see this describe
+   *  block's own comment). */
+  function linksSection(output: string): string {
+    const idx = output.indexOf("Links:\n");
+    return idx === -1 ? "" : output.slice(idx + "Links:\n".length);
+  }
+
+  test("a shipped dangerous-domain link is withheld from the Links: tail, with the count stated", async () => {
+    const { fetchFn } = scriptedFetch([{ status: 200, body: PAGE_WITH_DANGEROUS_LINK, contentType: "text/html" }]);
+    const r = new ToolRegistry();
+    registerReadPageTool(r, { cache: new PageCache(), fetchFn });
+
+    const out = await r.execute("ReadPage", { pages: [{ url: "https://example.com/page" }] }, ctx());
+    expect(out.isError).toBe(false);
+    const links = linksSection(out.output);
+    expect(links).not.toContain("transfer.sh"); // never advertised in the tail at all
+    expect(links).toContain("safe link (https://ok.example.com/)"); // sibling link unaffected
+    expect(links).toContain("1 link withheld"); // states the withheld count, never a silent drop
+  });
+
+  test("a USER-ADDED dangerous domain is withheld from the Links: tail too", async () => {
+    const html =
+      "<html><head><title>Page</title></head><body>" +
+      '<p><a href="https://my-internal-exfil.example/x">internal</a></p>' +
+      '<p><a href="https://ok.example.com/">safe link</a></p>' +
+      "</body></html>";
+    const { fetchFn } = scriptedFetch([{ status: 200, body: html, contentType: "text/html" }]);
+    const r = new ToolRegistry();
+    registerReadPageTool(r, {
+      cache: new PageCache(),
+      fetchFn,
+      dangerousDomainsAdded: (cwd) => (cwd === "/tmp" ? ["my-internal-exfil.example"] : undefined),
+    });
+
+    const out = await r.execute("ReadPage", { pages: [{ url: "https://example.com/page" }] }, ctx());
+    const links = linksSection(out.output);
+    expect(links).not.toContain("my-internal-exfil.example");
+    expect(links).toContain("safe link (https://ok.example.com/)");
+    expect(links).toContain("1 link withheld");
+  });
+
+  test("a page with NO dangerous links renders its Links: tail byte-identically to before this fix (no withheld note at all)", async () => {
+    const { fetchFn } = scriptedFetch([{ status: 200, body: FIVE_LINE_HTML, contentType: "text/html" }]);
+    const r = new ToolRegistry();
+    registerReadPageTool(r, { cache: new PageCache(), fetchFn });
+
+    const out = await r.execute("ReadPage", { pages: [{ url: "https://example.com/page" }] }, ctx());
+    const links = linksSection(out.output);
+    expect(links).toBe("1. other site (https://other.example.com/x)");
+    expect(links.toLowerCase()).not.toContain("withheld");
+  });
+
+  test("a page whose EVERY link is dangerous still succeeds (isError:false) with '(none)' replaced by the withheld note, never a silent empty list", async () => {
+    const html =
+      "<html><head><title>Page</title></head><body><p>text</p>" +
+      '<p><a href="https://transfer.sh/a">a</a></p><p><a href="https://pastebin.com/b">b</a></p>' +
+      "</body></html>";
+    const { fetchFn } = scriptedFetch([{ status: 200, body: html, contentType: "text/html" }]);
+    const r = new ToolRegistry();
+    registerReadPageTool(r, { cache: new PageCache(), fetchFn });
+
+    const out = await r.execute("ReadPage", { pages: [{ url: "https://example.com/page" }] }, ctx());
+    expect(out.isError).toBe(false);
+    const links = linksSection(out.output);
+    expect(links).not.toContain("transfer.sh");
+    expect(links).not.toContain("pastebin.com");
+    expect(links).toContain("2 links withheld");
+    expect(links).not.toContain("(none)"); // withheld note replaces the empty-list marker, not alongside it
   });
 });
 

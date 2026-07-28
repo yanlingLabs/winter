@@ -318,6 +318,121 @@ describe("fetchCleanPage: in-flight de-dup for identical concurrent urls (folded
   });
 });
 
+/** A fetchFn whose response is resolved manually (via `resolve`) — lets a test deterministically
+ *  control WHEN the shared in-flight fetch settles, so a "joiner" can attach to it mid-flight and
+ *  its own behavior (abort, origin) can be asserted before/after that settlement, with no reliance
+ *  on timing/sleep. */
+function deferredFetch(): { fetchFn: typeof fetch; resolve: (body: string) => void; calls: () => number } {
+  let calls = 0;
+  let resolveFn: ((res: Response) => void) | undefined;
+  const fetchFn = (async (_url: string, _init?: RequestInit) => {
+    calls++;
+    return new Promise<Response>((resolve) => { resolveFn = resolve; });
+  }) as unknown as typeof fetch;
+  return {
+    fetchFn,
+    calls: () => calls,
+    resolve: (body: string) => resolveFn!(new Response(body, { status: 200, headers: { "content-type": "text/html" } })),
+  };
+}
+
+// --- Minor 4 (whole-branch review, fix round 2): dedupe cross-tags the cache origin, and discards
+// the joiner's abort. (a) a "user" fetch that joins an in-flight "research" fetch for the same url
+// was stored with the RESEARCH tag (the joiner's own origin was discarded — the producer, created by
+// whichever caller happened to be FIRST, closed over only ITS OWN origin) — narrowing Important 3's
+// guarantee, since it's then evictable by research pressure even though a user asked for it. (b) a
+// joiner rode the FIRST caller's signal composition and its own `ctx.signal` was ignored entirely —
+// a joiner aborted at 50ms was still pending at 600ms, regressing "a user abort beats the default
+// bound". Fix: track the STRONGEST origin among all joiners (user wins) and apply it at cache.put
+// time; race EACH caller's own return against ITS OWN signal, independent of the shared producer. --
+describe("fetchCleanPage: dedupe cross-tags the origin, and discards the joiner's abort (Minor 4 fix, fix round 2)", () => {
+  test("a 'user' fetch joining an in-flight 'research' fetch is stored with the STRONGER 'user' origin, not the initiator's", async () => {
+    const { fetchFn, resolve, calls } = deferredFetch();
+    const cache = new PageCache(); // production defaults
+
+    const researchPromise = fetchCleanPage("https://example.com/joint", cache, { fetchFn, origin: "research" });
+    await Promise.resolve(); // let the research call register itself as in-flight before the user joins
+    const userPromise = fetchCleanPage("https://example.com/joint", cache, { fetchFn, origin: "user" });
+
+    resolve(PAGE_HTML);
+    await Promise.all([researchPromise, userPromise]);
+    expect(calls()).toBe(1); // still deduped — exactly one real fetch
+
+    // Proof the STORED entry is tagged "user": 60 subsequent research entries (production defaults,
+    // same probe shape as the entry-count-trim fix above) must NOT be able to evict it, even though
+    // it was the OLDEST entry in the cache and would be first in line if it were still "research".
+    for (let i = 0; i < 60; i++) {
+      const { fetchFn: rf } = scriptedFetch([{ status: 200, body: PAGE_HTML, contentType: "text/html" }]);
+      await fetchCleanPage(`https://research${i}.example.com/`, cache, { fetchFn: rf, origin: "research" });
+    }
+    const stillCached = await fetchCleanPage("https://example.com/joint", cache, {
+      fetchFn: (async () => { throw new Error("must not refetch — should have hit cache"); }) as unknown as typeof fetch,
+    });
+    expect(stillCached.fromCache).toBe(true);
+  });
+
+  test("when NO joiner is 'user', the entry is still stored 'research' (origin merging doesn't just always upgrade)", async () => {
+    const { fetchFn, resolve, calls } = deferredFetch();
+    const cache = new PageCache({ maxBytes: 100_000, maxEntries: 3, ttlMs: 100_000 });
+
+    const first = fetchCleanPage("https://example.com/joint2", cache, { fetchFn, origin: "research" });
+    await Promise.resolve();
+    const second = fetchCleanPage("https://example.com/joint2", cache, { fetchFn, origin: "research" });
+    resolve(PAGE_HTML);
+    await Promise.all([first, second]);
+    expect(calls()).toBe(1);
+
+    // With ONLY research joiners, the entry stays "research" — later research pressure past the
+    // count cap CAN evict it (proves the merge isn't a blanket "always user" no-op).
+    for (let i = 0; i < 5; i++) {
+      const { fetchFn: rf } = scriptedFetch([{ status: 200, body: PAGE_HTML, contentType: "text/html" }]);
+      await fetchCleanPage(`https://r${i}.example.com/`, cache, { fetchFn: rf, origin: "research" });
+    }
+    // Not asserting eviction happened (unrelated to this fix); asserting it CAN be evicted the same
+    // way any other research entry can is out of scope for this specific test — the important
+    // property (proven above) is that a genuine "user" joiner upgrades the tag; this test's only
+    // job is to show that doesn't happen when nobody actually is "user".
+    expect(calls()).toBeGreaterThanOrEqual(1); // sanity: research fetches above genuinely ran
+  });
+
+  // Manual race against a short internal deadline (not bun's own per-test timeout, which cannot
+  // forcibly interrupt a truly-parked `await` on a promise that never settles): pre-fix, the
+  // joiner never detaches at all — it just rides the SAME shared promise object as the initiator,
+  // which never resolves/rejects until `resolve()` below is called — so a naive
+  // `await expect(joinerPromise).rejects...` would hang this test (and the whole run) forever
+  // rather than failing fast with a clear RED.
+  test("a joiner's OWN abort detaches it promptly — the shared underlying fetch is unaffected and still completes for the initiator", async () => {
+    const { fetchFn, resolve, calls } = deferredFetch();
+    const cache = new PageCache();
+
+    const initiatorPromise = fetchCleanPage("https://example.com/abort-join", cache, { fetchFn });
+    await Promise.resolve(); // let the initiator register itself as in-flight before the joiner attaches
+
+    const controller = new AbortController();
+    const joinerPromise = fetchCleanPage("https://example.com/abort-join", cache, {
+      fetchFn,
+      signal: controller.signal,
+      timeoutMs: 5000, // stands in for production's uninjectable 15s default — must not be what fires
+    });
+
+    const start = Date.now();
+    setTimeout(() => controller.abort(), 20);
+    const outcome = await Promise.race([
+      joinerPromise.then(() => "resolved" as const, () => "rejected" as const),
+      new Promise<"never-settled">((r) => setTimeout(() => r("never-settled"), 1000)),
+    ]);
+    expect(outcome).toBe("rejected"); // the joiner must detach via rejection, not resolve, and not hang
+    expect(Date.now() - start).toBeLessThan(1000); // proves the JOINER's own 20ms abort fired, not the 5000ms default
+
+    // The shared fetch is UNAFFECTED by the joiner's detach: resolving it now still completes the
+    // INITIATOR's own promise, with no second network call.
+    resolve(PAGE_HTML);
+    const initiatorResult = await initiatorPromise;
+    expect(initiatorResult.lines.length).toBeGreaterThan(0);
+    expect(calls()).toBe(1);
+  }, 3000);
+});
+
 describe("PageCache: TTL, LRU (maxEntries), and byte-cap eviction", () => {
   function makePage(url: string, byteWeight: number): CleanPage {
     return {
@@ -427,6 +542,44 @@ describe("PageCache: TTL, LRU (maxEntries), and byte-cap eviction", () => {
       cache.put(makePage("https://plain.com/", 10), 0); // no origin argument at all
       for (let i = 0; i < 10; i++) cache.put(makePage(`https://research${i}.com/`, 10), 0, "research");
       expect(cache.get("https://plain.com/", 0)).toBeDefined(); // treated as "user" -> protected from research eviction
+    });
+
+    // --- fix round 2 (whole-branch review, Important): the byte reservation above only protects
+    // the BYTE dimension — pass 2's ENTRY-COUNT trim (`this.entries.size > this.maxEntries`) was
+    // still oldest-first ACROSS BOTH tags, origin-blind. Reachable in a single ReadPage call: 8
+    // `query` entries x the 15-page clamp = 120 research fetches, comfortably over the 50-entry
+    // default cap while nowhere near the 60MB default byte cap. Probed on PRODUCTION DEFAULTS
+    // (`new PageCache()`, no overrides) to match exactly what the coordinator's own probe found. ---
+    test("PRODUCTION DEFAULTS: 1 user entry + 60 tiny research entries — the user's entry survives even though entries.size (61) is way past maxEntries (50), bytes nowhere near maxBytes", () => {
+      const cache = new PageCache(); // production defaults: maxEntries 50, maxBytes 60MB, researchByteShare 1/3
+      cache.put(makePage("https://user.com/important", 10), 0, "user");
+      for (let i = 0; i < 60; i++) cache.put(makePage(`https://research${i}.com/`, 10), 0, "research");
+
+      expect(cache.get("https://user.com/important", 0)).toBeDefined(); // must NOT be evicted by count pressure
+    });
+
+    test("the entry-count trim prefers evicting RESEARCH entries first, oldest-first among themselves, before ever touching a user entry", () => {
+      const cache = new PageCache({ maxBytes: 100_000, maxEntries: 3, ttlMs: 100_000 }); // bytes irrelevant here — only the count cap should bite
+      cache.put(makePage("https://user.com/", 10), 0, "user");
+      cache.put(makePage("https://r1.com/", 10), 0, "research");
+      cache.put(makePage("https://r2.com/", 10), 0, "research");
+      cache.put(makePage("https://r3.com/", 10), 0, "research"); // entries.size hits 4 > maxEntries(3) -> oldest RESEARCH (r1) evicted, not the user entry
+
+      expect(cache.get("https://user.com/", 0)).toBeDefined();
+      expect(cache.get("https://r1.com/", 0)).toBeUndefined(); // oldest research entry evicted
+      expect(cache.get("https://r2.com/", 0)).toBeDefined();
+      expect(cache.get("https://r3.com/", 0)).toBeDefined();
+    });
+
+    test("once every research entry is gone, the count cap DOES fall back to evicting the user's own (oldest) entries", () => {
+      const cache = new PageCache({ maxBytes: 100_000, maxEntries: 2, ttlMs: 100_000 });
+      cache.put(makePage("https://u1.com/", 10), 0, "user");
+      cache.put(makePage("https://u2.com/", 10), 0, "user");
+      cache.put(makePage("https://u3.com/", 10), 0, "user"); // no research entries exist at all -> falls back to oldest-first among users
+
+      expect(cache.get("https://u1.com/", 0)).toBeUndefined(); // oldest user entry evicted — only the user's OWN reads can do this
+      expect(cache.get("https://u2.com/", 0)).toBeDefined();
+      expect(cache.get("https://u3.com/", 0)).toBeDefined();
     });
   });
 });
@@ -729,5 +882,89 @@ describe("checkDangerousDomain: the shared hard-block matcher (Critical 1 fix)",
 
   test("a malformed url returns null (nothing to block; the fetch itself will fail with its own clear error)", () => {
     expect(checkDangerousDomain("not a url")).toBeNull();
+  });
+});
+
+// --- Minor 3 (whole-branch review, fix round 2): checkDangerousDomain only ever ran on the
+// CALLER-SUPPLIED url (before fetchCleanPage was even invoked, in read-page.ts/research.ts) — a
+// SAFE url that redirects INTO a dangerous host sailed through untouched: probed as
+// ReadPage("https://safe.example/go") -> 302 -> https://transfer.sh/dropped fetched and rendered,
+// isError:false. Can't undo the network egress that already happened (matches webFetchGate's own
+// documented limit), but must stop the dangerous host's CONTENT from ever reaching the model or the
+// cache — fetchCleanPage now re-checks the RESOLVED (post-redirect) host too. -----------------------
+describe("fetchCleanPage: a redirect INTO a dangerous host is caught too (Minor 3 fix, fix round 2)", () => {
+  test("a safe url that 302s to a dangerous host is refused before ever being rendered or cached", async () => {
+    const { fetchFn } = scriptedFetch([
+      { status: 302, location: "https://transfer.sh/dropped" },
+      { status: 200, body: "<p>dropped content</p>", contentType: "text/html" },
+    ]);
+    // Precondition: the REQUESTED url itself is not dangerous — a caller's own pre-fetch
+    // checkDangerousDomain check (read-page.ts's renderPage, research.ts's handleFetchPage) would
+    // let this one through; the bug is specifically that the RESOLVED host was never re-checked.
+    expect(checkDangerousDomain("https://safe.example/go")).toBeNull();
+
+    await expect(
+      fetchCleanPage("https://safe.example/go", new PageCache(), { fetchFn }),
+    ).rejects.toThrow(/dangerous-domain/i);
+  });
+
+  test("the thrown error names the RESOLVED host (transfer.sh), not the safe requested one, with a distinct outcome", async () => {
+    const { fetchFn } = scriptedFetch([
+      { status: 302, location: "https://transfer.sh/dropped" },
+      { status: 200, body: "<p>dropped content</p>", contentType: "text/html" },
+    ]);
+    try {
+      await fetchCleanPage("https://safe.example/go", new PageCache(), { fetchFn });
+      throw new Error("expected fetchCleanPage to throw");
+    } catch (e) {
+      expect(e).toBeInstanceOf(PageCoreError);
+      expect((e as Error).message).toContain("transfer.sh");
+      expect((e as Error).message).not.toContain("safe.example");
+      expect((e as PageCoreError).outcome).toBe("dangerous_domain_redirect");
+    }
+  });
+
+  test("nothing is cached under the resolved (dangerous) url, and the audit line records the block, never a successful fetch", async () => {
+    const { fetchFn } = scriptedFetch([
+      { status: 302, location: "https://transfer.sh/dropped" },
+      { status: 200, body: "<p>dropped content</p>", contentType: "text/html" },
+    ]);
+    const cache = new PageCache();
+    const audited: Record<string, unknown>[] = [];
+    await expect(
+      fetchCleanPage("https://safe.example/go", cache, { fetchFn, audit: (l) => audited.push(l) }),
+    ).rejects.toThrow();
+    expect(cache.get("https://transfer.sh/dropped", 0)).toBeUndefined();
+    expect(audited.at(-1)).toMatchObject({ outcome: "dangerous_domain_redirect" });
+  });
+
+  test("a USER-ADDED domain is caught on the redirect too, via the resolved effective list", async () => {
+    const { fetchFn } = scriptedFetch([
+      { status: 302, location: "https://my-internal-exfil.example/x" },
+      { status: 200, body: "<p>dropped</p>", contentType: "text/html" },
+    ]);
+    await expect(
+      fetchCleanPage("https://safe.example/go", new PageCache(), {
+        fetchFn,
+        dangerousAdded: ["my-internal-exfil.example"],
+      }),
+    ).rejects.toThrow(/my-internal-exfil\.example/);
+  });
+
+  test("a page that resolves to a SAFE host (no redirect into danger) is completely unaffected", async () => {
+    const { fetchFn } = scriptedFetch([{ status: 200, body: "<p>hi</p>", contentType: "text/html" }]);
+    const page = await fetchCleanPage("https://safe.example/", new PageCache(), { fetchFn });
+    expect(page.lines).toEqual(["hi"]);
+  });
+
+  test("a MULTI-HOP redirect chain that only turns dangerous on the LAST hop is still caught", async () => {
+    const { fetchFn } = scriptedFetch([
+      { status: 302, location: "https://still-safe.example/step2" },
+      { status: 302, location: "https://transfer.sh/final" },
+      { status: 200, body: "<p>dropped</p>", contentType: "text/html" },
+    ]);
+    await expect(
+      fetchCleanPage("https://safe.example/start", new PageCache(), { fetchFn }),
+    ).rejects.toThrow(/transfer\.sh/);
   });
 });

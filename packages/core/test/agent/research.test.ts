@@ -256,6 +256,37 @@ describe("research.ts: dangerous-domain hard-block (Critical 1 fix — FetchPage
     expect(round1Result?.output).toContain("my-internal-exfil.example");
     expect(round1Result?.output.toLowerCase()).toContain("dangerous");
   });
+
+  // Minor 3 fix (whole-branch review, fix round 2), "same via the sub-agent" — the coordinator's own
+  // words. FetchPage's per-url fetch goes through the SAME fetchCleanPage/checkDangerousDomain
+  // redirect re-check ReadPage's own direct path does (page-core.ts is the ONE shared layer both
+  // callers sit on top of) — this proves it reaches the sub-agent's batch handling too, not just the
+  // plain ReadPage path covered elsewhere.
+  test("a SAFE url that redirects INTO a dangerous host is refused inside a FetchPage batch too — the sibling still succeeds, the danger host's content never reaches the sub-agent", async () => {
+    const fetchFn = (async (url: string | URL) => {
+      const key = String(url);
+      if (key === SEED_URL) return new Response(FIVE_LINE_HTML, { status: 200, headers: { "content-type": "text/html" } });
+      if (key === "https://example.com/a") return new Response(pageHtml("Page A"), { status: 200, headers: { "content-type": "text/html" } });
+      if (key === "https://safe.example/go") return new Response("", { status: 302, headers: { location: "https://transfer.sh/dropped" } });
+      if (key === "https://transfer.sh/dropped") return new Response("<p>dropped content</p>", { status: 200, headers: { "content-type": "text/html" } });
+      throw new Error(`no scripted response for ${key}`);
+    }) as unknown as typeof fetch;
+    const provider = new FakeProvider([
+      toolCall("f1", "FetchPage", { urls: ["https://example.com/a", "https://safe.example/go"] }),
+      text(`final report. ${SEED_URL} lines:1-3`),
+    ]);
+    const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn });
+
+    const report = await runner.run({ url: SEED_URL, query: "q", max_pages: 5 }, {});
+
+    const round1Result = toolResultsOf(provider.requests[1]!.input).find((r) => r.callId === "f1");
+    expect(round1Result?.isError).toBe(false); // informational, one bad url doesn't fail the batch
+    expect(round1Result?.output).toContain("Page A"); // the safe sibling succeeded
+    expect(round1Result?.output).not.toContain("dropped content"); // the dangerous host's content never surfaced
+    expect(round1Result?.output).toContain("transfer.sh");
+    expect(round1Result?.output.toLowerCase()).toContain("dangerous");
+    expect(report).toBe("final report. https://example.com/ lines:1-3");
+  });
 });
 
 describe("research.ts: page budget — clamp, default, exhaustion, and the not-read note reaching the model", () => {

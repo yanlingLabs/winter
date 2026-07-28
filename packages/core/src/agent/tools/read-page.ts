@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { ToolRegistry } from "./registry";
-import { fetchCleanPage, renderLines, PageCache, PageCoreError, checkDangerousDomain } from "./page-core";
+import { fetchCleanPage, renderLines, PageCache, PageCoreError, checkDangerousDomain, dangerousDomainRefusal } from "./page-core";
 
 /**
  * ReadPage (B2-T2): chat mode's (and, per user decision, dispatch's) batched page-reading tool —
@@ -96,13 +96,6 @@ export interface ReadPageDeps {
   dangerousDomainsAdded?: (cwd?: string) => string[] | undefined;
 }
 
-/** Shared refusal-text shape for BOTH `renderPage` and `runResearch` below — names the entry's url
- *  AND the matched list entry, so the transcript reads as a deliberate policy block, never a network
- *  failure (the user's own stated requirement). */
-function dangerousDomainRefusal(url: string, match: { host: string; matchedEntry: string }, cannotAskReason: string): string {
-  return `${url}: refused — ${match.host} matches the dangerous-domain list (${match.matchedEntry}); ${cannotAskReason}`;
-}
-
 type EntryResult = { ok: boolean; text: string };
 
 /** Truncates `text` to at most `cap` characters TOTAL (including `marker`) when it's over cap —
@@ -127,9 +120,15 @@ function capText(text: string, cap: number, marker: string): string {
  *
  *  Critical 1 fix (whole-branch review): a dangerous-domain url is refused BEFORE `fetchCleanPage`
  *  is ever called — zero network reached, no card (chat has no approval flow at all, USER DECISION)
- *  — see `checkDangerousDomain`'s own doc comment for the full rationale. */
+ *  — see `checkDangerousDomain`'s own doc comment for the full rationale.
+ *
+ *  Minor 3 fix (whole-branch review, fix round 2): the SAME resolved `added` list is also forwarded
+ *  into `fetchCleanPage` as `dangerousAdded`, so a SAFE url that redirects INTO a dangerous host
+ *  (this check above only catches the caller-supplied url itself) is caught by page-core's own
+ *  post-redirect re-check instead of sailing through. */
 async function renderPage(entry: PageRequestT, deps: ReadPageDeps, signal: AbortSignal | undefined, cwd: string | undefined): Promise<EntryResult> {
-  const dangerous = checkDangerousDomain(entry.url, deps.dangerousDomainsAdded?.(cwd));
+  const added = deps.dangerousDomainsAdded?.(cwd);
+  const dangerous = checkDangerousDomain(entry.url, added);
   if (dangerous) {
     return { ok: false, text: dangerousDomainRefusal(entry.url, dangerous, "ReadPage has no approval flow to ask for one, so fetches to known exfiltration/tunnel-provider hosts are blocked outright") };
   }
@@ -140,6 +139,7 @@ async function renderPage(entry: PageRequestT, deps: ReadPageDeps, signal: Abort
       audit: deps.audit,
       timeoutMs: deps.timeoutMs,
       signal,
+      dangerousAdded: added,
     });
     const rendered = renderLines(page, entry.lineStart, entry.lineEnd);
     const newlineIdx = rendered.indexOf("\n");
@@ -156,9 +156,23 @@ async function renderPage(entry: PageRequestT, deps: ReadPageDeps, signal: Abort
     // CITE THE RESOLVED URL, EVERYWHERE: state the input once, only when it actually differed —
     // every citation after this line is `page.url`, the address the shared cache is keyed on.
     const urlLine = entry.url === page.url ? page.url : `requested: ${entry.url} → resolved: ${page.url}`;
-    const linksList = page.links.length
-      ? page.links.map((l, i) => `${i + 1}. ${l.text || "(no text)"} (${l.href})`).join("\n")
-      : "(none)";
+
+    // Minor 5 fix (whole-branch review, fix round 2): strip dangerous-domain links from the
+    // rendered Links: tail before the model ever sees them — same rationale as Search's own
+    // dangerous-result fold-in (search.ts): advertising a link the hard-block would refuse anyway
+    // is a half-measure that just has the model try it, fail, and possibly retry. Never a silent
+    // drop: the withheld count is always stated, so a shorter list reads as a deliberate filter,
+    // not an incomplete one.
+    let linksWithheld = 0;
+    const safeLinks = page.links.filter((l) => {
+      if (!checkDangerousDomain(l.href, added)) return true;
+      linksWithheld++;
+      return false;
+    });
+    const withheldNote = linksWithheld > 0 ? `(${linksWithheld} link${linksWithheld === 1 ? "" : "s"} withheld — matched the dangerous-domain list)` : undefined;
+    const linksList = safeLinks.length
+      ? safeLinks.map((l, i) => `${i + 1}. ${l.text || "(no text)"} (${l.href})`).join("\n") + (withheldNote ? `\n${withheldNote}` : "")
+      : withheldNote ?? "(none)";
 
     // Important 3 fix (whole-branch review): `page.fromCache` already existed but was unused by
     // this tool — the model had no way to tell a cached read from a fresh refetch, even though the
