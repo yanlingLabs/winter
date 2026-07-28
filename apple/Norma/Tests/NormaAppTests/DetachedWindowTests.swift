@@ -236,6 +236,96 @@ final class DetachedWindowTests: XCTestCase {
         XCTAssertEqual(controller.sessionId, "S2")
     }
 
+    // MARK: - Plan-immunity (2026-07-28 design): DetachedWindowController.isChatSession(_:in:) (PURE)
+
+    func testIsChatSessionHelperMatchesTheModeField() {
+        let rows = [
+            SessionSummary(sessionId: "s_code", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "code"),
+            SessionSummary(sessionId: "s_chat", title: nil, createdAt: 2, scope: "global", cwd: nil, mode: "chat"),
+            SessionSummary(sessionId: "s_dispatch", title: nil, createdAt: 3, scope: "global", cwd: nil, mode: "dispatch"),
+            SessionSummary(sessionId: "s_absent", title: nil, createdAt: 4, scope: "global", cwd: nil, mode: nil),
+        ]
+        XCTAssertTrue(DetachedWindowController.isChatSession("s_chat", in: rows))
+        XCTAssertFalse(DetachedWindowController.isChatSession("s_code", in: rows))
+        XCTAssertFalse(DetachedWindowController.isChatSession("s_dispatch", in: rows))
+        XCTAssertFalse(DetachedWindowController.isChatSession("s_absent", in: rows))
+    }
+
+    /// Conservative default: a row the directory hasn't loaded yet is treated as NOT chat — matches
+    /// `FieldStateAdapter.isChatSession`'s own `false` default.
+    func testIsChatSessionHelperDefaultsFalseForAnUnknownId() {
+        XCTAssertFalse(DetachedWindowController.isChatSession("s_missing", in: []))
+        XCTAssertFalse(DetachedWindowController.isChatSession("s_missing", in: [
+            SessionSummary(sessionId: "s_other", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "chat"),
+        ]))
+    }
+
+    // MARK: - Plan-immunity (2026-07-28 design): isChat construction + in-place switch
+
+    /// The `isChat` construction param (defaulted `false`, matching every PRE-EXISTING caller of
+    /// `DetachedWindowController.init`) seeds `adapter.isChatSession` — CONTROL: an ordinary window
+    /// (the default, no `isChat` passed) stays non-chat.
+    func testIsChatDefaultsFalseForAnOrdinaryWindow() {
+        let t = DetachedScriptedTransport()
+        let session = SessionModel()
+        let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
+        let controller = DetachedWindowController(
+            feed: feed, session: session,
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+        )
+        defer { controller.close() }
+        XCTAssertFalse(controller.adapterForTesting.isChatSession)
+    }
+
+    /// `isChat: true` (the shape `AppDelegate.createAndOpenChat()`/`openChat()`'s reopen path pass)
+    /// seeds `adapter.isChatSession` true at construction.
+    func testIsChatTrueSeedsAdapterIsChatSession() {
+        let t = DetachedScriptedTransport()
+        let session = SessionModel()
+        let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
+        let controller = DetachedWindowController(
+            feed: feed, session: session,
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Chat", isChat: true
+        )
+        defer { controller.close() }
+        XCTAssertTrue(controller.adapterForTesting.isChatSession)
+    }
+
+    /// `selectSession`'s in-place re-derivation: the left sidebar lists every session (chat
+    /// included, no mode filter of its own — `SessionSidebar`'s plain `ForEach(directory.rows)`), so
+    /// switching a CODE window's pinned session onto an existing CHAT row (and back) must flip
+    /// `adapter.isChatSession` both directions, off the directory's own `mode` field — proven via a
+    /// real `directory.refresh()` round trip (not a hand-poked row), so this is what a REAL sidebar
+    /// switch would actually see.
+    func testSelectSessionUpdatesIsChatSessionFromTheDirectory() async throws {
+        let t = DetachedScriptedTransport()
+        let session = SessionModel()
+        let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
+        let controller = DetachedWindowController(
+            feed: feed, session: session,
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+        )
+        defer { controller.close() }
+        controller.show()
+
+        await answerHandshake(t, sessionId: "S1")
+        await feedWaitUntil { session.state.status != .disconnected }
+        XCTAssertFalse(controller.adapterForTesting.isChatSession, "S1 (code) starts non-chat")
+
+        let refreshTask = Task { await controller.directory.refresh() }
+        await waitUntilSent(t, 3)
+        let list = feedLineJSON(t.sent[2])
+        XCTAssertEqual(list["method"] as? String, "session.list")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(list["id"] as! Int),"result":{"sessions":[{"sessionId":"S1","scope":"global","createdAt":1,"lastSeq":0,"mode":"code"},{"sessionId":"S2","scope":"global","createdAt":2,"lastSeq":0,"mode":"chat"}]}}"#)
+        await refreshTask.value
+
+        controller.selectSession("S2")
+        XCTAssertTrue(controller.adapterForTesting.isChatSession, "switching in-place onto a chat row must flip isChatSession on")
+
+        controller.selectSession("S1")
+        XCTAssertFalse(controller.adapterForTesting.isChatSession, "switching back off a chat row must flip isChatSession off")
+    }
+
     /// Dispatch (Phase 7), task-7 review fix: the detached window's own respond wiring routes a
     /// relayed card's `childSessionId` to the CHILD (`childSessionId ?? self.sessionId`), proven on
     /// the wire — the DetachedWindowController leg of the same routing rule

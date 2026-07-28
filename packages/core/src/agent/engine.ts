@@ -159,8 +159,17 @@ const ULTRACODE_REMINDER = "<system-reminder>\nThe user opted into workflow orch
 // (a later task teaches it the new values' own distinct behavior; today dont-ask/accept-edits/
 // bypass ride evaluate()'s existing per-string branches unchanged, so behavior for the original
 // three values — plan/ask/auto — is untouched).
+// Plan-immunity (2026-07-28, USER-REVISED design): "chat" (gate.ts's SessionApprovalPolicy) ties
+// "plan" at rank 0 — chat's fixed policy denies every mutating tool outright at the gate, the SAME
+// verdict "plan" produces there (gate.ts's evaluate() treats the two identically: allow READ_ONLY/
+// NETWORK, deny everything else). This Record must stay EXHAUSTIVE over every SessionApprovalPolicy
+// value — TS itself enforces that (a widened union with no corresponding entry here fails
+// `tsc --noEmit`, which is exactly what caught this when the type grew this value) — so this entry
+// exists for type-completeness even though restrictPolicy() below is never actually reached with
+// "chat" as either argument in practice: chat's own tool allowlist (registry.namesForMode("chat"))
+// has no spawn_agent, so a chat session can never originate the spawn_agent bridge that calls it.
 const POLICY_RESTRICTIVENESS: Record<SessionApprovalPolicy, number> = {
-  plan: 0, "dont-ask": 1, ask: 2, "accept-edits": 3, auto: 4, bypass: 5,
+  plan: 0, chat: 0, "dont-ask": 1, ask: 2, "accept-edits": 3, auto: 4, bypass: 5,
 };
 
 /** RESTRICT-ONLY: returns the MORE RESTRICTIVE of {parent, requested} — a spawn_agent `mode`
@@ -1262,10 +1271,21 @@ export class AgentEngine {
    *  deferred:true (or isn't registered at all) — specs()/execute don't care about pins for a
    *  tool that was never hidden in the first place. `_cwd` is unused today (no current pin is
    *  scope-aware) — kept in the signature for parity with the other deferral seams, which all
-   *  thread cwd, in case a future pin needs it. */
-  private pinnedTools(sessionId: string, meta: { approvalPolicy: SessionApprovalPolicy }, _cwd: string | null, ultracodeActive?: boolean): Set<string> {
+   *  thread cwd, in case a future pin needs it.
+   *
+   *  Plan-immunity belt-and-braces (2026-07-28 design): `meta.mode` (optional — every pre-existing
+   *  caller passed an object with no `mode` field, which this treats identically to "code", so
+   *  behavior for every non-chat/dispatch caller is unchanged) gates the exit_plan_mode pin below.
+   *  For CHAT this is doubly-dead post turn-time-resolution (turn() itself now never lets
+   *  `meta.approvalPolicy` be anything but "chat" for a chat session, so the `=== "plan"` check
+   *  already can't fire) — kept anyway as defense-in-depth against a pre-fix persisted row reaching
+   *  this method some other way. For DISPATCH this is the LIVE fix: dispatch's policy is real and
+   *  settable, so a stale/pre-fix dispatch+plan row must still not pin a tool
+   *  (`exit_plan_mode`) that dispatch's own allowlist (registry.namesForMode("dispatch")) never
+   *  includes — Bug-#7 shape, "instructed to use a tool the mode cannot call." */
+  private pinnedTools(sessionId: string, meta: { approvalPolicy: SessionApprovalPolicy; mode?: string }, _cwd: string | null, ultracodeActive?: boolean): Set<string> {
     const pins = new Set<string>();
-    if (meta.approvalPolicy === "plan") pins.add("exit_plan_mode");
+    if (meta.approvalPolicy === "plan" && !isChatOrCowork(meta) && meta.mode !== "dispatch") pins.add("exit_plan_mode");
     if (this.cfg.worktrees?.active(sessionId)) pins.add("exit_worktree");
     const bgTasks = this.cfg.bgRegistry?.list(sessionId) ?? [];
     // 4h-ii-c Task 2: task_stop can kill a running bg TASK too (its bash-unify path — the ONLY
@@ -1808,7 +1828,7 @@ export class AgentEngine {
     // method's callers — turn() and the spawn bridge each call it exactly once), NOT the
     // per-round cadence used at the specs()/executeCall seams below. `loaded` itself is never
     // mutated — pins are unioned into a NEW Set.
-    const pins = tsEnabled ? this.pinnedTools(sessionId, { approvalPolicy: policy }, cwd, ultracodeActive) : new Set<string>();
+    const pins = tsEnabled ? this.pinnedTools(sessionId, { approvalPolicy: policy, mode }, cwd, ultracodeActive) : new Set<string>();
     const effectiveLoaded = pins.size ? new Set([...loaded, ...pins]) : loaded;
     const deferred = tsEnabled
       ? this.cfg.registry.deferredIndex(cwd, effectiveLoaded, deferThreshold, tsEnabled, this.toolSearchDeferExternals(cwd), mode)
@@ -1818,7 +1838,15 @@ export class AgentEngine {
     let instructionsFull = deferred.length
       ? base + "\n\n# Deferred tools\nThe following tools exist but their schemas are NOT loaded — calling them directly fails. Load schemas first with the ToolSearch tool (query \"select:<name>\" or keywords), then call them normally.\n" + deferred.map((d) => `- ${d.name} — ${d.description}`).join("\n")
       : base;
-    if (policy === "plan") {
+    // Plan-immunity belt-and-braces (2026-07-28 design): `mode !== "chat" && mode !== "dispatch"`
+    // (mode already resolved by every caller via resolveMode(), which folds "cowork" into "chat" —
+    // see that function's own doc comment) keeps this text out of hands-off-mode instructions. For
+    // CHAT this is doubly-dead post turn-time-resolution (turn()'s own override means `policy` can
+    // never literally be "plan" for a chat session — the `policy === "plan"` check above already
+    // can't fire) — kept anyway as defense-in-depth. For DISPATCH this is the LIVE fix: a stale/
+    // pre-fix dispatch+plan row must not tell the model "call exit_plan_mode" — a code-only tool
+    // dispatch's own allowlist never includes (Bug-#7 shape).
+    if (policy === "plan" && mode !== "chat" && mode !== "dispatch") {
       instructionsFull += "\n\n# Plan mode\nYou are in plan mode: research and form a plan, but make NO changes — file edits, writes, and commands are disabled and will be blocked. Any clarifying question or choice you need from the user MUST go through the ask_user tool (structured options) — do not ask in prose and stop. When your plan is ready, call exit_plan_mode with the plan (markdown) to present it for approval. Only after approval will editing be enabled.";
     }
     // Task B4: the /ultracode authorization reminder. Unconditional on `tsEnabled`/`deferred`
@@ -1844,6 +1872,19 @@ export class AgentEngine {
     // once-per-turn-read reasoning as isDispatch just above (meta.mode is set once at
     // createSession and never changes mid-session).
     const isChat = meta.mode === "chat";
+    // Plan-immunity (2026-07-28, USER-REVISED design): chat's approval policy is FIXED and
+    // immutable — resolved HERE, ONCE per turn, to the literal "chat" policy regardless of
+    // whatever the stored row actually says. This is deliberately turn-time, not storage: a
+    // pre-fix chat row may carry "auto" (the shipped Mac app's own creation default,
+    // AppDelegate.swift) or, in principle, anything else a stale/manually-poked row could hold —
+    // and this ONE resolution point makes the stored value irrelevant for chat, killing the
+    // stale-row problem outright rather than chasing every place a policy could have been written.
+    // `meta` is mutated IN PLACE (same SAME-TURN-mutation convention runPlanBridge/
+    // runEnterPlanBridge already use further down this file — see their own doc comments), so
+    // EVERY downstream read of `meta.approvalPolicy` for the rest of this turn — buildInstructionsFull's
+    // plan-text guard, pinnedTools' exit_plan_mode pin, the permission gate, dirGrant, the reviewer
+    // branches, all of them — sees "chat" with no separate mode check needed at any of those sites.
+    if (isChat) meta.approvalPolicy = "chat";
     // Dispatch and Chat both read the SHARED assistant bucket (Dreaming's `_assistant`); only code
     // sessions get the cwd-resolved project MEMDIR — see memoryBucket below.
     const isAssistantBucket = isDispatch || isChat;
@@ -3652,7 +3693,16 @@ export class AgentEngine {
         // guard here protects the write/edit TOOLS and the SANDBOXED bash path; a self-authored escape rule is
         // a strictly higher, separately-consented bar.
         let unsandboxedRuleAllowed = false;
-        if (bashEscalation.dangerouslyDisableSandbox && this.cfg.permissionRules && meta.approvalPolicy !== "plan"
+        // Plan-immunity (2026-07-28 design): `meta.approvalPolicy !== "chat"` added alongside the
+        // pre-existing `!== "plan"` exclusion — a persisted BashUnsandboxed rule must not silently
+        // flip a chat session's gate "deny" back to "allow" either. Unreachable today (chat's real
+        // allowlist, registry.namesForMode("chat"), never includes "bash"), but this is the ONE
+        // branch in the dispatch loop that reassigns `decision` BEFORE the `decision === "deny"`
+        // check below runs, so without this exclusion a future mistakenly-chat-eligible bash tool
+        // could bypass "chat never asks/never allows mutating" via a rule the human approved for a
+        // totally different (non-chat) session.
+        if (bashEscalation.dangerouslyDisableSandbox && this.cfg.permissionRules
+            && meta.approvalPolicy !== "plan" && meta.approvalPolicy !== "chat"
             && this.cfg.permissionRules.decision({ name: call.name, argsJson: call.argsJson }, projectRoot) === "allow") {
           unsandboxedRuleAllowed = true;
           decision = "allow"; // flows to executeCall (unsandboxed), skipping the escape card + the reviewer
@@ -3685,12 +3735,21 @@ export class AgentEngine {
           decision = "deny";
         }
         if (decision === "deny") {
-          // Plan mode's blanket deny (gate.ts) OR dont-ask's auto-decline (the flip just above): tool
-          // NOT run, no approval flow. The message is mode-aware — dont-ask and plan reach this same
-          // branch but for different reasons, so each gets its own accurate explanation.
+          // Plan mode's blanket deny (gate.ts), dont-ask's auto-decline (the flip just above), OR
+          // chat's fixed-policy deny (plan-immunity, 2026-07-28 design): tool NOT run, no approval
+          // flow. The message is mode-aware — dont-ask/plan/chat all reach this same branch but for
+          // different reasons, so each gets its own accurate explanation. The "chat" branch is
+          // unreachable for chat's REAL production allowlist today (registry.namesForMode("chat")
+          // is {AskQuestion, Search, ReadPage} — all READ_ONLY/NETWORK, so gate.evaluate never
+          // returns "deny" for any of them) — kept as honest, explicit handling for the hypothetical
+          // case (a future mistakenly-chat-eligible mutating tool) rather than falling through to
+          // the "Blocked in plan mode" text, which would be a flatly wrong explanation for a chat
+          // session that was never in plan mode at all.
           outcome = {
             output: meta.approvalPolicy === "dont-ask"
               ? "Denied automatically — you're in dont-ask mode, which declines every action that needs approval. Switch to ask or auto to be prompted, or add an allow-rule for this."
+              : meta.approvalPolicy === "chat"
+              ? "Blocked — chat sessions never ask permissions and cannot run this action."
               : "Blocked in plan mode — you are researching and planning, so file changes and commands are disabled. Make no changes; when your plan is ready, call exit_plan_mode to present it for approval.",
             isError: true,
           };

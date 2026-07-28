@@ -179,8 +179,15 @@ extension WindowContentView {
             Text("Options")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(sessionPolicyModes, id: \.self) { policyPickerRow($0) }
+            // Plan-immunity (2026-07-28 design): the SAME gate as WindowContentView's
+            // `policyMenuButton` (both surfaces render `policyPickerRow`, this file's own doc
+            // comment above) — chat's policy is fixed, so the picker is hidden entirely rather than
+            // shown-but-broken. `sidebarSessionInfo` below (title/scope/cwd) is still useful for
+            // chat and stays visible either way.
+            if !adapter.isChatSession {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(sessionPolicyModes, id: \.self) { policyPickerRow($0) }
+                }
             }
             sidebarSessionInfo
         }

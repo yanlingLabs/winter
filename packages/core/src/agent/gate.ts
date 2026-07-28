@@ -1,7 +1,16 @@
 import { isExternalToolName } from "./tools/registry";
 
 export type GateDecision = "allow" | "ask" | "deny";
-export type SessionApprovalPolicy = "plan" | "dont-ask" | "ask" | "accept-edits" | "auto" | "bypass";
+// Plan-immunity (2026-07-28 design, USER-REVISED mid-implementation): "chat" is chat-mode's OWN
+// fixed, immutable policy — NOT a user-selectable mode like the other six. It is core-internal
+// only and NEVER crosses the wire: packages/protocol/src/methods.ts's `ApprovalPolicy` zod enum
+// (session.create/session.setPolicy's wire schema) stays exactly six-valued, so a client can never
+// even EXPRESS "chat" in an RPC — it can only ever be produced by engine.ts's own turn-time
+// resolution (a chat-mode session's effective policy) or persisted by session.create's chat-seam
+// coercion (server.ts). Read as "the fixed policy of chat mode" wherever it appears below — not to
+// be confused with `mode === "chat"` (SessionStore's session-identity field, a totally different
+// axis) even though the two are obviously related by design.
+export type SessionApprovalPolicy = "plan" | "dont-ask" | "ask" | "accept-edits" | "auto" | "bypass" | "chat";
 
 // Skill is read-only: it reads a SKILL.md body and marks it loaded in-memory (no filesystem
 // mutation) — same class as read/glob/grep. Without this it would fall through to the
@@ -203,6 +212,16 @@ const EDIT_CLASS = new Set(["write", "edit"]);
  */
 export class PermissionGate {
   evaluate(toolName: string, policy: SessionApprovalPolicy): GateDecision {
+    // Plan-immunity (2026-07-28, USER-REVISED design): "chat" — chat-mode's fixed, immutable
+    // policy — is checked FIRST, before ALWAYS_ASK/MUTATING/everything below, because the user's
+    // directive ("chat simply wouldn't ever ask permissions") means NOTHING may resolve to "ask"
+    // under it, not even a future ALWAYS_ASK-classified addition. Chat's own allowlisted tools
+    // (AskQuestion/Search/ReadPage) all live in READ_ONLY/NETWORK, so this is exactly "allow the
+    // read-only/network classes, deny everything else outright" — never a card, matching "never
+    // asks" literally rather than degrading to a stricter-but-still-asking policy.
+    if (policy === "chat") {
+      return READ_ONLY.has(toolName) || NETWORK.has(toolName) ? "allow" : "deny";
+    }
     // ALWAYS_ASK (skill_write): a card no policy silences — EXCEPT bypass (accepts everything) and
     // plan (mutates nothing). See the set's doc comment.
     if (ALWAYS_ASK.has(toolName)) {

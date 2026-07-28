@@ -288,4 +288,31 @@ describe("PermissionGate v1", () => {
     expect(gate.evaluate("request_directory", "auto")).toBe("ask");
     expect(gate.evaluate("request_directory", "plan")).toBe("deny");
   });
+
+  // Plan-immunity (2026-07-28, USER-REVISED design): "chat" is chat-mode's own fixed, immutable
+  // internal policy (never crosses the wire — see gate.ts's SessionApprovalPolicy doc comment).
+  // The user's directive ("chat simply wouldn't ever ask permissions") means this policy must
+  // never resolve to "ask" for ANYTHING — chat's own three allowlisted tools (AskQuestion/Search/
+  // ReadPage, all READ_ONLY or NETWORK) allow; everything else DENIES outright, never cards.
+  describe("policy 'chat': chat's own tools allow, everything else DENIES (never asks)", () => {
+    test("chat's allowlisted tools (READ_ONLY/NETWORK classes) allow under 'chat'", () => {
+      for (const name of ["AskQuestion", "Search", "ReadPage", "read", "glob", "web_fetch"]) {
+        expect(gate.evaluate(name, "chat")).toBe("allow");
+      }
+    });
+
+    test("mutating tools DENY (not ask) under 'chat' — chat never asks permissions", () => {
+      for (const name of ["write", "edit", "bash", "notebook_edit", "computer", "schedule", "Workflow"]) {
+        expect(gate.evaluate(name, "chat")).toBe("deny");
+      }
+    });
+
+    test("ALWAYS_ASK (skill_write) also DENIES under 'chat', not 'ask' — the fixed policy overrides even the always-ask class", () => {
+      expect(gate.evaluate("skill_write", "chat")).toBe("deny");
+    });
+
+    test("an unrecognized/unclassified tool also DENIES under 'chat' (fail-closed, same direction as 'plan')", () => {
+      expect(gate.evaluate("mystery", "chat")).toBe("deny");
+    });
+  });
 });

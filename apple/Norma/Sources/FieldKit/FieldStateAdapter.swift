@@ -501,4 +501,19 @@ final class FieldStateAdapter: ObservableObject {
     /// window, `DetachedWindowController.init` for a detached window) to `session.setPolicy` — the
     /// same onSubmit-precedent chain as `onSubmit`/the three respond callbacks above.
     var onSetPolicy: (String) -> Void = { _ in }
+
+    /// Plan-immunity (2026-07-28 design): true for a chat-mode session — chat's approval policy is
+    /// FIXED (core's engine.ts resolves it to the internal "chat" policy every turn regardless of
+    /// the stored row, and session.setPolicy rejects ANY change for a chat target), so BOTH policy
+    /// pickers (`WindowContentView.policyMenuButton`'s ⋯ popover and `WorkSidebar`'s Options-block
+    /// picker) are meaningless for chat and hidden while this is true — showing a picker whose every
+    /// row would now come back as an RPC error is worse than no picker at all. Only a
+    /// `DetachedWindowController` ever sets this true: the morph/orb window (`GlassRootView`) has no
+    /// chat concept at all, so its adapter never touches this field and it stays at its `false`
+    /// default (unchanged behavior for every non-chat surface). Set at window construction
+    /// (`DetachedWindowController.init`'s `isChat` param) and kept in sync across an in-place
+    /// session switch (`DetachedWindowController.selectSession`, which re-derives it from the
+    /// session directory's own `mode` field for the newly-pinned session — the left sidebar lists
+    /// every session, chat included, with no mode filter of its own).
+    @Published var isChatSession: Bool = false
 }

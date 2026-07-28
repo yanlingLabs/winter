@@ -214,7 +214,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// every PRE-EXISTING caller (orb's child-status circles, the sidebars' ⌘-click, the Dashboard
     /// SessionsPane row click) keeps the exact same "Norma" fallback, unchanged; `openChat()` below
     /// is the first caller to pass something else (the session's own title, or "Chat").
-    private func openSessionInNewDetachedWindow(_ sessionId: String, frame: NSRect? = nil, title: String = "Norma") {
+    ///
+    /// Plan-immunity (2026-07-28 design): `isChat`, defaulted `false` for the same reason `title`
+    /// defaults `"Norma"` — every PRE-EXISTING caller is unaffected; `createAndOpenChat()`/
+    /// `openChat()`'s reopen path below are the only ones that ever pass `true`. Threaded straight
+    /// to `DetachedWindowController.init` via `spawnDetachedWindow`.
+    private func openSessionInNewDetachedWindow(_ sessionId: String, frame: NSRect? = nil, title: String = "Norma", isChat: Bool = false) {
         guard let model = appModel,
               let (feed, session) = model.makeDetachedFeed(sessionId: sessionId) else {
             OrbDebug.log("openSessionInNewDetachedWindow: no appModel or makeDetachedFeed nil — spawn aborted")
@@ -222,7 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let resolvedFrame = frame ?? centeredStandaloneFrame(visibleFrame: visible)
-        spawnDetachedWindow(feed: feed, session: session, frame: resolvedFrame, title: title)
+        spawnDetachedWindow(feed: feed, session: session, frame: resolvedFrame, title: title, isChat: isChat)
     }
 
     /// Chat Mode Slice A (CM-T3): pure decision helper for the "Chat" menu entry — the newest
@@ -265,7 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } ?? []
             if let sid = Self.chatSessionToOpen(in: rows) {
                 let title = rows.first { $0.sessionId == sid }?.title
-                self.openSessionInNewDetachedWindow(sid, title: Self.chatWindowTitle(title))
+                self.openSessionInNewDetachedWindow(sid, title: Self.chatWindowTitle(title), isChat: true)
                 return
             }
             await self.createAndOpenChat()
@@ -295,7 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             OrbDebug.log("createAndOpenChat: session.create(mode: chat) failed — spawn aborted")
             return
         }
-        openSessionInNewDetachedWindow(created.sessionId, title: Self.chatWindowTitle(nil))
+        openSessionInNewDetachedWindow(created.sessionId, title: Self.chatWindowTitle(nil), isChat: true)
     }
 
     /// Task 2 (2e-iv): the menu bar's "Open Norma App" entry (`NSMenuItem` wiring is Task 3) — a
@@ -499,8 +504,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @discardableResult
-    private func spawnDetachedWindow(feed: SessionFeed, session: SessionModel, frame: NSRect, title: String) -> DetachedWindowController {
-        let detached = DetachedWindowController(feed: feed, session: session, frame: frame, title: title.isEmpty ? "Norma" : title)
+    private func spawnDetachedWindow(feed: SessionFeed, session: SessionModel, frame: NSRect, title: String, isChat: Bool = false) -> DetachedWindowController {
+        let detached = DetachedWindowController(feed: feed, session: session, frame: frame, title: title.isEmpty ? "Norma" : title, isChat: isChat)
         registerDetachedWindow(detached)
         detached.show()
         return detached

@@ -284,8 +284,13 @@ export class SessionStore {
       | { scope: string; cwd: string | null; approval_policy: string; origin: string | null; mode: string | null; parent_session_id: string | null } | null;
     if (!row) throw new Error(`unknown session: ${sessionId}`);
     const p = row.approval_policy;
+    // Plan-immunity (2026-07-28, USER-REVISED design): "chat" (gate.ts's SessionApprovalPolicy)
+    // is a first-class recognized value here — session.create's chat-seam coercion persists it
+    // verbatim for every chat-mode session (server.ts). Without it in this list, a stored "chat"
+    // row would silently fall through to the "ask" default below, THE SAME TRAP the "plan must not
+    // read back as ask" precedent above already guards against, just for the newest value.
     const approvalPolicy: SessionApprovalPolicy =
-      (["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"] as const).includes(p as SessionApprovalPolicy)
+      (["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass", "chat"] as const).includes(p as SessionApprovalPolicy)
         ? (p as SessionApprovalPolicy)
         : "ask";
     return {

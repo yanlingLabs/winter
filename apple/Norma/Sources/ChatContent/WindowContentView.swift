@@ -68,7 +68,15 @@ struct WindowContentView<Accessory: View>: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer()
-                policyMenuButton
+                // Plan-immunity (2026-07-28 design): chat's approval policy is fixed and can never
+                // be changed — the picker behind this button is meaningless (and every row's
+                // onSetPolicy call would now come back as an RPC error) for a chat-pinned window, so
+                // it's hidden entirely rather than shown-but-broken. Every OTHER mode is unaffected
+                // (`adapter.isChatSession` defaults `false` and only a `DetachedWindowController`
+                // pinned to a `mode:"chat"` session ever sets it true).
+                if !adapter.isChatSession {
+                    policyMenuButton
+                }
             }
             .frame(height: chatWindowHeaderHeight)
 

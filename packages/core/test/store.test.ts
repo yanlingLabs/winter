@@ -201,6 +201,18 @@ describe("SessionStore", () => {
     }
   });
 
+  // Plan-immunity (2026-07-28, USER-REVISED design): chat's fixed internal policy "chat" is a
+  // first-class SessionApprovalPolicy value (gate.ts) that session.create persists verbatim for
+  // every chat-mode session (server.ts's create-seam coercion) — THE SAME TRAP as the test above,
+  // just for the newest value: meta()'s own hardcoded recognized-values array must include "chat"
+  // or a chat session's stored policy would silently round-trip back as "ask", quietly breaking the
+  // "coerce, don't reject" creation story the moment anything re-reads it from the store.
+  test("createSession/meta round-trip 'chat' verbatim (THE TRAP: chat must not read back as ask)", () => {
+    const { store } = makeStore();
+    const id = store.createSession("global", { approvalPolicy: "chat" as any });
+    expect(store.meta(id).approvalPolicy).toBe("chat");
+  });
+
   test("createSession with plan", () => {
     const { store } = makeStore();
     const id = store.createSession("global", { approvalPolicy: "plan" });

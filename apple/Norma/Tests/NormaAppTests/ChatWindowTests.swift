@@ -124,6 +124,9 @@ final class ChatWindowTests: XCTestCase {
         XCTAssertEqual(delegate.detachedWindows.count, 1)
         XCTAssertEqual(delegate.detachedWindows.first?.sessionId, "s_new_chat")
         XCTAssertEqual(delegate.detachedWindows.first?.windowForTesting?.title, "Chat", "a freshly created chat session has no title yet — falls back to 'Chat'")
+        // Plan-immunity (2026-07-28 design): "New Chat" must open a window whose policy picker
+        // is hidden (adapter.isChatSession true) — the fixed-policy chat window, not an ordinary one.
+        XCTAssertTrue(delegate.detachedWindows.first?.adapterForTesting.isChatSession ?? false)
     }
 
     // MARK: - AppDelegate.openChat() — open existing vs. create
@@ -164,6 +167,9 @@ final class ChatWindowTests: XCTestCase {
         XCTAssertEqual(delegate.detachedWindows.count, 1)
         XCTAssertEqual(delegate.detachedWindows.first?.sessionId, "s_chat1")
         XCTAssertEqual(delegate.detachedWindows.first?.windowForTesting?.title, "Existing chat")
+        // Plan-immunity (2026-07-28 design): reopening an EXISTING chat session must also open with
+        // its policy picker hidden — not just the freshly-created path above.
+        XCTAssertTrue(delegate.detachedWindows.first?.adapterForTesting.isChatSession ?? false)
 
         // settle: no session.create ever fired.
         try? await Task.sleep(nanoseconds: 200_000_000)
