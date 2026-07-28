@@ -42,6 +42,8 @@ import { MemoryStore } from "./agent/memory";
 import { registerScheduleTool } from "./agent/tools/schedule";
 import { registerWebTools } from "./agent/tools/web";
 import { registerSearchTool } from "./agent/tools/search";
+import { registerReadPageTool } from "./agent/tools/read-page";
+import { PageCache } from "./agent/tools/page-core";
 import { registerComputerTool } from "./agent/tools/computer";
 import { ComputerUseService } from "./agent/computer-use";
 import { McpManager } from "./agent/mcp/manager";
@@ -560,6 +562,12 @@ export async function startDaemon(opts: {
     // request). Same `audit`/`secrets` instances as registerWebTools just above; its own keychain
     // secret (EXA_API_KEY_SECRET) is `norma login --exa-key`'s write target, never web_search's.
     registerSearchTool(registry, { audit: (line) => audit.append(line), secret: (name) => secrets.get(name) });
+    // B2-T2: ReadPage — chat's (and, per user decision, dispatch's) batched page-reading tool.
+    // ONE PageCache instance per daemon, constructed here and shared: Task 3's ephemeral research
+    // runner hands the SAME instance to its FetchPage-only sub-agent, so a report's own citations
+    // resolve from the identical cache a follow-up ReadPage(lineStart/lineEnd) call would hit.
+    const pageCache = new PageCache();
+    registerReadPageTool(registry, { cache: pageCache, audit: (line) => audit.append(line) });
     const agents = new AgentStore({
       normaHome, trust: trustStore, baseInstructions: SYSTEM_PROMPT,
       plugins: { disabled: settings?.plugins?.disabled ?? [] },

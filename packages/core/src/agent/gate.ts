@@ -154,7 +154,15 @@ const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_workt
 // have. Ending up "read-only in practice" is a consequence of that argument, not the reason for
 // it — the classification is about what the tool COULD be pointed at, not what it happens to do
 // today.
-const NETWORK = new Set(["web_fetch", "web_search", "Search"]);
+//
+// B2-T2: `ReadPage` (chat/dispatch's batched page-reading tool) joins NETWORK for the SAME shape
+// as Search, not web_fetch's: it takes a caller-supplied `url`, unlike Search's fixed-endpoint
+// query — but so does web_fetch, which already lives in this class with no stricter floor at this
+// gate (its one floor, the dangerous-domain check, is a pre-exec engine.ts concern this file
+// deliberately never grows to match, per this class's own doc comment above). Same risk shape
+// (real outbound request, response text treated as untrusted model input), same unconditional
+// "allow" answer.
+const NETWORK = new Set(["web_fetch", "web_search", "Search", "ReadPage"]);
 // skill_write (phase 5c Task 2) gets a NEW class, strictly stricter than MUTATING: "ask" under
 // BOTH `ask` AND `auto` (a card on EVERY call — no policy setting silences it), "deny" under
 // `plan`. THE SKETCH PIN (phase-5-intelligence-design-sketch.md §5c): "a skill is standing

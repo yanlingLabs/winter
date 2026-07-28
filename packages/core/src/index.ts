@@ -41,6 +41,7 @@ export { registerBashTool } from "./agent/tools/bash";
 export { registerBackgroundTools } from "./agent/tools/background";
 export { registerWebTools, WEB_SEARCH_API_KEY_SECRET, type WebToolDeps } from "./agent/tools/web";
 export { registerSearchTool, EXA_API_KEY_SECRET, type SearchToolDeps } from "./agent/tools/search";
+export { registerReadPageTool, type ReadPageDeps, type ResearchRunner, type ResearchQuery } from "./agent/tools/read-page";
 export { registerToolSearchTool } from "./agent/tools/toolsearch";
 export { registerAskUserTool } from "./agent/tools/ask-user";
 export { registerAskQuestionTool } from "./agent/tools/ask-question";

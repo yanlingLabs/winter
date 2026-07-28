@@ -18,6 +18,8 @@ import { registerPushNotificationTool } from "../../src/agent/tools/push-notific
 import { registerAskUserTool } from "../../src/agent/tools/ask-user";
 import { registerAskQuestionTool } from "../../src/agent/tools/ask-question";
 import { registerSearchTool } from "../../src/agent/tools/search";
+import { registerReadPageTool } from "../../src/agent/tools/read-page";
+import { PageCache } from "../../src/agent/tools/page-core";
 import { registerWebTools } from "../../src/agent/tools/web";
 import { registerToolSearchTool } from "../../src/agent/tools/toolsearch";
 import { PermissionGate } from "../../src/agent/gate";
@@ -62,6 +64,11 @@ function harness(opts: { mode: "code" | "dispatch" | "chat"; extraTool?: string 
   registerAskUserTool(registry);
   registerAskQuestionTool(registry);
   registerSearchTool(registry);
+  // B2-T2: ReadPage joins Search/AskQuestion as chat's (and dispatch's) real production surface —
+  // registered here too so this harness's "full production surface" claim (this file's own doc
+  // comment) stays true rather than silently drifting the way mode-toolset-census.test.ts's own
+  // doc comment warns a hand-mirrored harness can.
+  registerReadPageTool(registry, { cache: new PageCache() });
   registerWebTools(registry);
   registerToolSearchTool(registry);
   if (opts.extraTool) {
@@ -119,10 +126,12 @@ function harness(opts: { mode: "code" | "dispatch" | "chat"; extraTool?: string 
 }
 
 describe("mode toolsets are unchanged by the derivation refactor", () => {
-  test("chat is offered exactly Search + AskQuestion", async () => {
+  // B2-T2: chat's exact offered set now also includes ReadPage (SANCTIONED pin move — task-2-brief
+  // .md's "chat exact set -> [AskQuestion, ReadPage, Search]").
+  test("chat is offered exactly AskQuestion + ReadPage + Search", async () => {
     const h = harness({ mode: "chat" });
     await h.turn("hi");
-    expect(h.offered().sort()).toEqual(["AskQuestion", "Search"]);
+    expect(h.offered().sort()).toEqual(["AskQuestion", "ReadPage", "Search"]);
   });
 
   test("code's offered set is unchanged", async () => {
@@ -133,7 +142,7 @@ describe("mode toolsets are unchanged by the derivation refactor", () => {
                      "web_fetch", "web_search", "spawn_agent", "computer", "notebook_edit"]) {
       expect(offered).toContain(t);
     }
-    for (const t of ["Search", "AskQuestion", "session_spawn"]) expect(offered).not.toContain(t);
+    for (const t of ["Search", "AskQuestion", "ReadPage", "session_spawn"]) expect(offered).not.toContain(t);
   });
 
   // R-T3 review finding 2: a reviewer proved by mutation that a tool wrongly declaring
@@ -153,11 +162,13 @@ describe("mode toolsets are unchanged by the derivation refactor", () => {
   // (mode-toolset-census.test.ts), which boots the real daemon/registry, is the one that actually
   // covers send_message's dispatch eligibility — by design, per this file's own R-T3 doc comment
   // above about not hand-mirroring every register* call.)
-  test("dispatch is offered EXACTLY this set (R-T3: web_fetch/web_search dropped, Search kept; D1-T2: AskQuestion replaces ask_user)", async () => {
+  // B2-T2: dispatch's immediate set gains ReadPage too (SANCTIONED pin move — task-2-brief.md's
+  // "dispatch immediate set += ReadPage").
+  test("dispatch is offered EXACTLY this set (R-T3: web_fetch/web_search dropped, Search kept; D1-T2: AskQuestion replaces ask_user; B2-T2: ReadPage added)", async () => {
     const h = harness({ mode: "dispatch" });
     await h.turn("hi");
     expect(h.offered().sort()).toEqual([
-      "Search", "ToolSearch", "AskQuestion", "bash", "computer", "glob", "grep", "ls",
+      "Search", "ReadPage", "ToolSearch", "AskQuestion", "bash", "computer", "glob", "grep", "ls",
       "push_notification", "read", "session_spawn", "task_stop",
     ].sort());
   });

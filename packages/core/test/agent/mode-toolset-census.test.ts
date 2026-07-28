@@ -116,6 +116,8 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
     );
   });
 
+  // B2-T2: dispatch's immediate set gains "ReadPage" too (SANCTIONED pin move — task-2-brief.md's
+  // "dispatch immediate set += ReadPage"): registered `modes: ["chat","dispatch"]`, NOT deferred.
   // D1-T2: dispatch's set changes here — deliberately, not a mechanical re-baseline:
   //   - REMOVED "ask_user": ask-user.ts drops "dispatch" from its own `modes` (dispatch now uses
   //     AskQuestion's simplified, header-less question card instead).
@@ -132,21 +134,36 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
   //   so dispatch's namesForMode simply never included it. Task 4 gives dispatch a real reason to
   //   call send_message (messaging the sessions it spawns via session_spawn), so `modes` widened
   //   to `["code", "dispatch"]` — making this list 13 names now, not a re-baseline of anything else.
-  test("dispatch mode is offered EXACTLY this set (13 tools)", async () => {
+  test("dispatch mode is offered EXACTLY this set (14 tools)", async () => {
     const d = await boot();
     const offered = [...d.registry!.namesForMode("dispatch", { builtinDeferral: true })];
     expect(offered.sort()).toEqual(
       [
-        "Search", "ToolSearch", "AskQuestion", "bash", "computer", "glob", "grep", "ls",
+        "Search", "ReadPage", "ToolSearch", "AskQuestion", "bash", "computer", "glob", "grep", "ls",
         "push_notification", "read", "send_message", "session_spawn", "task_stop",
       ].sort(),
     );
   });
 
-  test("chat mode is offered EXACTLY Search + AskQuestion", async () => {
+  // B2-T2: chat's exact offered set becomes AskQuestion + ReadPage + Search (SANCTIONED pin move —
+  // task-2-brief.md's "chat exact set -> [AskQuestion, ReadPage, Search]").
+  test("chat mode is offered EXACTLY AskQuestion + ReadPage + Search", async () => {
     const d = await boot();
     const offered = [...d.registry!.namesForMode("chat", { builtinDeferral: true })];
-    expect(offered.sort()).toEqual(["AskQuestion", "Search"].sort());
+    expect(offered.sort()).toEqual(["AskQuestion", "ReadPage", "Search"].sort());
+  });
+
+  // B2-T2 forward guard (task-2-brief.md: "census must ALSO assert FetchPage appears in NO mode —
+  // add that assertion now ... so Task 3 cannot accidentally register it"). FetchPage is the
+  // research sub-agent's OWN tiny toolset (spec §6) and must never land in the daemon's shared
+  // registry at all — not excluded from any mode, simply never registered, so `has()` is false and
+  // every mode's derived set is unaffected by construction.
+  test("FetchPage is registered in NO mode — the research sub-agent's tool never joins the daemon's shared registry (forward guard for Task 3)", async () => {
+    const d = await boot();
+    expect(d.registry!.has("FetchPage")).toBe(false);
+    for (const mode of ["code", "dispatch", "chat"] as const) {
+      expect(d.registry!.namesForMode(mode, { builtinDeferral: true }).has("FetchPage")).toBe(false);
+    }
   });
 });
 

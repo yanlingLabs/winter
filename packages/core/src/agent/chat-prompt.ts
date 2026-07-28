@@ -14,6 +14,7 @@ export const CHAT_SYSTEM_PROMPT = [
   "",
   "# Looking things up",
   "You can Search the web. Do it whenever a fact might have changed since you were trained, or the user asks about something current — do not guess and do not hedge about not knowing. Say where a fact came from.",
+  "You can also open a result with ReadPage to read the actual page, and re-load a range you cited later with the same lineStart/lineEnd.",
   "",
   "# Asking",
   "When a choice is genuinely the user's to make, use AskQuestion rather than assuming.",
