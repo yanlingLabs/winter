@@ -44,6 +44,7 @@ import { registerWebTools } from "./agent/tools/web";
 import { registerSearchTool } from "./agent/tools/search";
 import { registerReadPageTool } from "./agent/tools/read-page";
 import { PageCache } from "./agent/tools/page-core";
+import { createResearchRunner } from "./agent/research";
 import { registerComputerTool } from "./agent/tools/computer";
 import { ComputerUseService } from "./agent/computer-use";
 import { McpManager } from "./agent/mcp/manager";
@@ -567,7 +568,16 @@ export async function startDaemon(opts: {
     // runner hands the SAME instance to its FetchPage-only sub-agent, so a report's own citations
     // resolve from the identical cache a follow-up ReadPage(lineStart/lineEnd) call would hit.
     const pageCache = new PageCache();
-    registerReadPageTool(registry, { cache: pageCache, audit: (line) => audit.append(line) });
+    // B2-T3: the ephemeral research sub-agent — FetchPage-only, cited reports. Reuses the SAME
+    // Provider instance (`agentProvider.provider`) the main engine turns use — this whole `if` is
+    // already gated on agentProvider being present, so `research` is constructed unconditionally
+    // HERE and stays undefined only when this gate never opens at all (no agentProvider), matching
+    // ReadPage's own "research is not available in this session yet" fallback for that case.
+    // `research.ts` never touches this (or any) ToolRegistry itself — FetchPage is a hand-built
+    // spec + direct dispatch entirely inside that module, never registered here or anywhere else
+    // (mode-toolset-census.test.ts's forward guard pins that FetchPage never joins this registry).
+    const research = createResearchRunner({ provider: agentProvider.provider, cache: pageCache, audit: (line) => audit.append(line) });
+    registerReadPageTool(registry, { cache: pageCache, audit: (line) => audit.append(line), research });
     const agents = new AgentStore({
       normaHome, trust: trustStore, baseInstructions: SYSTEM_PROMPT,
       plugins: { disabled: settings?.plugins?.disabled ?? [] },

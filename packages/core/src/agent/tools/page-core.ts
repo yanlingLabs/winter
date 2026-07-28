@@ -69,6 +69,13 @@ export interface PageCoreDeps {
   fetchFn?: typeof fetch; // injectable; default global fetch
   now?: () => number; // injectable clock for TTL tests
   audit?: (line: Record<string, unknown>) => void;
+  /** Audit-line `tool` label — a named obligation from Task 2's review (task-3-brief.md): every
+   *  audit line below used to hardcode `tool: "ReadPage"`, which would have mislabeled every fetch
+   *  the FetchPage-only research sub-agent (Task 3, agent/research.ts) drives through this SAME
+   *  function. Defaults to "ReadPage" so ReadPage's own call sites (read-page.ts's `renderPage`)
+   *  are byte-identical without passing this; the research runner passes "FetchPage" instead, so
+   *  audit.jsonl can tell the two callers apart. */
+  tool?: string;
 }
 
 interface CacheEntry {
@@ -219,9 +226,11 @@ export class PageCoreError extends Error {
 export async function fetchCleanPage(url: string, cache: PageCache, deps: PageCoreDeps = {}): Promise<CleanPage> {
   const now = deps.now?.() ?? Date.now();
 
+  const tool = deps.tool ?? "ReadPage";
+
   const cached = cache.get(url, now);
   if (cached) {
-    deps.audit?.({ kind: "network", tool: "ReadPage", url, outcome: "ok", fromCache: true });
+    deps.audit?.({ kind: "network", tool, url, outcome: "ok", fromCache: true });
     return cached;
   }
 
@@ -237,7 +246,7 @@ export async function fetchCleanPage(url: string, cache: PageCache, deps: PageCo
             : res.kind === "http"
               ? "http_error"
               : "network_error";
-    deps.audit?.({ kind: "network", tool: "ReadPage", url, outcome });
+    deps.audit?.({ kind: "network", tool, url, outcome });
     throw new PageCoreError(res.error, outcome);
   }
 
@@ -252,12 +261,12 @@ export async function fetchCleanPage(url: string, cache: PageCache, deps: PageCo
     const links = isHtml ? extractLinks(res.body, res.url) : [];
     page = { url: res.url, title, lines: cleanedText.split("\n"), links, fetchedAt: now, fromCache: false };
   } catch (e) {
-    deps.audit?.({ kind: "network", tool: "ReadPage", url, outcome: "parse_error" });
+    deps.audit?.({ kind: "network", tool, url, outcome: "parse_error" });
     throw new PageCoreError(`could not parse page content: ${e instanceof Error ? e.message : String(e)}`, "parse_error");
   }
 
   cache.put(page, now);
-  deps.audit?.({ kind: "network", tool: "ReadPage", url, outcome: "ok", fromCache: false });
+  deps.audit?.({ kind: "network", tool, url, outcome: "ok", fromCache: false });
   return page;
 }
 
