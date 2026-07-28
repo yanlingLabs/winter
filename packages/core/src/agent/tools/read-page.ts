@@ -97,14 +97,21 @@ function capText(text: string, cap: number, marker: string): string {
 /** Renders one non-`query` entry: cache-aware `fetchCleanPage` -> `renderLines`, wrapped with the
  *  resolved-URL header and a `Links:` tail. Never throws — a fetch failure (SSRF refusal, timeout,
  *  http/network/parse error) becomes an `ok:false` result instead, so one bad URL in a batch can
- *  never take the others down with it. */
-async function renderPage(entry: PageRequestT, deps: ReadPageDeps): Promise<EntryResult> {
+ *  never take the others down with it.
+ *
+ *  fix-round-2 Minor: `signal` (the calling turn's own `ctx.signal`) is forwarded into
+ *  `fetchCleanPage` — before this, a user-interrupted turn left a plain page-read fetch running to
+ *  the full per-fetch default bound regardless. `fetchCleanPage`'s own signal composition
+ *  (`AbortSignal.any`) already means whichever of the caller's signal or the default fires FIRST
+ *  wins, so this is a pure forward, no new composition logic needed here. */
+async function renderPage(entry: PageRequestT, deps: ReadPageDeps, signal: AbortSignal | undefined): Promise<EntryResult> {
   try {
     const page = await fetchCleanPage(entry.url, deps.cache, {
       fetchFn: deps.fetchFn,
       now: deps.now,
       audit: deps.audit,
       timeoutMs: deps.timeoutMs,
+      signal,
     });
     const rendered = renderLines(page, entry.lineStart, entry.lineEnd);
     const newlineIdx = rendered.indexOf("\n");
@@ -172,7 +179,7 @@ export function registerReadPageTool(r: ToolRegistry, deps: ReadPageDeps): void 
     args: ReadPageArgs,
     async run({ pages }: z.infer<typeof ReadPageArgs>, ctx) {
       const results = await Promise.all(
-        pages.map((entry) => (entry.query ? runResearch(entry, deps, ctx.signal) : renderPage(entry, deps))),
+        pages.map((entry) => (entry.query ? runResearch(entry, deps, ctx.signal) : renderPage(entry, deps, ctx.signal))),
       );
       const anyOk = results.some((res) => res.ok);
       // A single-entry call returns its own text bare (no "## Page 1" wrapper) — the common case,

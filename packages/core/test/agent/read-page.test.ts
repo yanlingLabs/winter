@@ -327,6 +327,24 @@ describe("ReadPage: a stuck fetch no longer hangs the tool (fix-round-1 CRITICAL
     expect(out.isError).toBe(true); // the sole entry failed -> whole batch isError (existing "one bad entry" contract)
     expect(out.output.toLowerCase()).toContain("timed out");
   });
+
+  // fix-round-2 Minor: renderPage never forwarded ctx.signal (the caller/user's own abort) into
+  // fetchCleanPage at all — a user-interrupted turn left a plain page-read fetch running to the
+  // FULL default bound regardless. `timeoutMs: 5000` here stands in for the real (uninjectable in
+  // production) 15s default, just shrunk so RED capture doesn't take 15s — the point is proving
+  // ctx.signal (60ms) wins over whatever the default bound is, not any particular millisecond value.
+  test("a user abort (ctx.signal) mid-fetch returns promptly instead of running to the per-fetch default bound", async () => {
+    const r = new ToolRegistry();
+    registerReadPageTool(r, { cache: new PageCache(), fetchFn: hangingUntilAborted(), timeoutMs: 5000 });
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 60);
+
+    const start = Date.now();
+    const out = await r.execute("ReadPage", { pages: [{ url: "https://example.com/" }] }, ctx({ signal: controller.signal }));
+    expect(Date.now() - start).toBeLessThan(2000); // proves ctx.signal (60ms), not the 5000ms default, is what fired
+    expect(out.isError).toBe(true);
+    expect(out.output.toLowerCase()).toMatch(/timed out|aborted/);
+  });
 });
 
 describe("ReadPage via a real turn: not deferred, visible immediately (production-shaped harness)", () => {

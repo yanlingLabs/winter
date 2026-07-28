@@ -254,7 +254,27 @@ export async function fetchCleanPage(url: string, cache: PageCache, deps: PageCo
   const timeoutSignal = AbortSignal.timeout(deps.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS);
   const signal = deps.signal ? AbortSignal.any([deps.signal, timeoutSignal]) : timeoutSignal;
 
-  const res = await followRedirects(url, { fetchFn: deps.fetchFn, signal });
+  // fix-round-2 IMPORTANT (upgraded from a reviewer Minor): web.ts's followRedirects only wraps
+  // its OWN initial fetchFn() call in a try/catch — the body read (readCapped, web.ts's own
+  // followRedirects, called AFTER that try/catch closes) runs unguarded, so a timeout that fires
+  // AFTER headers arrive but DURING the body read escaped followRedirects (and, with no try/catch
+  // here either, escaped fetchCleanPage too) as a raw, unclassified error — no PageCoreError, no
+  // outcome, and (since the throw skipped every line below) NO AUDIT LINE for a fetch that
+  // genuinely reached the network. Preferred the page-core-local fix over moving readCapped inside
+  // followRedirects' own try (which would edit web.ts, shared by web_fetch/Search — web_fetch
+  // doesn't have this hole because its OWN try wraps the whole followRedirects call already, the
+  // same shape this now mirrors): whatever escapes the call, classify it with followRedirects' own
+  // AbortError/TimeoutError -> "timeout" vocabulary and audit it before rethrowing as a PageCoreError.
+  let res: Awaited<ReturnType<typeof followRedirects>>;
+  try {
+    res = await followRedirects(url, { fetchFn: deps.fetchFn, signal });
+  } catch (e) {
+    const name = e instanceof Error ? e.name : "";
+    const outcome = name === "AbortError" || name === "TimeoutError" ? "timeout" : "network_error";
+    const message = outcome === "timeout" ? `request timed out fetching ${url}` : `fetch failed: ${e instanceof Error ? e.message : String(e)}`;
+    deps.audit?.({ kind: "network", tool, url, outcome });
+    throw new PageCoreError(message, outcome);
+  }
   if (!res.ok) {
     const outcome =
       res.kind === "ssrf"

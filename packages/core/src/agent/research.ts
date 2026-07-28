@@ -343,9 +343,21 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
         deadline,
       );
     } catch (e) {
-      // A REAL fetch failure (SSRF refusal, http error, ...) — nothing was read at all, an
-      // honest failure (throws; see Minor 4 — never a silent isError:false "report"). Contrast
-      // the `timedOut` branch below, which the CRITICAL fix's own contract requires to RESOLVE.
+      // fix-round-2 (optional consistency fix): a wall-clock expiry reaching the seed fetch via a
+      // COOPERATIVE fetchFn (one that actually honors AbortSignal — the realistic "server sends
+      // headers then stalls" case, not the adversarial never-resolving double the `timedOut`
+      // branch below exists for) surfaces HERE as a PageCoreError(outcome:"timeout") rejection,
+      // not as `race.timedOut` — Promise.race settles the instant ANY raced promise settles, and
+      // the abort-driven rejection's own timer was registered earlier than raceDeadline's separate
+      // one, so it reliably wins. Treated identically to the `timedOut` branch below (resolve with
+      // a partial report, not a throw) — same class of expiry either way, and nothing is lost by
+      // resolving here: this is the SEED fetch, so zero pages have been read yet regardless of
+      // which of the two mechanisms caught it.
+      if (e instanceof PageCoreError && e.outcome === "timeout") {
+        return notReadReport("", state, `Research timed out before finishing (could not read the seed page ${q.url} in time)`);
+      }
+      // Any OTHER seed-fetch failure (SSRF refusal, http error, network error, ...) — nothing was
+      // read at all, an honest failure (throws; see Minor 4 — never a silent isError:false "report").
       const message = e instanceof PageCoreError || e instanceof Error ? e.message : String(e);
       throw new Error(capText(`could not read the seed page ${q.url}: ${message}`));
     }

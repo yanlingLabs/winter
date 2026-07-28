@@ -417,6 +417,61 @@ describe("fetchCleanPage: the per-fetch default timeout (fix-round-1 CRITICAL)",
   });
 });
 
+// fix-round-2 IMPORTANT (upgraded from the reviewer's Minor): web.ts's followRedirects only
+// wraps the INITIAL fetchFn() call in a try/catch — the body read (readCapped, web.ts:195) runs
+// OUTSIDE that try, so a timeout that fires AFTER headers arrive but DURING the body read escapes
+// followRedirects raw. Before this fix, fetchCleanPage had no try/catch of its own around the
+// followRedirects call either, so that raw error (a plain Error/DOMException, not a PageCoreError,
+// outcome: undefined) propagated straight out of fetchCleanPage — AND no audit line was ever
+// emitted for a fetch that genuinely reached the network. "Server sends headers then stalls" is
+// ordinary internet behavior, made newly reachable by fix-round-1's own 15s default.
+describe("fetchCleanPage: a timeout DURING the body read (after headers) still audits and classifies correctly (fix-round-2 IMPORTANT)", () => {
+  /** A Response whose body never delivers a single byte and never closes on its own — but DOES
+   *  error (as a real aborted body stream would) once the signal passed to the fetchFn fires. This
+   *  simulates "headers arrived, body stalls" — readCapped's `reader.read()` call is what would
+   *  hang, and what its abort-driven rejection must propagate through. */
+  function stalledBodyFetch(): typeof fetch {
+    return (async (_url: string, init?: RequestInit) => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const signal = init?.signal;
+          if (!signal) return; // shouldn't happen — fetchCleanPage always supplies one
+          const onAbort = () => {
+            const err = new Error("The operation was aborted.");
+            err.name = "AbortError";
+            controller.error(err);
+          };
+          if (signal.aborted) onAbort();
+          else signal.addEventListener("abort", onAbort, { once: true });
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "text/html" } });
+    }) as unknown as typeof fetch;
+  }
+
+  test("produces a PageCoreError with outcome:'timeout', a URL-naming message, well within the shrunk timeoutMs bound", async () => {
+    const start = Date.now();
+    try {
+      await fetchCleanPage("https://example.com/", new PageCache(), { fetchFn: stalledBodyFetch(), timeoutMs: 30 });
+      throw new Error("expected fetchCleanPage to throw");
+    } catch (e) {
+      expect(e).toBeInstanceOf(PageCoreError);
+      expect((e as PageCoreError).outcome).toBe("timeout");
+      expect((e as Error).message).toContain("example.com");
+    }
+    expect(Date.now() - start).toBeLessThan(1000);
+  });
+
+  test("emits an audit line with outcome:'timeout' — a fetch that genuinely reached the network is never silently unaudited", async () => {
+    const audited: Record<string, unknown>[] = [];
+    try {
+      await fetchCleanPage("https://example.com/", new PageCache(), { fetchFn: stalledBodyFetch(), timeoutMs: 30, audit: (l) => audited.push(l) });
+    } catch { /* asserted above */ }
+    expect(audited.length).toBeGreaterThan(0);
+    expect(audited.at(-1)).toMatchObject({ outcome: "timeout", tool: "ReadPage" });
+  });
+});
+
 describe("AD_TRACKER_LINK_SUBSTRINGS", () => {
   test("is the fixed seed list named in the brief", () => {
     expect(AD_TRACKER_LINK_SUBSTRINGS).toEqual([

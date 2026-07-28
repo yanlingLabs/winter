@@ -434,6 +434,41 @@ describe("research.ts: the wall clock also bounds FETCHES, not just the provider
     expect(report.toLowerCase()).toContain("timed out");
   });
 
+  // fix-round-2 (optional consistency fix, reviewer's nit): a wall-clock expiry that reaches the
+  // seed fetch via a COOPERATIVE fetchFn (one that actually honors AbortSignal, unlike
+  // `neverResolvingFetch` above) surfaces as a REJECTION from fetchCleanPage (a PageCoreError with
+  // outcome:"timeout") — Promise.race settles the instant ANY raced promise settles, and that
+  // abort-driven rejection's own timer was registered earlier than raceDeadline's separate one, so
+  // it reliably wins. Before this fix, the seed path's catch unconditionally re-threw that as a
+  // hard failure (reject), while the analogous per-URL case in the BATCH path (handleFetchPage)
+  // just logs a "not read" line and the run continues/resolves — same class of expiry, two
+  // different shapes. Both outcomes are bounded and honest either way (nothing lost at the seed —
+  // zero pages had been read yet), so this is cosmetic, not a correctness bug — fixed for
+  // consistency since the seed-specific `PageCoreError`/`outcome==="timeout"` check was one small,
+  // self-contained addition.
+  test("a wall-clock expiry reaching the seed fetch via a COOPERATIVE fetchFn also RESOLVES with a partial report — consistent with the batch path, not a reject", async () => {
+    const fetchFn = (async (_url: string, init?: RequestInit) => {
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) return;
+        const abort = () => {
+          const err = new Error("The operation was aborted.");
+          err.name = "AbortError";
+          reject(err);
+        };
+        if (signal.aborted) abort();
+        else signal.addEventListener("abort", abort, { once: true });
+      });
+    }) as unknown as typeof fetch;
+    const provider = new FakeProvider([text("unreachable")]);
+    const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn, wallClockMs: 50 });
+
+    const start = Date.now();
+    const report = await runner.run({ url: SEED_URL, query: "q" }, {});
+    expect(Date.now() - start).toBeLessThan(1500);
+    expect(report.toLowerCase()).toContain("timed out");
+  });
+
   test("a hanging FetchPage-BATCH fetch resolves via the wall clock too", async () => {
     const fetchFn = (async (url: string | URL) => {
       if (String(url) === SEED_URL) {
