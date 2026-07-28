@@ -121,6 +121,21 @@ export function ssrfGuard(raw: string): string | null {
 // tag-oblivious lazy scan. Using the bare token instead reproduces the original's exact behavior,
 // including its own over-matching quirk (a tag merely STARTING WITH "script" also counts — the
 // original has the identical quirk, so this is faithful, not a regression).
+//
+// EXACTNESS CAVEAT (closing review, independent fuzz): the script/style/head passes above are
+// byte-exact vs the original (0/40k adversarial), but TWO divergence classes exist elsewhere in
+// this rewrite, BOTH confined to malformed HTML and NOT reachable from realistic pages
+// (0 divergence across 13k realistic-shaped fuzz cases + a 20-doc corpus + 5/5 byte-identical
+// fixtures through the real web_fetch tool):
+//   (A) headings — an open like `<h3<h2>` whose `[^>]*` swallowed a later heading open: the
+//       original's combined regex could backtrack into the open tag's own parse to satisfy the
+//       trailing close; the linear two-pass scan cannot. This is the PRICE OF LINEARITY, not a
+//       fixable bug: restoring exact old semantics (retry at openStart+1) re-introduces the
+//       quadratic (~7.7 s at 256KB of `<h1` soup vs ~0.8 ms linear).
+//   (B) anchors — pathological `href` values like `<a href="href=">` pair differently for the
+//       same backtracking reason.
+// Do not "fix" either by reverting to combined lazy regexes — that reopens the daemon-freezing
+// DoS this rewrite exists to close (a model-chosen URL froze the event loop ~58 s per 3MB page).
 const SCRIPT_OPEN_RE = /<script/gi;
 const SCRIPT_CLOSE_RE = /<\/script>/gi;
 const STYLE_OPEN_RE = /<style/gi;
