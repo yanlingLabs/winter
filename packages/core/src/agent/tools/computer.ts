@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ToolRegistry } from "./registry";
+import type { Mode, ToolRegistry } from "./registry";
 import type { PeripheralClass } from "../../peripheral/broker";
 
 /**
@@ -205,7 +205,11 @@ function formatResult(a: ComputerArgsT, resultJson: string, attachImage?: (u: st
 
 export function registerComputerTool(
   r: ToolRegistry,
-  deps: { screenshotMaxDim?: number; deferred?: boolean } = {},
+  // D1-T2: `deferred` widened from `boolean` to `boolean | Mode[]` (registry.ts's
+  // ToolDefinition.deferred) — same ONE-mechanism reconciliation as task_stop's identical
+  // registration-time flag (see task-stop.ts's own doc comment). daemon.ts's two registration call
+  // sites now pass `deferred: ["dispatch"]`: immediate in code, deferred only in dispatch.
+  deps: { screenshotMaxDim?: number; deferred?: boolean | Mode[] } = {},
 ): void {
   const { screenshotMaxDim, deferred } = deps;
   r.register({

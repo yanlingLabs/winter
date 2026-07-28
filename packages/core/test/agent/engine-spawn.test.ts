@@ -17,7 +17,7 @@ import { registerToolSearchTool } from "../../src/agent/tools/toolsearch";
 import { registerWebTools } from "../../src/agent/tools/web";
 import { PermissionGate } from "../../src/agent/gate";
 import { ApprovalBroker } from "../../src/agent/approvals";
-import { AgentEngine } from "../../src/agent/engine";
+import { AgentEngine, type EngineConfig } from "../../src/agent/engine";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import { SessionDirectories } from "../../src/agent/dirs";
 import { ContextAssembler } from "../../src/agent/context";
@@ -78,6 +78,14 @@ export function setup(
     // EngineConfig's own getter shape — no extra wrapping needed at this boundary.
     lsp?: LspManager;
     autoDiagnosticsEnabled?: () => boolean | undefined;
+    // whole-branch review FIX 1: optional plugin-hooks facade, threaded straight to
+    // EngineConfig.hooks. Undefined (default) → every pre-existing call site in this file and
+    // every file that imports this `setup()` stays byte-identical (cfg.hooks absent, no hook call
+    // site in engine.ts ever fires — see EngineConfig.hooks' own doc comment). A test that wires
+    // one gets a controllable pause point at a real hook call site (e.g. "turn-end", fired AFTER
+    // cleanupThreadSteer but before runThread's own return — see engine.ts's fireTurnEnd call
+    // sites) without needing a second, hand-rolled engine harness.
+    hooks?: EngineConfig["hooks"];
   } = {},
 ) {
   const withSubagents = opts.withSubagents !== false;
@@ -156,6 +164,7 @@ export function setup(
     tmpDirOf: opts.withTranscripts ? sessionTmpDir : undefined,
     lsp: opts.lsp ? () => opts.lsp : undefined,
     autoDiagnosticsEnabled: opts.autoDiagnosticsEnabled,
+    hooks: opts.hooks,
   });
   const sessionId = store.createSession("global", { cwd, approvalPolicy: opts.approvalPolicy ?? "auto" });
   const events: SessionEvent[] = [];

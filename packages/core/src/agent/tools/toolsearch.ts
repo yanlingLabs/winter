@@ -13,7 +13,24 @@ export function registerToolSearchTool(r: ToolRegistry): void {
       maxResults: z.number().int().positive().max(20).optional(),
     }),
     run({ query, maxResults }, ctx) {
-      const index = r.deferredIndex(ctx.cwd, ctx.loadedTools, ctx.deferThreshold, ctx.builtinDeferral, ctx.deferExternals);
+      // D1-T2: `ctx.mode` — the engine now sets this on every ToolContext it builds (executeCall's
+      // ctx literal, engine.ts). Without it, an array-valued `deferred` fails closed to "deferred"
+      // for every mode (registry.ts's isDeferred doc comment) — this call would then list e.g.
+      // `bash` as loadable from a CODE session too, even though it's already immediate there.
+      const rawIndex = r.deferredIndex(ctx.cwd, ctx.loadedTools, ctx.deferThreshold, ctx.builtinDeferral, ctx.deferExternals, ctx.mode);
+      // D1-T3: `ctx.mode` above only resolves an ARRAY-valued `deferred` (e.g. bash's
+      // `deferred: ["dispatch"]`) — a builtin registered bare `deferred: true` (web_search,
+      // web_fetch, every lsp tool, skill_write, notebook_edit — all CODE-only via their own
+      // `modes`) rides deferral in EVERY mode regardless of `mode`, so `rawIndex` still lists it for
+      // a dispatch/chat session even though that session's `namesForMode`-derived allowlist would
+      // never have offered it. Filter with the EXACT allow/exclude semantics runThread's own
+      // `offered()` predicate uses (engine.ts) — composing WITH the mode narrowing above, not
+      // replacing it: a tool can be excluded from `index` either because this mode never defers it
+      // (rawIndex already dropped it) or because this thread's allowTools/excludeTools never
+      // offered it at all (this filter). Both `ctx.allowTools`/`ctx.excludeTools` absent (any
+      // caller predating this task, e.g. a direct registry.execute() in a unit test) is a no-op —
+      // byte-identical to before.
+      const index = rawIndex.filter((e) => !ctx.excludeTools?.has(e.name) && (!ctx.allowTools || ctx.allowTools.has(e.name)));
       let matches: Array<{ name: string; description: string }>;
       if (query.startsWith("select:")) {
         const wanted = query.slice("select:".length).split(",").map((s: string) => s.trim()).filter(Boolean);

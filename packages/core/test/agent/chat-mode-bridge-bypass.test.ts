@@ -315,17 +315,29 @@ describe("CM closing review: bridged calls obey the thread's toolset (the fourth
     expect(toolResultFor(events, "b1").output).toBe("tool bash is not available in this session");
   });
 
-  test("a tool that is BOTH off-list and deferred-unloaded keeps the deferral message — the new guard sits after the deferred-builtin guard, not before it", async () => {
-    // Ordering pin. `enter_worktree` is registered `deferred: true` (daemon.ts) and chat can never
-    // load it, so with deferral ON the pre-existing "load its schema via ToolSearch first" answer
-    // must still win; moving the new guard above that one would silently rewrite this message (and
-    // break chat-mode-allowlist.test.ts's `lsp` assertion the same way).
+  test("a tool that is BOTH off-list and deferred-unloaded gets the terminal 'not available' message — off-list now wins over deferred, INVERTED from the old ordering pin", async () => {
+    // Ordering pin, INVERTED (whole-branch review, dispatch-toolset FIX 2). This test used to
+    // assert the OPPOSITE: that the deferred-builtin guard fired FIRST, so a tool that is BOTH
+    // off-list and deferred-unloaded (`enter_worktree` — `deferred: true` in daemon.ts, code-only
+    // via `modes`, so chat can never load it) kept the "load its schema via ToolSearch first"
+    // message. That ordering was deliberate at the time (Slice A's spawn-gate fix judged the
+    // deferral message more actionable than a bare refusal) — but the whole-branch review PROVED
+    // that premise wrong by probe: for a mode that can never load the tool (chat has no ToolSearch
+    // at all) or a mode whose ToolSearch correctly reports the tool as no-match (an off-list tool
+    // in dispatch, e.g. `web_search`), "load its schema via ToolSearch first" is UNFOLLOWABLE
+    // advice — the model's only next move is to call the tool again, hitting this SAME guard again:
+    // a two-state loop with no exit, reproduced verbatim against `web_search` in dispatch. The fix
+    // added `offered(call.name) &&` to the deferred-builtin pre-check (engine.ts), so an off-list
+    // tool now falls through to the `!offered` guard below it and gets the terminal,
+    // unconditionally-true "is not available in this session" message instead — no unfollowable
+    // advice, no loop, no card, no bridge execution. This ordering is now load-bearing in the
+    // OPPOSITE direction from what this test originally pinned: off-list wins over deferred.
     const { engine, sessionId, events, worktrees } = setup(
       [call("e1", "enter_worktree", { name: "feat" }), text("ok")],
       { mode: "chat" }, // production-shaped deferral: ON
     );
     await engine.runTurn(sessionId);
-    expect(toolResultFor(events, "e1").output).toBe("tool enter_worktree is deferred — load its schema via ToolSearch first");
+    expect(toolResultFor(events, "e1").output).toBe("tool enter_worktree is not available in this session");
     expect(worktrees.active(sessionId)).toBeUndefined(); // either way, the bridge never ran
   });
 

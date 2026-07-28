@@ -5,7 +5,7 @@ import type { ApprovalOption, NewSessionEvent, Question, SessionEvent, Task } fr
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
 import type { Provider, ProviderEvent, TurnInputItem } from "../providers/types";
-import type { ToolRegistry } from "./tools/registry";
+import type { ToolRegistry, Mode } from "./tools/registry";
 import { isExternalToolName } from "./tools/registry";
 import type { PermissionGate, SessionApprovalPolicy } from "./gate";
 import type { ApprovalBroker } from "./approvals";
@@ -79,6 +79,29 @@ const WORKFLOW_TOOL = "Workflow";
 // the day cowork ships too, no gating logic to revisit at either call site below.
 function isChatOrCowork(meta: { mode?: string }): boolean {
   return meta.mode === "chat" || meta.mode === "cowork";
+}
+
+// D1-T2: resolves a session's REAL mode for registry.ts's per-mode `deferred` seams (specs()/
+// deferredIndex()/execute()/isDeferredBuiltin()) — `meta.mode` is stored as a loose `string`
+// (SessionStore's own column type), so this narrows it the same way isChatOrCowork/isDispatch
+// already do throughout this file: an explicit "dispatch"/"chat" wins, anything else (absent,
+// meaning a plain code session, or an unrecognized value) resolves to "code". Every real call site
+// that reaches registry.ts's deferral seams (buildInstructionsFull, runThread's specs()/
+// isDeferredBuiltin(), executeCall's ctx) must pass this through — an absent mode makes an
+// array-valued `deferred` fail-closed to DEFERRED in every mode, including code (isDeferred's own
+// doc comment, registry.ts), which would silently shrink a code session's toolset the moment any
+// tool declares one.
+// Whole-branch review (optional): `meta.mode === "cowork"` folds into the "chat" branch — cowork is
+// chat-shaped by design (isChatOrCowork's own grouping, context.ts's `_assistant` bucket earmark),
+// and registry.ts's `Mode` type has no separate "cowork" slot for a per-mode `deferred` seam to
+// resolve against, so "chat" is its correct analogue here, not the "code" fallback it silently fell
+// into before this line. Unreachable today (no session can carry mode:"cowork" yet — SessionStore's
+// own column type), but it's what makes this comment's "narrows it the same way isChatOrCowork
+// already does" claim actually true, rather than true for every value except this one.
+function resolveMode(meta: { mode?: string }): Mode {
+  if (meta.mode === "dispatch") return "dispatch";
+  if (meta.mode === "chat" || meta.mode === "cowork") return "chat";
+  return "code";
 }
 
 // Task B4 (/ultracode): the fixed clientName sentinels the ENGINE ITSELF stamps onto a
@@ -1020,12 +1043,31 @@ export class AgentEngine {
       }
       // Dispatch (Phase 7): child turn-end → registry appends child_update + wakes the dispatch session.
       this.cfg.onTurnEnd?.(sessionId);
-      if (this.retriggerPending.delete(sessionId) && !ac.signal.aborted) {
-        // A detached agent finished mid-turn; its task_notification is already persisted. Drain it
-        // now (CC parity: between-turns queue drain) so the model reacts without a user message.
-        // An esc-aborted turn deliberately drops the drain — don't fight the user's interrupt; the
-        // persisted event reaches the model on their next send.
-        void this.runTurn(sessionId).catch((err) => console.error("bg-notification drain failed:", err));
+      // Whole-branch review FIX 1 (Important — data loss): a send_message to THIS session lands in
+      // the window between the terminal branch above (cleanupThreadSteer already ran — and, per
+      // its own doc comment, no longer deletes this session's cross-session queue) and the
+      // `runningTurns.delete` two lines above THIS finally's own start — the sender saw
+      // `isRunning(sessionId) === true` and took the queue-only branch (sendToThread), trusting the
+      // tool_result's "queued ... will see this at its next round" promise. Nothing else ever
+      // drains `threadSteerQueue(sessionId)` unless a turn actually starts for this session, so
+      // check it HERE, unconditionally of why THIS turn ended (end_turn/error/cap/deniedByHuman/
+      // aborted) — combined with the pre-existing bg-notification drain into ONE restart decision,
+      // never two independently-racing `runTurn` calls for the same session (the loser would throw
+      // "turn already running"; a single turn's round-top drain already picks up BOTH reasons
+      // regardless of which one triggered it). Gated the SAME way the bg-notification drain always
+      // has been (`!ac.signal.aborted`): an ESC-aborted turn must not immediately relaunch itself —
+      // the message stays honestly queued (see cleanupThreadSteer's doc comment) and drains at
+      // whatever turn for this session genuinely runs next, exactly like a dropped bg-notification
+      // drain reaches the model on the user's own next send. The recursive `this.runTurn(sessionId)`
+      // call (not a bespoke drain path) means this SAME guarantee applies to the follow-up turn too,
+      // as many times as it takes.
+      const hadBgNotification = this.retriggerPending.delete(sessionId);
+      const hasStrandedMessage = (this.threadSteerQueue.get(sessionId)?.length ?? 0) > 0;
+      if ((hadBgNotification || hasStrandedMessage) && !ac.signal.aborted) {
+        // A detached agent finished mid-turn (its task_notification is already persisted) and/or a
+        // cross-session message is queued and undrained. Drain both now (CC parity: between-turns
+        // queue drain) so the model reacts without a user message.
+        void this.runTurn(sessionId).catch((err) => console.error("bg-notification/message drain failed:", err));
       }
     }
   }
@@ -1754,7 +1796,12 @@ export class AgentEngine {
   // threaded straight through to `pinnedTools` (pins Workflow for the turn) AND appended as an
   // authorization <system-reminder> below, mirroring the "# Plan mode" block's own
   // append-onto-instructionsFull shape.
-  private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: SessionApprovalPolicy, sessionId: string, excludeTools?: Set<string>, allowTools?: Set<string>, ultracodeActive?: boolean): string {
+  // D1-T2: `mode` (REQUIRED, not optional — every caller below knows its own mode) resolves an
+  // array-valued `deferred` at the deferredIndex() seam, mirroring specs()/execute()/
+  // isDeferredBuiltin() below. Threading it here is what keeps the "# Deferred tools" TEXT in sync
+  // with what specs() actually offers this same turn — an unthreaded mode would fail-closed
+  // (registry.ts's isDeferred doc comment) and silently advertise e.g. bash as deferred even in code.
+  private buildInstructionsFull(base: string, cwd: string, loaded: Set<string>, policy: SessionApprovalPolicy, sessionId: string, mode: Mode, excludeTools?: Set<string>, allowTools?: Set<string>, ultracodeActive?: boolean): string {
     const tsEnabled = this.toolSearchEnabled(cwd);
     const deferThreshold = this.toolSearchThreshold(cwd);
     // Pins computed HERE, at instructionsFull's own once-per-turn/thread cadence (see this
@@ -1764,7 +1811,7 @@ export class AgentEngine {
     const pins = tsEnabled ? this.pinnedTools(sessionId, { approvalPolicy: policy }, cwd, ultracodeActive) : new Set<string>();
     const effectiveLoaded = pins.size ? new Set([...loaded, ...pins]) : loaded;
     const deferred = tsEnabled
-      ? this.cfg.registry.deferredIndex(cwd, effectiveLoaded, deferThreshold, tsEnabled, this.toolSearchDeferExternals(cwd))
+      ? this.cfg.registry.deferredIndex(cwd, effectiveLoaded, deferThreshold, tsEnabled, this.toolSearchDeferExternals(cwd), mode)
           .filter((d) => !excludeTools?.has(d.name))
           .filter((d) => !allowTools || allowTools.has(d.name))
       : [];
@@ -1930,7 +1977,11 @@ export class AgentEngine {
           ...(excludeWorkflow ? [WORKFLOW_TOOL] : []),
           ...this.cfg.registry.namesNotForMode("code"),
         ]) };
-    const instructionsFull = this.buildInstructionsFull(instructions, cwd, loaded, meta.approvalPolicy, sessionId, toolAccess.excludeTools, toolAccess.allowTools, ultracodeActive);
+    // D1-T2: `resolveMode(meta)` — turn()'s own isDispatch/isChat already read this exact field;
+    // reusing the shared resolver here keeps this call in lockstep with runThread's/executeCall's
+    // own mode resolution for the SAME session, so they can never resolve a different mode for one
+    // turn's instructions text vs. its provider-facing specs().
+    const instructionsFull = this.buildInstructionsFull(instructions, cwd, loaded, meta.approvalPolicy, sessionId, resolveMode(meta), toolAccess.excludeTools, toolAccess.allowTools, ultracodeActive);
     // Auto-compact BEFORE historyInput is built, so a triggered compaction's checkpoint is
     // reflected in this turn's input. A compaction failure degrades to a normal (uncompacted)
     // turn rather than breaking it. Uses THIS turn's resolved model (sel.model), not the boot
@@ -2164,8 +2215,22 @@ export class AgentEngine {
     // so a send_message that landed but wasn't drained before the child finished can't resurface
     // when the SAME threadId is later resumed (resume reuses the threadId; its round-top drain
     // would otherwise pick up the stale entry). Called before EVERY terminal return below (the four
-    // returns: error, end_turn/aborted, deniedByHuman, cap). NO-OP for MAIN — the main thread never
-    // populates threadSteerQueue, so this leaves the byte-identical main path unchanged.
+    // returns: error, end_turn/aborted, deniedByHuman, cap).
+    // D1-T4 originally widened this to ALSO delete the MAIN thread's OWN cross-session queue
+    // (keyed by sessionId, not a thread id — see the send_message→session bridge below, and the
+    // round-top drain's MAIN branch). Whole-branch review FIX 1 (Minor 4's escalated half):
+    // REMOVED that widening — a MAIN thread's sessionId is never "reused" the way a child threadId
+    // is (that's the whole reason the child case above needs this at all), so there is no
+    // resurfacing risk to guard against, only a data-loss one: a message queued via sendToThread
+    // WHILE this round was in flight (isRunning still true) but not yet drained when the round
+    // ends — in particular when it ends ABORTED, whose own pending-check deliberately does NOT
+    // drain-and-continue (see the `stop !== "aborted"` guard a few lines below this closure's call
+    // sites) — would otherwise be silently destroyed here, right after the sender was told it's
+    // "queued ... will see this at its next round". Leaving it queued keeps that promise honest: it
+    // survives to drain at the round-top of whatever turn for THIS session genuinely runs next
+    // (see runTurn's `finally`, which proactively starts that next turn when the one that just
+    // ended wasn't itself an abort — matching the SAME "don't fight the user's interrupt" contract
+    // the bg-notification drain already has there).
     const cleanupThreadSteer = () => { if (threadId !== MAIN_THREAD) this.threadSteerQueue.delete(threadId); };
 
     this.emit(sessionId, { type: "turn_started", sessionId, threadId });
@@ -2174,6 +2239,24 @@ export class AgentEngine {
       if (threadId === MAIN_THREAD) {
         const steers = this.steerQueue.get(sessionId);
         if (steers && steers.length) { for (const t of steers) input.push({ type: "message", role: "user", content: t }); steers.length = 0; }
+        // D1-T4 (send_message → session target): a message queued by ANOTHER session's
+        // send_message while THIS session's main thread was running lands here — via
+        // `sendToThread`, keyed by THIS session's own id rather than a subagent thread id (session
+        // ids and thread ids are disjoint namespaces, so this never collides with a real child
+        // thread's own queue). PERSISTED HERE, at drain time — never at send time — mirroring the
+        // child branch below exactly, so it lands strictly after the prior round's tool_result,
+        // never between a tool_call and its result (the same ordering guarantee sendToThread
+        // already gives subagent threads, deliberately NOT `steer()`'s different send-time-persist-
+        // plus-replay-repair shape, which is for a human interjecting into their OWN session and
+        // stays untouched here).
+        const crossSession = this.threadSteerQueue.get(sessionId);
+        if (crossSession && crossSession.length) {
+          for (const t of crossSession) {
+            this.emit(sessionId, { type: "user_message", sessionId, threadId, text: t, clientName: "send_message" });
+            input.push({ type: "message", role: "user", content: t });
+          }
+          crossSession.length = 0;
+        }
       } else {
         // 4h-ii-b Task 4 (SM2): CHILD threads drain their OWN per-thread steer queue here — a
         // SEPARATE parallel branch to the MAIN branch above (which is untouched). A send_message to
@@ -2221,8 +2304,14 @@ export class AgentEngine {
         model: opts.model,
         instructions: instructionsFull,
         input,
+        // D1-T2: `mode: resolveMode(meta)` — this thread's own `meta` (destructured from `opts`
+        // above; a spawned child's is its parent session's meta, same value runThread has used
+        // throughout this method already, e.g. the dispatchReg/sessionSpawnCalls gate below).
+        // Without this, an array-valued `deferred` would fail-closed to deferred for EVERY mode
+        // (registry.ts's isDeferred doc comment) — silently hiding bash/task_stop/computer/
+        // AskQuestion/send_message from code's own specs() the moment they declared one.
         tools: this.cfg.registry.specs(cwd, tsEnabled
-            ? { loaded: effectiveLoaded, deferThreshold, builtinDeferral: true, deferExternals: this.toolSearchDeferExternals(cwd) }
+            ? { loaded: effectiveLoaded, deferThreshold, builtinDeferral: true, deferExternals: this.toolSearchDeferExternals(cwd), mode: resolveMode(meta) }
             : undefined)
           .filter((s) => !excludeTools?.has(s.name))
           .filter((s) => !allowTools || allowTools.has(s.name)),
@@ -2291,7 +2380,13 @@ export class AgentEngine {
         // silently dropped) — `pending` reads the MAIN steerQueue for the main thread and this
         // child's threadSteerQueue for a child. For the MAIN thread this is byte-identical to the
         // prior `if (threadId === MAIN_THREAD) { const pending = steerQueue.get(sessionId); ... }`.
-        const pending = threadId === MAIN_THREAD ? this.steerQueue.get(sessionId) : this.threadSteerQueue.get(threadId);
+        // D1-T4: MAIN's own check additionally covers threadSteerQueue(sessionId) — a cross-session
+        // send_message (see the round-top drain's MAIN branch above) landing as THIS session's
+        // final round finishes must also continue-and-drain rather than be silently dropped, same
+        // contract steerQueue already has.
+        const pending = threadId === MAIN_THREAD
+          ? [...(this.steerQueue.get(sessionId) ?? []), ...(this.threadSteerQueue.get(sessionId) ?? [])]
+          : this.threadSteerQueue.get(threadId);
         if (stop !== "aborted" && pending && pending.length) { continue; }
         cleanupThreadSteer();
         this.emit(sessionId, { type: "turn_completed", sessionId, threadId, stopReason: stop === "aborted" ? "aborted" : "end_turn", ...usage });
@@ -2343,8 +2438,15 @@ export class AgentEngine {
       // send_message call's tool_result, so it never falls through to executeCall. Processed in a
       // simple `for` loop (not Promise.all): a running-target delivery is sync (sendToThread), a
       // finished-target resume is async (awaited), and there's no benefit to parallelizing them.
+      // D1-T4 review finding (R-slice ledger): this gather had NO `offered()` gate — unlike
+      // spawnCalls just above, it ran its refusal for every session including chat (which never has
+      // this tool), fired pre/post-tool hooks for a tool the session never had, and returned a
+      // non-canonical refusal. `&& offered(c.name)` closes that: a session where send_message isn't
+      // offered now falls through to the per-call loop's own `!offered(call.name)` guard (the
+      // canonical "tool X is not available in this session" message), exactly like every other
+      // off-list tool — and this bridge is only ever reachable when it genuinely was offered.
       const sendMessageOutcomes = new Map<string, { output: string; isError: boolean }>();
-      const sendMessageCalls = opts.depth === 0 ? calls.filter((c) => c.name === "send_message") : [];
+      const sendMessageCalls = opts.depth === 0 ? calls.filter((c) => c.name === "send_message" && offered(c.name)) : [];
       // Dispatch (Phase 7) Task 4: session_spawn calls in the DISPATCH session's main thread spawn
       // full first-class CHILD SESSIONS (DispatchChildren.spawnChild) — a completely separate
       // session with its own turn()/transcript, not a subagent THREAD nested under this one
@@ -2719,7 +2821,11 @@ export class AgentEngine {
           // text too (buildInstructionsFull's own doc comment above) — not just out of specs()
           // (childExcludeTools just above) — so a spawn_agent child is never even told the tool
           // exists, matching the MAIN thread's own excludeWorkflow treatment in turn().
-          const instructionsFull = this.buildInstructionsFull(def.instructions, childCwd, childLoaded, childPolicy, sessionId, new Set([WORKFLOW_TOOL]));
+          // D1-T2: `mode: "code"` — literal, not resolved from `meta`. A spawn_agent child only
+          // ever exists inside a CODE session (this bridge's own childExcludeTools doc comment
+          // above: dispatch sessions can't spawn_agent at all — it's not in
+          // registry.namesForMode("dispatch", ...)), so this is never anything else.
+          const instructionsFull = this.buildInstructionsFull(def.instructions, childCwd, childLoaded, childPolicy, sessionId, "code", new Set([WORKFLOW_TOOL]));
           // 4h-ii-b Task 1: everything a future `resume` (Task 3) needs to re-run THIS child
           // EXCEPT input/signal — captured now, at spawn time, from the exact values this bridge
           // already computed to start the child's own live run below. Stored on the registry
@@ -3075,6 +3181,10 @@ export class AgentEngine {
       // dispatch loop below (read via `preOutcome`), so a send_message call never reaches
       // executeCall. `to`/`message` are hand-parsed from argsJson (string-only) BEFORE any zod
       // would run — same defensive shape as the spawn bridge — so a malformed call is a typed error.
+      // D1-T4: agent resolution below is UNCHANGED — `to` is resolved as an agent FIRST, preserving
+      // today's exact behavior (including the stale-name guard), so an agent named like a session id
+      // keeps its current meaning. Only when `to` resolves to NO agent does the `!target` branch now
+      // fall back to session resolution (see its own doc comment, right below `bgAgents.get`).
       for (const call of sendMessageCalls) {
         // [4f pre-tool — Site 1 (bridged)] FIRST statement, before any send_message work. Same
         // rationale as the spawn_agent bridge above: send_message is bridge-intercepted (its
@@ -3096,7 +3206,87 @@ export class AgentEngine {
         // spawn bridge's own `run_in_background && !bgAgents` guard.
         if (!this.cfg.bgAgents) { sendMessageOutcomes.set(call.callId, { output: "send_message is not available in this session", isError: true }); continue; }
         const target = this.cfg.bgAgents.get(to, sessionId);
-        if (!target) { sendMessageOutcomes.set(call.callId, { output: `no agent '${to}' to message`, isError: true }); continue; }
+        if (!target) {
+          // D1-T4 (dispatch-toolset): `to` didn't resolve as an agent — fall back to a SESSION
+          // target (a session_spawn'd first-class child; today only dispatch mints these, but
+          // authorization here is generic, not dispatch-specific — any session with a matching
+          // child could use it). Loops are STRUCTURALLY impossible by construction: authorization
+          // requires `parentSessionId === sessionId` — a direct parent EDGE, not ancestry (a
+          // grandchild's parent is its own spawner, never this session) — and spawn edges form a
+          // tree, so if A spawned B, A may message B but B can never message A (B's parentSessionId
+          // is A, never the reverse).
+          if (to === sessionId) {
+            sendMessageOutcomes.set(call.callId, { output: "cannot send_message to your own session", isError: true });
+            continue;
+          }
+          let targetMeta: ReturnType<SessionStore["meta"]> | undefined;
+          try { targetMeta = this.cfg.store.meta(to); }
+          catch {
+            // store.meta throws on an unknown id — caught here so the caller gets a typed refusal
+            // (matching the agent branch's own wording shape) instead of an unhandled exception.
+            sendMessageOutcomes.set(call.callId, { output: `no agent or session '${to}' to message`, isError: true });
+            continue;
+          }
+          if (targetMeta.parentSessionId !== sessionId) {
+            sendMessageOutcomes.set(call.callId, { output: `session '${to}' is not a session you spawned`, isError: true });
+            continue;
+          }
+          const wasRunning = this.isRunning(to);
+          // Fix round 1 (Important): this used to call a missing `cwd` "already ended" — wrong.
+          // SessionRow carries no stored terminal/ended status (deliberately — do not invent one:
+          // a session is always resumable by starting a fresh turn, same as `session.send`'s own
+          // handling, the idle branch below). `existsSync` only measures "workspace present right
+          // now" — it cannot tell "finished and cleaned up" from "the model gave session_spawn a
+          // typo'd or already-gone path that never existed" (session_spawn validates only
+          // `startsWith("/")`, never existence) or from "cwd was null" (skipped below, not "always
+          // ended"). The `resumeThread` removed-worktree precedent this was modeled on holds only
+          // for AGENT children, whose worktree is torn down BECAUSE they finished — a session's cwd
+          // is the model-supplied project directory, never a worktree, never removed by Norma. So:
+          // refuse the turn (the guard itself is right — starting one in a missing directory fails
+          // confusingly the instant any tool touches it), but assert NOTHING about the session
+          // having ended or the directory having previously existed. Only checked when idle — a
+          // currently-running target's in-flight turn already has whatever cwd it started with;
+          // that concern is orthogonal to queuing it a message.
+          if (!wasRunning && targetMeta.cwd && !existsSync(targetMeta.cwd)) {
+            sendMessageOutcomes.set(call.callId, {
+              output: `session '${to}' cannot be messaged — its working directory (${targetMeta.cwd}) does not exist`,
+              isError: true,
+            });
+            continue;
+          }
+          if (wasRunning) {
+            // RUNNING → queue-only, drained (and ONLY THEN persisted) at the target's own next
+            // round-top — reusing `sendToThread` verbatim, keyed by the TARGET's session id
+            // (session ids `s_...` and subagent thread ids `th_...` are disjoint namespaces, so
+            // this never collides with an in-flight subagent thread's own queue). This is the SAME
+            // ordering guarantee `sendToThread` already gives subagent threads (a message lands
+            // strictly after the prior round's tool_result, never between a tool_call and its
+            // result) — earned by a real bug (see `sendToThread`'s own doc comment) — deliberately
+            // NOT re-earned via `steer()`'s different (send-time-persist, replay-time-repaired)
+            // shape, which is for a human interjecting into their OWN session and stays untouched.
+            // Fix round 1 (Minor 2): pass `to` for BOTH arguments, not `sessionId, to` — the TARGET
+            // session owns this "thread" (its own id is the queue key its round-top drain reads),
+            // not the sender. `sendToThread`'s first param is unused today, so `sessionId, to` was
+            // inert — but every OTHER call site passes an owning session plus its OWN thread, and a
+            // future namespacing of the queue key (e.g. `${sessionId}:${threadId}`) would silently
+            // write under the sender while the target drains under itself: non-delivery with a
+            // tool_result that said "queued". `to, to` matches the invariant every other caller
+            // already holds.
+            this.sendToThread(to, to, message);
+          } else {
+            // IDLE → start a turn the same way the daemon's own `session.send` handling does
+            // (ipc/server.ts's `session.send` case): persist the user_message, then start a turn.
+            this.cfg.hub.append(to, { type: "user_message", sessionId: to, threadId: MAIN_THREAD, text: message, clientName: "send_message" });
+            void this.runTurn(to).catch((e) => console.error("send_message: session turn failed:", e));
+          }
+          sendMessageOutcomes.set(call.callId, {
+            output: wasRunning
+              ? `message queued for session '${to}' — it is running and will see this at its next round`
+              : `message delivered to session '${to}' — a new turn started`,
+            isError: false,
+          });
+          continue;
+        }
         // 4h-ii-b Task 5 (stale-name guard, CC v2.1.199 parity): only a BY-NAME resolution is
         // checked/tracked — `to !== target.agentId` is exactly that (get() tries the agentId map
         // FIRST, so a hit where `to` equals the returned entry's own agentId was resolved BY ID).
@@ -3177,7 +3367,26 @@ export class AgentEngine {
         // `tsEnabled` arg is this round's SAME toolSearchEnabled() flag threaded through specs()/
         // executeCall above — when toolSearch is disabled it always returns false, so this guard
         // is a no-op then, preserving the pre-4g byte-identical invariant.
-        if (this.cfg.registry.isDeferredBuiltin(call.name, tsEnabled) && !effectiveLoaded.has(call.name)) {
+        // D1-T2: `resolveMode(meta)` — this thread's own `meta` (destructured above), the SAME
+        // value the specs() call earlier this round already resolved a mode from. Unthreaded, this
+        // would fail-closed to "deferred" for EVERY mode (registry.ts's isDeferred doc comment),
+        // rejecting e.g. a code session's own `bash` call the instant bash declared `deferred:
+        // ["dispatch"]` — exactly the silent, type-checked regression this task's brief warns about.
+        // Whole-branch review FIX 2: `offered(call.name) &&` — this guard was mode-aware but
+        // allowTools-BLIND. A `deferred: true` built-in that a session's `modes`/allowTools never
+        // made eligible in the first place (e.g. web_search, `modes: ["code"]`, called from
+        // dispatch) used to fire here regardless, answering "is deferred — load its schema via
+        // ToolSearch first" — but T3's ToolSearch (toolsearch.ts) IS allowTools-aware, so the
+        // model's very next `ToolSearch(select:web_search)` correctly reports no match, and the
+        // model's next move (call the tool again, per the advice it was just given) hits this SAME
+        // guard again: an infinite loop, reproduced verbatim by the reviewer. Adding the `offered`
+        // check here gives this pre-check the SAME two axes (mode + allowTools) the `!offered`
+        // guard just below already has, so an off-list deferred tool now falls through to THAT
+        // guard instead and gets the terminal "is not available in this session" — no advice that
+        // sends the model back into a loop. `offered` is declared once above (this same function,
+        // `const offered = (name) => !excludeTools?.has(name) && (!allowTools || allowTools.has(name))`)
+        // — reused verbatim, not reimplemented.
+        if (offered(call.name) && this.cfg.registry.isDeferredBuiltin(call.name, tsEnabled, resolveMode(meta)) && !effectiveLoaded.has(call.name)) {
           outcome = { output: `tool ${call.name} is deferred — load its schema via ToolSearch first`, isError: true };
           this.emit(sessionId, { type: "tool_result", sessionId, threadId, callId: call.callId, output: outcome.output, isError: outcome.isError });
           input.push({ type: "tool_result", callId: call.callId, output: outcome.output, isError: outcome.isError });
@@ -3201,11 +3410,22 @@ export class AgentEngine {
         // the permission rules allow it silently, so executeCall's guard alone was enough for it.
         // Verified by probe in the closing review; the three above are the ones that really carded.)
         //
-        // Placed AFTER the deferred-builtin guard directly above, deliberately: for a tool that is
-        // BOTH off-list and deferred-unloaded (e.g. `lsp` in a chat session), "load its schema via
-        // ToolSearch first" stays the answer — the pre-existing message, pinned by
-        // test/agent/chat-mode-allowlist.test.ts. This guard owns the calls that guard doesn't:
-        // non-deferred names (spawn_agent), and every name when ToolSearch is disabled in settings.
+        // Placed AFTER the deferred-builtin guard directly above. Whole-branch review FIX 2
+        // INVERTED which guard wins for a tool that is BOTH off-list and deferred-unloaded (e.g.
+        // `lsp` in a chat session, `enter_worktree` in a chat session): the deferred-builtin guard
+        // used to fire unconditionally for such a tool, so "load its schema via ToolSearch first"
+        // was the answer (pinned, at the time, by test/agent/chat-mode-allowlist.test.ts and
+        // test/agent/chat-mode-bridge-bypass.test.ts). That ordering was disproven by evidence: for
+        // a mode that can never load the tool (chat has no ToolSearch) or whose ToolSearch reports
+        // it as no-match (an off-list tool in dispatch), that advice is unfollowable — the model's
+        // only next move is to call the tool again, hitting the SAME deferred-builtin guard again,
+        // an infinite loop reproduced verbatim against `web_search` in dispatch. The deferred-builtin
+        // guard is now ALSO `offered(call.name) &&`-gated, so it no longer fires at all for an
+        // off-list tool — such a call falls through to THIS guard instead and gets the terminal "is
+        // not available in this session" message (both pins above were updated to match). This guard
+        // owns every call the deferred-builtin guard doesn't: non-deferred off-list names
+        // (spawn_agent), any off-list name when ToolSearch is disabled in settings, and — as of FIX
+        // 2 — an off-list tool that IS deferred but was never offered to begin with.
         //
         // Skipping the pre-tool hook (below) for a refused call is the same contract the deferral
         // guard above already has, and matches `hookBlockedCallIds`' own rule: hooks never observe a
@@ -4114,7 +4334,10 @@ export class AgentEngine {
     const childMeta = { ...meta, approvalPolicy: childPolicy };
     const childId = "wfa_" + randomUUID().slice(0, 8); // same minting shape as the spawn bridge (engine.ts: "th_" + randomUUID().slice(0,8))
     const childLoaded = new Set<string>();
-    const instructionsFull = this.buildInstructionsFull(def.instructions, childCwd, childLoaded, childPolicy, sessionId);
+    // D1-T2: `mode: "code"` — literal. Workflow is never offered to chat/dispatch
+    // (workflowToolAllowed's own doc comment), so a workflow-spawned agent only ever exists inside
+    // a CODE session.
+    const instructionsFull = this.buildInstructionsFull(def.instructions, childCwd, childLoaded, childPolicy, sessionId, "code");
     // B1-T3 fix-round-1 (R-T2 fix-round-1: registry.namesNotForMode("code") replaces the old
     // CHAT_ONLY_TOOLS constant — see task-2-report.md, "Fix round 1") spread in alongside ask_user
     // — a workflow-spawned agent only ever exists inside a CODE session (Workflow is never offered
@@ -4908,12 +5131,27 @@ export class AgentEngine {
       deferThreshold: this.toolSearchThreshold(cwd),
       deferExternals: this.toolSearchDeferExternals(cwd),
       builtinDeferral: this.toolSearchEnabled(cwd),
+      // D1-T2: `mode: resolveMode(meta)` — `meta` was already re-read fresh above (this method's
+      // own `const meta = this.cfg.store.meta(sessionId)`, used for the ask-timeout branch). Without
+      // this, execute()'s own isDeferred check would fail-closed to "deferred" for every mode
+      // (registry.ts's doc comment), rejecting a call specs()/isDeferredBuiltin() upstream in THIS
+      // SAME round already decided was immediate — the three seams would disagree mid-turn.
+      mode: resolveMode(meta),
       ask,
       taskEvent,
       notify,
       computerUse: cuNow,
       attachImage,
       visionCapable,
+      // D1-T3: forwarded straight from THIS call's own `excludeTools`/`allowTools` params (runThread's
+      // opts, threaded through every call site in this file — see this method's own doc comment on
+      // them, just above). Additive only: absent for every caller that doesn't pass them, so this is
+      // byte-identical to before for a direct registry.execute() call (e.g. a unit test). ToolSearch
+      // (toolsearch.ts) is the one consumer today — it filters what it advertises/loads by these, so
+      // it can never offer a tool this thread's own early rejection (just above, `excludeTools?.has
+      // (call.name) || (allowTools && !allowTools.has(call.name))`) would refuse the very next round.
+      excludeTools,
+      allowTools,
     });
     // Auto-diagnostics after edit (lsp-consolidation T3): ONLY a SUCCESSFUL write/edit/
     // notebook_edit ever reaches this — `result.isError` gates it BEFORE any LSP call, so a

@@ -142,11 +142,22 @@ describe("mode toolsets are unchanged by the derivation refactor", () => {
   // instead of one reviewable literal (the old DISPATCH_ALLOW_TOOLS/CHAT_ALLOW_TOOLS constants).
   // These two pin the EXACT set this harness's full production surface resolves to, so a stray
   // `modes` entry on ANY tool file trips an exact-equality failure here, not just a subset check.
-  test("dispatch is offered EXACTLY this set (R-T3: web_fetch/web_search dropped, Search kept)", async () => {
+  // D1-T2: "ask_user" -> "AskQuestion" — ask-user.ts drops "dispatch" from its own `modes`;
+  // ask-question.ts (previously chat-only) gains it, deferred there (immediate in chat). `offered()`
+  // here is the union of specs()-visible names AND the deferred-bullet list, so AskQuestion (and
+  // bash/task_stop/computer's own now-dispatch-deferred status) still counts as "offered" — this
+  // pin is about ELIGIBILITY moving from ask_user to AskQuestion, not about anything dropping off
+  // dispatch's toolset. push_notification's presence is unaffected (already deferred:true, untouched
+  // by this task). (Fix round 1, optional: send_message was never registered in this file's own
+  // `harness()` — this comment previously named it here in error. The census test
+  // (mode-toolset-census.test.ts), which boots the real daemon/registry, is the one that actually
+  // covers send_message's dispatch eligibility — by design, per this file's own R-T3 doc comment
+  // above about not hand-mirroring every register* call.)
+  test("dispatch is offered EXACTLY this set (R-T3: web_fetch/web_search dropped, Search kept; D1-T2: AskQuestion replaces ask_user)", async () => {
     const h = harness({ mode: "dispatch" });
     await h.turn("hi");
     expect(h.offered().sort()).toEqual([
-      "Search", "ToolSearch", "ask_user", "bash", "computer", "glob", "grep", "ls",
+      "Search", "ToolSearch", "AskQuestion", "bash", "computer", "glob", "grep", "ls",
       "push_notification", "read", "session_spawn", "task_stop",
     ].sort());
   });

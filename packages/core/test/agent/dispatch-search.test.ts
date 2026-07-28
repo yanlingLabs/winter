@@ -150,3 +150,31 @@ describe("dispatch's web tools (R-T3)", () => {
     expect(result.output).toContain("https://example.com");
   });
 });
+
+// Whole-branch review FIX 2: `web_search` is registered `deferred: true` (web.ts) but `modes:
+// ["code"]` — dispatch was never OFFERED it at all (this file's own tests above pin that). Before
+// this fix, engine.ts's deferred-builtin pre-check was mode-aware but allowTools-BLIND: it fired
+// for web_search in dispatch regardless of eligibility, answering "tool web_search is deferred —
+// load its schema via ToolSearch first" — sending the model to ToolSearch, which correctly reports
+// no match (it IS allowTools-aware), and back to calling web_search again: an infinite loop, the
+// reviewer's own reproduction. The fix adds `offered(call.name) &&` to that pre-check so an
+// off-list deferred tool falls through to the terminal `!offered` guard instead.
+describe("whole-branch review FIX 2: an off-list deferred tool terminates instead of looping", () => {
+  test("web_search call in dispatch -> terminal 'not available' (not the deferral advice); ToolSearch(select:web_search) still returns the no-match branch", async () => {
+    const h = setup([
+      call("w1", "web_search", { query: "anything" }),
+      call("t1", "ToolSearch", { query: "select:web_search" }),
+      text("noted"),
+    ]);
+    await h.turn();
+
+    const webResult = toolResultFor(h.events, "w1");
+    expect(webResult.isError).toBe(true);
+    expect(webResult.output).toBe("tool web_search is not available in this session");
+    expect(webResult.output).not.toContain("is deferred"); // the old advisory that drove the loop
+
+    const tsResult = toolResultFor(h.events, "t1");
+    expect(tsResult.isError).toBeFalsy();
+    expect(tsResult.output).toContain('no deferred tools matched "select:web_search"');
+  });
+});

@@ -30,7 +30,11 @@ export function registerAskUserTool(r: ToolRegistry): void {
       "If you recommend an option, put it first and append ' (Recommended)' to its label. Use multiSelect: true when choices are not mutually exclusive. " +
       "The user's answers are returned; if no one answers in time you'll be told to proceed with your best judgment.",
     args: AskUserArgs,
-    modes: ["code", "dispatch"], // R-T2: was DISPATCH_ALLOW_TOOLS's literal membership
+    // D1-T2: dispatch drops ask_user in favor of AskQuestion (ask-question.ts), its own simplified
+    // question tool (no header chip, no per-option description, no preview, no notes, no
+    // multi-select — the header chip in particular is what a header-less AskQuestion card sheds).
+    // code keeps ask_user unchanged.
+    modes: ["code"], // R-T2 base was ["code","dispatch"] (DISPATCH_ALLOW_TOOLS's membership); D1-T2 drops dispatch
     async run({ questions }: z.infer<typeof AskUserArgs>, ctx) {
       if (!ctx.ask) return NO_ANSWER();
       const res = await ctx.ask(questions);
