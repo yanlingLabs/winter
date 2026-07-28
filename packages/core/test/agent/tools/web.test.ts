@@ -92,6 +92,72 @@ describe("htmlToText", () => {
   });
 });
 
+// --- Critical (whole-branch review fix-round-2): htmlToText runs UNCONDITIONALLY on every HTML
+// fetch (web_fetch AND, via fetchCleanPage, ReadPage/FetchPage) — unlike page-core.ts's
+// extractLinks (only reached when a page's LINKS are extracted), this is the DOMINANT cost the
+// re-review measured (256KB: 389.1ms extractLinks-alone vs 389.0ms full pipeline — ~100%
+// attributable to htmlToText). Its script/style/head/heading/anchor regexes had the IDENTICAL
+// lazy-scan-to-a-required-token shape extractLinks was already fixed for (page-core.ts's own
+// LINK_OPEN_RE/LINK_CLOSE_RE comment) — quadratic on many opens with a distant/absent close. Fixed
+// the same way: two single-pass regexes (opens, closes) paired by a monotonic pointer, per tag
+// shape (`replacePairedTag` for script/style/head/anchor; `convertHeadings` for the h1-h6
+// backreference case, which needs a per-LEVEL close list since `<h2>` only pairs with `</h2>`). ---
+describe("htmlToText: linear-time scanning (Critical fix, fix-round-2 — the SAME shape as page-core.ts's extractLinks fix, applied here too)", () => {
+  function unclosed(unit: string, totalBytes: number): string {
+    const reps = Math.ceil(totalBytes / unit.length);
+    return unit.repeat(reps);
+  }
+
+  const shapes: Array<{ name: string; unit: string }> = [
+    { name: "script", unit: '<script type="text/x"> ' },
+    { name: "style", unit: '<style type="text/x"> ' },
+    { name: "head", unit: "<head> " },
+    { name: "h1 (backreference case)", unit: '<h1 class="x">heading text ' },
+    { name: "a (the same shape extractLinks already fixed)", unit: '<a href="https://example.com/x">link text ' },
+  ];
+
+  for (const { name, unit } of shapes) {
+    test(`many unclosed <${name}> opens, no closing tag anywhere: a doubling series (128KB->1MB) stays bounded, not ~4x per doubling`, () => {
+      const sizesKb = [128, 256, 512, 1024];
+      const timings = sizesKb.map((kb) => {
+        const html = unclosed(unit, kb * 1024);
+        const start = performance.now();
+        htmlToText(html);
+        return performance.now() - start;
+      });
+      // Pre-fix this series was ~130/510/2070/8360ms per shape (measured directly on this branch
+      // before the fix, each step ~4x the last — clean O(n^2), matching the reviewer's own
+      // methodology). Post-fix every step must stay small and bounded — an absolute bound, not a
+      // ratio (CI timing noise): even the LARGEST (1MB) must complete in well under what the
+      // SMALLEST (128KB) took pre-fix.
+      for (const t of timings) expect(t).toBeLessThan(100);
+    });
+  }
+
+  test("the 3MB pathological case (no closing tags at all) completes in a small bounded time (was ~77,000ms pre-fix, measured directly)", () => {
+    const html = unclosed('<script type="text/x"> ', 3 * 1024 * 1024);
+    const start = performance.now();
+    htmlToText(html);
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  test("many WELL-FORMED, properly-closed tags of every shape (the realistic case) still extract correctly and quickly", () => {
+    const html = Array.from(
+      { length: 2000 },
+      (_, i) => `<h2>Heading ${i}</h2><p>Paragraph ${i} with a <a href="https://example.com/${i}">link ${i}</a>.</p>`,
+    ).join("");
+    const start = performance.now();
+    const result = htmlToText(html);
+    const elapsed = performance.now() - start;
+    expect(result).toContain("## Heading 0");
+    expect(result).toContain("link 0 (https://example.com/0)");
+    expect(result).toContain("## Heading 1999");
+    expect(result).toContain("link 1999 (https://example.com/1999)");
+    expect(elapsed).toBeLessThan(200);
+  });
+});
+
 // --- followRedirects: fake fetch, no live network ---------------------------------------------
 
 function fakeFetch(script: Array<{ status: number; location?: string; body?: string; contentType?: string }>): typeof fetch {
