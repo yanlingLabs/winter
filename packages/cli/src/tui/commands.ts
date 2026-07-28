@@ -17,6 +17,7 @@ import { parseOutputStyleArgs } from "../output-style-cli";
 import { formatElapsed, formatTokens } from "../task-display";
 import { formatRoutineLine } from "../routines-cli";
 import { formatMemoryList } from "../memory-cli";
+import { filterCodeSessions } from "../session-mode";
 import type { NormaClient } from "../client";
 
 export interface CommandCtx {
@@ -167,14 +168,24 @@ async function runQuota(ctx: CommandCtx): Promise<void> {
  *  `title` field, so main.ts's `s.title` read is only reachable via its `as any` cast on the RPC
  *  result; the typed client here has no such field to mirror. Also adds a "(no sessions)"
  *  fallback for the empty list, which the route (an unconditional for-loop) leaves silently blank
- *  — a bare empty note would be a poor one-note summary. */
+ *  — a bare empty note would be a poor one-note summary.
+ *
+ *  Plan-immunity Task 2 (mode×surface matrix): the TUI is CODE-ONLY, and /sessions is the
+ *  interactive resume PICKER — it feeds directly into resuming INTO this same TUI, which can only
+ *  ever attach to a code session — so this HIDES chat/dispatch/cowork rows entirely
+ *  (`filterCodeSessions`, session-mode.ts). Contrast `norma sessions` (main.ts), a plain inventory
+ *  listing that MARKS non-code rows instead of hiding them — see that module's file doc for the
+ *  full picker-vs-inventory distinction. */
 async function runSessions(ctx: CommandCtx): Promise<void> {
   // listSessions()'s return type is untyped (client.ts's private `validated()` helper returns
   // `any`, same reason main.ts's own `sessions` route casts `as any`) — annotate the destructure
   // explicitly so the .map below isn't an implicit-any under this package's strict tsconfig.
-  const { sessions } = (await ctx.client.listSessions()) as { sessions: Array<{ sessionId: string; scope: string; lastSeq: number }> };
-  if (sessions.length === 0) { ctx.appendNote("(no sessions)"); return; }
-  ctx.appendNote(sessions.map((s) => `${s.sessionId} ${s.scope} · ${s.lastSeq} events`).join("\n"));
+  // Widened to carry `mode` (SessionListResult always has it) — a narrower type here would silently
+  // drop the field the code-only filter below depends on.
+  const { sessions } = (await ctx.client.listSessions()) as { sessions: Array<{ sessionId: string; scope: string; lastSeq: number; mode?: string }> };
+  const codeSessions = filterCodeSessions(sessions);
+  if (codeSessions.length === 0) { ctx.appendNote("(no sessions)"); return; }
+  ctx.appendNote(codeSessions.map((s) => `${s.sessionId} ${s.scope} · ${s.lastSeq} events`).join("\n"));
 }
 
 /** Mirrors main.ts `case "add-dir"` (~:960): `client.addDir(sessionId, path, persist)` — sessionId

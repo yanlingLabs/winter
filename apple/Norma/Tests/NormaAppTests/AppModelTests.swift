@@ -487,4 +487,108 @@ final class AppModelTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertEqual(t.sent.count, 2, "hello + list only, no attach when no dispatch session exists: \(t.sent)")
     }
+
+    // MARK: - Plan-immunity (2026-07-28 design) Task 2 — T1 review's REAL hole: `focusSession(_:)`
+    // (the morph window's sidebar plain-click handler) and `refocus(onto:)` itself had NO mode gate
+    // at all — only `focusNewestSession()` filtered to dispatch above. `refocus` now refuses any
+    // session the (cached) `directory` already knows is non-dispatch; see its own doc comment for
+    // why "not found" is deliberately NOT refused.
+
+    /// Before this fix, clicking a CHAT row rendered in the orb's own sidebar would refocus the orb
+    /// straight onto it (same "shown-but-broken" shape the plan/policy immunity slice exists to
+    /// close — a chat window's policy picker firing rejected RPCs, just reached from the OTHER
+    /// direction: the orb summoning a session it can never talk to correctly). The chat row is
+    /// loaded into `directory.rows` via a REAL broadcast → refresh → relist round trip, same
+    /// mechanism `testSessionCreatedChatModeNeverRefocusesButDirectorySeesIt` above uses — proving
+    /// the gate sees exactly what a real sidebar click would have rendered from.
+    func testFocusSessionRefusesAKnownNonDispatchTarget() async throws {
+        let t = AppScriptedTransport()
+        let model = AppModel(makeTransport: { t }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        await answerHandshake(t, sessions: #"[{"sessionId":"s_a","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]"#)
+        await waitUntilSent(t, 3)
+        let attachA = lineJSON(t.sent[2])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attachA["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        await waitUntil { model.focusedSessionId == "s_a" }
+
+        // Load a real chat row into the directory (mode:"chat" never auto-refocuses — see the
+        // sessionCreated tests above — so focus is still on s_a at this point).
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session_created","seq":1,"sessionId":"s_chat","ts":5,"scope":"global","mode":"chat"}}"#)
+        let relist = await waitUntilMethod(t, "session.list", occurrence: 2)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(relist["id"] as! Int),"result":{"sessions":[{"sessionId":"s_a","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"},{"sessionId":"s_chat","scope":"global","createdAt":5,"lastSeq":0,"mode":"chat"}]}}"#)
+        await waitUntil { model.directory.rows.contains { $0.sessionId == "s_chat" } }
+
+        // The morph window's sidebar plain click — must be refused.
+        await model.focusSession("s_chat")
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(model.focusedSessionId, "s_a", "focusSession must refuse a known chat session")
+        let attaches = t.sent.filter { lineJSON($0)["method"] as? String == "session.attach" }
+        XCTAssertEqual(attaches.count, 1, "no attach for the refused chat session: \(t.sent)")
+    }
+
+    /// CONTROL: the same sidebar click, onto a KNOWN DISPATCH row — must actually refocus. Proves
+    /// the gate above isn't a blanket refusal of every `focusSession` call. Uses `session_titled`
+    /// (not `session_created`) to load the second row into the directory — titled events never
+    /// auto-refocus regardless of mode, so this test's OWN `focusSession` call is what must do it.
+    func testFocusSessionAllowsAKnownDispatchTarget() async throws {
+        let t = AppScriptedTransport()
+        let model = AppModel(makeTransport: { t }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        // Two dispatch rows from the start; s_a (newest) wins the initial auto-focus.
+        await answerHandshake(t, sessions: #"[{"sessionId":"s_a","scope":"global","createdAt":5,"lastSeq":0,"mode":"dispatch"},{"sessionId":"s_b","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]"#)
+        let attachA = await waitUntilMethod(t, "session.attach")
+        XCTAssertEqual((attachA["params"] as? [String: Any])?["sessionId"] as? String, "s_a")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attachA["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        await waitUntil { model.focusedSessionId == "s_a" }
+
+        // Load BOTH rows into the directory via a neutral (non-refocusing) broadcast.
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session_titled","seq":1,"sessionId":"s_b","ts":5,"threadId":"main","title":"B"}}"#)
+        let relist = await waitUntilMethod(t, "session.list", occurrence: 2)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(relist["id"] as! Int),"result":{"sessions":[{"sessionId":"s_a","scope":"global","createdAt":5,"lastSeq":0,"mode":"dispatch"},{"sessionId":"s_b","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch","title":"B"}]}}"#)
+        await waitUntil { model.directory.rows.contains { $0.sessionId == "s_b" } }
+
+        // `focusSession` awaits the attach RPC to COMPLETION (including the failure-path rollback
+        // in `refocus`'s catch) — it must run CONCURRENTLY with answering that RPC below, same
+        // `async let` shape `testSendOrSteerCreatesSessionWhenNoneAndSends` already uses, or the
+        // awaited call would block until an internal timeout, then roll back to the still-attached
+        // s_a (a real bug this exact mistake would silently mask as "the gate refuses everything").
+        async let focused: Void = model.focusSession("s_b")
+        let attachB = await waitUntilMethod(t, "session.attach", occurrence: 2)
+        XCTAssertEqual((attachB["params"] as? [String: Any])?["sessionId"] as? String, "s_b")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attachB["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        await focused
+        XCTAssertEqual(model.focusedSessionId, "s_b", "focusSession must still allow a known dispatch target")
+    }
+
+    /// The gate's "not found" leniency is load-bearing, not incidental: `ensureFocusedSession()`'s
+    /// real `session.dispatch` create must still refocus onto the fresh session even though it
+    /// cannot possibly be in `directory.rows` yet (the directory's own refresh is a separate,
+    /// unawaited round trip — `SessionDirectory.handle`'s `Task { refresh() }`). A "fail closed on
+    /// not-found" gate would wrongly block this, the orb's single most common path.
+    func testEnsureFocusedSessionRefocusesOntoAFreshDispatchSessionNotYetInTheDirectory() async throws {
+        let t = AppScriptedTransport()
+        let model = AppModel(makeTransport: { t }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+        await answerHandshake(t, sessions: "[]")
+        await waitUntil { model.session.state.status == .idle }
+        XCTAssertTrue(model.directory.rows.isEmpty, "nothing loaded into the directory yet")
+
+        async let sid = model.ensureFocusedSession()
+        let create = await waitUntilMethod(t, "session.dispatch")
+        // Real daemon wire order: broadcast BEFORE the RPC response — "s_new" is NOT yet in
+        // `directory.rows` at this point (its own relist is a separate, unawaited round trip).
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session_created","seq":1,"sessionId":"s_new","ts":0,"scope":"global","mode":"dispatch"}}"#)
+        let attach = await waitUntilMethod(t, "session.attach")
+        XCTAssertEqual((attach["params"] as? [String: Any])?["sessionId"] as? String, "s_new")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_new","created":true}}"#)
+        let result = await sid
+        XCTAssertEqual(result, "s_new")
+        XCTAssertEqual(model.focusedSessionId, "s_new")
+    }
 }

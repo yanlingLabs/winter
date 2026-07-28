@@ -366,6 +366,11 @@ final class AppModel: ObservableObject {
     /// already uses below, just parameterized to an explicit id instead of always picking the
     /// newest. `refocus(onto:)` is already idempotent (a no-op if already focused+attached there),
     /// so re-selecting the current row is safe.
+    ///
+    /// orb-scope fix (plan-immunity Task 2): this is the one caller that hands `refocus` an
+    /// ATTACKER-CHOSEN id (any row visible in the sidebar) rather than one this file already knows
+    /// is dispatch — `refocus`'s own dispatch-only gate (see its doc comment) is what actually
+    /// refuses a non-dispatch target; this wrapper stays a thin, obviously-correct one-liner.
     func focusSession(_ sessionId: String) async {
         await refocus(onto: sessionId)
     }
@@ -383,6 +388,32 @@ final class AppModel: ObservableObject {
     private func refocus(onto sessionId: String) async {
         // Idempotent: already focused AND attached to this session — nothing to do.
         if sessionId == focusedSessionId, await client.attachedSession == sessionId { return }
+        // orb-scope fix (plan-immunity Task 2 — T1 review's REAL hole): `refocus` is the ONE place
+        // `focusedSessionId` is ever assigned, so gating HERE (not only at each call site) closes
+        // every path, including `focusSession(_:)` below, which had NO mode gate at all before this
+        // fix — only `focusNewestSession()` filtered to dispatch. Positive match, same "== dispatch,
+        // fails closed on any other mode" shape as that filter and the fallback below.
+        //
+        // Checked against `directory`'s CACHED rows, never a fresh `listSessions()` RPC — that
+        // would add a round trip ahead of every attach, and this file's own test suite pins several
+        // attaches to a fixed wire position. "Not found" is deliberately NOT refused: every trusted
+        // internal caller (`ensureFocusedSession`/`startFreshSession`'s own `session.dispatch`
+        // create, `focusNewestSession`'s freshly-filtered list, the `sessionCreated` handler's own
+        // already-mode-checked broadcast) can reach here for a session that IS genuinely dispatch
+        // before the directory's own async refresh has caught up — `SessionDirectory.handle` kicks
+        // an UNAWAITED `Task { refresh() }`, so a split second after creation the new session is
+        // real but not yet cached. Refusing on "not found" would wrongly block the orb's own
+        // ordinary summon flow (see `testEnsureFocusedSessionRefocusesOntoAFreshDispatchSessionNotYetInTheDirectory`).
+        // Only a row that's actually LOADED with some OTHER mode is refused — `focusSession`'s
+        // sidebar click is the one caller that can supply an attacker-chosen id, and (after the
+        // orb sidebar's own row filter, `AppDelegate.isOrbSidebarRow`) it can only ever pass an id
+        // that's already in `directory.rows`, so the "not found" leniency is unreachable from
+        // there in practice — same precedent as `DetachedWindowController.isChatSession`'s own
+        // documented reasoning for its "false when not found" default.
+        if let row = directory.rows.first(where: { $0.sessionId == sessionId }), row.mode != "dispatch" {
+            OrbDebug.log("refocus: refusing non-dispatch session \(sessionId.prefix(10)) (mode: \(row.mode ?? "code"))")
+            return
+        }
         session.reset()
         focusedSessionId = sessionId
         // Full replay from 0 rebuilds tasks/pending state through the reducer.

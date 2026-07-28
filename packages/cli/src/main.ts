@@ -6,6 +6,7 @@ import type { Settings } from "@norma/core";
 import { METHODS, type ApprovalPolicy, type Task } from "@norma/protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
 import { NormaClient } from "./client";
+import { checkCodeSession, filterCodeSessions, sessionModeMarker } from "./session-mode";
 import { applyEvent, isStalled, type WatchdogState } from "./watchdog";
 import { streamAction } from "./stream-state";
 import { updateSubagents, type CliSubagent } from "./subagent-state";
@@ -807,8 +808,14 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
   const cwd = process.cwd();
   if (existingSessionId) {
     sessionId = existingSessionId;
-    const info = (await c.listSessions()).sessions.find((r: any) => r.sessionId === existingSessionId);
-    if (!info) { console.error(`no such session: ${existingSessionId}`); c.close(); process.exit(1); }
+    // Plan-immunity Task 2: this is the CLI's one attach/resume choke point (both the `resume <id>`
+    // chat route and the resumeOneShot route flow through here) — CLIENT-side mode gate, same
+    // reasoning as `case "send"`/`case "watch"` (product-surface rule, not a security boundary;
+    // session-mode.ts's file doc). The not-found message stays byte-identical to before.
+    const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; scope: string; lastSeq: number; mode?: string }> };
+    const check = checkCodeSession(sessions, existingSessionId);
+    if (!check.ok) { console.error(check.message); c.close(); process.exit(1); }
+    const info = check.row;
     console.log(`${DIM}↻ resuming ${existingSessionId} — ${info.scope}, ${info.lastSeq} events${RESET}`);
     // Attach from the tip (info.lastSeq) on every route EXCEPT the Ink resume route: attaching from
     // 0 there replays the whole session so `<App>` can render the full transcript back (T5), with a
@@ -1037,9 +1044,14 @@ if (import.meta.main) {
     break;
   }
   case "sessions": {
+    // Plan-immunity Task 2 (mode×surface matrix): this is a plain INVENTORY, not a picker — it
+    // stays a truthful listing of every session that exists, chat/dispatch/cowork included, just
+    // visibly MARKED as not-for-here via `sessionModeMarker` rather than hidden (contrast the
+    // TUI's `/sessions`, and `resume`'s no-id picker below, which HIDE non-code rows — see
+    // session-mode.ts's file doc for why the two surfaces differ).
     const c = await connect("cli-sessions");
     const { sessions } = (await c.listSessions()) as any;
-    for (const s of sessions) console.log(`${AQUA}${s.sessionId}${RESET} ${DIM}${s.scope} · ${s.lastSeq} events${process.stdout.isTTY && s.title ? ` — ${s.title}` : ""}${RESET}`);
+    for (const s of sessions) console.log(`${AQUA}${s.sessionId}${RESET} ${DIM}${s.scope} · ${s.lastSeq} events${process.stdout.isTTY && s.title ? ` — ${s.title}` : ""}${RESET}${sessionModeMarker(s.mode)}`);
     c.close();
     break;
   }
@@ -1068,7 +1080,21 @@ if (import.meta.main) {
     const text = args.slice(1).join(" ");
     if (!target || !text) { console.error("usage: norma send <sessionId|new> <text…>"); process.exit(1); }
     const c = await connect("cli-send");
-    const sessionId = target === "new" ? (await c.createSession("global")).sessionId : target;
+    let sessionId: string;
+    if (target === "new") {
+      // `createSession` here passes no `mode` — the daemon defaults that to code (absent = code,
+      // the R-slice convention), so `send new` always creates a code session. No gate needed.
+      sessionId = (await c.createSession("global")).sessionId;
+    } else {
+      // Plan-immunity Task 2: CLIENT-side mode gate (product-surface rule among same-user local
+      // clients, NOT a security boundary — the daemon-side gate is reserved for the remote role;
+      // see session-mode.ts's file doc). `attach`/`send` don't otherwise learn `mode`, so look the
+      // target up via session.list first.
+      const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
+      const check = checkCodeSession(sessions, target);
+      if (!check.ok) { console.error(check.message); c.close(); process.exit(1); }
+      sessionId = target;
+    }
     await c.attach(sessionId);
     await c.send(sessionId, text);
     console.log(`${AQUA}sent to ${sessionId}${RESET}`);
@@ -1463,6 +1489,11 @@ if (import.meta.main) {
       if (e.type === "user_message") console.log(`${AQUA}❯${RESET} [${e.clientName}] ${e.text}`);
       else console.log(`${DIM}· ${e.type}${"clientName" in e ? ` (${e.clientName})` : ""}${RESET}`);
     });
+    // Plan-immunity Task 2: CLIENT-side mode gate, same reasoning as `case "send"` above (product-
+    // surface rule, not a security boundary — session-mode.ts's file doc).
+    const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
+    const check = checkCodeSession(sessions, sessionId);
+    if (!check.ok) { console.error(check.message); c.close(); process.exit(1); }
     await c.attach(sessionId, 0);
     console.log(`${DIM}watching ${sessionId} — ctrl-c to stop${RESET}`);
     await new Promise(() => {}); // run until interrupted
@@ -1757,9 +1788,15 @@ if (import.meta.main) {
   }
   case "resume": {
     const sid = process.argv[3];
-    if (!sid) { // picker: list resumable sessions
+    if (!sid) {
+      // picker: list resumable sessions. Plan-immunity Task 2: this is a PICKER (same shape as the
+      // TUI's `/sessions` — its own inline comment is the same phrase), not the plain `norma
+      // sessions` inventory, so it HIDES non-code rows (`filterCodeSessions`) rather than marking
+      // them — showing a row here that `resume <id>` would immediately refuse below is the
+      // shown-but-broken shape this slice keeps closing. See session-mode.ts's file doc.
       const c = await connect("cli-resume");
-      const rows = (await c.listSessions()).sessions;
+      const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; scope: string; lastSeq: number; title?: string; mode?: string }> };
+      const rows = filterCodeSessions(sessions);
       if (!rows.length) console.log("no sessions yet");
       for (const r of rows) console.log(`${r.sessionId}  ${DIM}${r.scope}  ${r.lastSeq} events${process.stdout.isTTY && r.title ? ` — ${r.title}` : ""}${RESET}`);
       c.close(); process.exit(0);

@@ -10,12 +10,25 @@ import SwiftUI
 /// (a closure, not a captured value — the focused/pinned session changes over the window's life);
 /// `onSelect` switches in place, `onOpenDetached` spawns a new detached window for that id, and
 /// `onNewSession` creates+focuses a fresh session.
+///
+/// `rowFilter` (plan-immunity Task 2, mode×surface matrix): `directory` is SHARED — the orb's own
+/// `SidebarWiring` and a `DetachedWindowController`'s each point at a DIFFERENT `SessionDirectory`
+/// instance, but both instances carry every mode. The orb is a dispatch-only surface (it can never
+/// focus a chat/cowork/code session — see `AppModel.refocus`'s own gate), so showing those rows in
+/// ITS sidebar at all is the shown-but-broken shape this slice keeps closing; a detached window has
+/// no such restriction and must keep showing every mode. Rather than filtering inside
+/// `SessionDirectory` itself (shared — would wrongly also filter every detached window's sidebar),
+/// this is the orb's own CONSUMPTION-POINT filter: default `{ _ in true }` reproduces today's exact
+/// behavior for every pre-existing caller (both detached-window construction sites), and
+/// `AppDelegate.boot()`'s own `orb.sidebars` is the one caller that overrides it
+/// (`AppDelegate.isOrbSidebarRow`).
 struct SidebarWiring {
     let directory: SessionDirectory
     let currentSessionId: () -> String?
     let onSelect: (String) -> Void
     let onOpenDetached: (String) -> Void
     let onNewSession: () -> Void
+    var rowFilter: (SessionSummary) -> Bool = { _ in true }
 }
 
 /// Pure placement decision behind the relocation gates: the tasks/subagents "work" content is
