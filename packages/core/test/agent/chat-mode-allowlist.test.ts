@@ -250,6 +250,6 @@ describe("CM branch review Important 2: off-list execution is refused, with no s
     // server at all, via either check.
     const lspResult = toolResultFor(events, "l1");
     expect(lspResult.isError).toBe(true);
-    expect(lspResult.output).toBe("tool lsp is deferred — load its schema via ToolSearch first");
+    expect(lspResult.output).toBe("tool lsp is not available in this session");
   });
 });

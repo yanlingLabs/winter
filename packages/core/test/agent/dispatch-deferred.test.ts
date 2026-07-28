@@ -57,14 +57,17 @@ function harness(opts: { mode: "code" | "dispatch" | "chat" }) {
   const registry = new ToolRegistry();
   registerReadTools(registry);
   registerWriteTools(registry);
-  // `deferred: ["dispatch"]` on both — mirrors daemon.ts's OWN real registration for these two
-  // (the reconciled registration-time constructor flag; see task-stop.ts's/computer.ts's own doc
-  // comments), not just the bare `registerXTool(registry)` shape most other harnesses in this repo
-  // use. Without this, this harness would understate production: computer/task_stop would read as
-  // immediate in dispatch here even though the real daemon defers them.
+  // Mirrors daemon.ts's OWN real registration for these two (the reconciled registration-time
+  // constructor flag; see task-stop.ts's/computer.ts's own doc comments), not just the bare
+  // `registerXTool(registry)` shape most other harnesses in this repo use. Without this, this
+  // harness would understate production. computer stays dispatch-only (immediate in code);
+  // task_stop is `["code", "dispatch"]` — deferred in BOTH modes it's eligible for (whole-branch
+  // review FIX 3: daemon.ts's `deferred: ["dispatch"]` silently made task_stop immediate in code,
+  // an unrequested regression from its pre-D1-T2 `deferred: true` — see this file's own task_stop
+  // test below for why `["code","dispatch"]` restores that, not a new narrower behavior).
   registerComputerTool(registry, { deferred: ["dispatch"] });
   registerBashTool(registry);
-  registerTaskStopTool(registry, { deferred: ["dispatch"] });
+  registerTaskStopTool(registry, { deferred: ["code", "dispatch"] });
   registerNotebookTool(registry);
   registerSpawnAgentTool(registry);
   registerSessionSpawnTool(registry);
@@ -204,20 +207,35 @@ describe("D1-T2: dispatch's toolset slims to a deferred set + AskQuestion", () =
     expect(disp.offered()).toContain("ToolSearch");
   });
 
-  // Coverage for the other two of the "five tools deferred" — the brief's own Step 1 tests only
-  // drive bash/AskQuestion through a real turn; this closes the gap for the two tools that reach
-  // their dispatch-only deferral through the RECONCILED registration-time constructor flag
-  // (task-stop.ts/computer.ts) rather than a hardcoded literal, so a regression in THAT plumbing
-  // (e.g. daemon.ts's real call site reverting to `deferred: true`, or the widened type silently
-  // discarding the array) would still be caught here.
-  test("computer and task_stop are immediate in code but deferred in dispatch", async () => {
+  // Coverage for "computer" — it reaches its dispatch-only deferral through the RECONCILED
+  // registration-time constructor flag (computer.ts) rather than a hardcoded literal, so a
+  // regression in THAT plumbing (e.g. daemon.ts's real call site reverting to `deferred: true`, or
+  // the widened type silently discarding the array) would still be caught here.
+  test("computer is immediate in code but deferred in dispatch", async () => {
     const code = await harness({ mode: "code" }); await code.turn("hi");
     const disp = await harness({ mode: "dispatch" }); await disp.turn("hi");
-    for (const name of ["computer", "task_stop"]) {
-      expect(code.offered()).toContain(name);
-      expect(disp.offered()).not.toContain(name);
-      expect(disp.deferredBullets()).toContain(name);
-    }
+    expect(code.offered()).toContain("computer");
+    expect(disp.offered()).not.toContain("computer");
+    expect(disp.deferredBullets()).toContain("computer");
+  });
+
+  // task_stop (whole-branch review FIX 3): D1-T2 narrowed daemon.ts's registration to
+  // `deferred: ["dispatch"]` — immediate in code, deferred only in dispatch — but nobody named the
+  // consequence: the user's request was "deferred on dispatch" (narrowing bash/task_stop/computer/
+  // AskQuestion/send_message's toolset into dispatch), never "make task_stop immediate in code",
+  // and CC parity (this repo's tool surface deliberately tracks Claude Code's shape) has TaskStop
+  // deferred. Restored to `deferred: ["code", "dispatch"]` — deferred in BOTH modes it's eligible
+  // for, matching its pre-D1-T2 `deferred: true` behavior (task_stop's `modes` is exactly
+  // `["code","dispatch"]`, so `true` and `["code","dispatch"]` are equivalent here) rather than a
+  // new, narrower regression. Reads the specs list and the bullets list as DISTINCT assertions per
+  // mode — the exact blindness the reviewer found every prior test guilty of.
+  test("task_stop is deferred in BOTH code and dispatch — the SAME two modes it's eligible for (whole-branch review FIX 3)", async () => {
+    const code = await harness({ mode: "code" }); await code.turn("hi");
+    const disp = await harness({ mode: "dispatch" }); await disp.turn("hi");
+    expect(code.offered()).not.toContain("task_stop");
+    expect(code.deferredBullets()).toContain("task_stop");
+    expect(disp.offered()).not.toContain("task_stop");
+    expect(disp.deferredBullets()).toContain("task_stop");
   });
 
   test("dispatch has AskQuestion, not ask_user", async () => {

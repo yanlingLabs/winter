@@ -653,16 +653,23 @@ export async function startDaemon(opts: {
     // `bgAgents`/`bgRegistry` instances the engine cfg gets below, so a stop here is visible to
     // the engine's own pin/completion-reminder bookkeeping. Unlike spawn_agent/send_message this
     // is a PLAIN TOOL (no engine bridge — see task-stop.ts's own doc comment).
-    // D1-T2: `deferred: ["dispatch"]` — was `true` (deferred like bash_output/registerBackgroundTools
-    // above, in every mode). Narrowed to dispatch-only: task_stop stays immediate in code (CC
-    // parity: one generic stop tool, no separate bash_kill — removed; task_stop's bash-unify path
-    // is now the only way to kill a bg bash task) and now rides ToolSearch deferral ONLY for the
-    // dispatch coordinator, matching bash/computer/AskQuestion/send_message's identical treatment.
+    // D1-T2 originally narrowed this to `deferred: ["dispatch"]` (from `true`, deferred like
+    // bash_output/registerBackgroundTools above, in every mode), which silently made task_stop
+    // IMMEDIATE IN CODE — an unrequested regression nobody named at the time (whole-branch review
+    // FIX 3): the user's request was "deferred on dispatch" (narrowing bash/task_stop/computer/
+    // AskQuestion/send_message's EXISTING toolset into dispatch), never "make task_stop immediate in
+    // code", and CC parity (this repo's tool surface deliberately tracks Claude Code's shape — see
+    // norma-vs-cc-tools.md) has TaskStop deferred: one generic stop tool, no separate bash_kill
+    // (removed; task_stop's bash-unify path is now the only way to kill a bg bash task) — that is
+    // the ORIGINAL CC-parity clause this comment used to (mis)attribute to "stays immediate in
+    // code" instead. Restored to `deferred: ["code", "dispatch"]` — deferred in BOTH modes it's
+    // eligible for (task_stop's own `modes` below is exactly `["code","dispatch"]`), matching its
+    // pre-D1-T2 `deferred: true` behavior exactly rather than the narrower one D1-T2 introduced.
     // Dispatch (Phase 7) Task 5: `dispatch` closes over the `dispatchChildren` binding declared
     // further down (before `new AgentEngine(...)`) — safe (same later-assigned-closure shape as
     // `engine?.transcriptPathFor` a few lines below): this closure is only ever INVOKED at a real
     // task_stop call, long after boot finishes assigning it.
-    registerTaskStopTool(registry, { bgAgents, bgRegistry, deferred: ["dispatch"], dispatch: { stopChild: (caller, id) => dispatchChildren?.stopChild(caller, id) } });
+    registerTaskStopTool(registry, { bgAgents, bgRegistry, deferred: ["code", "dispatch"], dispatch: { stopChild: (caller, id) => dispatchChildren?.stopChild(caller, id) } });
     // phase 5a Task 1: agent_list/agent_output — the read-only "collect your subagents"
     // counterpart to spawn_agent/send_message/task_stop above, same bgAgents instance so what
     // they report is exactly what the engine's own pin/completion bookkeeping sees. `deferred:

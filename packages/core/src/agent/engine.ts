@@ -91,9 +91,16 @@ function isChatOrCowork(meta: { mode?: string }): boolean {
 // array-valued `deferred` fail-closed to DEFERRED in every mode, including code (isDeferred's own
 // doc comment, registry.ts), which would silently shrink a code session's toolset the moment any
 // tool declares one.
+// Whole-branch review (optional): `meta.mode === "cowork"` folds into the "chat" branch — cowork is
+// chat-shaped by design (isChatOrCowork's own grouping, context.ts's `_assistant` bucket earmark),
+// and registry.ts's `Mode` type has no separate "cowork" slot for a per-mode `deferred` seam to
+// resolve against, so "chat" is its correct analogue here, not the "code" fallback it silently fell
+// into before this line. Unreachable today (no session can carry mode:"cowork" yet — SessionStore's
+// own column type), but it's what makes this comment's "narrows it the same way isChatOrCowork
+// already does" claim actually true, rather than true for every value except this one.
 function resolveMode(meta: { mode?: string }): Mode {
   if (meta.mode === "dispatch") return "dispatch";
-  if (meta.mode === "chat") return "chat";
+  if (meta.mode === "chat" || meta.mode === "cowork") return "chat";
   return "code";
 }
 
@@ -1036,12 +1043,31 @@ export class AgentEngine {
       }
       // Dispatch (Phase 7): child turn-end → registry appends child_update + wakes the dispatch session.
       this.cfg.onTurnEnd?.(sessionId);
-      if (this.retriggerPending.delete(sessionId) && !ac.signal.aborted) {
-        // A detached agent finished mid-turn; its task_notification is already persisted. Drain it
-        // now (CC parity: between-turns queue drain) so the model reacts without a user message.
-        // An esc-aborted turn deliberately drops the drain — don't fight the user's interrupt; the
-        // persisted event reaches the model on their next send.
-        void this.runTurn(sessionId).catch((err) => console.error("bg-notification drain failed:", err));
+      // Whole-branch review FIX 1 (Important — data loss): a send_message to THIS session lands in
+      // the window between the terminal branch above (cleanupThreadSteer already ran — and, per
+      // its own doc comment, no longer deletes this session's cross-session queue) and the
+      // `runningTurns.delete` two lines above THIS finally's own start — the sender saw
+      // `isRunning(sessionId) === true` and took the queue-only branch (sendToThread), trusting the
+      // tool_result's "queued ... will see this at its next round" promise. Nothing else ever
+      // drains `threadSteerQueue(sessionId)` unless a turn actually starts for this session, so
+      // check it HERE, unconditionally of why THIS turn ended (end_turn/error/cap/deniedByHuman/
+      // aborted) — combined with the pre-existing bg-notification drain into ONE restart decision,
+      // never two independently-racing `runTurn` calls for the same session (the loser would throw
+      // "turn already running"; a single turn's round-top drain already picks up BOTH reasons
+      // regardless of which one triggered it). Gated the SAME way the bg-notification drain always
+      // has been (`!ac.signal.aborted`): an ESC-aborted turn must not immediately relaunch itself —
+      // the message stays honestly queued (see cleanupThreadSteer's doc comment) and drains at
+      // whatever turn for this session genuinely runs next, exactly like a dropped bg-notification
+      // drain reaches the model on the user's own next send. The recursive `this.runTurn(sessionId)`
+      // call (not a bespoke drain path) means this SAME guarantee applies to the follow-up turn too,
+      // as many times as it takes.
+      const hadBgNotification = this.retriggerPending.delete(sessionId);
+      const hasStrandedMessage = (this.threadSteerQueue.get(sessionId)?.length ?? 0) > 0;
+      if ((hadBgNotification || hasStrandedMessage) && !ac.signal.aborted) {
+        // A detached agent finished mid-turn (its task_notification is already persisted) and/or a
+        // cross-session message is queued and undrained. Drain both now (CC parity: between-turns
+        // queue drain) so the model reacts without a user message.
+        void this.runTurn(sessionId).catch((err) => console.error("bg-notification/message drain failed:", err));
       }
     }
   }
@@ -2190,11 +2216,22 @@ export class AgentEngine {
     // when the SAME threadId is later resumed (resume reuses the threadId; its round-top drain
     // would otherwise pick up the stale entry). Called before EVERY terminal return below (the four
     // returns: error, end_turn/aborted, deniedByHuman, cap).
-    // D1-T4: MAIN now ALSO populates threadSteerQueue — keyed by its OWN sessionId, not a thread
-    // id (see the send_message→session bridge below, and the round-top drain's MAIN branch) — so
-    // this must clean up THAT key for a MAIN thread, not stay a no-op. Session ids (`s_...`) and
-    // subagent thread ids (`th_...`) are disjoint namespaces, so the two never collide.
-    const cleanupThreadSteer = () => { this.threadSteerQueue.delete(threadId === MAIN_THREAD ? sessionId : threadId); };
+    // D1-T4 originally widened this to ALSO delete the MAIN thread's OWN cross-session queue
+    // (keyed by sessionId, not a thread id — see the send_message→session bridge below, and the
+    // round-top drain's MAIN branch). Whole-branch review FIX 1 (Minor 4's escalated half):
+    // REMOVED that widening — a MAIN thread's sessionId is never "reused" the way a child threadId
+    // is (that's the whole reason the child case above needs this at all), so there is no
+    // resurfacing risk to guard against, only a data-loss one: a message queued via sendToThread
+    // WHILE this round was in flight (isRunning still true) but not yet drained when the round
+    // ends — in particular when it ends ABORTED, whose own pending-check deliberately does NOT
+    // drain-and-continue (see the `stop !== "aborted"` guard a few lines below this closure's call
+    // sites) — would otherwise be silently destroyed here, right after the sender was told it's
+    // "queued ... will see this at its next round". Leaving it queued keeps that promise honest: it
+    // survives to drain at the round-top of whatever turn for THIS session genuinely runs next
+    // (see runTurn's `finally`, which proactively starts that next turn when the one that just
+    // ended wasn't itself an abort — matching the SAME "don't fight the user's interrupt" contract
+    // the bg-notification drain already has there).
+    const cleanupThreadSteer = () => { if (threadId !== MAIN_THREAD) this.threadSteerQueue.delete(threadId); };
 
     this.emit(sessionId, { type: "turn_started", sessionId, threadId });
 
@@ -3335,7 +3372,21 @@ export class AgentEngine {
         // would fail-closed to "deferred" for EVERY mode (registry.ts's isDeferred doc comment),
         // rejecting e.g. a code session's own `bash` call the instant bash declared `deferred:
         // ["dispatch"]` — exactly the silent, type-checked regression this task's brief warns about.
-        if (this.cfg.registry.isDeferredBuiltin(call.name, tsEnabled, resolveMode(meta)) && !effectiveLoaded.has(call.name)) {
+        // Whole-branch review FIX 2: `offered(call.name) &&` — this guard was mode-aware but
+        // allowTools-BLIND. A `deferred: true` built-in that a session's `modes`/allowTools never
+        // made eligible in the first place (e.g. web_search, `modes: ["code"]`, called from
+        // dispatch) used to fire here regardless, answering "is deferred — load its schema via
+        // ToolSearch first" — but T3's ToolSearch (toolsearch.ts) IS allowTools-aware, so the
+        // model's very next `ToolSearch(select:web_search)` correctly reports no match, and the
+        // model's next move (call the tool again, per the advice it was just given) hits this SAME
+        // guard again: an infinite loop, reproduced verbatim by the reviewer. Adding the `offered`
+        // check here gives this pre-check the SAME two axes (mode + allowTools) the `!offered`
+        // guard just below already has, so an off-list deferred tool now falls through to THAT
+        // guard instead and gets the terminal "is not available in this session" — no advice that
+        // sends the model back into a loop. `offered` is declared once above (this same function,
+        // `const offered = (name) => !excludeTools?.has(name) && (!allowTools || allowTools.has(name))`)
+        // — reused verbatim, not reimplemented.
+        if (offered(call.name) && this.cfg.registry.isDeferredBuiltin(call.name, tsEnabled, resolveMode(meta)) && !effectiveLoaded.has(call.name)) {
           outcome = { output: `tool ${call.name} is deferred — load its schema via ToolSearch first`, isError: true };
           this.emit(sessionId, { type: "tool_result", sessionId, threadId, callId: call.callId, output: outcome.output, isError: outcome.isError });
           input.push({ type: "tool_result", callId: call.callId, output: outcome.output, isError: outcome.isError });
