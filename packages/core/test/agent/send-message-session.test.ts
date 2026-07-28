@@ -239,9 +239,13 @@ describe("AgentEngine: send_message can target a session (D1-T4)", () => {
       expect(result?.output).toBe("no agent or session 's_doesnotexist' to message");
     }
 
-    // (b) an authorized child whose working directory has already been torn down — "already
-    // ended": sessions carry no stored terminal/ended status (do not invent one), so this is
-    // derived the same way resumeThread's own removed-worktree guard is for agent children.
+    // (b) an authorized child whose working directory does not exist on disk. Fix round 1
+    // (Important): this does NOT assert the session "already ended" — `existsSync` only measures
+    // "workspace present right now", which cannot distinguish "finished and cleaned up" (sessions
+    // are never worktree-isolated and Norma never removes a session's cwd) from "the model gave
+    // session_spawn a typo'd/never-existent path" (session_spawn validates only `startsWith("/")`,
+    // never existence). The refusal is about the missing directory only, not about the session's
+    // history.
     {
       class P implements Provider {
         readonly id = "fake";
@@ -253,15 +257,15 @@ describe("AgentEngine: send_message can target a session (D1-T4)", () => {
       }
       const provider = new P();
       const { engine, store, sessionId } = setupSend([], { provider });
-      const childCwd = mkChildCwd("ended");
+      const childCwd = mkChildCwd("missing-cwd");
       const childId = store.createSession("global", { cwd: childCwd, mode: "code", parentSessionId: sessionId });
-      rmSync(childCwd, { recursive: true, force: true }); // simulate the child's workspace being torn down
+      rmSync(childCwd, { recursive: true, force: true }); // the directory no longer exists on disk
       provider.targetChild = childId;
 
       await engine.runTurn(sessionId);
       const result = toolResult(store.read(sessionId), "m2");
       expect(result?.isError).toBe(true);
-      expect(result?.output).toContain("already ended");
+      expect(result?.output).toBe(`session '${childId}' cannot be messaged — its working directory (${childCwd}) does not exist`);
       expect(result?.output).not.toBe("no agent or session 's_doesnotexist' to message");
     }
   });

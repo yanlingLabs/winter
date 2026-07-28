@@ -3195,19 +3195,24 @@ export class AgentEngine {
             continue;
           }
           const wasRunning = this.isRunning(to);
-          // "already ended": SessionRow carries no stored terminal/ended status, and this task
-          // deliberately does not add one (do not invent a status field) — a session is always
-          // resumable by starting a fresh turn, same as `session.send`'s own handling (see the
-          // idle branch below). The one case that genuinely cannot be resumed sanely is a removed
-          // workspace — exactly the precedent `resumeThread`'s own removed-worktree guard
-          // establishes for AGENT children (see its own "T3 REVIEW" comment): reject up front
-          // rather than start a turn that will fail confusingly the moment any tool touches a
-          // directory that no longer exists. Only checked when idle — a currently-running target's
-          // in-flight turn already has whatever cwd it started with; that concern is orthogonal to
-          // queuing it a message.
+          // Fix round 1 (Important): this used to call a missing `cwd` "already ended" — wrong.
+          // SessionRow carries no stored terminal/ended status (deliberately — do not invent one:
+          // a session is always resumable by starting a fresh turn, same as `session.send`'s own
+          // handling, the idle branch below). `existsSync` only measures "workspace present right
+          // now" — it cannot tell "finished and cleaned up" from "the model gave session_spawn a
+          // typo'd or already-gone path that never existed" (session_spawn validates only
+          // `startsWith("/")`, never existence) or from "cwd was null" (skipped below, not "always
+          // ended"). The `resumeThread` removed-worktree precedent this was modeled on holds only
+          // for AGENT children, whose worktree is torn down BECAUSE they finished — a session's cwd
+          // is the model-supplied project directory, never a worktree, never removed by Norma. So:
+          // refuse the turn (the guard itself is right — starting one in a missing directory fails
+          // confusingly the instant any tool touches it), but assert NOTHING about the session
+          // having ended or the directory having previously existed. Only checked when idle — a
+          // currently-running target's in-flight turn already has whatever cwd it started with;
+          // that concern is orthogonal to queuing it a message.
           if (!wasRunning && targetMeta.cwd && !existsSync(targetMeta.cwd)) {
             sendMessageOutcomes.set(call.callId, {
-              output: `session '${to}' has already ended — its working directory (${targetMeta.cwd}) no longer exists; spawn a fresh session instead of messaging it`,
+              output: `session '${to}' cannot be messaged — its working directory (${targetMeta.cwd}) does not exist`,
               isError: true,
             });
             continue;
@@ -3222,7 +3227,15 @@ export class AgentEngine {
             // result) — earned by a real bug (see `sendToThread`'s own doc comment) — deliberately
             // NOT re-earned via `steer()`'s different (send-time-persist, replay-time-repaired)
             // shape, which is for a human interjecting into their OWN session and stays untouched.
-            this.sendToThread(sessionId, to, message);
+            // Fix round 1 (Minor 2): pass `to` for BOTH arguments, not `sessionId, to` — the TARGET
+            // session owns this "thread" (its own id is the queue key its round-top drain reads),
+            // not the sender. `sendToThread`'s first param is unused today, so `sessionId, to` was
+            // inert — but every OTHER call site passes an owning session plus its OWN thread, and a
+            // future namespacing of the queue key (e.g. `${sessionId}:${threadId}`) would silently
+            // write under the sender while the target drains under itself: non-delivery with a
+            // tool_result that said "queued". `to, to` matches the invariant every other caller
+            // already holds.
+            this.sendToThread(to, to, message);
           } else {
             // IDLE → start a turn the same way the daemon's own `session.send` handling does
             // (ipc/server.ts's `session.send` case): persist the user_message, then start a turn.
