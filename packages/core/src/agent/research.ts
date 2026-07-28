@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { Provider, ProviderEvent, TurnInputItem, ToolSpec } from "../providers/types";
-import { fetchCleanPage, renderLines, PageCoreError, type PageCache, type CleanPage } from "./tools/page-core";
+import { fetchCleanPage, renderLines, PageCoreError, checkDangerousDomain, type PageCache, type CleanPage } from "./tools/page-core";
 import { READPAGE_PER_PAGE_CHAR_CAP, READPAGE_TOTAL_OUTPUT_CHAR_CAP } from "./tools/read-page";
 
 /**
@@ -96,11 +96,17 @@ export const RESEARCH_SYSTEM_PROMPT = [
 /** What ReadPage (read-page.ts) hands the runner for a `query` entry — matches that file's own
  *  `ResearchQuery`/`ResearchRunner` types structurally (TS interfaces compare structurally; this
  *  file deliberately does not import them, so this runner has no compile-time dependency on
- *  ReadPage's own module — daemon.ts is the only place the two are wired together). */
+ *  ReadPage's own module — daemon.ts is the only place the two are wired together).
+ *
+ *  `cwd` (Critical 1 fix, whole-branch review): the calling turn's cwd, forwarded solely so this
+ *  runner's OWN dangerous-domain hard-block (below) can resolve the SAME per-project
+ *  `settings.permissions.dangerousDomains.added` list ReadPage itself uses — this runner has no
+ *  session/cwd identity of its own otherwise (by design, see this module's own doc comment). */
 export interface ResearchQuery {
   url: string;
   query: string;
   max_pages?: number;
+  cwd?: string;
 }
 
 export interface ResearchRunner {
@@ -118,6 +124,23 @@ export interface ResearchDeps {
   /** Wall-clock budget override — test-only (shrinks RESEARCH_WALL_CLOCK_MS so a stall test does
    *  not need to wait out the real 180s). Production never sets this. */
   wallClockMs?: number;
+  /** Critical 1 fix (whole-branch review, USER-REVISED design 2026-07-28): the user-added half of
+   *  the effective dangerous-domain list — SAME shape/getter as ReadPage's own
+   *  `ReadPageDeps.dangerousDomainsAdded` (and engine.ts's `EngineConfig.dangerousDomainsAdded`;
+   *  daemon.ts wires all three to the literal SAME function). Absent → no user additions; the
+   *  SHIPPED list alone still applies. FetchPage is "not interactive" (task-3-brief.md) — it cannot
+   *  card, so a match here is a hard refusal (see `handleFetchPage`'s and the seed-fetch's own
+   *  checks below), never a request for a human's yes. */
+  dangerousDomainsAdded?: (cwd?: string) => string[] | undefined;
+}
+
+/** Shared refusal text (matches read-page.ts's own `dangerousDomainRefusal` in shape, kept as a
+ *  separate small copy here rather than a cross-import — see this module's own doc comment on why
+ *  `research.ts` deliberately does not import from `read-page.ts`'s TYPES; this is plain string
+ *  formatting, not a matcher, so there is nothing to "fork" by not sharing the function itself —
+ *  the actual matching logic is ALWAYS `checkDangerousDomain`, imported from page-core.ts). */
+function dangerousDomainRefusal(url: string, match: { host: string; matchedEntry: string }, cannotAskReason: string): string {
+  return `${url}: refused — ${match.host} matches the dangerous-domain list (${match.matchedEntry}); ${cannotAskReason}`;
 }
 
 interface RunState {
@@ -154,13 +177,18 @@ function capText(text: string): string {
  *  rather than re-invented — the sub-agent's own context deserves the exact same per-page ceiling
  *  ReadPage already enforces for the main model). Before this fix, ONLY the final report (20k) was
  *  capped — a single huge fetched page went into the NEXT provider request whole, uncapped; 8
- *  such pages in one batch measured 2.4M chars in one tool_result. */
+ *  such pages in one batch measured 2.4M chars in one tool_result.
+ *
+ *  Important 3 fix (whole-branch review): states `page.fromCache` plainly ("cached fetch" -> reused
+ *  bytes / "fresh fetch" -> just fetched) — the sub-agent gets the SAME freshness signal ReadPage's
+ *  own header now carries (read-page.ts), since it shares the identical PageCache instance. */
 function pageSection(page: CleanPage): string {
   const rendered = renderLines(page);
   const linksList = page.links.length
     ? page.links.map((l, i) => `${i + 1}. ${l.text || "(no text)"} (${l.href})`).join("\n")
     : "(none)";
-  const section = [page.url, rendered, "", "Links:", linksList].join("\n");
+  const freshness = page.fromCache ? "cached fetch" : "fresh fetch";
+  const section = [`${page.url} (${freshness})`, rendered, "", "Links:", linksList].join("\n");
   return capWithMarker(
     section,
     READPAGE_PER_PAGE_CHAR_CAP,
@@ -203,13 +231,20 @@ function failureMessage(lastText: string, message: string): string {
  *  (`raceDeadline`) — a stuck fetch inside a batch can no longer hang the whole run, independent of
  *  whether the fetch itself would eventually honor `signal`. fix-round-1 IMPORTANT: the joined
  *  output is capped at READPAGE_TOTAL_OUTPUT_CHAR_CAP (read-page.ts's own batch cap), same posture
- *  as ReadPage's own batch response. */
+ *  as ReadPage's own batch response.
+ *
+ *  Critical 1 fix (whole-branch review): a dangerous-domain url in the batch is refused BEFORE
+ *  `fetchCleanPage` is ever called for it — zero network reached — same "one bad url doesn't fail
+ *  the batch" isolation every other per-url failure already gets, just detected up front instead of
+ *  via a caught exception. `dangerousAdded` is resolved ONCE by the caller (`runResearch`, from
+ *  `deps.dangerousDomainsAdded?.(q.cwd)`) rather than re-read per url in this loop. */
 async function handleFetchPage(
   urls: string[],
   state: RunState,
   deps: ResearchDeps,
   signal: AbortSignal,
   deadline: number,
+  dangerousAdded: string[],
 ): Promise<string> {
   if (state.pagesRead >= state.maxPages) {
     return `page budget exhausted (${state.pagesRead} pages read)`;
@@ -221,9 +256,14 @@ async function handleFetchPage(
   const sections = await Promise.all(
     toFetch.map(async (url) => {
       state.pagesRead++;
+      const dangerous = checkDangerousDomain(url, dangerousAdded);
+      if (dangerous) {
+        state.notRead.push(url);
+        return dangerousDomainRefusal(url, dangerous, "FetchPage has no approval flow to ask for one, so fetches to known exfiltration/tunnel-provider hosts are blocked outright");
+      }
       try {
         const race = await raceDeadline(
-          fetchCleanPage(url, deps.cache, { fetchFn: deps.fetchFn, now: deps.now, audit: deps.audit, tool: FETCH_PAGE_TOOL_NAME, signal }),
+          fetchCleanPage(url, deps.cache, { fetchFn: deps.fetchFn, now: deps.now, audit: deps.audit, tool: FETCH_PAGE_TOOL_NAME, signal, origin: "research" }),
           deadline,
         );
         if (race.timedOut) {
@@ -331,15 +371,29 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
   const timeoutSignal = AbortSignal.timeout(wallClockMs);
   const signal = AbortSignal.any([externalSignal, timeoutSignal].filter((s): s is AbortSignal => Boolean(s)));
   const deadline = Date.now() + wallClockMs;
+  // Critical 1 fix (whole-branch review): resolved ONCE per run (not re-read per url) — the SAME
+  // effective-list getter ReadPage itself uses, via `q.cwd` (read-page.ts threads its own ctx.cwd
+  // through). Covers BOTH the seed-fetch check just below and every `handleFetchPage` batch call.
+  const dangerousAdded = deps.dangerousDomainsAdded?.(q.cwd) ?? [];
 
   const state: RunState = { maxPages, pagesRead: 0, notRead: [], linksFound: new Map() };
+
+  // Critical 1 fix (whole-branch review): the SEED url is dangerous-domain-checked before anything
+  // else runs — defense in depth (ReadPage's own hard-block, read-page.ts, already covers this on
+  // the real path; this protects a direct caller of createResearchRunner too). Zero network reached
+  // for a blocked seed — an honest failure (throws, matching every other seed-fetch failure below),
+  // never a silent isError:false report.
+  const seedDangerous = checkDangerousDomain(q.url, dangerousAdded);
+  if (seedDangerous) {
+    throw new Error(capText(dangerousDomainRefusal(q.url, seedDangerous, "research has no approval flow to ask for one, so a blocked seed page is refused outright")));
+  }
 
   let seed: CleanPage;
   {
     let race: { timedOut: true } | { timedOut: false; value: CleanPage };
     try {
       race = await raceDeadline(
-        fetchCleanPage(q.url, deps.cache, { fetchFn: deps.fetchFn, now: deps.now, audit: deps.audit, tool: FETCH_PAGE_TOOL_NAME, signal }),
+        fetchCleanPage(q.url, deps.cache, { fetchFn: deps.fetchFn, now: deps.now, audit: deps.audit, tool: FETCH_PAGE_TOOL_NAME, signal, origin: "research" }),
         deadline,
       );
     } catch (e) {
@@ -482,7 +536,7 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
         input.push({ type: "tool_result", callId: call.callId, output: "invalid FetchPage arguments — could not parse JSON", isError: true });
         continue;
       }
-      const output = await handleFetchPage(urls, state, deps, signal, deadline);
+      const output = await handleFetchPage(urls, state, deps, signal, deadline, dangerousAdded);
       input.push({ type: "tool_result", callId: call.callId, output, isError: false });
     }
   }

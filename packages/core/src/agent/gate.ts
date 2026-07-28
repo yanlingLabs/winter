@@ -161,7 +161,19 @@ const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_workt
 // gate (its one floor, the dangerous-domain check, is a pre-exec engine.ts concern this file
 // deliberately never grows to match, per this class's own doc comment above). Same risk shape
 // (real outbound request, response text treated as untrusted model input), same unconditional
-// "allow" answer.
+// "allow" answer AT THIS GATE.
+//
+// Whole-branch review Critical 1 fix (2026-07-28, USER-REVISED design): `ReadPage` DOES now carry a
+// floor of its own — same family as web_fetch's, just NOT engine.ts-level and NOT a card. Chat/
+// dispatch structurally have no approval flow to card through at all (USER DECISION: "chat mode...
+// would never ask permissions"), so a dangerous-domain url is HARD-BLOCKED entirely inside the tool
+// (read-page.ts's `renderPage`/`runResearch`, both call page-core.ts's `checkDangerousDomain` before
+// ever reaching a fetch) — an isError refusal, never a card, and with NO `WebFetch(domain:...)`
+// standing-rule override (that rule is earned by approving a card, a consent flow this tool doesn't
+// have). The research sub-agent's `FetchPage` gets the identical hard-block (research.ts) for the
+// same reason: it "cannot card" (task-3-brief.md, "not interactive"). None of this changes what THIS
+// gate returns — `ReadPage`'s verdict here is still, and remains, unconditionally "allow"; the floor
+// lives entirely inside the tool, one layer below where this file's classification has any say.
 const NETWORK = new Set(["web_fetch", "web_search", "Search", "ReadPage"]);
 // skill_write (phase 5c Task 2) gets a NEW class, strictly stricter than MUTATING: "ask" under
 // BOTH `ask` AND `auto` (a card on EVERY call — no policy setting silences it), "deny" under

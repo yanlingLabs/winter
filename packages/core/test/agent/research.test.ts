@@ -197,6 +197,67 @@ describe("research.ts: FetchPage batching", () => {
   });
 });
 
+// --- Critical 1, whole-branch review (USER-REVISED design, 2026-07-28): FetchPage cannot card (it
+// is "not interactive" — the sub-agent has no human in the loop at all), so a dangerous-domain url
+// is HARD-REFUSED with a clear message that lands in the report, and the run continues with its
+// other pages. Reuses page-core.ts's `checkDangerousDomain` — NOT a second matcher. --------------
+describe("research.ts: dangerous-domain hard-block (Critical 1 fix — FetchPage cannot card, so it hard-refuses)", () => {
+  test("a dangerous url inside a FetchPage batch is refused with a clear message; the safe sibling in the SAME batch still succeeds, and the run completes normally", async () => {
+    const { fetchFn } = urlFetch({
+      [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" },
+      "https://example.com/a": { status: 200, body: pageHtml("Page A"), contentType: "text/html" },
+      // deliberately NO entry for transfer.sh — if the hard-block failed to stop the fetch, urlFetch
+      // itself would throw "no scripted response for..." instead of the dangerous-domain message,
+      // which would fail this test's own assertions below and so double as proof the network was
+      // never reached.
+    });
+    const provider = new FakeProvider([
+      toolCall("f1", "FetchPage", { urls: ["https://example.com/a", "https://transfer.sh/x"] }),
+      text(`final report. ${SEED_URL} lines:1-3`),
+    ]);
+    const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn });
+
+    const report = await runner.run({ url: SEED_URL, query: "q", max_pages: 5 }, {});
+
+    const round1Result = toolResultsOf(provider.requests[1]!.input).find((r) => r.callId === "f1");
+    expect(round1Result?.isError).toBe(false); // informational, never a hard tool error (matches the batch's own precedent)
+    expect(round1Result?.output).toContain("Page A"); // the safe sibling succeeded
+    expect(round1Result?.output).toContain("transfer.sh/x");
+    expect(round1Result?.output).toContain("transfer.sh"); // names the matched entry
+    expect(round1Result?.output.toLowerCase()).toContain("dangerous");
+    expect(report).toBe("final report. https://example.com/ lines:1-3"); // the run completed normally, not aborted
+  });
+
+  test("the SEED url itself being dangerous refuses before the sub-agent does anything (defense in depth — ReadPage's own hard-block already covers the normal path), never reaching the network", async () => {
+    // NO scripted response for transfer.sh — if the hard-block failed to fire before the seed
+    // fetch, urlFetch would throw "no scripted response for..." instead, which would NOT match the
+    // dangerous-domain message this asserts on (proving the network was never reached).
+    const { fetchFn } = urlFetch({});
+    const runner = createResearchRunner({ provider: new FakeProvider([]), cache: new PageCache(), fetchFn });
+    await expect(runner.run({ url: "https://transfer.sh/seed", query: "q" }, {})).rejects.toThrow(/dangerous-domain/i);
+  });
+
+  test("a USER-ADDED domain (threaded via ReadPage's own ctx.cwd -> ResearchQuery.cwd) is blocked exactly like a shipped one", async () => {
+    const { fetchFn } = urlFetch({
+      [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" },
+    });
+    const provider = new FakeProvider([
+      toolCall("f1", "FetchPage", { urls: ["https://my-internal-exfil.example/x"] }),
+      text(`final. ${SEED_URL} lines:1-3`),
+    ]);
+    const runner = createResearchRunner({
+      provider, cache: new PageCache(), fetchFn,
+      dangerousDomainsAdded: (cwd) => (cwd === "/tmp" ? ["my-internal-exfil.example"] : undefined),
+    });
+
+    await runner.run({ url: SEED_URL, query: "q", max_pages: 5, cwd: "/tmp" }, {});
+
+    const round1Result = toolResultsOf(provider.requests[1]!.input).find((r) => r.callId === "f1");
+    expect(round1Result?.output).toContain("my-internal-exfil.example");
+    expect(round1Result?.output.toLowerCase()).toContain("dangerous");
+  });
+});
+
 describe("research.ts: page budget — clamp, default, exhaustion, and the not-read note reaching the model", () => {
   test("max_pages unset defaults to 5 — exhaustion fires on the page immediately after the 5th", async () => {
     const responses: Record<string, Step> = { [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" } };
@@ -353,6 +414,87 @@ describe("research.ts: the report contract — the system prompt DEMANDS citatio
     expect(instructions).toContain("lines:n-m");
     expect(instructions).toContain("links found");
     expect(instructions).toContain("not read");
+  });
+});
+
+// --- Important 3, whole-branch review: same freshness signal ReadPage's own header now carries —
+// the sub-agent's context deserves the same "was this cached or fresh?" signal the main model gets.
+// --- Important 3, whole-branch review: the sub-agent's own fetches must be tagged "research" in the
+// SHARED PageCache (not "user", the default) — otherwise the reserved-byte-share eviction (page-
+// core.ts's own PageCache fix) would never actually apply to them, and a research run could still
+// evict the user's own recently-read pages. Same cache instance throughout (never a separate one —
+// the citation contract depends on ReadPage hitting the entry the sub-agent populated). -------------
+describe("research.ts: fetches are tagged 'research' in the shared cache — a research run cannot evict the user's own cached page (Important 3 fix)", () => {
+  test("a user's directly-cached page survives a research run that reads many OTHER (larger) pages, via the SAME PageCache instance, under a TIGHT overall budget", async () => {
+    // Tight enough that 8 research-sized pages alone (~200+ bytes each, ~1.6KB total) plus the
+    // user's own small page comfortably exceeds the WHOLE budget — if research fetches were still
+    // tagged "user" (the pre-fix default), the oldest entry (the user's, inserted first) would be
+    // the first thing pass-2's ordinary oldest-first eviction reclaims once that combined total blew
+    // past maxBytes. With research properly tagged, its own reserved half-share absorbs that
+    // pressure among ITS OWN entries and the user's entry is never touched.
+    const cache = new PageCache({ maxBytes: 1000, researchByteShare: 0.5 });
+    // The user's own page, put directly (mirrors what a plain ReadPage fetch does — origin "user"),
+    // BEFORE the research run — the oldest entry in the cache, and so the FIRST thing an untagged,
+    // purely-oldest-first eviction would reclaim.
+    await fetchCleanPage("https://user-important.example/", cache, {
+      fetchFn: urlFetch({ "https://user-important.example/": { status: 200, body: pageHtml("User Page"), contentType: "text/html" } }).fetchFn,
+    });
+
+    const responses: Record<string, Step> = { [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" } };
+    const urls = Array.from({ length: 8 }, (_, i) => `https://research${i}.example.com/`);
+    for (const u of urls) {
+      responses[u] = {
+        status: 200,
+        contentType: "text/html",
+        body: pageHtml(`Research page ${u} padded with a good deal of extra filler text so each one weighs a meaningful number of bytes on its own.`),
+      };
+    }
+    const { fetchFn } = urlFetch(responses);
+    const provider = new FakeProvider([
+      toolCall("f1", "FetchPage", { urls }),
+      text(`final. ${SEED_URL} lines:1-3`),
+    ]);
+    const runner = createResearchRunner({ provider, cache, fetchFn });
+
+    await runner.run({ url: SEED_URL, query: "q", max_pages: 10 }, {});
+
+    // The user's page must STILL be in cache — a research run, however large, must never evict it.
+    const stillCached = await fetchCleanPage("https://user-important.example/", cache, {
+      fetchFn: (async () => { throw new Error("must not refetch — should have hit cache"); }) as unknown as typeof fetch,
+    });
+    expect(stillCached.fromCache).toBe(true);
+  });
+});
+
+describe("research.ts: freshness signal in the sub-agent's own page sections (Important 3 fix)", () => {
+  test("the seed page section (in the first provider request) states it was a fresh fetch", async () => {
+    const { fetchFn } = urlFetch({ [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" } });
+    const provider = new FakeProvider([text(`report. ${SEED_URL} lines:1-3`)]);
+    const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn });
+
+    await runner.run({ url: SEED_URL, query: "q" }, {});
+
+    const seedMessage = provider.requests[0]!.input.find((i) => i.type === "message" && i.role === "user");
+    const seedText = seedMessage && seedMessage.type === "message" ? String(seedMessage.content) : "";
+    expect(seedText.toLowerCase()).toContain("fresh fetch");
+  });
+
+  test("a FetchPage batch entry served from cache states it was cached", async () => {
+    const { fetchFn } = urlFetch({
+      [SEED_URL]: { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" },
+      "https://example.com/a": { status: 200, body: pageHtml("Page A"), contentType: "text/html" },
+    });
+    const provider = new FakeProvider([
+      toolCall("f1", "FetchPage", { urls: ["https://example.com/a"] }),
+      toolCall("f2", "FetchPage", { urls: ["https://example.com/a"] }), // same url again -> cache hit
+      text(`final. ${SEED_URL} lines:1-3`),
+    ]);
+    const runner = createResearchRunner({ provider, cache: new PageCache(), fetchFn });
+
+    await runner.run({ url: SEED_URL, query: "q", max_pages: 10 }, {});
+
+    const round2Result = toolResultsOf(provider.requests[2]!.input).find((r) => r.callId === "f2");
+    expect(round2Result?.output.toLowerCase()).toContain("cached");
   });
 });
 

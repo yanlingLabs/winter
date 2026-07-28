@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { ToolRegistry } from "./registry";
-import { fetchCleanPage, renderLines, PageCache, PageCoreError } from "./page-core";
+import { fetchCleanPage, renderLines, PageCache, PageCoreError, checkDangerousDomain } from "./page-core";
 
 /**
  * ReadPage (B2-T2): chat mode's (and, per user decision, dispatch's) batched page-reading tool —
@@ -47,11 +47,17 @@ const ReadPageArgs = z.object({ pages: z.array(PageRequest).min(1).max(MAX_PAGES
 type PageRequestT = z.infer<typeof PageRequest>;
 
 /** What the tool passes a wired research runner for a `query` entry — the entry's own url/query,
- *  plus its optional model-chosen `max_pages` (Task 3 clamps this to its own hard ceiling). */
+ *  plus its optional model-chosen `max_pages` (Task 3 clamps this to its own hard ceiling).
+ *  `cwd` (Critical 1 fix, whole-branch review) is the calling turn's `ctx.cwd`, threaded through
+ *  SOLELY so the sub-agent's own dangerous-domain hard-block (research.ts) can resolve the SAME
+ *  per-project `settings.permissions.dangerousDomains.added` list this tool's own hard-block uses —
+ *  the sub-agent has no session/cwd identity of its own (by design, see research.ts's module doc
+ *  comment), so this is its only route to that per-project list. */
 export interface ResearchQuery {
   url: string;
   query: string;
   max_pages?: number;
+  cwd?: string;
 }
 
 /**
@@ -81,6 +87,20 @@ export interface ReadPageDeps {
    *  ReadPage itself no longer hangs on a stuck fetch without waiting out the real 15s default.
    *  Production never sets this — every real call is bounded by page-core's own fixed default. */
   timeoutMs?: number;
+  /** Critical 1 fix (whole-branch review, USER-REVISED design 2026-07-28): the user-added half of
+   *  the effective dangerous-domain list — SAME shape/getter as engine.ts's own
+   *  `EngineConfig.dangerousDomainsAdded` (and, in daemon.ts, literally the SAME function reference),
+   *  resolved per-project, hot (no daemon restart). Absent → no user additions; the SHIPPED list
+   *  alone still applies. See `page-core.ts`'s `checkDangerousDomain` for the full rationale — this
+   *  tool has NO approval flow, so a match here is a hard refusal, never a card. */
+  dangerousDomainsAdded?: (cwd?: string) => string[] | undefined;
+}
+
+/** Shared refusal-text shape for BOTH `renderPage` and `runResearch` below — names the entry's url
+ *  AND the matched list entry, so the transcript reads as a deliberate policy block, never a network
+ *  failure (the user's own stated requirement). */
+function dangerousDomainRefusal(url: string, match: { host: string; matchedEntry: string }, cannotAskReason: string): string {
+  return `${url}: refused — ${match.host} matches the dangerous-domain list (${match.matchedEntry}); ${cannotAskReason}`;
 }
 
 type EntryResult = { ok: boolean; text: string };
@@ -103,8 +123,16 @@ function capText(text: string, cap: number, marker: string): string {
  *  `fetchCleanPage` — before this, a user-interrupted turn left a plain page-read fetch running to
  *  the full per-fetch default bound regardless. `fetchCleanPage`'s own signal composition
  *  (`AbortSignal.any`) already means whichever of the caller's signal or the default fires FIRST
- *  wins, so this is a pure forward, no new composition logic needed here. */
-async function renderPage(entry: PageRequestT, deps: ReadPageDeps, signal: AbortSignal | undefined): Promise<EntryResult> {
+ *  wins, so this is a pure forward, no new composition logic needed here.
+ *
+ *  Critical 1 fix (whole-branch review): a dangerous-domain url is refused BEFORE `fetchCleanPage`
+ *  is ever called — zero network reached, no card (chat has no approval flow at all, USER DECISION)
+ *  — see `checkDangerousDomain`'s own doc comment for the full rationale. */
+async function renderPage(entry: PageRequestT, deps: ReadPageDeps, signal: AbortSignal | undefined, cwd: string | undefined): Promise<EntryResult> {
+  const dangerous = checkDangerousDomain(entry.url, deps.dangerousDomainsAdded?.(cwd));
+  if (dangerous) {
+    return { ok: false, text: dangerousDomainRefusal(entry.url, dangerous, "ReadPage has no approval flow to ask for one, so fetches to known exfiltration/tunnel-provider hosts are blocked outright") };
+  }
   try {
     const page = await fetchCleanPage(entry.url, deps.cache, {
       fetchFn: deps.fetchFn,
@@ -132,8 +160,12 @@ async function renderPage(entry: PageRequestT, deps: ReadPageDeps, signal: Abort
       ? page.links.map((l, i) => `${i + 1}. ${l.text || "(no text)"} (${l.href})`).join("\n")
       : "(none)";
 
+    // Important 3 fix (whole-branch review): `page.fromCache` already existed but was unused by
+    // this tool — the model had no way to tell a cached read from a fresh refetch, even though the
+    // two renders are byte-identical otherwise. Stated plainly here rather than left implicit.
+    const freshness = page.fromCache ? "cached" : "fresh fetch";
     const text = capText(
-      [urlLine, `${page.title} — lines:${start}-${end} of ${total}`, body, "", "Links:", linksList].join("\n"),
+      [urlLine, `${page.title} — lines:${start}-${end} of ${total} (${freshness})`, body, "", "Links:", linksList].join("\n"),
       READPAGE_PER_PAGE_CHAR_CAP,
       `\n[page output truncated at ${READPAGE_PER_PAGE_CHAR_CAP} chars — request a narrower lineStart/lineEnd]`,
     );
@@ -150,11 +182,22 @@ async function renderPage(entry: PageRequestT, deps: ReadPageDeps, signal: Abort
 /** Runs a `query` entry through the wired research hook (Task 3) — or, absent one, resolves to the
  *  fixed "not available" message. Never throws on its own: a research-runner failure becomes an
  *  `ok:false` result exactly like a fetch failure above, so it rides the same one-bad-entry
- *  isolation. */
-async function runResearch(entry: PageRequestT, deps: ReadPageDeps, signal: AbortSignal | undefined): Promise<EntryResult> {
+ *  isolation.
+ *
+ *  Critical 1 fix (whole-branch review): the SEED url (this entry's own `entry.url`) is
+ *  dangerous-domain-checked BEFORE the research runner is ever invoked — a query entry pointed at a
+ *  blocked host must not even start the sub-agent. This is defense-in-depth as much as anything: it
+ *  is also the ONLY place the seed gets checked before reaching `research.run()` at all, since the
+ *  sub-agent itself has no cwd/settings context of its own for anything BUT what `cwd` (below) hands
+ *  it for its own SEPARATE hard-block on the pages it fetches later via FetchPage (research.ts). */
+async function runResearch(entry: PageRequestT, deps: ReadPageDeps, signal: AbortSignal | undefined, cwd: string | undefined): Promise<EntryResult> {
   if (!deps.research) return { ok: false, text: RESEARCH_UNAVAILABLE };
+  const dangerous = checkDangerousDomain(entry.url, deps.dangerousDomainsAdded?.(cwd));
+  if (dangerous) {
+    return { ok: false, text: dangerousDomainRefusal(entry.url, dangerous, "research has no approval flow to ask for one, so a blocked seed page is refused outright") };
+  }
   try {
-    const report = await deps.research.run({ url: entry.url, query: entry.query!, max_pages: entry.max_pages }, { signal });
+    const report = await deps.research.run({ url: entry.url, query: entry.query!, max_pages: entry.max_pages, cwd }, { signal });
     return { ok: true, text: report };
   } catch (e) {
     return { ok: false, text: `research failed for ${entry.url}: ${e instanceof Error ? e.message : String(e)}` };
@@ -169,7 +212,8 @@ export function registerReadPageTool(r: ToolRegistry, deps: ReadPageDeps): void 
       "Batch up to 8 pages in a single call — each entry is independent. " +
       "With no lineStart/lineEnd the whole page loads (subject to a per-page size cap); give lineStart/lineEnd to load just that inclusive line range instead. " +
       "Cite what you used as '<url> lines:N-M', using the RESOLVED url shown in the output (after any redirect) — never the url you originally requested. " +
-      "The same lineStart/lineEnd reloads the identical text later, for as long as the page stays cached (roughly 1 hour); after that the page may have changed and the numbering is refetched. " +
+      "The same lineStart/lineEnd reloads the identical text later as long as the page is still cached — usually around an hour, but heavy fetching can reclaim it sooner, so don't assume a fixed window. " +
+      "Each page's header says '(cached)' or '(fresh fetch)' — check that instead: 'cached' means the same bytes you saw before, 'fresh fetch' means the page was reloaded and may have changed since. " +
       "Give an entry 'query' instead of a line range to run background research over that page and its links — you get back a cited report instead of the raw page. 'query' and a line range cannot both be set on the same entry.",
     // User decision (spec §6): dispatch gets the SAME ReadPage as chat, immediate — not deferred
     // (see the `deferred` field's absence below — bug #7's precedent: chat's derived toolset has no
@@ -179,7 +223,7 @@ export function registerReadPageTool(r: ToolRegistry, deps: ReadPageDeps): void 
     args: ReadPageArgs,
     async run({ pages }: z.infer<typeof ReadPageArgs>, ctx) {
       const results = await Promise.all(
-        pages.map((entry) => (entry.query ? runResearch(entry, deps, ctx.signal) : renderPage(entry, deps, ctx.signal))),
+        pages.map((entry) => (entry.query ? runResearch(entry, deps, ctx.signal, ctx.cwd) : renderPage(entry, deps, ctx.signal, ctx.cwd))),
       );
       const anyOk = results.some((res) => res.ok);
       // A single-entry call returns its own text bare (no "## Page 1" wrapper) — the common case,

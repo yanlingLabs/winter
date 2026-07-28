@@ -235,6 +235,13 @@ export async function startDaemon(opts: {
   // spawn only on first sight of a dir) and falls back to the dir itself outside a git repo, so
   // this is perf-neutral and a non-repo cwd behaves exactly as before.
   const projectRootOf = (cwd?: string | null): string | null => (cwd ? repoRootFor(cwd) : null);
+  // Critical 1 fix, whole-branch review (2026-07-28): the user-added half of the effective
+  // dangerous-domain list, SAME live-settings shape engine.ts's own EngineConfig.dangerousDomainsAdded
+  // getter (below) already used for web_fetch's approval-card floor — hoisted into ONE shared const
+  // here so ReadPage's/the research runner's/Search's NEW hard-block/withhold logic (this task) reads
+  // the IDENTICAL effective list that floor does, never a second independently-maintained getter.
+  const dangerousDomainsAdded = (cwd?: string): string[] | undefined =>
+    projectSettings.effective(projectRootOf(cwd))?.permissions?.dangerousDomains?.added;
   // Output styles (CC-parity phase 2, Task 4): per-project effective outputStyle, repo-root-keyed
   // via the SAME projectRootOf as every other getter here — a trusted project's `.norma/settings.json`
   // outputStyle applies; an untrusted project's is ignored (ProjectSettingsResolver.effective()'s own
@@ -562,7 +569,10 @@ export async function startDaemon(opts: {
     // B1-T5: Search — chat's Exa-backed one-call web search (results + page excerpts in a single
     // request). Same `audit`/`secrets` instances as registerWebTools just above; its own keychain
     // secret (EXA_API_KEY_SECRET) is `norma login --exa-key`'s write target, never web_search's.
-    registerSearchTool(registry, { audit: (line) => audit.append(line), secret: (name) => secrets.get(name) });
+    // Critical 1 fix (whole-branch review): `dangerousDomainsAdded` — the same shared getter every
+    // other consumer of the effective dangerous-domain list uses below — so a Search result whose
+    // url matches it is withheld before the model ever sees it (never a silent drop; see search.ts).
+    registerSearchTool(registry, { audit: (line) => audit.append(line), secret: (name) => secrets.get(name), dangerousDomainsAdded });
     // B2-T2: ReadPage — chat's (and, per user decision, dispatch's) batched page-reading tool.
     // ONE PageCache instance per daemon, constructed here and shared: Task 3's ephemeral research
     // runner hands the SAME instance to its FetchPage-only sub-agent, so a report's own citations
@@ -576,8 +586,13 @@ export async function startDaemon(opts: {
     // `research.ts` never touches this (or any) ToolRegistry itself — FetchPage is a hand-built
     // spec + direct dispatch entirely inside that module, never registered here or anywhere else
     // (mode-toolset-census.test.ts's forward guard pins that FetchPage never joins this registry).
-    const research = createResearchRunner({ provider: agentProvider.provider, cache: pageCache, audit: (line) => audit.append(line) });
-    registerReadPageTool(registry, { cache: pageCache, audit: (line) => audit.append(line), research });
+    // Critical 1 fix (whole-branch review, USER-REVISED design): both ReadPage and its research
+    // runner get the SAME `dangerousDomainsAdded` getter — chat/dispatch have no approval flow at
+    // all, so a dangerous-domain url is HARD-BLOCKED (isError, no card) rather than carded like
+    // web_fetch (code mode, unchanged). See page-core.ts's `checkDangerousDomain` for the full
+    // rationale and read-page.ts/research.ts for where the check actually fires.
+    const research = createResearchRunner({ provider: agentProvider.provider, cache: pageCache, audit: (line) => audit.append(line), dangerousDomainsAdded });
+    registerReadPageTool(registry, { cache: pageCache, audit: (line) => audit.append(line), research, dangerousDomainsAdded });
     const agents = new AgentStore({
       normaHome, trust: trustStore, baseInstructions: SYSTEM_PROMPT,
       plugins: { disabled: settings?.plugins?.disabled ?? [] },
@@ -923,8 +938,11 @@ export async function startDaemon(opts: {
       // uses above — `cwd` is the calling session's cwd (engine.ts's webFetchGate passes its own
       // param straight through); `effective(cwd ?? null)` degrades to `settings` verbatim for a
       // null/untrusted/overlay-less cwd, so this reads byte-identically to the pre-Task-7 getter
-      // whenever no project overlay applies.
-      dangerousDomainsAdded: (cwd) => projectSettings.effective(projectRootOf(cwd))?.permissions?.dangerousDomains?.added,
+      // whenever no project overlay applies. Critical 1 fix (whole-branch review): now literally the
+      // SAME `dangerousDomainsAdded` const ReadPage/the research runner/Search are wired with above
+      // (hoisted near `projectRootOf`), rather than a second inline lambda re-deriving the identical
+      // read — one getter, every consumer of the effective dangerous-domain list.
+      dangerousDomainsAdded,
       dirs: sessionDirs,
       // write-permission-flow F2: the out-of-root write/edit grant flow must never silently grant
       // any part of Norma's OWN home directory. This is BROADER than the READ denylist above

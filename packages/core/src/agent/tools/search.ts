@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ToolRegistry } from "./registry";
+import { checkDangerousDomain } from "./page-core";
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_RESULTS = 5;
@@ -23,6 +24,13 @@ export interface SearchToolDeps {
    *  over the same KeychainSecretStore instance the daemon already builds. Undefined (test
    *  default) is treated identically to "no key stored". */
   secret?: (name: string) => Promise<string | null>;
+  /** Critical 1 fold-in (whole-branch review, USER-REVISED design 2026-07-28): "dangerous URLs
+   *  never even get SHOWN to the model" — blocking the read (ReadPage/FetchPage) while still
+   *  advertising the link in a Search result would be a half-measure: the model would just try the
+   *  link, fail, and possibly retry. SAME shape/getter as ReadPage's/the research runner's own
+   *  `dangerousDomainsAdded` (and daemon.ts wires all three to the literal SAME function). Absent →
+   *  no user additions; the SHIPPED list alone still applies. */
+  dangerousDomainsAdded?: (cwd?: string) => string[] | undefined;
 }
 
 interface ExaSearchResponse {
@@ -162,9 +170,25 @@ export function registerSearchTool(r: ToolRegistry, deps: SearchToolDeps = {}): 
           throw new Error("search failed: malformed response from search service");
         }
 
-        const results = (data.results ?? []).slice(0, count);
+        const rawResults = (data.results ?? []).slice(0, count);
+        // Critical 1 fold-in (whole-branch review): strip any result whose url matches the
+        // effective dangerous-domain list BEFORE it ever reaches the model — advertising the link
+        // while blocking the read (ReadPage/FetchPage) would just have the model try it, fail, and
+        // possibly retry. Never a SILENT drop: the withheld count is always stated, so the model
+        // (and anyone reading the transcript) knows the result set was intentionally filtered, not
+        // just shorter than requested.
+        const added = deps.dangerousDomainsAdded?.(ctx.cwd) ?? [];
+        let withheld = 0;
+        const results = rawResults.filter((x) => {
+          if (!x.url || !checkDangerousDomain(x.url, added)) return true;
+          withheld++;
+          return false;
+        });
+        const withheldNote = withheld > 0
+          ? `\n\n[${withheld} result${withheld === 1 ? "" : "s"} withheld — matched the dangerous-domain list]`
+          : "";
         outcome = "ok";
-        if (results.length === 0) return `no results for ${query}`;
+        if (results.length === 0) return `no results for ${query}${withheldNote}`;
         const rendered = results
           .map((x, i) => {
             const excerpt = (x.text ?? "").slice(0, EXCERPT_CHARS).trim();
@@ -174,9 +198,10 @@ export function registerSearchTool(r: ToolRegistry, deps: SearchToolDeps = {}): 
         // Chat has no `read` tool — unlike code's web_fetch there is no save-to-file escape
         // hatch, so this string is ALL the model gets. Cap it hard: a correctness constraint, not
         // just a safety one.
-        return rendered.length > TOTAL_OUTPUT_CHARS
+        const capped = rendered.length > TOTAL_OUTPUT_CHARS
           ? rendered.slice(0, TOTAL_OUTPUT_CHARS) + "\n\n[results truncated]"
           : rendered;
+        return capped + withheldNote;
       } finally {
         // `query` only — the key must NEVER reach the audit line.
         deps.audit?.({ kind: "network", tool: "Search", query, outcome });

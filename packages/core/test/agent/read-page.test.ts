@@ -123,6 +123,43 @@ describe("ReadPage: full page (numbered lines + Links: tail)", () => {
   });
 });
 
+// --- Important 3, whole-branch review: page-core.ts's CleanPage.fromCache already exists but was
+// unused by both callers — the model has no way to tell a cached read from a fresh refetch, even
+// though cached/fresh renders are byte-identical otherwise. Surface it in the header. -------------
+describe("ReadPage: description no longer promises a purely time-based caching guarantee (Important 3 fix)", () => {
+  test("the description tells the model to check the freshness marker rather than assume a fixed time window", () => {
+    const r = new ToolRegistry();
+    registerReadPageTool(r, { cache: new PageCache() });
+    const spec = r.specs(null).find((s) => s.name === "ReadPage");
+    // The old wording promised reload stability "roughly 1 hour" — a pure TIME bound — while
+    // eviction pressure could actually reclaim the entry in seconds under load. The new wording must
+    // point the model at the per-page header's own freshness marker instead of a time estimate alone.
+    expect(spec?.description.toLowerCase()).toContain("cached");
+    expect(spec?.description.toLowerCase()).toContain("fresh fetch");
+  });
+});
+
+describe("ReadPage: freshness signal in the per-page header (Important 3 fix)", () => {
+  test("a first fetch is labeled as a fresh fetch, not cached", async () => {
+    const { fetchFn } = scriptedFetch([{ status: 200, body: FIVE_LINE_HTML, contentType: "text/html" }]);
+    const r = new ToolRegistry();
+    registerReadPageTool(r, { cache: new PageCache(), fetchFn });
+    const out = await r.execute("ReadPage", { pages: [{ url: "https://example.com/page" }] }, ctx());
+    expect(out.output.toLowerCase()).toContain("fresh");
+    expect(out.output.toLowerCase()).not.toContain("cached");
+  });
+
+  test("a second call inside the TTL is labeled as cached", async () => {
+    const { fetchFn } = scriptedFetch([{ status: 200, body: FIVE_LINE_HTML, contentType: "text/html" }]);
+    const cache = new PageCache();
+    const r = new ToolRegistry();
+    registerReadPageTool(r, { cache, fetchFn });
+    await r.execute("ReadPage", { pages: [{ url: "https://example.com/page" }] }, ctx());
+    const second = await r.execute("ReadPage", { pages: [{ url: "https://example.com/page" }] }, ctx());
+    expect(second.output.toLowerCase()).toContain("cached");
+  });
+});
+
 describe("ReadPage: line ranges + the citation round-trip (the property that matters most)", () => {
   test("a lineStart/lineEnd entry returns exactly those numbered lines", async () => {
     const { fetchFn } = scriptedFetch([{ status: 200, body: FIVE_LINE_HTML, contentType: "text/html" }]);
@@ -204,6 +241,107 @@ describe("ReadPage: batching — one failing entry must not fail the batch", () 
   });
 });
 
+// --- Critical 1, whole-branch review (USER-REVISED design, 2026-07-28): chat has no approval flow
+// at all — a dangerous-domain url is HARD-BLOCKED (isError per-entry, no card, never reaches
+// fetchFn), naming the matched entry so the transcript reads as a deliberate policy block, not a
+// network failure. A non-dangerous sibling in the same batch is unaffected. -----------------------
+describe("ReadPage: dangerous-domain hard-block (Critical 1 fix, no card, ever)", () => {
+  test("a SHIPPED dangerous host (transfer.sh) is refused outright — zero fetchFn calls, isError, names the matched entry", async () => {
+    let fetchCalled = false;
+    const fetchFn = (async () => { fetchCalled = true; return new Response("nope"); }) as unknown as typeof fetch;
+    const r = new ToolRegistry();
+    registerReadPageTool(r, { cache: new PageCache(), fetchFn });
+
+    const out = await r.execute("ReadPage", { pages: [{ url: "https://transfer.sh/x" }] }, ctx());
+    expect(out.isError).toBe(true);
+    expect(fetchCalled).toBe(false); // never reached the network
+    expect(out.output).toContain("https://transfer.sh/x");
+    expect(out.output).toContain("transfer.sh"); // names the matched entry
+    expect(out.output.toLowerCase()).toContain("dangerous");
+  });
+
+  test("a mixed batch: the dangerous entry is refused, the safe sibling still succeeds — isError:false overall", async () => {
+    const { fetchFn } = urlFetch({
+      "https://a.example.com/": { status: 200, body: FIVE_LINE_HTML, contentType: "text/html" },
+    });
+    const r = new ToolRegistry();
+    registerReadPageTool(r, { cache: new PageCache(), fetchFn });
+
+    const out = await r.execute(
+      "ReadPage",
+      { pages: [{ url: "https://a.example.com/" }, { url: "https://pastebin.com/raw/x" }] },
+      ctx(),
+    );
+    expect(out.isError).toBe(false); // the safe sibling rescues the batch
+    expect(out.output).toContain("1→line one");
+    expect(out.output).toContain("pastebin.com");
+    expect(out.output.toLowerCase()).toContain("dangerous");
+  });
+
+  test("a batch where EVERY entry is dangerous is isError:true (all-fail contract, same as any other all-failing batch)", async () => {
+    const r = new ToolRegistry();
+    registerReadPageTool(r, { cache: new PageCache() });
+    const out = await r.execute(
+      "ReadPage",
+      { pages: [{ url: "https://transfer.sh/a" }, { url: "https://webhook.site/b" }] },
+      ctx(),
+    );
+    expect(out.isError).toBe(true);
+  });
+
+  test("a USER-ADDED domain (settings.permissions.dangerousDomains.added) is blocked exactly like a shipped one", async () => {
+    let fetchCalled = false;
+    const fetchFn = (async () => { fetchCalled = true; return new Response("nope"); }) as unknown as typeof fetch;
+    const r = new ToolRegistry();
+    registerReadPageTool(r, {
+      cache: new PageCache(),
+      fetchFn,
+      dangerousDomainsAdded: (cwd) => (cwd === "/tmp" ? ["my-internal-exfil.example"] : undefined),
+    });
+
+    const out = await r.execute("ReadPage", { pages: [{ url: "https://my-internal-exfil.example/x" }] }, ctx());
+    expect(out.isError).toBe(true);
+    expect(fetchCalled).toBe(false);
+    expect(out.output).toContain("my-internal-exfil.example");
+  });
+
+  test("an ordinary (non-dangerous) host is completely unaffected", async () => {
+    const { fetchFn } = scriptedFetch([{ status: 200, body: FIVE_LINE_HTML, contentType: "text/html" }]);
+    const r = new ToolRegistry();
+    registerReadPageTool(r, { cache: new PageCache(), fetchFn });
+    const out = await r.execute("ReadPage", { pages: [{ url: "https://example.com/page" }] }, ctx());
+    expect(out.isError).toBe(false);
+    expect(out.output).toContain("1→line one");
+  });
+
+  test("a query entry whose SEED url is dangerous is refused before research ever runs", async () => {
+    let researchCalled = false;
+    const stub: ResearchRunner = { async run() { researchCalled = true; return "REPORT"; } };
+    const r = new ToolRegistry();
+    registerReadPageTool(r, { cache: new PageCache(), research: stub });
+
+    const out = await r.execute("ReadPage", { pages: [{ url: "https://transfer.sh/seed", query: "summarize" }] }, ctx());
+    expect(out.isError).toBe(true);
+    expect(researchCalled).toBe(false);
+    expect(out.output).toContain("transfer.sh");
+  });
+
+  test("EVERY policy the gate allows ReadPage under still hard-blocks — there is no card at all, ever (probed across the same policy set web_fetch cards under)", async () => {
+    // ReadPage's gate verdict is unconditionally "allow" under every policy (see the "gate
+    // classification" describe block above) — the hard-block below is enforced entirely INSIDE the
+    // tool, independent of policy, so it fires identically regardless of what policy a caller is
+    // under. This test proves that independence directly: same tool call, no policy plumbing
+    // involved at all, and the refusal is identical every time.
+    for (const _policy of ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"] as const) {
+      const r = new ToolRegistry();
+      registerReadPageTool(r, { cache: new PageCache() });
+      const out = await r.execute("ReadPage", { pages: [{ url: "https://transfer.sh/x" }] }, ctx());
+      expect(out.isError).toBe(true);
+      expect(out.output.toLowerCase()).toContain("dangerous");
+    }
+  });
+});
+
 describe("ReadPage: caps — a pathological page/batch must stay bounded", () => {
   function bigHtml(title: string, paragraphs: number): string {
     const body = Array.from(
@@ -264,8 +402,8 @@ describe("ReadPage: query (research hook) — T2 ships without T3", () => {
     expect(out.output).toContain("research is not available in this session yet");
   });
 
-  test("a query entry with research WIRED calls it with the entry's url/query/max_pages and relays its report verbatim", async () => {
-    const calls: Array<{ url: string; query: string; max_pages?: number }> = [];
+  test("a query entry with research WIRED calls it with the entry's url/query/max_pages (+ ctx.cwd, for the sub-agent's OWN dangerous-domain hard-block) and relays its report verbatim", async () => {
+    const calls: Array<{ url: string; query: string; max_pages?: number; cwd?: string }> = [];
     const stub: ResearchRunner = {
       async run(q) {
         calls.push(q);
@@ -282,7 +420,10 @@ describe("ReadPage: query (research hook) — T2 ships without T3", () => {
     );
     expect(out.isError).toBe(false);
     expect(out.output).toBe("REPORT: it's about widgets. https://example.com/ lines:1-3");
-    expect(calls).toEqual([{ url: "https://example.com/", query: "what is this about?", max_pages: 3 }]);
+    // cwd rides ctx().cwd ("/tmp") through — see research.ts's ResearchQuery.cwd doc comment (Critical
+    // 1 fix): FetchPage's own hard-block needs the SAME per-project dangerousDomainsAdded lookup
+    // ReadPage itself uses, and ctx.cwd is the only way it can reach that.
+    expect(calls).toEqual([{ url: "https://example.com/", query: "what is this about?", max_pages: 3, cwd: "/tmp" }]);
   });
 
   test("query and a line range on the same entry are rejected by the schema (mutually exclusive)", async () => {

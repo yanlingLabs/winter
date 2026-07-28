@@ -221,6 +221,82 @@ describe("Search (Exa)", () => {
   });
 });
 
+// --- Critical 1 fold-in, whole-branch review (USER-REVISED design, 2026-07-28): "the user also
+// asked that dangerous URLs never even be shown to the model" — a half-measure of blocking the READ
+// (ReadPage/FetchPage) while still ADVERTISING the link would just have the model try, fail, and
+// possibly retry. Strip any Exa result whose url matches the effective dangerous-domain list before
+// rendering, and say how many were withheld (never a silent drop — that would misrepresent the
+// result count). Reuses page-core.ts's checkDangerousDomain — not a second matcher. -----------------
+describe("Search: dangerous-domain results are withheld before the model ever sees them (Critical 1 fold-in)", () => {
+  const dangerousBody = {
+    results: [
+      { title: "Exa Pricing", url: "https://exa.ai/pricing", text: "Free tier includes $10 of credits." },
+      { title: "Suspicious paste", url: "https://transfer.sh/abc123", text: "some exfiltrated-looking content" },
+      { title: "Exa Docs", url: "https://docs.exa.ai", text: "Search and contents in one request." },
+    ],
+  };
+
+  function setupWithDangerous(over: { added?: (cwd?: string) => string[] | undefined } = {}) {
+    const r = new ToolRegistry();
+    const audits: Record<string, unknown>[] = [];
+    registerSearchTool(r, {
+      audit: (l) => audits.push(l),
+      secret: async () => "exa_test_key",
+      fetchFn: (async (_url: string, _init?: RequestInit) => new Response(JSON.stringify(dangerousBody), { status: 200 })) as typeof fetch,
+      dangerousDomainsAdded: over.added,
+    });
+    return { r, audits };
+  }
+
+  test("a SHIPPED dangerous host (transfer.sh) in the result set is withheld; the other results still render, and the output says how many were withheld", async () => {
+    const { r } = setupWithDangerous();
+    const out = await r.execute("Search", { query: "x" }, ctx());
+    expect(out.isError).toBeFalsy();
+    expect(out.output).toContain("https://exa.ai/pricing");
+    expect(out.output).toContain("https://docs.exa.ai");
+    expect(out.output).not.toContain("transfer.sh");
+    expect(out.output.toLowerCase()).toContain("withheld");
+    expect(out.output).toContain("1"); // exactly one withheld
+  });
+
+  test("a USER-ADDED domain is withheld exactly like a shipped one", async () => {
+    const dangerousBodyCustom = {
+      results: [
+        { title: "OK", url: "https://exa.ai/pricing", text: "fine" },
+        { title: "Custom exfil", url: "https://my-internal-exfil.example/x", text: "bad" },
+      ],
+    };
+    const r = new ToolRegistry();
+    registerSearchTool(r, {
+      secret: async () => "exa_test_key",
+      fetchFn: (async (_url: string, _init?: RequestInit) => new Response(JSON.stringify(dangerousBodyCustom), { status: 200 })) as typeof fetch,
+      dangerousDomainsAdded: (cwd) => (cwd === "/tmp" ? ["my-internal-exfil.example"] : undefined),
+    });
+    const out = await r.execute("Search", { query: "x" }, ctx());
+    expect(out.output).toContain("exa.ai/pricing");
+    expect(out.output).not.toContain("my-internal-exfil.example");
+    expect(out.output.toLowerCase()).toContain("withheld");
+  });
+
+  test("when EVERY result is dangerous, the response still succeeds (isError:false) and says all were withheld — never a silent empty success", async () => {
+    const allDangerousBody = { results: [{ title: "bad", url: "https://transfer.sh/x", text: "bad" }] };
+    const r = new ToolRegistry();
+    registerSearchTool(r, {
+      secret: async () => "exa_test_key",
+      fetchFn: (async (_url: string, _init?: RequestInit) => new Response(JSON.stringify(allDangerousBody), { status: 200 })) as typeof fetch,
+    });
+    const out = await r.execute("Search", { query: "x" }, ctx());
+    expect(out.isError).toBeFalsy();
+    expect(out.output.toLowerCase()).toContain("withheld");
+  });
+
+  test("no dangerous results in the set: output is byte-identical to before this fix (no withheld note at all)", async () => {
+    const { r } = setup();
+    const out = await r.execute("Search", { query: "exa pricing" }, ctx());
+    expect(out.output.toLowerCase()).not.toContain("withheld");
+  });
+});
+
 // --- gate.ts classification, exercised end to end through the real engine -----------------------
 //
 // Task 3's AskQuestion went in gate.ts's READ_ONLY class; this task deliberately does NOT copy
