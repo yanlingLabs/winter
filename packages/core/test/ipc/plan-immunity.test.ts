@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ERR, ConnWriter, type WritableSocket } from "@norma/protocol";
-import { startIpcServer } from "../../src/ipc/server";
+import { startIpcServer, REMOTE_ALLOWED_METHODS } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
@@ -22,9 +22,17 @@ import { TokenAuthority } from "../../src/auth/tokens";
 //    ApprovalPolicy zod enum stays exactly six-valued) — a caller that tries gets a parse error,
 //    not a policy decision.
 //
+// Chat Slice C extension (2026-07-29): the coercion above is proven again over the REMOTE role —
+// the phone sends `mode` only (never cwd/approvalPolicy, SP3.4 hardening) and must land on the same
+// fixed "chat" policy a local/harness create does. session.setPolicy, by contrast, is NOT
+// REMOTE_ALLOWED_METHODS-listed — a remote caller never reaches the chat/dispatch immunity checks
+// at all, refused earlier by the role→method allowlist gate. Both are asserted below rather than
+// assumed.
+//
 // Harness duplicated from remote-chat-gate.test.ts's own TestClient/boot() shape (this codebase's
 // convention: no shared test-harness module, every test/ipc/*.test.ts carries its own copy) — using
-// the "harness" role throughout, since none of this is role-specific (unlike Slice B1's remote gate).
+// the "harness" role throughout for the pre-existing tests, since none of that is role-specific
+// (unlike Slice B1's remote gate); the two new tests below add the "remote" role explicitly.
 
 /** Minimal raw test client speaking NDJSON JSON-RPC — duplicated from remote-chat-gate.test.ts's copy. */
 class TestClient {
@@ -74,7 +82,7 @@ describe("plan-immunity: session.create's chat-seam coercion", () => {
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
-  async function boot(): Promise<{ store: SessionStore; socketPath: string; harnessToken: string }> {
+  async function boot(): Promise<{ store: SessionStore; socketPath: string; harnessToken: string; remoteToken: string }> {
     const home = mkdtempSync(join(tmpdir(), "norma-plan-immunity-ipc-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
@@ -82,7 +90,7 @@ describe("plan-immunity: session.create's chat-seam coercion", () => {
     const tokens = await authority.ensureTokens();
     const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store });
     stop = () => { server.stop(); store.close(); };
-    return { store, socketPath, harnessToken: tokens.harness };
+    return { store, socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote };
   }
 
   async function harnessClient(socketPath: string, token: string): Promise<TestClient> {
@@ -90,6 +98,24 @@ describe("plan-immunity: session.create's chat-seam coercion", () => {
     await c.hello(token, "local-tui", "harness");
     return c;
   }
+
+  async function remoteClient(socketPath: string, token: string): Promise<TestClient> {
+    const c = await TestClient.connect(socketPath);
+    await c.hello(token, "iphone-gateway", "remote");
+    return c;
+  }
+
+  // Chat Slice C: the phone sends mode ONLY — never cwd/approvalPolicy (SP3.4 hardening already
+  // enforces that at the wire level) — and must land on the same fixed "chat" policy a local
+  // create does. Extends the compat proof above to the remote path.
+  test("remote chat create (Slice C) is ALSO coerced to the fixed 'chat' policy", async () => {
+    const { store, socketPath, remoteToken } = await boot();
+    const c = await remoteClient(socketPath, remoteToken);
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", mode: "chat" });
+    expect(res.error).toBeUndefined();
+    expect(store.meta(res.result.sessionId).approvalPolicy).toBe("chat");
+    c.close();
+  });
 
   test("app-shaped create (mode:'chat', approvalPolicy:'auto') is coerced to the fixed 'chat' policy — the compat proof (AppDelegate.swift's own creation shape)", async () => {
     const { store, socketPath, harnessToken } = await boot();
@@ -141,7 +167,7 @@ describe("plan-immunity: session.setPolicy — chat's fixed policy + dispatch's 
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
-  async function boot(): Promise<{ store: SessionStore; socketPath: string; harnessToken: string }> {
+  async function boot(): Promise<{ store: SessionStore; socketPath: string; harnessToken: string; remoteToken: string }> {
     const home = mkdtempSync(join(tmpdir(), "norma-plan-immunity-setpolicy-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
@@ -149,7 +175,7 @@ describe("plan-immunity: session.setPolicy — chat's fixed policy + dispatch's 
     const tokens = await authority.ensureTokens();
     const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store });
     stop = () => { server.stop(); store.close(); };
-    return { store, socketPath, harnessToken: tokens.harness };
+    return { store, socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote };
   }
 
   async function harnessClient(socketPath: string, token: string): Promise<TestClient> {
@@ -157,6 +183,33 @@ describe("plan-immunity: session.setPolicy — chat's fixed policy + dispatch's 
     await c.hello(token, "local-tui", "harness");
     return c;
   }
+
+  async function remoteClient(socketPath: string, token: string): Promise<TestClient> {
+    const c = await TestClient.connect(socketPath);
+    await c.hello(token, "iphone-gateway", "remote");
+    return c;
+  }
+
+  // Chat Slice C requirement 4: confirm — not assume — that session.setPolicy stays off the
+  // remote allowlist. If this ever regressed (someone adding it to REMOTE_ALLOWED_METHODS without
+  // updating this test), the assertion below would catch it directly; the end-to-end test right
+  // after proves the CONSEQUENCE — a remote setPolicy call never even reaches the chat/dispatch
+  // immunity checks above, because the role→method gate refuses it first.
+  test("session.setPolicy is NOT in REMOTE_ALLOWED_METHODS", () => {
+    expect(REMOTE_ALLOWED_METHODS.has(METHODS.sessionSetPolicy)).toBe(false);
+  });
+
+  test("a remote caller invoking session.setPolicy on a chat session is refused by the role allowlist (UNAUTHORIZED), never reaching the chat-immunity check", async () => {
+    const { store, socketPath, remoteToken } = await boot();
+    const chat = store.createSession("global", { mode: "chat", approvalPolicy: "chat" as any });
+    const c = await remoteClient(socketPath, remoteToken);
+    const res = await c.request(METHODS.sessionSetPolicy, { sessionId: chat, policy: "auto" });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.UNAUTHORIZED);
+    expect(res.error.message).toContain("remote role may not call");
+    expect(store.meta(chat).approvalPolicy).toBe("chat"); // unchanged
+    c.close();
+  });
 
   test.each(["auto", "plan", "bypass", "ask"] as const)(
     "session.setPolicy(chat session, '%s') is rejected — chat's policy is fixed and can never be changed, not even to a value that ISN'T plan",

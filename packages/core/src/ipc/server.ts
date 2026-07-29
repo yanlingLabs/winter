@@ -295,23 +295,38 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   METHODS.sessionHistory,
 ]);
 
-/** Chat mode Slice B1 Task 1: chat sessions are Mac-local until Slice C ships the phone's chat
- *  surface. Enforced DAEMON-side, not by a phone-side list filter, because Slice B1 Task 2 makes
- *  `QuestionSchema.header` optional — a decoder change in Swift. A phone on the current kit tag
- *  decodes `header` as a non-optional `String` and would fail on a header-less question. A
- *  client-side filter protects only phones that update; this protects every phone, including one
- *  that never updates. Same reasoning as the relay-config anti-rollback rule. Used by every
- *  REMOTE_ALLOWED_METHODS handler that takes a bare `sessionId` and could target a chat session:
- *  session.attach/send/history/interrupt (Slice B1 brief's four verbs) PLUS approval.respond,
- *  approval.list, and ask_user.respond — all three also carry a caller-supplied `sessionId` with no
- *  other mode check, and ask_user.respond in particular is exactly the RPC the AskQuestion tool
- *  (this same slice, Task 2+) resolves through. Remove when Slice C ships chat to the phone. */
+/** The session `mode`s a remote (iPhone) client may target at all — every other mode is Mac-local
+ *  and invisible to remote regardless of which RPC is used to reach it. An absent `mode` means
+ *  "code" (`SessionRow.mode`'s own convention, mirrored in store.ts/events.ts), so it's folded in
+ *  via the `?? "code"` fallback at each call site below rather than by adding `undefined` here.
+ *
+ *  Chat mode Slice C lifted chat into this set — the phone now gets its own chat surface. Dispatch
+ *  has been reachable since Phase 7 (the phone drives the shared dispatch session via
+ *  `session.dispatch`, itself REMOTE_ALLOWED_METHODS-listed). Nothing today has a wire-expressible
+ *  `mode` outside this set (`SessionCreateParams.mode`'s zod enum stays three-valued), but this is
+ *  written as an ALLOWLIST — not "everything except chat" — on purpose: a future Mac/apps-only mode
+ *  (e.g. a cowork surface) needs ZERO edits here to stay Mac-local; it's excluded simply by not
+ *  being one of these three. remote-chat-gate.test.ts proves this with a synthetic cowork-shaped
+ *  row written directly to the store (no protocol/session.create support exists for it — that's the
+ *  point: refusal is the gate's default, not an opt-in list of blocked modes to maintain). */
+const REMOTE_ELIGIBLE_SESSION_MODES = new Set(["code", "dispatch", "chat"]);
+
+/** Guards every REMOTE_ALLOWED_METHODS handler that takes a bare `sessionId` and could target a
+ *  session whose `mode` keeps it Mac-local — see REMOTE_ELIGIBLE_SESSION_MODES just above for
+ *  which modes those are and why this is an allowlist rather than a `mode === "chat"` special
+ *  case. Enforced DAEMON-side, not by a phone-side list filter — same reasoning as the relay-config
+ *  anti-rollback rule: a client-side filter only protects a phone that updates; this protects every
+ *  phone, including one that never does. Used by session.attach/send/history/interrupt plus
+ *  approval.respond, approval.list, and ask_user.respond — all three also carry a caller-supplied
+ *  `sessionId` with no other mode check, and ask_user.respond in particular is exactly the RPC the
+ *  AskQuestion tool resolves through. */
 function assertRemoteMayUseSession(store: SessionStore, role: string | undefined | null, sessionId: string): void {
   if (role !== "remote") return;
   let mode: string | undefined;
   try { mode = store.meta(sessionId).mode; } catch { return; } // unknown id → let the handler's own error win
-  if (mode === "chat") {
-    throw new RpcFailure(ERR.INVALID_PARAMS, "chat sessions are not available to remote clients yet");
+  const effectiveMode = mode ?? "code";
+  if (!REMOTE_ELIGIBLE_SESSION_MODES.has(effectiveMode)) {
+    throw new RpcFailure(ERR.INVALID_PARAMS, `${effectiveMode} sessions are not available to remote clients`);
   }
 }
 
@@ -666,11 +681,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // get-or-create — session.create rejects the mode outright rather than silently minting a
         // second one (there must only ever be one).
         if (p.mode === "dispatch") throw new RpcFailure(ERR.INVALID_PARAMS, "dispatch sessions are created via session.dispatch, not session.create");
-        // Chat (slice A) is Mac-local for now: the phone gets chat in a later slice, together with
-        // its own engine and sync. Until then a remote caller may only mint code sessions.
-        if (p.mode === "chat" && socket.data.authedRole === "remote") {
-          throw new RpcFailure(ERR.INVALID_PARAMS, "remote callers may not create chat sessions yet");
-        }
+        // Chat mode Slice C: a remote (phone) caller may now mint a chat session too — the daemon
+        // supplies cwd (homedir(), just below) and coerces approvalPolicy to "chat" (also below)
+        // exactly as it always has for local/harness callers; the phone sends `mode` only. A mode
+        // that stays Mac-local for remote (REMOTE_ELIGIBLE_SESSION_MODES above) has nothing to
+        // reject HERE because it isn't wire-expressible in SessionCreateParams' mode enum at all —
+        // there is no third "unlisted mode" branch to write.
         // SP3.4 hardening: the phone never picks a working directory or approval policy — the
         // spec's "the phone does not browse the Mac's filesystem" is enforced here, not just
         // convention. Local/harness callers are unchanged. Checked against the RAW wire params
@@ -714,10 +730,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionList: {
         const sessions = opts.store.list();
-        // Chat mode Slice B1 Task 1: chat sessions are invisible to remote — see
-        // assertRemoteMayUseSession's doc comment for why this is daemon-side, not phone-side.
+        // Chat mode Slice C: chat sessions are now visible to remote too. A mode outside
+        // REMOTE_ELIGIBLE_SESSION_MODES (Mac-local-only — e.g. a future cowork surface) stays
+        // filtered out for remote — see assertRemoteMayUseSession's doc comment above for why this
+        // is daemon-side, not phone-side, and why the set is an allowlist rather than a
+        // `mode !== "chat"` special case.
         return socket.data.authedRole === "remote"
-          ? { sessions: sessions.filter((s) => s.mode !== "chat") }
+          ? { sessions: sessions.filter((s) => REMOTE_ELIGIBLE_SESSION_MODES.has(s.mode ?? "code")) }
           : { sessions };
       }
       case METHODS.sessionDispatch: {
