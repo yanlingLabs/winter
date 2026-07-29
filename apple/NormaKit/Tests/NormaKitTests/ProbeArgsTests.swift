@@ -28,4 +28,17 @@ final class ProbeArgsTests: XCTestCase {
         guard case .failure = ProbeArgs.parse(["attach"]) else { return XCTFail() } // needs sessionId
         guard case .failure = ProbeArgs.parse(["attach", "s_1", "--from", "NaN"]) else { return XCTFail() }
     }
+
+    /// devfix: `--dev` picks the dev Keychain service (`com.norma.core.dev`) for the fallback
+    /// `KeychainToken.readHarnessToken` read — default (absent) must stay `false`/dist so every
+    /// existing invocation is unaffected.
+    func testDevFlagDefaultsFalse() throws {
+        guard case .success(let a) = ProbeArgs.parse(["list"]) else { return XCTFail() }
+        XCTAssertFalse(a.dev)
+    }
+
+    func testDevFlagSetWhenPassed() throws {
+        guard case .success(let a) = ProbeArgs.parse(["list", "--dev"]) else { return XCTFail() }
+        XCTAssertTrue(a.dev)
+    }
 }

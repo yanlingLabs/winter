@@ -8,11 +8,13 @@ final class AppProfileTests: XCTestCase {
         XCTAssertEqual(AppProfile.displayName, "Norma Dev")
         XCTAssertTrue(AppProfile.defaultNormaHome.hasSuffix("/.norma-dev"))
         XCTAssertEqual(normaHelperMachServiceName, "com.norma.helper.dev")
+        XCTAssertEqual(AppProfile.keychainService, "com.norma.core.dev")
         #else
         XCTAssertFalse(AppProfile.isDev)
         XCTAssertEqual(AppProfile.displayName, "Norma")
         XCTAssertTrue(AppProfile.defaultNormaHome.hasSuffix("/.norma"))
         XCTAssertEqual(normaHelperMachServiceName, "com.norma.helper")
+        XCTAssertEqual(AppProfile.keychainService, "com.norma.core")
         #endif
     }
 

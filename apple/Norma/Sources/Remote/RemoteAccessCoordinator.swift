@@ -81,7 +81,8 @@ final class RemoteAccessCoordinator {
             socketPath: NormaPaths.socketPath(),
             hostLabel: Host.current().localizedName ?? "Mac",
             relayConfig: relay.relayConfig,
-            relayURLs: relay.relayURLs
+            relayURLs: relay.relayURLs,
+            keychainService: AppProfile.keychainService
         ))
     }()
 

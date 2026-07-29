@@ -30,13 +30,14 @@ case .success(let a): args = a
 }
 
 let socketPath = args.socket ?? NormaPaths.socketPath()
+let keychainService = args.dev ? "com.norma.core.dev" : "com.norma.core"
 let token: String
 if let t = args.token { token = t }
 else {
-    out("reading harness token from Keychain — a permission prompt may appear; pass --token to skip")
-    do { token = try KeychainToken.readHarnessToken() }
+    out("reading harness token from Keychain (\(keychainService)) — a permission prompt may appear; pass --token to skip")
+    do { token = try KeychainToken.readHarnessToken(service: keychainService) }
     catch {
-        out("cannot read harness token from Keychain (\(error)) — is the daemon installed? Or pass --token.")
+        out("cannot read harness token from Keychain (\(error)) — is the daemon installed? Or pass --token\(args.dev ? "" : "/--dev").")
         exit(2)
     }
 }

@@ -53,6 +53,14 @@ public final class RemoteHost {
         /// scripted closure instead, so selection/fallback behavior is provable without the
         /// probe ever touching a real network.
         public var relayProbe: @Sendable (String) async -> Bool
+        /// Keychain service `start()` reads its `remote-token` from (`KeychainToken.
+        /// readRemoteToken(service:)`) — must match the TARGET daemon's `profile.ts`
+        /// `keychainService()` (dist `"com.norma.core"` vs. dev `"com.norma.core.dev"`; devfix:
+        /// before this field existed, EVERY profile read the dist service, so a dev-profile app
+        /// silently authenticated against the dist daemon's token instead of its own dev daemon's).
+        /// Defaulted to the dist literal so every construction site that predates this field
+        /// (production's own former behavior, every existing test) compiles and behaves unchanged.
+        public var keychainService: String
 
         public init(
             storeDir: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".norma/remote", isDirectory: true),
@@ -60,7 +68,8 @@ public final class RemoteHost {
             hostLabel: String,
             relayConfig: SignedRelayConfig,
             relayURLs: [String],
-            relayProbe: @escaping @Sendable (String) async -> Bool = RemoteHost.defaultRelayProbe
+            relayProbe: @escaping @Sendable (String) async -> Bool = RemoteHost.defaultRelayProbe,
+            keychainService: String = "com.norma.core"
         ) {
             self.storeDir = storeDir
             self.socketPath = socketPath
@@ -68,6 +77,7 @@ public final class RemoteHost {
             self.relayConfig = relayConfig
             self.relayURLs = relayURLs
             self.relayProbe = relayProbe
+            self.keychainService = keychainService
         }
     }
 
@@ -351,11 +361,11 @@ public final class RemoteHost {
         if let makeDaemonFactory {
             daemonFactory = makeDaemonFactory
         } else {
-            let token = try KeychainToken.readRemoteToken()
+            let token = try KeychainToken.readRemoteToken(service: config.keychainService)
             daemonFactory = { NormaClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: token, clientName: "iphone-gateway") }
         }
         #else
-        let token = try KeychainToken.readRemoteToken()
+        let token = try KeychainToken.readRemoteToken(service: config.keychainService)
         daemonFactory = { NormaClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: token, clientName: "iphone-gateway") }
         #endif
 

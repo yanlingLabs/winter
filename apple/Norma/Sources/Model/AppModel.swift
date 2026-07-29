@@ -113,7 +113,7 @@ final class AppModel: ObservableObject {
 
     /// Production wiring: harness token from the Keychain, default unix socket.
     static func production() throws -> AppModel {
-        let token = try KeychainToken.readHarnessToken()
+        let token = try KeychainToken.readHarnessToken(service: AppProfile.keychainService)
         let path = NormaPaths.socketPath()
         return AppModel(makeTransport: { UnixSocketTransport(path: path) }, token: token)
     }

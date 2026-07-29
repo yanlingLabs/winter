@@ -21,6 +21,14 @@ enum AppProfile {
     /// Menu-bar asset-name prefix (Task 5 loads `mb-…` / `mb-dev-…`).
     static var menuBarAssetPrefix: String { isDev ? "mb-dev" : "mb" }
 
+    /// Keychain service this profile's daemon stores its tokens under — mirrors
+    /// `packages/core/src/profile.ts`'s `keychainService()` exactly (dist stays the historical
+    /// literal, never migrate). Every `KeychainToken` read (`AppModel.production()`,
+    /// `RemoteHost.Config`) must pass this, not the bare `"com.norma.core"` default — otherwise a
+    /// dev-profile app reads the DIST daemon's token and fails to authenticate against its own dev
+    /// daemon (the bug this property exists to prevent).
+    static var keychainService: String { isDev ? "com.norma.core.dev" : "com.norma.core" }
+
     /// Exports NORMA_HOME + NORMA_PROFILE into this process's env (respecting pre-set values) so
     /// NormaPaths, NormaKit, and every spawned child (daemon, helper tools) inherit one identity.
     static func bootstrapEnvironment() {
