@@ -111,10 +111,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Production wiring: harness token from the Keychain, default unix socket.
+    /// Production wiring: harness token from the Keychain, profile-resolved unix socket (devfix
+    /// socket strand — `NormaPaths.socketPath(home:)` with `AppProfile.normaHome`, not the bare
+    /// no-arg `socketPath()`, so a dev-profile app dials its OWN daemon's socket instead of
+    /// whatever `$NORMA_HOME` independently resolves to).
     static func production() throws -> AppModel {
         let token = try KeychainToken.readHarnessToken(service: AppProfile.keychainService)
-        let path = NormaPaths.socketPath()
+        let path = NormaPaths.socketPath(home: AppProfile.normaHome)
         return AppModel(makeTransport: { UnixSocketTransport(path: path) }, token: token)
     }
 

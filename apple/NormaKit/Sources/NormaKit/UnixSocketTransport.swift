@@ -104,11 +104,28 @@ public enum NormaPaths {
 
     /// Mirror of core's resolveNormaHome(): $NORMA_HOME ?? ~/.norma, + /run/core.sock.
     public static func socketPath() -> String {
-        homeDirectory() + "/run/core.sock"
+        socketPath(home: homeDirectory())
+    }
+
+    /// devfix (socket strand): explicit-home overload. `homeDirectory()` re-derives `$NORMA_HOME`
+    /// independently at each call site — fine for a caller that's genuinely profile-agnostic (or
+    /// dist-only), but the live gate that found the keychain-service bug (v-dev-dist-split) found a
+    /// SECOND instance of the same shape here: a caller that has ALREADY resolved its own
+    /// profile-correct home (the app's `AppProfile.normaHome`) must pass it explicitly rather than
+    /// trust this type to independently re-derive the identical answer. Pure string-joining, no env
+    /// touched.
+    public static func socketPath(home: String) -> String {
+        home + "/run/core.sock"
     }
 
     /// Mirror of core's resolveNormaHome(): $NORMA_HOME ?? ~/.norma, + /settings.json.
     public static func settingsPath() -> String {
-        homeDirectory() + "/settings.json"
+        settingsPath(home: homeDirectory())
+    }
+
+    /// devfix (socket strand): see `socketPath(home:)`'s own doc comment — same explicit-home
+    /// contract, for the settings file path.
+    public static func settingsPath(home: String) -> String {
+        home + "/settings.json"
     }
 }

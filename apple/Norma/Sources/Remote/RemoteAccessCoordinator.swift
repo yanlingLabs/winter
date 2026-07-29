@@ -76,9 +76,15 @@ final class RemoteAccessCoordinator {
 
     private lazy var host: RemoteHost = {
         let relay = Self.loadVerifiedRelayConfig()
+        // devfix (socket strand): both `storeDir` and `socketPath` used to re-derive `$NORMA_HOME`
+        // independently via the bare `NormaPaths.homeDirectory()`/`socketPath()` — the SAME
+        // profile-blind gap `AppModel.production()` had. Resolve once via `AppProfile.normaHome`
+        // and pass it explicitly, so a dev-profile app's pairing stack persists its allowlist under
+        // (and dials the daemon at) its OWN home, not the dist one.
+        let home = AppProfile.normaHome
         return RemoteHost(config: RemoteHost.Config(
-            storeDir: URL(fileURLWithPath: NormaPaths.homeDirectory()).appendingPathComponent("remote", isDirectory: true),
-            socketPath: NormaPaths.socketPath(),
+            storeDir: URL(fileURLWithPath: home).appendingPathComponent("remote", isDirectory: true),
+            socketPath: NormaPaths.socketPath(home: home),
             hostLabel: Host.current().localizedName ?? "Mac",
             relayConfig: relay.relayConfig,
             relayURLs: relay.relayURLs,

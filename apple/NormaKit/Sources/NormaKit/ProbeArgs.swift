@@ -65,7 +65,19 @@ public struct ProbeArgs: Equatable {
       norma-probe create <scope> [--cwd <path>]
       norma-probe attach <sessionId> [--from <seq>]
       norma-probe send <sessionId> <text…>
-    global flags: --token <t> (default: Keychain harness-token), --socket <path> (default: $NORMA_HOME/run/core.sock),
-      --dev (read the dev daemon's Keychain service, com.norma.core.dev, instead of dist's com.norma.core)
+    global flags: --token <t> (default: Keychain harness-token), --socket <path> (default: $NORMA_HOME/run/core.sock,
+      or ~/.norma-dev/run/core.sock with --dev), --dev (read the dev daemon's Keychain service AND dial its
+      socket instead of dist's)
     """
+
+    /// devfix (socket strand): the socket to actually dial. `--socket` always wins; else `--dev`
+    /// targets this user's dev home explicitly (`~/.norma-dev/run/core.sock`) rather than the
+    /// ambient `NormaPaths.socketPath()` default — the earlier keychain-only pass switched `--dev`'s
+    /// Keychain service but left the socket ambient, so `norma-probe --dev list` read the DEV token
+    /// and dialed the DIST socket (hang/auth mismatch, live-gate-found). `devHome` is injectable so
+    /// this stays testable without touching `NSHomeDirectory()`; production callers (norma-probe's
+    /// `main.swift`) use the default.
+    public func resolvedSocketPath(devHome: String = NSHomeDirectory() + "/.norma-dev") -> String {
+        socket ?? (dev ? NormaPaths.socketPath(home: devHome) : NormaPaths.socketPath())
+    }
 }

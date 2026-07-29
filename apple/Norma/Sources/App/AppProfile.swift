@@ -18,6 +18,24 @@ enum AppProfile {
         NSHomeDirectory() + (isDev ? "/.norma-dev" : "/.norma")
     }
 
+    /// devfix (socket strand): the Norma home THIS process should actually dial/read against —
+    /// same precedence as `bootstrapEnvironment()`'s own `setenv(..., 0)` (an explicit `NORMA_HOME`
+    /// wins, else `defaultNormaHome`), but read via the raw POSIX `getenv` — the exact counterpart
+    /// of the `setenv` `bootstrapEnvironment()` writes with — rather than `ProcessInfo.
+    /// processInfo.environment` (what `NormaKit`'s `NormaPaths.homeDirectory()` reads). The live
+    /// gate that found the keychain-service bug (v-dev-dist-split) found a second, same-shaped gap
+    /// here: `AppModel.production()`/`RemoteAccessCoordinator` called `NormaPaths.socketPath()`
+    /// directly, which re-derives `$NORMA_HOME` independently of this profile's own resolution —
+    /// on the live Mac the two disagreed, so the dev app dialed the DIST socket (where an old
+    /// dist-era daemon was listening) with a dev token, hanging/failing auth. Every daemon-facing
+    /// path call now resolves its home HERE, once, and passes it explicitly into `NormaPaths.
+    /// socketPath(home:)`/`settingsPath(home:)` instead of trusting a second, independent read to
+    /// agree.
+    static var normaHome: String {
+        if let raw = getenv("NORMA_HOME") { return String(cString: raw) }
+        return defaultNormaHome
+    }
+
     /// Menu-bar asset-name prefix (Task 5 loads `mb-…` / `mb-dev-…`).
     static var menuBarAssetPrefix: String { isDev ? "mb-dev" : "mb" }
 

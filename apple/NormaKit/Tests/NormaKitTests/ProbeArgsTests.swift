@@ -41,4 +41,27 @@ final class ProbeArgsTests: XCTestCase {
         guard case .success(let a) = ProbeArgs.parse(["list", "--dev"]) else { return XCTFail() }
         XCTAssertTrue(a.dev)
     }
+
+    // MARK: - resolvedSocketPath (devfix, socket strand)
+
+    /// devfix: `--dev` switched the Keychain service but NOT the socket in the earlier pass —
+    /// `norma-probe --dev list` dialed the DIST socket with a DEV token and hung. `--dev` (absent
+    /// `--socket`) must now target the dev home's socket explicitly.
+    func testResolvedSocketPathDevDefaultsToDevHomeSocket() throws {
+        guard case .success(let a) = ProbeArgs.parse(["list", "--dev"]) else { return XCTFail() }
+        XCTAssertEqual(a.resolvedSocketPath(devHome: "/tmp/fake-dev-home"), "/tmp/fake-dev-home/run/core.sock")
+    }
+
+    /// Explicit `--socket` always wins, `--dev` or not.
+    func testResolvedSocketPathExplicitSocketWinsOverDev() throws {
+        guard case .success(let a) = ProbeArgs.parse(["list", "--dev", "--socket", "/tmp/explicit.sock"]) else { return XCTFail() }
+        XCTAssertEqual(a.resolvedSocketPath(devHome: "/tmp/fake-dev-home"), "/tmp/explicit.sock")
+    }
+
+    /// No `--dev`: falls back to the ambient `NormaPaths.socketPath()` default — unchanged dist
+    /// behavior for every invocation that predates `--dev`.
+    func testResolvedSocketPathWithoutDevMatchesAmbientDefault() throws {
+        guard case .success(let a) = ProbeArgs.parse(["list"]) else { return XCTFail() }
+        XCTAssertEqual(a.resolvedSocketPath(), NormaPaths.socketPath())
+    }
 }

@@ -29,7 +29,7 @@ case .failure(let err): out(err.message); exit(2)
 case .success(let a): args = a
 }
 
-let socketPath = args.socket ?? NormaPaths.socketPath()
+let socketPath = args.resolvedSocketPath()
 let keychainService = args.dev ? "com.norma.core.dev" : "com.norma.core"
 let token: String
 if let t = args.token { token = t }

@@ -682,8 +682,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // token item's ACL, so SecItemCopyMatching blocks on a securityd consent dialog
         // (observed: testBootInstallsMenuBar hung 394s). Tests exercise the degraded path.
         let production = Self.isRunningUnitTests ? nil : (try? AppModel.production())
+        // devfix (socket strand): the degraded fallback must still dial THIS profile's socket —
+        // same `AppProfile.normaHome` resolution as `AppModel.production()` above, not the bare
+        // `NormaPaths.socketPath()` (which would keep it pinned to the dist path for a dev app).
         let model = production ?? AppModel(
-            makeTransport: { UnixSocketTransport(path: NormaPaths.socketPath()) },
+            makeTransport: { UnixSocketTransport(path: NormaPaths.socketPath(home: AppProfile.normaHome)) },
             token: AppModel.missingTokenSentinel
         )
         let tokenMissing = production == nil
