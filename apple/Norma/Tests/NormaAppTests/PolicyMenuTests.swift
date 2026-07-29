@@ -137,4 +137,74 @@ final class PolicyMenuTests: XCTestCase {
         let labels = sessionPolicyModes.map(policyDisplayLabel)
         XCTAssertEqual(labels, ["Plan", "Don't Ask", "Ask", "Accept Edits", "Auto", "Bypass"])
     }
+
+    // MARK: - Plan-immunity (2026-07-28 design; fix round 1, review finding "door 3"):
+    // OrbWindowController.updateIsChatSession — the orb's OWN adapter, separate from any
+    // DetachedWindowController's own, must also stop lying about whether the picker is editable.
+
+    /// Local copy of `AppModelTests`' `waitUntilMethod` — polls for the Nth occurrence of a
+    /// specific RPC method rather than a fixed `t.sent[n]` index, tolerant of the directory's own
+    /// unawaited `session.list` re-fetch racing on the wire alongside whatever this test is
+    /// waiting for (same rationale as that file's own doc comment on the method).
+    func waitUntilMethod(_ t: AppScriptedTransport, _ method: String, occurrence: Int = 1, timeout: TimeInterval = 3) async -> [String: Any] {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let matches = t.sent.map(lineJSON).filter { $0["method"] as? String == method }
+            if matches.count >= occurrence { return matches[occurrence - 1] }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTFail("timed out waiting for occurrence \(occurrence) of method \(method): \(t.sent)")
+        return [:]
+    }
+
+    /// `AppDelegate.boot()`'s own `AppModel` can never be given a scripted transport in a unit test
+    /// (its `isRunningUnitTests` gate always falls back to a token-missing model whose
+    /// `makeDetachedFeed` — and, by extension, every RPC — fails immediately), so the ACTUAL
+    /// `orb.sidebars.onSelect` closure isn't independently end-to-end testable. This proves the
+    /// method that closure delegates to instead (`OrbWindowController.updateIsChatSession`) against
+    /// a REAL `model.directory.rows`, populated via a genuine scripted-transport round trip (not a
+    /// hand-fed array) — the same "session_created kicks the directory's own re-list" mechanism
+    /// `AppModelTests.testSessionCreatedChatModeNeverRefocusesButDirectorySeesIt` already proves
+    /// populates chat rows correctly. The `onSelect` closure itself is now a one-line, obviously-
+    /// correct delegate to this method plus the pre-existing `focusSession` call (see
+    /// `AppDelegate.swift`'s own doc comment at that call site).
+    @MainActor
+    func testOrbUpdateIsChatSessionTracksARealDirectoryRoundTrip() async throws {
+        let t = AppScriptedTransport()
+        let model = AppModel(makeTransport: { t }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        await answerHandshake(t, sessions: #"[{"sessionId":"s_a","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"}]"#)
+        await waitUntilSent(t, 3)
+        let attach = lineJSON(t.sent[2])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        await waitUntil { model.session.state.status == .idle }
+
+        // A chat session appears (e.g. created from another window) — kicks the directory's own
+        // unconditional re-list, same mechanism AppModelTests' chat-mode test already proves.
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session_created","seq":1,"sessionId":"s_chat","ts":5,"scope":"global","mode":"chat"}}"#)
+        let relist = await waitUntilMethod(t, "session.list", occurrence: 2)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(relist["id"] as! Int),"result":{"sessions":[{"sessionId":"s_a","scope":"global","createdAt":1,"lastSeq":0,"mode":"dispatch"},{"sessionId":"s_chat","scope":"global","createdAt":5,"lastSeq":0,"mode":"chat"}]}}"#)
+        await waitUntil { model.directory.rows.contains { $0.sessionId == "s_chat" } }
+
+        let orb = OrbWindowController(session: SessionModel())
+        XCTAssertFalse(orb.fieldAdapter.isChatSession, "a fresh orb adapter starts non-chat")
+
+        orb.updateIsChatSession(for: "s_chat", rows: model.directory.rows)
+        XCTAssertTrue(orb.fieldAdapter.isChatSession, "selecting a REAL chat row (from an actual directory round trip) must flip the orb's OWN adapter")
+
+        orb.updateIsChatSession(for: "s_a", rows: model.directory.rows)
+        XCTAssertFalse(orb.fieldAdapter.isChatSession, "switching back to a non-chat row must flip it back off")
+    }
+
+    /// CONTROL: an id the directory hasn't loaded (yet) resolves non-chat — matches
+    /// `DetachedWindowController.isChatSession`'s own documented "not found -> false" behavior
+    /// (the SAME pure helper this method calls).
+    @MainActor
+    func testOrbUpdateIsChatSessionDefaultsFalseForAnUnknownId() {
+        let orb = OrbWindowController(session: SessionModel())
+        orb.updateIsChatSession(for: "s_missing", rows: [])
+        XCTAssertFalse(orb.fieldAdapter.isChatSession)
+    }
 }

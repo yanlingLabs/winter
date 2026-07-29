@@ -19,12 +19,16 @@ struct SessionSidebar: View {
     let onSelect: (String) -> Void
     let onOpenDetached: (String) -> Void
     let onNewSession: () -> Void
+    /// Plan-immunity Task 2: `SidebarWiring.rowFilter` threaded straight through — see that
+    /// struct's own doc comment. Default `{ _ in true }` reproduces every pre-existing behavior
+    /// (nothing filtered) for any direct construction that doesn't pass one.
+    var rowFilter: (SessionSummary) -> Bool = { _ in true }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 2) {
                 newSessionRow
-                ForEach(directory.rows) { row in
+                ForEach(directory.rows.filter(rowFilter)) { row in
                     SessionSidebarRow(
                         row: row,
                         isCurrent: row.sessionId == currentSessionId,

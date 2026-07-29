@@ -686,7 +686,20 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // sessions default to the home directory (the same value session.dispatch uses). Scoped to
         // the remote role so local/harness callers keep today's semantics (omitted cwd stays unset).
         const cwd = p.cwd ?? (socket.data.authedRole === "remote" ? homedir() : undefined);
-        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy: p.approvalPolicy, origin: p.origin, mode: p.mode });
+        // Plan-immunity (2026-07-28, USER-REVISED design): a chat session's approvalPolicy is
+        // ALWAYS the fixed internal "chat" policy (gate.ts's SessionApprovalPolicy) — COERCED here,
+        // not rejected, regardless of whatever the caller sent (or omitted; `p.approvalPolicy`'s
+        // zod `.default("ask")` already filled in something by this point either way). This is
+        // deliberate compat: the shipped Mac app creates every chat session with
+        // `approvalPolicy: "auto"` (AppDelegate.swift) and must keep working completely unchanged —
+        // the field is simply meaningless for chat, so silently overriding it here is honest, unlike
+        // the mode:"dispatch" rejection just above where the caller is asking for a real singleton
+        // this handler cannot mint. `"chat"` itself can never arrive as `p.approvalPolicy` from the
+        // wire (the protocol's ApprovalPolicy zod enum stays six-valued — see gate.ts's
+        // SessionApprovalPolicy doc comment), so this coercion is the ONLY way a session's stored
+        // policy ever becomes "chat".
+        const approvalPolicy = p.mode === "chat" ? "chat" : p.approvalPolicy;
+        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy, origin: p.origin, mode: p.mode });
         const trusted = cwd ? (opts.trust?.isTrusted(cwd) ?? false) : false;
         // Broadcast the session_created event to every authed harness (not just attachments —
         // a brand-new session has none) so other harnesses can offer to follow (spec §4.4).
@@ -938,6 +951,24 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionSetPolicy: {
         const p = parseParams(SessionSetPolicyParams, params);
+        // Plan-immunity (2026-07-28, USER-REVISED design): chat's policy is FIXED — ANY value is
+        // rejected for a chat target, not just "plan" (unlike dispatch below, chat has no
+        // meaningful policy axis left to set at all: its allowlisted tools all allow under every
+        // real policy anyway, per gate.ts, so the only honest answer is "this can't be changed").
+        // Dispatch keeps the narrower "plan" rejection — same incoherence as chat's original brief
+        // (exit_plan_mode is code-only, dispatch's own allowlist never includes it), but every
+        // OTHER policy remains meaningful and settable for dispatch. The `try`/`catch` around
+        // `store.meta()` mirrors assertRemoteMayUseSession's own established precedent (its doc
+        // comment above): an unknown session id must fall through to `setApprovalPolicy`'s own
+        // NOT_FOUND below, not a confusing immunity error that implies the session exists.
+        let targetMode: string | undefined;
+        try { targetMode = opts.store.meta(p.sessionId).mode; } catch { /* unknown id — NOT_FOUND below wins */ }
+        if (targetMode === "chat") {
+          throw new RpcFailure(ERR.INVALID_PARAMS, "chat sessions have a fixed policy and cannot be changed — chat never asks permissions");
+        }
+        if (targetMode === "dispatch" && p.policy === "plan") {
+          throw new RpcFailure(ERR.INVALID_PARAMS, "plan policy is not available for dispatch sessions — dispatch never asks permissions");
+        }
         try {
           opts.store.setApprovalPolicy(p.sessionId, p.policy);
         } catch (e) {

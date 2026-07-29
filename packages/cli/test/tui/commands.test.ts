@@ -221,6 +221,36 @@ describe("runners — mirror main.ts's routes", () => {
     expect(notes).toEqual(["(no sessions)"]);
   });
 
+  // Plan-immunity Task 2: the TUI is CODE-ONLY (mode×surface matrix) — /sessions is the resume
+  // PICKER, so it HIDES non-code rows entirely rather than marking them (contrast `norma sessions`,
+  // a plain inventory — see session-mode.ts's file doc). Absent mode = code (the R-slice
+  // convention); "code" explicit also counts.
+  test("/sessions — hides chat/dispatch/cowork rows, keeps absent-mode and explicit-code rows", async () => {
+    const { client } = makeClient({
+      listSessions: () => ({
+        sessions: [
+          { sessionId: "s1", scope: "global", lastSeq: 12, createdAt: 0 },
+          { sessionId: "s2", scope: "global", lastSeq: 3, createdAt: 0, mode: "code" },
+          { sessionId: "s3", scope: "global", lastSeq: 7, createdAt: 0, mode: "chat" },
+          { sessionId: "s4", scope: "global", lastSeq: 1, createdAt: 0, mode: "dispatch" },
+          { sessionId: "s5", scope: "global", lastSeq: 2, createdAt: 0, mode: "cowork" },
+        ],
+      }),
+    });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/sessions");
+    expect(notes).toEqual(["s1 global · 12 events\ns2 global · 3 events"]);
+  });
+
+  test("/sessions — every visible row is non-code -> \"(no sessions)\", not a blank note", async () => {
+    const { client } = makeClient({
+      listSessions: () => ({ sessions: [{ sessionId: "s1", scope: "global", lastSeq: 1, createdAt: 0, mode: "chat" }] }),
+    });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/sessions");
+    expect(notes).toEqual(["(no sessions)"]);
+  });
+
   test("/add-dir — mirrors `case \"add-dir\"`: path + persist flag forwarded", async () => {
     const { client, calls } = makeClient({ addDir: () => ["/a", "/b", "/c"] });
     const { ctx, notes } = makeCtx(client, { sessionId: "sess-5" });

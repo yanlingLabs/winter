@@ -134,7 +134,7 @@ function buildLeasePolicy(deps: {
   timeoutMs?: number;
 }): (sessionId: string, cls: PeripheralClass) => Promise<"granted" | "denied"> {
   return async (sessionId: string, cls: PeripheralClass): Promise<"granted" | "denied"> => {
-    let approvalPolicy: SessionApprovalPolicy;
+    let meta: { approvalPolicy: SessionApprovalPolicy; mode?: string };
     try {
       // COUPLING (4h-i, refined 4h-ii-a): this reads the PERSISTED session policy as a proxy for
       // "the current caller's policy". That's safe because peripheral.lease is a harness-only RPC
@@ -142,12 +142,23 @@ function buildLeasePolicy(deps: {
       // subagent, sync or async/4h-ii) can ever reach it from a tool call. If a thread-correlated
       // lease path is ever added to the registry in the future, gate approval on the calling
       // thread's policy (opts.threadId, or a thread_policy map), not the persisted session policy.
-      approvalPolicy = deps.store.meta(sessionId).approvalPolicy;
+      meta = deps.store.meta(sessionId);
     } catch {
       return "denied"; // unknown session — fail closed (ipc/server.ts already validates first)
     }
-    if (approvalPolicy === "plan") return "denied";
-    if (approvalPolicy === "auto") return "granted";
+    // Plan-immunity fix round 1, Minor 1 (reviewer finding): a chat session never gets a peripheral
+    // lease — denied outright, matching "chat never asks permissions" (and chat has no computer
+    // tool in the first place, so this is unreachable today — same defense-in-depth tier as the
+    // other explicit "chat" handling this slice added). Keyed on `meta.mode`, NOT
+    // `meta.approvalPolicy` — a chat session created BEFORE this fix shipped keeps its stored
+    // policy at "auto" forever (session.setPolicy now rejects EVERY change to a chat target, so
+    // there is no migration path that would ever rewrite that row to "chat"), so a raw-policy check
+    // here would miss exactly the rows this fix most needs to catch — proven by a synthetic
+    // stale-row test (packages/core/test/peripheral/e2e.test.ts) that GRANTS instead of denying
+    // without this `mode` check.
+    if (meta.mode === "chat") return "denied";
+    if (meta.approvalPolicy === "plan") return "denied";
+    if (meta.approvalPolicy === "auto") return "granted";
 
     // ask: register the wait BEFORE emitting approval_requested (the append is synchronous, so a
     // watcher that resolves as soon as it observes the event would otherwise race broker.wait()).

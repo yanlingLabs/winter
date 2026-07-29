@@ -78,7 +78,12 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     ///   - frame: spawn exactly here (the morph window's frame at the moment of detach — task 4).
     ///   - title: the session's first prompt, clipped to ~40 chars, else "Norma" (a11y + the
     ///     Dock-minimize label a native titled window shows).
-    init(feed: SessionFeed, session: SessionModel, frame: NSRect, title: String) {
+    ///   - isChat: Plan-immunity (2026-07-28 design) — true only for a session pinned at
+    ///     `mode:"chat"`. Defaulted `false` so every PRE-EXISTING caller (sidebar +New, ⌘-click
+    ///     detach, "Open Norma App") is unaffected; `AppDelegate.createAndOpenChat()`/`openChat()`'s
+    ///     reopen path are the only callers that ever pass `true`. Seeds `adapter.isChatSession`
+    ///     (see that property's own doc comment for what it gates).
+    init(feed: SessionFeed, session: SessionModel, frame: NSRect, title: String, isChat: Bool = false) {
         self.feed = feed
         self.session = session
         if let pinned = feed.pinnedSessionId {
@@ -136,6 +141,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         self.window = window
 
         let adapter = FieldStateAdapter(session: session)
+        adapter.isChatSession = isChat
         self.adapter = adapter
 
         super.init()
@@ -252,12 +258,44 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// opening a new detached window. `sessionId` flips FIRST, synchronously, so every closure that
     /// reads it live (submit/interrupt/respond/setPolicy above) targets the new session immediately
     /// — even before `feed.repin(to:)`'s attach round-trip completes.
+    ///
+    /// Plan-immunity (2026-07-28 design): `adapter.isChatSession` is re-derived HERE too, from
+    /// `directory`'s already-loaded rows (`isChatSession(_:in:)` below) — the left sidebar
+    /// (`SessionSidebar`) lists every session with no mode filter of its own, so a code window's
+    /// sidebar can select INTO an existing chat session (and vice versa) without ever closing this
+    /// window. Without this re-derivation the policy picker would stay stuck showing (or hiding)
+    /// whatever `isChat` this controller happened to be constructed with, regardless of which
+    /// session is actually pinned now.
     func selectSession(_ sessionId: String) {
         guard sessionId != self.sessionId else { return }
         self.sessionId = sessionId
+        adapter.isChatSession = Self.isChatSession(sessionId, in: directory.rows)
         Task { @MainActor [weak self] in
             await self?.feed.repin(to: sessionId)
         }
+    }
+
+    /// Plan-immunity (2026-07-28 design; fix round 1, Minor 3 — comment corrected, default kept):
+    /// pure decision helper for `selectSession`'s in-place `isChatSession` re-derivation — is the
+    /// given session id chat-mode, per the directory's currently-loaded rows? `false` (not chat)
+    /// whenever the row isn't found (the directory hasn't loaded it yet).
+    ///
+    /// This is NOT "the conservative default" in any general safety sense — for a chat target that
+    /// isn't loaded yet, `false` is the WRONG direction (it shows a picker that cannot work, rather
+    /// than hiding one that could). It's kept anyway because it's the CORRECT answer for the one
+    /// real caller that actually reaches "not found" today: `newSession()` below calls
+    /// `selectSession(created.sessionId)` immediately after creating a plain session (no `mode`
+    /// param — always code), so the freshly minted id is NEVER in `directory.rows` yet, and `false`
+    /// is simply right, not a hedge. The sidebar's plain-click path (`selectSession`'s OTHER call
+    /// site) never hits "not found" in practice — the clicked row IS the directory's own row, so
+    /// it's always already loaded — making the "wrong" direction for a hypothetical unloaded chat
+    /// id unreachable rather than merely tolerated. Flipping the default to `true` would fix that
+    /// unreachable case at the cost of breaking the reachable one (every "+ New session" would
+    /// briefly show its picker hidden, since the fresh id isn't loaded either). `nonisolated
+    /// static`, no `self`/MainActor dependency, mirrors `AppDelegate.chatSessionToOpen(in:)`'s own
+    /// "pure decision helper, directly unit-testable" shape.
+    nonisolated static func isChatSession(_ sessionId: String, in rows: [SessionSummary]) -> Bool {
+        rows.first(where: { $0.sessionId == sessionId })?.mode == "chat"
     }
 
     /// Task 5 (2e-iii): the sidebar's "+ New session" action — create, then re-pin this window onto

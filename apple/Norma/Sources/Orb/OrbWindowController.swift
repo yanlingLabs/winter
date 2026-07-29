@@ -153,6 +153,24 @@ final class OrbWindowController: ObservableObject {
     /// then, and the `directory` inside drives its own updates independently.
     var sidebars: SidebarWiring?
 
+    /// Plan-immunity (2026-07-28 design; fix round 1, review finding — door 3): keeps THIS
+    /// controller's own `fieldAdapter.isChatSession` honest across a sidebar session switch —
+    /// `AppDelegate.boot()`'s `sidebars.onSelect` calls this alongside `AppModel.focusSession(_:)`,
+    /// mirroring `DetachedWindowController.selectSession`'s identical in-place re-derivation (same
+    /// pure helper, `DetachedWindowController.isChatSession(_:in:)`). Pulled out of that closure
+    /// into its own method — rather than inlined — specifically so it's unit-testable directly
+    /// against a real `OrbWindowController` (`AdapterOwnershipTests.swift`'s own construction
+    /// precedent) without booting the whole app: `AppDelegate.boot()`'s own `AppModel` can never be
+    /// given a scripted transport in a unit test (its `isRunningUnitTests` gate always falls back to
+    /// a token-missing model), so a closure inlined there would be untestable end-to-end. The morph
+    /// window renders `WindowContentView` off `fieldAdapter` — a SEPARATE `FieldStateAdapter`
+    /// instance from any `DetachedWindowController`'s own — so without this, selecting a chat row
+    /// here would leave the orb's OWN policy pickers shown-but-broken even after the
+    /// `DetachedWindowController` fix.
+    func updateIsChatSession(for sessionId: String, rows: [SessionSummary]) {
+        fieldAdapter.isChatSession = DetachedWindowController.isChatSession(sessionId, in: rows)
+    }
+
     /// Task 4: fired by `requestWindowDetach()` with the panel's CURRENT frame (spawn the detached
     /// window exactly there). AppDelegate's closure spawns the detached window SYNCHRONOUSLY
     /// (`DetachedWindowController.show()`'s `makeKeyAndOrderFront` runs before the closure

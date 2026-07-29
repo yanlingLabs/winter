@@ -119,14 +119,18 @@ function buildLeasePolicy(deps: {
   hub: SessionHub;
 }): (sessionId: string, cls: PeripheralClass) => Promise<"granted" | "denied"> {
   return async (sessionId: string, cls: PeripheralClass): Promise<"granted" | "denied"> => {
-    let approvalPolicy: SessionApprovalPolicy;
+    let meta: { approvalPolicy: SessionApprovalPolicy; mode?: string };
     try {
-      approvalPolicy = deps.store.meta(sessionId).approvalPolicy;
+      meta = deps.store.meta(sessionId);
     } catch {
       return "denied";
     }
-    if (approvalPolicy === "plan") return "denied";
-    if (approvalPolicy === "auto") return "granted";
+    // Plan-immunity fix round 1, Minor 1: mirrors daemon.ts's own "chat" fix — keyed on `meta.mode`,
+    // not the raw `approvalPolicy` column (a pre-fix chat row keeps stored "auto" forever). See
+    // daemon.ts's buildLeasePolicy for the full rationale this mirrors byte-for-byte.
+    if (meta.mode === "chat") return "denied";
+    if (meta.approvalPolicy === "plan") return "denied";
+    if (meta.approvalPolicy === "auto") return "granted";
 
     const callId = `lease_${randomBytes(6).toString("hex")}`;
     const issuedAt = Date.now();
@@ -316,6 +320,48 @@ describe("2f Task 7: peripheral lease end-to-end gate", () => {
       const c = await TestClient.connect(harness.socketPath);
       await c.hello(harness.harnessToken, "plan-leaser");
       const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", approvalPolicy: "plan" });
+      await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
+
+      const res = await c.request(METHODS.peripheralLease, { sessionId: created.sessionId, class: "ax-read" });
+      expect(res.result).toEqual({ code: "denied" });
+      await sleep(100);
+      expect(c.notifications.some((n) => n.params?.type === "approval_requested")).toBe(false);
+      c.close();
+    });
+
+    // Plan-immunity fix round 1, Minor 1 (reviewer finding): buildLeasePolicy (daemon.ts) was not
+    // taught "chat" — a chat row's stored policy is now "chat" (session.create's own coercion),
+    // neither the "plan" deny nor the "auto" grant branch above, so it fell through to the ask
+    // branch and raised the ONE outcome plan-immunity forbids for a chat session: an approval card.
+    // Unreachable today (computer/peripheral isn't chat-eligible), but it's exactly the "every
+    // comparison site handles chat explicitly" class of fix this slice otherwise claims closed.
+    test("chat policy (post-fix: the stored row genuinely reads 'chat') denies immediately — no approval card, chat never asks and has no computer tool anyway", async () => {
+      const c = await TestClient.connect(harness.socketPath);
+      await c.hello(harness.harnessToken, "chat-leaser");
+      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", mode: "chat" });
+      expect(harness.store.meta(created.sessionId).approvalPolicy).toBe("chat"); // sanity: the coercion really landed
+      await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
+
+      const res = await c.request(METHODS.peripheralLease, { sessionId: created.sessionId, class: "ax-read" });
+      expect(res.result).toEqual({ code: "denied" });
+      await sleep(100);
+      expect(c.notifications.some((n) => n.params?.type === "approval_requested")).toBe(false);
+      c.close();
+    });
+
+    // The reviewer's own wrinkle: a chat session created BEFORE this fix shipped keeps its stored
+    // "auto" forever — session.setPolicy now rejects EVERY change to a chat target, so there is no
+    // migration path that would ever rewrite that row to "chat". buildLeasePolicy must therefore key
+    // on `mode`, not the raw `approvalPolicy` column, or exactly the rows this fix most needs to
+    // catch would still fall through to a card. Simulated here via a direct store write (bypassing
+    // session.setPolicy's own RPC-level rejection), matching this whole slice's established
+    // "synthetic pre-fix row" precedent (packages/core/test/agent/plan-immunity.test.ts).
+    test("a PRE-FIX chat session whose stored row still carries 'auto' is STILL denied — keyed on mode, not the raw approvalPolicy column", async () => {
+      const c = await TestClient.connect(harness.socketPath);
+      await c.hello(harness.harnessToken, "stale-chat-leaser");
+      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", mode: "chat" });
+      harness.store.setApprovalPolicy(created.sessionId, "auto");
+      expect(harness.store.meta(created.sessionId).approvalPolicy).toBe("auto"); // sanity: the stale row is real
       await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
 
       const res = await c.request(METHODS.peripheralLease, { sessionId: created.sessionId, class: "ax-read" });
