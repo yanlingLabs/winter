@@ -138,8 +138,10 @@ describe("session.dispatch get-or-create RPC (Phase 7 dispatch mode Task 2)", ()
 // Chat Mode Slice A Task 1: chat becomes a third session.create mode value — additive alongside
 // code (default) and dispatch (still rejected here, singleton minted only via session.dispatch).
 // Same bare-IPC-server harness shape as the dispatch describe block above (own SessionStore +
-// TokenAuthority), extended with the remote token (remote-role.test.ts's boot() pattern) since
-// slice A keeps chat Mac-local: a remote caller may not mint one yet.
+// TokenAuthority), extended with the remote token (remote-role.test.ts's boot() pattern). Slice A
+// kept chat Mac-local for remote; Slice C lifts that (see remote-chat-gate.test.ts and
+// plan-immunity.test.ts for the full gate-lift + coercion coverage) — the FLIPPED test below now
+// proves a remote caller CAN mint a chat session, with the daemon supplying cwd/policy.
 describe("chat mode (Chat Mode Slice A Task 1)", () => {
   let stop: (() => void) | undefined;
 
@@ -194,15 +196,22 @@ describe("chat mode (Chat Mode Slice A Task 1)", () => {
     c.close();
   });
 
-  test("a REMOTE caller may not create a chat session (slice A: remote stays code-only)", async () => {
-    const { socketPath, remoteToken } = await boot();
+  // FLIP (was "a REMOTE caller may not create a chat session (slice A: remote stays code-only)"):
+  // Slice C lifts the remote chat-create gate. cwd defaults to $HOME (SP3.4's remote convention,
+  // same as any other remote session.create) and approvalPolicy is coerced to the fixed "chat"
+  // value exactly as it is for local/harness callers — see plan-immunity.test.ts's dedicated
+  // remote-path coercion test for the focused proof.
+  test("a REMOTE caller may now create a chat session (Slice C lifted the gate)", async () => {
+    const { store, socketPath, remoteToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(remoteToken, "iphone-gateway", "remote");
 
     const res = await c.request(METHODS.sessionCreate, { scope: "global", mode: "chat" });
-    expect(res.error).toBeTruthy();
-    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
-    expect(res.error.message).toContain("remote callers may not create chat sessions yet");
+    expect(res.error).toBeUndefined();
+    const meta = store.meta(res.result.sessionId);
+    expect(meta.mode).toBe("chat");
+    expect(meta.cwd).toBe(homedir());
+    expect(meta.approvalPolicy).toBe("chat");
     c.close();
   });
 });
