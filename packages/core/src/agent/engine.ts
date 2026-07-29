@@ -4,7 +4,7 @@ import { relative, sep, isAbsolute, resolve, dirname, basename, join } from "nod
 import type { ApprovalOption, NewSessionEvent, Question, SessionEvent, Task } from "@norma/protocol";
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
-import type { Provider, ProviderEvent, TurnInputItem } from "../providers/types";
+import type { ModelInfo, Provider, ProviderEvent, TurnInputItem } from "../providers/types";
 import type { ToolRegistry, Mode } from "./tools/registry";
 import { isExternalToolName } from "./tools/registry";
 import type { PermissionGate, SessionApprovalPolicy } from "./gate";
@@ -968,6 +968,17 @@ export class AgentEngine {
     return this.runningTurns.size;
   }
 
+  /** I1 review fix (Chat Slice D task 1): the ACTIVE provider's known models, exposed so
+   *  `session.setModel`'s handler (ipc/server.ts) can validate a per-session model override
+   *  BEFORE storing it — reusing the exact `known.length > 0`-guarded idiom `spawn_agent`'s own
+   *  bridge already uses below (this method is remote-reachable and hand-callable, so a future
+   *  picker's UI list must never be the only guard). Empty for a provider that can't enumerate
+   *  its models (e.g. an arbitrary openai-compatible endpoint), same as `spawn_agent`'s own
+   *  fallback for that case. */
+  knownModels(): ModelInfo[] {
+    return this.cfg.provider.provider.models();
+  }
+
   /** Lazily seeds the main thread entry for a session on first read/turn. */
   private threadList(sessionId: string): ThreadInfo[] {
     let list = this.threads.get(sessionId);
@@ -1310,14 +1321,37 @@ export class AgentEngine {
   }
 
   /** `model` is the PER-TURN resolved model (turn()'s `sel.model` — live-resolved when
-   *  `cfg.provider.live` is wired, else the boot snapshot) — never the boot model directly, so a
-   *  live model change is reflected in the auto-compact threshold on the very next turn, not just
-   *  in the streamTurn call. Unknown model (no ModelInfo match, e.g. an openai-compatible
-   *  provider with no static `models()` list) falls back to Infinity — i.e. auto-compact never
-   *  fires rather than firing on a guessed window; this is the pre-existing behavior, unchanged. */
+   *  `cfg.provider.live` is wired, else the boot snapshot, and possibly overridden by
+   *  `meta.model` — see `resolveSel`) — never the boot model directly, so a live model change is
+   *  reflected in the auto-compact threshold on the very next turn, not just in the streamTurn
+   *  call. Unknown model (no ModelInfo match, e.g. an openai-compatible provider with no static
+   *  `models()` list) falls back to Infinity when NEITHER `model` nor the live/boot default
+   *  resolve — i.e. auto-compact never fires rather than firing on a guessed window; this is the
+   *  pre-existing behavior, unchanged for a plain (non-overridden) turn.
+   *
+   *  I1 review fix (Chat Slice D task 1): `session.setModel` validates a NEW override at set time
+   *  (ipc/server.ts, the same `known.length > 0`-guarded idiom spawn_agent's bridge uses below),
+   *  but `known` can drift AFTER a valid override was stored — a provider swap, or the provider's
+   *  own `models()` list losing an id (codex-oauth's deprecated-slug story, `manager.ts`'s
+   *  `resolveSelection`, which only ever protects the GLOBAL/boot model, never a per-session
+   *  override that bypasses it entirely via `resolveSel`). Silently returning Infinity for a
+   *  now-stale override would permanently disable auto-compact for the rest of that session with
+   *  no signal — so when `model` itself has no match but the live/boot default DOES, this falls
+   *  back to the default's contextWindow as a safe approximation instead. Deliberately narrow: it
+   *  only ever fires when `model` differs from the live/boot default (i.e. an override is
+   *  active) — a plain non-overridden turn's `model` always EQUALS the default already computed
+   *  here, so the `model !== base.model` guard below is false and the Infinity fallback for that
+   *  case is untouched, byte-identical to before this fix. */
   private contextWindow(model: string): number {
-    const m = this.cfg.provider.provider.models().find((mi) => mi.id === model);
-    return m?.contextWindow ?? Infinity;
+    const known = this.cfg.provider.provider.models();
+    const direct = known.find((mi) => mi.id === model);
+    if (direct) return direct.contextWindow;
+    const base = this.cfg.provider.live?.() ?? { model: this.cfg.provider.model };
+    if (base.model !== model) {
+      const fallback = known.find((mi) => mi.id === base.model);
+      if (fallback) return fallback.contextWindow;
+    }
+    return Infinity;
   }
 
   /** Auto-compact off the REAL provider-reported size of the previous turn (its `turn_completed`
@@ -1862,17 +1896,23 @@ export class AgentEngine {
   }
 
   /** Chat Slice D task 1: THE single per-turn/per-call model-resolution point — every call site
-   *  that used to inline `this.cfg.provider.live?.() ?? { model: this.cfg.provider.model }`
-   *  (turn(), sendToAgent()) now goes through here instead, so a per-SESSION override
-   *  (`meta.model`, set via `store.setModel`/`session.setModel`) is honored everywhere that
-   *  resolution happens, not just in one of the two. `meta.model` — when set — overrides only the
-   *  `model` field; `reasoningEffort` still comes from `live()`/the boot snapshot, since a
-   *  per-session model override changes WHICH model answers, not how hard it reasons. Mode-agnostic
-   *  by construction: works identically for code/dispatch/chat (unlike `session.setPolicy`'s fixed
-   *  chat policy, a completely different axis this does not touch). No caching of its own — each
-   *  call site still decides its own "resolve once per X" cadence (turn() calls this once per
-   *  turn, sendToAgent() once per resume) by calling this exactly once per its own cadence, same as
-   *  the inline expression it replaces. */
+   *  that used to (or, for `runWorkflowAgent`, effectively did) inline
+   *  `this.cfg.provider.live?.() ?? { model: this.cfg.provider.model }` (`turn()`,
+   *  `sendToAgent()`, and — I3 review fix — `runWorkflowAgent()`) now goes through here instead,
+   *  so a per-SESSION override (`meta.model`, set via `store.setModel`/`session.setModel`) is
+   *  honored everywhere that resolution happens, not just some of the three. `meta.model` — when
+   *  set — overrides only the `model` field; `reasoningEffort` still comes from `live()`/the boot
+   *  snapshot, since a per-session model override changes WHICH model answers, not how hard it
+   *  reasons. Mode-agnostic by construction: works identically for code/dispatch/chat (unlike
+   *  `session.setPolicy`'s fixed chat policy, a completely different axis this does not touch). No
+   *  caching of its own — each call site still decides its own "resolve once per X" cadence
+   *  (`turn()` once per turn, `sendToAgent()` once per resume, `runWorkflowAgent()` once per
+   *  workflow-spawned child) by calling this exactly once per its own cadence, same as the inline
+   *  expression it replaces. Deliberately does NOT validate `meta.model` against the current
+   *  provider's `models()` — `session.setModel`'s handler (ipc/server.ts) is where that happens,
+   *  at set time (I1 review fix); this method's only defense-in-depth for a since-drifted override
+   *  lives in `contextWindow`'s own fallback (see its doc comment), not here, so this stays exactly
+   *  as cheap and side-effect-free as the expression it replaces. */
   private resolveSel(meta: { model?: string }): { model: string; reasoningEffort?: string } {
     const base = this.cfg.provider.live?.() ?? { model: this.cfg.provider.model };
     return meta.model ? { ...base, model: meta.model } : base;
@@ -2550,14 +2590,22 @@ export class AgentEngine {
             spawnOutcomes.set(call.callId, { output: "prompt is required — write the child a complete, self-contained task.", isError: true });
             continue;
           }
-          // Model override (v1, decision documented in the task-4 report): turn() resolves
-          // `sel.model` ONCE per turn, GLOBALLY, off cfg.provider.live?.() — there is no
-          // per-session model column (SessionRow, sessions/store.ts) and thus no seam to pin a
-          // model to a specific child session the way spawn_agent pins one to a THREAD via
-          // `resumeCtx.model`/the runThread `model` arg. So a validated override rides as a
-          // `[model: <id>]` trailer on the child's FIRST user_message instead (folded into
-          // `childPrompt` below, before spawnChild ever sees it) — and the tool_result says so, so
-          // the coordinator knows the mechanism rather than assuming a silent, precise override.
+          // Model override (v1, decision documented in the task-4 report): STILL rides as a
+          // `[model: <id>]` trailer on the child's FIRST user_message (folded into `childPrompt`
+          // below, before spawnChild ever sees it) rather than an enforced per-session value.
+          // I2 review fix (Chat Slice D task 1) — this comment used to claim "there is no
+          // per-session model column and thus no seam"; that seam now EXISTS (`SessionRow.model`,
+          // `store.setModel`/`session.setModel`, `AgentEngine.resolveSel`), so the reason this path
+          // doesn't use it is no longer "it doesn't exist" but a real ordering constraint: the
+          // child's first turn is fire-and-forget INSIDE `dispatchReg.spawnChild()` below (this
+          // file's own doc comment a few lines up, "only the child's OWN turn is fire-and-forget"),
+          // which means it can already be resolving `sel` by the time this function returns — a
+          // `store.setModel()` call placed AFTER `spawnChild()` would race that first turn. Wiring
+          // it correctly would mean threading `model: effectiveOverride` through
+          // `dispatchReg.spawnChild()`'s own params into `createSession`'s opts (dispatch-
+          // children.ts), so the override lands BEFORE the fire-and-forget turn ever reads `meta` —
+          // left as a follow-up (out of scope for this fix), not implemented here. The tool_result
+          // below must at least tell the coordinator the truth about which mechanism is in play.
           let effectiveOverride = typeof parsed.model === "string" ? parsed.model : undefined;
           if (effectiveOverride !== undefined) {
             const known = this.cfg.provider.provider.models();
@@ -2579,8 +2627,13 @@ export class AgentEngine {
           // dispatchReg was truthy at the ternary above that derived it from the SAME expression.
           const childId = dispatchReg!.spawnChild({ dispatchSessionId: sessionId, dir, prompt: childPrompt, title });
           spawnedChildIds.set(call.callId, childId); // announced AFTER this call's own tool_result — see doc comment above
+          // I2 review fix (Chat Slice D task 1): this used to tell the coordinator "no per-session
+          // model override exists yet" — false as of this same task, which added
+          // `session.setModel`/`store.setModel`. The real reason this path still uses the prompt
+          // trailer instead of that seam is the fire-and-forget ordering constraint explained in
+          // the comment above (`dispatchReg.spawnChild()`), not the seam's absence — say so.
           const modelNote = effectiveOverride
-            ? ` (model override '${effectiveOverride}' noted in the child's opening prompt — no per-session model override exists yet)`
+            ? ` (model override '${effectiveOverride}' noted in the child's opening prompt — session.setModel exists but isn't wired to session_spawn yet, so the child reads this as a suggestion in its first message, not an enforced override)`
             : "";
           spawnOutcomes.set(call.callId, {
             output: `spawned session ${childId} ("${title}") in ${dir}${modelNote} — you'll get a child_update when it finishes.`,
@@ -4427,7 +4480,13 @@ export class AgentEngine {
     const result = await this.cfg.subagents.run(async (childSignal, progress) => this.runThread({
       sessionId, threadId: childId, instructionsFull,
       input: [{ type: "message", role: "user", content: prompt }],
-      cwd: childCwd, model: opts?.model ?? this.cfg.provider.model, meta: childMeta, depth: 1,
+      // I3 review fix (Chat Slice D task 1): this used to fall back to the raw BOOT-time
+      // `this.cfg.provider.model` — a third model-resolution path bypassing BOTH `live()` and a
+      // per-session override, unlike turn()/sendToAgent() which both go through `resolveSel`
+      // (`meta` is already in scope a few lines up). Now the SAME single resolution point: an
+      // explicit `opts.model` (the workflow script's own arg) still wins when present, otherwise
+      // this session's live/override-aware default, never the bare boot snapshot.
+      cwd: childCwd, model: opts?.model ?? this.resolveSel(meta).model, meta: childMeta, depth: 1,
       signal: AbortSignal.any([childSignal, signal]),
       loaded: childLoaded, excludeTools: childExcludeTools, allowTools: def.allowTools, onProgress: progress,
     }));

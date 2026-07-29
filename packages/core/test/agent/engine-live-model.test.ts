@@ -160,4 +160,64 @@ describe("per-session model override (Chat Slice D task 1: meta.model wins over 
     expect(provider.requests[0]!.model).toBe("override-for-a-only");
     expect(provider.requests[1]!.model).toBe("live-model"); // session B never had an override
   });
+
+  // I1 review fix: session.setModel validates a NEW override at set time (ipc/server.ts), but
+  // `store.setModel` itself (this test drives it directly, bypassing the RPC) does not — and even
+  // a validly-set override can go stale later (a provider swap, or the provider's own models()
+  // list losing an id). Without this fix, contextWindow(model) would return Infinity for an
+  // unrecognized override, silently disabling auto-compact for the rest of the session. Mirrors
+  // "a live() model change is reflected in the SAME turn's auto-compact contextWindow check" above,
+  // but the override here is NOT one of provider.models() — proving the fallback to the live/boot
+  // default's contextWindow, not Infinity.
+  test("an override the CURRENT provider doesn't recognize never disables auto-compact (contextWindow falls back to the live/boot model's, not Infinity)", async () => {
+    const SMALL_MODEL = { id: "live-small", family: "fake", contextWindow: 1000, supportsVision: false };
+    const provider = new FakeProvider(
+      [
+        [{ type: "text_delta", delta: "SUMMARY_TOKEN" }, done("end_turn")], // the compaction's own streamTurn
+        text("ok"), // the actual turn's streamTurn
+      ],
+      [SMALL_MODEL], // known models — does NOT include the stale override below
+    );
+    const { engine, store, sessionId } = setupEngine(provider, { live: () => ({ model: "live-small" }) });
+    store.setModel(sessionId, "stale-override-not-in-known-models");
+    for (let i = 0; i < 5; i++) {
+      store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: `u${i}`, clientName: "test" });
+      store.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: `a${i}` });
+    }
+    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 900, outputTokens: 10 }); // 900 > 750
+
+    await engine.runTurn(sessionId);
+
+    const checkpoint = store.read(sessionId).find((e) => e.type === "checkpoint");
+    expect(checkpoint).toBeDefined(); // auto-compact fired — contextWindow fell back to live-small's 1000, not Infinity
+    // sel.model itself is UNCHANGED by this fix — the turn still attempts the raw override (the
+    // handler-side I1 validation is what should have prevented this at set time; this test proves
+    // the defense-in-depth for a value that reached resolveSel anyway never breaks auto-compact).
+    expect(provider.requests[1]!.model).toBe("stale-override-not-in-known-models");
+  });
+
+  // Control: when the provider CANNOT enumerate its models at all (empty models()), there is no
+  // sane fallback to use either — contextWindow legitimately stays Infinity, exactly the
+  // pre-existing documented behavior for an unenumerable provider (unchanged by this fix).
+  test("an unrecognized override still yields Infinity (no auto-compact) when the provider can't enumerate ANY models — unchanged pre-existing behavior", async () => {
+    const provider = new FakeProvider(
+      [
+        text("ok"), // no compaction streamTurn scripted — compaction must NOT fire
+      ],
+      [], // empty models() — provider can't enumerate anything, override or not
+    );
+    const { engine, store, sessionId } = setupEngine(provider, { live: () => ({ model: "live-model" }) });
+    store.setModel(sessionId, "some-override");
+    for (let i = 0; i < 5; i++) {
+      store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: `u${i}`, clientName: "test" });
+      store.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: `a${i}` });
+    }
+    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 900, outputTokens: 10 });
+
+    await engine.runTurn(sessionId);
+
+    const checkpoint = store.read(sessionId).find((e) => e.type === "checkpoint");
+    expect(checkpoint).toBeUndefined(); // Infinity threshold — never compacts, same as before this fix
+    expect(provider.requests[0]!.model).toBe("some-override"); // the turn itself still ran with the raw override
+  });
 });

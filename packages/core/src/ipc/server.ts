@@ -40,6 +40,7 @@ import type { SessionStore } from "../sessions/store";
 import { readHistoryPage } from "../sessions/history";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { AgentEngine } from "../agent/engine";
+import { resolveModelAlias } from "../agent/model-aliases";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionRules } from "../agent/permission-rules";
 import { repoRootFor } from "../agent/memory-dir";
@@ -1029,8 +1030,23 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.sessionSetModel: {
         const p = parseParams(SessionSetModelParams, params);
         assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        let model = p.model;
+        // I1 review fix: this method is remote-reachable and hand-callable, so a future picker's
+        // UI list must never be the only guard — reuse spawn_agent's own `known.length > 0`-guarded
+        // validation idiom (engine.ts's spawn bridge, and session_spawn's mirror of it) rather than
+        // inventing a second one. `null` (clearing) is never validated — there's no model id to
+        // check. A provider that can't enumerate its models (empty `knownModels()`, e.g. an
+        // arbitrary openai-compatible endpoint) can't validate anything either, so the value is
+        // stored freely, same as spawn_agent's own fallback for that case.
+        if (model !== null) {
+          const known = opts.engine?.knownModels() ?? [];
+          if (known.length > 0) model = resolveModelAlias(model, known.map((m) => m.id));
+          if (known.length > 0 && !known.some((m) => m.id === model)) {
+            throw new RpcFailure(ERR.INVALID_PARAMS, `unknown model '${model}' — available models: ${known.map((m) => m.id).join(", ")}`);
+          }
+        }
         try {
-          opts.store.setModel(p.sessionId, p.model);
+          opts.store.setModel(p.sessionId, model);
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }

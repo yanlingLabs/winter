@@ -44,6 +44,11 @@ export async function makeWorkflowAgentHarness(opts: {
   sessionId: string;
   registry: ToolRegistry;
   toolsSeenByChild: (() => string[]) & { policy?: () => string | undefined };
+  // I3 review fix (Chat Slice D task 1): exposed so a test can `store.setModel(sessionId, ...)`
+  // and `provider.requests[...]` to prove `runWorkflowAgent` honors a per-session override —
+  // additive, every pre-existing caller destructures only the fields it already used.
+  store: SessionStore;
+  provider: FakeProvider;
 }> {
   const home = mkdtempSync(join(tmpdir(), "norma-workflow-agent-home-"));
   const cwd = mkdtempSync(join(tmpdir(), "norma-workflow-agent-cwd-"));
@@ -116,5 +121,5 @@ export async function makeWorkflowAgentHarness(opts: {
     return call?.[0]?.meta?.approvalPolicy;
   };
 
-  return { engine, sessionId, registry, toolsSeenByChild };
+  return { engine, sessionId, registry, toolsSeenByChild, store, provider };
 }
