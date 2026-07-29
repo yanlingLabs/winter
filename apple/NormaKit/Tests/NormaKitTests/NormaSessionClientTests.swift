@@ -580,6 +580,64 @@ final class NormaSessionClientTests: XCTestCase {
         XCTAssertEqual(got.first?["expiresAt"]?.intValue, 6000)
     }
 
+    // MARK: - orb-regressions fix round 1 (2026-07-29): no-argument RPCs carry `params: {}`
+    //
+    // `rpcCall` built its frame with `if let params { obj["params"] = params }` — character-for-
+    // character the NormaKit bug that killed the orb's Enter and detach: the daemon validates each
+    // method with `parseParams` against its zod schema, every no-argument method's schema is
+    // `z.object({})`, and `z.object({}).safeParse(undefined)` FAILS, so an omitted key comes back
+    // `-32602 invalid params: (root)`.
+    //
+    // It mattered MORE here than in NormaKit: NormaSessionKit — not NormaKit — is what `norma-ios`
+    // actually consumes (the root Package.swift exports NormaProtocol + NormaSessionKit only), and
+    // the phone is version-skewed by design (kit tags + App Store cadence), so a client-side-only
+    // fix is precisely the fix that cannot be shipped there quickly. `engine.activity` and
+    // `session.dispatch` are both remote-allowed and both `z.object({})`, so a phone feature
+    // calling either without params would have reproduced the orb's exact symptom on a binary this
+    // repo's suites cannot catch.
+    //
+    // `send`'s `params` gained a `nil` default in the same change — source-compatible (every
+    // existing caller passes a value), and it turns "a no-argument call is a trap" into "a
+    // no-argument call is correct by construction", which is also what makes this test possible.
+
+    func testNoArgumentSendCarriesAnEmptyParamsObject() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+
+        let call = Task { try await client.send(method: "engine.activity") }
+        let out = try await waitOutbound(conn, count: 2) // [hello, engine.activity request]
+        let req = decodeOutbound(out[1])
+        XCTAssertEqual(req.kind, .rpcRequest)
+        XCTAssertEqual(outboundPayload(req)["method"]?.stringValue, "engine.activity")
+        XCTAssertNotNil(
+            outboundPayload(req)["params"]?.objectValue,
+            "a no-argument RPC must carry a params OBJECT — the daemon parses it with z.object({}), which REJECTS an omitted params key (-32602 invalid params: (root))"
+        )
+        let id = outboundPayload(req)["id"]!.intValue!
+        conn.enqueueInbound(rpcResponseFrame(id: id, result: .object(["activeTurns": .number(0)])))
+        let result = try await call.value
+        XCTAssertEqual(result["activeTurns"]?.intValue, 0)
+    }
+
+    /// CONTROL: a call that DOES carry params is untouched — the normalization only fills an
+    /// absent value, it never replaces a real one.
+    func testExplicitParamsAreStillSentVerbatim() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+
+        let call = Task { try await client.send(method: "session.send", params: .object(["text": .string("hi")])) }
+        let out = try await waitOutbound(conn, count: 2)
+        let req = decodeOutbound(out[1])
+        XCTAssertEqual(outboundPayload(req)["params"]?["text"]?.stringValue, "hi")
+        let id = outboundPayload(req)["id"]!.intValue!
+        conn.enqueueInbound(rpcResponseFrame(id: id, result: .object(["ok": .bool(true)])))
+        _ = try await call.value
+    }
+
     // MARK: - Session history (opaque decode)
 
     func testHistoryDecodesPageOpaquelyIncludingAnUnknownEventType() async throws {

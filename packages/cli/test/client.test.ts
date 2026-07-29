@@ -414,6 +414,56 @@ describe("NormaClient against a hostile/fake server", () => {
     client.close();
   });
 
+  // orb-regressions fix round 1 (2026-07-29), review finding I1 — the TS twin of the NormaKit bug.
+  //
+  // `request(method, params?)` builds `encodeLine({jsonrpc, id, method, params})`, and
+  // `JSON.stringify` DROPS a key whose value is `undefined` — so a params-less call emitted
+  // `{"jsonrpc":"2.0","id":N,"method":"session.list"}` with no `params` key at all, character-for-
+  // character the frame that killed the orb from Swift. It has one live params-less caller today
+  // (`listSessions()`), which survived only because `session.list`'s handler happens not to call
+  // `parseParams`. Any no-argument method the CLI calls without params — or a schema growing onto
+  // `session.list` — would have reproduced `-32602 invalid params: (root)` in the CLI/TUI while
+  // both Swift suites stayed green. Pinned on the WIRE (not end-to-end against a daemon) so this
+  // stays RED for a CLI-only regression even though the daemon now normalizes `params ?? {}` too.
+  test("a params-less request still puts an empty params object on the wire", async () => {
+    const sock = join(mkdtempSync(join(tmpdir(), "norma-fake-params-")), "fake.sock");
+    const lines: any[] = [];
+    Bun.listen({
+      unix: sock,
+      socket: {
+        data(s, chunk) {
+          for (const line of new TextDecoder().decode(chunk).split("\n").filter(Boolean)) {
+            const msg = JSON.parse(line);
+            lines.push(msg);
+            if (msg.method === METHODS.hello) {
+              s.write(encodeLine({ jsonrpc: "2.0", id: msg.id, result: { ok: true, serverVersion: "fake", protocolVersion: PROTOCOL_VERSION } }));
+            } else if (msg.method === METHODS.sessionList) {
+              s.write(encodeLine({ jsonrpc: "2.0", id: msg.id, result: { sessions: [] } }));
+            } else {
+              s.write(encodeLine({ jsonrpc: "2.0", id: msg.id, result: {} }));
+            }
+          }
+        },
+      },
+    });
+    const client = await NormaClient.connect({ socketPath: sock, token: "t", clientName: "v", timeoutMs: 500, onEvent: () => {} });
+
+    await client.listSessions();                 // the one live params-less caller
+    await client.request(METHODS.sessionDispatch); // a no-argument method with a real z.object({})
+
+    const listFrame = lines.find((l) => l.method === METHODS.sessionList);
+    const dispatchFrame = lines.find((l) => l.method === METHODS.sessionDispatch);
+    expect(listFrame).toBeTruthy();
+    expect(dispatchFrame).toBeTruthy();
+    // `"params" in frame` is the assertion that matters — JSON.stringify drops undefined values,
+    // so a missing key is exactly the pre-fix wire shape.
+    expect("params" in listFrame).toBe(true);
+    expect(listFrame.params).toEqual({});
+    expect("params" in dispatchFrame).toBe(true);
+    expect(dispatchFrame.params).toEqual({});
+    client.close();
+  });
+
   test("client rejects a malformed result for a validated method", async () => {
     const sock = join(mkdtempSync(join(tmpdir(), "norma-fake2-")), "fake.sock");
     Bun.listen({

@@ -213,7 +213,19 @@ public actor NormaClient {
         let id = nextId
         nextId += 1
         var obj: [String: JSONValue] = ["jsonrpc": .string("2.0"), "id": .number(Double(id)), "method": .string(method)]
-        if let params { obj["params"] = params }
+        // orb-regressions (2026-07-29): `nil` params send an EMPTY OBJECT, never an omitted key.
+        // JSON-RPC 2.0 allows omitting `params`, but the daemon validates each method against its
+        // zod schema (`parseParams`, ipc/server.ts) and the no-argument methods' schemas are
+        // `z.object({})` — `z.object({}).safeParse(undefined)` FAILS, so every wrapper that passed
+        // `nil` (session.dispatch, daemon.status, engine.activity, quota.state, trust.list) came
+        // back `-32602 invalid params: (root)` against a real daemon. `session.dispatch`'s failure
+        // was user-visible: `AppModel.ensureFocusedSession()` returned nil on any Norma home with
+        // no dispatch session yet, so orb Enter silently no-op'd and the yellow-light detach bailed
+        // on a permanently-nil `focusedSessionId`. Fixed HERE rather than at the five call sites so
+        // the whole CLASS is closed — a future `params: nil` wrapper can't reintroduce it — and
+        // rather than in the daemon so the fix holds against an already-installed older daemon too.
+        // `{}` is inert for every handler that ignores params (verified live on session.list).
+        obj["params"] = params ?? .object([:])
         if let commandId { obj["commandId"] = .string(commandId) }
         let data = try JSONEncoder().encode(JSONValue.object(obj))
         // timeout watchdog: resumes the continuation with an error if the response never lands
