@@ -814,4 +814,76 @@ final class MethodWrapperTests: XCTestCase {
             XCTAssertEqual(error.message, "unknown run: ghost")
         }
     }
+
+    // MARK: - orb-regressions (2026-07-29): the no-argument methods must still carry `params: {}`
+    //
+    // `request(_:params:)` USED TO OMIT the `params` key entirely when the caller passed `nil`
+    // (`if let params { obj["params"] = params }`). That is legal JSON-RPC 2.0 — but the daemon
+    // validates these methods with `parseParams(z.object({}), params)`, and
+    // `z.object({}).safeParse(undefined)` FAILS, so every one of them came back
+    // `-32602 invalid params: (root)` against a REAL daemon. Proven live against the dev daemon
+    // (`session.dispatch` with no `params` key → that exact error; with `"params":{}` → success).
+    //
+    // User-visible blast radius: `AppModel.ensureFocusedSession()` calls `dispatchSession()` on
+    // the FIRST orb summon/submit of any Norma home that has no dispatch session yet. The throw
+    // made it return `nil`, so `sendOrSteer` returned false (Enter silently did nothing) and
+    // `focusedSessionId` stayed nil forever (the yellow-light detach bailed too — see
+    // `AppDelegate.handleWindowDetach`). The bug was latent from Phase 7 until the dev/dist split
+    // pointed the Debug app at a FRESH `~/.norma-dev` with no pre-existing dispatch session.
+    //
+    // `session.list` is in this list even though its handler happens not to `parseParams` today —
+    // pinning it costs nothing and stops that handler ever growing a schema into a silent break.
+
+    /// `session.dispatch` — the one whose failure the user actually reported.
+    func testDispatchSessionSendsAParamsObject() async throws {
+        let (client, t) = try await connected()
+        let (req, result) = try await roundTrip(t, sentIndex: 1, result: #"{"sessionId":"s_d","created":true}"#) {
+            try await client.dispatchSession()
+        }
+        XCTAssertEqual(req["method"] as? String, "session.dispatch")
+        XCTAssertNotNil(
+            req["params"] as? [String: Any],
+            "session.dispatch must carry a params OBJECT — the daemon parses it with z.object({}), which REJECTS an omitted params key (-32602 invalid params: (root))"
+        )
+        XCTAssertEqual(result.sessionId, "s_d")
+        XCTAssertTrue(result.created)
+    }
+
+    /// The other four `z.object({})`-validated no-argument methods, same defect, same fix.
+    func testEveryNoArgumentMethodSendsAParamsObject() async throws {
+        let (client, t) = try await connected()
+
+        let (listReq, _) = try await roundTrip(t, sentIndex: 1, result: #"{"sessions":[]}"#) {
+            try await client.listSessions()
+        }
+        XCTAssertEqual(listReq["method"] as? String, "session.list")
+        XCTAssertNotNil(listReq["params"] as? [String: Any], "session.list must carry a params object")
+
+        let (statusReq, _) = try await roundTrip(
+            t, sentIndex: 2,
+            result: #"{"version":"0","uptimeMs":1,"socketPath":"/s","sessionsCount":0,"pluginsCount":0}"#
+        ) { try await client.daemonStatus() }
+        XCTAssertEqual(statusReq["method"] as? String, "daemon.status")
+        XCTAssertNotNil(statusReq["params"] as? [String: Any], "daemon.status must carry a params object")
+
+        let (activityReq, turns) = try await roundTrip(t, sentIndex: 3, result: #"{"activeTurns":2}"#) {
+            try await client.engineActivity()
+        }
+        XCTAssertEqual(activityReq["method"] as? String, "engine.activity")
+        XCTAssertNotNil(activityReq["params"] as? [String: Any], "engine.activity must carry a params object")
+        XCTAssertEqual(turns, 2)
+
+        let (quotaReq, _) = try await roundTrip(
+            t, sentIndex: 4, result: #"{"kind":"ok","inputTokens":0,"outputTokens":0}"#
+        ) { try await client.quotaState() }
+        XCTAssertEqual(quotaReq["method"] as? String, "quota.state")
+        XCTAssertNotNil(quotaReq["params"] as? [String: Any], "quota.state must carry a params object")
+
+        let (trustReq, dirs) = try await roundTrip(t, sentIndex: 5, result: #"{"dirs":["/tmp"]}"#) {
+            try await client.trustList()
+        }
+        XCTAssertEqual(trustReq["method"] as? String, "trust.list")
+        XCTAssertNotNil(trustReq["params"] as? [String: Any], "trust.list must carry a params object")
+        XCTAssertEqual(dirs, ["/tmp"])
+    }
 }
