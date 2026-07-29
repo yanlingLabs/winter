@@ -42,6 +42,13 @@ final class OrbSessionAcquisitionTests: XCTestCase {
     /// validation. Runs until cancelled; every method the orb's acquisition path can emit is
     /// covered, and `session.list` is answered wherever it lands (the directory's own unawaited
     /// refresh interleaves at unpredictable wire positions — `waitUntilMethod`'s own rationale).
+    ///
+    /// SCOPE (fix round 1, review Minor M2): this is a METHOD-SCOPED double, not a general contract
+    /// double. Only `session.dispatch` validates params here — `default:` answers `{"result":{}}`
+    /// for anything else — because `session.dispatch` is the one method whose params contract these
+    /// two regressions turn on. The identical defect in `daemon.status`/`engine.activity`/
+    /// `quota.state`/`trust.list` is pinned at the byte level in NormaKit's `MethodWrapperTests`
+    /// instead; do not read this double as proving anything about them.
     private func startDaemonDouble(
         _ t: AppScriptedTransport,
         sessions: String = "[]",
@@ -80,11 +87,16 @@ final class OrbSessionAcquisitionTests: XCTestCase {
         }
     }
 
+    /// Fix round 1 (review Minor M3): restores the `XCTAssertGreaterThanOrEqual` its twin
+    /// (`StandaloneWindowTests.waitUntilSent`) carries. Without it a stalled wire makes the control
+    /// test's "no session.dispatch was ever sent" assertion pass for the WRONG reason — that
+    /// assertion gets weaker, not stronger, as fewer frames arrive.
     private func waitUntilSent(_ t: AppScriptedTransport, _ n: Int) async {
         let deadline = Date().addingTimeInterval(3)
         while t.sent.count < n && Date() < deadline {
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
+        XCTAssertGreaterThanOrEqual(t.sent.count, n, "timed out waiting for \(n) sent lines: \(t.sent)")
     }
 
     private func methodsSent(_ t: AppScriptedTransport) -> [String] {
@@ -151,6 +163,16 @@ final class OrbSessionAcquisitionTests: XCTestCase {
         )
         await waitUntil { !delegate.detachedWindows.isEmpty }
         XCTAssertEqual(delegate.detachedWindows.first?.sessionId, "s_disp")
+
+        // Fix round 1 (review Minor M4): the detach spawns a SECOND client
+        // (`AppModel.makeDetachedFeed` → `factory.make()` → `factory.made[1]`). Left unanswered it
+        // hangs on `protocol.hello` until the 5 s request timeout and then enters its reconnect
+        // loop — harmless to the assertions above but a background-task flake vector under load.
+        // Give it its own double so it settles inside the test instead of outliving it.
+        await waitUntil { factory.made.count >= 2 }
+        let detachedDaemon = startDaemonDouble(factory.made[1])
+        defer { detachedDaemon.cancel() }
+        await waitUntil { self.methodsSent(factory.made[1]).contains("session.attach") }
     }
 
     /// CONTROL: the pre-existing path stays untouched — a home that ALREADY has a dispatch session

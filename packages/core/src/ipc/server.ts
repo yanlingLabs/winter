@@ -407,8 +407,26 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     }
   }
 
+  /** orb-regressions fix round 1 (2026-07-29): `params ?? {}` — an ABSENT `params` key is
+   *  normalized to an empty object before validation. JSON-RPC 2.0 allows omitting `params`, and
+   *  `RpcRequest.params` (protocol/jsonrpc.ts) is `z.unknown().optional()` so the envelope already
+   *  accepts it — but every no-argument method's schema is `z.object({})`, and
+   *  `z.object({}).safeParse(undefined)` FAILS, so a legal frame came back
+   *  `-32602 invalid params: (root)`. That is what killed the orb (NormaKit's `session.dispatch`
+   *  omitted the key → `AppModel.ensureFocusedSession()` returned nil → Enter no-op'd and the
+   *  yellow-light detach bailed on a permanently-nil focus), and the identical client-side pattern
+   *  still exists in the TS CLI client and the phone's `NormaSessionClient`. Both are fixed too,
+   *  but a client-side fix only protects clients that UPDATE — this protects every client that
+   *  ever talks to this daemon, including already-shipped and version-skewed ones (the phone).
+   *
+   *  Provably not a loosening: all 76 `*Params` schemas in packages/protocol were swept and ZERO
+   *  accept `undefined`, so no currently-SUCCEEDING call can change verdict; only the 11
+   *  `{}`-accepting schemas (the no-argument set plus three all-optional ones) go from a spurious
+   *  refusal to their intended behavior. A schema with a required field still fails — it just
+   *  names the missing field instead of the bare "(root)". Pinned both directions in
+   *  test/ipc/session-dispatch.test.ts. */
   function parseParams<S extends z.ZodTypeAny>(schema: S, params: unknown): z.infer<S> {
-    const result = schema.safeParse(params);
+    const result = schema.safeParse(params ?? {});
     if (!result.success) {
       throw new RpcFailure(
         ERR.INVALID_PARAMS,

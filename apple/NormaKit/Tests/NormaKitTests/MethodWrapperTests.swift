@@ -832,7 +832,18 @@ final class MethodWrapperTests: XCTestCase {
     // pointed the Debug app at a FRESH `~/.norma-dev` with no pre-existing dispatch session.
     //
     // `session.list` is in this list even though its handler happens not to `parseParams` today —
-    // pinning it costs nothing and stops that handler ever growing a schema into a silent break.
+    // pinning it costs nothing and keeps THIS client correct if that handler ever grows a schema.
+    //
+    // Fix round 1 (review finding I1): that is a Swift-side guarantee only, so it is no longer the
+    // whole defence. The identical pattern lived in two more clients and is fixed in both, each
+    // with its own wire-shape pin: the phone's `NormaSessionClient` (`rpcCall`, covered by
+    // `NormaSessionClientTests.testNoArgumentSendCarriesAnEmptyParamsObject`) and the TS CLI
+    // client (`packages/cli/src/client.ts`, covered by client.test.ts's "a params-less request
+    // still puts an empty params object on the wire"). The daemon also normalizes `params ?? {}`
+    // now (`parseParams`, packages/core/src/ipc/server.ts, pinned both directions in
+    // test/ipc/session-dispatch.test.ts), which is what actually protects clients that DON'T
+    // update — a version-skewed phone above all. Client-side pins still earn their keep: they hold
+    // against an OLDER daemon, which a `norma` CLI or a shipped app can genuinely be talking to.
 
     /// `session.dispatch` — the one whose failure the user actually reported.
     func testDispatchSessionSendsAParamsObject() async throws {

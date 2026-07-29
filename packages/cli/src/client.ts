@@ -119,7 +119,15 @@ export class NormaClient {
 
   request(method: string, params?: unknown): Promise<any> {
     const id = this.nextId++;
-    this.writer.enqueue(encodeLine({ jsonrpc: "2.0", id, method, params }));
+    // orb-regressions fix round 1 (2026-07-29): `params ?? {}` — JSON.stringify DROPS a key whose
+    // value is undefined, so a params-less call used to emit a frame with no `params` key at all.
+    // That is legal JSON-RPC 2.0, but every no-argument method's daemon schema is `z.object({})`
+    // and `z.object({}).safeParse(undefined)` FAILS — the exact defect that killed the orb's
+    // `session.dispatch` from the Swift client (see NormaClient.swift's own note). The daemon now
+    // normalizes too (`parseParams`, ipc/server.ts), but this client must not depend on that: a
+    // `norma` CLI can be pointed at an older daemon. Normalized HERE rather than at `listSessions`
+    // (today's only params-less caller) so the whole class is closed for every future one.
+    this.writer.enqueue(encodeLine({ jsonrpc: "2.0", id, method, params: params ?? {} }));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (this.pending.delete(id)) reject(new Error(`request timed out: ${method}`));

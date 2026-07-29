@@ -306,7 +306,14 @@ public actor NormaSessionClient {
     /// re-executing — pass it explicitly and it is used verbatim across every retry. Omitted
     /// (`nil`), a fresh id is minted via `idgen()` — the pre-existing behavior for one-shot sends.
     /// (`answerApproval` already takes its caller-owned `ApprovalAnswer.commandID` — unchanged.)
-    public func send(method: String, params: SessionEvent.JSONValue, commandID: String? = nil) async throws -> SessionEvent.JSONValue {
+    ///
+    /// orb-regressions fix round 1 (2026-07-29): `params` is now OPTIONAL with a `nil` default, so
+    /// a no-argument RPC (`engine.activity`, `session.dispatch` — both remote-allowed) can be
+    /// called without inventing an empty object at the call site. Source-compatible: every existing
+    /// caller passes a value. `rpcCall` normalizes `nil` to `{}` on the wire — see its own note for
+    /// why an OMITTED `params` key is a daemon-side `-32602`, and why that mattered here more than
+    /// anywhere else (this, not NormaKit, is the target `norma-ios` consumes).
+    public func send(method: String, params: SessionEvent.JSONValue? = nil, commandID: String? = nil) async throws -> SessionEvent.JSONValue {
         try await rpcCall(method: method, params: params, commandID: commandID ?? idgen())
     }
 
@@ -395,7 +402,19 @@ public actor NormaSessionClient {
             "method": .string(method),
             "commandId": .string(commandID),
         ]
-        if let params { obj["params"] = params }
+        // orb-regressions fix round 1 (2026-07-29): `nil` params send an EMPTY OBJECT, never an
+        // omitted key. JSON-RPC 2.0 permits omitting `params`, but the daemon validates each method
+        // against its zod schema (`parseParams`, packages/core/src/ipc/server.ts) and every
+        // no-argument method's schema is `z.object({})` — `z.object({}).safeParse(undefined)` FAILS,
+        // so an omitted key returns `-32602 invalid params: (root)`. That exact defect (the same
+        // `if let params` line, in NormaKit's `NormaClient`) killed the orb's Enter and yellow-light
+        // detach. It was latent here — the public `send` took a NON-optional `params`, so nothing
+        // could reach the nil branch — which is precisely the shape that makes a future
+        // no-argument call a silent trap. Closed rather than left dead, because THIS target (not
+        // NormaKit) is what `norma-ios` consumes, and a version-skewed phone is exactly where a
+        // client-side-only fix cannot be shipped quickly. The daemon normalizes too now, but this
+        // client must hold against an older/skewed daemon on its own.
+        obj["params"] = params ?? .object([:])
         let payload = try JSONEncoder().encode(SessionEvent.JSONValue.object(obj))
 
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<SessionEvent.JSONValue, Error>) in
