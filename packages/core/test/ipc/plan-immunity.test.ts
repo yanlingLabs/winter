@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ERR, ConnWriter, type WritableSocket } from "@norma/protocol";
 import { startIpcServer, REMOTE_ALLOWED_METHODS } from "../../src/ipc/server";
@@ -114,6 +114,39 @@ describe("plan-immunity: session.create's chat-seam coercion", () => {
     const res = await c.request(METHODS.sessionCreate, { scope: "global", mode: "chat" });
     expect(res.error).toBeUndefined();
     expect(store.meta(res.result.sessionId).approvalPolicy).toBe("chat");
+    c.close();
+  });
+
+  // Cross-repo contract pin (2026-07-29 follow-up, post-review): norma-ios's newChatSession() sends
+  // this EXACT literal payload over the wire — {scope: "global", mode: "chat"}, nothing else. The
+  // test right above always included `scope` (as does every other test in this describe), and
+  // remote-chat-gate.test.ts's mode-gate tests bypass parseParams entirely (they drive
+  // store.createSession directly) — so neither suite ever exercised the phone's actual byte shape,
+  // and the phone's real bug (newChatSession() omitting `scope`) sailed through both repos green.
+  // This test sends the phone's LITERAL correct shape through the real IPC/RPC layer as remote and
+  // asserts the full contract (session created, policy coerced to "chat", cwd daemon-supplied) —
+  // THEN sends the phone's actual buggy shape ({mode:"chat"}, no scope) and asserts it still fails
+  // with "invalid params: scope", pinning that scope stays required. Drift on EITHER side of the
+  // contract — the phone's payload shape, or the daemon relaxing/renaming this schema field — trips
+  // this test, so a regression to the old bug is caught HERE, not on-device.
+  test("cross-repo contract pin: norma-ios's newChatSession() payload {scope:'global', mode:'chat'}", async () => {
+    const { store, socketPath, remoteToken } = await boot();
+    const c = await remoteClient(socketPath, remoteToken);
+
+    // RED-proof: the phone's actual regression — scope omitted — must still fail. If `scope` were
+    // ever relaxed to optional, this assertion is what would catch it.
+    const missingScope = await c.request(METHODS.sessionCreate, { mode: "chat" });
+    expect(missingScope.error).toBeTruthy();
+    expect(missingScope.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(missingScope.error.message).toContain("invalid params: scope");
+
+    // The phone's real, correct payload — sent verbatim, nothing extra beyond scope+mode.
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", mode: "chat" });
+    expect(res.error).toBeUndefined();
+    expect(typeof res.result.sessionId).toBe("string");
+    const meta = store.meta(res.result.sessionId);
+    expect(meta.approvalPolicy).toBe("chat"); // coerced, exactly like every other chat create
+    expect(meta.cwd).toBe(homedir());          // daemon-supplied — the phone never sends cwd
     c.close();
   });
 
