@@ -66,6 +66,29 @@ final class RemoteHostTests: XCTestCase {
         try await seedStore.add(phoneEndpointID: peerID, label: "iPhone", caps: ["sessions"], at: 1_000)
     }
 
+    // MARK: - Config.keychainService (dev/dist Keychain split — devfix)
+
+    /// Default must preserve every existing call site byte-for-byte (dist literal, unchanged since
+    /// before the dev/dist split existed).
+    func test_config_keychainServiceDefaultsToDistService() {
+        let config = RemoteHost.Config(
+            storeDir: tempStoreDir(), socketPath: "/tmp/unused.sock",
+            hostLabel: "Test Mac", relayConfig: makeRelayConfig(), relayURLs: []
+        )
+        XCTAssertEqual(config.keychainService, "com.norma.core")
+    }
+
+    /// The app threads `AppProfile.keychainService` through here so a dev-profile `RemoteHost`
+    /// reads the DEV daemon's `remote-token`, not the dist one (the bug this test guards against).
+    func test_config_keychainServiceOverride() {
+        let config = RemoteHost.Config(
+            storeDir: tempStoreDir(), socketPath: "/tmp/unused.sock",
+            hostLabel: "Test Mac", relayConfig: makeRelayConfig(), relayURLs: [],
+            keychainService: "com.norma.core.dev"
+        )
+        XCTAssertEqual(config.keychainService, "com.norma.core.dev")
+    }
+
     // MARK: - startIfNeeded
 
     func test_startIfNeeded_staysStoppedAtZeroDevices() async throws {
