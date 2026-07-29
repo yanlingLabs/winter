@@ -989,6 +989,79 @@ export function routeCliInvocation(argv: string[], isTTY: boolean): CliRoute {
   return { kind: "fallthrough" };
 }
 
+// Plan-immunity Task 2, fix round 1 (whole-branch review, Important): the first pass gated
+// send/watch/resume but left EIGHT more session-targeted verbs reaching chat/dispatch sessions
+// with no check at all — proven live against a real daemon (`norma steer <chatId> "..."` injected
+// a real user_message into a chat session's JSONL; `norma steer <dispatchId> "..."` started a real
+// dispatch turn from the terminal; `norma bg peek <chatId> <task>` read chat output into the
+// terminal). Each verb's logic is pulled out of its `case` block into its own small function here —
+// client + params in, a plain discriminated result out, no console.log/process.exit inside — so the
+// gate is directly unit-testable with a fake `NormaClient` (`test/cli-verb-gates.test.ts`, same
+// recorded-calls double as tui/commands.test.ts's own `makeClient`) instead of only reachable by
+// hand through a real CLI invocation. Every `case` block below stays a thin, obviously-correct
+// wrapper: resolve argv, call the route function, print/exit on the result exactly as before this
+// fix — the console output strings are byte-identical to what each case block printed previously.
+export async function runAddDirRoute(c: NormaClient, sessionId: string, path: string, persist: boolean): Promise<{ ok: true; roots: string[] } | { ok: false; message: string }> {
+  const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
+  const check = checkCodeSession(sessions, sessionId);
+  if (!check.ok) return { ok: false, message: check.message };
+  return { ok: true, roots: await c.addDir(sessionId, path, persist) };
+}
+
+export async function runCdRoute(c: NormaClient, sessionId: string, cwd: string): Promise<{ ok: true; cwd: string } | { ok: false; message: string }> {
+  const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
+  const check = checkCodeSession(sessions, sessionId);
+  if (!check.ok) return { ok: false, message: check.message };
+  return { ok: true, cwd: await c.setCwd(sessionId, cwd) };
+}
+
+export async function runSteerRoute(c: NormaClient, sessionId: string, text: string): Promise<{ ok: true; injected: boolean } | { ok: false; message: string }> {
+  const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
+  const check = checkCodeSession(sessions, sessionId);
+  if (!check.ok) return { ok: false, message: check.message };
+  const r = await c.steer(sessionId, text);
+  return { ok: true, injected: r.injected };
+}
+
+export async function runInterruptRoute(c: NormaClient, sessionId: string): Promise<{ ok: true; wasRunning: boolean } | { ok: false; message: string }> {
+  const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
+  const check = checkCodeSession(sessions, sessionId);
+  if (!check.ok) return { ok: false, message: check.message };
+  const r = await c.interrupt(sessionId);
+  return { ok: true, wasRunning: r.wasRunning };
+}
+
+export async function runCompactRoute(c: NormaClient, sessionId: string): Promise<{ ok: true; compacted: boolean; uptoSeq: number; summaryChars: number } | { ok: false; message: string }> {
+  const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
+  const check = checkCodeSession(sessions, sessionId);
+  if (!check.ok) return { ok: false, message: check.message };
+  const r = await c.compact(sessionId);
+  return { ok: true, ...r };
+}
+
+export async function runBgListRoute(c: NormaClient, sessionId: string): Promise<{ ok: true; tasks: Array<{ taskId: string; command: string; status: string; exitCode: number | null; startedAt: number }> } | { ok: false; message: string }> {
+  const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
+  const check = checkCodeSession(sessions, sessionId);
+  if (!check.ok) return { ok: false, message: check.message };
+  return { ok: true, tasks: await c.bgList(sessionId) };
+}
+
+export async function runBgPeekRoute(c: NormaClient, sessionId: string, taskId: string): Promise<{ ok: true; chunk: string; status: string; exitCode: number | null } | { ok: false; message: string }> {
+  const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
+  const check = checkCodeSession(sessions, sessionId);
+  if (!check.ok) return { ok: false, message: check.message };
+  const r = await c.bgPeek(sessionId, taskId);
+  return { ok: true, ...r };
+}
+
+export async function runBgKillRoute(c: NormaClient, sessionId: string, taskId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
+  const check = checkCodeSession(sessions, sessionId);
+  if (!check.ok) return { ok: false, message: check.message };
+  await c.bgKill(sessionId, taskId);
+  return { ok: true };
+}
+
 // Guarded so `main.ts` can be imported (e.g. by tests, for INIT_PROMPT/runTurnSession) without
 // executing the CLI — import.meta.main is true only when this file is the entry point.
 if (import.meta.main) {
@@ -1106,8 +1179,9 @@ if (import.meta.main) {
     const path = process.argv[4];
     if (!sessionId || !path) { console.error("usage: norma add-dir <sessionId> <path> [--persist]"); process.exit(1); }
     const c = await connect("cli-add-dir");
-    const roots = await c.addDir(sessionId, path, process.argv.includes("--persist"));
-    console.log(`${AQUA}+ dir ${path} → ${roots.length} roots${RESET}`);
+    const result = await runAddDirRoute(c, sessionId, path, process.argv.includes("--persist"));
+    if (!result.ok) { console.error(result.message); c.close(); process.exit(1); }
+    console.log(`${AQUA}+ dir ${path} → ${result.roots.length} roots${RESET}`);
     c.close();
     break;
   }
@@ -1156,8 +1230,9 @@ if (import.meta.main) {
     const cwd = process.argv[4];
     if (!sessionId || !cwd) { console.error("usage: norma cd <sessionId> <path>"); process.exit(1); }
     const c = await connect("cli-cd");
-    const newCwd = await c.setCwd(sessionId, cwd);
-    console.log(`${AQUA}cwd → ${newCwd}${RESET}`);
+    const result = await runCdRoute(c, sessionId, cwd);
+    if (!result.ok) { console.error(result.message); c.close(); process.exit(1); }
+    console.log(`${AQUA}cwd → ${result.cwd}${RESET}`);
     c.close();
     break;
   }
@@ -1166,7 +1241,8 @@ if (import.meta.main) {
     const text = process.argv.slice(4).join(" ");
     if (!sessionId || !text) { console.error("usage: norma steer <sessionId> <text…>"); process.exit(1); }
     const c = await connect("cli-steer");
-    const result = await c.steer(sessionId, text);
+    const result = await runSteerRoute(c, sessionId, text);
+    if (!result.ok) { console.error(result.message); c.close(); process.exit(1); }
     console.log(`${AQUA}steered${RESET} ${result.injected ? "(injected)" : "(queued for next turn)"}`);
     c.close();
     break;
@@ -1175,7 +1251,8 @@ if (import.meta.main) {
     const sessionId = process.argv[3];
     if (!sessionId) { console.error("usage: norma interrupt <sessionId>"); process.exit(1); }
     const c = await connect("cli-interrupt");
-    const result = await c.interrupt(sessionId);
+    const result = await runInterruptRoute(c, sessionId);
+    if (!result.ok) { console.error(result.message); c.close(); process.exit(1); }
     console.log(`${AQUA}interrupted${RESET} ${result.wasRunning ? "(was running)" : "(nothing running)"}`);
     c.close();
     break;
@@ -1184,8 +1261,9 @@ if (import.meta.main) {
     const sid = process.argv[3];
     if (!sid) { console.error("usage: norma compact <sessionId>"); process.exit(1); }
     const c = await connect("cli-compact");
-    const r = await c.compact(sid);
-    console.log(r.compacted ? `${AQUA}compacted${RESET} (through seq ${r.uptoSeq}, ${r.summaryChars} char summary)` : "nothing to compact yet");
+    const result = await runCompactRoute(c, sid);
+    if (!result.ok) { console.error(result.message); c.close(); process.exit(1); }
+    console.log(result.compacted ? `${AQUA}compacted${RESET} (through seq ${result.uptoSeq}, ${result.summaryChars} char summary)` : "nothing to compact yet");
     c.close();
     process.exit(0);
   }
@@ -1357,15 +1435,18 @@ if (import.meta.main) {
     }
     const c = await connect("cli-bg");
     if (bgSub === "list") {
-      const tasks = await c.bgList(bgSessionId);
-      for (const t of tasks) console.log(`${AQUA}${t.taskId}${RESET} ${DIM}${t.status} · ${t.command.slice(0, 80)}${RESET}`);
-      if (tasks.length === 0) console.log(`${DIM}(no bg tasks)${RESET}`);
+      const result = await runBgListRoute(c, bgSessionId);
+      if (!result.ok) { console.error(result.message); c.close(); process.exit(1); }
+      for (const t of result.tasks) console.log(`${AQUA}${t.taskId}${RESET} ${DIM}${t.status} · ${t.command.slice(0, 80)}${RESET}`);
+      if (result.tasks.length === 0) console.log(`${DIM}(no bg tasks)${RESET}`);
     } else if (bgSub === "peek") {
-      const r = await c.bgPeek(bgSessionId, bgTaskId!);
-      console.log(`${AQUA}${r.status}${RESET} ${DIM}exit=${r.exitCode ?? "-"}${RESET}`);
-      if (r.chunk) process.stdout.write(r.chunk);
+      const result = await runBgPeekRoute(c, bgSessionId, bgTaskId!);
+      if (!result.ok) { console.error(result.message); c.close(); process.exit(1); }
+      console.log(`${AQUA}${result.status}${RESET} ${DIM}exit=${result.exitCode ?? "-"}${RESET}`);
+      if (result.chunk) process.stdout.write(result.chunk);
     } else if (bgSub === "kill") {
-      await c.bgKill(bgSessionId, bgTaskId!);
+      const result = await runBgKillRoute(c, bgSessionId, bgTaskId!);
+      if (!result.ok) { console.error(result.message); c.close(); process.exit(1); }
       console.log(`${AQUA}killed ${bgTaskId}${RESET}`);
     } else {
       console.error("usage: norma bg list <session> | bg peek <session> <taskId> | bg kill <session> <taskId>");

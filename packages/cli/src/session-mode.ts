@@ -65,6 +65,10 @@ export function checkCodeSession<T extends { sessionId: string; mode?: string }>
 ): { ok: true; row: T } | { ok: false; message: string } {
   const row = rows.find((r) => r.sessionId === sessionId);
   if (!row) return { ok: false, message: `no such session: ${sessionId}` };
-  if (!isCodeMode(row.mode)) return { ok: false, message: nonCodeRefusalMessage(row.mode ?? "code") };
+  // Fix round 1 Minor: `row.mode!` — `!isCodeMode(row.mode)` already proves `row.mode` is neither
+  // undefined nor "code" (isCodeMode's own body: `(mode ?? "code") === "code"`), so it's always a
+  // defined, non-code string here. The `?? "code"` this used to fall back to was unreachable dead
+  // code (that branch can only run when `row.mode` IS "code" — the opposite of what got us here).
+  if (!isCodeMode(row.mode)) return { ok: false, message: nonCodeRefusalMessage(row.mode!) };
   return { ok: true, row };
 }

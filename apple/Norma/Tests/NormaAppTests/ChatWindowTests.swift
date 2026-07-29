@@ -85,6 +85,31 @@ final class ChatWindowTests: XCTestCase {
         XCTAssertEqual(rows.filter(AppDelegate.isOrbSidebarRow).map { $0.sessionId }, ["s_dispatch"])
     }
 
+    /// Fix round 1, Minor 2: the predicate above being correct proves nothing about whether `boot()`
+    /// actually WIRES it — the reviewer deleted `rowFilter: AppDelegate.isOrbSidebarRow` from
+    /// `boot()`'s `orb.sidebars = SidebarWiring(...)` call and all 897 existing tests stayed green
+    /// (nothing exercised the INSTALLATION, only the predicate in isolation). This calls the LIVE
+    /// closure `boot()` actually puts on a real `OrbWindowController.sidebars`, so removing the
+    /// wiring again — `SidebarWiring`'s default `rowFilter` is `{ _ in true }`, which would let
+    /// every row through — fails this test.
+    func testBootWiresIsOrbSidebarRowAsTheOrbsSidebarFilter() {
+        let delegate = AppDelegate()
+        XCTAssertTrue(delegate.boot())
+        guard let rowFilter = delegate.orbController?.sidebars?.rowFilter else {
+            XCTFail("boot() must wire orb.sidebars.rowFilter")
+            return
+        }
+        let rows = [
+            SessionSummary(sessionId: "s_dispatch", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "dispatch"),
+            SessionSummary(sessionId: "s_chat", title: nil, createdAt: 2, scope: "global", cwd: nil, mode: "chat"),
+            SessionSummary(sessionId: "s_code", title: nil, createdAt: 3, scope: "global", cwd: nil, mode: "code"),
+        ]
+        XCTAssertEqual(
+            rows.filter(rowFilter).map { $0.sessionId }, ["s_dispatch"],
+            "boot()'s installed rowFilter must actually be the dispatch-only predicate, not SidebarWiring's default (which lets every row through)"
+        )
+    }
+
     // MARK: - AppDelegate.chatWindowTitle(_:) (PURE)
 
     func testChatWindowTitleFallsBackToChatWhenNilOrBlank() {

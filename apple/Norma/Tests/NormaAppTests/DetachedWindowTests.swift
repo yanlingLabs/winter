@@ -292,8 +292,11 @@ final class DetachedWindowTests: XCTestCase {
     }
 
     /// `selectSession`'s in-place re-derivation: the left sidebar lists every session (chat
-    /// included, no mode filter of its own — `SessionSidebar`'s plain `ForEach(directory.rows)`), so
-    /// switching a CODE window's pinned session onto an existing CHAT row (and back) must flip
+    /// included — a detached window's `SidebarWiring` never passes `rowFilter`, so `SessionSidebar`
+    /// applies its default `{ _ in true }`, i.e. no filtering at all; only the orb's OWN sidebar
+    /// wiring narrows it, via `AppDelegate.isOrbSidebarRow` — see `WorkSidebar.swift`'s doc comment
+    /// on `SidebarWiring.rowFilter`), so switching a CODE window's pinned session onto an existing
+    /// CHAT row (and back) must flip
     /// `adapter.isChatSession` both directions, off the directory's own `mode` field — proven via a
     /// real `directory.refresh()` round trip (not a hand-poked row), so this is what a REAL sidebar
     /// switch would actually see.
