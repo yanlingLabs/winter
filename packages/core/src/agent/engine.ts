@@ -1174,7 +1174,7 @@ export class AgentEngine {
     // model's own send_message-to-a-finished-agent — see resumeThread's own doc comment for the
     // full D1-D7 guard set (clean-termination repair, removed-worktree, policy no-widen, ...).
     const meta = this.cfg.store.meta(sessionId);
-    const sel = this.cfg.provider.live?.() ?? { model: this.cfg.provider.model };
+    const sel = this.resolveSel(meta);
     const result = await this.resumeThread({
       sessionId,
       resumeArg: agent,
@@ -1861,6 +1861,23 @@ export class AgentEngine {
     return instructionsFull;
   }
 
+  /** Chat Slice D task 1: THE single per-turn/per-call model-resolution point — every call site
+   *  that used to inline `this.cfg.provider.live?.() ?? { model: this.cfg.provider.model }`
+   *  (turn(), sendToAgent()) now goes through here instead, so a per-SESSION override
+   *  (`meta.model`, set via `store.setModel`/`session.setModel`) is honored everywhere that
+   *  resolution happens, not just in one of the two. `meta.model` — when set — overrides only the
+   *  `model` field; `reasoningEffort` still comes from `live()`/the boot snapshot, since a
+   *  per-session model override changes WHICH model answers, not how hard it reasons. Mode-agnostic
+   *  by construction: works identically for code/dispatch/chat (unlike `session.setPolicy`'s fixed
+   *  chat policy, a completely different axis this does not touch). No caching of its own — each
+   *  call site still decides its own "resolve once per X" cadence (turn() calls this once per
+   *  turn, sendToAgent() once per resume) by calling this exactly once per its own cadence, same as
+   *  the inline expression it replaces. */
+  private resolveSel(meta: { model?: string }): { model: string; reasoningEffort?: string } {
+    const base = this.cfg.provider.live?.() ?? { model: this.cfg.provider.model };
+    return meta.model ? { ...base, model: meta.model } : base;
+  }
+
   private async turn(sessionId: string, signal: AbortSignal): Promise<void> {
     const meta = this.cfg.store.meta(sessionId);
     const threadId = MAIN_THREAD;
@@ -1904,8 +1921,10 @@ export class AgentEngine {
     // settings.json edit mid-turn does not retroactively change THIS turn's model, only the
     // NEXT one's, mirroring how `instructions`/`instructionsFull` below are also computed once
     // per turn and not re-read mid-turn. Falls back to the boot-time `provider.model` when `live`
-    // isn't wired (most test harnesses) — unchanged behavior for them.
-    const sel = this.cfg.provider.live?.() ?? { model: this.cfg.provider.model };
+    // isn't wired (most test harnesses) — unchanged behavior for them. Chat Slice D task 1:
+    // `meta.model` (a per-SESSION override, `store.setModel`/`session.setModel`) wins over
+    // whichever of those two this picks — see resolveSel's own doc comment.
+    const sel = this.resolveSel(meta);
     if (!meta.cwd) {
       this.emit(sessionId, { type: "turn_started", sessionId, threadId });
       this.emit(sessionId, { type: "agent_error", sessionId, threadId, message: "session has no working directory — create the session with a cwd" });

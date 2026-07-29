@@ -73,6 +73,7 @@ final class MethodWrapperTests: XCTestCase {
             ("ask_user.respond", #"{"ok":true,"alreadyResolved":false}"#, { _ = try await client.askUserRespond(sessionId: "s", callId: "c1", answers: ["Q": "A"]) }),
             ("plan.respond", #"{"ok":true,"alreadyResolved":false}"#, { _ = try await client.planRespond(sessionId: "s", callId: "c1", approved: true, autoAccept: true) }),
             ("session.setPolicy", #"{"ok":true}"#, { try await client.setPolicy(sessionId: "s", policy: "auto") }),
+            ("session.setModel", #"{}"#, { try await client.setModel(sessionId: "s", model: "claude-opus-5") }),
             ("session.steer", #"{"ok":true,"injected":true}"#, { _ = try await client.steer(sessionId: "s", text: "also do X") }),
             ("session.interrupt", #"{"ok":true,"wasRunning":true}"#, { _ = try await client.interrupt(sessionId: "s") }),
             ("daemon.trustDir", #"{"ok":true,"trusted":true}"#, { _ = try await client.trustDir(path: "/tmp/p") }),
@@ -83,6 +84,30 @@ final class MethodWrapperTests: XCTestCase {
             XCTAssertEqual(req["method"] as? String, method, "wrong wire method for \(method)")
             idx += 1
         }
+    }
+
+    /// Chat Slice D task 1: `session.setModel`'s wire shape — a set carries the string; a clear
+    /// carries a LITERAL JSON `null` for `"model"`, never an omitted key (the wire param is
+    /// required-but-nullable, `SessionSetModelParams.model: z.string().min(1).nullable()` — NOT
+    /// optional — so omitting the key entirely would fail the daemon's own schema validation).
+    func testSetModelEncodesStringOrLiteralNull() async throws {
+        let (client, t) = try await connected()
+
+        let (setReq, _) = try await roundTrip(t, sentIndex: 1, result: #"{}"#) {
+            try await client.setModel(sessionId: "s_1", model: "claude-opus-5")
+        }
+        XCTAssertEqual(setReq["method"] as? String, "session.setModel")
+        XCTAssertEqual((setReq["params"] as? [String: Any])?["sessionId"] as? String, "s_1")
+        XCTAssertEqual((setReq["params"] as? [String: Any])?["model"] as? String, "claude-opus-5")
+
+        let (clearReq, _) = try await roundTrip(t, sentIndex: 2, result: #"{}"#) {
+            try await client.setModel(sessionId: "s_1", model: nil)
+        }
+        XCTAssertEqual(clearReq["method"] as? String, "session.setModel")
+        XCTAssertTrue(
+            (clearReq["params"] as? [String: Any])?["model"] is NSNull,
+            "model:nil must send a literal JSON null, not an omitted key"
+        )
     }
 
     /// child-transcript-view T1: `thread.send`/`agent.stop` wrappers — proves the method/param

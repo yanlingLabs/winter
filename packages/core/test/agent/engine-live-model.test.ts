@@ -100,3 +100,64 @@ describe("engine live model resolution (no daemon restart)", () => {
     expect(fp.requests[1]!.reasoningEffort).toBe("max");
   });
 });
+
+// Chat Slice D task 1: session.setModel/store.setModel's per-SESSION model override, threaded
+// through AgentEngine's resolveSel — the SAME "once per turn" resolution point the tests above pin
+// for live()/the boot snapshot. meta.model, when set, wins over whichever of those two would
+// otherwise be chosen; it never touches reasoningEffort (a completely separate axis).
+describe("per-session model override (Chat Slice D task 1: meta.model wins over live()/boot)", () => {
+  test("a session WITHOUT a model uses the live() default (control) — same engine, same live()", async () => {
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, sessionId } = setupEngine(provider, { live: () => ({ model: "live-model", reasoningEffort: "high" }) });
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.model).toBe("live-model");
+    expect(provider.requests[0]!.reasoningEffort).toBe("high");
+  });
+
+  test("store.setModel overrides live()'s model for THIS session, but leaves reasoningEffort untouched", async () => {
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, store, sessionId } = setupEngine(provider, { live: () => ({ model: "live-model", reasoningEffort: "high" }) });
+    store.setModel(sessionId, "session-override-model");
+
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.model).toBe("session-override-model");
+    expect(provider.requests[0]!.reasoningEffort).toBe("high"); // untouched — only `model` is overridden
+  });
+
+  test("store.setModel overrides the BOOT-SNAPSHOT model when no live() is wired", async () => {
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, store, sessionId } = setupEngine(provider); // no `live` opt — boot model is "gated-1"
+    store.setModel(sessionId, "session-override-model");
+
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.model).toBe("session-override-model");
+  });
+
+  test("store.setModel(sessionId, null) clears the override — the NEXT turn falls back to the default again", async () => {
+    const provider = new FakeProvider([text("first"), text("second")]);
+    const { engine, store, sessionId } = setupEngine(provider, { live: () => ({ model: "live-model" }) });
+    store.setModel(sessionId, "session-override-model");
+
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.model).toBe("session-override-model");
+
+    store.setModel(sessionId, null);
+    await engine.runTurn(sessionId);
+    expect(provider.requests[1]!.model).toBe("live-model");
+  });
+
+  test("a session with NO cwd (turn short-circuits before resolveSel matters) still runs unaffected by an override on ANOTHER session", async () => {
+    // Control proving the override is scoped to the exact sessionId it was set on, not global
+    // state: a second session (different sessionId, same engine/provider) never sees session A's
+    // override.
+    const provider = new FakeProvider([text("a"), text("b")]);
+    const { engine, store, sessionId: sessionA, cwd } = setupEngine(provider, { live: () => ({ model: "live-model" }) });
+    const sessionB = store.createSession("global", { cwd });
+    store.setModel(sessionA, "override-for-a-only");
+
+    await engine.runTurn(sessionA);
+    await engine.runTurn(sessionB);
+    expect(provider.requests[0]!.model).toBe("override-for-a-only");
+    expect(provider.requests[1]!.model).toBe("live-model"); // session B never had an override
+  });
+});

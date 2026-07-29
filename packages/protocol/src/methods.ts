@@ -46,6 +46,12 @@ export const SessionCreateParams = z.object({
   // Chat Mode Slice A: "chat" added — additive, NOT a singleton (many chat sessions may exist).
   // The handler rejects it for remote callers only (Mac-local for this slice).
   mode: z.enum(["code", "dispatch", "chat"]).optional(),
+  // Chat Slice D Task 1: an optional per-session model override, stamped at creation time —
+  // additive/optional so every existing caller (CLI, NormaKit, the phone) that never sends it is
+  // unaffected. Index-only metadata (like `cwd`/`approvalPolicy`, NOT `mode` — see
+  // `SessionRow.model`'s own doc comment in store.ts), so it does NOT ride the `session_created`
+  // event and resets to absent on a full index rebuild.
+  model: z.string().min(1).optional(),
 });
 export const SessionCreateResult = z.object({ sessionId: z.string(), trusted: z.boolean() });
 
@@ -64,6 +70,9 @@ export const SessionListResult = z.object({
     origin: z.string().optional(),
     mode: z.string().optional(),            // "dispatch" for the singleton; absent = code
     parentSessionId: z.string().optional(), // set on dispatch children
+    // Chat Slice D Task 1: round-trips SessionRow.model (store.ts) — absent for every session
+    // created before this field existed, or created/left without an explicit override.
+    model: z.string().optional(),
   })),
 });
 
@@ -292,6 +301,17 @@ export const PlanRespondResult = z.object({ ok: z.literal(true), alreadyResolved
 
 export const SessionSetPolicyParams = z.object({ sessionId: z.string().min(1), policy: ApprovalPolicy });
 export const SessionSetPolicyResult = z.object({ ok: z.literal(true) });
+
+// Chat Slice D Task 1: per-session model override, mode-agnostic — unlike session.setPolicy
+// (chat rejects EVERY value, plan-immunity's fixed policy), session.setModel works identically
+// for code/dispatch/chat: there is no "fixed model" concept for any mode. `model: null` CLEARS the
+// override (falls back to the live/boot default — AgentEngine.resolveSel) rather than being
+// omittable — the field is required-but-nullable so a caller can't confuse "didn't send it" with
+// "explicitly clearing it". Result mirrors skills.write's bare-`{}` idiom (nothing to report beyond
+// success — a thrown RpcFailure is how the daemon reports an unknown sessionId, same NOT_FOUND
+// precedent as session.setPolicy).
+export const SessionSetModelParams = z.object({ sessionId: z.string().min(1), model: z.string().min(1).nullable() });
+export const SessionSetModelResult = z.object({});
 
 export const ThreadInfoSchema = z.object({
   threadId: z.string(), parentThreadId: z.string().optional(), agentType: z.string().optional(),
@@ -906,6 +926,7 @@ export const METHODS = {
   taskList: "task.list",
   planRespond: "plan.respond",
   sessionSetPolicy: "session.setPolicy",
+  sessionSetModel: "session.setModel",
   threadList: "thread.list",
   threadSend: "thread.send",
   agentStop: "agent.stop",

@@ -29,9 +29,11 @@ import NormaSessionKit
 public actor Gateway {
     /// Mirrors the daemon's own `REMOTE_ALLOWED_METHODS` (packages/core/src/ipc/server.ts) as an
     /// independent Swift constant — defense in depth: the gateway rejects an off-list method
-    /// BEFORE it ever reaches the daemon, which enforces the identical 12-method allowlist itself.
+    /// BEFORE it ever reaches the daemon, which enforces the identical 13-method allowlist itself.
     /// SP3 T4b added `approval.list` (10th). SP3.4 added `session.create` (11th). Session history
     /// (design 2026-07-23) added `session.history` (12th) — a pure passthrough, no special-casing.
+    /// Chat Slice D task 1 added `session.setModel` (13th) — the phone sets the model on a
+    /// remote-driven code/dispatch/chat session; also a pure passthrough.
     static let remoteAllowedMethods: Set<String> = [
         "protocol.hello", "session.list", "session.attach", "session.send",
         "session.dispatch", "approval.respond", "ask_user.respond",
@@ -40,6 +42,8 @@ public actor Gateway {
         "session.create",
         // Session history (design 2026-07-23): the phone reads past events over a paged RPC.
         "session.history",
+        // Chat Slice D task 1: the phone sets the model on a remote-driven session.
+        "session.setModel",
     ]
 
     /// Session-map cap (SP2b Task 4) — see `evictIfNeeded()`.

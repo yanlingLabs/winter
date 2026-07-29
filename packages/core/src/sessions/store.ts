@@ -27,6 +27,13 @@ export interface SessionRow {
   // a complete index.db loss.
   mode?: string;
   parentSessionId?: string;
+  /** Chat Slice D task 1: a per-session model override (`session.setModel`/`store.setModel`).
+   *  Index-only metadata — like `cwd`/`approvalPolicy` (NOT `mode`, which ALSO rides the
+   *  session_created event so the dispatch-singleton invariant survives an index rebuild): this
+   *  does NOT ride the event log, so it resets to undefined on a full index.db loss, same as
+   *  `cwd`/`origin`/`approvalPolicy`'s own reset-to-default behavior in recoverAll's pass-2
+   *  INSERT below. Absent means "use the live/boot default" — AgentEngine.resolveSel's own rule. */
+  model?: string;
 }
 
 /** Derives a fallback title from the first line of the session's first main-thread
@@ -56,7 +63,8 @@ export class SessionStore {
       cwd TEXT,
       approval_policy TEXT NOT NULL DEFAULT 'ask',
       mode TEXT,
-      parent_session_id TEXT
+      parent_session_id TEXT,
+      model TEXT
     )`);
     // Handle pre-existing index.db files by adding missing columns
     for (const ddl of [
@@ -67,6 +75,8 @@ export class SessionStore {
       "ALTER TABLE sessions ADD COLUMN origin TEXT",
       "ALTER TABLE sessions ADD COLUMN mode TEXT",
       "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
+      // Chat Slice D task 1: additive migration, same pattern as approval_policy/cwd above.
+      "ALTER TABLE sessions ADD COLUMN model TEXT",
     ]) {
       try { this.db.run(ddl); }
       catch (e) {
@@ -191,14 +201,14 @@ export class SessionStore {
 
   createSession(
     scope: string,
-    opts: { cwd?: string; approvalPolicy?: SessionApprovalPolicy; origin?: string; mode?: "code" | "dispatch" | "chat"; parentSessionId?: string } = {},
+    opts: { cwd?: string; approvalPolicy?: SessionApprovalPolicy; origin?: string; mode?: "code" | "dispatch" | "chat"; parentSessionId?: string; model?: string } = {},
   ): string {
     if (!SCOPE_RE.test(scope)) throw new Error(`invalid scope: ${scope}`);
     const sessionId = `s_${randomBytes(6).toString("hex")}`;
     mkdirSync(join(this.homeDir, "sessions", scope), { recursive: true });
     this.db.run(
-      "INSERT INTO sessions (session_id, scope, created_at, last_seq, cwd, approval_policy, origin, mode, parent_session_id) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)",
-      [sessionId, scope, Date.now(), opts.cwd ?? null, opts.approvalPolicy ?? "ask", opts.origin ?? null, opts.mode ?? null, opts.parentSessionId ?? null],
+      "INSERT INTO sessions (session_id, scope, created_at, last_seq, cwd, approval_policy, origin, mode, parent_session_id, model) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+      [sessionId, scope, Date.now(), opts.cwd ?? null, opts.approvalPolicy ?? "ask", opts.origin ?? null, opts.mode ?? null, opts.parentSessionId ?? null, opts.model ?? null],
     );
     this.append(sessionId, { type: "session_created", sessionId, scope, ...(opts.mode ? { mode: opts.mode } : {}) });
     return sessionId;
@@ -241,8 +251,8 @@ export class SessionStore {
   }
 
   list(): SessionRow[] {
-    return (this.db.query("SELECT session_id, scope, created_at, last_seq, title, first_message, cwd, origin, mode, parent_session_id FROM sessions ORDER BY created_at").all() as
-      { session_id: string; scope: string; created_at: number; last_seq: number; title: string | null; first_message: string | null; cwd: string | null; origin: string | null; mode: string | null; parent_session_id: string | null }[])
+    return (this.db.query("SELECT session_id, scope, created_at, last_seq, title, first_message, cwd, origin, mode, parent_session_id, model FROM sessions ORDER BY created_at").all() as
+      { session_id: string; scope: string; created_at: number; last_seq: number; title: string | null; first_message: string | null; cwd: string | null; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null }[])
       .map((r) => ({
         sessionId: r.session_id,
         scope: r.scope,
@@ -253,6 +263,7 @@ export class SessionStore {
         origin: r.origin ?? undefined,
         mode: r.mode ?? undefined,
         parentSessionId: r.parent_session_id ?? undefined,
+        model: r.model ?? undefined,
       }));
   }
 
@@ -276,12 +287,24 @@ export class SessionStore {
     if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
   }
 
+  /** Chat Slice D task 1: per-session model override — `model: null` CLEARS it (falls back to the
+   *  live/boot default at the next resolution, AgentEngine.resolveSel). Deterministic on an
+   *  unknown session, same precedent as setApprovalPolicy (throws, mapped to NOT_FOUND by the IPC
+   *  layer) — unlike setCwd's silent no-op, an explicit model change must not fail silently.
+   *  Idempotent: setting the same value (including re-clearing an already-clear one) is a no-op
+   *  UPDATE that still reports success (SQLite's `changes` counts the matched row regardless of
+   *  whether the value actually differs). */
+  setModel(sessionId: string, model: string | null): void {
+    const res = this.db.run("UPDATE sessions SET model = ? WHERE session_id = ?", [model, sessionId]);
+    if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
+  }
+
   meta(sessionId: string): {
     sessionId: string; scope: string; cwd: string | null; approvalPolicy: SessionApprovalPolicy;
-    origin?: string; mode?: string; parentSessionId?: string;
+    origin?: string; mode?: string; parentSessionId?: string; model?: string;
   } {
-    const row = this.db.query("SELECT scope, cwd, approval_policy, origin, mode, parent_session_id FROM sessions WHERE session_id = ?").get(sessionId) as
-      | { scope: string; cwd: string | null; approval_policy: string; origin: string | null; mode: string | null; parent_session_id: string | null } | null;
+    const row = this.db.query("SELECT scope, cwd, approval_policy, origin, mode, parent_session_id, model FROM sessions WHERE session_id = ?").get(sessionId) as
+      | { scope: string; cwd: string | null; approval_policy: string; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null } | null;
     if (!row) throw new Error(`unknown session: ${sessionId}`);
     const p = row.approval_policy;
     // Plan-immunity (2026-07-28, USER-REVISED design): "chat" (gate.ts's SessionApprovalPolicy)
@@ -296,6 +319,7 @@ export class SessionStore {
     return {
       sessionId, scope: row.scope, cwd: row.cwd, approvalPolicy,
       origin: row.origin ?? undefined, mode: row.mode ?? undefined, parentSessionId: row.parent_session_id ?? undefined,
+      model: row.model ?? undefined,
     };
   }
 

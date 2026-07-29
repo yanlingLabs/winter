@@ -131,12 +131,12 @@ describe("remote chat gate: chat lifted (Slice C), the mechanism survives for co
     remote.close(); harness.close();
   });
 
-  // FLIP 2 (was "%s on a chat session is refused for remote"): the same seven methods (the brief's
+  // FLIP 2 (was "%s on a chat session is refused for remote"): the same eight methods (the brief's
   // four verbs — attach/send/history/interrupt — plus approval.respond/approval.list/ask_user.respond,
-  // every OTHER REMOTE_ALLOWED_METHODS entry taking a bare `sessionId`) now SUCCEED against a chat
-  // session for remote. sessionSend always requires a prior attach regardless of role/mode (ordinary
-  // session semantics, unrelated to the remote-chat gate) — attaching first is harmless for the other
-  // six methods too, so it's done uniformly.
+  // plus Chat Slice D task 1's session.setModel — every OTHER REMOTE_ALLOWED_METHODS entry taking a
+  // bare `sessionId`) now SUCCEED against a chat session for remote. sessionSend always requires a
+  // prior attach regardless of role/mode (ordinary session semantics, unrelated to the remote-chat
+  // gate) — attaching first is harmless for the other methods too, so it's done uniformly.
   test.each([
     [METHODS.sessionAttach, {}],
     [METHODS.sessionSend, { text: "hi" }],
@@ -145,6 +145,7 @@ describe("remote chat gate: chat lifted (Slice C), the mechanism survives for co
     [METHODS.approvalRespond, { callId: "c_x", approved: true }],
     [METHODS.approvalList, {}],
     [METHODS.askUserRespond, { callId: "c_x", answers: {} }],
+    [METHODS.sessionSetModel, { model: "claude-opus-5" }],
   ])("%s on a chat session now succeeds for remote (Slice C lifted the gate)", async (method, extra) => {
     const { store, socketPath, remoteToken } = await boot();
     const chat = store.createSession("global", { mode: "chat" });
@@ -160,7 +161,7 @@ describe("remote chat gate: chat lifted (Slice C), the mechanism survives for co
   // The mechanism proof (T1 requirement 2): assertRemoteMayUseSession is GENERALIZED, not deleted.
   // A cowork-shaped session — mode written directly to the store; there is no session.create or
   // wire support for "cowork" to register anywhere, deliberately — is still refused for remote on
-  // every one of the same seven methods, exactly like chat used to be before this slice.
+  // every one of the same eight methods, exactly like chat used to be before this slice.
   test.each([
     [METHODS.sessionAttach, {}],
     [METHODS.sessionSend, { text: "hi" }],
@@ -169,6 +170,7 @@ describe("remote chat gate: chat lifted (Slice C), the mechanism survives for co
     [METHODS.approvalRespond, { callId: "c_x", approved: true }],
     [METHODS.approvalList, {}],
     [METHODS.askUserRespond, { callId: "c_x", answers: {} }],
+    [METHODS.sessionSetModel, { model: "claude-opus-5" }],
   ])("%s on a cowork-shaped session is refused for remote (the gate generalizes, not deleted)", async (method, extra) => {
     const { store, socketPath, remoteToken } = await boot();
     const cowork = makeCoworkSession(store);

@@ -16,6 +16,8 @@ import {
   PlanRespondResult,
   SessionSetPolicyParams,
   SessionSetPolicyResult,
+  SessionSetModelParams,
+  SessionSetModelResult,
   SessionAddDirParams,
   SessionSetCwdParams,
   TrustDirParams,
@@ -470,6 +472,42 @@ describe("plan.respond / session.setPolicy schemas", () => {
     expect(() => SessionSetPolicyParams.parse({ sessionId: "s1", policy: "bogus" })).toThrow();
     expect(SessionSetPolicyResult.parse({ ok: true }).ok).toBe(true);
     expect(METHODS.sessionSetPolicy).toBe("session.setPolicy");
+  });
+});
+
+// Chat Slice D Task 1: per-session model override — session.setModel {sessionId, model: string|null}
+// → {} (null clears). Works for ALL modes (unlike session.setPolicy, which chat rejects outright).
+describe("session.setModel schema (Chat Slice D Task 1)", () => {
+  test("params: sessionId required non-empty, model is a nullable string (both string and null accepted)", () => {
+    expect(SessionSetModelParams.parse({ sessionId: "s1", model: "claude-opus-5" }).model).toBe("claude-opus-5");
+    expect(SessionSetModelParams.parse({ sessionId: "s1", model: null }).model).toBeNull();
+    expect(() => SessionSetModelParams.parse({ sessionId: "s1", model: "" })).toThrow(); // empty string is not a valid model id
+    expect(() => SessionSetModelParams.parse({ sessionId: "", model: "m" })).toThrow();
+    expect(() => SessionSetModelParams.parse({ sessionId: "s1" })).toThrow(); // model is required (nullable, not optional)
+  });
+
+  test("result is empty; METHODS carries the verb", () => {
+    expect(SessionSetModelResult.parse({})).toEqual({});
+    expect(METHODS.sessionSetModel).toBe("session.setModel");
+  });
+});
+
+describe("session.create / session.list carry an optional per-session model (Chat Slice D Task 1)", () => {
+  test("SessionCreateParams accepts an optional model, absent by default", () => {
+    expect(SessionCreateParams.parse({ scope: "global", model: "claude-opus-5" }).model).toBe("claude-opus-5");
+    expect(SessionCreateParams.parse({ scope: "global" }).model).toBeUndefined();
+    expect(() => SessionCreateParams.parse({ scope: "global", model: "" })).toThrow();
+  });
+
+  test("SessionListResult rows carry an optional model; older shapes without it still parse", () => {
+    const listed = SessionListResult.parse({
+      sessions: [
+        { sessionId: "s_1", scope: "global", createdAt: 1, lastSeq: 0, model: "claude-opus-5" },
+        { sessionId: "s_2", scope: "global", createdAt: 1, lastSeq: 0 }, // no model — pre-existing shape
+      ],
+    });
+    expect(listed.sessions[0]!.model).toBe("claude-opus-5");
+    expect(listed.sessions[1]!.model).toBeUndefined();
   });
 });
 

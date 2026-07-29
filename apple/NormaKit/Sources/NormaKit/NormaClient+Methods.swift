@@ -329,6 +329,21 @@ extension NormaClient {
         _ = try await request("session.setPolicy", params: obj(["sessionId": .string(sessionId), "policy": .string(policy)]))
     }
 
+    /// `session.setModel {sessionId, model}` (Chat Slice D task 1) — per-session model override,
+    /// mode-agnostic (unlike `setPolicy` above, this has no chat/dispatch special case: there is no
+    /// "fixed model" concept for any mode). `model: nil` CLEARS the override on the wire (the param
+    /// is required-but-nullable there, `SessionSetModelParams.model: z.string().min(1).nullable()`
+    /// — NOT optional), so this always sends the `"model"` key: `.string(...)` when set, `.null`
+    /// when clearing. Result is a bare `{}` (skills.write's idiom) — nothing to report beyond
+    /// success; an unresolvable sessionId throws `RpcError` via the daemon's own NOT_FOUND, same
+    /// precedent as `setPolicy`.
+    public func setModel(sessionId: String, model: String?) async throws {
+        _ = try await request("session.setModel", params: obj([
+            "sessionId": .string(sessionId),
+            "model": model.map { JSONValue.string($0) } ?? JSONValue.null,
+        ]))
+    }
+
     public func taskList(sessionId: String) async throws -> [(id: String, subject: String, status: String, activeForm: String?)] {
         let r = try await request("task.list", params: obj(["sessionId": .string(sessionId)]))
         return (r["tasks"]?.arrayValue ?? []).compactMap { t in

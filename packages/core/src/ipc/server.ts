@@ -12,6 +12,7 @@ import {
   SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams,
   SkillsReadParams, SkillsWriteParams, SkillsDeleteParams,
   PluginsListParams, AskUserRespondParams, TaskListParams, PlanRespondParams, SessionSetPolicyParams,
+  SessionSetModelParams,
   ThreadListParams, ThreadSendParams, AgentStopParams,
   PeripheralLeaseParams, PeripheralRenewParams, PeripheralReleaseParams, PeripheralAdvertiseParams,
   PeripheralRevokeParams, PeripheralRespondParams, DaemonStatusParams, EngineActivityParams, QuotaStateParams,
@@ -293,6 +294,11 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   // Session history: the phone reads past events to render history without
   // an unbounded attach replay. Pure passthrough — all filtering/budgeting is daemon-side.
   METHODS.sessionHistory,
+  // Chat Slice D task 1: the phone sets the model on a remote-driven code (or dispatch/chat)
+  // session — mode-agnostic, unlike session.setPolicy (which stays OFF this list entirely: chat's
+  // fixed policy has no remote-meaningful "set" at all). Guarded by assertRemoteMayUseSession below,
+  // same as every other bare-sessionId entry on this list.
+  METHODS.sessionSetModel,
 ]);
 
 /** The session `mode`s a remote (iPhone) client may target at all — every other mode is Mac-local
@@ -319,7 +325,7 @@ const REMOTE_ELIGIBLE_SESSION_MODES = new Set(["code", "dispatch", "chat"]);
  *  phone, including one that never does. Used by session.attach/send/history/interrupt plus
  *  approval.respond, approval.list, and ask_user.respond — all three also carry a caller-supplied
  *  `sessionId` with no other mode check, and ask_user.respond in particular is exactly the RPC the
- *  AskQuestion tool resolves through. */
+ *  AskQuestion tool resolves through. Chat Slice D task 1 added session.setModel to this set too. */
 function assertRemoteMayUseSession(store: SessionStore, role: string | undefined | null, sessionId: string): void {
   if (role !== "remote") return;
   let mode: string | undefined;
@@ -733,7 +739,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // SessionApprovalPolicy doc comment), so this coercion is the ONLY way a session's stored
         // policy ever becomes "chat".
         const approvalPolicy = p.mode === "chat" ? "chat" : p.approvalPolicy;
-        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy, origin: p.origin, mode: p.mode });
+        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy, origin: p.origin, mode: p.mode, model: p.model });
         const trusted = cwd ? (opts.trust?.isTrusted(cwd) ?? false) : false;
         // Broadcast the session_created event to every authed harness (not just attachments —
         // a brand-new session has none) so other harnesses can offer to follow (spec §4.4).
@@ -1012,6 +1018,23 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
         return { ok: true };
+      }
+      // Chat Slice D task 1: per-session model override — mode-agnostic (unlike session.setPolicy
+      // just above, this has NO chat/dispatch special case: there is no "fixed model" concept for
+      // any mode). `assertRemoteMayUseSession` guards it since it's REMOTE_ALLOWED_METHODS-listed
+      // and takes a bare caller-supplied sessionId, same as session.attach/send/history/interrupt
+      // above. `model: null` clears the override (AgentEngine.resolveSel falls back to the
+      // live/boot default on the NEXT turn — this never affects an already-running turn, mirroring
+      // how a live model-settings edit doesn't retroactively change the CURRENT turn either).
+      case METHODS.sessionSetModel: {
+        const p = parseParams(SessionSetModelParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        try {
+          opts.store.setModel(p.sessionId, p.model);
+        } catch (e) {
+          throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
+        }
+        return {};
       }
 
       // -----------------------------------------------------------------------------------------
