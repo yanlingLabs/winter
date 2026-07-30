@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 /**
  * THE STRUCTURAL TRIPWIRE for the HTML-scanning regex class, and the reason it exists: Task 6b found
@@ -16,43 +16,65 @@ import { join } from "node:path";
  * engine consumes to end-of-string and fails, which is quadratic; stack two such quantifiers on one
  * span and it is cubic (measured: 86 s on 39 KB for the anchor pattern).
  *
- * THE RULE ENFORCED BELOW: every regex literal in live code in `web.ts` and `page-core.ts` that
- * mentions `<` or `>` must either carry no unbounded class/dot quantifier, or have that quantifier as
- * its final element, or be named in `ALLOWED` with a reason. Bounded quantifiers (`{1,4}`) and
- * quantifier-free candidate patterns are the shapes the fixes use, and they pass automatically.
+ * THE RULE ENFORCED BELOW: every regex literal in live code under `src/agent` that mentions `<` or `>`
+ * must either carry no unbounded class/dot quantifier, or have that quantifier as its final element, or
+ * have its ONLY unbounded quantifiers be whitespace-only and not leading (see
+ * `unboundedQuantifierBeforeMore` for that rule and its proof), or be named in `ALLOWED` with a reason.
+ * Bounded quantifiers (`{1,4}`) and quantifier-free candidate patterns are the shapes the fixes use,
+ * and they pass automatically.
  *
  * The fixed sites deliberately do NOT appear as allowlist entries: they were rewritten into
  * quantifier-free candidate regexes (`/<a\s/gi`, `/<h([1-6])/gi`, `/<li(?![0-9A-Za-z_])/gi`) plus a
  * bounded scan around a monotonic `>` pointer, so there is nothing left to allow.
  */
 
-const SRC_DIR = join(import.meta.dir, "../../../src/agent/tools");
+/** The scan root. Was `src/agent/tools`, NON-recursively (review Minor 7 — demonstrated, not
+ *  hypothetical: a dangerous regex in `src/agent/__x.ts` one level UP, or in
+ *  `src/agent/tools/__sub/x.ts` one level DOWN, left the gate green). The derivation followed code
+ *  *added beside* `web.ts` but not code *lifted out of* it — which is the very refactor its own doc
+ *  comment cited. Now: recursive, from one level higher. */
+const SRC_DIR = join(import.meta.dir, "../../../src/agent");
+
+/** The whole of `packages/core/src`, walked only by the scope invariant below — the scanners could be
+ *  moved anywhere in the package, and the invariant's job is to notice. */
+const PACKAGE_SRC_DIR = join(import.meta.dir, "../../../src");
+
+/** Every `.ts` under `dir`, recursively, as paths relative to `dir`. */
+function walkTs(dir: string, prefix = ""): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) out.push(...walkTs(join(dir, entry.name), rel));
+    else if (entry.name.endsWith(".ts")) out.push(rel);
+  }
+  return out;
+}
 
 /** DERIVED, not hardcoded (review Minor 5, bypass 1 — demonstrated, not hypothetical: a new file
  *  containing `/<td[^>]*>([\s\S]*?)<\/td>/gi` left the gate green). `FILES` used to be
- *  `["web.ts", "page-core.ts"]`, and the obvious next refactor — lifting these scanners into a shared
- *  module — would have walked straight out of coverage. Every `.ts` in the tools directory is scanned
- *  now, so extending coverage requires no edit here at all.
+ *  `["web.ts", "page-core.ts"]`, then every `.ts` directly inside `src/agent/tools`; it is now every
+ *  `.ts` under `src/agent`, RECURSIVELY, so neither adding a file beside `web.ts` nor lifting the
+ *  scanners into a shared module walks out of coverage.
  *
- *  Deriving it today adds no allowlist entries: across all 31 files the only flagged literal is the
- *  `<br\s*\/?>` already listed below. (The two `task-notification` literals the review measured live in
- *  `agent/engine.ts`, one level up, so they are outside this directory — see the report's found-but-not-
- *  fixed list, which is where the decision about widening further belongs.) */
-const FILES: string[] = readdirSync(SRC_DIR).filter((f) => f.endsWith(".ts")).sort();
+ *  Path is not the only thing tying scope to code — see the scanner-symbol invariant below, which
+ *  fails loudly if a guarded scanner lands anywhere the derivation does not reach. */
+const FILES: string[] = walkTs(SRC_DIR);
+
+/** The scanners this gate exists to protect. If a file anywhere in `packages/core/src` mentions one of
+ *  these and is NOT inside `FILES`, the derivation has silently narrowed and the invariant below says
+ *  so — the property the path-based derivation alone could never have. */
+const SCANNER_SYMBOLS = /scanAnchorOpens|scanHeadingOpens|stripTags|replaceListItems|extractLinks/;
 
 /** Patterns that match the dangerous SHAPE but are provably safe, each with the proof. Adding an entry
- *  must be a deliberate, argued edit — that is the whole point of the list being asserted below. */
-const ALLOWED: Array<{ source: string; why: string }> = [
-  {
-    source: "<br\\s*\\/?>",
-    why:
-      "`\\s*` can only consume WHITESPACE, and the whitespace run after one `<br` is disjoint from the "
-      + "run after any other: a candidate begins with `<`, which is not whitespace, so it terminates the "
-      + "preceding candidate's run. The sum of all runs is therefore bounded by the document length — "
-      + "linear, not quadratic. Measured flat at 0.1 ms across the same 5k-160k doubling series on "
-      + "which `[^>]*` patterns grew 4x per step.",
-  },
-];
+ *  must be a deliberate, argued edit — that is the whole point of the list being asserted below.
+ *
+ *  EMPTY, and deliberately so. Widening the scope to `src/agent/**` brought exactly three flagged
+ *  literals into view (`<br\s*\/?>` here, and `agent/engine.ts`'s two `</\s*task-notification\s*>`),
+ *  and all three are the SAME safe shape: a whitespace-only unbounded quantifier behind a
+ *  non-whitespace literal. Extending the RULE with that proof (see `unboundedQuantifierBeforeMore`)
+ *  covers them and every future one; growing this list entry-by-entry would have covered three and
+ *  taught the next author nothing. */
+const ALLOWED: Array<{ source: string; why: string }> = [];
 
 /** A small lexer, because a regex-based scan for regex literals cannot tell code from comments — and
  *  the comments in `web.ts` deliberately quote the dangerous patterns as reference spellings (that is
@@ -115,20 +137,63 @@ function liveRegexLiterals(src: string): Array<{ line: number; source: string }>
   return out;
 }
 
+/** Every character a `\s`-only class may contain, as regex source. Anything else in a class makes the
+ *  atom able to consume non-whitespace, which is what the exemption below may not cover. */
+const WHITESPACE_CLASS_MEMBER = /^(?:\\s|\\t|\\n|\\r|\\f|\\v|\\u00[aA]0|\s)$/;
+
+/** True when a class body (`[...]`'s contents) can match ONLY whitespace. Conservative: an unrecognised
+ *  member, a negation, or a range makes it false. */
+function classIsWhitespaceOnly(body: string): boolean {
+  if (body === "" || body.startsWith("^") || body.includes("-")) return false;
+  let i = 0;
+  while (i < body.length) {
+    const member = body[i] === "\\" ? body.slice(i, i + (/^\\u/.test(body.slice(i)) ? 6 : 2)) : body[i]!;
+    if (!WHITESPACE_CLASS_MEMBER.test(member)) return false;
+    i += member.length;
+  }
+  return true;
+}
+
 /** True when `source` carries an unbounded quantifier (`*`, `+`, `{n,}`, greedy or lazy) applied to a
  *  character class, an escaped class (`\s`, `\S`, `\w`…) or `.`, AND something follows it — the shape
  *  that turns "consume as far as possible" into "consume to end-of-string, then fail". A quantifier at
- *  the very end of the pattern is safe: there is no terminator to be missing. */
+ *  the very end of the pattern is safe: there is no terminator to be missing.
+ *
+ *  THE WHITESPACE EXEMPTION (review §4 / §7.2, and what lets `ALLOWED` be empty). An unbounded
+ *  quantifier over a WHITESPACE-ONLY atom is linear rather than quadratic, provided it is not the
+ *  pattern's leading atom and the pattern has no alternation. Proof: every candidate start is pinned to
+ *  a preceding non-whitespace literal, and a whitespace run has exactly one position immediately before
+ *  it — so no two candidates can consume the same run, and each candidate consumes at most one run per
+ *  `\s`-quantifier (a constant). The sum of all runs is bounded by the document length. Measured on the
+ *  three live instances (`<br\s*\/?>`, and `engine.ts`'s two `</\s*task-notification\s*>`): flat at
+ *  0.1 ms and 1.3 ms/938 KB across the same doubling series on which `[^>]*` patterns grew 4x per step.
+ *
+ *  Both conditions are load-bearing, and both are self-tested below:
+ *   - LEADING is quadratic. `/\s*x/` on a run of spaces retries at every position in the run and
+ *     re-consumes its tail each time — the exemption must not cover it.
+ *   - ALTERNATION can smuggle a leading position in (`/(?:y|\s*x)/`), so the exemption declines to
+ *     reason about any pattern containing `|`.
+ *
+ *  `^`-anchoring is deliberately NOT a second exemption even though it would also be sound (one start
+ *  position). The review's Important 5 was a `$`-anchored alternative that was quadratic for exactly the
+ *  reason a `^`-anchored one is not, and no live pattern needs it — an exemption phrased around
+ *  "anchored" is an invitation to generalise it the wrong way. */
 export function unboundedQuantifierBeforeMore(source: string): boolean {
+  const hasAlternation = source.includes("|");
+  let sawLiteralBefore = false;
   let i = 0;
   while (i < source.length) {
     let atomIsScanning = false;
+    let atomIsWhitespaceOnly = false;
     if (source[i] === "\\") {
       atomIsScanning = /[sSwWdD]/.test(source[i + 1] ?? "");
+      atomIsWhitespaceOnly = source[i + 1] === "s";
       i += 2;
     } else if (source[i] === "[") {
+      const bodyStart = i + 1;
       i++;
       while (i < source.length && source[i] !== "]") { if (source[i] === "\\") i++; i++; }
+      atomIsWhitespaceOnly = classIsWhitespaceOnly(source.slice(bodyStart, i));
       i++;
       atomIsScanning = true;
     } else if (source[i] === "(") {
@@ -153,19 +218,33 @@ export function unboundedQuantifierBeforeMore(source: string): boolean {
       atomIsScanning = true;
       i++;
     } else {
+      // An ordinary literal character, which is what pins a candidate start position — but only when it
+      // is REQUIRED. An optional one (`x?`, `x*`, `x{0,2}`) pins nothing, so a `\s*` behind it can still
+      // be reached at every position. Regex syntax that matches nothing (anchors, quantifier marks,
+      // group/alternation punctuation) never pins either.
+      const optional = source[i + 1] === "?" || source[i + 1] === "*" || source[i + 1] === "{";
+      if (!optional && !/[\^$|?*+(){}]/.test(source[i]!)) sawLiteralBefore = true;
       i++;
       continue;
     }
     // a quantifier may follow, optionally lazy
     let quantified = false;
-    if (source[i] === "*" || source[i] === "+") { quantified = true; i++; }
-    else if (source[i] === "{") {
+    let matchesAtLeastOne = true; // no quantifier at all ⇒ the atom must match exactly once
+    if (source[i] === "*" || source[i] === "+") {
+      quantified = true;
+      matchesAtLeastOne = source[i] === "+";
+      i++;
+    } else if (source[i] === "{") {
       const close = source.indexOf("}", i);
       if (close > 0 && /^\{\d+,\}$/.test(source.slice(i, close + 1))) quantified = true;
-      if (close > 0) i = close + 1;
+      if (close > 0) { matchesAtLeastOne = !/^\{0[,}]/.test(source.slice(i, close + 1)); i = close + 1; }
+    } else if (source[i] === "?") {
+      matchesAtLeastOne = false;
     }
     if (source[i] === "?") i++; // lazy marker (or the optional marker, which we do not treat as unbounded)
-    if (quantified && atomIsScanning && i < source.length) return true;
+    const whitespaceExempt = atomIsWhitespaceOnly && sawLiteralBefore && !hasAlternation;
+    if (quantified && atomIsScanning && !whitespaceExempt && i < source.length) return true;
+    if (matchesAtLeastOne) sawLiteralBefore = true; // it must consume a character, so it pins what follows
   }
   return false;
 }
@@ -199,18 +278,42 @@ describe("regex shapes in the HTML-scanning paths (structural tripwire)", () => 
     }
   });
 
+  test("the whitespace exemption covers the three live instances and nothing looser", () => {
+    // EXEMPT — a whitespace-only unbounded quantifier behind a required non-whitespace literal. These
+    // are the only three such literals in scope, and they are why `ALLOWED` is empty.
+    for (const safe of ["<br\\s*\\/?>", "<\\/\\s*task-notification\\s*>", "<x[ \\t]*>"]) {
+      expect(unboundedQuantifierBeforeMore(safe)).toBe(false);
+    }
+    // NOT exempt — each breaks one condition of the proof, and each is genuinely quadratic.
+    for (const unsafe of [
+      "\\s*<x>", // LEADING: every position is a candidate and re-consumes the run's tail
+      "\\s+x", // same, with `+`
+      "<x>|\\s*y", // ALTERNATION can smuggle the leading position back in past the pinning literal
+      "x?\\s*<y>", // the only preceding literal is OPTIONAL, so the `\s*` is reachable at every position
+      "<x[^>]*\\s*>", // a second, non-whitespace unbounded quantifier is still the original defect
+      "<x\\S*>", // `\S` is not whitespace
+      "<x[\\s\\S]*>", // the class can consume anything — the `[\s\S]*?` shape this family started as
+    ]) {
+      expect(unboundedQuantifierBeforeMore(unsafe)).toBe(true);
+    }
+  });
+
   test("the lexer finds live regexes and ignores the ones quoted in comments", () => {
     // Two failure modes this pins: a lexer that finds nothing (the tripwire silently stops guarding)
     // and one that reads doc comments (it cries wolf over the reference spellings the fixes document).
     // The derived list must actually contain the two files this task worked on — a derivation that
     // silently returned nothing, or the wrong directory, would make every check below vacuous.
-    expect(FILES).toContain("web.ts");
-    expect(FILES).toContain("page-core.ts");
+    expect(FILES).toContain("tools/web.ts");
+    expect(FILES).toContain("tools/page-core.ts");
     expect(FILES.length).toBeGreaterThan(10);
+    // The recursion really did widen the scope past the tools directory (review Minor 7): `engine.ts`
+    // sits one level up and used to be invisible to this gate.
+    expect(FILES).toContain("engine.ts");
+    expect(FILES.filter((f) => !f.startsWith("tools/")).length).toBeGreaterThan(5);
     // page-core.ts is down to exactly three live regexes now that its duplicate of the anchor open
     // pattern is gone (`/<\/a>/gi`, `/\n+/g`, `/\r\n/g`); web.ts has many.
-    expect(liveRegexLiterals(readFileSync(join(SRC_DIR, "page-core.ts"), "utf8")).length).toBeGreaterThanOrEqual(3);
-    expect(liveRegexLiterals(readFileSync(join(SRC_DIR, "web.ts"), "utf8")).length).toBeGreaterThan(15);
+    expect(liveRegexLiterals(readFileSync(join(SRC_DIR, "tools/page-core.ts"), "utf8")).length).toBeGreaterThanOrEqual(3);
+    expect(liveRegexLiterals(readFileSync(join(SRC_DIR, "tools/web.ts"), "utf8")).length).toBeGreaterThan(15);
     for (const file of FILES) {
       const found = liveRegexLiterals(readFileSync(join(SRC_DIR, file), "utf8"));
       for (const { source } of found) {
@@ -220,13 +323,27 @@ describe("regex shapes in the HTML-scanning paths (structural tripwire)", () => 
       }
     }
     // And it really does see the live ones.
-    const web = liveRegexLiterals(readFileSync(join(SRC_DIR, "web.ts"), "utf8")).map((r) => r.source);
+    const web = liveRegexLiterals(readFileSync(join(SRC_DIR, "tools/web.ts"), "utf8")).map((r) => r.source);
     expect(web).toContain("<a\\s");
     expect(web).toContain("<h([1-6])");
     expect(web).toContain("<li(?![0-9A-Za-z_])");
   });
 
-  test("no live regex in web.ts or page-core.ts scans unboundedly past a missing '>'", () => {
+  /** THE INVARIANT THAT TIES SCOPE TO CODE RATHER THAN TO A PATH (review Minor 7). A path-derived scope
+   *  can only ever follow code that stays put; this one follows the code itself. If a scanner is lifted
+   *  into `src/util/html.ts` tomorrow, the gate does not quietly stop guarding it — this fails, naming
+   *  the file, and the fix is one edit to `SRC_DIR`. */
+  test("every file in the package that carries a guarded scanner is inside the scanned scope", () => {
+    const carriers = walkTs(PACKAGE_SRC_DIR)
+      .filter((f) => SCANNER_SYMBOLS.test(readFileSync(join(PACKAGE_SRC_DIR, f), "utf8")));
+    expect(carriers.length).toBeGreaterThan(0); // a matcher that found nothing would be vacuous
+
+    const scoped = new Set(FILES.map((f) => relative(PACKAGE_SRC_DIR, join(SRC_DIR, f))));
+    const escaped = carriers.filter((f) => !scoped.has(f));
+    expect(escaped.join("\n")).toBe("");
+  });
+
+  test("no live regex under src/agent scans unboundedly past a missing '>'", () => {
     const allowed = new Set(ALLOWED.map((a) => a.source));
     const offenders: string[] = [];
     for (const file of FILES) {
@@ -241,7 +358,9 @@ describe("regex shapes in the HTML-scanning paths (structural tripwire)", () => 
   });
 
   test("the allowlist is exactly what it is documented to be (adding to it must be deliberate)", () => {
-    expect(ALLOWED.map((a) => a.source)).toEqual(["<br\\s*\\/?>"]);
+    // EMPTY. Every literal that used to need an entry is covered by the whitespace exemption's proof
+    // instead, so the gate now has zero exceptions — and re-introducing one is a visible edit here.
+    expect(ALLOWED.map((a) => a.source)).toEqual([]);
     for (const { why } of ALLOWED) expect(why.length).toBeGreaterThan(80); // a reason, not a shrug
   });
 });
