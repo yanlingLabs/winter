@@ -31,6 +31,14 @@ public struct RpcError: Error, Equatable {
     }
 }
 
+/// What `syncAll` throws when one or more SESSIONS failed while the pass itself completed. Every
+/// other session in that pass was still attempted (review N-M2) — this reports which ones didn't make
+/// it, so Task 11 can surface a per-conversation state instead of a dead sync.
+public struct SyncPassError: Error {
+    public let failures: [(sessionId: String, error: any Error)]
+    public var sessionIds: [String] { failures.map { $0.sessionId } }
+}
+
 /// The narrow seam the app fills over its paired connection. One method: send a JSON-RPC request
 /// (method + already-encoded params object) and hand back the `result` value's raw JSON bytes, or
 /// throw `RpcError` carrying the JSON-RPC `code` and — for `DIVERGED` — `data.lastSeq`. Keeping it
@@ -129,10 +137,16 @@ public actor SyncClient {
     /// on, then push every local-ahead session. Called at a turn boundary (never mid-turn), so the
     /// common case is a clean fast-forward in one direction; a genuine two-sided divergence resolves
     /// through the fork dance in `push`.
+    /// PER-SESSION ISOLATION (review N-M2): one session's transport error used to abort the whole
+    /// reconcile and leave every LATER session unsynced — a single wedged conversation silently
+    /// stopping the rest. Each session is now attempted independently; failures are collected and
+    /// thrown together as `SyncPassError` at the end, so nothing is swallowed but nothing is blocked
+    /// either. `sync.heads` itself still throws directly: without it there is no pass to run.
     @discardableResult
     public func syncAll() async throws -> [SyncHead] {
         let heads = try await headsCall()
         let headsById = Dictionary(uniqueKeysWithValues: heads.map { ($0.sessionId, $0) })
+        var failures: [(sessionId: String, error: any Error)] = []
 
         // 1. PULL: daemon sessions the phone has never seen, or is strictly behind on with no local
         //    divergence. A session with local-ahead events (localLast > localSynced) is left for the
@@ -141,14 +155,18 @@ public actor SyncClient {
             let localLast = await store.lastSeq(sessionId: head.sessionId)
             let localSynced = await store.lastSyncedSeq(sessionId: head.sessionId)
             if head.lastSeq > localSynced && localLast == localSynced {
-                try await pull(head: head, fromSeq: localSynced)
+                do { try await pull(head: head, fromSeq: localSynced) }
+                catch { failures.append((head.sessionId, error)) }
             }
         }
 
         // 2. PUSH: every session whose local head is ahead of what the daemon has confirmed.
         for meta in await store.sessions() where meta.lastSeq > meta.lastSyncedSeq {
-            try await push(sessionId: meta.sessionId, headsById: headsById)
+            do { try await push(sessionId: meta.sessionId, headsById: headsById) }
+            catch { failures.append((meta.sessionId, error)) }
         }
+
+        if !failures.isEmpty { throw SyncPassError(failures: failures) }
         return heads
     }
 
@@ -234,6 +252,15 @@ public actor SyncClient {
                                      pushMeta: PushMetaParams, daemonHead: SyncHead?) async throws {
         let daemonTail = try await pullBytes(sessionId: sessionId, fromSeq: baseSeq)
 
+        // N-M3: an EMPTY daemon tail would make `localTail.starts(with: daemonTail)` trivially true
+        // (every sequence starts with the empty one) and send us to re-push at the very `baseSeq` that
+        // just DIVERGEd — a silent loop. Unreachable for an append-only daemon (it just told us its
+        // head is past our base), so say so loudly rather than papering over it.
+        guard !daemonTail.isEmpty else {
+            throw RpcError(code: ERR_INTERNAL,
+                           message: "sync.push DIVERGED for \(sessionId) but sync.pull from \(baseSeq) returned nothing — the daemon's head moved backwards")
+        }
+
         if daemonTail.starts(with: localTail) {
             // Lost ACK (or a crash before the sidecar write): the daemon holds our bytes verbatim,
             // possibly plus events of its own. Append only what we are missing and adopt their head.
@@ -281,40 +308,37 @@ public actor SyncClient {
     /// and because the retry derives the SAME id from `originalId + atSeq`, a push that actually
     /// landed before the failure is recognised rather than duplicated.
     private func forkAndReconcile(originalId: String, atSeq: Int, daemonHead: SyncHead?) async throws {
-        let newId = Self.forkId(originalId: originalId, atSeq: atSeq)
-        let plan = try await store.planFork(originalId: originalId, newId: newId, atSeq: atSeq)
+        // The id is derived by `planFork` from the branch point AND the branch content, so a retry of
+        // THIS branch recomputes this id while a different branch gets its own (review round 2).
+        let plan = try await store.planFork(originalId: originalId, atSeq: atSeq)
         let forkPushMeta = PushMetaParams(title: plan.title, model: plan.model, forkedFrom: plan.forkedFrom)
         do {
-            let result = try await pushChunked(sessionId: newId, baseSeq: 0, data: plan.bytes, meta: forkPushMeta)
-            await store.commitFork(plan, syncedSeq: result.lastSeq)
+            let result = try await pushChunked(sessionId: plan.newId, baseSeq: 0, data: plan.bytes, meta: forkPushMeta)
+            try await store.commitFork(plan, syncedSeq: result.lastSeq)
         } catch let e as RpcError where e.code == ERR_DIVERGED {
-            // The deterministic id already exists on the daemon — this fork landed on an earlier
-            // attempt whose acknowledgement we lost. Adopt it instead of minting a duplicate.
+            // This id already exists on the daemon. Because the id is content-derived, that normally
+            // means THIS EXACT fork landed on an earlier attempt whose acknowledgement we lost — adopt
+            // it rather than minting a duplicate. But verify the daemon's bytes really are ours before
+            // trusting that: adopting a session whose content differs would mark two divergent replicas
+            // "synced" and strand both forever (review round 2, second variant).
             guard let head = e.divergedLastSeq, head > 0 else { throw e }
-            await store.commitFork(plan, syncedSeq: min(head, plan.lastSeq))
+            let remote = try await pullBytes(sessionId: plan.newId, fromSeq: 0)
+            guard remote == plan.bytes else {
+                throw RpcError(code: ERR_INTERNAL,
+                               message: "fork \(plan.newId) exists on the daemon with different bytes — refusing to adopt it and discard this branch")
+            }
+            try await store.commitFork(plan, syncedSeq: min(head, plan.lastSeq))
         }
 
         // Reconcile the original: drop the divergent tail, then pull the daemon's branch. The
-        // watermark again comes from what was applied, not from the heads snapshot (C1).
+        // watermark again comes from what was applied, not from the heads snapshot (C1). Ordering is
+        // deliberate: the fork is durable on BOTH devices before the original's tail is dropped, so a
+        // failure anywhere above leaves the divergent branch recoverable.
         await store.truncate(sessionId: originalId, toSeq: atSeq)
         let branch = try await pullBytes(sessionId: originalId, fromSeq: atSeq)
         try await store.applyPull(sessionId: originalId, data: branch,
                                   title: .some(daemonHead?.title ?? nil), model: .some(daemonHead?.model ?? nil),
                                   forkedFrom: .some(daemonHead?.forkedFrom ?? nil))
-    }
-
-    /// A fork's id, derived DETERMINISTICALLY from its branch point so a retried reconcile targets the
-    /// same session instead of minting a new one each attempt. Shaped as a v4-looking UUID because the
-    /// daemon's creating-push path requires that form (`sync.ts`'s `SYNCED_SESSION_ID_RE`).
-    static func forkId(originalId: String, atSeq: Int) -> String {
-        var hasher = SHA256()
-        hasher.update(data: Data("norma-chat-fork:\(originalId):\(atSeq)".utf8))
-        var bytes = Array(hasher.finalize().prefix(16))
-        bytes[6] = (bytes[6] & 0x0F) | 0x40 // version 4
-        bytes[8] = (bytes[8] & 0x3F) | 0x80 // RFC 4122 variant
-        let hex = bytes.map { String(format: "%02x", $0) }.joined()
-        let s = { (lo: Int, hi: Int) in String(hex[hex.index(hex.startIndex, offsetBy: lo)..<hex.index(hex.startIndex, offsetBy: hi)]) }
-        return "\(s(0, 8))-\(s(8, 12))-\(s(12, 16))-\(s(16, 20))-\(s(20, 32))"
     }
 
     /// Splits `data` into base64 chunks under `maxChunkBase64` and pushes them in order. `meta` rides

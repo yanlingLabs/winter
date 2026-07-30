@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import NormaProtocol
 
 // ================================================================================================
@@ -77,6 +78,10 @@ enum LocalStoreError: Error, Equatable {
     case notContiguous(expected: Int, got: Int)
     case sessionExists(String)
     case unknownSession(String)
+    /// The scoped fork rewrite did not reach every line (see `planFork`'s verification, N-M1).
+    case forkRewriteIncomplete(String)
+    /// A fork id already exists locally with DIFFERENT bytes — never adopt-and-discard (round 2).
+    case forkBytesMismatch(String)
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -619,10 +624,33 @@ public actor LocalEventStore {
     /// PURE: computes the fork of `originalId` at `atSeq` without touching the filesystem or the
     /// registry. The whole log is copied with each event's `sessionId` FIELD rewritten (seqs
     /// preserved); `forkedFrom` + a marked title are prepared for the push's `meta`.
-    func planFork(originalId: String, newId: String, atSeq: Int,
+    ///
+    /// THE FORK ID IS DERIVED FROM THE BRANCH CONTENT, not just the branch point (review round 2). A
+    /// point-only id (`SHA256(originalId:atSeq)`) is idempotent for a RETRY of the same branch — which
+    /// is what it was introduced for — but it also collides across DIFFERENT branches forked at the
+    /// same seq, and the adopt path then discarded the second one silently (PROBE4). Hashing the
+    /// SOURCE log as well keeps every property intact: a genuine retry hashes identically (same bytes
+    /// → same id → recognised, never duplicated), while a genuinely different branch gets a different
+    /// id and therefore survives. The hash is over the pre-rewrite bytes deliberately — hashing the
+    /// rewritten output would be circular, since the rewrite needs the id.
+    func planFork(originalId: String, atSeq: Int,
                   titleMarker: String = LocalEventStore.forkTitleSuffix) throws -> ForkPlan {
         guard let original = handles[originalId] else { throw LocalStoreError.unknownSession(originalId) }
-        let rewritten = LocalEventStore.rewriteSessionId(original.snapshotRawLog(), from: originalId, to: newId)
+        let sourceBytes = original.snapshotRawLog()
+        let newId = LocalEventStore.forkId(originalId: originalId, atSeq: atSeq, contentOf: sourceBytes)
+        let rewritten = LocalEventStore.rewriteSessionId(sourceBytes, from: originalId, to: newId)
+
+        // N-M1: the scoped rewrite swaps a literal token, so VERIFY it actually applied to every line
+        // rather than trusting that no writer ever emits `"sessionId" : "…"` with spaces. Failing loudly
+        // here beats shipping a fork whose lines still carry the original id — which the daemon would
+        // reject with a confusing "event carries sessionId X, not Y". This is also the assertion the
+        // whole I3 field-scoping argument rests on.
+        for line in LocalChatSession.split(rewritten) {
+            guard let env = LineEnvelope(line), env.sessionId == newId else {
+                throw LocalStoreError.forkRewriteIncomplete(originalId)
+            }
+        }
+
         let originalMeta = original.metaSnapshot()
         return ForkPlan(newId: newId, bytes: rewritten,
                         title: (originalMeta.title ?? "Chat") + titleMarker,
@@ -631,14 +659,23 @@ public actor LocalEventStore {
                         lastSeq: originalMeta.lastSeq)
     }
 
-    /// Commits a planned fork locally, AFTER its push has landed on the daemon. Idempotent: a fork
-    /// already registered (a retry that got as far as committing last time) just re-records its
-    /// watermark rather than throwing, so a partially-completed reconcile converges instead of
-    /// duplicating. Returns the committed metadata.
+    /// Commits a planned fork locally, AFTER its push has landed on the daemon. Idempotent for a true
+    /// retry: a fork already registered whose bytes ARE the plan's just re-records its watermark, so a
+    /// partially-completed reconcile converges instead of duplicating.
+    ///
+    /// It REFUSES to adopt an existing log whose bytes differ from the plan's (review round 2). The
+    /// old unconditional adopt is what made PROBE4 lose a whole branch: it kept the existing log and
+    /// silently dropped `plan.bytes`, and the caller then truncated the original — so branch two
+    /// existed on neither device. Content-derived ids make a mismatch here essentially unreachable;
+    /// this throw is what makes "a fork is never silently discarded" structural rather than a property
+    /// of the hash.
     @discardableResult
-    func commitFork(_ plan: ForkPlan, syncedSeq: Int) -> LocalSessionMeta {
+    func commitFork(_ plan: ForkPlan, syncedSeq: Int) throws -> LocalSessionMeta {
         let handle: LocalChatSession
         if let existing = handles[plan.newId] {
+            guard existing.snapshotRawLog() == plan.bytes else {
+                throw LocalStoreError.forkBytesMismatch(plan.newId)
+            }
             handle = existing
         } else {
             LocalChatSession.atomicWrite(plan.bytes, to: logURL(plan.newId))
@@ -658,6 +695,30 @@ public actor LocalEventStore {
     /// Suffix appended to a fork's title so the user can tell the divergent local copy from the
     /// daemon's canonical branch. Public so Task 11's sidebar can key on it.
     public static let forkTitleSuffix = " (offline copy)"
+
+    /// A fork's id: deterministic in its branch POINT **and** its branch CONTENT, shaped as a
+    /// v4-looking UUID because the daemon's creating-push path requires that form
+    /// (`sync.ts`'s `SYNCED_SESSION_ID_RE`).
+    ///
+    /// Both halves are load-bearing. The branch point makes a RETRY of the same reconcile derive the
+    /// same id, so a fork push that landed before a lost acknowledgement is recognised instead of
+    /// duplicated (review I1). The content hash makes a DIFFERENT branch forked at the same seq derive
+    /// a DIFFERENT id, so it cannot collide with — and be silently discarded in favour of — the first
+    /// one (review round 2 / PROBE4).
+    static func forkId(originalId: String, atSeq: Int, contentOf source: Data) -> String {
+        var content = SHA256()
+        content.update(data: source)
+        let contentHex = content.finalize().map { String(format: "%02x", $0) }.joined()
+
+        var hasher = SHA256()
+        hasher.update(data: Data("norma-chat-fork:\(originalId):\(atSeq):\(contentHex)".utf8))
+        var bytes = Array(hasher.finalize().prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x40 // version 4
+        bytes[8] = (bytes[8] & 0x3F) | 0x80 // RFC 4122 variant
+        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+        let s = { (lo: Int, hi: Int) in String(hex[hex.index(hex.startIndex, offsetBy: lo)..<hex.index(hex.startIndex, offsetBy: hi)]) }
+        return "\(s(0, 8))-\(s(8, 12))-\(s(12, 16))-\(s(16, 20))-\(s(20, 32))"
+    }
 
     static func sessionId(of event: SessionEvent) -> String {
         guard let data = try? JSONEncoder().encode(event),

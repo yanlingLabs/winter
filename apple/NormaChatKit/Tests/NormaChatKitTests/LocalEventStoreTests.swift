@@ -246,12 +246,13 @@ final class LocalEventStoreTests: XCTestCase {
         s.persist(.assistantMessage(.init(seq: 3, sessionId: orig, ts: 0, threadId: "main", text: "branch")))
         s.setSyncedMeta(title: .some("Original"), model: .some("gpt-5.4"))
 
-        let newId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
         // plan (pure) → commit: a fork is only written locally once its push has landed (review I1).
-        let plan = try await store.planFork(originalId: orig, newId: newId, atSeq: 1)
+        // The id is derived by planFork from the branch point AND content (review round 2).
+        let plan = try await store.planFork(originalId: orig, atSeq: 1)
+        let newId = plan.newId
         let planned = await store.sessions().count
         XCTAssertEqual(planned, 1, "planFork writes nothing — a failed push can leave no orphan")
-        let forkMeta = await store.commitFork(plan, syncedSeq: 0)
+        let forkMeta = try await store.commitFork(plan, syncedSeq: 0)
 
         // Both sessions exist; the fork's log equals the original's, byte-for-byte, with only the
         // sessionId FIELD swapped (the expectation built independently of the SUT's rewriter).
@@ -307,7 +308,6 @@ final class LocalEventStoreTests: XCTestCase {
 
     func testForkNeverRewritesASessionIdQUOTEDInMessageContent() async throws {
         let orig = "e0000000-0000-4000-8000-000000000003"
-        let newId = "e0000000-0000-4000-8000-0000000000ff"
         let store = try LocalEventStore(directory: dir)
         let s = try await store.createSession(sessionId: orig)
         // The user legitimately types the session id into a message — and after a fork+reconcile the
@@ -315,7 +315,9 @@ final class LocalEventStoreTests: XCTestCase {
         let typed = "why is session \(orig) stuck?"
         s.persist(.userMessage(.init(seq: 2, sessionId: orig, ts: 2, threadId: "main", text: typed, clientName: "phone")))
 
-        try await store.commitFork(store.planFork(originalId: orig, newId: newId, atSeq: 1), syncedSeq: 0)
+        let plan = try await store.planFork(originalId: orig, atSeq: 1)
+        let newId = plan.newId
+        try await store.commitFork(plan, syncedSeq: 0)
 
         let forkEvents = await store.read(sessionId: newId, fromSeq: 0)
         let forkedText = forkEvents.compactMap { ev -> String? in
@@ -329,13 +331,14 @@ final class LocalEventStoreTests: XCTestCase {
 
     func testForkRewritesTheEnvelopeFieldOnEveryLine() async throws {
         let orig = "e1000000-0000-4000-8000-000000000001"
-        let newId = "e1000000-0000-4000-8000-0000000000aa"
         let store = try LocalEventStore(directory: dir)
         let s = try await store.createSession(sessionId: orig)
         s.persist(.userMessage(.init(seq: 2, sessionId: orig, ts: 2, threadId: "main", text: "hi", clientName: "phone")))
         s.appendReasoning(itemJSON: #"{"type":"reasoning","encrypted_content":"BLOB"}"#, seq: 3, ts: 3)
 
-        try await store.commitFork(store.planFork(originalId: orig, newId: newId, atSeq: 2), syncedSeq: 0)
+        let plan = try await store.planFork(originalId: orig, atSeq: 2)
+        let newId = plan.newId
+        try await store.commitFork(plan, syncedSeq: 0)
 
         // Every line — including the reasoning_item, which has no Swift variant — carries the new id.
         let lines = String(decoding: try Data(contentsOf: logURL(newId)), as: UTF8.self)

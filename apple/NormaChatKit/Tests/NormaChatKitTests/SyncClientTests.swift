@@ -324,16 +324,162 @@ final class SyncClientTests: XCTestCase {
         XCTAssertEqual(settled, 2)
     }
 
-    func testTheForkIdIsDeterministicInItsBranchPoint() {
-        // What makes a retried reconcile converge rather than mint a new session each attempt.
-        let a = SyncClient.forkId(originalId: "10000000-0000-4000-8000-0000000000ff", atSeq: 5)
-        let b = SyncClient.forkId(originalId: "10000000-0000-4000-8000-0000000000ff", atSeq: 5)
-        let c = SyncClient.forkId(originalId: "10000000-0000-4000-8000-0000000000ff", atSeq: 6)
+    func testTheForkIdIsDeterministicInBothItsBranchPointAndItsContent() {
+        let orig = "10000000-0000-4000-8000-0000000000ff"
+        let branchOne = Data("line-one\n".utf8)
+        let branchTwo = Data("line-one\nline-two\n".utf8)
+
+        // Same point AND same content → the same id: what makes a retried reconcile converge rather
+        // than mint a new session each attempt (review I1's idempotency guarantee, preserved exactly).
+        let a = LocalEventStore.forkId(originalId: orig, atSeq: 5, contentOf: branchOne)
+        let b = LocalEventStore.forkId(originalId: orig, atSeq: 5, contentOf: branchOne)
         XCTAssertEqual(a, b)
-        XCTAssertNotEqual(a, c)
-        // ...and it must be the UUID shape the daemon's creating-push path requires.
+
+        // A different branch POINT → a different id (as before).
+        XCTAssertNotEqual(a, LocalEventStore.forkId(originalId: orig, atSeq: 6, contentOf: branchOne))
+        // ...and — the round-2 fix — a different branch CONTENT at the SAME point → a different id, so
+        // a second divergent branch can never collide with the first and be silently discarded.
+        XCTAssertNotEqual(a, LocalEventStore.forkId(originalId: orig, atSeq: 5, contentOf: branchTwo))
+
+        // It must be the UUID shape the daemon's creating-push path requires.
         XCTAssertNotNil(UUID(uuidString: a))
         XCTAssertEqual(a.count, 36)
+    }
+
+    // MARK: - PROBE4: a second divergent branch must never be silently discarded
+
+    func testASecondBranchSurvivesWhenTheOriginalPullFailedAfterAFork() async throws {
+        // The reviewer's PROBE4 chain, link for link:
+        //  1. genuine divergence → fork F pushed and committed,
+        //  2. the original's branch pull FAILS (connection drop) → syncAll throws; the original is
+        //     already truncated, so branch ONE now lives only in F,
+        //  3. the user takes another offline turn → the original holds branch TWO,
+        //  4. next pass forks again — and must NOT derive F, adopt it, and drop branch two.
+        let id = "10000000-0000-4000-8000-00000000000e"
+        let daemon = FailingBranchPullDaemon()
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: id)
+        s.setLastSyncedSeq(1)
+        let sharedPrefix = LocalChatSession.split(try Data(contentsOf: logURL(id)))
+        daemon.seed(id, sharedPrefix + [asst(id, 2, "mac-branch")])
+
+        // Branch ONE, offline.
+        s.persist(.userMessage(.init(seq: 2, sessionId: id, ts: 2, threadId: "main", text: "BRANCH-ONE", clientName: "phone")))
+
+        // Pass 1: the divergence byte-compare (pull #1) and the fork push succeed; the original's
+        // branch pull (pull #2) fails.
+        daemon.failPullOccurrences = [id: [2]]
+        do { try await client(store, daemon).syncAll(); XCTFail("the branch pull should have failed") } catch {}
+        let afterPass1 = await store.sessions()
+        XCTAssertEqual(afterPass1.count, 2, "fork F committed; the original truncated")
+        let forkOne = afterPass1.first { $0.forkedFrom != nil }!
+        XCTAssertTrue(String(decoding: try Data(contentsOf: logURL(forkOne.sessionId)), as: UTF8.self).contains("BRANCH-ONE"))
+
+        // Step 3: the user takes ANOTHER offline turn on the original.
+        let original = await store.session(id)!
+        original.persist(.userMessage(.init(seq: 2, sessionId: id, ts: 3, threadId: "main", text: "BRANCH-TWO", clientName: "phone")))
+
+        // Pass 4: the transport recovers.
+        daemon.failPullOccurrences = [:]
+        try await client(store, daemon).syncAll()
+
+        // ---- The postcondition PROBE4 violated: BOTH branches must still exist somewhere. ----
+        let finalMetas = await store.sessions()
+        var localTexts: [String] = []
+        for meta in finalMetas {
+            localTexts.append(String(decoding: try Data(contentsOf: logURL(meta.sessionId)), as: UTF8.self))
+        }
+        XCTAssertTrue(localTexts.contains { $0.contains("BRANCH-ONE") }, "branch one must survive")
+        XCTAssertTrue(localTexts.contains { $0.contains("BRANCH-TWO") },
+                      "branch two must survive — it was silently discarded before the content-derived id")
+        // ...and on the daemon too, so it is not merely phone-local.
+        let daemonTexts = daemon.sessionIds().map { String(decoding: daemon.rawLog($0), as: UTF8.self) }
+        XCTAssertTrue(daemonTexts.contains { $0.contains("BRANCH-ONE") })
+        XCTAssertTrue(daemonTexts.contains { $0.contains("BRANCH-TWO") },
+                      "branch two must be replicated, not just held locally")
+        // Two distinct forks + the original.
+        XCTAssertEqual(finalMetas.filter { $0.forkedFrom != nil }.count, 2)
+        XCTAssertEqual(finalMetas.count, 3)
+    }
+
+    func testAdoptingAnExistingForkIsRefusedWhenItsBytesDiffer() async throws {
+        // The second variant: the fork id exists on the DAEMON with different bytes (a hash collision,
+        // or an externally-modified log). Adopting it would mark two divergent replicas "synced" and
+        // strand both forever, since lastSeq == lastSyncedSeq on each. It must refuse instead.
+        let id = "10000000-0000-4000-8000-00000000000f"
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: id)
+        s.setLastSyncedSeq(1)
+        let sharedPrefix = LocalChatSession.split(try Data(contentsOf: logURL(id)))
+        daemon.seed(id, sharedPrefix + [asst(id, 2, "mac-branch")])
+        s.persist(.userMessage(.init(seq: 2, sessionId: id, ts: 2, threadId: "main", text: "phone-branch", clientName: "phone")))
+
+        // Pre-seed the daemon with the fork id this reconcile WILL derive, holding different content.
+        let plan = try await store.planFork(originalId: id, atSeq: 1)
+        daemon.seed(plan.newId, [created(plan.newId), asst(plan.newId, 2, "SOMEONE ELSE'S BYTES")])
+
+        do {
+            try await client(store, daemon).syncAll()
+            XCTFail("adopting a fork whose bytes differ must be refused")
+        } catch {
+            // Surfaced per-session (N-M2) rather than swallowed.
+            let pass = error as? SyncPassError
+            XCTAssertEqual(pass?.sessionIds, [id])
+        }
+        // The local divergent branch is untouched, so nothing was lost and a later pass can retry.
+        let head = await store.lastSeq(sessionId: id)
+        XCTAssertEqual(head, 2)
+        XCTAssertTrue(String(decoding: try Data(contentsOf: logURL(id)), as: UTF8.self).contains("phone-branch"))
+    }
+
+    // MARK: - N-M2: one failing session must not block the others in the pass
+
+    func testOneFailingSessionStillLetsEveryOtherSessionSync() async throws {
+        let bad = "10000000-0000-4000-8000-000000000010"
+        let good = "10000000-0000-4000-8000-000000000011"
+        let daemon = FailingBranchPullDaemon()
+        daemon.seed(bad, [created(bad), asst(bad, 2, "unreachable")])
+        daemon.seed(good, [created(good), asst(good, 2, "reachable")])
+        daemon.failPullOccurrences = [bad: [1]] // the FIRST session in id order fails
+
+        let store = try LocalEventStore(directory: dir)
+        do {
+            try await client(store, daemon).syncAll()
+            XCTFail("the failing session must still be surfaced")
+        } catch {
+            XCTAssertEqual((error as? SyncPassError)?.sessionIds, [bad])
+        }
+        // The later session synced anyway — before per-session isolation it was left untouched.
+        let syncedGood = await store.lastSyncedSeq(sessionId: good)
+        XCTAssertEqual(syncedGood, 2, "a later session must not be blocked by an earlier failure")
+        let badHead = await store.lastSeq(sessionId: bad)
+        XCTAssertEqual(badHead, 0)
+    }
+
+    // MARK: - N-M1: the scoped rewrite is verified to have applied
+
+    func testPlanForkRefusesALogWhoseIdFieldTheScopedRewriteCannotReach() async throws {
+        // A line written as `"sessionId" : "<id>"` (spaces around the colon) is not matched by the
+        // scoped token. No writer here emits that — and the guard is what keeps that assumption honest
+        // instead of shipping a fork whose lines still carry the original id.
+        let id = "10000000-0000-4000-8000-000000000012"
+        let store = try LocalEventStore(directory: dir)
+        _ = try await store.createSession(sessionId: id)
+        let spaced = #"{"type":"assistant_message","sessionId" : "\#(id)","seq":2,"ts":2,"threadId":"main","text":"x"}"#
+        LocalChatSession.appendLine(Data(spaced.utf8), to: logURL(id))
+        let reopened = try LocalEventStore(directory: dir)
+
+        do {
+            _ = try await reopened.planFork(originalId: id, atSeq: 1)
+            XCTFail("planFork must refuse a log the scoped rewrite could not fully apply to")
+        } catch {
+            XCTAssertEqual(error as? LocalStoreError, .forkRewriteIncomplete(id))
+        }
+    }
+
+    private func client(_ store: LocalEventStore, _ conn: RpcConn) -> SyncClient {
+        SyncClient(store: store, conn: conn)
     }
 
     // MARK: - I4: the Swift cursor-resume loops must actually execute
@@ -586,6 +732,31 @@ final class FailingForkPushDaemon: FakeDaemon, @unchecked Sendable {
            (p["baseSeq"] as? NSNumber)?.intValue == 0,
            let sid = p["sessionId"] as? String, !has(sid) {
             throw RpcError(code: -32603, message: "simulated network failure during the fork push")
+        }
+        return try await super.call(method: method, paramsJSON: paramsJSON)
+    }
+}
+
+/// A `FakeDaemon` whose PULLS can be made to fail per session — the connection drop that leaves a
+/// reconcile half-finished (PROBE4's step 2) and the per-session isolation probe (N-M2).
+///
+/// Selection is by OCCURRENCE, not by `fromSeq`: a reconcile issues TWO pulls for the same session at
+/// the same `fromSeq` (first `reconcileDivergence`'s byte-compare, then — after the fork push lands —
+/// the original's branch pull), so `fromSeq` cannot tell them apart. `failPullOccurrences[id] = [2]`
+/// therefore fails exactly the branch pull while letting the compare and the fork push succeed.
+final class FailingBranchPullDaemon: FakeDaemon, @unchecked Sendable {
+    var failPullOccurrences: [String: Set<Int>] = [:]
+    private var seen: [String: Int] = [:]
+
+    override func call(method: String, paramsJSON: Data) async throws -> Data {
+        if method == METHODS.syncPull,
+           let p = (try? JSONSerialization.jsonObject(with: paramsJSON)) as? [String: Any],
+           let sid = p["sessionId"] as? String {
+            let n = (seen[sid] ?? 0) + 1
+            seen[sid] = n
+            if failPullOccurrences[sid]?.contains(n) == true {
+                throw RpcError(code: -32603, message: "simulated connection drop during sync.pull #\(n)")
+            }
         }
         return try await super.call(method: method, paramsJSON: paramsJSON)
     }
