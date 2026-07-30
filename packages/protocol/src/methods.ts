@@ -53,6 +53,20 @@ export const IROH_MAX_FRAME_BYTES = 1 << 20;
  *  and small enough that the title contribution to an unpaged list stays negligible. */
 export const SESSION_TITLE_MAX_CHARS = 200;
 
+/** Chat Slice D task 1 review (M2), landed in the whole-branch fix round: the same unbounded-field
+ *  hazard as `SESSION_TITLE_MAX_CHARS`, one column over. `model` is remote-settable on three
+ *  ingress paths (`session.create`, `session.setModel`, `sync.push`'s `meta`) and rides EVERY
+ *  `session.list`/`sync.heads` row, both unpaged. When the provider cannot enumerate its catalogue
+ *  the daemon deliberately stores an unrecognized slug rather than refusing it — correct for a
+ *  BYO-endpoint deployment, but it means nothing else bounds the value. A multi-megabyte "model"
+ *  would then make every subsequent list response exceed the phone transport's frame limit
+ *  (`WireError.oversize`), permanently and across restarts, with the repair calls among the broken
+ *  ones. Bounded at the SCHEMA, so every ingress inherits it without remembering to.
+ *
+ *  200 for the same reason the title cap is: far above every real slug (the longest today is under
+ *  40 characters), far below anything that could bloat a row. */
+export const SESSION_MODEL_MAX_CHARS = 200;
+
 /** Chat Slice D task 2 (session sync): where a session was branched from — the parent session's id
  *  plus the seq it was forked AT (every parent event with `seq <= atSeq` is shared history). Index-
  *  only metadata carried by `sync.push`'s `meta` and reported by `sync.heads`/`session.list`; it
@@ -84,8 +98,8 @@ export const SessionCreateParams = z.object({
   // additive/optional so every existing caller (CLI, NormaKit, the phone) that never sends it is
   // unaffected. Index-only metadata (like `cwd`/`approvalPolicy`, NOT `mode` — see
   // `SessionRow.model`'s own doc comment in store.ts), so it does NOT ride the `session_created`
-  // event and resets to absent on a full index rebuild.
-  model: z.string().min(1).optional(),
+  // event and resets to absent on a full index rebuild. Bounded — see SESSION_MODEL_MAX_CHARS.
+  model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).optional(),
 });
 export const SessionCreateResult = z.object({ sessionId: z.string(), trusted: z.boolean() });
 
@@ -349,7 +363,7 @@ export const SessionSetPolicyResult = z.object({ ok: z.literal(true) });
 // "explicitly clearing it". Result mirrors skills.write's bare-`{}` idiom (nothing to report beyond
 // success — a thrown RpcFailure is how the daemon reports an unknown sessionId, same NOT_FOUND
 // precedent as session.setPolicy).
-export const SessionSetModelParams = z.object({ sessionId: z.string().min(1), model: z.string().min(1).nullable() });
+export const SessionSetModelParams = z.object({ sessionId: z.string().min(1), model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).nullable() });
 export const SessionSetModelResult = z.object({});
 
 export const ThreadInfoSchema = z.object({
@@ -1027,7 +1041,7 @@ export const SyncPushParams = z.object({
     // Bounded at the wire, not just clamped internally — see SESSION_TITLE_MAX_CHARS for why an
     // unbounded title on an UNPAGED heads/list response is a persistent connection killer.
     title: z.string().max(SESSION_TITLE_MAX_CHARS).optional(),
-    model: z.string().min(1).optional(),
+    model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).optional(),
     forkedFrom: SessionForkRef.optional(),
   }).optional(),
 });
@@ -1081,7 +1095,14 @@ export type SyncConfigResult = z.infer<typeof SyncConfigResult>;
 /** `cursor` echoes back a previous page's `nextCursor` — an index into the bucket's STABLE
  *  (sorted-by-name) file list, not a byte offset (contrast `sync.pull`'s `cursor`, which IS a byte
  *  offset into one file's tail): this bucket is many small files, not one growing log, so paging
- *  over whole files is the natural unit. Omitted/`0` starts from the beginning. */
+ *  over whole files is the natural unit. Omitted/`0` starts from the beginning.
+ *
+ *  "STABLE" means stable ORDERING (sorted by name), NOT a snapshot: the handler re-reads the
+ *  directory on every call, so a write landing between two pages of the same walk — a Dreamer cycle
+ *  adding a topic file that sorts before the cursor — shifts what that index means, and one file can
+ *  be served twice or skipped for that walk (T3 review Minor). Harmless by design: this is a
+ *  stale-is-fine replica, and the client's next walk from cursor 0 self-heals it. Do not read it as
+ *  "consistent under concurrent writes". */
 export const SyncMemoryParams = z.object({
   cursor: z.number().int().nonnegative().optional(),
 });

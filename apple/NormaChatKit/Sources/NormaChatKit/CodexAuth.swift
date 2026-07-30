@@ -121,7 +121,9 @@ public struct PKCE: Sendable, Equatable {
     public let verifier: String
     public let challenge: String
 
-    public init(verifier: String) {
+    /// INTERNAL (review M3): a caller-chosen verifier is the PKCE secret handed to an attacker.
+    /// Production mints one with `generate()`; the RFC-7636 test vectors reach this via `@testable`.
+    init(verifier: String) {
         self.verifier = verifier
         self.challenge = Base64URL.encode(Data(SHA256.hash(data: Data(verifier.utf8))))
     }
@@ -235,6 +237,31 @@ public struct TokenState: Codable, Equatable, Sendable {
     }
 }
 
+/// REDACTED under reflection (review M4). Default struct reflection renders every stored property,
+/// so `"\(tokens)"`, `String(describing:)`, `dump()`, `os_log("\(state)")` or even a SwiftUI
+/// `Text("\(state)")` printed the access token, the refresh token and the id token verbatim — and
+/// the phone app *will* log. `Codable` is untouched: `ChatKeychain` still round-trips the real
+/// values; only the human-readable rendering is scrubbed.
+///
+/// `CustomReflectable` is required alongside the two string protocols, not instead of them: `dump()`
+/// and the debugger's variable view walk the `Mirror`, which by default still enumerates every
+/// stored property regardless of `description`. Redacting one and not the other closes half the hole.
+extension TokenState: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String {
+        "TokenState(account: \(accountId ?? "—"), expiresAtMs: \(Int64((expiresAt.timeIntervalSince1970 * 1000).rounded())), refreshToken: \(refreshToken == nil ? "absent" : "<redacted>"), accessToken: <redacted>)"
+    }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: [
+            "accountId": accountId as Any,
+            "expiresAt": expiresAt,
+            "accessToken": "<redacted>",
+            "refreshToken": refreshToken == nil ? "absent" : "<redacted>",
+            "idToken": idToken == nil ? "absent" : "<redacted>",
+        ], displayStyle: .struct)
+    }
+}
+
 // MARK: - the flow
 
 /// One in-flight sign-in: the URL to open, plus the `state`/`verifier` the callback is checked and
@@ -276,6 +303,25 @@ public struct AuthHandle: Sendable {
     }
 }
 
+/// REDACTED under reflection (review M4), same reasoning as `TokenState`'s: the PKCE `verifier` is a
+/// stored property, so any interpolation of a live handle leaked the secret the code exchange is
+/// bound to. The `state` shown here is the CSRF token, which is only meaningful in-flight and is what
+/// a log actually needs for correlation.
+extension AuthHandle: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String {
+        "AuthHandle(state: \(state), redirectURI: \(redirectURI), verifier: <redacted>)"
+    }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror {
+        Mirror(self, children: [
+            "authorizationURL": authorizationURL,
+            "state": state,
+            "redirectURI": redirectURI,
+            "verifier": "<redacted>",
+        ], displayStyle: .struct)
+    }
+}
+
 /// Opens the authorize URL and returns the redirect the provider sent the user back to.
 ///
 /// iOS implements this with `ASWebAuthenticationSession` (its `presentationContextProvider`
@@ -295,7 +341,19 @@ public struct CodexAuth: Sendable {
     ///
     /// (Unlike the TS this is neither async nor throwing — the asyncness there is only
     /// `crypto.subtle.digest`, which CryptoKit does synchronously, and nothing here can fail.)
-    public func beginFlow(pkce: PKCE = .generate(), state: String = CodexAuth.randomState()) -> AuthHandle {
+    ///
+    /// The ONLY public entry, and it takes no arguments (review M3): both seeds are security
+    /// material — `state` is the CSRF token this flow's callback is checked against, `verifier` the
+    /// PKCE secret — and a public injection point invites a caller (or a task copy-pasting a test)
+    /// to pass a fixed or guessable one, quietly defeating the check the rest of this file is
+    /// careful to get right. The seeded form below is `internal`, reachable only via `@testable`.
+    public func beginFlow() -> AuthHandle {
+        beginFlow(pkce: .generate(), state: CodexAuth.randomState())
+    }
+
+    /// Seeded entry — TESTS ONLY (see `beginFlow()`). `state` has no default deliberately: it is
+    /// what makes this overload unambiguous with the public no-arg one.
+    func beginFlow(pkce: PKCE = .generate(), state: String) -> AuthHandle {
         let query = FormURLEncoded.encode([
             ("response_type", "code"),
             ("client_id", config.clientId),

@@ -308,6 +308,47 @@ final class CodexAuthTests: XCTestCase {
         XCTAssertNotEqual(a.authorizationURL, b.authorizationURL)
     }
 
+    // MARK: - M3/M4 (whole-branch ride-alongs): the security surface the tag freezes
+
+    /// M4. Default struct reflection prints every stored property, so an interpolated `TokenState`
+    /// or `AuthHandle` used to render the access token, the refresh token and the PKCE verifier
+    /// verbatim — and a phone app logs. Every rendering path is covered here, because
+    /// `CustomStringConvertible` alone does not cover `dump()`/`debugDescription`.
+    func testTokenStateAndAuthHandleNeverPrintTheirSecrets() {
+        let tokens = TokenState(accessToken: "ACCESS_SECRET", refreshToken: "REFRESH_SECRET",
+                                idToken: "ID_SECRET", accountId: "acct_42",
+                                expiresAt: t0.addingTimeInterval(3600))
+        let handle = CodexAuth(config: config).beginFlow(pkce: PKCE(verifier: "VERIFIER_SECRET"), state: "st_1")
+
+        var dumped = ""
+        dump(tokens, to: &dumped)
+        dump(handle, to: &dumped)
+        let renderings = ["\(tokens)", String(describing: tokens), String(reflecting: tokens),
+                          "\(handle)", String(describing: handle), String(reflecting: handle), dumped]
+        for rendering in renderings {
+            for secret in ["ACCESS_SECRET", "REFRESH_SECRET", "ID_SECRET", "VERIFIER_SECRET"] {
+                XCTAssertFalse(rendering.contains(secret), "\(secret) leaked into a rendering: \(rendering)")
+            }
+        }
+        // Still USEFUL for diagnostics — the non-secret facts survive.
+        XCTAssertTrue("\(tokens)".contains("acct_42"))
+        XCTAssertTrue("\(handle)".contains("st_1"))
+        // ...and `Codable` is untouched: the keychain round-trip still carries the real values.
+        let json = String(decoding: try! JSONEncoder().encode(tokens), as: UTF8.self)
+        XCTAssertTrue(json.contains("ACCESS_SECRET"))
+    }
+
+    /// M3. The seeded `beginFlow` and `PKCE(verifier:)` are the CSRF-token and PKCE-secret injection
+    /// points; both are now `internal`, reachable here only because this file is `@testable`. This
+    /// test is a documentation anchor for that decision — the compile-time proof is that the public
+    /// entry below takes no arguments at all, so no library consumer can seed either.
+    func testTheOnlyPublicFlowEntryTakesNoSeeds() {
+        let auth = CodexAuth(config: config)
+        let handle = auth.beginFlow() // the sole public overload
+        XCTAssertFalse(handle.state.isEmpty)
+        XCTAssertEqual(handle.redirectURI, config.redirectURI)
+    }
+
     // MARK: - refresh
 
     /// The margin is the ONE place this port deliberately adds to the TS (which refreshes only

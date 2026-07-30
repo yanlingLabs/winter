@@ -146,7 +146,10 @@ describe("per-session model override (Chat Slice D task 1: meta.model wins over 
     expect(provider.requests[1]!.model).toBe("live-model");
   });
 
-  test("a session with NO cwd (turn short-circuits before resolveSel matters) still runs unaffected by an override on ANOTHER session", async () => {
+  // Renamed in the whole-branch fix round (T1 review M1): the old name claimed to cover the
+  // `!meta.cwd` short-circuit path, but session B is created WITH a cwd two lines down and nothing
+  // here touches that branch. The name now says what the body — and its own doc comment — do.
+  test("an override is scoped to its own sessionId — a second session on the same engine is unaffected", async () => {
     // Control proving the override is scoped to the exact sessionId it was set on, not global
     // state: a second session (different sessionId, same engine/provider) never sees session A's
     // override.
