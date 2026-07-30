@@ -110,6 +110,21 @@ final class MethodWrapperTests: XCTestCase {
         )
     }
 
+    /// Chat Slice D Task 10: `listSessions()` threads `model` through (T1 deferred this — "no
+    /// consumer yet" — the Mac model picker is the consumer). Decodes to the row's model string
+    /// when present, `nil` when absent (every session created/left without an explicit override).
+    func testListSessionsDecodesModel() async throws {
+        let (client, t) = try await connected()
+        let (_, sessions) = try await roundTrip(
+            t, sentIndex: 1,
+            result: #"{"sessions":[{"sessionId":"s_1","scope":"global","createdAt":5,"lastSeq":9,"model":"gpt-5.6-luna"},{"sessionId":"s_2","scope":"global","createdAt":6,"lastSeq":1}]}"#
+        ) {
+            try await client.listSessions()
+        }
+        XCTAssertEqual(sessions[0].model, "gpt-5.6-luna")
+        XCTAssertNil(sessions[1].model, "absent on the wire decodes to nil")
+    }
+
     /// child-transcript-view T1: `thread.send`/`agent.stop` wrappers — proves the method/param
     /// names and decodes both outcome shapes (`delivered:"queued"|"resumed"`, plus `agent.stop`'s
     /// status string), mirroring `testRespondersAndControls`'s method/param-shape-only style above
@@ -157,6 +172,7 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertEqual(sessions.count, 1)
         XCTAssertEqual(sessions[0].sessionId, "s_1")
         XCTAssertEqual(sessions[0].lastSeq, 9)
+        XCTAssertNil(sessions[0].model, "no model on the wire decodes to nil")
 
         let (_, tasks) = try await roundTrip(t, sentIndex: 2, result: #"{"ok":true,"tasks":[{"id":"1","subject":"do it","status":"pending"}]}"#) {
             try await client.taskList(sessionId: "s_1")

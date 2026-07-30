@@ -351,7 +351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { [weak self] in
             guard let self else { return }
             let rows = (try? await model.client.listSessions())?.map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId)
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model)
             } ?? []
             if let sid = Self.chatSessionToOpen(in: rows) {
                 let title = rows.first { $0.sessionId == sid }?.title
@@ -788,6 +788,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // closures above.
         orb.onSetPolicy = { [weak self] policy in
             await self?.appModel?.setSessionPolicy(policy) ?? false
+        }
+
+        // Task 10 (Chat Slice D): the model menu — same seam as the policy picker just above.
+        orb.onSetModel = { [weak self] model in
+            await self?.appModel?.setSessionModel(model) ?? false
         }
 
         // Dispatch (Phase 7), Task 8: the field's child-status circles — tapping one opens that

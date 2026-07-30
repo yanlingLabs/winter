@@ -502,6 +502,22 @@ final class FieldStateAdapter: ObservableObject {
     /// same onSubmit-precedent chain as `onSubmit`/the three respond callbacks above.
     var onSetPolicy: (String) -> Void = { _ in }
 
+    // MARK: - Task 10 (Chat Slice D): the header's model menu — `session.setModel`, ALL modes
+
+    /// True while a `session.setModel` RPC is in flight — the model menu's rows disable themselves
+    /// on this, mirroring `policyChangeInFlight` exactly. A SEPARATE flag (not shared with
+    /// `policyChangeInFlight`): the model and policy menus are independent affordances — a policy
+    /// change in flight must never disable the model menu, and vice versa.
+    @Published var modelChangeInFlight: Bool = false
+
+    /// Wired by whichever surface owns this adapter to `session.setModel` — `nil` clears the
+    /// override (the wire itself sends a literal `null`, `NormaClient.setModel`'s own doc). UNLIKE
+    /// `onSetPolicy`, there is no adapter-cached "current value" this callback bumps on success:
+    /// `session.list` already carries `model` per-row (T1) — the wirer refreshes that row's
+    /// directory entry instead of keeping a second source of truth here (see `WindowContentView`'s
+    /// model-menu content, which reads the row directly via `currentSidebarSessionSummary`).
+    var onSetModel: (String?) -> Void = { _ in }
+
     /// Plan-immunity (2026-07-28 design): true for a chat-mode session — chat's approval policy is
     /// FIXED (core's engine.ts resolves it to the internal "chat" policy every turn regardless of
     /// the stored row, and session.setPolicy rejects ANY change for a chat target), so BOTH policy
