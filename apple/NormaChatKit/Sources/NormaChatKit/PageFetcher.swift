@@ -141,7 +141,15 @@ public enum PageFetchOutcome: String, Sendable, Equatable {
     case httpError = "http_error"
     case networkError = "network_error"
     case parseError = "parse_error"
-    case invalidURL = "invalid_url"
+    /// Every `ssrfGuard` refusal, including "invalid url" and "only http(s) urls are allowed" —
+    /// `followRedirects` in the TS maps the whole guard to one `kind: "ssrf"`, so an unparseable or
+    /// `file://` url audits identically on both engines. (An earlier revision of this port invented
+    /// an `invalid_url` outcome for those two; review Minor 1.)
+    case ssrfRefused = "ssrf_refused"
+    case tooManyRedirects = "too_many_redirects"
+    /// The one outcome with no TS counterpart — chat mode's stricter-than-the-daemon pre-fetch block
+    /// on the REQUESTED url. A redirect INTO a dangerous host still reports
+    /// `dangerous_domain_redirect`, exactly as the TS does.
     case dangerousDomain = "dangerous_domain"
     case dangerousDomainRedirect = "dangerous_domain_redirect"
 }
@@ -254,21 +262,23 @@ public struct PageFetcher: Sendable {
 
     // MARK: the producer
 
+    /// web.ts's `MAX_REDIRECT_HOPS`.
+    static let maxRedirectHops = 3
+
+    /// One successfully-fetched hop's payload — the port of web.ts's `FetchSuccess`.
+    private struct FetchedBody {
+        let url: String
+        let contentType: String
+        let body: String
+    }
+
     private func produce(url: String,
                          at timestamp: Date,
                          signal: ChatAbortSignal?,
                          effectiveOrigin: @Sendable @escaping () async -> PageOrigin) async throws -> CleanPage {
-        guard let requested = URL(string: url) else {
-            emit(url: url, outcome: .invalidURL)
-            throw PageFetchError(outcome: .invalidURL, message: "invalid url: \(url)")
-        }
-        guard let scheme = requested.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
-            emit(url: url, outcome: .invalidURL)
-            throw PageFetchError(outcome: .invalidURL, message: "only http(s) urls are allowed")
-        }
-
         // Always bounded, even with no caller signal. The caller's signal and the timeout are
-        // COMBINED: either can fire, and the timeout is a ceiling the caller cannot raise.
+        // COMBINED: either can fire, and the timeout is a ceiling the caller cannot raise. One
+        // signal governs the WHOLE redirect chain, exactly as the TS passes one `signal` to every hop.
         let combined = ChatAbortSignal()
         var registrations: [ChatAbortSignal.Registration] = []
         if let signal { registrations.append(signal.onAbort { combined.abort() }) }
@@ -281,77 +291,29 @@ public struct PageFetcher: Sendable {
             for registration in registrations { registration.cancel() }
         }
 
-        var request = URLRequest(url: requested)
-        request.httpMethod = "GET"
-        request.timeoutInterval = timeout
-
-        let httpTask = Task { try await http.send(request) }
-        let httpRegistration = combined.onAbort { httpTask.cancel() }
-        defer { httpRegistration.cancel() }
-
-        let data: Data
-        let response: HTTPURLResponse
+        let fetched: FetchedBody
         do {
-            // Swift task cancellation is bridged in too, so a caller that cancels its Task (rather
-            // than aborting the signal) also tears the fetch down instead of leaking it.
-            (data, response) = try await withTaskCancellationHandler {
-                try await httpTask.value
-            } onCancel: {
-                combined.abort()
-            }
-        } catch {
-            let timedOut = Self.isAbortLike(error)
-            let outcome: PageFetchOutcome = timedOut ? .timeout : .networkError
-            emit(url: url, outcome: outcome)
-            throw PageFetchError(
-                outcome: outcome,
-                message: timedOut ? "request timed out fetching \(url)" : "fetch failed: \(error.localizedDescription)"
-            )
+            fetched = try await followRedirects(from: url, signal: combined)
+        } catch let error as PageFetchError {
+            emit(url: url, outcome: error.outcome)
+            throw error
         }
 
-        guard (200 ..< 300).contains(response.statusCode) else {
-            emit(url: url, outcome: .httpError)
-            throw PageFetchError(outcome: .httpError, message: "fetch failed: \(response.statusCode)")
-        }
-
-        // The post-redirect re-check. A pre-fetch check on the CALLER-SUPPLIED url only catches a url
-        // that directly IS a dangerous host, never one that merely redirects INTO one. This can't
-        // undo the egress that already happened, but it stops the dangerous host's CONTENT from ever
-        // reaching the model or the cache.
-        let resolved = response.url ?? requested
-        let resolvedString = resolved.absoluteString
-        if let hit = DangerousDomains.check(resolved, extra: dangerousAdded) {
-            emit(url: url, outcome: .dangerousDomainRedirect)
-            throw PageFetchError(
-                outcome: .dangerousDomainRedirect,
-                message: DangerousDomains.refusal(url: resolvedString, hit: hit,
-                                                  cannotAskReason: Self.noApprovalFlowRedirectReason)
-            )
-        }
-
-        // The byte cap is applied after the transport rather than during it: `ChatHTTP` has no
-        // streaming seam (web.ts's `readCapped` cancels mid-stream). Truncating on a byte boundary
-        // can clip a UTF-8 sequence into U+FFFD — the same thing Node's `subarray().toString("utf8")`
-        // does at the cap, so the behaviour matches.
-        let capped = data.count > maxBytes ? data.prefix(maxBytes) : data[...]
-        let body = String(decoding: capped, as: UTF8.self)
-        let contentType = response.value(forHTTPHeaderField: "Content-Type") ?? ""
-        let isHTML = contentType.lowercased().contains("text/html")
-
+        let isHTML = fetched.contentType.lowercased().contains("text/html")
         let page: CleanPage
         if isHTML {
-            page = CleanPage(resolvedURL: resolvedString,
-                             title: extractTitle(body),
-                             lines: htmlToTextLines(body),
-                             links: extractLinks(body, baseURL: resolvedString),
+            page = CleanPage(resolvedURL: fetched.url,
+                             title: extractTitle(fetched.body),
+                             lines: htmlToTextLines(fetched.body),
+                             links: extractLinks(fetched.body, baseURL: fetched.url),
                              fetchedAt: timestamp,
                              fromCache: false)
         } else {
             // The HTML path trims each line, which incidentally drops a trailing "\r"; the raw-text
             // path has no such step, so a CRLF body would otherwise leak "\r" onto every line.
-            page = CleanPage(resolvedURL: resolvedString,
+            page = CleanPage(resolvedURL: fetched.url,
                              title: "-",
-                             lines: body.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n"),
+                             lines: fetched.body.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n"),
                              links: [],
                              fetchedAt: timestamp,
                              fromCache: false)
@@ -360,6 +322,109 @@ public struct PageFetcher: Sendable {
         await cache.put(page, now: timestamp, origin: await effectiveOrigin())
         emit(url: url, outcome: .ok, fromCache: false)
         return page
+    }
+
+    /// Port of web.ts's `followRedirects` (`web.ts:317-349`): a MANUAL redirect loop that guards
+    /// every hop, including the first.
+    ///
+    /// Manual, rather than letting the transport chase redirects, for one reason: a compliant first
+    /// URL must not be able to 302 into a private address, a dangerous host, or a `file://` scheme.
+    /// A transport that follows redirects silently makes every hop after the first unguarded — the
+    /// hole this whole fix round exists to close. `ChatHTTP.sendCapped` is contractually
+    /// non-following, which is what makes the loop below the only redirect handling there is.
+    ///
+    /// Per-hop order matters and mirrors the TS exactly: guard `current` FIRST (hop 0 included),
+    /// then send; on a 3xx, a MISSING `Location` is reported before the hop bound is consulted, so a
+    /// malformed redirect reads as the malformed redirect it is rather than as "too many hops".
+    private func followRedirects(from startURL: String, signal: ChatAbortSignal) async throws -> FetchedBody {
+        var current = startURL
+        var hop = 0
+
+        while true {
+            if let refusal = ssrfGuard(current) {
+                throw PageFetchError(outcome: .ssrfRefused, message: refusal)
+            }
+            // Chat mode's addition over the TS, consistent with the pre-fetch check in `fetch`: the
+            // dangerous-domain floor applies to EVERY hop, not just the first and the last.
+            if let hit = DangerousDomains.check(current, extra: dangerousAdded) {
+                let viaRedirect = hop > 0
+                throw PageFetchError(
+                    outcome: viaRedirect ? .dangerousDomainRedirect : .dangerousDomain,
+                    message: DangerousDomains.refusal(
+                        url: current, hit: hit,
+                        cannotAskReason: viaRedirect ? Self.noApprovalFlowRedirectReason : Self.noApprovalFlowReason
+                    )
+                )
+            }
+            guard let requestURL = URL(string: current) else {
+                throw PageFetchError(outcome: .ssrfRefused, message: "invalid url: \(current)")
+            }
+
+            var request = URLRequest(url: requestURL)
+            request.httpMethod = "GET"
+            request.timeoutInterval = timeout
+
+            let hopResult: CappedResponse
+            do {
+                hopResult = try await send(request, signal: signal)
+            } catch {
+                let timedOut = Self.isAbortLike(error)
+                throw PageFetchError(
+                    outcome: timedOut ? .timeout : .networkError,
+                    message: timedOut
+                        ? "request timed out fetching \(current)"
+                        : "fetch failed: \(error.localizedDescription)"
+                )
+            }
+
+            let status = hopResult.response.statusCode
+            if (300 ..< 400).contains(status) {
+                let location = hopResult.response.value(forHTTPHeaderField: "Location") ?? ""
+                guard !location.isEmpty else {
+                    throw PageFetchError(outcome: .httpError,
+                                         message: "redirect (\(status)) with no Location header")
+                }
+                guard hop < Self.maxRedirectHops else {
+                    throw PageFetchError(outcome: .tooManyRedirects,
+                                         message: "too many redirects (>\(Self.maxRedirectHops) hops)")
+                }
+                guard let next = URL(string: whatwgPreprocess(location), relativeTo: requestURL)?.absoluteURL else {
+                    throw PageFetchError(outcome: .ssrfRefused, message: "invalid url: \(location)")
+                }
+                current = whatwgNormalize(next) // == the TS's `new URL(loc, current).toString()`
+                hop += 1
+                continue
+            }
+
+            guard (200 ..< 300).contains(status) else {
+                throw PageFetchError(outcome: .httpError, message: "fetch failed: \(status)")
+            }
+
+            return FetchedBody(url: current,
+                               contentType: hopResult.response.value(forHTTPHeaderField: "Content-Type") ?? "",
+                               body: String(decoding: hopResult.body, as: UTF8.self))
+        }
+    }
+
+    /// One hop, with the abort signal wired to the underlying task.
+    private func send(_ request: URLRequest, signal: ChatAbortSignal) async throws -> CappedResponse {
+        // Review Minor 2: short-circuit BEFORE creating the task. Previously the task was built and
+        // only THEN had `onAbort` attached, so an already-aborted caller still put one request on the
+        // wire — real egress the TS's `AbortSignal.any` never performs, and exactly the thing the
+        // LAN threat model above cares about.
+        if signal.isAborted { throw ChatAbortError.aborted }
+
+        let task = Task { [http, maxBytes] in try await http.sendCapped(request, maxBytes: maxBytes) }
+        let registration = signal.onAbort { task.cancel() }
+        defer { registration.cancel() }
+
+        // Swift task cancellation is bridged in too, so a caller that cancels its Task (rather than
+        // aborting the signal) also tears the fetch down instead of leaking it.
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            signal.abort()
+        }
     }
 
     private func emit(url: String, outcome: PageFetchOutcome, fromCache: Bool? = nil) {
@@ -403,9 +468,9 @@ let adTrackerLinkEntries = [
 /// the input.
 ///
 /// Without it a malformed `href` carrying a raw newline resolves to a `%0A`-bearing url in Swift and
-/// a newline-free one in JS. That was the ONLY divergence a 16,000-case differential fuzz against
+/// a newline-free one in JS. It was the first divergence the adversarial differential fuzz against
 /// the live TS surfaced (20 hits, every one this shape) — the cleaner itself was byte-identical on
-/// all 16,000.
+/// all 28,000 cases.
 func whatwgPreprocess(_ href: String) -> String {
     let scalars = Array(href.unicodeScalars)
     var start = 0
@@ -416,15 +481,26 @@ func whatwgPreprocess(_ href: String) -> String {
     return String(String.UnicodeScalarView(stripped))
 }
 
-/// The two output normalizations WHATWG `URL.toString()` performs and `Foundation.URL.absoluteString`
-/// does not: a lowercase scheme + host, and an elided default port (`:80` for http, `:443` for
-/// https). Both were surfaced by the differential fuzz as the ONLY remaining classes, and both
-/// matter beyond cosmetics — the emitted href is the dedupe key here and the cache key downstream,
-/// so `HTTP://Example.COM/A` and `http://example.com/A` must not read as two different pages.
+/// The output normalizations WHATWG `URL.toString()` performs and `Foundation.URL.absoluteString`
+/// does not: a lowercase scheme + host, an elided default port (`:80` for http, `:443` for https),
+/// and a NON-EMPTY path for every special-scheme URL. All of these matter beyond cosmetics — the
+/// emitted href is the link dedupe key here and the cache key downstream, so `HTTP://Example.COM/A`
+/// and `http://example.com/A`, or `https://example.com` and `https://example.com/`, must not read
+/// as two different pages.
 ///
-/// Deliberately narrow: no dot-segment collapsing, no percent-encoding rewriting, no IDN work.
-/// The fuzz proved Foundation already agrees with WHATWG on all of those for the shapes that reach
-/// here, and a broader rewrite would risk inventing NEW divergences rather than closing known ones.
+/// The first three classes came out of a 28,000-case adversarial differential against the live TS.
+/// The FOURTH — the empty path — did not, and that is a documented gap in that harness: its
+/// generator only emitted hrefs it had spelled out as literal tokens, and every one of those
+/// carried a path (`/x`, `/nl`, `https://e.test/y`, …). A bare authority (`href="https://example.com"`)
+/// was never generated, so the class could not appear no matter how many seeds were run. Adversarial
+/// token-splicing finds malformed-input classes; it does not find classes that live in the ORDINARY
+/// input the generator happens not to produce. Found instead by the reviewer's 24-case REALISTIC
+/// differential — the two techniques are complementary, and the fuzz needs both shapes.
+///
+/// Deliberately narrow beyond these four: no dot-segment collapsing, no percent-encoding rewriting,
+/// no IDN work. Both differentials proved Foundation already agrees with WHATWG on all of those for
+/// the shapes that reach here, and a broader rewrite would risk inventing NEW divergences rather
+/// than closing known ones.
 func whatwgNormalize(_ url: URL) -> String {
     guard var components = URLComponents(url: url, resolvingAgainstBaseURL: true) else {
         return url.absoluteString
@@ -436,6 +512,7 @@ func whatwgNormalize(_ url: URL) -> String {
        (scheme == "http" && port == 80) || (scheme == "https" && port == 443) {
         components.port = nil
     }
+    if scheme == "http" || scheme == "https", components.path.isEmpty { components.path = "/" }
     return components.string ?? url.absoluteString
 }
 

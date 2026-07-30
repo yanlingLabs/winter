@@ -233,11 +233,13 @@ final class PageCoreTests: XCTestCase {
         }
     }
 
+    /// Review Minor 1: the whole `ssrfGuard` — including "invalid url" and the non-http(s) refusal —
+    /// audits as `ssrf_refused`, exactly as `followRedirects` maps `kind: "ssrf"` on the Mac.
     func testNonHttpSchemeIsRefusedBeforeAnyRequest() async throws {
         let cache = PageCache()
         let (fetcher, http) = makeFetcher([], cache: cache)
 
-        await XCTAssertThrowsPageError(outcome: .invalidURL) {
+        await XCTAssertThrowsPageError(outcome: .ssrfRefused) {
             _ = try await fetcher.fetch(url: "file:///etc/passwd")
         }
         XCTAssertEqual(http.requestCount, 0)
@@ -272,6 +274,11 @@ final class PageCoreTests: XCTestCase {
         XCTAssertFalse(gate.isOpen, "the abort, not the scripted response, ended the fetch")
     }
 
+    /// Review Minor 2: this used to assert `requestCount <= 1`, i.e. it PERMITTED the egress its own
+    /// name denies — and the egress was real, because the task was created before `onAbort` was
+    /// attached. Now the send short-circuits on an already-aborted signal, so the assertion is the
+    /// one the name promises. It matters: with the LAN threat model behind `ssrfGuard`, "we already
+    /// sent it, then cancelled" is not the same as "we never sent it".
     func testAnAlreadyAbortedSignalNeverReachesTheNetwork() async throws {
         let cache = PageCache()
         let (fetcher, http) = makeFetcher([.hang], cache: cache, timeout: 30)
@@ -281,7 +288,7 @@ final class PageCoreTests: XCTestCase {
         await XCTAssertThrowsPageError(outcome: .timeout) {
             _ = try await fetcher.fetch(url: "https://slow.test/x", signal: signal)
         }
-        XCTAssertLessThanOrEqual(http.requestCount, 1, "at most the one request that is aborted immediately")
+        XCTAssertEqual(http.requestCount, 0, "zero egress — not one request that is cancelled afterwards")
     }
 
     // MARK: - dangerous domains
@@ -300,8 +307,8 @@ final class PageCoreTests: XCTestCase {
     /// happened, but the content must never reach the model or the cache.
     func testRedirectIntoADangerousHostIsBlockedAndNotCached() async throws {
         let cache = PageCache()
-        let (fetcher, _) = makeFetcher(
-            [.html("<p>exfiltrated</p>", finalURL: URL(string: "https://transfer.sh/dropped")!)],
+        let (fetcher, http) = makeFetcher(
+            [.redirect(status: 302, location: "https://transfer.sh/dropped")],
             cache: cache
         )
 
@@ -310,12 +317,13 @@ final class PageCoreTests: XCTestCase {
         }
         let count = await cache.count
         XCTAssertEqual(count, 0, "the dangerous host's content never reaches the cache")
+        XCTAssertEqual(http.requestCount, 1, "the redirect TARGET is never even requested")
     }
 
     func testRedirectReCheckHonoursTheUserAddedList() async throws {
         let cache = PageCache()
         let (fetcher, _) = makeFetcher(
-            [.html("<p>x</p>", finalURL: URL(string: "https://drop.corp.test/f")!)],
+            [.redirect(status: 302, location: "https://drop.corp.test/f")],
             cache: cache, dangerousAdded: ["corp.test"]
         )
 
@@ -488,6 +496,40 @@ final class PageCoreTests: XCTestCase {
         XCTAssertEqual(whatwgPreprocess("/keep\u{00A0}nbsp"), "/keep\u{00A0}nbsp", "only ASCII controls go")
     }
 
+    /// WHATWG gives every special-scheme URL a NON-EMPTY path; `URLComponents` does not. Review
+    /// Important 2 — the 4th divergence class, and the most reachable of the four: it needs only an
+    /// ordinary `<a href="https://example.com">`, where the other three needed malformed input.
+    /// A page linking both `https://example.com` and `https://example.com/` (overwhelmingly common)
+    /// would otherwise yield two `CleanPage.links` entries on the phone and one on the Mac, and
+    /// downstream two cache keys for one page.
+    ///
+    /// These are the exact 8 shapes the reviewer's 24-case realistic differential found diverging;
+    /// the other 16 already agreed and are covered by the sibling tests.
+    func testEmptyPathNormalisesToSlashLikeWhatwg() {
+        let cases: [(href: String, expected: String)] = [
+            ("https://example.com", "https://example.com/"),
+            ("//example.com", "https://example.com/"),
+            ("https://example.com?q=1", "https://example.com/?q=1"),
+            ("https://example.com#f", "https://example.com/#f"),
+            ("http://u:p@example.com", "http://u:p@example.com/"),
+            ("https://ex.com:8080", "https://ex.com:8080/"),
+            ("HTTPS://EX.COM", "https://ex.com/"),
+            ("https://example.com:443", "https://example.com/"),
+        ]
+        for (href, expected) in cases {
+            let html = "<a href=\"\(href)\">x</a>"
+            XCTAssertEqual(extractLinks(html, baseURL: "https://base.test/dir/page").map(\.href), [expected],
+                           "WHATWG divergence for href \(href)")
+        }
+    }
+
+    /// The failure this class actually causes downstream: the bare and slashed spellings must dedupe
+    /// to ONE link, as they do in JS.
+    func testBareAndSlashedAuthorityDedupeToOneLink() {
+        let html = #"<a href="https://example.com">bare</a><a href="https://example.com/">slashed</a>"#
+        XCTAssertEqual(extractLinks(html, baseURL: "https://base.test/").map(\.href), ["https://example.com/"])
+    }
+
     /// A lowercase scheme + host and an elided default port. These are the dedupe key here and the
     /// cache key downstream — `HTTP://Example.COM/A` must not read as a different page.
     func testResolvedHrefIsWhatwgNormalised() {
@@ -510,32 +552,86 @@ final class PageCoreTests: XCTestCase {
 
     // MARK: - linearity guard
 
-    /// The whole reason this port keeps the two-pass/monotonic-pointer shape. "Many opens + ONE
-    /// distant close" is the exact adversarial case the TS measured the lazy `[\s\S]*?` form on:
-    /// each open rescans forward to that single far-away close, so cost is O(n²). At ~1.1 MB the TS
-    /// numbers extrapolate to ~10 s; measured here (release) at 0.11 s. The ceilings below are
-    /// deliberately loose — they exist to catch an accidental re-quadraticisation under a debug
-    /// build, not to benchmark — and a quadratic implementation misses them by an order of magnitude.
-    func testAnchorPairingStaysLinearOnManyOpensAndOneDistantClose() {
-        let soup = String(repeating: #"<a href="/x">t"#, count: 80_000) + "</a>"
-        assertFast("anchor pairing") { _ = htmlToText(soup) }
+    // The whole reason this port keeps the two-pass/monotonic-pointer shape, and the reason these
+    // probes use the shape they do.
+    //
+    // THE ADVERSARIAL SHAPE IS THE **ABSENT** CLOSE, NOT A DISTANT ONE. An earlier version of these
+    // probes used "many opens + ONE distant close", which the TS's own linearity test explicitly
+    // keeps SMALL because it is fast even pre-fix (`page-core.test.ts:255-262`: the first open
+    // absorbs everything up to the close, so there is only ever one long scan). Measured by the
+    // reviewer on the pre-fix combined lazy regexes, at 80k/20k opens:
+    //
+    //     shape                              V8 (bun)     ICU (NSRegularExpression)
+    //     80k opens + 1 distant close           0.8 ms          11 ms      <- inert as a probe
+    //     20k opens, close ABSENT           21,296 ms      57,504 ms      <- the real thing
+    //
+    // With no close after them, EVERY open independently rescans to end-of-string. That is the
+    // O(n²) the linearization exists to kill, and it is what a "simplify it back to one regex"
+    // regression reintroduces. Each probe below therefore prefixes ONE properly-closed pair (so the
+    // `closes.isEmpty` short-circuit cannot carry the test on its own and the pointer logic really
+    // runs) and then piles on 20,000 opens that never close.
+    //
+    // CEILING CALIBRATION — measured, not guessed. I built a deliberately-quadratic mutant
+    // (`replacePaired`/`convertHeadings`/`extractLinks`/`stripTags` each swapped back for the single
+    // combined `OPEN[\s\S]*?CLOSE` regex they replaced), ran these probes against it, then restored.
+    // Debug build, same machine, same inputs:
+    //
+    //     probe                          linear     quadratic mutant     ratio    verdict
+    //     convertAnchors                 70.6 ms          57,669 ms       816x    mutant FAILS
+    //     convertHeadings                35.9 ms          11,484 ms       320x    mutant FAILS
+    //     stripPairedLiteral(script)     48.7 ms          31,396 ms       644x    mutant FAILS
+    //     stripPairedLiteral(style)      43.4 ms          25,566 ms       589x    mutant FAILS
+    //     stripPairedLiteral(head)       38.4 ms          24,543 ms       640x    mutant FAILS
+    //     extractLinks                   16.3 ms          59,326 ms      3636x    mutant FAILS
+    //
+    // A 1 s ceiling sits ~14x above the slowest linear run and ~11x below the FASTEST mutant run,
+    // so it is both non-flaky and genuinely discriminating. (The old distant-close probes cleared a
+    // 5 s ceiling by ~450x even when quadratic — they could not fail. Review Important 1.)
+    private static let quadraticProbeOpens = 20_000
+    private static let linearityCeiling = Duration.seconds(1)
+
+    func testAnchorPairingStaysLinearWhenTheCloseIsAbsent() {
+        let soup = #"<a href="/first">closed</a>"# + String(repeating: #"<a href="/x">t"#, count: Self.quadraticProbeOpens)
+        assertFast("convertAnchors") { _ = htmlToText(soup) }
     }
 
-    func testHeadingPairingStaysLinearOnManyOpensAndOneDistantClose() {
-        let soup = String(repeating: "<h1>t", count: 80_000) + "</h1>"
-        assertFast("heading pairing") { _ = htmlToText(soup) }
+    func testHeadingPairingStaysLinearWhenTheCloseIsAbsent() {
+        let soup = "<h1>closed</h1>" + String(repeating: "<h1>t", count: Self.quadraticProbeOpens)
+        assertFast("convertHeadings") { _ = htmlToText(soup) }
     }
 
-    func testLinkExtractionStaysLinear() {
-        let soup = String(repeating: #"<a href="/x">t"#, count: 80_000) + "</a>"
-        assertFast("link extraction") { _ = extractLinks(soup, baseURL: "https://base.test/") }
+    /// `web.ts:93-111` names script/style/head as the DOMINANT pre-fix cost — `htmlToText` runs on
+    /// every byte of every HTML fetch, so a re-quadraticised strip pass hurts more than the anchor
+    /// one. These three passes previously had no probe at all (review Important 1).
+    func testScriptStyleHeadStripsStayLinearWhenTheCloseIsAbsent() {
+        for (name, closed, open) in [("script", "<script>x</script>", "<script x"),
+                                     ("style", "<style>x</style>", "<style y"),
+                                     ("head", "<head>x</head>", "<head z")] {
+            let soup = closed + String(repeating: open, count: Self.quadraticProbeOpens)
+            assertFast("stripPairedLiteral(\(name))") { _ = htmlToText(soup) }
+        }
+    }
+
+    /// `extractLinks` has its own pairing loop, separate from the cleaner's.
+    func testLinkExtractionStaysLinearWhenTheCloseIsAbsent() {
+        let soup = #"<a href="/first">closed</a>"# + String(repeating: #"<a href="/x">t"#, count: Self.quadraticProbeOpens)
+        assertFast("extractLinks") { _ = extractLinks(soup, baseURL: "https://base.test/") }
+    }
+
+    /// Pairing CORRECTNESS on the distant-close shape still matters — it just belongs in a
+    /// correctness test, not a timing one. (`testNestedAnchorsFollowTheConsumedSpanRule` covers the
+    /// nested case; this covers the plain one.)
+    func testDistantCloseStillPairsWithTheFirstOpenOnly() {
+        let soup = String(repeating: #"<a href="/x">t"#, count: 3) + "</a>"
+        XCTAssertEqual(extractLinks(soup, baseURL: "https://base.test/").map(\.href), ["https://base.test/x"])
     }
 
     private func assertFast(_ what: String, _ body: () -> Void, file: StaticString = #filePath, line: UInt = #line) {
         let started = ContinuousClock.now
         body()
         let elapsed = ContinuousClock.now - started
-        XCTAssertLessThan(elapsed, .seconds(5), "\(what) went superlinear: \(elapsed)", file: file, line: line)
+        XCTAssertLessThan(elapsed, Self.linearityCeiling,
+                          "\(what) went superlinear: \(elapsed)", file: file, line: line)
     }
 }
 
@@ -549,7 +645,10 @@ private final class AuditBox: @unchecked Sendable {
 }
 
 extension XCTestCase {
+    /// `message`, when given, is asserted verbatim — the refusal text is the audit/transcript surface
+    /// and has to match the TS byte for byte, not merely classify the same way.
     func XCTAssertThrowsPageError(outcome: PageFetchOutcome,
+                                  message expectedMessage: String? = nil,
                                   file: StaticString = #filePath,
                                   line: UInt = #line,
                                   _ body: () async throws -> Void) async {
@@ -558,6 +657,9 @@ extension XCTestCase {
             XCTFail("expected a PageFetchError(\(outcome.rawValue))", file: file, line: line)
         } catch let error as PageFetchError {
             XCTAssertEqual(error.outcome, outcome, "message was: \(error.message)", file: file, line: line)
+            if let expectedMessage {
+                XCTAssertEqual(error.message, expectedMessage, file: file, line: line)
+            }
         } catch {
             XCTFail("expected a PageFetchError(\(outcome.rawValue)), got \(error)", file: file, line: line)
         }

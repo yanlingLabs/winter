@@ -10,11 +10,16 @@ final class ScriptedChatHTTP: ChatHTTP, @unchecked Sendable {
     enum Step {
         case ok(status: Int, body: Data)
         case failure(Error)
-        /// Like `.ok`, plus the two things page fetching needs a double to control: response HEADERS
-        /// (the `Content-Type` that decides the HTML vs raw-text path) and a FINAL URL that differs
-        /// from the requested one (a transport-followed redirect, which is what the post-redirect
-        /// dangerous-domain re-check fires on).
-        case response(status: Int, body: Data, headers: [String: String], finalURL: URL?)
+        /// Like `.ok`, plus the response HEADERS page fetching needs a double to control (the
+        /// `Content-Type` that decides the HTML vs raw-text path).
+        case response(status: Int, body: Data, headers: [String: String])
+        /// A 3xx the fetcher must handle ITSELF. `location: nil` scripts the malformed
+        /// redirect-with-no-Location case. (`ChatHTTP.sendCapped` is contractually non-following, so
+        /// a redirect is always delivered to the caller rather than chased.)
+        case redirect(status: Int, location: String?)
+        /// A body produced ONE BYTE AT A TIME by a pull-counting source, so a test can prove the
+        /// consumer stopped asking at the cap instead of buffering the whole thing.
+        case generated(status: Int, contentType: String, byteCount: Int, byte: UInt8)
         /// Suspends until the CALLING task is cancelled, then throws `CancellationError` — the shape
         /// a stuck connection has from the fetcher's point of view. Drives timeout/abort tests.
         case hang
@@ -31,24 +36,31 @@ final class ScriptedChatHTTP: ChatHTTP, @unchecked Sendable {
             .ok(status: status, body: Data(body.utf8))
         }
 
-        static func html(_ body: String, status: Int = 200, finalURL: URL? = nil) -> Step {
+        static func html(_ body: String, status: Int = 200) -> Step {
             .response(status: status, body: Data(body.utf8),
-                      headers: ["Content-Type": "text/html; charset=utf-8"], finalURL: finalURL)
+                      headers: ["Content-Type": "text/html; charset=utf-8"])
         }
 
-        static func plainText(_ body: String, status: Int = 200, finalURL: URL? = nil) -> Step {
+        static func plainText(_ body: String, status: Int = 200) -> Step {
             .response(status: status, body: Data(body.utf8),
-                      headers: ["Content-Type": "text/plain; charset=utf-8"], finalURL: finalURL)
+                      headers: ["Content-Type": "text/plain; charset=utf-8"])
+        }
+
+        static func generatedHTML(byteCount: Int, byte: UInt8 = UInt8(ascii: "a")) -> Step {
+            .generated(status: 200, contentType: "text/html; charset=utf-8", byteCount: byteCount, byte: byte)
         }
     }
 
     private let lock = NSLock()
     private var steps: [Step]
     private(set) var requests: [URLRequest] = []
+    /// How many bytes a `.generated` body was actually PULLED for, across all steps. The proof that
+    /// `collectCapped` aborts mid-stream rather than reading everything and slicing.
+    let pulled = ByteCounter()
 
     init(_ steps: [Step] = []) { self.steps = steps }
 
-    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    private func nextStep(for request: URLRequest) throws -> Step {
         let next: Step? = lock.withLock {
             requests.append(request)
             return steps.isEmpty ? nil : steps.removeFirst()
@@ -56,33 +68,61 @@ final class ScriptedChatHTTP: ChatHTTP, @unchecked Sendable {
         guard let step = next else {
             throw ScriptedHTTPMisuse.noStepsLeft(request.url?.absoluteString ?? "<nil>")
         }
-        return try await deliver(step, for: request)
+        return step
     }
 
-    private func deliver(_ step: Step, for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let resolved = try await resolve(nextStep(for: request), for: request)
+        var body = Data()
+        for try await byte in resolved.bytes { body.append(byte) }
+        return (body, resolved.response)
+    }
+
+    func sendCapped(_ request: URLRequest, maxBytes: Int) async throws -> CappedResponse {
+        let resolved = try await resolve(nextStep(for: request), for: request)
+        // Mirror the real transport: a non-2xx body is never pulled at all.
+        guard (200 ..< 300).contains(resolved.response.statusCode) else {
+            return CappedResponse(response: resolved.response, body: Data(), bytesRead: 0, truncated: false)
+        }
+        let (body, truncated) = try await collectCapped(resolved.bytes, maxBytes: maxBytes)
+        return CappedResponse(response: resolved.response, body: body, bytesRead: body.count, truncated: truncated)
+    }
+
+    private struct Resolved {
+        let response: HTTPURLResponse
+        let bytes: CountingByteStream
+    }
+
+    private func resolve(_ step: Step, for request: URLRequest) async throws -> Resolved {
+        func make(_ status: Int, _ headers: [String: String]?, _ source: CountingByteStream.Source) -> Resolved {
+            Resolved(response: HTTPURLResponse(url: request.url!, statusCode: status,
+                                               httpVersion: "HTTP/1.1", headerFields: headers)!,
+                     bytes: CountingByteStream(source: source, counter: pulled))
+        }
         switch step {
         case .failure(let error):
             throw error
         case .ok(let status, let body):
-            let response = HTTPURLResponse(url: request.url!, statusCode: status,
-                                           httpVersion: "HTTP/1.1", headerFields: nil)!
-            return (body, response)
-        case .response(let status, let body, let headers, let finalURL):
-            let response = HTTPURLResponse(url: finalURL ?? request.url!, statusCode: status,
-                                           httpVersion: "HTTP/1.1", headerFields: headers)!
-            return (body, response)
+            return make(status, nil, .data([UInt8](body)))
+        case .response(let status, let body, let headers):
+            return make(status, headers, .data([UInt8](body)))
+        case .redirect(let status, let location):
+            return make(status, location.map { ["Location": $0] } ?? [:], .data([]))
+        case .generated(let status, let contentType, let byteCount, let byte):
+            return make(status, ["Content-Type": contentType], .generated(count: byteCount, byte: byte))
         case .hang:
             try await Task.sleep(for: .seconds(3600)) // throws CancellationError the moment we're cancelled
             throw ScriptedHTTPMisuse.hangCompleted
         case .gated(let gate, let then):
             try await gate.wait()
-            return try await deliver(then, for: request)
+            return try await resolve(then, for: request)
         }
     }
 
     // MARK: - assertions helpers
 
     var requestCount: Int { lock.withLock { requests.count } }
+    var requestedURLs: [String] { lock.withLock { requests.map { $0.url?.absoluteString ?? "<nil>" } } }
 
     func bodyString(_ index: Int = 0) -> String {
         guard let data = lock.withLock({ requests[index].httpBody }) else { return "<no body>" }
@@ -168,4 +208,54 @@ enum AuthFixture {
         backendURL: URL(string: "https://backend.test.invalid/codex")!,
         headers: ["OpenAI-Beta": "responses=experimental", "originator": "norma"]
     )
+}
+
+
+/// Counts every byte a consumer actually PULLS. Deliberately pull-based with no internal buffering —
+/// an `AsyncStream` would let the producer run ahead of the consumer and blur exactly the thing this
+/// exists to measure.
+///
+/// The counter is unsynchronised on the increment path: a scripted response has exactly one consumer,
+/// and tests read `value` only after that consumer has finished (the `await` chain establishes the
+/// ordering). Locking per byte would dominate the runtime of a multi-megabyte cap test.
+final class ByteCounter: @unchecked Sendable {
+    private var count = 0
+    var value: Int { count }
+    func reset() { count = 0 }
+    fileprivate func bump() { count += 1 }
+}
+
+struct CountingByteStream: AsyncSequence, Sendable {
+    typealias Element = UInt8
+
+    enum Source: Sendable {
+        case data([UInt8])
+        case generated(count: Int, byte: UInt8)
+    }
+
+    let source: Source
+    let counter: ByteCounter
+
+    struct AsyncIterator: AsyncIteratorProtocol {
+        let source: Source
+        let counter: ByteCounter
+        var index = 0
+
+        mutating func next() async throws -> UInt8? {
+            switch source {
+            case .data(let bytes):
+                guard index < bytes.count else { return nil }
+                defer { index += 1 }
+                counter.bump()
+                return bytes[index]
+            case .generated(let count, let byte):
+                guard index < count else { return nil }
+                index += 1
+                counter.bump()
+                return byte
+            }
+        }
+    }
+
+    func makeAsyncIterator() -> AsyncIterator { AsyncIterator(source: source, counter: counter) }
 }

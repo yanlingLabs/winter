@@ -99,19 +99,20 @@ private func compile(_ pattern: String) -> NSRegularExpression {
 private enum Patterns {
     /// `/<a\s[^>]*href="([^"]+)"[^>]*>/gi`. `([^"]+)` may legitimately span a `>` — that is the
     /// backtracking behaviour PRICE-OF-LINEARITY class (B) is pinned on, and ICU reproduces it.
-    static let anchorOpen = compile("<[Aa]\(jsWS)[^>]*[Hh][Rr][Ee][Ff]=\"([^\"]+)\"[^>]*>")
+    static let anchorOpen = compile("<[Aa]\(jsWS)[^>]*[Hh][Rr][Ee][Ff]=\"([^\"]++)\"[^>]*+>")
     /// `/<h([1-6])[^>]*>/gi`
-    static let headingOpen = compile("<[Hh]([1-6])[^>]*>")
+    static let headingOpen = compile("<[Hh]([1-6])[^>]*+>")
     /// `/<\/h([1-6])>/gi`
     static let headingClose = compile("</[Hh]([1-6])>")
     /// `/<li\b[^>]*>/gi` — see the `\b` note in this file's header.
-    static let listItem = compile("<[Ll][Ii](?![0-9A-Za-z_])[^>]*>")
+    static let listItem = compile("<[Ll][Ii](?![0-9A-Za-z_])[^>]*+>")
     /// `/<br\s*\/?>/gi`
     static let lineBreak = compile("<[Bb][Rr]\(jsWS)*/?>")
     /// `/<\/(p|div|h[1-6]|li|tr)>/gi`
     static let closingBlock = compile("</([Pp]|[Dd][Ii][Vv]|[Hh][1-6]|[Ll][Ii]|[Tt][Rr])>")
-    /// `/<[^>]+>/g`
-    static let anyTag = compile("<[^>]+>")
+    /// `/<[^>]+>/g` — kept only as the reference spelling. The pass itself runs through
+    /// `stripTags`, which is exactly equivalent and linear; see that function.
+    static let anyTag = compile("<[^>]++>")
     /// `/\n+/g` — the collapse `extractTitle` / link-text extraction apply.
     static let newlineRun = compile("\n+")
     /// `/<h1[^>]*>([\s\S]*?)<\/h1>/i` — deliberately the LAZY form, exactly as the TS keeps it: it
@@ -267,6 +268,60 @@ private func convertAnchors(_ html: String) -> String {
     return replacePaired(text, opens: opens, closes: closes) { open, inner in "\(inner) (\(open.capture))" }
 }
 
+/// The final tag strip, `html.replace(/<[^>]+>/g, "")`, as a single monotonic forward scan.
+///
+/// Exactly equivalent, and the equivalence is easy to see: the regex's leftmost match at a `<` is
+/// `<`, then the run of characters up to the FIRST `>` after it (that run is non-`>` by
+/// construction), then that `>` — with at least one character in between, since `[^>]+` cannot match
+/// empty. So there is nothing for a regex engine to search for that a forward pointer does not
+/// already know.
+///
+/// Why it is hand-written rather than left to ICU. On markup with no `>` after some point — an
+/// unterminated tag, i.e. exactly the malformed shape the rest of this file is hardened against —
+/// `<[^>]+>` is O(n²): at EVERY `<` the engine consumes to end-of-string and then fails. Making the
+/// quantifier possessive (`[^>]++`) removes the futile backtracking but not the forward re-scan, so
+/// it only bought ~25%. Measured on 20,000 unterminated `<script x` tokens (180 KB) in debug:
+/// **36 s greedy → 27 s possessive → 3 ms here.**
+///
+/// This is a deliberate, disclosed PERFORMANCE-ONLY divergence from `web.ts`, which still has the
+/// quadratic form (measured 2.1 s on the same input under V8 — same O(n²), a ~17x smaller constant
+/// than ICU's, which is why it has not bitten the daemon as hard). Output is byte-identical: the 14
+/// cleaner vectors and the 28,000-case differential against the live TS both pass unchanged. Worth
+/// porting BACK to `web.ts` — see the fix-round notes in task-6-report.md.
+///
+/// The single early exit (`no '>' anywhere after here`) is what makes the worst case cheap: if no
+/// `>` remains, no match can start at this position or any later one.
+func stripTags(_ text: Utf16Text) -> String {
+    let units = text.units
+    let lt: UInt16 = 0x3C // "<"
+    let gt: UInt16 = 0x3E // ">"
+
+    var out = ""
+    out.reserveCapacity(text.string.utf8.count)
+    var copied = 0
+    var i = 0
+    var gtPtr = 0 // monotonic — never rewinds across the whole scan
+
+    while i < units.count {
+        guard units[i] == lt else {
+            i += 1
+            continue
+        }
+        if gtPtr <= i { gtPtr = i + 1 }
+        while gtPtr < units.count, units[gtPtr] != gt { gtPtr += 1 }
+        if gtPtr >= units.count { break } // no close anywhere after this "<" — nothing more can match
+        if gtPtr > i + 1 { // `[^>]+` needs at least one character, so "<>" is not a tag
+            out += text.slice(copied, i)
+            copied = gtPtr + 1
+            i = gtPtr + 1
+        } else {
+            i += 1
+        }
+    }
+    out += text.slice(copied, units.count)
+    return out
+}
+
 private func replaceAll(_ re: NSRegularExpression, in string: String, with template: String) -> String {
     re.stringByReplacingMatches(in: string,
                                 options: [],
@@ -290,7 +345,7 @@ public func htmlToText(_ html: String) -> String {
     out = replaceAll(Patterns.listItem, in: out, with: "\n- ")
     out = replaceAll(Patterns.lineBreak, in: out, with: "\n")
     out = replaceAll(Patterns.closingBlock, in: out, with: "\n")
-    out = replaceAll(Patterns.anyTag, in: out, with: "")
+    out = stripTags(Utf16Text(out)) // == replace(/<[^>]+>/g, ""), linear — see stripTags
 
     // Entity order matters and mirrors the TS exactly: `&amp;` first, so `&amp;lt;` decodes to the
     // literal text `&lt;` rather than to `<`.
