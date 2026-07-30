@@ -25,7 +25,7 @@ import {
   MemoryListParams, MemoryReadParams, MemoryWriteParams, MemoryDeleteParams, MemoryAuditParams,
   ProviderConfigureParams,
   WorkflowListParams, WorkflowRunParams, WorkflowStopParams, WorkflowGetParams,
-  SyncHeadsParams, SyncPullParams, SyncPushParams,
+  SyncHeadsParams, SyncPullParams, SyncPushParams, SyncConfigParams, SyncMemoryParams,
   SYSTEM_SESSION_ID,
   type SessionEvent, ConnWriter, type WritableSocket,
 } from "@norma/protocol";
@@ -39,7 +39,7 @@ import type { MemoryStore, MemoryErrorKind } from "../agent/memory";
 import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTailMemDir } from "../agent/memory-file-ops";
 import type { SessionStore } from "../sessions/store";
 import { readHistoryPage } from "../sessions/history";
-import { SyncPushBuffers, syncHeads, syncPull, syncPush } from "./sync";
+import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { AgentEngine } from "../agent/engine";
 import { resolveModelAlias } from "../agent/model-aliases";
@@ -137,8 +137,23 @@ export interface IpcServerOptions {
   // as `normaHome` above: a server built without one (most existing tests) makes
   // `provider.configure` a typed failure rather than throwing on construction. daemon.ts always
   // wires its own `secrets` (KeychainSecretStore by default, `startDaemon({secrets})`-injectable
-  // for tests) into this field.
+  // for tests) into this field. Also `sync.config`'s ONLY route to the Exa key (Chat Slice D task
+  // 3) — the SAME instance, never a second read path.
   secrets?: SecretStore;
+  // Chat Slice D task 3 (`sync.config`): the user-ADDED half of the dangerous-domains list —
+  // daemon.ts's own shared `dangerousDomainsAdded` const, the SAME live getter Search/ReadPage/the
+  // research runner already consult (see those callers' own doc comments). `sync.config` calls
+  // this with NO cwd (it carries no session/project context), which resolves against the daemon's
+  // base settings — same "no cwd" behavior every other cwd-less caller in this codebase already
+  // gets. Optional — same "typed no-op, never a crash" precedent as the rest of this options
+  // object: a server built without one (most existing tests) reports an empty list.
+  dangerousDomainsAdded?: (cwd?: string) => string[] | undefined;
+  // Chat Slice D task 3 (`sync.config`): the provider's LIVE model, re-resolved at call time —
+  // mirrors `AgentEngine`'s own `provider.live?.() ?? {model: provider.model}` idiom (engine.ts)
+  // rather than a boot-time snapshot like `providerInfo` below. Optional: a server built without
+  // one (most existing tests, or a no-agentProvider daemon) reports `""` — `defaultModel` is a
+  // plain string, never nullable.
+  liveModel?: () => string;
   // Phase 4b Task 4 (spec §3): the plugin tool bridge. `registry` is the SAME ToolRegistry the
   // AgentEngine executes tool calls against (daemon.ts shares the one instance) — tool.register
   // registers `plugin__<pluginId>__<tool>` into it; the socket close() handler and the
@@ -316,6 +331,13 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   METHODS.syncHeads,
   METHODS.syncPull,
   METHODS.syncPush,
+  // Chat Slice D task 3: `sync.config`/`sync.memory` — the phone's OWN standalone-chat bootstrap
+  // (Exa key + user dangerous domains + default model) and its read-only `_assistant` memory-bucket
+  // replica. Neither carries a `sessionId` (there is no per-session gate to run), but both stay on
+  // this list for the same reason the three verbs above do: the phone is the only client that has
+  // ever needed them.
+  METHODS.syncConfig,
+  METHODS.syncMemory,
 ]);
 
 /** The session `mode`s a remote (iPhone) client may target at all — every other mode is Mac-local
@@ -1133,6 +1155,28 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             }
           },
         }, p);
+      }
+
+      // -----------------------------------------------------------------------------------------
+      // Chat Slice D task 3: `sync.config` / `sync.memory` — the two remaining sync surfaces,
+      // for the phone's OWN standalone chat rather than log replication. Neither carries a
+      // `sessionId` (no `assertRemoteMayUseSession` call — there is no session to gate on), unlike
+      // every verb above this comment.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.syncConfig: {
+        parseParams(SyncConfigParams, params);
+        return await syncConfig({
+          secret: opts.secrets ? (name) => opts.secrets!.get(name) : undefined,
+          dangerousDomainsAdded: opts.dangerousDomainsAdded ? () => opts.dangerousDomainsAdded!() : undefined,
+          liveModel: opts.liveModel,
+        });
+      }
+      case METHODS.syncMemory: {
+        const p = parseParams(SyncMemoryParams, params);
+        // No `normaHome` wired (most existing tests) → no bucket to page over — same typed no-op
+        // shape as `syncMemory`'s own missing-directory branch, not a crash.
+        if (!opts.normaHome) return { files: [], complete: true };
+        return syncMemory(opts.normaHome, p.cursor ?? 0);
       }
 
       // -----------------------------------------------------------------------------------------

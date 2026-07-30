@@ -1,6 +1,10 @@
+import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { ERR, SessionEvent, SESSION_TITLE_MAX_CHARS, type SyncHeadsResult, type SyncPullParams, type SyncPullResult, type SyncPushParams, type SyncPushResult } from "@norma/protocol";
+import { join } from "node:path";
+import { ERR, SessionEvent, SESSION_TITLE_MAX_CHARS, type SyncConfigResult, type SyncHeadsResult, type SyncMemoryResult, type SyncPullParams, type SyncPullResult, type SyncPushParams, type SyncPushResult } from "@norma/protocol";
 import { resolveModelAlias } from "../agent/model-aliases";
+import { assistantMemoryDirFor } from "../agent/memory-dir";
+import { EXA_API_KEY_SECRET } from "../agent/tools/search";
 import type { SessionForkRef, SessionStore, SyncedEntry } from "../sessions/store";
 
 // ================================================================================================
@@ -40,6 +44,13 @@ import type { SessionForkRef, SessionStore, SyncedEntry } from "../sessions/stor
 // unavoidable cost of byte-verbatim replication (an event-type allowlist would break both the
 // reasoning_item decision below and the byte-identity contract). Recorded here so the bound is
 // visible at the seam rather than only in a review document.
+//
+// Chat Slice D task 3 adds two READ-ONLY, session-less siblings further down this file:
+// `sync.config` (the Exa key + the user's added dangerous domains + the live default model — a
+// freshly-paired phone's bootstrap for its OWN standalone chat) and `sync.memory` (a paged replica
+// of the shared `_assistant` memory bucket, so the phone's local assembler can inject the same
+// memory a Mac chat session sees). Neither takes a `sessionId`, so neither touches the chat-only
+// gate or the push buffer above at all.
 // ================================================================================================
 
 /** One `sync.pull` page. A quarter of the phone transport's hard frame limit (`maxFrameBytes`,
@@ -479,4 +490,121 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
   if (createdEvent) ctx.broadcastCreated(createdEvent);
 
   return { applied: true, lastSeq, buffered: 0 };
+}
+
+// ------------------------------------------------------------------------------------------------
+// sync.config (Chat Slice D task 3)
+// ------------------------------------------------------------------------------------------------
+
+/** Everything `syncConfig` needs, injected so the RPC layer (ipc/server.ts) supplies the SAME live
+ *  getters every other consumer of these values already reads through — never a second,
+ *  independently-stale copy. Every field is OPTIONAL, same "typed no-op, never a crash" precedent
+ *  as the rest of `IpcServerOptions`: a server built without one (most existing tests) degrades
+ *  that piece to its safest empty value rather than throwing. */
+export interface SyncConfigContext {
+  /** Same shape as `SearchToolDeps.secret` (agent/tools/search.ts) — daemon.ts wires both from the
+   *  identical `SecretStore` instance, so a BYOK/Exa-key read never opens a second store. Absent,
+   *  or a resolved `null`, both mean "no key stored". */
+  secret?(name: string): Promise<string | null>;
+  /** The user-ADDED half of the dangerous-domains list — daemon.ts's own shared
+   *  `dangerousDomainsAdded` const (the SAME one Search/ReadPage/the research runner already
+   *  consult for the identical live list). Called with NO cwd: `sync.config` carries no
+   *  session/project context, so this resolves against the daemon's base (non-project) settings —
+   *  the same "no cwd" behavior every other cwd-less caller in this codebase already gets. */
+  dangerousDomainsAdded?(): string[] | undefined;
+  /** The provider's live model, re-resolved at call time (mirrors `AgentEngine`'s own
+   *  `provider.live?.() ?? {model: provider.model}` idiom). Absent (no agent provider configured)
+   *  degrades to `""` — there is no sensible model to report, and `defaultModel` is a plain
+   *  string, never nullable (see `SyncConfigResult`'s own doc comment). */
+  liveModel?(): string;
+}
+
+/** Everything a freshly-paired phone needs to run its OWN standalone chat (the `phone-always-local`
+ *  design decision): the Exa key, the user's additions to the dangerous-domains list, and the
+ *  daemon's current default model. Every field is read HERE, at call time — nothing is cached
+ *  across calls, so a Keychain rotation or a settings edit is visible on the very next
+ *  `sync.config`, no daemon restart (the same "hot" contract every other settings-backed getter in
+ *  this codebase already keeps). */
+export async function syncConfig(ctx: SyncConfigContext): Promise<SyncConfigResult> {
+  const exaKey = (await ctx.secret?.(EXA_API_KEY_SECRET)) ?? null;
+  const dangerousDomains = ctx.dangerousDomainsAdded?.() ?? [];
+  const defaultModel = ctx.liveModel?.() ?? "";
+  return { exaKey, dangerousDomains, defaultModel };
+}
+
+// ------------------------------------------------------------------------------------------------
+// sync.memory (Chat Slice D task 3)
+// ------------------------------------------------------------------------------------------------
+
+/** Appended to a single file whose bytes exceed one WHOLE page's budget, in place of everything
+ *  past the truncation point. Memory files are small markdown by construction (the Dreamer caps
+ *  each at ~8KB, dream-ops.ts's `MAX_FILES`/content-size doctrine), so this is a rare safety valve
+ *  — never the normal path, and never a substitute for splitting a file across pages (see
+ *  `syncMemory`'s own doc comment for why a single file is never split). */
+export const SYNC_MEMORY_TRUNCATION_MARKER = "\n…[truncated for sync]";
+
+/** Truncates `buf` to at most `maxBytes`, backing off from a UTF-8 continuation byte (the top two
+ *  bits `10xxxxxx`) so the cut never lands mid-character and produces mojibake at the boundary.
+ *  `maxBytes <= 0` truncates to the empty string. */
+function truncateUtf8(buf: Buffer, maxBytes: number): string {
+  let end = Math.max(0, Math.min(maxBytes, buf.length));
+  while (end > 0 && (buf[end]! & 0xc0) === 0x80) end--;
+  return buf.subarray(0, end).toString("utf8");
+}
+
+/** One `sync.memory` page: a read-only replica of the shared `_assistant` memory bucket
+ *  (`assistantMemoryDirFor`, memory-dir.ts:146) — the SAME directory `ContextAssembler`'s
+ *  `memoryBucket: "assistant"` branch reads for every dispatch/chat turn on this Mac. The phone
+ *  runs its own local engine (`phone-always-local`, the design's own user decision) and needs a
+ *  copy of this bucket so ITS assembler can inject the identical memory.
+ *
+ *  Paging is over WHOLE FILES in stable (sorted) name order, budgeted by `SYNC_PAGE_BYTES` —
+ *  unlike `sync.pull`'s byte-offset cursor into ONE growing log, this bucket is many small,
+ *  independent files, so the natural unit is "which files", not "which bytes of which file". A
+ *  single file larger than the WHOLE budget is truncated (never split across two pages, per the
+ *  marker's own doc comment) rather than left off entirely — it always lands on the page it starts,
+ *  alone. Hidden/dotfile entries (`.dream-state.json.tmp`, `.MEMORY.md.tmp` — the Dreamer's own
+ *  atomic-write temporaries, dreamer.ts) are excluded: they are mid-write artifacts, never durable
+ *  memory, and replicating one would be a flaky accident of paging timing rather than a real memory
+ *  file. A missing or empty bucket (no dream cycle has ever run) returns `{files: [], complete:
+ *  true}` — never an error, same "typed no-op" precedent as every other optional-dependency
+ *  degrade in this file. */
+export function syncMemory(normaHome: string, cursor: number): SyncMemoryResult {
+  const dir = assistantMemoryDirFor({ normaHome });
+  let names: string[];
+  try {
+    names = readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isFile() && !e.name.startsWith("."))
+      .map((e) => e.name)
+      .sort();
+  } catch {
+    names = []; // bucket doesn't exist yet — no dream cycle has ever run
+  }
+  if (cursor >= names.length) return { files: [], complete: true };
+
+  const files: { name: string; content: string }[] = [];
+  let budget = SYNC_PAGE_BYTES;
+  let i = cursor;
+  for (; i < names.length; i++) {
+    const name = names[i]!;
+    let raw: Buffer;
+    try {
+      raw = readFileSync(join(dir, name));
+    } catch {
+      continue; // vanished between readdir and read (e.g. a concurrent Dreamer delete) — skip it
+    }
+    if (files.length === 0 && raw.length > budget) {
+      // The lone oversized file on this page: truncate to fit and move past it — never split
+      // across pages (this function's own doc comment).
+      const markerBytes = Buffer.byteLength(SYNC_MEMORY_TRUNCATION_MARKER, "utf8");
+      const content = truncateUtf8(raw, budget - markerBytes) + SYNC_MEMORY_TRUNCATION_MARKER;
+      files.push({ name, content });
+      i++;
+      break;
+    }
+    if (raw.length > budget) break; // doesn't fit alongside what's already on this page
+    files.push({ name, content: raw.toString("utf8") });
+    budget -= raw.length;
+  }
+  return i >= names.length ? { files, complete: true } : { files, nextCursor: i, complete: false };
 }

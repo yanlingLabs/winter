@@ -1045,6 +1045,55 @@ export type SyncPushParams = z.infer<typeof SyncPushParams>;
 export type SyncPushResult = z.infer<typeof SyncPushResult>;
 export type SessionForkRef = z.infer<typeof SessionForkRef>;
 
+// ---------------------------------------------------------------------------------------------
+// Chat Slice D task 3 — `sync.config` + `sync.memory`, the two remaining sync surfaces for the
+// phone's OWN standalone chat (no Mac session in the loop at all): the bootstrap config bundle a
+// freshly-paired phone needs to run chat locally, and a read-only replica of the shared
+// `_assistant` memory bucket so its own context assembler can inject the SAME memory the Mac's
+// chat sessions see. Neither carries a `sessionId` — there is no session to gate on — but both stay
+// REMOTE_ALLOWED_METHODS-listed for the same reason `sync.heads`/`pull`/`push` are: the phone is
+// the only client that has ever needed them.
+// ---------------------------------------------------------------------------------------------
+
+/** No params: everything returned is either global (the Exa key, the user's added dangerous
+ *  domains) or a live daemon-wide default (the current model) — nothing here is per-project or
+ *  per-session. Every field is read AT CALL TIME (hot, no daemon restart), same discipline as
+ *  every other settings-backed getter in this codebase. */
+export const SyncConfigParams = z.object({});
+export const SyncConfigResult = z.object({
+  /** `null` when no key is stored — never an empty string (indistinguishable from "stored but
+   *  blank"). Sourced from `Bun.secrets` (`EXA_API_KEY_SECRET`), the SAME keychain item Search's
+   *  own accessor reads — never written to disk anywhere in this envelope. */
+  exaKey: z.string().nullable(),
+  /** The USER-ADDED half of the dangerous-domains list ONLY (`settings.permissions.dangerousDomains.added`)
+   *  — the shipped baseline list ships baked into the phone kit itself (Task 6), so sending it here
+   *  too would be redundant on every call and would need to stay in lockstep with the kit release
+   *  forever. An empty array, never omitted, when the user has added nothing. */
+  dangerousDomains: z.array(z.string()),
+  /** The provider's LIVE model (re-resolved every call, mirroring `AgentEngine`'s own
+   *  `provider.live?.() ?? {model: provider.model}` idiom) — the phone's starting point for a brand
+   *  new local chat session, not a value it re-validates against anything. */
+  defaultModel: z.string(),
+});
+export type SyncConfigParams = z.infer<typeof SyncConfigParams>;
+export type SyncConfigResult = z.infer<typeof SyncConfigResult>;
+
+/** `cursor` echoes back a previous page's `nextCursor` — an index into the bucket's STABLE
+ *  (sorted-by-name) file list, not a byte offset (contrast `sync.pull`'s `cursor`, which IS a byte
+ *  offset into one file's tail): this bucket is many small files, not one growing log, so paging
+ *  over whole files is the natural unit. Omitted/`0` starts from the beginning. */
+export const SyncMemoryParams = z.object({
+  cursor: z.number().int().nonnegative().optional(),
+});
+export const SyncMemoryResult = z.object({
+  files: z.array(z.object({ name: z.string(), content: z.string() })),
+  /** Present iff `complete` is false. */
+  nextCursor: z.number().int().nonnegative().optional(),
+  complete: z.boolean(),
+});
+export type SyncMemoryParams = z.infer<typeof SyncMemoryParams>;
+export type SyncMemoryResult = z.infer<typeof SyncMemoryResult>;
+
 export const METHODS = {
   hello: "protocol.hello",
   sessionCreate: "session.create",
@@ -1126,4 +1175,6 @@ export const METHODS = {
   syncHeads: "sync.heads",
   syncPull: "sync.pull",
   syncPush: "sync.push",
+  syncConfig: "sync.config",
+  syncMemory: "sync.memory",
 } as const;

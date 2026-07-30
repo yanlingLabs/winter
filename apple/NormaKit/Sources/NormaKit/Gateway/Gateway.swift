@@ -37,6 +37,10 @@ public actor Gateway {
     /// Chat Slice D task 2 added `sync.heads`/`sync.pull`/`sync.push` (14th–16th) — chat-session
     /// log replication; also pure passthroughs (the daemon owns the chat-only gate, the byte
     /// paging, and the divergence check).
+    /// Chat Slice D task 3 added `sync.config`/`sync.memory` (17th–18th) — the phone's OWN
+    /// standalone-chat bootstrap config (Exa key + user dangerous domains + default model) and its
+    /// read-only `_assistant` memory-bucket replica. Neither carries a sessionId; both are pure
+    /// passthroughs, same as every other sync verb.
     static let remoteAllowedMethods: Set<String> = [
         "protocol.hello", "session.list", "session.attach", "session.send",
         "session.dispatch", "approval.respond", "ask_user.respond",
@@ -49,6 +53,8 @@ public actor Gateway {
         "session.setModel",
         // Chat Slice D task 2: the phone replicates its own chat-session logs both ways.
         "sync.heads", "sync.pull", "sync.push",
+        // Chat Slice D task 3: the phone's standalone-chat config bundle + memory-bucket replica.
+        "sync.config", "sync.memory",
     ]
 
     /// Session-map cap (SP2b Task 4) — see `evictIfNeeded()`.

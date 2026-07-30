@@ -1202,6 +1202,13 @@ export async function startDaemon(opts: {
 
   const providerInfo = agentProvider ? { id: agentProvider.provider.id, model: agentProvider.model } : null;
 
+  // Chat Slice D task 3 (`sync.config`): the phone's "default model" bootstrap value, re-resolved
+  // HOT at every call — mirrors engine.ts's own boot idiom EXACTLY
+  // (`this.cfg.provider.live?.() ?? {model: this.cfg.provider.model}`) rather than reusing
+  // `providerInfo` above, which is a boot-time snapshot. `undefined` on a no-agentProvider daemon —
+  // `ipc/server.ts` degrades that to `""`.
+  const liveModel = agentProvider ? () => (agentProvider!.live?.() ?? { model: agentProvider!.model }).model : undefined;
+
   const server: IpcServer = startIpcServer({
     socketPath: dirs.socketPath,
     serverVersion: CORE_VERSION,
@@ -1229,8 +1236,14 @@ export async function startDaemon(opts: {
     normaHome,
     // BYOK T1: the SAME SecretStore instance `authority`/`createProvider` above already use (one
     // Keychain, no separate store to keep in sync) — lets `provider.configure` write the BYO
-    // OpenAI API key server-side.
+    // OpenAI API key server-side. Chat Slice D task 3: also `sync.config`'s ONLY route to the Exa
+    // key, never a second read path.
     secrets,
+    // Chat Slice D task 3 (`sync.config`): the SAME shared getter Search/ReadPage/the research
+    // runner already consult (constructed above, before the `if (agentProvider)` gate).
+    dangerousDomainsAdded,
+    // Chat Slice D task 3 (`sync.config`): the hot live-model closure built just above.
+    liveModel,
     mcp: mcp ?? undefined,
     // Phase 4b Task 4: the plugin tool bridge. `registry` is undefined whenever agentProvider is
     // null (see `sharedRegistry`'s doc comment above). `supervisor`, unlike `registry`, is now
