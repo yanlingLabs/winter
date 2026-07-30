@@ -9,9 +9,13 @@ import { buildCleanerVectorsFixture, buildDangerousDomainsFixture, CLEANER_VECTO
  * existing Swift-side fixture-count tripwire (`RoundTripTests.fixtureURLs()`'s `count == 56`
  * assertion): both call the SAME `parity-fixtures.ts` functions the generator itself calls, so a
  * fixture on disk that disagrees with what those functions compute RIGHT NOW means real drift —
- * `packages/core`'s `SHIPPED_DANGEROUS_DOMAINS`/`htmlToText`/`renderLines` changed (or the vector
- * list changed) without a `pnpm protocol:generate` re-run — never two hand-maintained copies
- * quietly disagreeing with each other.
+ * `packages/core`'s `SHIPPED_DANGEROUS_DOMAINS`/`htmlToText` changed (or the vector list changed)
+ * without a `pnpm protocol:generate` re-run — never two hand-maintained copies quietly disagreeing
+ * with each other.
+ *
+ * `cleaner-vectors.json`'s `lines` is RAW `htmlToText` output (Task 4 review fix, Important-1) —
+ * never `renderLines`' numbered/headered presentation string, which Task 6's Swift
+ * `htmlToText(_ html: String) -> [String]` was never asked to reproduce.
  */
 const fixDir = join(import.meta.dir, "..", "generated", "fixtures");
 
@@ -22,10 +26,22 @@ describe("cross-language parity fixtures (Chat Slice D, Task 4): regeneration fr
     expect(committed).toBe(fresh);
   });
 
-  test("cleaner-vectors.json is byte-identical to a fresh run of the live htmlToText+renderLines", () => {
+  test("cleaner-vectors.json is byte-identical to a fresh run of the live htmlToText", () => {
     const committed = readFileSync(join(fixDir, "cleaner-vectors.json"), "utf8");
     const fresh = JSON.stringify(buildCleanerVectorsFixture(), null, 2);
     expect(committed).toBe(fresh);
+  });
+
+  // Task 4 review regression guard (Important-1): every vector's `lines` must be RAW htmlToText
+  // output, never renderLines' numbered ("N→text") presentation format — a plain "N→" prefix or a
+  // "(lines X-Y of Z)" header would mean the presentation-layer round-trip crept back in.
+  test("no vector's lines carry renderLines' numbering/header presentation format", () => {
+    for (const vector of buildCleanerVectorsFixture()) {
+      for (const line of vector.lines) {
+        expect(line).not.toMatch(/^\d+→/);
+      }
+      expect(vector.lines[0] ?? "").not.toMatch(/^Fixture \(lines? /);
+    }
   });
 
   test("cleaner-vectors.json covers at least 12 vectors", () => {

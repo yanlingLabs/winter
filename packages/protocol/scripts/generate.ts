@@ -137,10 +137,12 @@ for (const [name, value] of Object.entries(fixtures)) {
 }
 
 // 2b. Cross-language parity fixtures (Chat Slice D, Task 4) — anchors for the upcoming Swift ports
-// of the shipped dangerous-domain list and the html cleaner (page-core.ts's htmlToText/renderLines
-// pipeline). Both values are COMPUTED from the live TS implementations at generate time (never
-// hand-copied) via packages/protocol/scripts/parity-fixtures.ts, the ONE place that imports across
-// the protocol->core boundary — see that file's own doc comment for why that's safe here.
+// of the shipped dangerous-domain list and the html cleaner (web.ts's htmlToText linearization
+// algorithm — RAW output only, never renderLines' presentation layer; see parity-fixtures.ts's own
+// doc comment, Task 4 review Important-1). Both values are COMPUTED from the live TS
+// implementations at generate time (never hand-copied) via packages/protocol/scripts/
+// parity-fixtures.ts, the ONE place that imports across the protocol->core boundary — see that
+// file's own doc comment for why that's safe here.
 // Written into the SAME fixtures/ directory as the SessionEvent fixtures above, but deliberately
 // NOT added to the `fixtures` map itself and NOT swept into the Swift NormaProtocol test bundle
 // below: RoundTripTests.swift decodes EVERY .json file it finds under Fixtures/ as a SessionEvent

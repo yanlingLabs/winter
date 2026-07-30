@@ -5,22 +5,29 @@
  * functions below — never a second, independently-typed copy of the domain list, the vector
  * inputs, or the html->lines transform — so the test's "regenerating produces byte-identical
  * output" claim is actually true by construction: if a fixture on disk ever disagrees with what
- * these functions compute RIGHT NOW, that's real drift (core's htmlToText/renderLines/
- * SHIPPED_DANGEROUS_DOMAINS changed and `pnpm protocol:generate` wasn't re-run), not a false
- * positive from two hand-maintained copies disagreeing with each other.
+ * these functions compute RIGHT NOW, that's real drift (core's htmlToText/SHIPPED_DANGEROUS_DOMAINS
+ * changed and `pnpm protocol:generate` wasn't re-run), not a false positive from two
+ * hand-maintained copies disagreeing with each other.
  *
  * Reaches into `@norma/core` via a RELATIVE import, deliberately: core depends on protocol
  * (`@norma/core`'s package.json lists `@norma/protocol`), never the reverse — protocol declaring a
  * package dependency on core would be a real cycle. This file is a dev-time codegen/test helper
  * only, though, never part of protocol's published `"."` export (`src/index.ts`, which does not
  * import this file or anything under `scripts/`) — no protocol *consumer* ever pulls core in via
- * this path. `SHIPPED_DANGEROUS_DOMAINS`/`htmlToText`/`renderLines`/`CleanPage` are already
- * exported by core for their own callers, so this only reuses the real symbols, never duplicates
- * their values.
+ * this path. `SHIPPED_DANGEROUS_DOMAINS`/`htmlToText` are already exported by core for their own
+ * callers, so this only reuses the real symbols, never duplicates their values.
+ *
+ * Task 4 review fix (Important-1): `cleaner-vectors.json`'s `lines` is the RAW `htmlToText`
+ * output (`htmlToText(html).split("\n")` — exactly what `page-core.ts`'s `fetchCleanPage` stores
+ * as `CleanPage.lines`), never `renderLines`'s numbered/headered presentation string. The plan's
+ * own Task 6 Swift signature (`htmlToText(_ html: String) -> [String]`, docs/superpowers/plans/
+ * 2026-07-29-chat-slice-d.md) is a direct port of the LINEARIZATION algorithm alone — it was never
+ * asked to reproduce `renderLines`'s numbering/header format (nor the placeholder title an earlier
+ * version of this file baked in to drive that formatting), so the fixture must isolate exactly the
+ * thing under test.
  */
 import { SHIPPED_DANGEROUS_DOMAINS } from "../../core/src/agent/dangerous-domains";
 import { htmlToText } from "../../core/src/agent/tools/web";
-import { renderLines, type CleanPage } from "../../core/src/agent/tools/page-core";
 
 /** The exact shipped dangerous-domain list, verbatim — `fixtures/dangerous-domains.json`'s entire
  *  content (a plain JSON array, no wrapper object). */
@@ -39,11 +46,17 @@ export interface CleanerVector {
   lines: string[];
 }
 
-/** >20k-char page (coverage: "cap behavior") — built by APPENDING real paragraph markup until the
- *  html crosses the threshold, rather than a fixed repeat count, so the exact byte length is a
- *  deterministic function of the loop, never a guessed constant. Proves `htmlToText`/`renderLines`
- *  apply no hidden line/length cap of their own on a large page (unlike web.ts's network-layer
- *  MAX_FETCH_BYTES/PREVIEW_BYTES, which this pure pipeline never touches). */
+/** >20k-char page — built by APPENDING real paragraph markup until the html crosses the
+ *  threshold, rather than a fixed repeat count, so the exact byte length is a deterministic
+ *  function of the loop, never a guessed constant.
+ *
+ *  Task 4 review fix (Important-1): the ONLY caps anywhere near this pipeline are network-layer
+ *  (web.ts's `MAX_FETCH_BYTES`/`PREVIEW_BYTES`) and the in-memory `PageCache`'s byte budget —
+ *  both explicitly outside what `htmlToText` (a pure string->string function with no I/O, no
+ *  byte-count awareness at all) touches. So this vector's real claim, pinned at the RAW layer
+ *  (see `buildCleanerVector` below — no `renderLines`/presentation layer involved), is "no hidden
+ *  line/length cap exists in the raw linearization algorithm itself" — a large page is cleaned in
+ *  full, every paragraph present, nothing silently dropped or truncated. */
 function buildLargeHtml(): string {
   let html = "<h1>Large Page</h1>";
   let i = 0;
@@ -109,7 +122,7 @@ export const CLEANER_VECTOR_INPUTS: CleanerVectorInput[] = [
     html: "",
   },
   {
-    name: ">20k-char page (cap behavior)",
+    name: ">20k-char page (no hidden line/length cap in the raw htmlToText pipeline — MAX_FETCH_BYTES/PREVIEW_BYTES are network-layer only, out of scope here)",
     html: buildLargeHtml(),
   },
   {
@@ -122,21 +135,16 @@ export const CLEANER_VECTOR_INPUTS: CleanerVectorInput[] = [
   },
 ];
 
-/** The shared html->lines transform: `htmlToText` builds the cleaned-line array exactly the way
- *  `page-core.ts`'s `fetchCleanPage` does (`cleanedText.split("\n")` becomes `CleanPage.lines`),
- *  then `renderLines` (no range — the whole page) numbers it. `title`/`url`/`fetchedAt` are fixed,
- *  content-independent placeholders (this fixture is about the html->lines pipeline, not title
- *  extraction or caching), so every vector's header reads `"Fixture (lines 1-N of N)"` uniformly. */
+/** The shared html->lines transform: RAW `htmlToText` output only — exactly what `page-core.ts`'s
+ *  `fetchCleanPage` stores as `CleanPage.lines` (`cleanedText.split("\n")`), and exactly what Task
+ *  6's Swift `htmlToText(_ html: String) -> [String]` is a direct port of. Deliberately does NOT
+ *  build a `CleanPage` or call `renderLines` (Task 4 review fix, Important-1) — that's a separate,
+ *  presentation-layer function (numbering + a header carrying a title) that Task 6 was never asked
+ *  to port, and baking its output into these vectors would have forced an unrelated, unspecified
+ *  reimplementation (or undocumented unwrapping) onto whoever writes that port. This isolates
+ *  exactly the thing under test: the linearization algorithm alone. */
 export function buildCleanerVector(input: CleanerVectorInput): CleanerVector {
-  const page: CleanPage = {
-    url: "https://example.com/fixture",
-    title: "Fixture",
-    lines: htmlToText(input.html).split("\n"),
-    links: [],
-    fetchedAt: 0,
-    fromCache: false,
-  };
-  return { name: input.name, html: input.html, lines: renderLines(page).split("\n") };
+  return { name: input.name, html: input.html, lines: htmlToText(input.html).split("\n") };
 }
 
 export function buildCleanerVectorsFixture(): CleanerVector[] {
