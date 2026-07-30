@@ -694,6 +694,120 @@ final class SyncClientTests: XCTestCase {
         }
     }
 
+    // MARK: - G1-G6: FakeDaemon now refuses what the wire refuses (whole-branch combined review,
+    // Important-1 mandate). Each test drives `daemon.call` directly — the same `RpcConn` seam a real
+    // client bug would misuse — rather than through `SyncClient`, since the point is that the DOUBLE
+    // itself must refuse bad input regardless of how well-behaved the caller is.
+
+    func testPushRefusesAChunkThatBreachesTheWiresBase64Ceiling() async throws {
+        // G1: `SyncPushParams.data` is `z.string().max(SYNC_MAX_CHUNK_B64)` (384 KiB) — a schema-level
+        // hard refusal. Pre-fix, FakeDaemon had no size check at all.
+        let daemon = FakeDaemon()
+        let oversized = String(repeating: "A", count: SyncClient.maxChunkBase64 + 4)
+        let params: [String: Any] = [
+            "sessionId": "10000000-0000-4000-8000-000000000030", "baseSeq": 0,
+            "data": oversized, "complete": true,
+        ]
+        do {
+            _ = try await daemon.call(method: METHODS.syncPush, paramsJSON: try! JSONSerialization.data(withJSONObject: params))
+            XCTFail("a chunk over the 384 KiB base64 ceiling must be refused, matching SyncPushParams.data's max()")
+        } catch {
+            // refused — proof the double no longer accepts what the wire refuses
+        }
+    }
+
+    func testPushRefusesInvalidBase64InsteadOfSilentlyEmptyingTheChunk() async throws {
+        // G2: invalid base64 must hard-refuse (ipc/sync.ts's round-trip check), not silently become an
+        // empty chunk — the double's pre-fix `Data(base64Encoded:) ?? Data()` fallback was silent
+        // corruption, strictly worse than mere leniency.
+        let daemon = FakeDaemon()
+        let id = "10000000-0000-4000-8000-000000000031"
+        let params: [String: Any] = [
+            "sessionId": id, "baseSeq": 0, "data": "not-valid-base64!!!", "complete": true,
+        ]
+        do {
+            _ = try await daemon.call(method: METHODS.syncPush, paramsJSON: try! JSONSerialization.data(withJSONObject: params))
+            XCTFail("invalid base64 must be refused, not silently treated as an empty chunk")
+        } catch {}
+        XCTAssertFalse(daemon.has(id), "nothing may be created from a refused push")
+    }
+
+    func testPushRefusesACreatingPushWhoseSessionIdIsNotAUuid() async throws {
+        // G3: a creating push's sessionId must be a UUID (sync.ts's SYNCED_SESSION_ID_RE mirror) — it
+        // becomes a filesystem path component. Pre-fix, any string could create a session.
+        let daemon = FakeDaemon()
+        let id = "not-a-uuid-at-all"
+        let params: [String: Any] = [
+            "sessionId": id, "baseSeq": 0, "data": created(id).base64EncodedString(), "complete": true,
+        ]
+        do {
+            _ = try await daemon.call(method: METHODS.syncPush, paramsJSON: try! JSONSerialization.data(withJSONObject: params))
+            XCTFail("a non-UUID creating-push sessionId must be refused")
+        } catch {}
+        XCTAssertFalse(daemon.has(id))
+    }
+
+    func testPushRefusesALineThatIsEnvelopeValidButNotAFullSessionEvent() async throws {
+        // G4 — the widest gap: a line carrying {seq, sessionId, type} but missing a variant's required
+        // fields (here `user_message` with no threadId/text/clientName) passed the old envelope-only
+        // check. The wire's `SessionEvent.safeParse` refuses the WHOLE batch; nothing may be appended.
+        let daemon = FakeDaemon()
+        let id = "10000000-0000-4000-8000-000000000032"
+        let malformed = line(["type": "user_message", "sessionId": id, "seq": 2, "ts": 2])
+        let batch = LocalChatSession.join([created(id), malformed])
+        let params: [String: Any] = [
+            "sessionId": id, "baseSeq": 0, "data": batch.base64EncodedString(), "complete": true,
+        ]
+        do {
+            _ = try await daemon.call(method: METHODS.syncPush, paramsJSON: try! JSONSerialization.data(withJSONObject: params))
+            XCTFail("a line missing required SessionEvent fields must be refused")
+        } catch {}
+        XCTAssertFalse(daemon.has(id), "nothing may be partially appended from a refused batch")
+    }
+
+    func testPushRefusesAnEmptyOrOverlongModelInMeta() async throws {
+        // G5: `meta.model` is `z.string().min(1).max(SESSION_MODEL_MAX_CHARS)` (200) — a schema-level
+        // bound. Pre-fix, FakeDaemon accepted and applied any model, including "" and >200 chars.
+        let daemon = FakeDaemon()
+        let batch = created("10000000-0000-4000-8000-000000000033")
+        func attempt(model: String) async -> Bool {
+            let params: [String: Any] = [
+                "sessionId": "10000000-0000-4000-8000-000000000033", "baseSeq": 0,
+                "data": batch.base64EncodedString(), "complete": true, "meta": ["model": model],
+            ]
+            do {
+                _ = try await daemon.call(method: METHODS.syncPush, paramsJSON: try! JSONSerialization.data(withJSONObject: params))
+                return true // did not throw
+            } catch { return false }
+        }
+        let emptyAccepted = await attempt(model: "")
+        XCTAssertFalse(emptyAccepted, "an empty meta.model must be refused — z.string().min(1)")
+        let overlongAccepted = await attempt(model: String(repeating: "m", count: 201))
+        XCTAssertFalse(overlongAccepted, "a >200 char meta.model must be refused — SESSION_MODEL_MAX_CHARS")
+    }
+
+    func testPushRefusesAMalformedForkedFromInsteadOfSilentlyDroppingIt() async throws {
+        // G6: a malformed `forkedFrom` fails `SessionForkRef`'s zod shape at the wire, refusing the
+        // WHOLE call. Pre-fix, FakeDaemon silently kept the session's previous forkedFrom (or nil) and
+        // let the rest of the push through — a fork-provenance encoding bug passing silently.
+        let daemon = FakeDaemon()
+        let id = "10000000-0000-4000-8000-000000000034"
+        let batch = created(id)
+        for badFork in [["sessionId": "", "atSeq": 1] as [String: Any],
+                         ["sessionId": "parent", "atSeq": -1] as [String: Any],
+                         ["sessionId": "parent"] as [String: Any]] {
+            let params: [String: Any] = [
+                "sessionId": id, "baseSeq": 0, "data": batch.base64EncodedString(), "complete": true,
+                "meta": ["forkedFrom": badFork],
+            ]
+            do {
+                _ = try await daemon.call(method: METHODS.syncPush, paramsJSON: try! JSONSerialization.data(withJSONObject: params))
+                XCTFail("a malformed forkedFrom (\(badFork)) must refuse the whole call, not silently drop the field")
+            } catch {}
+        }
+        XCTAssertFalse(daemon.has(id), "every attempt above was refused — nothing was ever created")
+    }
+
     // MARK: - config / memory bootstrap
 
     func testFetchConfigAndMemory() async throws {
@@ -777,6 +891,13 @@ final class SyncClientTests: XCTestCase {
 //   • `baseSeq` must equal the head exactly (else DIVERGED with the real head).
 // It also PAGES (`pageBytes`) so the Swift client's cursor-resume loops actually execute (review I4),
 // and can run a hook on first pull to simulate a Mac append racing the pull window (review C1).
+//
+// WIRE-SCHEMA HARDENING (whole-branch combined review, Important-1 mandate): the list above is the
+// daemon's HANDLER semantics; `push()` below now ALSO mirrors the five `sync.*` zod schemas'
+// (packages/protocol/src/methods.ts) own refusals, comment-tagged G1-G6 at each check, the same
+// per-rule commenting convention already used for the `meta.title` cap above — so a future reader can
+// diff double-against-wire by eye. G7/G8 are commented at their own call sites as deliberately NOT
+// modeled (ruled unreachable / end-state-identical by the same review), not silently absent.
 // ================================================================================================
 
 class FakeDaemon: RpcConn, @unchecked Sendable {
@@ -842,6 +963,12 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
     }
 
     /// Byte-offset-cursor paging over the tail, exactly as `SessionStore.readRawTail` does.
+    ///
+    /// G7 (deliberately unmodeled, not fixed): the wire's `resolveChatSession` (ipc/sync.ts:161-183)
+    /// makes an unknown sessionId NOT_FOUND and a non-chat session INVALID_PARAMS; this double has no
+    /// mode concept at all and returns an empty success (`logs[id] ?? []`) for an id it has never seen.
+    /// Left as-is because it is unreachable from today's `SyncClient` control flow (it only ever pulls
+    /// an id sourced from `heads` or a post-DIVERGED fork/reconcile path) — the combined review's ruling.
     private func pull(_ p: [String: Any]) throws -> Data {
         let id = p["sessionId"] as! String
         let fromSeq = (p["fromSeq"] as! NSNumber).intValue
@@ -863,18 +990,68 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
 
     private func push(_ p: [String: Any]) throws -> Data {
         let id = p["sessionId"] as! String
+        let metaObj = p["meta"] as? [String: Any]
+
         // WIRE CAP, mirrored from `SyncPushParams.meta.title` = `z.string().max(200)`. It is a ZOD
         // SCHEMA check, so it runs in `parseParams` before any handler sees the call and it is a hard
         // refusal, never a clamp. This double did not model it, which is why the phone could build a
         // 210-char fork title (a served-at-the-cap title plus the 15-char marker) and no test noticed
         // that every push carrying it would be refused for as long as the title lived — whole-branch
         // WB-I1. A test double that is lenient where the wire is strict proves nothing about the wire.
-        if let title = (p["meta"] as? [String: Any])?["title"] as? String, title.utf16.count > 200 {
+        if let title = metaObj?["title"] as? String, title.utf16.count > 200 {
             throw RpcError(code: -32602, message: "expected string to have <=200 characters (meta.title was \(title.utf16.count))")
         }
+        // G5 — WIRE RULE mirrored from `SyncPushParams.meta.model` = `z.string().min(1).max(SESSION_MODEL_MAX_CHARS)`
+        // (methods.ts:1044, 200 chars) — a schema-level bound, refused before any handler logic runs.
+        // Distinct from (and NOT modeled here) the separate handler-level policy in `validateSyncMeta`
+        // where an unknown-but-well-shaped model slug is DROPPED rather than failing the call: that
+        // needs a model catalogue this double has no concept of, so it is out of scope for a wire-SHAPE
+        // check. Only the hard length bound — where the double used to accept "" and any length — is.
+        if let model = metaObj?["model"] as? String, model.isEmpty || model.utf16.count > 200 {
+            throw RpcError(code: -32602, message: "expected string to have >=1 and <=200 characters (meta.model was \(model.utf16.count))")
+        }
+        // G6 — WIRE RULE mirrored from `SessionForkRef` (methods.ts:75-78): `{sessionId: min(1) string,
+        // atSeq: nonnegative int}`. A malformed shape fails zod's parse BEFORE any handler runs, so the
+        // WHOLE call is refused — this double used to silently keep whatever `forkedFrom` the session
+        // already had (or nil) and let the rest of the push through, which is a fork-provenance
+        // corruption passing silently rather than loudly.
+        if let forkAny = metaObj?["forkedFrom"] {
+            guard let fork = forkAny as? [String: Any],
+                  let forkSid = fork["sessionId"] as? String, !forkSid.isEmpty,
+                  let atSeqNum = fork["atSeq"] as? NSNumber,
+                  atSeqNum.doubleValue == atSeqNum.doubleValue.rounded(), atSeqNum.intValue >= 0
+            else {
+                throw RpcError(code: -32602, message: "meta.forkedFrom must be {sessionId: non-empty string, atSeq: nonnegative int}")
+            }
+        }
+
+        // G1 — WIRE CEILING mirrored from `SyncPushParams.data` = `z.string().max(SYNC_MAX_CHUNK_B64)`
+        // (methods.ts:1038, 384 KiB) — a hard refusal at the schema, before any bytes are buffered. This
+        // double had NO size check at all, so a kit regression removing the client's own `chunkBytes`
+        // clamp would pass every test here and only fail on a real (frame-ending) phone socket.
+        let dataStr = p["data"] as! String
+        guard dataStr.utf16.count <= SyncClient.maxChunkBase64 else {
+            throw RpcError(code: -32602, message: "expected string to have <=\(SyncClient.maxChunkBase64) characters (data was \(dataStr.utf16.count))")
+        }
+        // G2 — WIRE RULE mirrored from `sync.ts`'s post-decode round-trip check (ipc/sync.ts ~373-380):
+        // `Buffer.from(s, "base64")` never throws — it silently discards non-alphabet characters — so
+        // the wire re-encodes and compares byte-for-byte, refusing anything that doesn't round-trip
+        // EXACTLY. This double used to fall back to `Data()` on a decode failure — SILENT CORRUPTION
+        // dressed up as an empty chunk, worse than mere leniency (a kit encoding bug would silently
+        // corrupt the batch here while the real wire fails loudly).
+        guard let chunk = Data(base64Encoded: dataStr), chunk.base64EncodedString() == dataStr else {
+            throw RpcError(code: -32602, message: "sync.push data is not valid standard (padded) base64")
+        }
+
         let baseSeq = (p["baseSeq"] as! NSNumber).intValue
         let complete = p["complete"] as! Bool
-        let chunk = Data(base64Encoded: p["data"] as! String) ?? Data()
+        // G8 (deliberately unmodeled, not fixed): the wire re-checks `baseSeq` against the head on
+        // EVERY chunk before buffering (ipc/sync.ts:346-353, review M5), so a stale client learns of a
+        // divergence on frame 1 rather than after uploading the whole batch; this double only checks it
+        // below, on the final chunk. Reassembly here is also unbounded, where the real daemon caps it
+        // at 32 MiB / 16 open pushes (`SyncPushBuffers`). Both are timing/bounds only — the end state
+        // (applied vs. refused) is identical either way, which is why the combined review ruled this
+        // gap class unreachable-in-effect rather than a correctness hole worth spending lines on here.
         lock.lock(); pushFrames += 1; buffer[id, default: Data()].append(chunk); lock.unlock()
 
         if !complete {
@@ -889,6 +1066,16 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
         if !creating && baseSeq != currentHead {
             throw RpcError(code: ERR_DIVERGED, message: "baseSeq mismatch", divergedLastSeq: currentHead)
         }
+        if creating {
+            // G3 — WIRE RULE mirrored from `sync.ts`'s SYNCED_SESSION_ID_RE check (ipc/sync.ts:365-370):
+            // a creating push's sessionId must be a UUID — it becomes a filesystem path component.
+            // Production's `LocalEventStore.forkId` and "+ New chat"'s `UUID()` both conform today, so
+            // this hides a FUTURE id source: a forkId refactor that breaks the shape would pass every
+            // kit test here and strand every fork/creating push in production.
+            guard id.range(of: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", options: .regularExpression) != nil else {
+                throw RpcError(code: -32602, message: "a sync-created session id must be a UUID (got \(id))")
+            }
+        }
 
         // The daemon's own batch validation (M5) — every one of these is a hard refusal server-side.
         let lines = LocalChatSession.split(batch)
@@ -896,6 +1083,16 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
         var expected = currentHead + 1
         for line in lines {
             guard let env = LineEnvelope(line) else { throw RpcError(code: -32602, message: "unparseable event line") }
+            // G4 — THE WIDEST GAP. WIRE RULE mirrored from `sync.ts`'s `parseBatch` (ipc/sync.ts:306-332):
+            // every line must be a full `SessionEvent.safeParse`, not merely carry the
+            // `{seq, sessionId, type}` envelope `LineEnvelope` checks. An envelope-only check lets a
+            // variant with a MISSING REQUIRED FIELD (or an unrecognized `type`) through — exactly what a
+            // phone-engine event-construction bug or a fork-rewrite corruption could produce — and every
+            // SyncClient test would still pass. `NormaProtocol.SessionEvent` is the Swift mirror of the
+            // same zod schema, so decoding each line with it is the cheap, faithful fix.
+            guard (try? JSONDecoder().decode(NormaProtocol.SessionEvent.self, from: line)) != nil else {
+                throw RpcError(code: -32602, message: "unparseable or invalid SessionEvent line")
+            }
             guard env.sessionId == id else {
                 throw RpcError(code: -32602, message: "event carries sessionId \(env.sessionId), not \(id)")
             }
@@ -912,8 +1109,8 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
 
         lock.withLock {
             logs[id, default: []].append(contentsOf: lines)
-            if let metaObj = p["meta"] as? [String: Any] {
-                // (title length already refused above — see the wire-cap guard)
+            if let metaObj = metaObj {
+                // (title length + model bound + forkedFrom shape already refused above)
                 var fork: SessionForkRef? = metas[id]?.forkedFrom
                 if let f = metaObj["forkedFrom"] as? [String: Any], let sid = f["sessionId"] as? String, let at = (f["atSeq"] as? NSNumber)?.intValue {
                     fork = SessionForkRef(sessionId: sid, atSeq: at)
