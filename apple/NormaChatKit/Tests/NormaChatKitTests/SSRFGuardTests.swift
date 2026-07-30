@@ -120,6 +120,101 @@ final class SSRFGuardTests: XCTestCase {
         }
     }
 
+    // MARK: NON-CANONICAL spellings (fix round 2, CRITICAL)
+
+    /// Every one of these is a spelling of a private address that the first version of this guard
+    /// ALLOWED, because it string-matched a host `Foundation.URL` never canonicalizes. WHATWG's
+    /// `new URL()` rewrites them all to dotted-quad before the TS's checks run; Foundation does not.
+    /// The reviewer confirmed each against Darwin's own resolver — these are addresses the phone
+    /// would really have dialled.
+    func testIntegerHexOctalAndPartialDotSpellingsAreRefused() {
+        let cases: [(String, String)] = [
+            ("3232235777", priv),      // 192.168.1.1 — the router
+            ("2852039166", priv),      // 169.254.169.254 — cloud metadata
+            ("0xc0a80101", priv),      // 192.168.1.1
+            ("192.168.257", priv),     // 192.168.1.1
+            ("0300.0250.0.1", priv),   // 192.168.0.1 (octal)
+            ("2130706433", priv),      // 127.0.0.1
+            ("0x7f000001", priv),      // 127.0.0.1
+            ("0x7f.0.0.1", priv),      // 127.0.0.1
+            ("127.1", priv),           // 127.0.0.1
+            ("127.0.1", priv),         // 127.0.0.1
+            ("0", local),              // 0.0.0.0 — WHATWG canonicalizes to the local-names branch
+        ]
+        for (host, expected) in cases {
+            assertRefused("http://\(host)/", expected)
+        }
+    }
+
+    /// Uncompressed / partially-compressed spellings WHATWG would have compressed first.
+    func testNonCanonicalIpv6SpellingsAreRefused() {
+        let cases: [(String, String)] = [
+            ("0::1", local),                    // ::1
+            ("::0:0:1", local),                 // ::1
+            ("0:0:0:0:0:0:0:1", local),         // ::1
+            ("0:0:0:0:0:ffff:7f00:1", priv),    // ::ffff:127.0.0.1 — mapped, so the IPv4 table applies
+            ("::ffff:c0a8:101", priv),          // ::ffff:192.168.1.1
+        ]
+        for (host, expected) in cases {
+            assertRefused("http://[\(host)]/x", expected)
+        }
+    }
+
+    /// A zone id must not be able to disguise a link-local address — the resolver honours scopes.
+    func testZoneIdDoesNotDisguiseLinkLocal() {
+        assertRefused("http://[fe80::1%25en0]/x", priv)
+    }
+
+    /// The two IPv4 readings disagree here, and each row is private under exactly ONE of them.
+    /// Consulting both is what makes the guard fail closed; consulting either alone fails open on
+    /// one of these.
+    func testBothIpv4ReadingsAreConsulted() {
+        assertRefused("http://010.0.0.1/", priv)  // decimal 10.0.0.1 (what getaddrinfo dials); inet_aton says 8.0.0.1
+        assertRefused("http://0177.0.0.1/", priv) // inet_aton 127.0.0.1; decimal says 177.0.0.1
+    }
+
+    /// The parse must not over-block: these are public under BOTH readings.
+    func testNonCanonicalPublicSpellingsStayAllowed() {
+        for host in ["16843009", "0x08080808", "8.8.8.8", "134744072", "1.1", "223.255.255.255"] {
+            assertAllowed("http://\(host)/x")
+        }
+    }
+
+    /// Ordinary names are not addresses and fall through to DNS, untouched by any of the numeric
+    /// machinery.
+    func testNameHostsFallThroughToTheNameChecks() {
+        for host in ["example.com", "notanaddress", "8.8.8.8.nip.io", "2021.example.com",
+                     "08.example.com"] {
+            assertAllowed("http://\(host)/x")
+        }
+    }
+
+    /// WHATWG refuses a host whose LAST label looks numeric but does not parse as IPv4 — it never
+    /// lets one fall through to DNS. Foundation happily treats every one of these as a name, so the
+    /// rule has to be ported explicitly or the two engines disagree.
+    func testNumericLookingHostsThatAreNotAddressesAreInvalid() {
+        for host in ["999.999.999.999", "1.2.3.4.5", "1..2",
+                     "12345678901234567890",  // overflows 32 bits — `inet_aton` would WRAP to 235.31.10.210
+                     "4294967296",            // 2^32 exactly — `inet_aton` would WRAP to 0.0.0.0
+                     "0x1c0a80101"] {         // 2^32 + 192.168.1.1 — `inet_aton` would WRAP to the router
+            XCTAssertEqual(ssrfGuard("http://\(host)/x"), "invalid url: http://\(host)/x",
+                           "expected an invalid-url refusal for \(host)")
+        }
+    }
+
+    /// WHATWG reads a bare `0x` as zero, so the host is `0.0.0.0`.
+    func testBareHexPrefixIsZero() {
+        assertRefused("http://0x/x", local)
+    }
+
+    /// Digits outside the radix a leading `0` implies make the whole URL invalid in WHATWG, even
+    /// though the decimal reading would be a perfectly ordinary public address.
+    func testLeadingZeroWithNonOctalDigitsIsInvalid() {
+        for host in ["08.8.8.8", "0128.0.0.1", "0192.167.1.1"] {
+            XCTAssertEqual(ssrfGuard("http://\(host)/x"), "invalid url: http://\(host)/x")
+        }
+    }
+
     // MARK: ordinary public hosts
 
     func testOrdinaryPublicHostsAreAllowed() {
