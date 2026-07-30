@@ -2,6 +2,7 @@ import { z } from "zod";
 import { cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SessionEvent } from "../src/events";
+import { buildCleanerVectorsFixture, buildDangerousDomainsFixture } from "./parity-fixtures";
 
 const outDir = join(import.meta.dir, "..", "generated");
 const fixDir = join(outDir, "fixtures");
@@ -135,9 +136,32 @@ for (const [name, value] of Object.entries(fixtures)) {
   writeFileSync(join(fixDir, `${name}.json`), JSON.stringify(value, null, 2));
 }
 
-// 3. Sync fixtures into the Swift test bundle.
+// 2b. Cross-language parity fixtures (Chat Slice D, Task 4) — anchors for the upcoming Swift ports
+// of the shipped dangerous-domain list and the html cleaner (page-core.ts's htmlToText/renderLines
+// pipeline). Both values are COMPUTED from the live TS implementations at generate time (never
+// hand-copied) via packages/protocol/scripts/parity-fixtures.ts, the ONE place that imports across
+// the protocol->core boundary — see that file's own doc comment for why that's safe here.
+// Written into the SAME fixtures/ directory as the SessionEvent fixtures above, but deliberately
+// NOT added to the `fixtures` map itself and NOT swept into the Swift NormaProtocol test bundle
+// below: RoundTripTests.swift decodes EVERY .json file it finds under Fixtures/ as a SessionEvent
+// and asserts an exact count of 56 — these two are a different shape entirely, so the sync step
+// below now copies the SessionEvent set explicitly (never a blanket directory copy) to keep that
+// gate byte-for-byte unchanged. A later task wires these two into their own Swift consumer.
+writeFileSync(join(fixDir, "dangerous-domains.json"), JSON.stringify(buildDangerousDomainsFixture(), null, 2));
+const cleanerVectors = buildCleanerVectorsFixture();
+writeFileSync(join(fixDir, "cleaner-vectors.json"), JSON.stringify(cleanerVectors, null, 2));
+
+// 3. Sync fixtures into the Swift test bundle — the SessionEvent per-variant fixtures ONLY (see
+// the comment above): a blanket directory copy would also carry dangerous-domains.json/
+// cleaner-vectors.json into RoundTripTests.swift's Fixtures/, which decodes every file there as a
+// SessionEvent and hard-asserts a count of 56.
 const swiftFixDir = join(import.meta.dir, "..", "..", "..", "apple", "NormaProtocol", "Tests", "NormaProtocolTests", "Fixtures");
 rmSync(swiftFixDir, { recursive: true, force: true }); // delete-then-copy: no orphaned fixtures after variant renames
 mkdirSync(swiftFixDir, { recursive: true });
-cpSync(fixDir, swiftFixDir, { recursive: true });
-console.log(`generated: schema + ${Object.keys(fixtures).length} fixtures (synced to Swift test bundle)`);
+for (const name of Object.keys(fixtures)) {
+  cpSync(join(fixDir, `${name}.json`), join(swiftFixDir, `${name}.json`));
+}
+console.log(
+  `generated: schema + ${Object.keys(fixtures).length} fixtures (synced to Swift test bundle) + ` +
+    `dangerous-domains (${buildDangerousDomainsFixture().length} entries) + cleaner-vectors (${cleanerVectors.length} vectors)`,
+);
