@@ -27,6 +27,13 @@ final class SSRFResolverSweepTests: XCTestCase {
         let corpus = Self.mechanicalCorpus()
         // The corpus must be large and must exercise BOTH branches, or the invariant is vacuous.
         XCTAssertGreaterThan(corpus.count, 400, "corpus too small to be a meaningful sweep")
+        // …and it must really contain the UTS-46 class, whose whole point is that reading the host as
+        // written and reading it as Foundation parses it give different answers.
+        let mappingClass = corpus.filter { $0.contains("%") || $0.unicodeScalars.contains { !$0.isASCII } }
+        XCTAssertGreaterThan(mappingClass.count, 100, "the UTS-46 spellings are missing from the corpus")
+        XCTAssertTrue(mappingClass.contains { host in
+            Self.resolutionTargets(host).count > 1 && Self.forResolution(host) != Self.resolutionTargets(host)[1]
+        }, "no corpus host has two distinct resolution readings — the mapping check would be vacuous")
 
         var allowed = 0
         var refused = 0
@@ -38,8 +45,10 @@ final class SSRFResolverSweepTests: XCTestCase {
                 continue
             }
             allowed += 1
-            for addr in Self.numericResolve(Self.forResolution(host)) where Self.isPrivateAddress(addr) {
-                holes.append("http://\(host)/  ALLOWED but resolves to \(addr)")
+            for target in Self.resolutionTargets(host) {
+                for addr in Self.numericResolve(target) where Self.isPrivateAddress(addr) {
+                    holes.append("http://\(host)/  ALLOWED but \(target) resolves to \(addr)")
+                }
             }
         }
 
@@ -80,7 +89,7 @@ final class SSRFResolverSweepTests: XCTestCase {
             (172, 15, 0, 1), (172, 32, 0, 1), (192, 167, 1, 1), (192, 169, 1, 1),
             (169, 253, 0, 1), (169, 255, 0, 1),
         ]
-        for octets in privateV4 + publicV4 { hosts += ipv4Spellings(octets) }
+        for octets in privateV4 + publicV4 { hosts += ipv4Spellings(octets) + uts46Spellings(octets) }
 
         // IPv6 — private literals (refused) and public ones (allowed), each expanded mechanically.
         let privateV6 = ["::1", "::", "fe80::1", "fe90::1", "febf::1", "fc00::1", "fdff:ffff::1"]
@@ -119,6 +128,39 @@ final class SSRFResolverSweepTests: XCTestCase {
         ]
     }
 
+    /// The UTS-46 MAPPING class, derived rather than enumerated (chat-d T6c). `Foundation.URL` applies the
+    /// mapping step, so `URL.host` — the string `ssrfGuard` judges AND the string the transport dials
+    /// (`SSRFHostMappingTests` pins both halves) — comes back as ASCII. That makes these spellings safe
+    /// TODAY, and it is exactly the kind of "safe because of something two layers away" that wants a
+    /// mechanical gate rather than a comment: if Foundation ever stops mapping, every one of these becomes a
+    /// host the guard cannot parse and the resolver can, and this sweep is what notices.
+    ///
+    /// Both the leading-zero (ambiguous, `010` → decimal 10 on Darwin) and plain forms are generated, since
+    /// the leading-zero reading is the one WHATWG and the resolver disagree about.
+    private static func uts46Spellings(_ octets: (UInt32, UInt32, UInt32, UInt32)) -> [String] {
+        let (a, b, c, d) = octets
+        /// ASCII digits → their FULLWIDTH counterparts (U+FF10…U+FF19).
+        func wide(_ s: String) -> String {
+            String(String.UnicodeScalarView(s.unicodeScalars.map {
+                ($0.value >= 48 && $0.value <= 57) ? Unicode.Scalar($0.value - 48 + 0xFF10)! : $0
+            }))
+        }
+        func pct(_ s: String) -> String { s.utf8.map { String(format: "%%%02X", $0) }.joined() }
+
+        var out: [String] = []
+        for head in ["\(a)", "0\(a)", "00\(a)"] {
+            let quad = "\(head).\(b).\(c).\(d)"
+            out.append(wide(head) + ".\(b).\(c).\(d)") // fullwidth digits, ASCII separators
+            out.append(wide(quad).replacingOccurrences(of: ".", with: "\u{FF61}")) // fullwidth throughout
+            for separator in ["\u{3002}", "\u{FF0E}", "\u{FF61}"] { // the three alternate full stops
+                out.append(quad.replacingOccurrences(of: ".", with: separator))
+            }
+            out.append(pct(wide(head)) + ".\(b).\(c).\(d)") // percent-encoded UTF-8 of the fullwidth head
+            out.append(pct(wide(quad).replacingOccurrences(of: ".", with: "\u{FF61}"))) // …and of the whole host
+        }
+        return out
+    }
+
     private static func ipv6Spellings(_ literal: String) -> [String] {
         var out = [literal, "[\(literal)]", "[\(literal.uppercased())]"]
         var bytes = [UInt8](repeating: 0, count: 16)
@@ -131,6 +173,40 @@ final class SSRFResolverSweepTests: XCTestCase {
     }
 
     // MARK: - the resolver oracle
+
+    /// EVERY string a dialler could plausibly resolve for this corpus entry:
+    ///
+    ///  1. the host AS WRITTEN (brackets/trailing dot stripped) — what a client that does no mapping sees;
+    ///  2. the host AS `Foundation.URL` PARSES IT — which is both what `ssrfGuard` judges and, per
+    ///     `SSRFHostMappingTests`, what `URLSession` actually connects to today;
+    ///  3. the host UTS-46-MAPPED BY THIS TEST — an INDEPENDENT second implementation of the mapping step,
+    ///     and the only reading that survives the failure this sweep has to be able to see. If a future
+    ///     Foundation stops mapping, readings (1) and (2) collapse to the same unmappable string and both go
+    ///     quiet, while CFNetwork (a different library) keeps mapping and keeps dialling — so without (3)
+    ///     the sweep would report no hole for exactly the regression it exists to catch. VERIFIED BY
+    ///     MUTATION: a guard made mapping-blind (reading the authority out of the raw string instead of
+    ///     `URL.host`) goes from 0 holes to **168**, e.g. `http://000｡1｡2｡3/ ALLOWED but 000.1.2.3 resolves
+    ///     to 0.1.2.3`. Shipped: corpus 1045, allowed 407, refused 638, holes 0.
+    ///
+    /// Reading (3) deliberately does NOT percent-decode first, because the transport does not either: a
+    /// percent-encoded fullwidth host is dialled as written and fails to resolve (measured: -1003), so it is
+    /// not a hole. Modelling the mapping more eagerly than the transport does would manufacture false ones.
+    private static func resolutionTargets(_ host: String) -> [String] {
+        var targets = [forResolution(host)]
+        for candidate in [URL(string: "http://\(host)/x")?.host(percentEncoded: false),
+                          uts46Mapped(forResolution(host))] {
+            if let candidate, !candidate.isEmpty, !targets.contains(candidate) { targets.append(candidate) }
+        }
+        return targets
+    }
+
+    /// UTS-46's mapping step, independently: NFKC (which folds the fullwidth and superscript digit forms, and
+    /// U+FF0E/U+FF61) plus the explicit fold of U+3002, which is NFKC-stable.
+    private static func uts46Mapped(_ host: String) -> String {
+        host.precomposedStringWithCompatibilityMapping
+            .replacingOccurrences(of: "\u{3002}", with: ".")
+            .lowercased()
+    }
 
     /// Strip the brackets/zone the corpus carries for the guard so `getaddrinfo` sees a bare host.
     private static func forResolution(_ host: String) -> String {

@@ -96,30 +96,28 @@ private func compile(_ pattern: String) -> NSRegularExpression {
     return re
 }
 
+/// WHAT IS **NOT** HERE, and must never come back (chat-d T6c, mirroring `web.ts` fix rounds 1-3):
+/// every pattern whose unbounded quantifier is followed by a required `>` — the whole open-tag class.
+/// Their reference spellings live in the doc comments of the scanners that replaced them, deliberately
+/// as prose rather than as compiled constants:
+///
+///     /<a\s[^>]*href="([^"]+)"[^>]*>/gi   -> scanAnchorOpens    (was Patterns.anchorOpen, CUBIC)
+///     /<h([1-6])[^>]*>/gi                -> scanHeadingOpens   (was Patterns.headingOpen)
+///     /<li\b[^>]*>/gi                    -> replaceListItems   (was Patterns.listItem)
+///     /<h1[^>]*>([\s\S]*?)<\/h1>/i       -> firstElementInner  (was Patterns.firstH1)
+///     /<title[^>]*>([\s\S]*?)<\/title>/i -> firstElementInner  (was Patterns.firstTitle)
+///     /<[^>]+>/g                         -> stripTags          (was Patterns.anyTag, unused)
 private enum Patterns {
-    /// `/<a\s[^>]*href="([^"]+)"[^>]*>/gi`. `([^"]+)` may legitimately span a `>` — that is the
-    /// backtracking behaviour PRICE-OF-LINEARITY class (B) is pinned on, and ICU reproduces it.
-    static let anchorOpen = compile("<[Aa]\(jsWS)[^>]*[Hh][Rr][Ee][Ff]=\"([^\"]++)\"[^>]*+>")
-    /// `/<h([1-6])[^>]*>/gi`
-    static let headingOpen = compile("<[Hh]([1-6])[^>]*+>")
     /// `/<\/h([1-6])>/gi`
     static let headingClose = compile("</[Hh]([1-6])>")
-    /// `/<li\b[^>]*>/gi` — see the `\b` note in this file's header.
-    static let listItem = compile("<[Ll][Ii](?![0-9A-Za-z_])[^>]*+>")
-    /// `/<br\s*\/?>/gi`
+    /// `/<br\s*\/?>/gi` — `\s*` can only consume WHITESPACE and it sits behind a required non-whitespace
+    /// literal, so the runs it consumes across candidates are disjoint: linear, not quadratic. (The same
+    /// proof the TS tripwire's whitespace exemption records.)
     static let lineBreak = compile("<[Bb][Rr]\(jsWS)*/?>")
     /// `/<\/(p|div|h[1-6]|li|tr)>/gi`
     static let closingBlock = compile("</([Pp]|[Dd][Ii][Vv]|[Hh][1-6]|[Ll][Ii]|[Tt][Rr])>")
-    /// `/<[^>]+>/g` — kept only as the reference spelling. The pass itself runs through
-    /// `stripTags`, which is exactly equivalent and linear; see that function.
-    static let anyTag = compile("<[^>]++>")
     /// `/\n+/g` — the collapse `extractTitle` / link-text extraction apply.
     static let newlineRun = compile("\n+")
-    /// `/<h1[^>]*>([\s\S]*?)<\/h1>/i` — deliberately the LAZY form, exactly as the TS keeps it: it
-    /// runs once (first match only), so there is no quadratic multi-open scan to linearize.
-    static let firstH1 = compile("<[Hh]1[^>]*>([\\s\\S]*?)</[Hh]1>")
-    /// `/<title[^>]*>([\s\S]*?)<\/title>/i`
-    static let firstTitle = compile("<[Tt][Ii][Tt][Ll][Ee][^>]*>([\\s\\S]*?)</[Tt][Ii][Tt][Ll][Ee]>")
 }
 
 /// The bare, `>`-less open tokens the TS uses for script/style/head. Deliberately NOT `<script[^>]*>`
@@ -134,12 +132,279 @@ private enum Literals {
     static let headClose = Array("</head>".utf16)
     /// `/<\/a>/gi` — deliberately not whitespace-tolerant, matching the TS literal exactly.
     static let anchorClose = Array("</a>".utf16)
+    /// The `href="` the anchor scan searches for, lowercase (the scan folds A-Z as JS's `i` flag does).
+    static let hrefOpen = Array("href=\"".utf16)
 }
 
 // MARK: - scanning primitives
 
+private let ltUnit: UInt16 = 0x3C // "<"
+private let gtUnit: UInt16 = 0x3E // ">"
+private let quoteUnit: UInt16 = 0x22 // '"'
+
+/// Exactly `jsWhitespaceScalars` as UTF-16 code units — every member is BMP, so one unit each.
+private let jsWhitespaceUnits: Set<UInt16> = Set(jsWhitespaceScalars.utf16)
+
 @inline(__always) private func asciiFold(_ unit: UInt16) -> UInt16 {
     (unit >= 65 && unit <= 90) ? unit + 32 : unit
+}
+
+@inline(__always) private func isJsWhitespace(_ unit: UInt16) -> Bool { jsWhitespaceUnits.contains(unit) }
+
+/// JS `\w` == `[0-9A-Za-z_]` (ICU's includes Unicode letters) — the `\b` in `/<li\b/` spelled out.
+@inline(__always) private func isJsWordUnit(_ unit: UInt16) -> Bool {
+    (unit >= 48 && unit <= 57) || (unit >= 65 && unit <= 90) || (unit >= 97 && unit <= 122) || unit == 95
+}
+
+// ---------------------------------------------------------------------------------------------
+// THE OPEN-TAG SCAN CLASS, and the primitive that closes it.
+//
+// Ported from `packages/core/src/agent/tools/web.ts` (Task 6b fix rounds 1-3, which needed three
+// rounds because each one fixed the instances it was handed). THE CLASS: a pattern with an unbounded
+// quantifier (`[^>]*`, `[^"]+`) followed by a REQUIRED `>` is quadratic on input where that `>` never
+// arrives — at every candidate start position the engine consumes to end-of-string and then fails. The
+// anchor pattern stacked THREE unbounded quantifiers on one span, which is CUBIC. Possessive
+// quantifiers (`[^>]*+`, which is what this file used) remove the futile BACKTRACKING but not the
+// forward re-scan; this file's own note that possessive "only bought ~25%" applies verbatim, and ICU's
+// constant is far larger than V8's. On the daemon the same shapes cost 13.2 s of blocked event loop on
+// a 14.6 KB page, charged TWICE per fetch (the cleaner's anchor pass AND the link extractor) — and the
+// phone carries the identical double charge through `convertAnchors` + `anchorSpans`.
+//
+// THE FIX IS STRUCTURAL. Every open-tag pattern is now (a) a quantifier-free candidate test — a
+// hand-written ASCII scan rather than a regex, because ICU would allocate an `NSTextCheckingResult` per
+// candidate and the case/whitespace classes have to be JS's anyway — plus (b) a scan bounded by a
+// monotonic `>` pointer that never rewinds.
+//
+// THE BOUND IS THE LOAD-BEARING HALF (review of TS fix round 3, Critical 3). The intermediate TS
+// version advanced a scan pointer but left the `href="` SEARCH unbounded, which made ORDINARY markup
+// quadratic — `<a name="sN">Section</a>` repeated cost 12.13 s at 510 KB against 0.32 ms for the regex
+// it replaced, on a page nobody would call adversarial. `scanAnchorOpens` below passes the span end as
+// an upper bound to that search; that alone makes the examined regions disjoint across spans.
+
+/// The shared primitive: the first `>` at or after `at`, or -1 when none remains.
+///
+/// CONTRACT: `at` must be non-decreasing across calls on one finder. Every caller scans candidates left
+/// to right, so this holds. It is what makes the whole scan linear — the pointer crosses the document
+/// once in total, not once per candidate. It is also why the cached answer stays CORRECT when two
+/// candidates share a span: if there is no `>` in `[a1, g)` then there is none in `[a2, g)` for any
+/// `a2 > a1`.
+private struct GtFinder {
+    private let units: [UInt16]
+    private var ptr = 0
+
+    init(_ units: [UInt16]) { self.units = units }
+
+    mutating func next(_ at: Int) -> Int {
+        if ptr < at { ptr = at }
+        while ptr < units.count, units[ptr] != gtUnit { ptr += 1 }
+        return ptr >= units.count ? -1 : ptr
+    }
+}
+
+/// ASCII-case-insensitive `indexOf` over `[from, until)`. `needleLower` must already be lowercase ASCII.
+///
+/// `until` is not politeness: an unbounded search followed by a required terminator is the same defect
+/// whether a regex engine or a hand-written loop performs it (review Critical 3). Callers that run once
+/// per DOCUMENT may pass `units.count`; a caller that runs once per CANDIDATE must pass the bound its
+/// answer could possibly come from.
+private func indexOfAsciiCI(_ units: [UInt16], _ needleLower: [UInt16], from: Int, until: Int) -> Int {
+    let n = min(until, units.count)
+    let m = needleLower.count
+    guard m > 0 else { return max(0, from) }
+    var i = max(0, from)
+    while i + m <= n {
+        var k = 0
+        while k < m, asciiFold(units[i + k]) == needleLower[k] { k += 1 }
+        if k == m { return i }
+        i += 1
+    }
+    return -1
+}
+
+private func indexOfUnit(_ units: [UInt16], _ unit: UInt16, from: Int) -> Int {
+    var i = max(0, from)
+    while i < units.count {
+        if units[i] == unit { return i }
+        i += 1
+    }
+    return -1
+}
+
+/// `/<h([1-6])[^>]*>/gi`, linearly. `[^>]*` cannot cross a `>`, so the match ends at the FIRST `>` at or
+/// after the candidate token — there is nothing to search for that the pointer does not already know.
+/// No `>` after a candidate means no match for it or for any later one, hence the early return.
+///
+/// `internal`, not `private`, only so the tuple differential can compare it against the regex it
+/// replaced. Not part of any public surface.
+func scanHeadingOpens(_ text: Utf16Text) -> [TagOpen] {
+    let units = text.units
+    let n = units.count
+    var opens: [TagOpen] = []
+    var finder = GtFinder(units)
+    var i = 0
+    while i + 3 <= n {
+        guard units[i] == ltUnit, asciiFold(units[i + 1]) == 0x68 /* h */,
+              units[i + 2] >= 0x31, units[i + 2] <= 0x36 /* 1-6 */ else {
+            i += 1 // exactly what a failed `exec` candidate does: advance one position
+            continue
+        }
+        let gt = finder.next(i + 3)
+        if gt < 0 { break }
+        opens.append(TagOpen(start: i, end: gt + 1, capture: text.slice(i + 2, i + 3)))
+        i = gt + 1 // the global regex's own `lastIndex` jump past the match
+    }
+    return opens
+}
+
+/// `/<a\s[^>]*href="([^"]+)"[^>]*>/gi`, linearly — the cubic one, and the only site whose equivalence is
+/// not obvious, so here is the whole derivation (it is the TS's, verified there against the real regex on
+/// 500,000 randomized documents as full `(start, end, capture)` tuple lists, and re-verified here).
+///
+/// For a candidate `<a` + one `\s` at `i` (token ending at `i+3`):
+///
+///  1. `[^>]*` cannot cross a `>`, so `href="` must lie entirely inside `[i+3, spanEnd)` where `spanEnd`
+///     is the first `>` at or after `i+3`. No `>` at all after `i+3` ⇒ no match here or later ⇒ stop.
+///  2. `([^"]+)` cannot match a `"`, and backtracking it to a shorter run would need a `"` where there
+///     is none — so the value is EXACTLY the text from after `href="` to the NEXT `"`, and that `"` must
+///     exist. It may legitimately cross a `>`; that is PRICE-OF-LINEARITY class (B) (`<a href="href=">`),
+///     pinned as a cleaner vector, and reproduced here.
+///  3. The trailing `[^>]*>` then needs a `>` after that closing quote — necessarily the FIRST one.
+///  4. The leading `[^>]*` is GREEDY, so the engine tries `href="` occurrences RIGHT TO LEFT and takes
+///     the first that completes 2-3: the winner is the RIGHTMOST VIABLE occurrence, where "viable" means
+///     it has a closing `"` and a `>` after that quote — neither of which depends on `i`.
+///
+/// That last point is what makes this O(1) per candidate: viability is a property of the SPAN, so the
+/// rightmost viable occurrence is computed once per span and candidates sharing a span reuse it.
+func scanAnchorOpens(_ text: Utf16Text) -> [TagOpen] {
+    let units = text.units
+    let n = units.count
+    var opens: [TagOpen] = []
+    var spanFinder = GtFinder(units)
+    var quoteGtFinder = GtFinder(units)
+
+    var cachedSpanEnd = -1 // the span the cache below describes
+    var bestHref = -1 // rightmost VIABLE `href="` in that span, or -1
+    var bestQuote = -1 // its closing `"`
+    var bestEnd = -1 // its match end (first `>` after that quote, +1)
+    var hrefScanFrom = 0 // monotonic; belt-and-braces next to the `until` bound below
+
+    var i = 0
+    while i + 3 <= n {
+        guard units[i] == ltUnit, asciiFold(units[i + 1]) == 0x61 /* a */,
+              isJsWhitespace(units[i + 2]) else {
+            i += 1
+            continue
+        }
+        let start = i
+        let tokenEnd = i + 3 // just past `<a` + the one whitespace unit
+        let spanEnd = spanFinder.next(tokenEnd)
+        if spanEnd < 0 { break } // no `>` after this candidate, nor after any later one
+
+        if spanEnd != cachedSpanEnd {
+            cachedSpanEnd = spanEnd
+            bestHref = -1
+            bestQuote = -1
+            bestEnd = -1
+            var p = max(hrefScanFrom, tokenEnd)
+            while p + 6 <= spanEnd {
+                // BOUNDED BY `spanEnd`. Without the bound this search runs forward past the span — to
+                // the next `href="` anywhere in the document, or to the end — and the result is then
+                // thrown away by the range test below, so the next href-less span re-walks the same
+                // ground. That is quadratic on ORDINARY markup with no hostile input at all. An
+                // occurrence at or past `spanEnd` can never be viable for this span, so there was never
+                // a reason to look there.
+                let at = indexOfAsciiCI(units, Literals.hrefOpen, from: p, until: spanEnd)
+                if at < 0 { break }
+                // `quote > at + 6` because `([^"]+)` needs at least ONE character: `href=""` does not
+                // match, and the engine then keeps backtracking to an EARLIER occurrence rather than
+                // giving up — so an empty value simply is not viable.
+                let quote = indexOfUnit(units, quoteUnit, from: at + 6)
+                if quote > at + 6 {
+                    let gt = quoteGtFinder.next(quote + 1)
+                    if gt >= 0 { // keep the RIGHTMOST viable
+                        bestHref = at
+                        bestQuote = quote
+                        bestEnd = gt + 1
+                    }
+                }
+                p = at + 1 // occurrences may overlap (`href="href="`), so advance by one
+            }
+            hrefScanFrom = spanEnd
+        }
+
+        if bestHref < tokenEnd || bestEnd < 0 {
+            i = tokenEnd // `exec`'s `lastIndex` after a candidate that did not complete a match
+            continue
+        }
+        opens.append(TagOpen(start: start, end: bestEnd, capture: text.slice(bestHref + 6, bestQuote)))
+        if bestEnd >= n { break }
+        i = bestEnd // the global regex's own jump past the match
+    }
+    return opens
+}
+
+/// `html.replace(/<li\b[^>]*>/gi, "\n- ")` as a monotonic forward scan — the SAME bug and the same fix
+/// as `stripTags`, and measurably worse per byte than it on the daemon (54 s at 781 KB there).
+///
+/// Equivalence: `[^>]*` cannot cross a `>`, so the match at a given `<li` open ends at the FIRST `>` at
+/// or after the open token. `copied` reproduces the global replace's own jump past each match (so a
+/// `<li` nested inside an already-consumed match is not separately matched), and the early exit is what
+/// makes the worst case cheap: if no `>` follows this open, none follows any later one either.
+func replaceListItems(_ text: Utf16Text) -> String {
+    let units = text.units
+    let n = units.count
+    var out = ""
+    out.reserveCapacity(text.string.utf8.count)
+    var copied = 0
+    var gtPtr = 0 // monotonic — never rewinds across the whole scan
+    var i = 0
+    while i + 3 <= n {
+        guard units[i] == ltUnit, asciiFold(units[i + 1]) == 0x6C /* l */,
+              asciiFold(units[i + 2]) == 0x69 /* i */ else {
+            i += 1
+            continue
+        }
+        let tokenEnd = i + 3 // just past `<li`
+        // `\b`: the preceding character is always `i`, a JS word character, so the boundary holds iff the
+        // next character is a non-word one — or the string ends, where the original then fails for want
+        // of a `>`, as does this scan.
+        if tokenEnd < n, isJsWordUnit(units[tokenEnd]) {
+            i += 1
+            continue
+        }
+        if gtPtr < tokenEnd { gtPtr = tokenEnd }
+        while gtPtr < n, units[gtPtr] != gtUnit { gtPtr += 1 }
+        if gtPtr >= n { break } // no ">" after this open, nor after any later one
+        out += text.slice(copied, i) + "\n- "
+        copied = gtPtr + 1
+        i = copied
+    }
+    out += text.slice(copied, n)
+    return out
+}
+
+/// `html.match(/<TAG[^>]*>([\s\S]*?)<\/TAG>/i)?.[1]` — the first such element's inner text, or `nil` when
+/// the regex would not have matched at all — as a BOUNDED forward scan.
+///
+/// Why only the FIRST `<TAG` occurrence needs looking at (this is where the daemon's O(n²) came from: the
+/// regex is non-global, but a FAILING match still retries at every `<h1` position). For a candidate open
+/// at `i`, `[^>]*` cannot cross a `>`, so the open tag's end is FORCED to the first `>` at or after
+/// `i + 1 + tag.count` — the engine can never backtrack to a different one. And the first `>` after a
+/// LATER candidate is at or after that same position, so if no `</TAG>` exists after the first
+/// candidate's `>`, none exists after any later candidate's either. The first candidate decides the whole
+/// match: no loop, no retry, no re-scan.
+///
+/// The two `indexOfAsciiCI` calls here deliberately keep the whole-document bound: they run once per
+/// document, not once per candidate.
+func firstElementInner(_ text: Utf16Text, _ tag: String) -> String? {
+    let units = text.units
+    let open = indexOfAsciiCI(units, Array("<\(tag)".utf16), from: 0, until: units.count)
+    if open < 0 { return nil }
+    let openEnd = indexOfUnit(units, gtUnit, from: open + tag.utf16.count + 1)
+    if openEnd < 0 { return nil }
+    let close = indexOfAsciiCI(units, Array("</\(tag)>".utf16), from: openEnd + 1, until: units.count)
+    if close < 0 { return nil }
+    return text.slice(openEnd + 1, close)
 }
 
 /// Non-overlapping, ASCII-case-insensitive literal scan — the JS `/literal/gi` `exec` loop, whose
@@ -160,19 +425,6 @@ private func findLiteral(_ needle: [UInt16], in haystack: [UInt16]) -> [Int] {
         }
     }
     return hits
-}
-
-private func matchOpens(_ re: NSRegularExpression, _ text: Utf16Text) -> [TagOpen] {
-    re.matches(in: text.string, options: [], range: text.fullRange).map { m in
-        let capture: String
-        if m.numberOfRanges > 1, m.range(at: 1).location != NSNotFound {
-            let r = m.range(at: 1)
-            capture = text.slice(r.location, r.location + r.length)
-        } else {
-            capture = ""
-        }
-        return TagOpen(start: m.range.location, end: m.range.location + m.range.length, capture: capture)
-    }
 }
 
 /// The shared linear mechanism behind the four same-tag-name passes (script/style/head/anchor) —
@@ -232,7 +484,7 @@ private func convertHeadings(_ html: String) -> String {
         if (1 ... 6).contains(level) { closesByLevel[level].append(m.range.location) }
     }
 
-    let opens = matchOpens(Patterns.headingOpen, text)
+    let opens = scanHeadingOpens(text)
     guard !opens.isEmpty else { return text.string }
 
     var pointers = [Int](repeating: 0, count: 7)
@@ -262,7 +514,7 @@ private func convertHeadings(_ html: String) -> String {
 
 private func convertAnchors(_ html: String) -> String {
     let text = Utf16Text(html)
-    let opens = matchOpens(Patterns.anchorOpen, text)
+    let opens = scanAnchorOpens(text)
     let closes = findLiteral(Literals.anchorClose, in: text.units)
         .map { TagClose(start: $0, end: $0 + Literals.anchorClose.count) }
     return replacePaired(text, opens: opens, closes: closes) { open, inner in "\(inner) (\(open.capture))" }
@@ -283,19 +535,16 @@ private func convertAnchors(_ html: String) -> String {
 /// it only bought ~25%. Measured on 20,000 unterminated `<script x` tokens (180 KB) in debug:
 /// **36 s greedy → 27 s possessive → 3 ms here.**
 ///
-/// This is a deliberate, disclosed PERFORMANCE-ONLY divergence from `web.ts`, which still has the
-/// quadratic form (measured 2.1 s on the same input under V8 — same O(n²), a ~17x smaller constant
-/// than ICU's, which is why it has not bitten the daemon as hard). Output is byte-identical: the 14
-/// cleaner vectors and the 28,000-case differential against the live TS both pass unchanged. Worth
-/// porting BACK to `web.ts` — see the fix-round notes in task-6-report.md.
+/// This WAS a disclosed PERFORMANCE-ONLY divergence from `web.ts`, which had the quadratic form
+/// (measured 2.1 s on the same input under V8 — same O(n²), a ~17x smaller constant than ICU's, which is
+/// why it bit the daemon less hard). It is no longer a divergence: Task 6b ported this function BACK to
+/// `web.ts`, whose own `stripTags` doc comment now credits this one. Output is byte-identical: the 14
+/// cleaner vectors and the 28,000-case differential against the live TS both pass unchanged.
 ///
 /// The single early exit (`no '>' anywhere after here`) is what makes the worst case cheap: if no
 /// `>` remains, no match can start at this position or any later one.
 func stripTags(_ text: Utf16Text) -> String {
     let units = text.units
-    let lt: UInt16 = 0x3C // "<"
-    let gt: UInt16 = 0x3E // ">"
-
     var out = ""
     out.reserveCapacity(text.string.utf8.count)
     var copied = 0
@@ -303,12 +552,12 @@ func stripTags(_ text: Utf16Text) -> String {
     var gtPtr = 0 // monotonic — never rewinds across the whole scan
 
     while i < units.count {
-        guard units[i] == lt else {
+        guard units[i] == ltUnit else {
             i += 1
             continue
         }
         if gtPtr <= i { gtPtr = i + 1 }
-        while gtPtr < units.count, units[gtPtr] != gt { gtPtr += 1 }
+        while gtPtr < units.count, units[gtPtr] != gtUnit { gtPtr += 1 }
         if gtPtr >= units.count { break } // no close anywhere after this "<" — nothing more can match
         if gtPtr > i + 1 { // `[^>]+` needs at least one character, so "<>" is not a tag
             out += text.slice(copied, i)
@@ -342,7 +591,7 @@ public func htmlToText(_ html: String) -> String {
     out = convertHeadings(out)
     out = convertAnchors(out)
 
-    out = replaceAll(Patterns.listItem, in: out, with: "\n- ")
+    out = replaceListItems(Utf16Text(out)) // == .replace(/<li\b[^>]*>/gi, "\n- "), linear — see replaceListItems
     out = replaceAll(Patterns.lineBreak, in: out, with: "\n")
     out = replaceAll(Patterns.closingBlock, in: out, with: "\n")
     out = stripTags(Utf16Text(out)) // == replace(/<[^>]+>/g, ""), linear — see stripTags
@@ -374,17 +623,16 @@ public func htmlToTextLines(_ html: String) -> [String] {
     htmlToText(html).components(separatedBy: "\n")
 }
 
-/// TS `page-core.ts`'s own small `extractTitle` (h1, else `<title>`, run through the cleaner and
-/// collapsed to one line). `"-"` when neither is present or both clean to nothing.
+/// TS `web.ts`'s `extractTitle` (h1, else `<title>`, run through the cleaner and collapsed to one line).
+/// `"-"` when neither is present or both clean to nothing.
+///
+/// `??` and not `||` is deliberate and preserved from the TS: an h1 that matched but captured the EMPTY
+/// string short-circuits to `"-"` rather than falling through to `<title>`, because `""` is not nullish
+/// in JS and `""` is not `nil` here.
 func extractTitle(_ html: String) -> String {
-    let range = NSRange(location: 0, length: html.utf16.count)
-    let match = Patterns.firstH1.firstMatch(in: html, options: [], range: range)
-        ?? Patterns.firstTitle.firstMatch(in: html, options: [], range: range)
-    guard let match, match.numberOfRanges > 1, match.range(at: 1).location != NSNotFound else { return "-" }
-
     let text = Utf16Text(html)
-    let inner = match.range(at: 1)
-    let collapsed = collapseToOneLine(htmlToText(text.slice(inner.location, inner.location + inner.length)))
+    guard let src = firstElementInner(text, "h1") ?? firstElementInner(text, "title") else { return "-" }
+    let collapsed = collapseToOneLine(htmlToText(src))
     return collapsed.isEmpty ? "-" : collapsed
 }
 
@@ -397,7 +645,7 @@ func collapseToOneLine(_ text: String) -> String {
 /// cleaner uses but has to run on the RAW html (the cleaner rewrites `<a>` into `text (href)` prose
 /// and so destroys the structure a link list needs). ONE pairing implementation, two callers.
 func anchorSpans(_ text: Utf16Text) -> (opens: [TagOpen], closes: [TagClose]) {
-    let opens = matchOpens(Patterns.anchorOpen, text)
+    let opens = scanAnchorOpens(text)
     let closes = findLiteral(Literals.anchorClose, in: text.units)
         .map { TagClose(start: $0, end: $0 + Literals.anchorClose.count) }
     return (opens, closes)

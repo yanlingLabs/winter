@@ -43,15 +43,41 @@ import Foundation
 ///     010.0.0.1        8.0.0.1        10.0.0.1       yes — ONLY under getaddrinfo
 ///     0177.0.0.1       127.0.0.1      177.0.0.1      yes — ONLY under inet_aton
 ///
-/// `getaddrinfo` prefers a DECIMAL reading whenever it is in range (`010` → 10) and falls back to
-/// octal only when decimal would overflow an octet (`0300` → 192); `inet_aton` always takes the C
-/// convention (`010` → 8). A guard consulting either one alone fails OPEN on one of those two rows,
-/// so `ipv4Interpretations` returns both and ANY private reading refuses. That is fail-closed by
-/// construction and costs nothing: a genuinely public address is public under both readings.
+/// A guard consulting either one alone fails OPEN on one of those two rows, so `ipv4Interpretations`
+/// returns both and ANY private reading refuses. That is fail-closed by construction and costs nothing:
+/// a genuinely public address is public under both readings.
 ///
-/// The `010.0.0.1` row also makes this guard deliberately STRICTER than the Mac, which follows
-/// WHATWG's octal reading and allows it. Darwin resolves that host to 10.0.0.1, so the Mac is the
-/// one that is wrong — worth back-porting rather than relaxing here.
+/// WHY IT IS FAIL-CLOSED — the mechanism, corrected (T6b review §1, which measured Darwin directly; this
+/// comment previously described a per-part rule that does not exist). `getaddrinfo` does NOT choose a
+/// radix per part. Darwin's actual rule is: **try a strict four-part all-decimal parse (leading zeros
+/// allowed, every part ≤ 255); if that fails, hand the whole host to `inet_aton`.** Measured:
+///
+///     host              new URL      getaddrinfo   inet_aton
+///     010.0.0.1         8.0.0.1      10.0.0.1      8.0.0.1      <- 4 parts: the decimal quad wins
+///     010.0.1           8.0.0.1      8.0.0.1       8.0.0.1      <- 3 parts: C convention
+///     0172.020.0300.1   122.16.192.1 122.16.192.1  122.16.192.1 <- decimal quad FAILS (300 > 255)
+///     0172.020.192.1    122.16.192.1 172.20.192.1  122.16.192.1 <- decimal quad succeeds
+///
+/// The guard is correct anyway, and for a stronger reason than the old comment gave: the union
+/// `cConvention ∪ decimalOnly` is a strict SUPERSET of Darwin's rule for every part count, so no address
+/// Darwin can reach is missing from the readings this guard checks. `hasInvalidOctalOctet` is NOT what
+/// covers the mixed-radix class — the superset property is. (Verified against a 46,598-host mixed-radix
+/// corpus on the TS side: 0 resolver holes, 0 dial holes.)
+///
+/// The `010.0.0.1` row also makes this guard deliberately STRICTER than WHATWG, which reads the leading
+/// zero as octal. Darwin resolves that host to 10.0.0.1, so WHATWG is the reading that is wrong — the Mac
+/// now refuses it too (T6b added the as-written reading there).
+///
+/// ### UTS-46, and why there is no mapping code here (T6c)
+///
+/// The mapping step is `Foundation`'s, not this guard's: `URL.host(percentEncoded: false)` returns the
+/// MAPPED host, so `http://０１０.0.0.1/` (fullwidth digits) arrives here as `010.0.0.1` and is refused by
+/// the `decimalOnly` reading like any other spelling. `URLSession` dials that same mapped form — verified
+/// with a loopback listener bound to 127.0.0.1 only. The one spelling that survives unmapped is the
+/// PERCENT-ENCODED UTF-8 of those characters, and the transport will not resolve it either (-1003). Both
+/// halves are pinned in `SSRFHostMappingTests`, and `SSRFResolverSweepTests` carries the class
+/// mechanically with an independent mapping oracle, because this guard's correctness DEPENDS on Foundation
+/// continuing to map.
 
 // MARK: - refusal tables
 
@@ -172,6 +198,12 @@ private func parsePart(_ part: String, _ policy: RadixPolicy) -> UInt64? {
 /// larger surface to get wrong); it closes exactly the divergence class the differential found, in
 /// the fail-CLOSED direction, and the differential is what proves it closes that class and no other.
 /// `08.example.com` is untouched, because not every part is digits.
+///
+/// WHAT IT IS *NOT* FOR (T6b review §2a, correcting this file's earlier claim): it is not what makes the
+/// guard safe against `getaddrinfo`'s mixed-radix readings. `0172.020.0300.1` has no `8`/`9` digit, so
+/// this helper says nothing about it; what covers that host is the superset property described in the
+/// header. This helper is a PARITY device — it keeps Foundation's verdict identical to WHATWG's on 38
+/// spellings WHATWG rejects outright — and nothing more.
 private func hasInvalidOctalOctet(_ host: String) -> Bool {
     let parts = host.components(separatedBy: ".")
     guard (1 ... 4).contains(parts.count) else { return false }
