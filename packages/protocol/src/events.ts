@@ -467,6 +467,36 @@ export const SessionEvent = z.discriminatedUnion("type", [
 ]);
 export type SessionEvent = z.infer<typeof SessionEvent>;
 
+/** The seven BROADCAST-ONLY TRANSIENT event types — the canonical, cross-language definition.
+ *
+ *  A transient is fanned out to attached clients by `SessionHub.broadcastTransient` and is NEVER
+ *  appended to the session log: absent from the JSONL, absent from attach replay, absent from
+ *  `session.history`. It is stamped with `seq = the store's CURRENT lastSeq` — the seq of the last
+ *  event actually APPENDED, not one of its own — so on a caught-up client a transient routinely
+ *  arrives at `seq == cursor` (and can even sit BELOW the cursor). Every client therefore MUST
+ *  exempt these from BOTH seq-based dedupe AND lastSeq/cursor advancement (see
+ *  `AssistantDeltaEvent`'s own doc comment for the original statement of that obligation).
+ *
+ *  **Why this constant exists.** The list was hand-copied into four places — `NormaClient.route`
+ *  (Mac), `NormaSessionClient` (phone), its test mirror, and the daemon's remote live-stream
+ *  filter (`sessions/remote-stream.ts`) — because Swift's `SessionEvent.Discriminator` is
+ *  `private`. Hand-mirrored list #4 was one copy too many: an event type that is transient in the
+ *  daemon but missing from a client's copy is dropped 100% of the time, silently, with a green
+ *  suite (exactly the iOS-streaming bug — the phone's client was missing the whole list). The
+ *  Swift mirror is `SessionEvent.transientTypes` in `apple/NormaProtocol`; both sides are pinned to
+ *  the same literal seven by parity tests (`packages/core/test/ipc/remote-live-stream.test.ts`
+ *  and `SessionEventTransientTests`), so editing one side alone fails a test rather than silently
+ *  diverging. */
+export const TRANSIENT_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<SessionEvent["type"]>([
+  "assistant_delta",
+  "lease_granted",
+  "lease_lost",
+  "peripheral_call_requested",
+  "plugin_tool_invoke",
+  "hardware_requested",
+  "plugin_tile_updated",
+]);
+
 /** Event payload before the store assigns seq/ts (distributes Omit over the union). */
 type DistributedOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 export type NewSessionEvent = DistributedOmit<SessionEvent, "seq" | "ts">;

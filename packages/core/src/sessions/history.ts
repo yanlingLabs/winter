@@ -99,7 +99,20 @@ function countStrings(value: unknown): number {
   return 0;
 }
 
-function capEvent(event: SessionEvent, outputCap: number): SessionEvent {
+/** Default per-STRING cap. Applied first; `WHOLE_EVENT_CEILING` is the second, aggregate pass. */
+export const DEFAULT_OUTPUT_CAP = 64 * 1024;
+
+/** Brings one event under `WHOLE_EVENT_CEILING`, per-string first then aggregate. Pure and
+ *  deterministic (depends only on `event` + the two constants), so the same input always yields
+ *  byte-identical output.
+ *
+ *  **Shared with the LIVE remote stream** (`sessions/remote-stream.ts`), deliberately and with the
+ *  same defaults: `session.history` and the live/replay feed hand the phone the SAME events, so a
+ *  divergent cap would make a message rendered live differ from the same message re-read from a
+ *  history page — the transcript would visibly flip on rebuild. That is also why the truncation
+ *  marker still says "by history" on both paths: identical bytes matter more than a per-path
+ *  wording, and the phone reconciles the two by seq. */
+export function capEvent(event: SessionEvent, outputCap: number = DEFAULT_OUTPUT_CAP): SessionEvent {
   const capped = capJson(event, outputCap);
   const size = Buffer.byteLength(JSON.stringify(capped), "utf8");
   if (size <= WHOLE_EVENT_CEILING) return capped as SessionEvent;
@@ -118,7 +131,7 @@ export function readHistoryPage(
 ): { events: SessionEvent[]; hasMore: boolean; oldestSeq: number | null } {
   const limit = opts.limit ?? 200;
   const byteBudget = opts.byteBudget ?? 256 * 1024;
-  const outputCap = opts.outputCap ?? 64 * 1024;
+  const outputCap = opts.outputCap ?? DEFAULT_OUTPUT_CAP;
   const upper = opts.beforeSeq ?? Infinity;
 
   // O(file) per call — accepted for v1 page sizes. Throws "unknown session" for a bad id (mapped to

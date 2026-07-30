@@ -725,10 +725,14 @@ public actor NormaSessionClient {
     ///
     /// Matched on the wire discriminator rather than a typed decode: this client handles event
     /// payloads OPAQUELY (`SessionEnvelope.json`) so an unknown/future type never throws.
-    private static let transientEventTypes: Set<String> = [
-        "assistant_delta", "lease_granted", "lease_lost", "peripheral_call_requested",
-        "plugin_tool_invoke", "hardware_requested", "plugin_tile_updated",
-    ]
+    ///
+    /// The list itself is `SessionEvent.transientTypes` (NormaProtocol) — the ONE cross-language
+    /// definition, mirroring the daemon's `TRANSIENT_EVENT_TYPES`. It was a private literal here,
+    /// hand-copied from `NormaClient`'s case list; the daemon's new remote live-stream filter would
+    /// have made that hand-mirrored copy #4 on the same axis, and a filter missing a type it should
+    /// carry drops that event silently, forever, one hop upstream of this client. Derive, never
+    /// re-list.
+    private static let transientEventTypes: Set<String> = SessionEvent.transientTypes
 
     private func isTransient(_ decoded: SessionEnvelope) -> Bool {
         guard let type = decoded.json["type"]?.stringValue else { return false }

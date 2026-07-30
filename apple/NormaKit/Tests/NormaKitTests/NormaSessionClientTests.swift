@@ -163,13 +163,23 @@ final class NormaSessionClientTests: XCTestCase {
     private func types(_ envs: [SessionEnvelope]) -> [String] { envs.map { $0.json["type"]?.stringValue ?? "<untyped>" } }
     private func deltas(_ envs: [SessionEnvelope]) -> [String] { envs.compactMap { $0.json["delta"]?.stringValue } }
 
-    /// The seven broadcast-only TRANSIENT event types, in the exact order/membership of the Mac
-    /// client's exemption list (`NormaKit.NormaClient.route`) — the list this suite pins the phone
-    /// client against.
+    /// The seven broadcast-only TRANSIENT event types — the list this suite drives the phone client
+    /// with. An INDEPENDENT literal, deliberately not read from `SessionEvent.transientTypes`: the
+    /// remote-allowlist parity pattern, where each copy pins itself to the same literal names so
+    /// editing one alone fails a test (`testTransientListMatchesTheProtocolConstant` just below)
+    /// instead of silently diverging.
     private static let transientTypes = [
         "assistant_delta", "lease_granted", "lease_lost", "peripheral_call_requested",
         "plugin_tool_invoke", "hardware_requested", "plugin_tile_updated",
     ]
+
+    /// Parity: this suite's literal seven ARE the protocol's canonical seven. Without this, a type
+    /// added to `SessionEvent.transientTypes` (and therefore honoured by the shipped client) would
+    /// silently go untested here, and a type dropped from it would leave these tests passing
+    /// against a list the client no longer uses.
+    func testTransientListMatchesTheProtocolConstant() {
+        XCTAssertEqual(Set(Self.transientTypes), SessionEvent.transientTypes)
+    }
 
     // MARK: - Step 1: CursorStore
 
