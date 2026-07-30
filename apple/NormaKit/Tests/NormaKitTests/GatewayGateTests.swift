@@ -593,6 +593,82 @@ final class GatewayGateTests: XCTestCase {
                        "Swift remote allowlist drifted from the eighteen — mirror packages/core/src/ipc/server.ts's REMOTE_ALLOWED_METHODS")
     }
 
+    // MARK: - WB-C1: a JSON-RPC error's `data` survives the relay (DIVERGED{lastSeq} → the phone)
+
+    /// Chat Slice D whole-branch review, Critical WB-C1. The phone's fork-on-divergence machinery
+    /// keys on ONE field: `error.data.lastSeq` off an `ERR.DIVERGED` (-32006) `sync.push` response
+    /// (`SyncClient.push` — `guard let daemonLast = e.divergedLastSeq else { throw e }`). Every
+    /// per-task gate tested one SIDE of that field's journey — T2 spoke TS straight to the daemon
+    /// socket (where `data` is intact), T9 drove a scripted `RpcConn` that FABRICATES
+    /// `divergedLastSeq` — and neither touched the component BETWEEN them, this gateway, which
+    /// dropped the field twice over (`RpcError` had no `data`; `sendRpcError` re-minted the body as
+    /// `{code, message}`). Over the production transport every DIVERGED therefore arrived
+    /// field-less and the phone threw instead of reconciling: a lost push ack wedged that session's
+    /// sync permanently and fork-on-divergence — the slice's headline mechanic — never ran once.
+    ///
+    /// So this test deliberately uses NEITHER double: a real daemon, a real `Gateway`, a real
+    /// `NormaClient` bridge, and the assertion made on the bytes of the phone-bound `rpcResponse`
+    /// frame. Both `lastSeq` values that the client branches on are driven, because they mean
+    /// opposite things and only one of them is zero (which a "field present" assertion could pass
+    /// by accident):
+    ///   • `lastSeq: 0`  — the daemon holds nothing for this id → re-push from seq 1 (NOT a fork);
+    ///   • `lastSeq: >0` — a genuine branch point → byte-compare reconcile, then fork.
+    func testWBC1_DivergedErrorDataSurvivesTheGatewayRelay_BothZeroAndNonZeroLastSeq() async throws {
+        let daemon = try await RealDaemon.start()
+        defer { daemon.stop() }
+        let listener = LoopbackListener()
+        let gateway = realGateway(socketPath: daemon.socketPath, remoteToken: daemon.remoteToken, listener: listener)
+        let runTask = Task { await gateway.run() }
+        defer { runTask.cancel() }
+
+        let conn = ScriptedRemoteConn()
+        listener.simulateConnection(conn)
+        conn.enqueueInbound(try helloFrame(clientInstanceID: "phone-diverged", resumes: []))
+        _ = try await waitForOutbound(conn, count: 1) // helloAck
+
+        /// The `error` object of the Nth phone-bound `rpcResponse` frame.
+        func errorBody(_ frames: [Data], index: Int) throws -> JSONValue? {
+            let env = try decodeEnvelope(frames[index])
+            XCTAssertEqual(env.kind, .rpcResponse)
+            return try JSONDecoder().decode(JSONValue.self, from: env.payload)["error"]
+        }
+
+        // ---- (a) unknown session, baseSeq > 0 → DIVERGED{lastSeq: 0} ------------------------------
+        let unknownId = "11111111-2222-4333-8444-555555555555"
+        conn.enqueueInbound(try rpcRequestFrame(id: 1, method: "sync.push", params: .object([
+            "sessionId": .string(unknownId), "baseSeq": .number(5), "data": .string(""), "complete": .bool(false),
+        ])))
+        let outA = try await waitForOutbound(conn, count: 2)
+        let errA = try errorBody(outA, index: 1)
+        XCTAssertEqual(errA?["code"]?.intValue, -32006, "an unknown session pushed at a non-zero base is DIVERGED")
+        XCTAssertEqual(errA?["data"]?["lastSeq"]?.intValue, 0,
+                       "the relay dropped error.data — the phone reads DIVERGED{lastSeq:0} as 're-push from seq 1', and without it wedges instead")
+
+        // ---- (b) a real chat session, pushed at a stale base → DIVERGED{lastSeq: 1} ---------------
+        // Create it the way the phone does: a creating push whose seq-1 event is a chat
+        // `session_created` (sync.ts's own precondition for starting a log).
+        let liveId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        let created = #"{"type":"session_created","sessionId":"\#(liveId)","seq":1,"ts":1,"scope":"global","mode":"chat"}"#
+        conn.enqueueInbound(try rpcRequestFrame(id: 2, method: "sync.push", params: .object([
+            "sessionId": .string(liveId), "baseSeq": .number(0),
+            "data": .string(Data((created + "\n").utf8).base64EncodedString()), "complete": .bool(true),
+        ])))
+        let outB = try await waitForOutbound(conn, count: 3)
+        let createEnv = try decodeEnvelope(outB[2])
+        let createBody = try JSONDecoder().decode(JSONValue.self, from: createEnv.payload)
+        XCTAssertNil(createBody["error"], "the creating push must land: \(createBody)")
+        XCTAssertEqual(createBody["result"]?["lastSeq"]?.intValue, 1)
+
+        conn.enqueueInbound(try rpcRequestFrame(id: 3, method: "sync.push", params: .object([
+            "sessionId": .string(liveId), "baseSeq": .number(7), "data": .string(""), "complete": .bool(false),
+        ])))
+        let outC = try await waitForOutbound(conn, count: 4)
+        let errC = try errorBody(outC, index: 3)
+        XCTAssertEqual(errC?["code"]?.intValue, -32006)
+        XCTAssertEqual(errC?["data"]?["lastSeq"]?.intValue, 1,
+                       "a NON-ZERO branch point must reach the phone verbatim — it is the seq the byte-compare reconcile pulls from")
+    }
+
     // MARK: - Eviction: session-map cap (32) bounds phone churn (SP2b Task 4)
 
     /// 31 phones connect then hang up (evictable — no `currentConn`), a 32nd stays connected, and

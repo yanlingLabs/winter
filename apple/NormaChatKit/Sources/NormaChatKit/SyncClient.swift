@@ -87,7 +87,24 @@ struct SyncMemoryResult: Decodable { let files: [SyncMemoryFile]; let nextCursor
 // wire (never `null`) — exactly what the daemon's optional schema fields expect.
 private struct HeadsParams: Encodable {}
 private struct PullParams: Encodable { let sessionId: String; let fromSeq: Int; let cursor: Int? }
-private struct PushMetaParams: Encodable { let title: String?; let model: String?; let forkedFrom: SessionForkRef? }
+private struct PushMetaParams: Encodable {
+    let title: String?
+    let model: String?
+    let forkedFrom: SessionForkRef?
+
+    /// The ONE construction point, so the wire's title ceiling is enforced structurally rather than
+    /// remembered at each call site (whole-branch WB-I1). `SyncPushParams.meta.title` is
+    /// `z.string().max(SESSION_TITLE_MAX_CHARS)` and is checked by `parseParams` BEFORE any handler
+    /// runs — an over-long title is not clamped server-side, it is a hard INVALID_PARAMS that
+    /// re-fires on every pass until the title happens to change. Today's titles all come from the
+    /// daemon (already bounded) or from `planFork` (bounded there too); this guard is what keeps a
+    /// FUTURE local title source — T11's phone-side titler — from silently wedging a session.
+    init(title: String?, model: String?, forkedFrom: SessionForkRef?) {
+        self.title = title.map(LocalEventStore.capTitle)
+        self.model = model
+        self.forkedFrom = forkedFrom
+    }
+}
 private struct PushParams: Encodable { let sessionId: String; let baseSeq: Int; let data: String; let complete: Bool; let meta: PushMetaParams? }
 private struct ConfigParams: Encodable {}
 private struct MemoryParams: Encodable { let cursor: Int? }
@@ -321,9 +338,18 @@ public actor SyncClient {
             // it rather than minting a duplicate. But verify the daemon's bytes really are ours before
             // trusting that: adopting a session whose content differs would mark two divergent replicas
             // "synced" and strand both forever (review round 2, second variant).
+            //
+            // A PREFIX relation, not equality (T9 round-2 M1, promoted to must-fix by the whole-branch
+            // review). `reconcileDivergence` two functions up already settled the semantics for exactly
+            // this question: daemon ⊇ local means the daemon HAS our bytes. Once the ack is lost the
+            // "(offline copy)" is a live session on the Mac too — one message typed into it makes
+            // `remote` our bytes PLUS theirs, which equality read as "different branch" and refused on
+            // every pass thereafter (PROBE5: `[threw, threw, threw]`, the original stuck at
+            // head=2/synced=1). Adopting the plan's bytes is safe and complete: they are provably the
+            // daemon's own prefix, and the next pass's PULL phase fast-forwards the rest.
             guard let head = e.divergedLastSeq, head > 0 else { throw e }
             let remote = try await pullBytes(sessionId: plan.newId, fromSeq: 0)
-            guard remote == plan.bytes else {
+            guard remote.starts(with: plan.bytes) else {
                 throw RpcError(code: ERR_INTERNAL,
                                message: "fork \(plan.newId) exists on the daemon with different bytes — refusing to adopt it and discard this branch")
             }

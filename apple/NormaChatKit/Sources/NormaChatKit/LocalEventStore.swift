@@ -185,12 +185,24 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
     public var lastSeq: Int { lock.withLock { head } }
 
     /// Provider-input reconstruction of the persisted log — the faithful Swift port of
-    /// `engine.ts`'s `historyInput` fold (the MAIN-THREAD filter + `eventToInput` +
-    /// `normalizeReplayOrder`), minus only the checkpoint fast-forward (a chat session is never
-    /// compacted, exactly like `childHistoryInput`, so there is no checkpoint to skip past). Reads
-    /// every line at turn start; a `reasoning_item` replays VERBATIM through `.reasoning(itemJSON:)`
-    /// — the T8 reasoning-replay minor, delegated here — feeding the provider the encrypted state
-    /// back for continuity, never rendering it.
+    /// `engine.ts`'s `historyInput` fold: the CHECKPOINT fast-forward, the MAIN-THREAD filter,
+    /// `eventToInput`, `normalizeReplayOrder`. Reads every line at turn start; a `reasoning_item`
+    /// replays VERBATIM through `.reasoning(itemJSON:)` — the T8 reasoning-replay minor, delegated
+    /// here — feeding the provider the encrypted state back for continuity, never rendering it.
+    ///
+    /// CHECKPOINTS (whole-branch WB-I2). This fold used to skip the compaction half on the premise
+    /// that "a chat session is never compacted". That is false for the logs this store actually
+    /// holds: `maybeAutoCompact` runs at the top of EVERY daemon turn with no mode gate
+    /// (`engine.ts:2089`), so a long Mac-side chat session acquires a `checkpoint` event, and
+    /// `sync.pull` replicates it here verbatim like any other line. Folding such a log without the
+    /// fast-forward dropped the summary AND replayed every event the summary replaced — by
+    /// definition more than 75% of the model's context window, since that is what triggered the
+    /// compaction, and growing with each further cycle. Mirrors `engine.ts:1381-1391`: the LAST
+    /// checkpoint's summary is injected as a leading user message under the same
+    /// `"[Summary of earlier conversation]"` header, and everything at or below its `uptoSeq` is
+    /// skipped. The checkpoint search is deliberately NOT thread-filtered — `engine.ts` does not
+    /// filter it either (the compactor only ever writes main-thread checkpoints), and the port's
+    /// contract is to produce the same input the Mac would for the same bytes.
     ///
     /// The main-thread filter mirrors `engine.ts:1389` (`if ("threadId" in e && e.threadId !==
     /// MAIN_THREAD) continue`). The phone's own engine only ever stamps `MainThread`, but `sync.push`
@@ -199,9 +211,22 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
     /// Mac's (review M1).
     public func priorInput() -> [ProviderInputItem] {
         let lines = lock.withLock { Self.scanLog(logURL).lines }
+        let envelopes = lines.compactMap { LineEnvelope($0) }
+
         var input: [ProviderInputItem] = []
-        for line in lines {
-            guard let env = LineEnvelope(line) else { continue }
+        let lastCheckpoint = envelopes.last { $0.type == "checkpoint" }
+        if let cp = lastCheckpoint, let summary = cp.object["summary"] as? String {
+            input.append(.message(role: .user, content: "[Summary of earlier conversation]\n" + summary))
+        }
+        // A checkpoint whose `summary` is unreadable must NOT also suppress the events it covers —
+        // that would silently erase the conversation instead of summarizing it. Unreachable for a
+        // schema-valid event; fail toward keeping history rather than losing it.
+        let uptoSeq = (lastCheckpoint?.object["summary"] as? String) != nil
+            ? ((lastCheckpoint?.object["uptoSeq"] as? NSNumber)?.intValue ?? 0)
+            : 0
+
+        for env in envelopes {
+            if env.seq <= uptoSeq { continue }
             if let threadId = env.object["threadId"] as? String, threadId != MainThread { continue }
             if let item = Self.eventToInput(env) { input.append(item) }
         }
@@ -653,27 +678,39 @@ public actor LocalEventStore {
 
         let originalMeta = original.metaSnapshot()
         return ForkPlan(newId: newId, bytes: rewritten,
-                        title: (originalMeta.title ?? "Chat") + titleMarker,
+                        // CLAMPED (whole-branch WB-I1): the 15-character marker is appended to a title
+                        // the daemon may already have served at the cap, and `SyncPushParams.meta.title`
+                        // refuses anything over it at the WIRE — so an un-clamped marked title makes the
+                        // fork's own creating push fail with INVALID_PARAMS, stranding the branch.
+                        title: LocalEventStore.capTitle((originalMeta.title ?? "Chat") + titleMarker),
                         model: originalMeta.model,
                         forkedFrom: SessionForkRef(sessionId: originalId, atSeq: atSeq),
                         lastSeq: originalMeta.lastSeq)
     }
 
     /// Commits a planned fork locally, AFTER its push has landed on the daemon. Idempotent for a true
-    /// retry: a fork already registered whose bytes ARE the plan's just re-records its watermark, so a
-    /// partially-completed reconcile converges instead of duplicating.
+    /// retry: a fork already registered whose log CONTAINS the plan's bytes just re-records its
+    /// watermark, so a partially-completed reconcile converges instead of duplicating.
     ///
-    /// It REFUSES to adopt an existing log whose bytes differ from the plan's (review round 2). The
-    /// old unconditional adopt is what made PROBE4 lose a whole branch: it kept the existing log and
-    /// silently dropped `plan.bytes`, and the caller then truncated the original — so branch two
+    /// It REFUSES to adopt an existing log that does not CONTAIN the plan's bytes (review round 2).
+    /// The old unconditional adopt is what made PROBE4 lose a whole branch: it kept the existing log
+    /// and silently dropped `plan.bytes`, and the caller then truncated the original — so branch two
     /// existed on neither device. Content-derived ids make a mismatch here essentially unreachable;
     /// this throw is what makes "a fork is never silently discarded" structural rather than a property
     /// of the hash.
+    ///
+    /// "Contains" is a PREFIX relation, not equality (T9 round-2 M1). The existing local log can
+    /// legitimately be LONGER than the plan: once a fork push lands, the fork is a live session the
+    /// Mac can type into, and this pass's own pull phase may already have fast-forwarded the local
+    /// copy before the push phase re-derives the same content-addressed plan. Equality read that as
+    /// "different branch" and threw on every pass. A longer log that starts with the plan's bytes has
+    /// discarded nothing, so it is kept as-is — only the watermark is recorded, and never LOWERED
+    /// below what a prior pull already confirmed.
     @discardableResult
     func commitFork(_ plan: ForkPlan, syncedSeq: Int) throws -> LocalSessionMeta {
         let handle: LocalChatSession
         if let existing = handles[plan.newId] {
-            guard existing.snapshotRawLog() == plan.bytes else {
+            guard existing.snapshotRawLog().starts(with: plan.bytes) else {
                 throw LocalStoreError.forkBytesMismatch(plan.newId)
             }
             handle = existing
@@ -684,7 +721,7 @@ public actor LocalEventStore {
             handles[plan.newId] = handle
         }
         handle.setSyncedMeta(title: .some(plan.title), model: .some(plan.model), forkedFrom: .some(plan.forkedFrom))
-        handle.setLastSyncedSeq(syncedSeq)
+        handle.setLastSyncedSeq(max(syncedSeq, handle.metaSnapshot().lastSyncedSeq))
         return handle.metaSnapshot()
     }
 
@@ -695,6 +732,33 @@ public actor LocalEventStore {
     /// Suffix appended to a fork's title so the user can tell the divergent local copy from the
     /// daemon's canonical branch. Public so Task 11's sidebar can key on it.
     public static let forkTitleSuffix = " (offline copy)"
+
+    /// The wire's hard ceiling on `sync.push`'s `meta.title` — the Swift mirror of the protocol's
+    /// `SESSION_TITLE_MAX_CHARS` (`packages/protocol/src/methods.ts`). Over it, the push is refused
+    /// with INVALID_PARAMS before any handler runs, so a title this side never checks wedges that
+    /// session's replication on every pass (whole-branch WB-I1).
+    public static let maxTitleChars = 200
+
+    /// Bounds a title at `maxTitleChars` with the ellipsis INSIDE the budget — the same shape as the
+    /// daemon's own `SessionStore.capTitle`. Returns the input unchanged when already within budget
+    /// (every title the daemon serves already is, so this is a no-op on the echo path).
+    ///
+    /// Measured in UTF-16 code units, not Characters, because that is what the wire's
+    /// `z.string().max(…)` counts — a grapheme-counted 200 can be a 400-unit refusal. Truncation
+    /// still lands on a Character boundary, so no surrogate pair is ever split.
+    static func capTitle(_ title: String) -> String {
+        guard title.utf16.count > maxTitleChars else { return title }
+        var out = ""
+        var used = 0
+        let budget = maxTitleChars - 1 // the "…" is one UTF-16 unit
+        for ch in title {
+            let width = String(ch).utf16.count
+            if used + width > budget { break }
+            out.append(ch)
+            used += width
+        }
+        return out + "…"
+    }
 
     /// A fork's id: deterministic in its branch POINT **and** its branch CONTENT, shaped as a
     /// v4-looking UUID because the daemon's creating-push path requires that form

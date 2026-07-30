@@ -210,7 +210,9 @@ export function validateSyncMeta(
 ): SyncMeta {
   const out: SyncMeta = {};
   if (meta.title !== undefined) {
-    out.title = meta.title.length <= SESSION_TITLE_MAX_CHARS ? meta.title : `${meta.title.slice(0, SESSION_TITLE_MAX_CHARS)}…`;
+    // Ellipsis INSIDE the budget, same as `SessionStore.capTitle` (whole-branch WB-I1) — a clamp
+    // that emits MAX + 1 produces a title the wire schema above then rejects.
+    out.title = meta.title.length <= SESSION_TITLE_MAX_CHARS ? meta.title : `${meta.title.slice(0, SESSION_TITLE_MAX_CHARS - 1)}…`;
   }
   if (meta.forkedFrom !== undefined) out.forkedFrom = meta.forkedFrom;
   if (meta.model !== undefined) {

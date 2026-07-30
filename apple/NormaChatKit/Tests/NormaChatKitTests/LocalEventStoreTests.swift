@@ -157,6 +157,110 @@ final class LocalEventStoreTests: XCTestCase {
         XCTAssertEqual(a, "here you go")
     }
 
+    // MARK: - WB-I2: a COMPACTED (Mac-authored, replicated) log folds through its checkpoint
+
+    /// The checkpoint line's field names come from the TS-generated protocol fixture, not from this
+    /// test's imagination: `packages/protocol/scripts/generate.ts` emits `checkpoint.json`, the same
+    /// artifact `NormaProtocol`'s round-trip suite pins. Re-stamping its `seq`/`sessionId`/`uptoSeq`
+    /// keeps the SHAPE generated and only the coordinates local — so a protocol rename breaks this
+    /// test instead of silently turning the fold back into a no-op.
+    private func checkpointLine(sessionId: String, seq: Int, uptoSeq: Int, summary: String) throws -> Data {
+        let fixture = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // …/NormaChatKitTests
+            .deletingLastPathComponent()  // …/Tests
+            .deletingLastPathComponent()  // …/NormaChatKit
+            .deletingLastPathComponent()  // …/apple
+            .appendingPathComponent("NormaProtocol/Tests/NormaProtocolTests/Fixtures/checkpoint.json")
+        var obj = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fixture)) as? [String: Any])
+        XCTAssertEqual(obj["type"] as? String, "checkpoint")
+        obj["sessionId"] = sessionId
+        obj["seq"] = seq
+        obj["uptoSeq"] = uptoSeq
+        obj["summary"] = summary
+        return try JSONSerialization.data(withJSONObject: obj)
+    }
+
+    /// Whole-branch review WB-I2. `priorInput()` had no `checkpoint` case and no `uptoSeq` skip, on
+    /// the stated premise that "a chat session is never compacted". False for the logs this store
+    /// holds: `maybeAutoCompact` is MODE-UNGATED on the daemon (`engine.ts:2089`), so a long Mac chat
+    /// session compacts, and `sync.pull` hands the phone those raw bytes. Continuing such a session
+    /// on the phone replayed the entire pre-summary history WITHOUT the summary — more than 75% of
+    /// the context window by construction (that is the compaction trigger), so every phone turn on
+    /// that conversation was degraded at best and provider-refused at worst, while the Mac was fine.
+    func testPriorInputOfACompactedLogInjectsTheSummaryAndSkipsWhatItCovers() async throws {
+        let id = "c1000000-0000-4000-8000-000000000001"
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: id)
+        // The pre-summary history the checkpoint replaces (seq 2…5).
+        s.persist(.userMessage(.init(seq: 2, sessionId: id, ts: 2, threadId: "main", text: "old-1", clientName: "mac")))
+        s.persist(.assistantMessage(.init(seq: 3, sessionId: id, ts: 3, threadId: "main", text: "old-2")))
+        s.persist(.userMessage(.init(seq: 4, sessionId: id, ts: 4, threadId: "main", text: "old-3", clientName: "mac")))
+        s.persist(.assistantMessage(.init(seq: 5, sessionId: id, ts: 5, threadId: "main", text: "old-4")))
+        // The daemon's compaction, replicated verbatim (checkpoint has no Swift SessionEvent-emit
+        // path on the phone — it only ever ARRIVES, which is precisely the gap).
+        LocalChatSession.appendLine(try checkpointLine(sessionId: id, seq: 6, uptoSeq: 5,
+                                                       summary: "Earlier: the user asked about X; we settled on Y."),
+                                    to: logURL(id))
+        // …and the tail that survives it.
+        let reopened = try LocalEventStore(directory: dir)
+        let s2 = await reopened.session(id)!
+        s2.persist(.userMessage(.init(seq: 7, sessionId: id, ts: 7, threadId: "main", text: "new-1", clientName: "phone")))
+        s2.appendReasoning(itemJSON: #"{"type":"reasoning","id":"rs_after_cp","encrypted_content":"BLOB"}"#, seq: 8, ts: 8)
+        s2.persist(.assistantMessage(.init(seq: 9, sessionId: id, ts: 9, threadId: "main", text: "new-2")))
+
+        let input = s2.priorInput()
+
+        // 1. The summary leads, under engine.ts's exact header.
+        guard case .message(.user, let head) = input.first else { return XCTFail("the summary must lead the input") }
+        XCTAssertEqual(head, "[Summary of earlier conversation]\nEarlier: the user asked about X; we settled on Y.")
+
+        // 2. Nothing the checkpoint covers replays — the whole point of compaction.
+        let texts = input.compactMap { if case .message(_, let c) = $0 { return c } else { return nil } }
+        for old in ["old-1", "old-2", "old-3", "old-4"] {
+            XCTAssertFalse(texts.contains(old), "\(old) is covered by uptoSeq 5 and must not replay")
+        }
+
+        // 3. The post-checkpoint tail survives intact, reasoning item included (continuity).
+        XCTAssertEqual(texts, [head, "new-1", "new-2"])
+        guard case .reasoning(let itemJSON) = input[2] else { return XCTFail("a reasoning item after the checkpoint still replays") }
+        XCTAssertTrue(itemJSON.contains("rs_after_cp"))
+        XCTAssertEqual(input.count, 4)
+    }
+
+    /// Repeated compaction: only the LAST checkpoint governs (`engine.ts` takes the last one and
+    /// never re-feeds an earlier summary). Two cycles is the realistic shape of a long conversation,
+    /// and it is where a "first checkpoint wins" port would silently keep re-injecting stale context.
+    func testOnlyTheLastCheckpointGoverns() async throws {
+        let id = "c1000000-0000-4000-8000-000000000002"
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: id)
+        s.persist(.userMessage(.init(seq: 2, sessionId: id, ts: 2, threadId: "main", text: "era-1", clientName: "mac")))
+        LocalChatSession.appendLine(try checkpointLine(sessionId: id, seq: 3, uptoSeq: 2, summary: "FIRST"), to: logURL(id))
+        var reopened = try LocalEventStore(directory: dir)
+        var handle = await reopened.session(id)!
+        handle.persist(.assistantMessage(.init(seq: 4, sessionId: id, ts: 4, threadId: "main", text: "era-2")))
+        LocalChatSession.appendLine(try checkpointLine(sessionId: id, seq: 5, uptoSeq: 4, summary: "SECOND"), to: logURL(id))
+        reopened = try LocalEventStore(directory: dir)
+        handle = await reopened.session(id)!
+        handle.persist(.userMessage(.init(seq: 6, sessionId: id, ts: 6, threadId: "main", text: "era-3", clientName: "phone")))
+
+        let texts = handle.priorInput().compactMap { if case .message(_, let c) = $0 { return c } else { return nil } }
+        XCTAssertEqual(texts, ["[Summary of earlier conversation]\nSECOND", "era-3"])
+    }
+
+    /// Control: an UNCOMPACTED log is byte-for-byte the same fold it always was — the fast-forward
+    /// must not perturb the overwhelmingly common case.
+    func testAnUncompactedLogFoldsExactlyAsBefore() async throws {
+        let id = "c1000000-0000-4000-8000-000000000003"
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: id)
+        s.persist(.userMessage(.init(seq: 2, sessionId: id, ts: 2, threadId: "main", text: "a", clientName: "phone")))
+        s.persist(.assistantMessage(.init(seq: 3, sessionId: id, ts: 3, threadId: "main", text: "b")))
+
+        let texts = s.priorInput().compactMap { if case .message(_, let c) = $0 { return c } else { return nil } }
+        XCTAssertEqual(texts, ["a", "b"], "no checkpoint ⟹ no summary injected, nothing skipped")
+    }
+
     // MARK: - reasoning_item: opaque sink + verbatim replay (the T8 minor)
 
     func testAppendReasoningIsStoredAndReplayedVerbatimAndNeverRenders() async throws {

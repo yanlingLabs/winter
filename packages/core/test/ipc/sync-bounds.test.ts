@@ -289,7 +289,7 @@ describe("I2 — title is bounded at every ingress, so heads/list can never outg
 
     // ...but the INDEX column, which is what heads/list serialize, is bounded.
     const row = store.list().find((r) => r.sessionId === id)!;
-    expect(row.title!.length).toBeLessThanOrEqual(SESSION_TITLE_MAX_CHARS + 1); // +1 for the ellipsis
+    expect(row.title!.length).toBeLessThanOrEqual(SESSION_TITLE_MAX_CHARS); // ellipsis INSIDE the budget (WB-I1)
     c.close();
   });
 
@@ -328,7 +328,7 @@ describe("I2 — title is bounded at every ingress, so heads/list can never outg
     const c = await TestClient.connect(socketPath);
     await c.hello(token, "sync");
     const heads = await c.requestSized(METHODS.syncHeads, {});
-    expect(heads.msg.result.sessions[0].title.length).toBeLessThanOrEqual(SESSION_TITLE_MAX_CHARS + 1);
+    expect(heads.msg.result.sessions[0].title.length).toBeLessThanOrEqual(SESSION_TITLE_MAX_CHARS);
     expect(heads.frameBytes).toBeLessThan(IROH_MAX_FRAME_BYTES);
     c.close();
   });
@@ -343,6 +343,52 @@ describe("I2 — title is bounded at every ingress, so heads/list can never outg
       meta: { title: "Planning the kitchen renovation" },
     });
     expect(store.list().find((r) => r.sessionId === id)!.title).toBe("Planning the kitchen renovation");
+    c.close();
+  });
+
+  // WB-I1 (whole-branch review): the clamp used to emit MAX + 1 characters (`slice(0, MAX)` plus an
+  // ellipsis), while `SyncPushParams.meta.title` rejects anything over MAX at the WIRE — before
+  // `validateSyncMeta`'s defence-in-depth clamp can ever run. So the daemon served a title through
+  // `sync.heads` that it would then refuse to accept back, and since the phone echoes the served
+  // title verbatim into every push, that session's sync wedged with INVALID_PARAMS on every pass
+  // until the title happened to change. This is the deferred T2-fix-1 Minor, landed as the gate.
+  test("a title the daemon SERVES round-trips back through its own push wire (clamped output is pushable)", async () => {
+    const { socketPath, token } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(token, "sync");
+
+    const id = uuid();
+    await pushChunked(c, id, 0, jsonl([created(id), ev(id, 2, { type: "session_titled", threadId: "main", title: HOSTILE })]));
+
+    // What a phone actually receives and then echoes back.
+    const served = (await c.request(METHODS.syncHeads, {})).result.sessions.find((s: any) => s.sessionId === id)!.title as string;
+    expect(served.length).toBeLessThanOrEqual(SESSION_TITLE_MAX_CHARS);
+
+    const echoed = await c.request(METHODS.syncPush, {
+      sessionId: id, baseSeq: 2, data: b64(jsonl([asstMsg(id, 3, "ok")])), complete: true, meta: { title: served },
+    });
+    expect(echoed.error).toBeUndefined(); // pre-fix: INVALID_PARAMS, "expected string to have <=200 characters"
+    expect(echoed.result.applied).toBe(true);
+    c.close();
+  });
+
+  // The other half of the same contract: a LEGITIMATE near-cap title must survive push → pull
+  // un-mangled. A cap that is one character too generous is only visible from one side; a cap that
+  // truncates a title at the maximum is only visible from the other.
+  test("a legitimate title at exactly the cap survives push → heads with no truncation", async () => {
+    const { socketPath, token } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(token, "sync");
+
+    const id = uuid();
+    const atCap = "N".repeat(SESSION_TITLE_MAX_CHARS);
+    const res = await c.request(METHODS.syncPush, {
+      sessionId: id, baseSeq: 0, data: b64(jsonl([created(id)])), complete: true, meta: { title: atCap },
+    });
+    expect(res.error).toBeUndefined();
+
+    const served = (await c.request(METHODS.syncHeads, {})).result.sessions.find((s: any) => s.sessionId === id)!.title;
+    expect(served).toBe(atCap); // no ellipsis, no lost character
     c.close();
   });
 });

@@ -724,7 +724,10 @@ public actor Gateway {
             let result = try await session.daemonClient.request(rpc.method, params: rpc.params, commandId: rpc.commandId)
             await sendRpcResult(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, streamID: envelope.streamID, result: result)
         } catch let e as RpcError {
-            await sendRpcError(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, code: e.code, message: e.message)
+            // `data` rides along (WB-C1): the relay is transparent for the whole JSON-RPC error
+            // object, not just its two required members. `sync.push`'s DIVERGED carries the
+            // daemon's `lastSeq` there and the phone's reconcile is unreachable without it.
+            await sendRpcError(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, code: e.code, message: e.message, data: e.data)
         } catch {
             await sendRpcError(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, code: -1, message: "\(error)")
         }
@@ -797,8 +800,13 @@ public actor Gateway {
         await send(conn, epoch: epoch, kind: .rpcResponse, sessionID: sessionID, streamID: streamID, seq: nil, payload: payload)
     }
 
-    private func sendRpcError(_ conn: RemoteConn, epoch: Int, id: JSONValue, sessionID: String?, code: Int, message: String) async {
-        let body = JSONValue.object(["jsonrpc": .string("2.0"), "id": id, "error": .object(["code": .number(Double(code)), "message": .string(message)])])
+    /// `data`: the daemon's OPTIONAL structured error payload, forwarded verbatim (Chat Slice D
+    /// whole-branch Critical WB-C1). Omitted from the body when absent, so every error that doesn't
+    /// carry one stays byte-identical on the wire to what this relay sent before.
+    private func sendRpcError(_ conn: RemoteConn, epoch: Int, id: JSONValue, sessionID: String?, code: Int, message: String, data: JSONValue? = nil) async {
+        var error: [String: JSONValue] = ["code": .number(Double(code)), "message": .string(message)]
+        if let data { error["data"] = data }
+        let body = JSONValue.object(["jsonrpc": .string("2.0"), "id": id, "error": .object(error)])
         guard let payload = try? JSONEncoder().encode(body) else { return }
         await send(conn, epoch: epoch, kind: .rpcResponse, sessionID: sessionID, streamID: nil, seq: nil, payload: payload)
     }

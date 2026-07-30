@@ -69,9 +69,17 @@ export interface SessionRow {
  *  only: a row written before this existed — or by any future writer that forgets — still cannot
  *  produce a response too large for the phone transport to deliver. See `SESSION_TITLE_MAX_CHARS`
  *  for the failure it prevents. Returns the SAME reference when already within budget (the
- *  overwhelmingly common case — every daemon-side writer caps at 60). */
+ *  overwhelmingly common case — every daemon-side writer caps at 60).
+ *
+ *  The ellipsis is part of the budget, not extra (whole-branch WB-I1). Emitting `MAX + 1` made the
+ *  daemon's own clamped output UN-PUSHABLE through its own wire: `SyncPushParams.meta.title` is
+ *  `z.string().max(SESSION_TITLE_MAX_CHARS)`, enforced by `parseParams` BEFORE `validateSyncMeta`'s
+ *  clamp can run, and the phone echoes daemon-served titles verbatim into every push — so a single
+ *  over-long title wedged that session's replication with INVALID_PARAMS on every pass, healing only
+ *  if the title changed. A clamp whose output its own schema rejects is a contradiction regardless
+ *  of who is reachable today. */
 function capTitle(title: string): string {
-  return title.length <= SESSION_TITLE_MAX_CHARS ? title : `${title.slice(0, SESSION_TITLE_MAX_CHARS)}…`;
+  return title.length <= SESSION_TITLE_MAX_CHARS ? title : `${title.slice(0, SESSION_TITLE_MAX_CHARS - 1)}…`;
 }
 
 /** Derives a fallback title from the first line of the session's first main-thread

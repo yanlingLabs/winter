@@ -205,6 +205,75 @@ final class SyncClientTests: XCTestCase {
         XCTAssertEqual(origSynced, 4)
     }
 
+    // MARK: - WB-I1: the marked fork title must clear the wire's own 200-char title ceiling
+
+    /// Whole-branch review WB-I1. `SyncPushParams.meta.title` is `z.string().max(200)` — a ZOD
+    /// schema check, so it refuses the call in `parseParams` before any handler runs; it is never a
+    /// clamp. `planFork` appended the 15-character " (offline copy)" marker to whatever title the
+    /// session already carried, with no bound of its own. A session titled at (or near) the cap —
+    /// which the daemon happily SERVES, and which the phone stores verbatim off `sync.heads` —
+    /// therefore produced a fork title the wire refuses, so the fork's creating push failed with
+    /// INVALID_PARAMS on every pass and the divergent branch could never leave the phone.
+    ///
+    /// Driven end-to-end through a genuine divergence, because the fork title is only ever built on
+    /// that path. `FakeDaemon` now enforces the same ceiling the real schema does (it did not
+    /// before — that leniency is the second half of why this went unnoticed).
+    func testForkOfANearCapTitleStillPushes_TheMarkedTitleFitsTheWire() async throws {
+        let id = "10000000-0000-4000-8000-000000000011"
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+
+        // A title the daemon can legitimately serve: exactly at the cap. + the marker = 215 > 200.
+        let atCap = String(repeating: "T", count: LocalEventStore.maxTitleChars)
+        let s = try await store.createSession(sessionId: id)
+        s.setLastSyncedSeq(1)
+        s.setSyncedMeta(title: .some(atCap))
+        let sharedPrefix = LocalChatSession.split(try Data(contentsOf: logURL(id)))
+        daemon.seed(id, sharedPrefix + [user(id, 2, "mac-x"), asst(id, 3, "mac-y")], title: atCap)
+        s.persist(.userMessage(.init(seq: 2, sessionId: id, ts: 2, threadId: "main", text: "phone-a", clientName: "phone")))
+
+        let client = SyncClient(store: store, conn: daemon)
+        try await client.syncAll() // pre-fix: throws SyncPassError — the fork push is refused
+
+        let metas = await store.sessions()
+        XCTAssertEqual(metas.count, 2, "the divergent branch forked")
+        let forkId = metas.map { $0.sessionId }.first { $0 != id }!
+        XCTAssertTrue(daemon.has(forkId), "the fork actually LANDED on the daemon — the point of the fix")
+
+        let forkTitle = metas.first { $0.sessionId == forkId }!.title!
+        XCTAssertLessThanOrEqual(forkTitle.utf16.count, LocalEventStore.maxTitleChars)
+        XCTAssertEqual(daemon.meta(forkId)?.title, forkTitle, "local and daemon agree on the clamped title")
+        XCTAssertTrue(forkTitle.hasSuffix("…"), "clamped titles are marked as truncated, ellipsis inside the budget")
+
+        // Control: an ORDINARY title still gets the full, unmangled marker.
+        XCTAssertEqual(LocalEventStore.capTitle("Shared" + LocalEventStore.forkTitleSuffix),
+                       "Shared" + LocalEventStore.forkTitleSuffix)
+    }
+
+    /// The other half of WB-I1's contract, at the wire boundary rather than the fork path: ANY title
+    /// this client sends is bounded, whatever built it. `PushMetaParams`' initializer is the single
+    /// construction point, so a future local titler (T11) cannot wedge a session by forgetting.
+    func testPushMetaTitleIsClampedWhateverTheLocalSourceWas() async throws {
+        let id = "10000000-0000-4000-8000-000000000012"
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: id)
+        // A title no daemon would have served — stands in for a future phone-side titler.
+        s.setSyncedMeta(title: .some(String(repeating: "L", count: 900)))
+
+        let client = SyncClient(store: store, conn: daemon)
+        try await client.syncAll() // creating push; pre-fix the wire refuses it outright
+
+        XCTAssertTrue(daemon.has(id))
+        let pushed = daemon.meta(id)?.title
+        XCTAssertEqual(pushed?.utf16.count, LocalEventStore.maxTitleChars)
+
+        // UTF-16 measurement, not grapheme count: a 200-emoji title is 400 units on the wire.
+        let emoji = String(repeating: "🙂", count: 300)
+        XCTAssertLessThanOrEqual(LocalEventStore.capTitle(emoji).utf16.count, LocalEventStore.maxTitleChars)
+        XCTAssertTrue(LocalEventStore.capTitle(emoji).hasSuffix("🙂…"), "truncation lands on a Character boundary — no surrogate pair split")
+    }
+
     // MARK: - C1: a daemon append RACING the pull must not wedge the session into forking forever
 
     func testARacingDaemonAppendDoesNotLeaveAStaleWatermarkOrMintForks() async throws {
@@ -433,6 +502,89 @@ final class SyncClientTests: XCTestCase {
         XCTAssertTrue(String(decoding: try Data(contentsOf: logURL(id)), as: UTF8.self).contains("phone-branch"))
     }
 
+    // MARK: - PROBE5 (T9 round-2 M1): the adopt guard is a PREFIX relation, not equality
+
+    /// The reviewer's PROBE5 chain: the fork push LANDS, its acknowledgement is lost, and before the
+    /// phone's next pass the Mac types into the new "(offline copy)". The daemon's copy of the fork is
+    /// then `plan.bytes` PLUS the Mac's line — and the adopt guard, written as `remote == plan.bytes`,
+    /// read that as "a different branch" and refused. Every subsequent pass refused identically
+    /// (`outcomes=[threw, threw, threw]`, the original frozen at head=2/synced=1) until the user
+    /// happened to send another message, which changed the source bytes and therefore the
+    /// content-derived fork id.
+    ///
+    /// Rated Minor on consequence (loud, nothing lost, self-heals on the next user turn) and promoted
+    /// to must-fix by the whole-branch review for one reason: WB-C1's fix is what makes this code path
+    /// EXECUTE in production for the first time, and the kit tag freezes it.
+    ///
+    /// The correct relation is the one `reconcileDivergence` two functions up already uses:
+    /// daemon ⊇ local ⟹ the daemon holds our bytes. Adopt, and let the pull phase collect the rest.
+    func testAdoptingAForkTheMacHasSinceAppendedToConverges() async throws {
+        let id = "10000000-0000-4000-8000-000000000013"
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: id)
+        s.setLastSyncedSeq(1)
+        let sharedPrefix = LocalChatSession.split(try Data(contentsOf: logURL(id)))
+        daemon.seed(id, sharedPrefix + [asst(id, 2, "mac-branch")])
+        s.persist(.userMessage(.init(seq: 2, sessionId: id, ts: 2, threadId: "main", text: "phone-branch", clientName: "phone")))
+
+        // The lost-ack state: the daemon ALREADY holds this exact fork (same content-derived id, same
+        // bytes) — and the Mac has since appended one message to it.
+        let plan = try await store.planFork(originalId: id, atSeq: 1)
+        daemon.seed(plan.newId, LocalChatSession.split(plan.bytes) + [asst(plan.newId, plan.lastSeq + 1, "mac-typed-into-the-copy")],
+                    title: plan.title, forkedFrom: plan.forkedFrom)
+
+        // Three passes, exactly as PROBE5 ran them. Pre-fix: [threw, threw, threw].
+        var outcomes: [String] = []
+        for _ in 0..<3 {
+            do { try await client(store, daemon).syncAll(); outcomes.append("ok") }
+            catch { outcomes.append("threw: \(error)") }
+        }
+        XCTAssertEqual(outcomes, ["ok", "ok", "ok"], "the adopt must converge, not refuse forever")
+
+        // ---- Postcondition: the fork is adopted locally, INCLUDING the Mac's later message ----
+        let metas = await store.sessions()
+        XCTAssertEqual(metas.count, 2)
+        let fork = metas.first { $0.sessionId == plan.newId }
+        XCTAssertNotNil(fork, "the adopted fork keeps the content-derived id — no duplicate was minted")
+        XCTAssertEqual(daemon.sessionIds().count, 2, "no second fork on the daemon either")
+        let forkBytes = try Data(contentsOf: logURL(plan.newId))
+        XCTAssertEqual(forkBytes, daemon.rawLog(plan.newId), "the pull phase fast-forwarded the adopted fork")
+        XCTAssertTrue(String(decoding: forkBytes, as: UTF8.self).contains("phone-typed") == false)
+        XCTAssertTrue(String(decoding: forkBytes, as: UTF8.self).contains("mac-typed-into-the-copy"))
+        XCTAssertEqual(fork?.lastSyncedSeq, fork?.lastSeq, "watermark caught up — no perpetual re-push")
+
+        // ...and the ORIGINAL converged onto the daemon's branch, which is what stayed frozen before.
+        XCTAssertEqual(try Data(contentsOf: logURL(id)), daemon.rawLog(id))
+        let origSynced = await store.lastSyncedSeq(sessionId: id)
+        let origHead = await store.lastSeq(sessionId: id)
+        XCTAssertEqual(origSynced, origHead)
+        XCTAssertEqual(origHead, 2)
+    }
+
+    /// The refusal must stay REAL: a prefix relation is not "anything goes". A fork id holding bytes
+    /// that are NOT ours is still refused — `testAdoptingAnExistingForkIsRefusedWhenItsBytesDiffer`
+    /// above covers the daemon side; this covers the LOCAL store's own adopt gate, which the same fix
+    /// loosened from `==` to `starts(with:)`.
+    func testCommitForkStillRefusesALocalLogThatIsNotOurBranch() async throws {
+        let id = "10000000-0000-4000-8000-000000000014"
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: id)
+        s.persist(.userMessage(.init(seq: 2, sessionId: id, ts: 2, threadId: "main", text: "ours", clientName: "phone")))
+        let plan = try await store.planFork(originalId: id, atSeq: 1)
+
+        // A local log already registered under the fork id whose FIRST bytes are somebody else's.
+        let alien = try await store.createSession(sessionId: plan.newId)
+        alien.persist(.assistantMessage(.init(seq: 2, sessionId: plan.newId, ts: 2, threadId: "main", text: "SOMEONE ELSE'S BYTES")))
+
+        do {
+            _ = try await store.commitFork(plan, syncedSeq: 2)
+            XCTFail("a local log that does not contain our branch must never be adopted")
+        } catch {
+            XCTAssertEqual(error as? LocalStoreError, .forkBytesMismatch(plan.newId))
+        }
+    }
+
     // MARK: - N-M2: one failing session must not block the others in the pass
 
     func testOneFailingSessionStillLetsEveryOtherSessionSync() async throws {
@@ -655,6 +807,15 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
 
     private func push(_ p: [String: Any]) throws -> Data {
         let id = p["sessionId"] as! String
+        // WIRE CAP, mirrored from `SyncPushParams.meta.title` = `z.string().max(200)`. It is a ZOD
+        // SCHEMA check, so it runs in `parseParams` before any handler sees the call and it is a hard
+        // refusal, never a clamp. This double did not model it, which is why the phone could build a
+        // 210-char fork title (a served-at-the-cap title plus the 15-char marker) and no test noticed
+        // that every push carrying it would be refused for as long as the title lived — whole-branch
+        // WB-I1. A test double that is lenient where the wire is strict proves nothing about the wire.
+        if let title = (p["meta"] as? [String: Any])?["title"] as? String, title.utf16.count > 200 {
+            throw RpcError(code: -32602, message: "expected string to have <=200 characters (meta.title was \(title.utf16.count))")
+        }
         let baseSeq = (p["baseSeq"] as! NSNumber).intValue
         let complete = p["complete"] as! Bool
         let chunk = Data(base64Encoded: p["data"] as! String) ?? Data()
@@ -696,6 +857,7 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
         lock.withLock {
             logs[id, default: []].append(contentsOf: lines)
             if let metaObj = p["meta"] as? [String: Any] {
+                // (title length already refused above — see the wire-cap guard)
                 var fork: SessionForkRef? = metas[id]?.forkedFrom
                 if let f = metaObj["forkedFrom"] as? [String: Any], let sid = f["sessionId"] as? String, let at = (f["atSeq"] as? NSNumber)?.intValue {
                     fork = SessionForkRef(sessionId: sid, atSeq: at)
