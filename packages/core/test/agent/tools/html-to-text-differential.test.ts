@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { htmlToText } from "../../../src/agent/tools/web";
+import { extractTitle, htmlToText } from "../../../src/agent/tools/web";
 
 /**
  * Differential harness for the whole-branch review's Critical fix-round-2: `htmlToText`'s five
@@ -58,6 +58,17 @@ const REALISTIC_CASES: Array<{ name: string; html: string }> = [
   { name: "a <br> immediately followed by a heading", html: "line<br><h2>Next</h2>" },
   { name: "script immediately followed by style immediately followed by head", html: "<script>1</script><style>2</style><head><title>3</title></head><p>4</p>" },
   { name: "whitespace-only lines collapse (multiple blank lines between blocks)", html: "<p>a</p>\n\n\n<p>b</p>" },
+  // Task 6b fix-round-1 (review Critical 1): the `<li\b[^>]*>` pass was linearized too, and the
+  // absent-`>` shape it is quadratic on was NOT expressible by the fuzz vocabulary below before this
+  // round (every `<li…>` token it emitted carried its own `>`). Pinned here as explicit cases as well
+  // as being added to `NO_TERMINATOR_TAGS`, because a pairing bug in that pass is a byte divergence,
+  // not just a slow one.
+  { name: "an unterminated <li with no '>' anywhere after it", html: "<ul><li>one</li><li x" },
+  { name: "many unterminated <li opens in a row", html: "<li a<li b<li c" },
+  { name: "an unterminated <li whose '>' belongs to a LATER unrelated tag", html: "<li attr=\"oops<p>after</p>" },
+  { name: "<li immediately followed by a word character (the \\b must not match)", html: "<link rel=x><lithium>Li</lithium>" },
+  { name: "<li> with an empty attribute run", html: "<li><li >x" },
+  { name: "a stray '<' between two list items", html: "<li>a</li><<li>b</li>" },
   {
     name: "realistic blog-post-shaped page",
     html:
@@ -132,7 +143,33 @@ function makeFuzzer(seed: number) {
   const ATTR_FRAGS = ["", ' class="x"', ' id="y" data-z="1"', ' href="https://example.com/z"', ' href="/rel"', ' href="", ', " href=noquotes", ' href="mismatched'];
   const TEXT_FRAGS = ["hello", "world &amp; friends", "<3", ">>", "&nbsp;pad", "", " ", "\n", "&#39;quoted&#39;", "text with < and > raw"];
   const ENTITY_FRAGS = ["&amp;", "&lt;", "&gt;", "&quot;", "&#39;", "&nbsp;", "&unknown;"];
-  const NO_TERMINATOR_TAGS = ["script", "style", "head"]; // the class that used to diverge — see above
+  // Tags emitted WITHOUT their own terminating '>' — the shape every quadratic pass in this cleaner is
+  // quadratic on, and the shape a pairing bug shows up as a byte divergence in. Task 6b fix-round-1
+  // added `li` and `title` (review Critical 1): before that, `script`/`style`/`head` were the only
+  // unterminated opens the generator could express, so this corpus could not have caught a divergence
+  // in the `<li` pass — one of the two sites that round linearized.
+  //
+  // `h1` IS DELIBERATELY ABSENT, and this is the interesting part. Adding it makes the generator able
+  // to express `<h1<h2>`-shaped input, which is exactly PRICE-OF-LINEARITY divergence class (A) that
+  // web.ts's own comment documents and the fix-round-2 whole-branch review accepted: the original
+  // combined `<h([1-6])[^>]*>([\s\S]*?)<\/h\1>` could backtrack INTO its own open tag's parse to
+  // satisfy the trailing close, and `convertHeadings`'s two-pass scan cannot. Measured here:
+  // 16/10,000 (seed 0xc0ffee) and 23/10,000 (seed 0x539) with `h1` in this list.
+  //
+  // Attributed, not assumed. `convertHeadings` is untouched by BOTH Task 6b commits (`git diff` over
+  // `19b766f8..HEAD` shows no heading lines), and swapping ONLY the heading pass back to the original
+  // combined regex — while keeping this round's `<li` scan and `stripTags` — drives those same two
+  // corpora to **0/10,000 and 0/10,000**. So every divergence the `h1` token produces belongs to the
+  // accepted class in code this task did not modify, and none belongs to `replaceListItems` or
+  // `stripTags`. Per-token isolation says the same thing: `li` alone 0/10,000, `title` alone 0/10,000,
+  // `h1` alone 28/10,000.
+  //
+  // Including it would therefore mean either weakening this gate to a non-zero budget or asserting a
+  // classifier for a known-accepted class — both worse than leaving the heading class where its own
+  // documentation already is. The `<h1`/`<title` absent-`>` shapes ARE covered at zero divergence in
+  // section (c) below, against `extractTitle`, which is the function whose `<h1`/`<title` handling
+  // this round actually changed.
+  const NO_TERMINATOR_TAGS = ["script", "style", "head", "li", "title"];
 
   function randomToken(): string {
     const kind = int(0, 12);
@@ -190,6 +227,91 @@ describe("htmlToText differential harness: randomized adversarial fuzz — diver
       const doc = fuzz(Math.floor(mulberry32(i + 9999)() * 30) + 2);
       if (oldHtmlToText(doc) !== htmlToText(doc)) divergences++;
     }
+    expect(divergences).toBe(0);
+  });
+});
+
+// --- (c) `extractTitle`, Task 6b fix-round-1 (review Critical 1). Both of its regexes
+// (`/<h1[^>]*>([\s\S]*?)<\/h1>/i` and the `<title>` fallback) were O(n²) on the absent-`>` shape:
+// non-global, but a FAILING match still retries at every `<h1` position. Replaced with a bounded
+// forward scan (`firstElementInner`), whose equivalence rests on an argument — the open tag's `>` is
+// forced, and a later candidate's `>` is never earlier — so it wants a differential, not just a
+// ceiling test. Same harness shape as (a)/(b) above. -------------------------------------------------
+//
+// `oldExtractTitle` is a byte-for-byte frozen copy of the PRE-fix extraction, kept here only as the
+// oracle. It deliberately calls the LIVE `htmlToText`: the only thing under test here is which
+// substring gets extracted, and `htmlToText` has its own oracle in (a)/(b). Sharing the unchanged
+// half is what isolates the changed half.
+function oldExtractTitle(html: string): string {
+  const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+  const src = h1?.[1] ?? html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+  if (!src) return "-";
+  const text = htmlToText(src).replace(/\n+/g, " ").trim();
+  return text || "-";
+}
+
+const TITLE_CASES: Array<{ name: string; html: string }> = [
+  { name: "h1 present", html: "<h1>Hello</h1><title>Ignored</title>" },
+  { name: "no h1, title used", html: "<head><title>Only Title</title></head><body>x</body>" },
+  { name: "neither", html: "<p>nothing here</p>" },
+  { name: "h1 with attributes", html: '<h1 class="a" id="b">Attr H1</h1>' },
+  { name: "uppercase tags", html: "<H1>Upper</H1>" },
+  { name: "mixed-case close", html: "<h1>Mixed</H1>" },
+  // The `??`-not-`||` edge: an h1 that MATCHED but captured "" must short-circuit to "-" rather than
+  // fall through to <title>, because "" is not nullish.
+  { name: "EMPTY h1 short-circuits and does NOT fall through to title", html: "<h1></h1><title>Not Used</title>" },
+  { name: "whitespace-only h1 also cleans to nothing", html: "<h1>   </h1><title>Not Used</title>" },
+  { name: "h1 containing markup and entities", html: '<h1>A <b>bold</b> &amp; <a href="/x">linked</a> title</h1>' },
+  { name: "h1 spanning newlines", html: "<h1>\n  Multi\n  line\n</h1>" },
+  // The absent-`>` shapes — the quadratic trigger, and the pairing edges the argument turns on.
+  { name: "unterminated h1 open, no '>' anywhere", html: "<h1 x" },
+  { name: "unterminated h1 open then a title", html: "<h1 x<title>Fallback</title>" },
+  { name: "many unterminated h1 opens", html: "<h1 a<h1 b<h1 c" },
+  { name: "h1 open with no close anywhere", html: "<h1>dangling text" },
+  { name: "h1 open, no close, but a title exists", html: "<h1>dangling<title>Used</title>" },
+  { name: "a </h1> BEFORE the open tag's own '>'", html: "<h1 </h1> x>body" },
+  { name: "the first h1 has no close but a later one does", html: "<h1>first<h1>second</h1>" },
+  { name: "nested h1 opens with one close", html: "<h1><h1>inner</h1>" },
+  { name: "unterminated title open", html: "<title x" },
+  { name: "many unterminated title opens", html: "<title a<title b<title c" },
+  { name: "title open with no close", html: "<title>dangling" },
+  { name: "<h1 followed by a word char still matches (no \\b in this regex, unlike <li)", html: "<h1x>Yes</h1>" },
+  { name: "h1 close with a level mismatch", html: "<h1>text</h2>" },
+  { name: "a bare '<' before the h1", html: "<<h1>after stray</h1>" },
+  { name: "empty string", html: "" },
+  { name: "only a '<'", html: "<" },
+];
+
+describe("extractTitle differential harness: the bounded scan matches the frozen regex oracle", () => {
+  for (const { name, html } of TITLE_CASES) {
+    test(name, () => {
+      expect(extractTitle(html)).toBe(oldExtractTitle(html));
+    });
+  }
+
+  test("10,000 randomized title-shaped documents (seeded): zero divergence", () => {
+    const rand = mulberry32(0x71713);
+    const pick = <T,>(arr: T[]): T => arr[Math.floor(rand() * arr.length)]!;
+    // Vocabulary biased at the two regexes' own edges: opens with and without their `>`, closes,
+    // level mismatches, `</h1>` text sitting inside an open tag, and bare `<`/`>`.
+    const TOKENS = [
+      "<h1>", "<h1 ", '<h1 class="x">', "<h1x>", "</h1>", "</H1>", "<H1>",
+      "<title>", "<title ", '<title lang="en">', "</title>", "</TITLE>",
+      "<", ">", "<p>", "</p>", "<b>x</b>", "text", " ", "\n", "&amp;", "&lt;",
+      "</h2>", '<a href="/x">link</a>', "<li x", "<script",
+    ];
+    let divergences = 0;
+    const examples: string[] = [];
+    for (let i = 0; i < 10_000; i++) {
+      const len = 1 + Math.floor(rand() * 14);
+      let doc = "";
+      for (let j = 0; j < len; j++) doc += pick(TOKENS);
+      if (extractTitle(doc) !== oldExtractTitle(doc)) {
+        divergences++;
+        if (examples.length < 10) examples.push(doc);
+      }
+    }
+    if (divergences > 0) console.error("extractTitle divergences", examples);
     expect(divergences).toBe(0);
   });
 });

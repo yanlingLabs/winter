@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } fr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ToolRegistry } from "../../../src/agent/tools/registry";
-import { registerWebTools, ssrfGuard, htmlToText, followRedirects, WEB_SEARCH_API_KEY_SECRET } from "../../../src/agent/tools/web";
+import { registerWebTools, ssrfGuard, htmlToText, extractTitle, followRedirects, WEB_SEARCH_API_KEY_SECRET } from "../../../src/agent/tools/web";
 
 function tmp(): string {
   return realpathSync(mkdtempSync(join(tmpdir(), "norma-webfetch-")));
@@ -103,8 +103,9 @@ describe("ssrfGuard", () => {
   // Task 6b Part A (back-ported from the phone's fix-round-2 Critical): every check in this guard
   // used to be a string comparison against `u.hostname` — the host AFTER WHATWG canonicalized it.
   // Canonicalization is LOSSY, and the reading WHATWG picks is not the only reading a resolver
-  // accepts: it reads a leading zero as OCTAL (`0127` → 87) while `getaddrinfo` prefers DECIMAL
-  // whenever it fits (`0127` → 127). Every host below was ALLOWED by the old guard and confirmed by
+  // accepts: it reads a leading zero as OCTAL (`0127` → 87) while `getaddrinfo`, for a four-part
+  // all-decimal quad, reads it as DECIMAL (`0127` → 127). Every host below was ALLOWED by the old
+  // guard and confirmed by
   // `getaddrinfo` to denote the private address named in the comment — 18 spellings found by
   // `ssrf-resolver-sweep.test.ts` against the old guard, which is also the gate that proves the
   // class (not the list) is closed.
@@ -133,6 +134,30 @@ describe("ssrfGuard", () => {
     // the same public 87.0.0.1 — the raw-authority reading has to decode too.
     expect(ssrfGuard("http://%30%31%32%37.0.0.1/")).toBe("refusing to fetch a private address");
     expect(ssrfGuard("http://%30%31%30.0.0.1/")).toBe("refusing to fetch a private address");
+  });
+
+  // Task 6b fix-round-1, review Minor 1: `rawAuthorityHost` reproduced everything WHATWG does to a
+  // URL before the host parser runs EXCEPT the UTS-46 mapping step, which folds fullwidth digits and
+  // the three alternate full-stop characters into ASCII. All six of these canonicalize to the same
+  // public address the ambiguous class does (`8.0.0.1` / `87.0.0.1`), so they defeated exactly the leg
+  // that exists to survive a dialer that does NOT canonicalize.
+  test("UTS-46-mapped spellings of the ambiguous class are refused too (fullwidth digits, alternate full stops)", () => {
+    for (const bad of [
+      "http://０１０.0.0.1/", // FULLWIDTH DIGIT ZERO/ONE/ZERO → 010
+      "http://%EF%BC%90%EF%BC%91%EF%BC%90.0.0.1/", // …the same, percent-encoded UTF-8
+      "http://０１２７.0.0.1/", // → 0127
+      "http://010。0.0.1/", // U+3002 IDEOGRAPHIC FULL STOP
+      "http://010．0.0.1/", // U+FF0E FULLWIDTH FULL STOP
+      "http://010｡0.0.1/", // U+FF61 HALFWIDTH IDEOGRAPHIC FULL STOP
+    ]) {
+      expect(ssrfGuard(bad)).toBe("refusing to fetch a private address");
+    }
+  });
+
+  test("the UTS-46 mapping does not over-block non-ASCII hostnames", () => {
+    for (const ok of ["https://ünicode.example/", "https://日本.example/", "https://xn--nicode-2ya.example/", "https://ｅxample.com/"]) {
+      expect(ssrfGuard(ok)).toBeNull();
+    }
   });
 
   test("still refuses the spellings WHATWG canonicalizes INTO the guarded form (both readings consulted)", () => {
@@ -284,6 +309,79 @@ describe("htmlToText: linear-time scanning (Critical fix, fix-round-2 — the SA
       return elapsed;
     });
     for (const t of timings) expect(t).toBeLessThan(200);
+  });
+
+  // Task 6b fix-round-1 (review Critical 1). The strip fixed above was NOT the last quadratic on this
+  // path: `<li\b[^>]*>` — in the very statement that rewrite split — and BOTH of `extractTitle`'s
+  // regexes have the identical unbounded-`[^>]*`-then-required-`>` shape, and all three run on the
+  // full, un-truncated body of every `text/html` fetch (`web_fetch`; and `fetchCleanPage` for
+  // ReadPage / FetchPage / the research runner), where the only cap in front of them is the 5 MB
+  // `MAX_FETCH_BYTES`. `extractTitle`'s regexes are non-global and "run once", which is what hid them:
+  // a FAILING match still retries at every `<h1` position, so being lazy saves nothing.
+  //
+  // CEILING CALIBRATION — measured on the real functions, before this round's fix and after.
+  // The three probes are deliberately separated by tag so each ceiling can only be met by fixing its
+  // own site (the `<script x` probe above isolates the strip the same way):
+  //
+  //     probe                        opens    bytes      before      after     ratio
+  //     "<li x"      htmlToText      40,000   195 KB    3,254 ms    0.4 ms     8100x
+  //                                 160,000   781 KB   53,300 ms    1.4 ms    38000x
+  //     "<h1 x"      extractTitle    40,000   195 KB    2,780 ms    0.6 ms     4600x
+  //     "<title x"   extractTitle    40,000   312 KB    4,490 ms    0.5 ms     9000x
+  //
+  // A 200 ms ceiling sits >100x above every linear run and >13x below every quadratic one at the
+  // largest size asserted, and the whole doubling series is asserted (not just the top size) because a
+  // constant-factor win that stayed O(n²) can clear a single absolute bound at one size and not
+  // others. Verified discriminating by mutating each site back independently — see the report.
+  const linearityCeilingMs = 200;
+
+  test("the <li> pass stays linear when no '>' follows (was 3.2s/195KB, 53s/781KB — worse per byte than the strip)", () => {
+    const timings = [5_000, 20_000, 40_000, 80_000].map((opens) => {
+      const html = "<ul><li>closed</li>" + "<li x".repeat(opens); // one real pair first, so the pass isn't short-circuited
+      const start = performance.now();
+      const text = htmlToText(html);
+      const elapsed = performance.now() - start;
+      // Byte-identity spot-check: an unterminated `<li` is NOT a list item, so it survives verbatim.
+      expect(text).toBe(`- closed\n${"<li x".repeat(opens).trim()}`);
+      return elapsed;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+  test("extractTitle's <h1> regex stays linear when no '>' follows (was 2.8s/195KB; a FAILING match retried at every <h1)", () => {
+    const timings = [5_000, 20_000, 40_000, 80_000].map((opens) => {
+      const html = "<h1 x".repeat(opens);
+      const start = performance.now();
+      const title = extractTitle(html);
+      const elapsed = performance.now() - start;
+      expect(title).toBe("-"); // no `>` and no `</h1>` ⇒ no match, and no `<title>` either
+      return elapsed;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+  test("extractTitle's <title> fallback stays linear when no '>' follows (was 4.5s/312KB)", () => {
+    const timings = [5_000, 20_000, 40_000, 80_000].map((opens) => {
+      const html = "<title x".repeat(opens); // no `<h1` at all, so the fallback is what's exercised
+      const start = performance.now();
+      const title = extractTitle(html);
+      const elapsed = performance.now() - start;
+      expect(title).toBe("-");
+      return elapsed;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+  test("extractTitle stays linear on the shape where the h1 open IS terminated but never closes", () => {
+    // A different failing path: the open tag's `>` exists (so the scan gets past it) but `</h1>` never
+    // does, which is where the original's lazy `[\s\S]*?` scanned to end-of-string per candidate.
+    const timings = [5_000, 20_000, 40_000, 80_000].map((opens) => {
+      const html = "<h1>t</h1x>".repeat(opens); // `</h1x>` is not `</h1>`
+      const start = performance.now();
+      extractTitle(html);
+      return performance.now() - start;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
   });
 
   test("many WELL-FORMED, properly-closed tags of every shape (the realistic case) still extract correctly and quickly", () => {

@@ -44,8 +44,8 @@ function ipv4HostRefusal(bits: number): string | null {
 }
 
 /** `inet_aton`/WHATWG's radix rules (`0x…` hex, a leading `0` octal, else decimal) vs. every part
- *  read as DECIMAL regardless of a leading zero — what `getaddrinfo` prefers whenever the decimal
- *  reading fits. See `ipv4Interpretations` for why both are consulted. */
+ *  read as DECIMAL regardless of a leading zero — the reading Darwin's resolver takes whenever the
+ *  host is a four-part all-decimal quad. See `ipv4Interpretations` for why both are consulted. */
 type RadixPolicy = "c-convention" | "decimal-only";
 
 /** One dotted part under one radix policy, or `null` when it isn't a legal part at all.
@@ -117,19 +117,28 @@ function dottedIPv4(host: string, policy: RadixPolicy): number | null {
  *      010.0.0.1        8.0.0.1            10.0.0.1       yes — ONLY under getaddrinfo
  *      0177.0.0.1       127.0.0.1          177.0.0.1      yes — ONLY under inet_aton/WHATWG
  *
- *  `getaddrinfo` prefers a DECIMAL reading whenever it fits (`010` → 10) and falls back to octal
- *  only when decimal would overflow the part (`0300` → 192); `inet_aton` always takes the C
+ *  `getaddrinfo` reads a leading zero as DECIMAL (`010` → 10) where `inet_aton` takes the C
  *  convention (`010` → 8). A guard consulting either alone fails OPEN on one of those two rows, so
  *  both are returned and ANY private reading refuses. That is fail-closed by construction and costs
  *  nothing: a genuinely public address is public under both readings.
  *
- *  (`getaddrinfo`'s true rule is per-PART — decimal if it fits, else octal — so a host mixing an
- *  overflowing octal part with an in-range decimal one has a third reading neither policy produces.
- *  Every such host is either covered by `c-convention` anyway, because a part whose decimal reading
- *  fits reads the same under both policies unless it carries a leading zero, or rejected outright by
- *  WHATWG: `0300.168.0.1` → 192.168.0.1 under `c-convention`; `0300.0168.0.1` has an out-of-radix
- *  octal digit and `new URL()` throws. The resolver sweep is what checks that claim empirically
- *  rather than by argument — `test/agent/tools/ssrf-resolver-sweep.test.ts`.) */
+ *  DARWIN'S ACTUAL RULE, since the obvious guess is wrong and the wrong guess was in this comment
+ *  until the review corrected it: it is not per-part. `getaddrinfo` tries a STRICT FOUR-PART
+ *  ALL-DECIMAL parse first (leading zeros allowed, every part ≤ 255) and falls back to whole-host
+ *  `inet_aton` when that fails — never a mix. Measured:
+ *
+ *      host              new URL        getaddrinfo    inet_aton
+ *      010.0.0.1         8.0.0.1        10.0.0.1       8.0.0.1      4 parts: the decimal quad wins
+ *      010.0.1           8.0.0.1        8.0.0.1        8.0.0.1      3 parts: no quad, so C convention
+ *      0172.020.0300.1   122.16.192.1   122.16.192.1   122.16.192.1 quad FAILS (300 > 255) → aton
+ *      0172.020.192.1    122.16.192.1   172.20.192.1   122.16.192.1 quad succeeds
+ *
+ *  `decimal-only` ∪ `c-convention` is a strict SUPERSET of that rule for every part count — which is
+ *  the fail-closed property this needs, and it is what makes the mechanism correction a comment fix
+ *  rather than a code fix. Checked empirically, not by argument: a 46,598-host mixed-radix corpus
+ *  (including the `0172.020.0300.1` shape built specifically to break it) found 0 resolver holes and
+ *  0 dial holes. `test/agent/tools/ssrf-resolver-sweep.test.ts` carries the transform that keeps a
+ *  regression here visible. */
 function ipv4Interpretations(host: string): number[] {
   const found: number[] = [];
   for (const policy of ["c-convention", "decimal-only"] as const) {
@@ -267,7 +276,18 @@ function hostRefusal(host: string): string | null {
  *  arbitrary run of leading slashes, userinfo up to the LAST `@`, and percent-decoding — and
  *  nothing it does after. It is deliberately CONTAINED: a mis-extraction can only produce a host
  *  that no reading recognises (in which case the canonical check, which is what this guard has
- *  always done, still stands unchanged), never a weaker verdict than before. */
+ *  always done, still stands unchanged), never a weaker verdict than before.
+ *
+ *  The UTS-46 MAPPING step (review Minor 1) is the last thing WHATWG does before parsing the host,
+ *  and skipping it let six measured spellings of the ambiguous class walk straight past this leg:
+ *  `０１０.0.0.1` (FULLWIDTH DIGIT ZERO/ONE), its percent-encoded UTF-8 form
+ *  `%EF%BC%90%EF%BC%91%EF%BC%90.0.0.1`, `０１２７.0.0.1`, and `010。0.0.1` / `010．0.0.1` /
+ *  `010｡0.0.1` (U+3002 IDEOGRAPHIC, U+FF0E FULLWIDTH and U+FF61 HALFWIDTH IDEOGRAPHIC FULL STOP —
+ *  UTS-46 folds all three to `.`). `NFKC` covers the fullwidth digits and U+FF0E, and folds U+FF61 to
+ *  U+3002; U+3002 is itself NFKC-stable, so it is folded explicitly. Order matters: percent-decode
+ *  first (those escapes ARE the UTF-8 of those characters), then normalize, then fold, then
+ *  lowercase. This is the mapping step only, not a reimplementation of IDNA — Punycode conversion
+ *  cannot turn a host into a private IPv4 literal, so it buys nothing here. */
 function rawAuthorityHost(raw: string): string | null {
   let rest = raw.replace(/[\t\n\r]/g, "").replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "");
   const scheme = /^[A-Za-z][A-Za-z0-9+\-.]*:/.exec(rest);
@@ -286,7 +306,7 @@ function rawAuthorityHost(raw: string): string | null {
   }
   if (host === "") return null;
   try { host = decodeURIComponent(host); } catch { /* not valid UTF-8 escapes — judge it as written */ }
-  return host.toLowerCase();
+  return host.normalize("NFKC").replace(/\u3002/g, ".").toLowerCase();
 }
 
 /** Norma's ONLY sanctioned network egress (spec 4g §4.3) — bash stays sandboxed (network denied).
@@ -490,6 +510,34 @@ function convertHeadings(html: string): string {
 const LT = 0x3c; // "<"
 const GT = 0x3e; // ">"
 
+/** `/<li\b[^>]*>/gi`'s OPEN token only. `(?![0-9A-Za-z_])` is exactly the original's `\b`: the
+ *  preceding character is always `i`, a JS word character, so the boundary holds iff the next
+ *  character is a non-word one (or the string ends — where the original then fails for want of a `>`,
+ *  as does the scan below). No unbounded quantifier, so driving this with `exec` is linear; the
+ *  `[^>]*>` tail is what `replaceListItems` pairs with a pointer instead of a re-scan. */
+const LIST_ITEM_OPEN_RE = /<li(?![0-9A-Za-z_])/gi;
+
+/** ASCII-case-insensitive `indexOf`. `needleLower` must already be lowercase ASCII.
+ *
+ *  Why not `/needle/i`: JS's non-`u` `i` flag folds exactly the ASCII letters and nothing else (the
+ *  spec's `Canonicalize` refuses to map a non-ASCII code unit onto an ASCII one, which is why
+ *  `/k/i` does NOT match U+212A KELVIN SIGN), so an explicit ASCII fold is the faithful equivalent —
+ *  the same discipline the Swift port spells out. Needles here are 3-8 characters, so the naive
+ *  scan is linear in `haystack` with a small constant. */
+function indexOfAsciiCI(haystack: string, needleLower: string, from: number): number {
+  const n = haystack.length;
+  const m = needleLower.length;
+  outer: for (let i = Math.max(0, from); i + m <= n; i++) {
+    for (let k = 0; k < m; k++) {
+      let c = haystack.charCodeAt(i + k);
+      if (c >= 65 && c <= 90) c += 32; // fold A-Z only
+      if (c !== needleLower.charCodeAt(k)) continue outer;
+    }
+    return i;
+  }
+  return -1;
+}
+
 /** The final tag strip, `html.replace(/<[^>]+>/g, "")`, as a single monotonic forward scan.
  *
  *  Exactly equivalent, and the equivalence is easy to see: the regex's leftmost match at a `<` is
@@ -541,6 +589,48 @@ function stripTags(text: string): string {
   return out + text.slice(copied);
 }
 
+/** `html.replace(/<li\b[^>]*>/gi, "\n- ")` as a monotonic forward scan.
+ *
+ *  SAME BUG, SAME FIX AS `stripTags` — and this pass was measurably WORSE per byte than the strip
+ *  (review Critical 1). `[^>]*` followed by a required `>` is O(n²) on the absent-`>` shape: at every
+ *  `<li` the engine consumes to end-of-string and then fails. It runs on the full, un-truncated body
+ *  of every `text/html` fetch (`web_fetch`, and `fetchCleanPage` for ReadPage / FetchPage / the
+ *  research runner), where the only cap in front of it is `MAX_FETCH_BYTES` — 5 MB. Measured on the
+ *  real `htmlToText`, `"<li x".repeat(n)`, ×4.3 per doubling:
+ *
+ *      opens      bytes     before      after
+ *       5,000      25 KB      44 ms     0.2 ms
+ *      20,000      98 KB     903 ms     0.3 ms
+ *      40,000     195 KB    3,254 ms    0.4 ms
+ *      80,000     391 KB   13,586 ms    0.7 ms
+ *     160,000     781 KB   53,300 ms    1.4 ms   (~39 min extrapolated to the 5 MB cap)
+ *
+ *  Equivalence: `[^>]*` cannot cross a `>`, so the match at a given `<li` open ends at the FIRST `>`
+ *  at or after the open token — there is nothing to search for that a forward pointer does not
+ *  already know. `lastIndex` is driven to just past each match, reproducing the global replace's own
+ *  jump (so a `<li` nested inside an already-consumed match is not separately matched, exactly as
+ *  before), and the early `break` is what makes the worst case cheap: if no `>` follows this open,
+ *  none follows any later one either. */
+function replaceListItems(html: string): string {
+  const n = html.length;
+  let out = "";
+  let copied = 0;
+  let gtPtr = 0; // monotonic — never rewinds across the whole scan
+  LIST_ITEM_OPEN_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = LIST_ITEM_OPEN_RE.exec(html))) {
+    if (m.index < copied) continue; // inside an already-consumed match
+    const tokenEnd = LIST_ITEM_OPEN_RE.lastIndex; // just past "<li"
+    if (gtPtr < tokenEnd) gtPtr = tokenEnd;
+    while (gtPtr < n && html.charCodeAt(gtPtr) !== GT) gtPtr++;
+    if (gtPtr >= n) break; // no ">" after this open, nor after any later one
+    out += html.slice(copied, m.index) + "\n- ";
+    copied = gtPtr + 1;
+    LIST_ITEM_OPEN_RE.lastIndex = copied;
+  }
+  return out + html.slice(copied);
+}
+
 export function htmlToText(html: string): string {
   let out = html;
   out = replacePairedTag(out, SCRIPT_OPEN_RE, SCRIPT_CLOSE_RE, () => "");
@@ -549,21 +639,50 @@ export function htmlToText(html: string): string {
   // structure worth keeping (user design): headings → #, links → text (url), list items → "- "
   out = convertHeadings(out);
   out = replacePairedTag(out, ANCHOR_OPEN_RE, ANCHOR_CLOSE_RE, (m, inner) => `${inner} (${m[1]})`);
-  out = out
-    .replace(/<li\b[^>]*>/gi, "\n- ")
-    .replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|h[1-6]|li|tr)>/gi, "\n");
+  out = replaceListItems(out); // == .replace(/<li\b[^>]*>/gi, "\n- "), linear — see replaceListItems
+  // `<br\s*\/?>` and `</(p|div|h[1-6]|li|tr)>` are both bounded (no `[^>]*`), so neither has the
+  // quadratic shape: measured flat at 0.1 ms across the whole doubling series above.
+  out = out.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|h[1-6]|li|tr)>/gi, "\n");
   out = stripTags(out); // == .replace(/<[^>]+>/g, ""), linear — see stripTags
   return out
     .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ")
     .split("\n").map(l => l.trim()).filter(Boolean).join("\n");
 }
 
+/** `html.match(/<TAG[^>]*>([\s\S]*?)<\/TAG>/i)?.[1]` — the first such element's inner text, or `null`
+ *  when the regex would not have matched at all — as a bounded forward scan.
+ *
+ *  Equivalence, and why only the FIRST `<TAG` occurrence needs looking at (review Critical 1: the
+ *  regex is non-global, but a FAILING match still retries at every `<h1` position, which is where the
+ *  O(n²) came from). For a candidate open at `i`, `[^>]*` cannot cross a `>`, so the open tag's end
+ *  is FORCED to the first `>` at or after `i + 1 + tag.length` — the engine can never backtrack to a
+ *  different one. And the first `>` after a LATER candidate is at or after that same position, so if
+ *  no `</TAG>` exists after the first candidate's `>`, none exists after any later candidate's
+ *  either. The first candidate therefore decides the whole match: no loop, no retry, no re-scan. */
+function firstElementInner(html: string, tag: string): string | null {
+  const open = indexOfAsciiCI(html, `<${tag}`, 0);
+  if (open < 0) return null;
+  const openEnd = html.indexOf(">", open + tag.length + 1);
+  if (openEnd < 0) return null;
+  const close = indexOfAsciiCI(html, `</${tag}>`, openEnd + 1);
+  if (close < 0) return null;
+  return html.slice(openEnd + 1, close);
+}
+
 /** Title extraction happens on the RAW html, before htmlToText runs on the whole page (which
  *  destroys the tags this looks for). Reuses htmlToText only on the small extracted h1/title
- *  snippet — that's just tag-stripping + entity-decoding, not the whole-page conversion. */
-function extractTitle(html: string): string {
-  const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-  const src = h1?.[1] ?? html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+ *  snippet — that's just tag-stripping + entity-decoding, not the whole-page conversion.
+ *
+ *  EXPORTED, and page-core.ts's byte-identical private copy deleted, as part of the Critical-1 fix
+ *  (review: "both `extractTitle` regexes … **two copies**"). Two copies of a quadratic meant two
+ *  places to fix and two places for the next fix to miss; the duplication was only ever there to
+ *  avoid exporting a web.ts internal, and page-core.ts already imports `htmlToText` and
+ *  `followRedirects` from here.
+ *
+ *  `??` and not `||` is deliberate and preserved: an h1 that matched but captured the EMPTY string
+ *  short-circuits to `"-"` rather than falling through to `<title>`, because `""` is not nullish. */
+export function extractTitle(html: string): string {
+  const src = firstElementInner(html, "h1") ?? firstElementInner(html, "title");
   if (!src) return "-";
   const text = htmlToText(src).replace(/\n+/g, " ").trim();
   return text || "-";
@@ -617,7 +736,18 @@ export type FollowResult = FetchSuccess | FetchFailure;
 
 /** SSRF-guarded manual-redirect loop: guards EVERY hop (including the first) — a compliant first
  *  URL must not be able to 302 into a private address. `fetchFn` is injectable so tests drive this
- *  with a fake (no live network in unit tests); it defaults to the global fetch. */
+ *  with a fake (no live network in unit tests); it defaults to the global fetch.
+ *
+ *  DISCLOSED ASYMMETRY on the raw-authority leg (review Minor 3). Each hop is resolved with
+ *  `new URL(loc, current).toString()` below — necessarily, since a `Location` may be relative — which
+ *  RE-SERIALIZES it in canonical form. So a `Location: http://0127.0.0.1/` reaches the next
+ *  `ssrfGuard` call already rewritten to `http://87.0.0.1/`, and `rawAuthorityHost` has nothing left
+ *  to judge: the ambiguous spelling is refused as a model-supplied URL and accepted as a redirect
+ *  target. This is not a hole — the dial IS that public canonical address, on the same
+ *  WHATWG-canonicalizing `fetch` the guard's canonical leg matches — but it does mean the
+ *  defense-in-depth layer stops at hop 0. Closing it properly needs the raw `Location` string carried
+ *  alongside the resolved one (only meaningful when `loc` is absolute), which is a shape change to
+ *  this loop's contract; deliberately not taken in a fix round whose subject is elsewhere. */
 export async function followRedirects(startUrl: string, opts: FollowRedirectsOptions = {}): Promise<FollowResult> {
   const fetchFn = opts.fetchFn ?? fetch;
   const maxHops = opts.maxHops ?? MAX_REDIRECT_HOPS;

@@ -1,4 +1,4 @@
-import { followRedirects, htmlToText } from "./web";
+import { extractTitle, followRedirects, htmlToText } from "./web";
 import { SHIPPED_DANGEROUS_DOMAINS, dangerousDomainMatch } from "../dangerous-domains";
 
 /**
@@ -441,17 +441,12 @@ function abortError(signal: AbortSignal): Error {
   return err;
 }
 
-/** Own small title-extraction helper — NOT web.ts's private `extractTitle` (it isn't exported;
- *  only `followRedirects`, `ssrfGuard` (transitively, via `followRedirects`), and `htmlToText` are).
- *  Same idea (h1, else `<title>`, run through `htmlToText` and collapsed to one line) kept small
- *  and separate rather than exporting web.ts internals this task doesn't otherwise need. */
-function extractTitle(html: string): string {
-  const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-  const src = h1?.[1] ?? html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
-  if (!src) return "-";
-  const text = htmlToText(src).replace(/\n+/g, " ").trim();
-  return text || "-";
-}
+// Title extraction used to live here as a byte-identical private copy of web.ts's `extractTitle`,
+// deliberately duplicated to avoid exporting a web.ts internal. Task 6b fix-round-1 deleted the copy
+// and imports the real one instead (web.ts now `export`s it): both copies carried the SAME quadratic
+// `/<h1[^>]*>([\s\S]*?)<\/h1>/i` (review Critical 1, measured 2.8 s per 200 KB of `<h1 x` soup on a
+// path reached by every HTML fetch), so the duplication meant two places to fix and two places for
+// the next fix to miss. One implementation, one linearity test, one place to be wrong.
 
 // Critical 2, whole-branch review (2026-07-28): the ORIGINAL single combined regex
 // (`/<a\s[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi`, the SAME shape web.ts:98's htmlToText still
