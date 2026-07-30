@@ -41,10 +41,19 @@ final class NormaSessionClientTests: XCTestCase {
         return try! WireFrame.encode(e)
     }
 
-    private func eventFrame(session: String, stream: String? = nil, seq: Int) -> Data {
-        let payload = try! JSONEncoder().encode(SessionEvent.JSONValue.object([
-            "sessionId": .string(session), "seq": .number(Double(seq)), "type": .string("assistant_delta"),
-        ]))
+    /// `type` is the event's wire discriminator and it is NOT decoration: the client exempts the
+    /// seven TRANSIENT types from seq dedupe/cursor advance, so a frame's type decides which half of
+    /// `applyEvent` it exercises. Anything testing dedupe/gap/replay must therefore use a PERSISTED
+    /// type (the `assistant_message` default); the transient tests pass their own.
+    private func eventFrame(
+        session: String, stream: String? = nil, seq: Int,
+        type: String = "assistant_message", extra: [String: SessionEvent.JSONValue] = [:]
+    ) -> Data {
+        var body: [String: SessionEvent.JSONValue] = [
+            "sessionId": .string(session), "seq": .number(Double(seq)), "type": .string(type),
+        ]
+        for (k, v) in extra { body[k] = v }
+        let payload = try! JSONEncoder().encode(SessionEvent.JSONValue.object(body))
         return serverFrame(kind: .event, sessionID: session, streamID: stream ?? session, seq: seq, payload: payload)
     }
 
@@ -151,6 +160,16 @@ final class NormaSessionClientTests: XCTestCase {
     }
 
     private func seqs(_ envs: [SessionEnvelope]) -> [Int] { envs.compactMap { $0.seq } }
+    private func types(_ envs: [SessionEnvelope]) -> [String] { envs.map { $0.json["type"]?.stringValue ?? "<untyped>" } }
+    private func deltas(_ envs: [SessionEnvelope]) -> [String] { envs.compactMap { $0.json["delta"]?.stringValue } }
+
+    /// The seven broadcast-only TRANSIENT event types, in the exact order/membership of the Mac
+    /// client's exemption list (`NormaKit.NormaClient.route`) — the list this suite pins the phone
+    /// client against.
+    private static let transientTypes = [
+        "assistant_delta", "lease_granted", "lease_lost", "peripheral_call_requested",
+        "plugin_tool_invoke", "hardware_requested", "plugin_tile_updated",
+    ]
 
     // MARK: - Step 1: CursorStore
 
@@ -422,6 +441,144 @@ final class NormaSessionClientTests: XCTestCase {
         // Only the applied replay event was ever yielded; nothing buffered leaked out of order.
         XCTAssertEqual(seqs(events.items), [1])
         XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 1)
+    }
+
+    // MARK: - Transient events: exempt from BOTH the seq dedupe and the cursor advance
+
+    /// **The bug this pins.** `hub.ts`'s `broadcastTransient` stamps a transient with the store's
+    /// CURRENT `lastSeq` — the seq of the last event it actually APPENDED, never a seq of its own
+    /// (`packages/protocol/src/events.ts` writes the contract out: clients "MUST exempt
+    /// assistant_delta from seq-based dedupe and lastSeq updates"). So on a caught-up client every
+    /// delta of a turn arrives at `seq == cursor`, and the plain `seq <= cursor` drop killed 100% of
+    /// them — no streaming at all on a remote session, the whole reply landing at once at
+    /// turn end.
+    ///
+    /// Note the shape: FOUR deltas ALL carrying seq 5 (the seq of the `turn_started` that preceded
+    /// them). Every pre-existing event test in this file feeds STRICTLY INCREASING seqs — a shape
+    /// the daemon never produces for a transient — which is exactly why the suite was green while
+    /// streaming was totally broken.
+    func testAssistantDeltaBurstAtCursorSeqIsDeliveredNotDeduped() async throws {
+        let conn = ScriptedRemoteConn()
+        let cursors = InMemoryCursorStore()
+        let client = makeClient(conn: conn, cursors: cursors)
+        let (events, evTask) = drain(client.events)
+        defer { evTask.cancel() }
+
+        conn.enqueueInbound(helloAckFrame(verdicts: [.upToDate(sessionID: "s1", highWatermark: 0)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0)])
+
+        // The persisted event that opens the turn: the cursor lands on ITS seq.
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 5, type: "turn_started"))
+        // ...and every delta of that turn is then stamped with the same 5.
+        for i in 1...4 {
+            conn.enqueueInbound(eventFrame(session: "s1", seq: 5, type: "assistant_delta",
+                                           extra: ["delta": .string("chunk-\(i)")]))
+        }
+        // Barrier: the persisted final message closes the turn at the next real seq.
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 6, type: "assistant_message"))
+
+        try await waitUntil({ self.types(events.items).last == "assistant_message" }, "the turn's final message")
+        XCTAssertEqual(deltas(events.items), ["chunk-1", "chunk-2", "chunk-3", "chunk-4"],
+                       "every streamed delta must reach the consumer — pre-fix all four died on `seq <= cursor`")
+        XCTAssertEqual(types(events.items), ["turn_started"] + Array(repeating: "assistant_delta", count: 4) + ["assistant_message"],
+                       "deltas are delivered in order, between the two persisted events")
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 6,
+                       "only the two PERSISTED events moved the cursor")
+    }
+
+    /// The same drop killed all SEVEN transient types, not just streaming: the peripheral-lease v1
+    /// events, `plugin_tool_invoke`, `hardware_requested` and `plugin_tile_updated` are broadcast
+    /// with the same borrowed seq. Pins the phone's exemption list against the Mac client's
+    /// (`NormaClient.swift`) — membership drift in either direction fails here.
+    func testAllSevenTransientTypesAtCursorSeqAreExempt() async throws {
+        let conn = ScriptedRemoteConn()
+        let cursors = InMemoryCursorStore()
+        let client = makeClient(conn: conn, cursors: cursors)
+        let (events, evTask) = drain(client.events)
+        defer { evTask.cancel() }
+
+        conn.enqueueInbound(helloAckFrame(verdicts: [.upToDate(sessionID: "s1", highWatermark: 0)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0)])
+
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 5, type: "turn_started")) // cursor → 5
+        for t in Self.transientTypes { conn.enqueueInbound(eventFrame(session: "s1", seq: 5, type: t)) }
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 6, type: "assistant_message")) // barrier
+
+        try await waitUntil({ self.types(events.items).last == "assistant_message" }, "the barrier event")
+        XCTAssertEqual(types(events.items), ["turn_started"] + Self.transientTypes + ["assistant_message"],
+                       "all seven transient types must pass the dedupe gate at seq == cursor")
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 6,
+                       "no transient moved the cursor")
+    }
+
+    /// **The other half, and why exempting only the dedupe would be a WORSE bug.** A transient's
+    /// borrowed seq belongs to a REAL event — one this client may not have applied yet (here: seqs
+    /// 4 and 5 of a replay batch still in flight). If the transient advanced the cursor to its
+    /// borrowed seq, those two genuine, persisted events would be swallowed as duplicates the
+    /// moment they arrived: streaming restored, transcript silently truncated.
+    ///
+    /// Pre-fix this test fails in exactly that shape — the delta (seq 5 > cursor 3) IS yielded and
+    /// DOES drag the cursor to 5, and replay seqs 4 and 5 then vanish.
+    func testTransientDoesNotAdvanceCursorSoLaterRealEventsAtThatSeqStillArrive() async throws {
+        let conn = ScriptedRemoteConn()
+        let cursors = InMemoryCursorStore()
+        let client = makeClient(conn: conn, cursors: cursors)
+        let (events, evTask) = drain(client.events)
+        let (gaps, gapTask) = drain(client.gaps)
+        defer { evTask.cancel(); gapTask.cancel() }
+
+        // Replay window 1..5 — the batch is mid-flight while the live turn streams.
+        conn.enqueueInbound(helloAckFrame(verdicts: [.replayBegin(sessionID: "s1", fromSeq: 0, highWatermark: 5)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0)])
+
+        for seq in 1...3 { conn.enqueueInbound(eventFrame(session: "s1", seq: seq, type: "assistant_message")) }
+        // A live delta borrowing seq 5 lands while the cursor is still at 3.
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 5, type: "assistant_delta",
+                                       extra: ["delta": .string("live")]))
+        // The rest of the replay batch — these are the events a cursor-advancing transient eats.
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 4, type: "assistant_message"))
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 5, type: "assistant_message"))
+
+        try await waitUntil({ self.seqs(events.items).count >= 6 }, "the full replay batch plus the live delta")
+        XCTAssertEqual(seqs(events.items), [1, 2, 3, 5, 4, 5],
+                       "the delta rides through at seq 5 without consuming replay seqs 4 and 5")
+        XCTAssertEqual(types(events.items),
+                       ["assistant_message", "assistant_message", "assistant_message",
+                        "assistant_delta", "assistant_message", "assistant_message"])
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 5,
+                       "the cursor tracks persisted events only — the transient never moved it")
+        XCTAssertTrue(gaps.items.isEmpty)
+    }
+
+    /// Control: the exemption is type-scoped, not a blanket hole. A REPLAYED persisted event at
+    /// `seq <= cursor` is still dropped, and persisted events still advance the cursor — even when
+    /// a transient at the very same seq passes between them.
+    func testNonTransientReplayAtOrBelowCursorIsStillDroppedAndStillAdvances() async throws {
+        let conn = ScriptedRemoteConn()
+        let cursors = InMemoryCursorStore()
+        let client = makeClient(conn: conn, cursors: cursors)
+        let (events, evTask) = drain(client.events)
+        defer { evTask.cancel() }
+
+        conn.enqueueInbound(helloAckFrame(verdicts: [.upToDate(sessionID: "s1", highWatermark: 0)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0)])
+
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 1, type: "user_message"))
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 2, type: "assistant_message")) // cursor → 2
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 2, type: "assistant_message")) // replay dup: dropped
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 1, type: "user_message"))      // older dup: dropped
+        // A transient at the SAME seq the duplicates were rejected at still gets through.
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 2, type: "assistant_delta",
+                                       extra: ["delta": .string("live")]))
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 3, type: "assistant_message")) // barrier
+
+        try await waitUntil({ self.types(events.items).count >= 4 }, "the barrier event")
+        XCTAssertEqual(types(events.items),
+                       ["user_message", "assistant_message", "assistant_delta", "assistant_message"],
+                       "persisted duplicates stay deduped; only the transient bypasses the gate")
+        XCTAssertEqual(seqs(events.items), [1, 2, 2, 3])
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 3,
+                       "persisted events still advance the cursor")
     }
 
     // MARK: - Step 6: idempotency (commandId) + approval state machine
