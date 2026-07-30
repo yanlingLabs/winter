@@ -25,6 +25,7 @@ import {
   MemoryListParams, MemoryReadParams, MemoryWriteParams, MemoryDeleteParams, MemoryAuditParams,
   ProviderConfigureParams,
   WorkflowListParams, WorkflowRunParams, WorkflowStopParams, WorkflowGetParams,
+  SyncHeadsParams, SyncPullParams, SyncPushParams,
   SYSTEM_SESSION_ID,
   type SessionEvent, ConnWriter, type WritableSocket,
 } from "@norma/protocol";
@@ -38,6 +39,7 @@ import type { MemoryStore, MemoryErrorKind } from "../agent/memory";
 import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTailMemDir } from "../agent/memory-file-ops";
 import type { SessionStore } from "../sessions/store";
 import { readHistoryPage } from "../sessions/history";
+import { SyncPushBuffers, syncHeads, syncPull, syncPush } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { AgentEngine } from "../agent/engine";
 import { resolveModelAlias } from "../agent/model-aliases";
@@ -71,6 +73,11 @@ import {
 } from "../plugins/lifecycle";
 
 interface ConnState {
+  /** Chat Slice D task 2: a process-unique id for this socket, minted at `open`. The first key of
+   *  the `sync.push` reassembly buffer — a number rather than the ConnState object itself so the
+   *  buffer map holds nothing that could keep a dead connection's state alive, and so `close()` can
+   *  drop everything the connection owned with a single call. */
+  connId: number;
   decoder: LineDecoder;
   authedRole: string | null;
   clientName: string;
@@ -300,6 +307,15 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   // fixed policy has no remote-meaningful "set" at all). Guarded by assertRemoteMayUseSession below,
   // same as every other bare-sessionId entry on this list.
   METHODS.sessionSetModel,
+  // Chat Slice D task 2 (session sync): the phone replicates its own chat-session logs both ways.
+  // The phone is the ONLY client that has ever needed these three — they exist for exactly this
+  // role. All three are additionally CHAT-ONLY and fail closed on an absent/unknown session mode
+  // (ipc/sync.ts), a strictly tighter gate than assertRemoteMayUseSession's eligible-mode set; the
+  // two bare-sessionId verbs run BOTH, so removing "chat" from REMOTE_ELIGIBLE_SESSION_MODES would
+  // close this surface too rather than silently leaving it open.
+  METHODS.syncHeads,
+  METHODS.syncPull,
+  METHODS.syncPush,
 ]);
 
 /** The session `mode`s a remote (iPhone) client may target at all — every other mode is Mac-local
@@ -367,6 +383,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   // orb attached to a different, older session) learn about it and can offer to follow (spec §4.4).
   // Added on successful hello (role === "harness"); removed on socket close.
   const harnessConns = new Set<ConnState>();
+
+  // Chat Slice D task 2 (session sync): the `sync.push` reassembly buffers, one server-wide holder
+  // keyed by (connId, sessionId). Not per-ConnState so the whole structure is testable on its own
+  // and so its caps are enforced in one place; `close()` below drops a connection's buffers.
+  const syncBuffers = new SyncPushBuffers();
+  let nextConnId = 1;
 
   // session_titled (Task 3) is broadcast to EVERY authed harness, not just clients attached to
   // that session — mirrors the session.create broadcast above for the same reason: a harness
@@ -567,6 +589,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         }
         connections++;
         socket.data = {
+          connId: nextConnId++,
           decoder: new LineDecoder(preAuthMaxLine),
           authedRole: null,
           clientName: "",
@@ -586,6 +609,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (socket.data.helloTimer) clearTimeout(socket.data.helloTimer);
         if (socket.data.hubClient) hub.detach(socket.data.hubClient);
         harnessConns.delete(socket.data);
+        // Chat Slice D task 2: an in-flight chunked sync.push dies with its connection — the
+        // partial bytes are dropped, never carried over to whatever reconnects next (a resumed
+        // push must start over, which is exactly what makes the apply atomic).
+        syncBuffers.dropConnection(socket.data.connId);
         // Provider disconnect (spec §A3): only the connection that most recently advertised
         // counts — isProvider() is checked BEFORE providerGone() resets the broker's identity.
         if (opts.peripheral?.isProvider(socket.data)) {
@@ -648,10 +675,19 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             }
             socket.data.writer.enqueue(encodeLine({ jsonrpc: "2.0", id, result }));
           } catch (err) {
-            const e = err as Partial<RpcFailure>;
+            const e = err as Partial<RpcFailure> & { data?: unknown };
             const code = e.code ?? ERR.INTERNAL;
             const message = e.message ?? "internal error";
-            socket.data.writer.enqueue(encodeLine({ jsonrpc: "2.0", id, error: { code, message } }));
+            // Chat Slice D task 2: a thrown error may carry a structured `data` payload
+            // (`RpcError.data`, already part of the JSON-RPC envelope schema) — `sync.push`'s
+            // DIVERGED uses it to hand back the daemon's `lastSeq` so a client can branch
+            // programmatically instead of string-matching a message. Read structurally off
+            // whatever was thrown, so no error class needs to know about this pump; omitted
+            // entirely when absent, leaving every existing error byte-identical on the wire.
+            const data = e.data;
+            socket.data.writer.enqueue(encodeLine({
+              jsonrpc: "2.0", id, error: { code, message, ...(data !== undefined ? { data } : {}) },
+            }));
           }
         }
       },
@@ -1051,6 +1087,47 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
         return {};
+      }
+
+      // -----------------------------------------------------------------------------------------
+      // Session sync (Chat Slice D task 2): `sync.heads`/`sync.pull`/`sync.push` — the replication
+      // wire between a phone's own chat-session logs and this daemon's. The handlers themselves
+      // live in ipc/sync.ts (chat-only gate, byte paging, reassembly buffer, divergence); this
+      // switch only routes, exactly like session.history delegates to readHistoryPage.
+      //
+      // The two bare-sessionId verbs run assertRemoteMayUseSession FIRST, ahead of sync's own
+      // stricter chat-only gate, so a Mac-local-only mode produces the SAME "not available to
+      // remote clients" answer as every other remote verb rather than a sync-specific message —
+      // and so the remote-eligibility rule stays the single place that decides what a phone may
+      // reach at all. Errors thrown by ipc/sync.ts are SyncRpcError, which the data() pump's catch
+      // reads structurally (code/message/data) — that's how DIVERGED carries `{ lastSeq }`.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.syncHeads: {
+        parseParams(SyncHeadsParams, params);
+        return syncHeads(opts.store);
+      }
+      case METHODS.syncPull: {
+        const p = parseParams(SyncPullParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        return syncPull(opts.store, p);
+      }
+      case METHODS.syncPush: {
+        const p = parseParams(SyncPushParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        return syncPush({
+          store: opts.store,
+          buffers: syncBuffers,
+          connId: socket.data.connId,
+          // The SAME broadcast session.create performs (see its handler above): a brand-new session
+          // has no attachments, so its session_created can't reach anyone through the hub's
+          // per-session fan-out — it goes to every authed harness so a sidebar can pick it up.
+          broadcastCreated(event) {
+            for (const conn of harnessConns) {
+              try { conn.writer.enqueue(encodeLine({ jsonrpc: "2.0", method: METHODS.event, params: event })); }
+              catch { /* dead socket — its close() handler will evict it from harnessConns */ }
+            }
+          },
+        }, p);
       }
 
       // -----------------------------------------------------------------------------------------

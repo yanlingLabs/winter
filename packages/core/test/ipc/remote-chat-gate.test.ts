@@ -131,12 +131,15 @@ describe("remote chat gate: chat lifted (Slice C), the mechanism survives for co
     remote.close(); harness.close();
   });
 
-  // FLIP 2 (was "%s on a chat session is refused for remote"): the same eight methods (the brief's
+  // FLIP 2 (was "%s on a chat session is refused for remote"): the same ten methods (the brief's
   // four verbs — attach/send/history/interrupt — plus approval.respond/approval.list/ask_user.respond,
-  // plus Chat Slice D task 1's session.setModel — every OTHER REMOTE_ALLOWED_METHODS entry taking a
-  // bare `sessionId`) now SUCCEED against a chat session for remote. sessionSend always requires a
-  // prior attach regardless of role/mode (ordinary session semantics, unrelated to the remote-chat
-  // gate) — attaching first is harmless for the other methods too, so it's done uniformly.
+  // plus Chat Slice D task 1's session.setModel and task 2's sync.pull/sync.push — every OTHER
+  // REMOTE_ALLOWED_METHODS entry taking a bare `sessionId`) now SUCCEED against a chat session for
+  // remote. sessionSend always requires a prior attach regardless of role/mode (ordinary session
+  // semantics, unrelated to the remote-chat gate) — attaching first is harmless for the other
+  // methods too, so it's done uniformly. sync.push is parametrized with an EMPTY non-final chunk:
+  // that buffers nothing and applies nothing, which is precisely what makes it a clean probe of the
+  // gate rather than of the sync machinery (sync-core.test.ts covers the machinery).
   test.each([
     [METHODS.sessionAttach, {}],
     [METHODS.sessionSend, { text: "hi" }],
@@ -146,6 +149,8 @@ describe("remote chat gate: chat lifted (Slice C), the mechanism survives for co
     [METHODS.approvalList, {}],
     [METHODS.askUserRespond, { callId: "c_x", answers: {} }],
     [METHODS.sessionSetModel, { model: "claude-opus-5" }],
+    [METHODS.syncPull, { fromSeq: 0 }],
+    [METHODS.syncPush, { baseSeq: 1, data: "", complete: false }],
   ])("%s on a chat session now succeeds for remote (Slice C lifted the gate)", async (method, extra) => {
     const { store, socketPath, remoteToken } = await boot();
     const chat = store.createSession("global", { mode: "chat" });
@@ -161,7 +166,9 @@ describe("remote chat gate: chat lifted (Slice C), the mechanism survives for co
   // The mechanism proof (T1 requirement 2): assertRemoteMayUseSession is GENERALIZED, not deleted.
   // A cowork-shaped session — mode written directly to the store; there is no session.create or
   // wire support for "cowork" to register anywhere, deliberately — is still refused for remote on
-  // every one of the same eight methods, exactly like chat used to be before this slice.
+  // every one of the same ten methods, exactly like chat used to be before this slice. The two sync
+  // verbs (Chat Slice D task 2) run this gate BEFORE their own stricter chat-only check precisely
+  // so they answer with the SAME "not available to remote clients" message as everything else here.
   test.each([
     [METHODS.sessionAttach, {}],
     [METHODS.sessionSend, { text: "hi" }],
@@ -171,6 +178,8 @@ describe("remote chat gate: chat lifted (Slice C), the mechanism survives for co
     [METHODS.approvalList, {}],
     [METHODS.askUserRespond, { callId: "c_x", answers: {} }],
     [METHODS.sessionSetModel, { model: "claude-opus-5" }],
+    [METHODS.syncPull, { fromSeq: 0 }],
+    [METHODS.syncPush, { baseSeq: 1, data: "", complete: false }],
   ])("%s on a cowork-shaped session is refused for remote (the gate generalizes, not deleted)", async (method, extra) => {
     const { store, socketPath, remoteToken } = await boot();
     const cowork = makeCoworkSession(store);

@@ -89,4 +89,11 @@ export const ERR = {
   VERSION_MISMATCH: -32002,
   NOT_FOUND: -32004,
   ALREADY_ATTACHED: -32005,
+  // Chat Slice D task 2 (session sync): the pushing client's `baseSeq` does not match the daemon's
+  // own `lastSeq` for that session — the two logs have diverged and the daemon will NEVER silently
+  // overwrite its copy. The error's `data` carries `{ lastSeq }` (the daemon's current head) so the
+  // client can decide: pull and fast-forward, or fork a new session at its own divergence point.
+  // A distinct numeric code (not INVALID_PARAMS) precisely because a client must be able to branch
+  // on it programmatically without string-matching a message.
+  DIVERGED: -32006,
 } as const;

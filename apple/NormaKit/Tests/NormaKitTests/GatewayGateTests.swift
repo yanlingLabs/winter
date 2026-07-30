@@ -575,18 +575,20 @@ final class GatewayGateTests: XCTestCase {
         XCTAssertEqual(resp.kind, .rpcResponse, "the connection must still serve a normal rpc after an ignored pong")
     }
 
-    // MARK: - G7: the Swift remote allowlist is EXACTLY the thirteen names (cross-language tripwire)
+    // MARK: - G7: the Swift remote allowlist is EXACTLY the sixteen names (cross-language tripwire)
 
-    func testG7_RemoteAllowlistIsExactlyTheThirteenNames() {
+    func testG7_RemoteAllowlistIsExactlyTheSixteenNames() {
         let expected: Set<String> = [
             "protocol.hello", "session.list", "session.attach", "session.send",
             "session.dispatch", "approval.respond", "ask_user.respond",
             "session.interrupt", "engine.activity", "approval.list",
             "session.create", "session.history", "session.setModel",
+            // Chat Slice D task 2: chat-session log replication.
+            "sync.heads", "sync.pull", "sync.push",
         ]
-        XCTAssertEqual(Gateway.remoteAllowedMethods.count, 13)
+        XCTAssertEqual(Gateway.remoteAllowedMethods.count, 16)
         XCTAssertEqual(Gateway.remoteAllowedMethods, expected,
-                       "Swift remote allowlist drifted from the thirteen — mirror packages/core/src/ipc/server.ts's REMOTE_ALLOWED_METHODS")
+                       "Swift remote allowlist drifted from the sixteen — mirror packages/core/src/ipc/server.ts's REMOTE_ALLOWED_METHODS")
     }
 
     // MARK: - Eviction: session-map cap (32) bounds phone churn (SP2b Task 4)

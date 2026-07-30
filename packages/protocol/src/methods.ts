@@ -29,6 +29,16 @@ export const HelloResult = z.object({
   protocolVersion: z.number().int(),
 });
 
+/** Chat Slice D task 2 (session sync): where a session was branched from — the parent session's id
+ *  plus the seq it was forked AT (every parent event with `seq <= atSeq` is shared history). Index-
+ *  only metadata carried by `sync.push`'s `meta` and reported by `sync.heads`/`session.list`; it
+ *  does NOT ride the event log, so it resets to absent on a full index rebuild, same as
+ *  `cwd`/`model` (see `SessionRow` in packages/core/src/sessions/store.ts). */
+export const SessionForkRef = z.object({
+  sessionId: z.string().min(1),
+  atSeq: z.number().int().nonnegative(),
+});
+
 export const SessionCreateParams = z.object({
   scope: z.string().regex(/^[a-z0-9]([a-z0-9-]{0,39}[a-z0-9])?$/), // slug: no leading/trailing hyphen, ≤41 chars
   cwd: AbsoluteDirPath.optional(),        // absolute path (not '/'); session working directory for tools
@@ -73,6 +83,11 @@ export const SessionListResult = z.object({
     // Chat Slice D Task 1: round-trips SessionRow.model (store.ts) — absent for every session
     // created before this field existed, or created/left without an explicit override.
     model: z.string().optional(),
+    // Chat Slice D Task 2: round-trips SessionRow.forkedFrom (store.ts). Declared here — rather
+    // than left to smuggle through undeclared — for the same reason `title` above is: the value
+    // really does flow out of `store.list()`, so a schema-validating client must be able to read
+    // it. Absent for every session that isn't a fork.
+    forkedFrom: SessionForkRef.optional(),
   })),
 });
 
@@ -895,6 +910,98 @@ export const WorkflowStopResult = z.object({ ok: z.literal(true), stopped: z.boo
 export const WorkflowGetParams = z.object({ runId: z.string().min(1) });
 export const WorkflowGetResult = z.object({ run: WorkflowRunViewSchema });
 
+// ---------------------------------------------------------------------------------------------
+// Session sync (Chat Slice D task 2) — `sync.heads` / `sync.pull` / `sync.push`.
+//
+// The replication wire between a phone's own chat-session logs and the daemon's. All three are
+// CHAT-ONLY and fail closed on an absent/unknown session `mode` (the plan-immunity composing-seam
+// rule — `mode ?? "code"` is the store-wide convention, so an absent mode is a CODE session and is
+// refused, never waved through). All three are REMOTE_ALLOWED_METHODS-listed: the phone is the
+// only client that has ever needed them.
+//
+// Paging is over RAW JSONL BYTES, not events. That is the load-bearing design choice: a single
+// event larger than a page is a non-problem BY CONSTRUCTION (it simply spans pages), where an
+// event-granular pager would have to either drop it or blow the transport's frame limit. It also
+// keeps the replica byte-identical — the daemon stores the client's exact line bytes rather than a
+// re-serialization, so pull → push → pull is a fixed point and a future content hash stays stable.
+// ---------------------------------------------------------------------------------------------
+
+/** No params: the daemon reports the head of every chat session it holds, and the client diffs. */
+export const SyncHeadsParams = z.object({});
+export const SyncHeadsResult = z.object({
+  sessions: z.array(z.object({
+    sessionId: z.string(),
+    /** The daemon's current head — the `baseSeq` a subsequent `sync.push` must declare. */
+    lastSeq: z.number().int().nonnegative(),
+    /** `null`, never absent, when the session has neither a generated title nor a first message. */
+    title: z.string().nullable(),
+    model: z.string().optional(),
+    forkedFrom: SessionForkRef.optional(),
+  })),
+});
+export type SyncHeadsResult = z.infer<typeof SyncHeadsResult>;
+
+/** `fromSeq` is an EXCLUSIVE lower bound (matches `SessionStore.read`'s own `seq > fromSeq`), so
+ *  `fromSeq: 0` is "the whole log" and `fromSeq: lastSeq` is "nothing new". `cursor` is a BYTE
+ *  offset into the tail slice that starts at `fromSeq` — echo back the previous page's
+ *  `nextCursor`, never a value you computed yourself. The tail only ever grows at the end (the log
+ *  is append-only), so a cursor stays valid across a concurrent append; one past the end of the
+ *  tail is refused rather than silently emptied. */
+export const SyncPullParams = z.object({
+  sessionId: z.string().min(1),
+  fromSeq: z.number().int().nonnegative(),
+  cursor: z.number().int().nonnegative().optional(),
+});
+export const SyncPullResult = z.object({
+  /** base64 of raw JSONL bytes — verbatim log lines, NOT re-serialized events. `""` when empty. */
+  data: z.string(),
+  /** Present iff `complete` is false: the byte offset to pass as the next call's `cursor`. */
+  nextCursor: z.number().int().nonnegative().optional(),
+  complete: z.boolean(),
+});
+export type SyncPullParams = z.infer<typeof SyncPullParams>;
+export type SyncPullResult = z.infer<typeof SyncPullResult>;
+
+/** Hard ceiling on a single `sync.push` chunk's base64 payload. The authed socket's own line cap is
+ *  8 MiB (LineDecoder's default) and an oversized line kills the connection outright — this bound
+ *  sits below it so an over-eager client gets a clean INVALID_PARAMS instead of a dropped socket.
+ *  It bounds ONE chunk; total reassembly across chunks is bounded separately (32 MiB, see
+ *  `SYNC_PUSH_BUFFER_MAX_BYTES` in packages/core/src/ipc/sync.ts). */
+export const SYNC_MAX_CHUNK_B64 = 4 * 1024 * 1024;
+
+/** `baseSeq` is the client's belief about the daemon's head, and it is CHECKED, never trusted: a
+ *  mismatch is `ERR.DIVERGED` carrying `data: { lastSeq }`, never a silent overwrite. An UNKNOWN
+ *  `sessionId` with `baseSeq: 0` CREATES the session (chat mode, fixed "chat" policy, cwd $HOME,
+ *  and the id must be a UUID — a phone-minted id, distinct from the daemon's own `s_<hex>` shape).
+ *  Chunking: send `complete: false` for every chunk but the last; the daemon buffers per
+ *  (connection, sessionId) and applies the whole batch ATOMICALLY on the final chunk — nothing is
+ *  appended unless every line validates. `meta` is index-only session metadata that has no event
+ *  of its own (title/model/fork provenance); it is applied only alongside a successful `complete`. */
+export const SyncPushParams = z.object({
+  sessionId: z.string().min(1),
+  baseSeq: z.number().int().nonnegative(),
+  data: z.string().max(SYNC_MAX_CHUNK_B64), // base64 of a raw JSONL chunk; may split mid-line
+  complete: z.boolean(),
+  meta: z.object({
+    title: z.string().optional(),
+    model: z.string().min(1).optional(),
+    forkedFrom: SessionForkRef.optional(),
+  }).optional(),
+});
+export const SyncPushResult = z.object({
+  /** True only on the final chunk, once the batch has actually landed on disk. */
+  applied: z.boolean(),
+  /** The daemon's head AFTER this call: the new head when `applied`, the unchanged current head
+   *  (0 for a session that does not exist yet) while chunks are still being buffered. */
+  lastSeq: z.number().int().nonnegative(),
+  /** Bytes currently held in the reassembly buffer for this (connection, sessionId) — 0 once
+   *  applied. Lets a client see its own chunking progress without guessing. */
+  buffered: z.number().int().nonnegative(),
+});
+export type SyncPushParams = z.infer<typeof SyncPushParams>;
+export type SyncPushResult = z.infer<typeof SyncPushResult>;
+export type SessionForkRef = z.infer<typeof SessionForkRef>;
+
 export const METHODS = {
   hello: "protocol.hello",
   sessionCreate: "session.create",
@@ -973,4 +1080,7 @@ export const METHODS = {
   workflowRun: "workflow.run",
   workflowStop: "workflow.stop",
   workflowGet: "workflow.get",
+  syncHeads: "sync.heads",
+  syncPull: "sync.pull",
+  syncPush: "sync.push",
 } as const;
