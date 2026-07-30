@@ -26,7 +26,16 @@ public protocol LocalSession: Sendable {
     var lastSeq: Int { get }
     /// Provider-input reconstruction of everything ALREADY in the log — prior turns' user/assistant
     /// messages, reasoning passthrough, and function calls + their results, in provider order. Empty
-    /// for a brand-new session. The engine appends this turn's items after these.
+    /// for a brand-new session.
+    ///
+    /// TURN-START SNAPSHOT CONTRACT (load-bearing for the persist-on-emit sink): the engine reads
+    /// this EXACTLY ONCE, at turn start, BEFORE it emits this turn's `user_message`/`turn_started`,
+    /// and appends the current `userText` itself. A conforming store whose `emit` sink persists
+    /// events into the same log this method folds (Task 11's faithful wiring) therefore must NOT let
+    /// a return value from a call made after runTurn began reflect this turn's own just-emitted
+    /// events — but because the engine only ever calls it before any emit, that ordering can never
+    /// double the current user message. Do not call `priorInput()` mid-turn expecting to see this
+    /// turn's events; it is a pre-turn reconstruction only.
     func priorInput() -> [ProviderInputItem]
     /// Append an opaque reasoning item to the log at `seq` (epoch-ms `ts`). This is its only sink; it
     /// is never rendered. A continued turn reads it back through `priorInput()`.
@@ -151,12 +160,19 @@ public final class ChatEngine: @unchecked Sendable {
         let sid = session.sessionId
         let seq = SeqAllocator(lastSeq: session.lastSeq)
 
+        // Turn-START snapshot of the provider input, taken BEFORE emitting this turn's own events —
+        // see LocalSession.priorInput()'s contract. A daemon-faithful sink persists on emit (Task
+        // 11's `emit` is the only sink for user/assistant/tool events), so reading priorInput() AFTER
+        // emitting user_message would let it observe this turn's own message and the manual append
+        // below would then DOUBLE the user message in the provider input every turn. Reading it here
+        // (SeqAllocator is already seeded from lastSeq first, so this is behavior-neutral) makes the
+        // input a genuine turn-start snapshot regardless of when/whether emit persists.
+        var input = session.priorInput()
+        input.append(.message(role: .user, content: userText))
+
         emit(.userMessage(.init(seq: seq.next(), sessionId: sid, ts: nowMs(), threadId: MainThread,
                                 text: userText, clientName: Self.clientName)))
         emit(.turnStarted(.init(seq: seq.next(), sessionId: sid, ts: nowMs(), threadId: MainThread)))
-
-        var input = session.priorInput()
-        input.append(.message(role: .user, content: userText))
 
         var inputTokens = 0
         var outputTokens = 0

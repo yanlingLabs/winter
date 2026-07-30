@@ -25,6 +25,49 @@ final class ScriptedLocalSession: LocalSession, @unchecked Sendable {
     }
 }
 
+/// A DAEMON-FAITHFUL `LocalSession`: its `emit` sink persists user/assistant/tool events into the
+/// very log `priorInput()` folds (exactly what Task 11's wiring does), so `priorInput()` is DYNAMIC,
+/// not static. This is the double that makes the turn-start-snapshot bug bite: if the engine read
+/// `priorInput()` after emitting `user_message`, the current user message would appear twice in the
+/// next round's provider input. Wire `runTurn(emit:)` to `record` to exercise the real sink shape.
+final class PersistingLocalSession: LocalSession, @unchecked Sendable {
+    let sessionId: String
+    private let lock = NSLock()
+    private var log: [ProviderInputItem] = []
+    private var head = 0
+
+    init(sessionId: String = "ses_persist") { self.sessionId = sessionId }
+
+    var lastSeq: Int { lock.withLock { head } }
+    func priorInput() -> [ProviderInputItem] { lock.withLock { log } }
+
+    func appendReasoning(itemJSON: String, seq: Int, ts: Int) {
+        lock.withLock { log.append(.reasoning(itemJSON: itemJSON)); head = max(head, seq) }
+    }
+
+    /// The persist-on-emit sink — fold each renderable, PERSISTED event into the provider-input log
+    /// exactly as `engine.ts`'s `eventToInput` does. Transient `assistant_delta` is ignored (never
+    /// persisted); its seq rides the head, so it can't advance it past a real event.
+    func record(_ event: SessionEvent) {
+        lock.withLock {
+            switch event {
+            case .userMessage(let v): log.append(.message(role: .user, content: v.text)); head = max(head, v.seq)
+            case .assistantMessage(let v): log.append(.message(role: .assistant, content: v.text)); head = max(head, v.seq)
+            case .toolCall(let v): log.append(.functionCall(callId: v.callId, name: v.name, argumentsJSON: v.argsJson)); head = max(head, v.seq)
+            case .toolResult(let v): log.append(.toolResult(callId: v.callId, output: v.output, isError: v.isError)); head = max(head, v.seq)
+            case .turnStarted(let v): head = max(head, v.seq)
+            case .turnCompleted(let v): head = max(head, v.seq)
+            case .questionAsked(let v): head = max(head, v.seq)
+            case .questionResolved(let v): head = max(head, v.seq)
+            case .agentError(let v): head = max(head, v.seq)
+            case .assistantDelta: break // transient — never persisted
+            default: break
+            }
+        }
+    }
+    var callback: @Sendable (SessionEvent) -> Void { { self.record($0) } }
+}
+
 /// Thread-safe ordered sink for the events a turn emits.
 final class EventCollector: @unchecked Sendable {
     private let lock = NSLock()

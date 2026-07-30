@@ -70,6 +70,30 @@ final class ChatEngineTests: XCTestCase {
         if case .message(let role, let c2) = input[2] { XCTAssertEqual(c2, "now"); XCTAssertEqual(role, .user) } else { XCTFail() }
     }
 
+    // MARK: - turn-start snapshot (review I1): the user message is never doubled
+
+    func testUserMessageAppearsExactlyOncePerTurnWithAPersistOnEmitSink() async {
+        // A daemon-faithful sink persists on emit, so priorInput() is DYNAMIC. If the engine read
+        // priorInput() AFTER emitting this turn's user_message, the manual append would double it.
+        let provider = ScriptedChatProvider([
+            [.textDelta("reply1"), .done(.endTurn)],
+            [.textDelta("reply2"), .done(.endTurn)],
+        ])
+        let session = PersistingLocalSession()
+        let eng = engine(provider)
+
+        await eng.runTurn(session: session, userText: "first", model: "m", tools: toolset(), emit: session.callback)
+        await eng.runTurn(session: session, userText: "second", model: "m", tools: toolset(), emit: session.callback)
+
+        func userMessages(_ input: [ProviderInputItem]) -> [String] {
+            input.compactMap { if case .message(.user, let c) = $0 { return c } else { return nil } }
+        }
+        // Turn 1's provider input holds "first" exactly once.
+        XCTAssertEqual(userMessages(provider.request(0).input), ["first"])
+        // Turn 2's provider input holds "first" AND "second", each exactly once (not doubled).
+        XCTAssertEqual(userMessages(provider.request(1).input), ["first", "second"])
+    }
+
     // MARK: - tool round-trip
 
     func testToolRoundTripSearch() async {
