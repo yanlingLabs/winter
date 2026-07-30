@@ -289,7 +289,21 @@ function hostRefusal(host: string): string | null {
  *  lowercase. This is the mapping step only, not a reimplementation of IDNA — Punycode conversion
  *  cannot turn a host into a private IPv4 literal, so it buys nothing here. */
 function rawAuthorityHost(raw: string): string | null {
-  let rest = raw.replace(/[\t\n\r]/g, "").replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "");
+  // C0-control-or-space trim, as an INDEX WALK (review Important 5). This was
+  // `.replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "")`, whose second alternative is unbounded and
+  // NOT anchored, so on a run of spaces followed by any non-space the engine retried it at every
+  // position in the run — quadratic, and reachable straight from `ssrfGuard` with a long
+  // model-supplied URL (`z.string().min(1)` has no length cap): measured 758 ms at 39 KB, 17.7 s at
+  // 195 KB, 58.4 s at 391 KB. Splitting it into two anchored replacements does NOT fix it, because
+  // `/[\u0000-\u0020]+$/` still has to be tried at every start position. A walk from each end is
+  // obviously linear and byte-identical: the regex could only ever strip a LEADING run (`^`-anchored)
+  // and a TRAILING one (`$`-anchored), never an interior one.
+  const stripped = raw.replace(/[\t\n\r]/g, "");
+  let head = 0;
+  let tail = stripped.length;
+  while (head < tail && stripped.charCodeAt(head) <= 0x20) head++;
+  while (tail > head && stripped.charCodeAt(tail - 1) <= 0x20) tail--;
+  let rest = stripped.slice(head, tail);
   const scheme = /^[A-Za-z][A-Za-z0-9+\-.]*:/.exec(rest);
   if (!scheme) return null;
   rest = rest.slice(scheme[0].length).replace(/^[/\\]*/, "");
@@ -539,7 +553,11 @@ function scanAnchorOpens(html: string): TagOpen[] {
   let bestHref = -1; // rightmost VIABLE `href="` in that span, or -1
   let bestQuote = -1; // its closing `"`
   let bestEnd = -1; // its match end (first `>` after that quote, +1)
-  let hrefScanFrom = 0; // monotonic: no span is ever scanned twice
+  // Monotonic: together with the `until` bound on the search below, the regions examined across spans
+  // are DISJOINT, so the whole scan is O(n). (Before Critical 3's fix this comment read "no span is ever
+  // scanned twice", which was true of the span bookkeeping and false of the search it was guarding —
+  // exactly the gap that let the regression through. The bound is what makes the claim true.)
+  let hrefScanFrom = 0;
 
   ANCHOR_CANDIDATE_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
@@ -552,8 +570,16 @@ function scanAnchorOpens(html: string): TagOpen[] {
       cachedSpanEnd = spanEnd;
       bestHref = bestQuote = bestEnd = -1;
       for (let p = Math.max(hrefScanFrom, tokenEnd); p + 6 <= spanEnd; ) {
-        const at = indexOfAsciiCI(html, `href="`, p);
-        if (at < 0 || at + 6 > spanEnd) break;
+        // BOUNDED BY `spanEnd` (review Critical 3). Without the bound this search ran forward past the
+        // span — to the next `href="` anywhere in the document, or to end-of-string — and the result was
+        // then thrown away by the range test below, while `hrefScanFrom` advanced only to `spanEnd`, so
+        // the next href-less span re-walked the same ground. That is quadratic on ORDINARY markup, with
+        // no hostile input at all: `<a name="sN">Section</a>` repeated (a classic named-anchor page) cost
+        // 12.13 s at 510 KB, charged twice per fetch, against 0.32 ms for the regex this scanner
+        // replaced. An occurrence at or past `spanEnd` can never be viable for this span, so there was
+        // never a reason to look there.
+        const at = indexOfAsciiCI(html, `href="`, p, spanEnd);
+        if (at < 0) break;
         // `quote > at + 6` because `([^"]+)` needs at least ONE character: `href=""` does NOT match,
         // and the engine then keeps backtracking to an EARLIER occurrence rather than giving up — so
         // an empty value simply is not viable. (Found by the tuple differential below, which caught
@@ -677,15 +703,21 @@ function convertHeadings(html: string): string {
  *  `[^>]*>` tail is what `replaceListItems` pairs with a pointer instead of a re-scan. */
 const LIST_ITEM_OPEN_RE = /<li(?![0-9A-Za-z_])/gi;
 
-/** ASCII-case-insensitive `indexOf`. `needleLower` must already be lowercase ASCII.
+/** ASCII-case-insensitive `indexOf`, searching `[from, until)`. `needleLower` must already be lowercase
+ *  ASCII.
  *
  *  Why not `/needle/i`: JS's non-`u` `i` flag folds exactly the ASCII letters and nothing else (the
  *  spec's `Canonicalize` refuses to map a non-ASCII code unit onto an ASCII one, which is why
  *  `/k/i` does NOT match U+212A KELVIN SIGN), so an explicit ASCII fold is the faithful equivalent —
  *  the same discipline the Swift port spells out. Needles here are 3-8 characters, so the naive
- *  scan is linear in `haystack` with a small constant. */
-function indexOfAsciiCI(haystack: string, needleLower: string, from: number): number {
-  const n = haystack.length;
+ *  scan is linear in the searched range with a small constant.
+ *
+ *  `until` IS THE FIX FOR REVIEW CRITICAL 3, and it is not optional politeness: an unbounded search
+ *  followed by a required terminator is the same defect whether a regex engine or a hand-written loop
+ *  performs it. `scanAnchorOpens` passes the span end, so a caller can no longer walk past the region
+ *  its answer could possibly come from. See that function for the measurements. */
+function indexOfAsciiCI(haystack: string, needleLower: string, from: number, until: number = haystack.length): number {
+  const n = Math.min(until, haystack.length);
   const m = needleLower.length;
   outer: for (let i = Math.max(0, from); i + m <= n; i++) {
     for (let k = 0; k < m; k++) {

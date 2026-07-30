@@ -480,6 +480,79 @@ describe("htmlToText: linear-time scanning (Critical fix, fix-round-2 — the SA
     }
   });
 
+
+  // Task 6b fix-round-3 (review Critical 3 + Minor 5's highest-value item). THE SHAPE NO CEILING
+  // COVERED: **many candidates, no LOCAL match, one distant match** — or no match at all. Every ceiling
+  // above uses either spans with under 6 characters of room (`<a x>`, which never enters the href scan)
+  // or an `href` inside every span, so all of them stayed green while `scanAnchorOpens` was quadratic on
+  // ordinary named-anchor markup: its `href="` search was bounded only by the document, so each
+  // href-less span re-walked the same ground looking for an occurrence it would then discard.
+  //
+  // This is the gate that would have caught it, and it is deliberately a SCAN-CODE ceiling rather than
+  // anything the regex tripwire could express: an unbounded search followed by a required terminator is
+  // the same defect whether a regex engine or a hand-written `indexOf` loop performs it.
+  //
+  // CALIBRATION — `<a name="sN">Section</a>` repeated, the shape the review measured, before the bound
+  // was added and after:
+  //
+  //     reps      bytes    before (htmlToText + extractLinks)     after
+  //     2,500     65 KB    189 ms                                 2.5 ms
+  //     5,000    131 KB    735 ms                                 2.0 ms
+  //    10,000    263 KB      2.79 s                               3.2 ms
+  //    20,000    536 KB     12.13 s                               5.6 ms
+  //
+  // x4 per doubling before, flat after; the 200 ms ceiling first breaches at the smallest size in the
+  // series, which is what makes it a gate rather than a formality.
+  test("ORDINARY named-anchor markup stays linear — many candidates, no local href (review Critical 3)", () => {
+    const timings = [2_500, 5_000, 10_000, 20_000].map((reps) => {
+      let html = "";
+      for (let i = 0; i < reps; i++) html += `<a name="s${i}">Section</a>`;
+      const start = performance.now();
+      htmlToText(html);
+      extractLinks(html, "https://base.test/"); // charged a SECOND time per fetch, so timed together
+      return performance.now() - start;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+  test("every scanner stays linear on 'many candidates, no local match, one distant match'", () => {
+    // One distant match at the very end, so no scanner can pass by taking an early exit: each must walk
+    // its candidates without re-walking the document per candidate.
+    const shapes: Array<{ name: string; html: string; run: (h: string) => void }> = [
+      // anchors: 12-char spans (past the 6-char floor that hid Critical 3), no local href, one at the end
+      { name: "anchor opens", html: "<a xxxxxxxx>".repeat(45_000) + '<a href="y">t</a>', run: (h) => { htmlToText(h); } },
+      { name: "extractLinks", html: "<a xxxxxxxx>".repeat(45_000) + '<a href="y">t</a>', run: (h) => { extractLinks(h, "https://base.test/"); } },
+      // anchors where a quoted attribute closes the span early, so the href is never in range
+      { name: "anchor opens, quoted '>' in attrs", html: '<a x=">" y>'.repeat(45_000) + '<a href="y">t</a>', run: (h) => { htmlToText(h); } },
+      // headings/list-items/strip: many candidates, the only '>' at the very end
+      { name: "heading opens", html: "<h1 xxxxxxxx".repeat(20_000) + ">t</h1>", run: (h) => { htmlToText(h); } },
+      { name: "list items", html: "<li xxxxxxxx".repeat(20_000) + ">t", run: (h) => { htmlToText(h); } },
+      { name: "final tag strip", html: "<zz xxxxxxxx".repeat(20_000) + ">t", run: (h) => { htmlToText(h); } },
+      // extractTitle: many candidates whose close only appears once, at the end
+      { name: "extractTitle h1", html: "<h1 xxxxxxxx".repeat(20_000) + ">t</h1>", run: (h) => { extractTitle(h); } },
+      { name: "extractTitle title", html: "<title xxxxxxxx".repeat(20_000) + ">t</title>", run: (h) => { extractTitle(h); } },
+    ];
+    for (const { name, html, run } of shapes) {
+      const start = performance.now();
+      run(html);
+      const elapsed = performance.now() - start;
+      expect(elapsed, `${name} went superlinear on the no-local-match shape`).toBeLessThan(linearityCeilingMs);
+    }
+  });
+
+  test("ssrfGuard stays linear in a URL's whitespace run (review Important 5)", () => {
+    // `rawAuthorityHost`'s C0/space trim used an unanchored `[ - ]+$` alternative, which the
+    // engine retried at every position in the run: 758 ms at 39 KB, 17.7 s at 195 KB, 58.4 s at 391 KB.
+    // Reachable from a model-supplied URL — `web_fetch`'s `url` is `z.string().min(1)`, uncapped.
+    const timings = [39, 78, 195, 391].map((kb) => {
+      const url = `http://example.com/${" ".repeat(kb * 1024)}x`;
+      const start = performance.now();
+      expect(ssrfGuard(url)).toBeNull(); // still ALLOWED, exactly as before — this is a cost fix only
+      return performance.now() - start;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
   test("many WELL-FORMED, properly-closed tags of every shape (the realistic case) still extract correctly and quickly", () => {
     const html = Array.from(
       { length: 2000 },

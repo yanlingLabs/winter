@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -26,8 +26,19 @@ import { join } from "node:path";
  * bounded scan around a monotonic `>` pointer, so there is nothing left to allow.
  */
 
-const FILES = ["web.ts", "page-core.ts"] as const;
 const SRC_DIR = join(import.meta.dir, "../../../src/agent/tools");
+
+/** DERIVED, not hardcoded (review Minor 5, bypass 1 — demonstrated, not hypothetical: a new file
+ *  containing `/<td[^>]*>([\s\S]*?)<\/td>/gi` left the gate green). `FILES` used to be
+ *  `["web.ts", "page-core.ts"]`, and the obvious next refactor — lifting these scanners into a shared
+ *  module — would have walked straight out of coverage. Every `.ts` in the tools directory is scanned
+ *  now, so extending coverage requires no edit here at all.
+ *
+ *  Deriving it today adds no allowlist entries: across all 31 files the only flagged literal is the
+ *  `<br\s*\/?>` already listed below. (The two `task-notification` literals the review measured live in
+ *  `agent/engine.ts`, one level up, so they are outside this directory — see the report's found-but-not-
+ *  fixed list, which is where the decision about widening further belongs.) */
+const FILES: string[] = readdirSync(SRC_DIR).filter((f) => f.endsWith(".ts")).sort();
 
 /** Patterns that match the dangerous SHAPE but are provably safe, each with the proof. Adding an entry
  *  must be a deliberate, argued edit — that is the whole point of the list being asserted below. */
@@ -120,6 +131,24 @@ export function unboundedQuantifierBeforeMore(source: string): boolean {
       while (i < source.length && source[i] !== "]") { if (source[i] === "\\") i++; i++; }
       i++;
       atomIsScanning = true;
+    } else if (source[i] === "(") {
+      // A QUANTIFIED GROUP is the same defect wearing a hat (review Minor 5, bypass 3):
+      // `<x(?:[^>])*>` was NOT flagged before this branch, and it is genuinely dangerous — measured
+      // 1011 ms at 98 KB, *slower* than the bare `[^>]*` control at 599 ms. It also happens to be
+      // exactly how one writes an attribute-aware tag matcher (`(?:[^>]|"[^"]*")*`), which makes it the
+      // most likely shape for a future author to reach for.
+      const start = i;
+      let depth = 0;
+      while (i < source.length) {
+        if (source[i] === "\\") { i += 2; continue; }
+        if (source[i] === "[") {
+          i++;
+          while (i < source.length && source[i] !== "]") { if (source[i] === "\\") i++; i++; }
+        } else if (source[i] === "(") depth++;
+        else if (source[i] === ")") { depth--; if (depth === 0) { i++; break; } }
+        i++;
+      }
+      atomIsScanning = /\[|\.|\\[sSwWdD]/.test(source.slice(start, i));
     } else if (source[i] === ".") {
       atomIsScanning = true;
       i++;
@@ -155,6 +184,10 @@ describe("regex shapes in the HTML-scanning paths (structural tripwire)", () => 
       "<a\\s[^>]*href=\"([^\"]+)\"[^>]*>", // round 2: the cubic one
       "<h([1-6])[^>]*>", // round 2: the heading open
       "<script[\\s\\S]*?<\\/script>", // the pre-T6 shape this whole family started as
+      // …and the group-wrapped spellings of the same thing (review Minor 5, bypass 3)
+      "<x(?:[^>])*>",
+      '<x(?:[^>]|"[^"]*")*>',
+      "<x(?:.)+>",
     ]) {
       expect(mentionsMarkup(offender) && unboundedQuantifierBeforeMore(offender)).toBe(true);
     }
@@ -169,6 +202,11 @@ describe("regex shapes in the HTML-scanning paths (structural tripwire)", () => 
   test("the lexer finds live regexes and ignores the ones quoted in comments", () => {
     // Two failure modes this pins: a lexer that finds nothing (the tripwire silently stops guarding)
     // and one that reads doc comments (it cries wolf over the reference spellings the fixes document).
+    // The derived list must actually contain the two files this task worked on — a derivation that
+    // silently returned nothing, or the wrong directory, would make every check below vacuous.
+    expect(FILES).toContain("web.ts");
+    expect(FILES).toContain("page-core.ts");
+    expect(FILES.length).toBeGreaterThan(10);
     // page-core.ts is down to exactly three live regexes now that its duplicate of the anchor open
     // pattern is gone (`/<\/a>/gi`, `/\n+/g`, `/\r\n/g`); web.ts has many.
     expect(liveRegexLiterals(readFileSync(join(SRC_DIR, "page-core.ts"), "utf8")).length).toBeGreaterThanOrEqual(3);
