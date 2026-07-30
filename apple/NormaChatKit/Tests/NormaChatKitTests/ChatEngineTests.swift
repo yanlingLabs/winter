@@ -133,6 +133,40 @@ final class ChatEngineTests: XCTestCase {
         XCTAssertTrue(result.output.contains("unknown tool: Nope"))
     }
 
+    // MARK: - the broker's `alreadyResolved` verdict (T11 concern 4 / review ruling 4)
+
+    /// `answer` reports whether it WON. Without this the phone's card could not distinguish "we
+    /// delivered it" from "the timeout/interrupt/another surface beat you", and had to hard-code
+    /// `false` — which is the one thing the remote path's own `alreadyResolved` contract does say.
+    func testAnswerReportsWhetherItWonTheRace() async {
+        let broker = QuestionBroker()
+
+        // Early-store: no `wait` yet, but this answer IS the one the engine will get — it won.
+        var alreadyResolved = await broker.answer(id: "q1", text: "first")
+        XCTAssertFalse(alreadyResolved)
+        // A second answer to the same id loses.
+        alreadyResolved = await broker.answer(id: "q1", text: "second")
+        XCTAssertTrue(alreadyResolved)
+        // …and the engine still receives the FIRST one.
+        let delivered = await broker.wait(id: "q1")
+        XCTAssertEqual(delivered, .answered("first"))
+
+        // A timeout that lands first also makes the user's answer resolved-elsewhere.
+        await broker.timeOut(id: "q2")
+        alreadyResolved = await broker.answer(id: "q2", text: "too late")
+        XCTAssertTrue(alreadyResolved)
+        let timedOut = await broker.wait(id: "q2")
+        XCTAssertEqual(timedOut, .timedOut)
+
+        // An answer to a question a live turn is WAITING on wins.
+        let waiting = Task { await broker.wait(id: "q3") }
+        try? await TestGate.poll { await broker.isWaiting(id: "q3") }
+        alreadyResolved = await broker.answer(id: "q3", text: "on time")
+        XCTAssertFalse(alreadyResolved)
+        let answer = await waiting.value
+        XCTAssertEqual(answer, .answered("on time"))
+    }
+
     // MARK: - question round-trip mid-turn
 
     func testQuestionRoundTripMidTurn() async {

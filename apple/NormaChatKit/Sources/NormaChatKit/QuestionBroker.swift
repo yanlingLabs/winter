@@ -30,8 +30,17 @@ public actor QuestionBroker {
 
     /// UI entry point: the user answered `id` with `text`. First resolution wins; a later answer to
     /// an already-resolved id is ignored.
-    public func answer(id: String, text: String) {
-        resolve(id, .answered(text))
+    ///
+    /// Returns **`alreadyResolved`** — `true` when this answer LOST the race (the ask window had
+    /// already timed out, the turn was interrupted, or another surface answered first), `false` when
+    /// it is the one the engine will act on. Without it the phone's card could not tell the two
+    /// apart and had to hard-code `false`, so the local path could never surface the daemon's
+    /// "answered elsewhere" copy that `approval.respond`/`ask_user` already have (T11 concern 4,
+    /// review ruling 4). Early-store still counts as WINNING: an answer that arrives before the
+    /// engine's `wait` is held and returned by that `wait`, so it is not resolved-elsewhere.
+    @discardableResult
+    public func answer(id: String, text: String) -> Bool {
+        !resolve(id, .answered(text))
     }
 
     /// Engine entry point: the ask window elapsed.
@@ -44,16 +53,29 @@ public actor QuestionBroker {
         resolve(id, .aborted)
     }
 
-    private func resolve(_ id: String, _ answer: Answer) {
+    /// Resolves `id`, returning whether THIS resolution won (i.e. is the one `wait` will hand back).
+    @discardableResult
+    private func resolve(_ id: String, _ answer: Answer) -> Bool {
         switch slots[id] {
         case .waiting(let continuation):
             slots[id] = nil
             continuation.resume(returning: answer)
+            return true
         case .resolved:
-            break // first wins
+            return false // first wins
         case nil:
             slots[id] = .resolved(answer) // early resolution — the next `wait` picks it up
+            return true
         }
+    }
+
+    /// Whether a `wait` for `id` is currently PARKED on its continuation (as opposed to unregistered
+    /// or already resolved). Internal, and it exists for one reason: a test that wants to prove the
+    /// `.waiting` branch of `resolve` — rather than the early-store branch — has to gate on the
+    /// continuation actually being installed, and that is not otherwise observable.
+    func isWaiting(id: String) -> Bool {
+        if case .waiting? = slots[id] { return true }
+        return false
     }
 
     /// Engine: await the answer for `id`. Returns immediately if `id` was already resolved.

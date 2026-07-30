@@ -638,6 +638,103 @@ final class NormaSessionClientTests: XCTestCase {
         _ = try await call.value
     }
 
+    // MARK: - WB-C1: the JSON-RPC error's `data` member reaches the caller
+    //
+    // `sync.push` answers a base-seq mismatch with `ERR.DIVERGED (-32006)` and puts the daemon's own
+    // head in `error.data.lastSeq`. `NormaChatKit.SyncClient` branches on THAT number and nothing
+    // else — `0` means "the daemon holds nothing for this id, re-push from seq 1", `> 0` is a real
+    // branch point that forks. The Mac gateway was fixed to relay `data` through; a client that
+    // decoded only `code`/`message` would put the phone right back where it started, and the failure
+    // is SILENT: `push` rethrows, the session simply never reconciles, and no error surfaces.
+
+    func testRpcErrorCarriesItsDataMemberThroughToTheCaller() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+
+        let call = Task { try await client.send(method: "sync.push", params: .object(["baseSeq": .number(3)])) }
+        let out = try await waitOutbound(conn, count: 2)
+        let id = outboundPayload(decodeOutbound(out[1]))["id"]!.intValue!
+        // A REAL error body, byte-shaped exactly as the daemon writes it.
+        let body = SessionEvent.JSONValue.object([
+            "jsonrpc": .string("2.0"), "id": .number(Double(id)),
+            "error": .object([
+                "code": .number(-32006), "message": .string("diverged"),
+                "data": .object(["lastSeq": .number(9)]),
+            ]),
+        ])
+        conn.enqueueInbound(serverFrame(kind: .rpcResponse, payload: try JSONEncoder().encode(body)))
+
+        do {
+            _ = try await call.value
+            XCTFail("a JSON-RPC error body must throw")
+        } catch let e as SessionClientError {
+            guard case .rpcError(let code, let message, let data) = e else { return XCTFail("wrong case: \(e)") }
+            XCTAssertEqual(code, -32006)
+            XCTAssertEqual(message, "diverged")
+            XCTAssertEqual(data?["lastSeq"]?.intValue, 9, "data.lastSeq is the ONLY thing the fork logic keys on")
+        }
+    }
+
+    /// The same for a gateway-level `.error` FRAME (an allowlist/envelope rejection of an in-flight
+    /// request) — a second construction site that would have to be fixed independently.
+    func testGatewayErrorFrameAlsoCarriesItsDataMember() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+
+        let call = Task { try await client.send(method: "sync.push", params: .object([:])) }
+        let out = try await waitOutbound(conn, count: 2)
+        let id = outboundPayload(decodeOutbound(out[1]))["id"]!.intValue!
+        let body = SessionEvent.JSONValue.object([
+            "jsonrpc": .string("2.0"), "id": .number(Double(id)),
+            "error": .object([
+                "code": .number(-32006), "message": .string("diverged"),
+                "data": .object(["lastSeq": .number(0)]),
+            ]),
+        ])
+        conn.enqueueInbound(serverFrame(kind: .error, payload: try JSONEncoder().encode(body)))
+
+        do {
+            _ = try await call.value
+            XCTFail("an error frame must throw")
+        } catch let e as SessionClientError {
+            guard case .rpcError(_, _, let data) = e else { return XCTFail("wrong case: \(e)") }
+            // ZERO, not nil — "the daemon has nothing for this id", which re-pushes rather than forks.
+            XCTAssertEqual(data?["lastSeq"]?.intValue, 0)
+        }
+    }
+
+    /// CONTROL: an error with no `data` member still surfaces, with `data == nil` — the field is
+    /// optional on the wire and its absence must never turn into a decode failure.
+    func testAnErrorWithoutDataStillSurfacesWithNilData() async throws {
+        let conn = ScriptedRemoteConn()
+        let client = makeClient(conn: conn, cursors: InMemoryCursorStore())
+        conn.enqueueInbound(helloAckFrame(verdicts: []))
+        _ = try await client.handshake(resumes: [])
+
+        let call = Task { try await client.send(method: "session.list", params: .object([:])) }
+        let out = try await waitOutbound(conn, count: 2)
+        let id = outboundPayload(decodeOutbound(out[1]))["id"]!.intValue!
+        let body = SessionEvent.JSONValue.object([
+            "jsonrpc": .string("2.0"), "id": .number(Double(id)),
+            "error": .object(["code": .number(-32000), "message": .string("pairing revoked")]),
+        ])
+        conn.enqueueInbound(serverFrame(kind: .rpcResponse, payload: try JSONEncoder().encode(body)))
+
+        do {
+            _ = try await call.value
+            XCTFail("expected a throw")
+        } catch let e as SessionClientError {
+            guard case .rpcError(let code, let message, let data) = e else { return XCTFail("wrong case: \(e)") }
+            XCTAssertEqual(code, -32000)
+            XCTAssertEqual(message, "pairing revoked")
+            XCTAssertNil(data)
+        }
+    }
+
     // MARK: - Session history (opaque decode)
 
     func testHistoryDecodesPageOpaquelyIncludingAnUnknownEventType() async throws {

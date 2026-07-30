@@ -553,9 +553,13 @@ public actor NormaSessionClient {
               let id = body["id"]?.intValue,
               let cont = pending.removeValue(forKey: id) else { return }
         if let err = body["error"] {
+            // `data` rides along verbatim (WB-C1). `sync.push`'s DIVERGED carries the daemon's
+            // `lastSeq` there and `SyncClient`'s whole reconcile is unreachable without it — see
+            // `SessionClientError.rpcError`'s own doc comment.
             cont.resume(throwing: SessionClientError.rpcError(
                 code: err["code"]?.intValue ?? -1,
-                message: err["message"]?.stringValue ?? "rpc error"
+                message: err["message"]?.stringValue ?? "rpc error",
+                data: err["data"]
             ))
         } else {
             cont.resume(returning: body["result"] ?? .null)
@@ -583,7 +587,8 @@ public actor NormaSessionClient {
         let err = body["error"]
         cont.resume(throwing: SessionClientError.rpcError(
             code: err?["code"]?.intValue ?? -32000,
-            message: err?["message"]?.stringValue ?? "gateway error"
+            message: err?["message"]?.stringValue ?? "gateway error",
+            data: err?["data"]
         ))
     }
 

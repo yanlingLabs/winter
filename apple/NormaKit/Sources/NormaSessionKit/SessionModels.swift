@@ -152,7 +152,18 @@ public enum SessionClientError: Error, Equatable {
     /// The connection closed (inbound stream ended) with a request still awaiting its response.
     case connectionClosed
     /// The host answered a request with a JSON-RPC error.
-    case rpcError(code: Int, message: String)
+    ///
+    /// `data` is the JSON-RPC error object's OPTIONAL third member, carried verbatim (Chat Slice D
+    /// T12 / whole-branch WB-C1). It is not decoration: `sync.push` answers a base-seq mismatch with
+    /// `ERR.DIVERGED` whose `data.lastSeq` is the daemon's own head, and `NormaChatKit.SyncClient`
+    /// branches on THAT number — `0` means "the daemon holds nothing, re-push from seq 1", `> 0` is a
+    /// real branch point that forks. The Mac gateway was fixed to relay `data` through
+    /// (`Gateway.handleRpc`); dropping it HERE would put the phone back where it started, and the
+    /// failure is silent — `SyncClient.push` rethrows and the session simply never reconciles.
+    ///
+    /// Defaulted to `nil` so every existing CONSTRUCTION site compiles unchanged; pattern matches
+    /// must bind all three (there is exactly one in `norma-ios`, `ConnectionClassifier.classify`).
+    case rpcError(code: Int, message: String, data: SessionEvent.JSONValue? = nil)
     /// A response arrived that could not be parsed as JSON-RPC.
     case malformedResponse
 }

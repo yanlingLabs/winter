@@ -708,6 +708,62 @@ final class SyncClientTests: XCTestCase {
         let memory = try await client.fetchMemory()
         XCTAssertEqual(memory.map { $0.name }, ["MEMORY.md", "prefs.md"])
     }
+
+    // MARK: - T11-review F-8: the per-session leg
+
+    /// A leg reconciles ONE session and leaves every other alone — the property the phone's
+    /// store-wide turn queue needs so a Send waits for one session's reconcile, not a whole pass.
+    func testAPerSessionLegReconcilesOnlyThatSession() async throws {
+        let a = "10000000-0000-4000-8000-000000000020"
+        let b = "10000000-0000-4000-8000-000000000021"
+        let daemon = FakeDaemon()
+        daemon.seed(a, [created(a), asst(a, 2, "from mac A")])
+        daemon.seed(b, [created(b), asst(b, 2, "from mac B")])
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        let heads = try await client.heads()
+        let ids = await client.passSessionIds(heads: heads)
+        XCTAssertEqual(Set(ids), [a, b])
+
+        try await client.syncSession(a, heads: heads)
+        let headA = await store.lastSeq(sessionId: a)
+        let headBBeforeItsLeg = await store.lastSeq(sessionId: b)
+        XCTAssertEqual(headA, 2)
+        XCTAssertEqual(headBBeforeItsLeg, 0, "B's leg has not run — it must be untouched")
+
+        try await client.syncSession(b, heads: heads)
+        let headB = await store.lastSeq(sessionId: b)
+        XCTAssertEqual(headB, 2)
+        // Leg-by-leg lands EXACTLY where the indivisible pass would.
+        XCTAssertEqual(try Data(contentsOf: logURL(a)), daemon.rawLog(a))
+        XCTAssertEqual(try Data(contentsOf: logURL(b)), daemon.rawLog(b))
+    }
+
+    /// A leg pushes a purely LOCAL session too (it is in `passSessionIds` via the store, not heads),
+    /// and a leg for a session neither side has is a no-op rather than a throw.
+    func testAPerSessionLegPushesALocalOnlySessionAndIgnoresAnUnknownOne() async throws {
+        let local = "10000000-0000-4000-8000-000000000022"
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        let session = try await store.createSession(sessionId: local)
+        session.persist(.userMessage(.init(seq: 2, sessionId: local, ts: 2, threadId: "main", text: "typed offline", clientName: "phone")))
+        let client = SyncClient(store: store, conn: daemon)
+
+        let heads = try await client.heads()
+        let ids = await client.passSessionIds(heads: heads)
+        XCTAssertEqual(heads, [], "the daemon has nothing yet")
+        XCTAssertEqual(ids, [local])
+
+        try await client.syncSession(local, heads: heads)
+        let synced = await store.lastSyncedSeq(sessionId: local)
+        XCTAssertTrue(daemon.has(local))
+        XCTAssertEqual(daemon.head(local), 2)
+        XCTAssertEqual(synced, 2)
+
+        // A leg for an id neither side holds does nothing at all.
+        try await client.syncSession("10000000-0000-4000-8000-0000000000ff", heads: heads)
+    }
 }
 
 // ================================================================================================

@@ -77,9 +77,16 @@ public struct SyncConfig: Codable, Equatable, Sendable {
 }
 
 /// One replicated `_assistant` memory file.
+///
+/// The memberwise init is spelled out and PUBLIC (like `SyncConfig`'s): the phone writes these to
+/// its own replica directory, and its tests have to be able to build a page without a socket.
 public struct SyncMemoryFile: Decodable, Equatable, Sendable {
     public let name: String
     public let content: String
+    public init(name: String, content: String) {
+        self.name = name
+        self.content = content
+    }
 }
 struct SyncMemoryResult: Decodable { let files: [SyncMemoryFile]; let nextCursor: Int?; let complete: Bool }
 
@@ -162,29 +169,69 @@ public actor SyncClient {
     @discardableResult
     public func syncAll() async throws -> [SyncHead] {
         let heads = try await headsCall()
-        let headsById = Dictionary(uniqueKeysWithValues: heads.map { ($0.sessionId, $0) })
         var failures: [(sessionId: String, error: any Error)] = []
+        for sessionId in await passSessionIds(heads: heads) {
+            do { try await syncSession(sessionId, heads: heads) }
+            catch { failures.append((sessionId, error)) }
+        }
+        if !failures.isEmpty { throw SyncPassError(failures: failures) }
+        return heads
+    }
 
-        // 1. PULL: daemon sessions the phone has never seen, or is strictly behind on with no local
-        //    divergence. A session with local-ahead events (localLast > localSynced) is left for the
-        //    push phase, where a real divergence forks rather than clobbering the local tail.
-        for head in heads {
-            let localLast = await store.lastSeq(sessionId: head.sessionId)
-            let localSynced = await store.lastSyncedSeq(sessionId: head.sessionId)
+    // MARK: - the per-session entry (T12 / T11-review F-8)
+
+    /// `sync.heads` on its own — the pass's opening read, exposed so a caller that drives the pass
+    /// SESSION BY SESSION can take the snapshot once and hand it to each leg.
+    public func heads() async throws -> [SyncHead] { try await headsCall() }
+
+    /// Every session one pass over `heads` would touch: the daemon's sessions first (in the order
+    /// `sync.heads` served them — the pull candidates), then every LOCAL session the snapshot did
+    /// not mention (the push-only candidates, in the store's stable id order). Deduped.
+    public func passSessionIds(heads: [SyncHead]) async -> [String] {
+        var ids: [String] = []
+        var seen: Set<String> = []
+        for head in heads where seen.insert(head.sessionId).inserted { ids.append(head.sessionId) }
+        for meta in await store.sessions() where seen.insert(meta.sessionId).inserted { ids.append(meta.sessionId) }
+        return ids
+    }
+
+    /// ONE session's leg of a pass: pull what the daemon has that we don't, then push what we have
+    /// that it doesn't. `syncAll` is exactly this over `passSessionIds`, so there is one reconcile
+    /// implementation and no second code path to drift.
+    ///
+    /// **Why this exists at all** (T11-review F-8). The phone serializes turns against sync on ONE
+    /// store-wide queue, because `LocalEventStore.appendPulledVerbatim` throws `notContiguous` the
+    /// moment a pull lands on a log a turn just extended. With `syncAll()` as the only entry, that
+    /// queue item is a whole network-bound pass over EVERY session — so a user typing in session B
+    /// watched a disabled composer for the duration of a pass that had nothing to do with B. A
+    /// per-session queue plus a global barrier does not help: holding the barrier for an indivisible
+    /// `syncAll()` IS the store-wide block. Splitting the pass into legs is what makes the caller's
+    /// wait bounded by ONE session's reconcile: the app enqueues leg *k*, awaits it, and only then
+    /// enqueues leg *k+1*, so a Send tapped mid-pass lands in the FIFO right behind the running leg
+    /// instead of behind the whole pass.
+    ///
+    /// A leg is INDEPENDENT of every other leg: it reads and writes only this session's log and
+    /// watermark, and consults `heads` (a value) rather than re-reading the daemon. The only shared
+    /// object it touches is the store's registry, which is the actor itself.
+    public func syncSession(_ sessionId: String, heads: [SyncHead]) async throws {
+        let headsById = Dictionary(uniqueKeysWithValues: heads.map { ($0.sessionId, $0) })
+
+        // 1. PULL: a daemon session the phone has never seen, or is strictly behind on with no local
+        //    divergence. A session with local-ahead events (localLast > localSynced) falls through to
+        //    the push below, where a real divergence forks rather than clobbering the local tail.
+        if let head = headsById[sessionId] {
+            let localLast = await store.lastSeq(sessionId: sessionId)
+            let localSynced = await store.lastSyncedSeq(sessionId: sessionId)
             if head.lastSeq > localSynced && localLast == localSynced {
-                do { try await pull(head: head, fromSeq: localSynced) }
-                catch { failures.append((head.sessionId, error)) }
+                try await pull(head: head, fromSeq: localSynced)
             }
         }
 
-        // 2. PUSH: every session whose local head is ahead of what the daemon has confirmed.
-        for meta in await store.sessions() where meta.lastSeq > meta.lastSyncedSeq {
-            do { try await push(sessionId: meta.sessionId, headsById: headsById) }
-            catch { failures.append((meta.sessionId, error)) }
-        }
-
-        if !failures.isEmpty { throw SyncPassError(failures: failures) }
-        return heads
+        // 2. PUSH: whenever the local head is ahead of what the daemon has confirmed. Re-read after
+        //    the pull — a pull that just fast-forwarded this session leaves nothing to push.
+        guard let meta = await store.sessions().first(where: { $0.sessionId == sessionId }),
+              meta.lastSeq > meta.lastSyncedSeq else { return }
+        try await push(sessionId: sessionId, headsById: headsById)
     }
 
     // MARK: - pull
