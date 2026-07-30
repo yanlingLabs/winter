@@ -159,6 +159,41 @@ final class CodexAuthTests: XCTestCase {
         XCTAssertNil(tokens.accountId)
     }
 
+    /// T5-review M1: some token-endpoint responses send `expires_in` as a JSON STRING. The TS
+    /// coerces it (`Number(j.expires_in)`); a strict Double-only decode would throw
+    /// `.malformedTokenResponse` and sign the user out over a wire shape the daemon accepts. A
+    /// numeric string and a numeric value must yield the IDENTICAL expiry.
+    func testExpiresInCoercesAStringLikeTheTs() async throws {
+        let numeric = ScriptedChatHTTP([.json(["access_token": "at_1", "expires_in": 3600])])
+        let stringy = ScriptedChatHTTP([.ok(status: 200,
+            body: Data(#"{"access_token":"at_1","expires_in":"3600"}"#.utf8))])
+
+        func exchange(_ http: ScriptedChatHTTP) async throws -> TokenState {
+            let handle = CodexAuth(config: config).beginFlow(state: "st_1")
+            return try await handle.complete(
+                callbackURL: URL(string: "http://localhost:1455/auth/callback?code=c&state=st_1")!,
+                http: http, now: { t0 })
+        }
+
+        let a = try await exchange(numeric)
+        let b = try await exchange(stringy)
+        XCTAssertEqual(a.expiresAt, t0.addingTimeInterval(3600))
+        XCTAssertEqual(b.expiresAt, t0.addingTimeInterval(3600), "a string expires_in coerces to the same value")
+    }
+
+    /// A NON-numeric `expires_in` string is not a decode failure — it falls through to the 3600s
+    /// default (never a NaN/invalid expiry), and the rest of the token still decodes.
+    func testUnparseableExpiresInFallsBackToDefault() async throws {
+        let http = ScriptedChatHTTP([.ok(status: 200,
+            body: Data(#"{"access_token":"at_1","expires_in":"soon"}"#.utf8))])
+        let handle = CodexAuth(config: config).beginFlow(state: "st_1")
+        let tokens = try await handle.complete(
+            callbackURL: URL(string: "http://localhost:1455/auth/callback?code=c&state=st_1")!,
+            http: http, now: { t0 })
+        XCTAssertEqual(tokens.accessToken, "at_1")
+        XCTAssertEqual(tokens.expiresAt, t0.addingTimeInterval(3600))
+    }
+
     /// The TS callback server checks `state` BEFORE it looks at `code` — a CSRF'd callback must
     /// never reach the token endpoint, even when it carries a plausible code.
     func testStateMismatchIsRejectedBeforeAnyHttp() async {

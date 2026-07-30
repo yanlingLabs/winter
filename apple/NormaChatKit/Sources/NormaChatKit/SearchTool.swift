@@ -29,7 +29,8 @@ public enum SearchTool {
     /// never carry `x-api-key` onward to a host outside Exa's control.
     static let maxResponseBytes = 5 * 1024 * 1024
 
-    static let noKeyMessage = "Search needs an API key — store one with: norma login --exa-key (from exa.ai)"
+    // T7-review M1: `public` so Task 12's phone reword can reach it (chat has no CLI `norma login`).
+    public static let noKeyMessage = "Search needs an API key — store one with: norma login --exa-key (from exa.ai)"
 
     /// Runs one search. `key` is the Exa API key (nil/empty → the no-key error); `http` is the kit's
     /// one egress seam. `dangerousAdded` is the user-added half of the effective dangerous-domain

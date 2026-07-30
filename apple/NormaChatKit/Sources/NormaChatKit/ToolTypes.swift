@@ -94,14 +94,17 @@ public enum ProviderRole: String, Sendable, Equatable {
     case system
 }
 
-/// One item in a turn's input — the Swift mirror of the `TurnInputItem` cases the research loop
-/// actually builds (a user/assistant message, a function call it is echoing back, and a tool
-/// result). Task 8's ResponsesClient may extend this for its own richer input; the research runner
-/// needs only these three.
+/// One item in a turn's input — the Swift mirror of `providers/types.ts`'s `TurnInputItem`. The
+/// research loop builds only the first three (message / echoed function call / tool result); Task 8's
+/// `ResponsesClient` adds `.reasoning`, the opaque encrypted-reasoning passthrough (`mapInput`'s
+/// `JSON.parse(i.itemJson)` case) — a session that continues after a reasoning-bearing round must
+/// feed those items back verbatim for provider continuity. `itemJSON` is sensitive-opaque: it rides
+/// the request body and the session log, and is never rendered or logged (CLAUDE.md §events).
 public enum ProviderInputItem: Sendable {
     case message(role: ProviderRole, content: String)
     case functionCall(callId: String, name: String, argumentsJSON: String)
     case toolResult(callId: String, output: String, isError: Bool)
+    case reasoning(itemJSON: String)
 }
 
 /// A tool advertised to the model. `parametersJSON` is a JSON Schema string (the TS carries

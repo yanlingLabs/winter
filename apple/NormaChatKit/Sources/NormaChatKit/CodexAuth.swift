@@ -179,8 +179,20 @@ public struct TokenState: Codable, Equatable, Sendable {
                                          margin: TimeInterval = TokenState.refreshMargin,
                                          now: @Sendable () -> Date = { Date() }) async throws -> Bool {
         guard needsRefresh(now: now(), margin: margin) else { return false }
-        guard let refreshToken else { throw CodexAuthError.missingRefreshToken }
+        self = try await refreshed(http: http, config: config, now: now)
+        return true
+    }
 
+    /// One UNCONDITIONAL refresh POST, returning the merged result (never mutates `self`). The
+    /// primitive `TokenSource` (Task 8) serializes through an actor so two concurrent turns at the
+    /// margin share ONE POST — factored out of `refreshIfNeeded` so both the proactive-margin path
+    /// and the reactive 401 path use the exact same merge rule and neither re-checks the margin.
+    ///
+    /// Merge rule mirrors `codex-oauth.ts` verbatim: "refresh grants usually return no id_token and
+    /// may not rotate the refresh token: never let nulls clobber known-good identity fields."
+    public func refreshed(http: ChatHTTP, config: CodexConfig = .codex,
+                          now: @Sendable () -> Date = { Date() }) async throws -> TokenState {
+        guard let refreshToken else { throw CodexAuthError.missingRefreshToken }
         let fresh = try await CodexAuth.exchange(
             tokenURL: config.tokenURL,
             params: [
@@ -189,13 +201,13 @@ public struct TokenState: Codable, Equatable, Sendable {
                 ("refresh_token", refreshToken),
             ],
             http: http, now: now)
-
-        accessToken = fresh.accessToken
-        expiresAt = fresh.expiresAt
-        if let rotated = fresh.refreshToken { self.refreshToken = rotated }
-        if let id = fresh.idToken { idToken = id }
-        if let account = fresh.accountId { accountId = account }
-        return true
+        var merged = self
+        merged.accessToken = fresh.accessToken
+        merged.expiresAt = fresh.expiresAt
+        if let rotated = fresh.refreshToken { merged.refreshToken = rotated }
+        if let id = fresh.idToken { merged.idToken = id }
+        if let account = fresh.accountId { merged.accountId = account }
+        return merged
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -363,6 +375,27 @@ public struct CodexAuth: Sendable {
             case refreshToken = "refresh_token"
             case idToken = "id_token"
             case expiresIn = "expires_in"
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            accessToken = try c.decode(String.self, forKey: .accessToken)
+            refreshToken = try c.decodeIfPresent(String.self, forKey: .refreshToken)
+            idToken = try c.decodeIfPresent(String.self, forKey: .idToken)
+            // T5-review M1: coerce a STRING `expires_in` the way the TS does (`Number(j.expires_in)`
+            // in pkce.ts) rather than hard-rejecting the whole token response. OpenAI's token
+            // endpoint has been observed to send `expires_in` as a JSON string on some responses; a
+            // strict `Double`-only decode would throw and surface as `.malformedTokenResponse`,
+            // signing the user out over a wire shape the daemon accepts fine. A numeric string
+            // coerces to its value; anything unparseable (or absent) falls through to `nil`, which
+            // the caller defaults to 3600s — never a NaN expiry.
+            if let n = try? c.decodeIfPresent(Double.self, forKey: .expiresIn) {
+                expiresIn = n
+            } else if let s = try? c.decodeIfPresent(String.self, forKey: .expiresIn) {
+                expiresIn = Double(s.trimmingCharacters(in: .whitespaces))
+            } else {
+                expiresIn = nil
+            }
         }
     }
 }
