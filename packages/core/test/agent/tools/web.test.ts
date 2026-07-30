@@ -63,6 +63,117 @@ describe("ssrfGuard", () => {
   test("rejects the IPv6 unspecified address", () => {
     expect(ssrfGuard("http://[::]/")).not.toBeNull();
   });
+
+  // Task 6b Part A: the guard was rewritten from string comparisons to a parser (see below). These
+  // messages are the audit-line and model-transcript surface AND the phone mirrors them byte for
+  // byte, so the rewrite must not reword a single one. Pinned verbatim, not just as "non-null".
+  test("every pre-existing refusal keeps its exact message (the rewrite tightens, never rewords)", () => {
+    const expected: Array<[string, string]> = [
+      ["ftp://x.com", "only http(s) urls are allowed"],
+      ["file:///etc/passwd", "only http(s) urls are allowed"],
+      ["http://not a url", "invalid url: http://not a url"],
+      ["http://localhost/x", "refusing to fetch a local address"],
+      ["http://localhost./x", "refusing to fetch a local address"],
+      ["http://foo.local/", "refusing to fetch a local address"],
+      ["http://foo.local./x", "refusing to fetch a local address"],
+      ["http://0.0.0.0/", "refusing to fetch a local address"],
+      ["http://0/", "refusing to fetch a local address"], // WHATWG canonicalizes this to 0.0.0.0
+      ["http://[::1]/", "refusing to fetch a local address"],
+      ["http://[::]/", "refusing to fetch a local address"],
+      ["http://127.0.0.1", "refusing to fetch a private address"],
+      ["http://10.0.0.5", "refusing to fetch a private address"],
+      ["http://10.0.0.1./x", "refusing to fetch a private address"],
+      ["http://172.16.9.1", "refusing to fetch a private address"],
+      ["http://192.168.1.1", "refusing to fetch a private address"],
+      ["http://169.254.169.254", "refusing to fetch a private address"],
+      ["http://[fe80::1]/", "refusing to fetch a private address"],
+      ["http://[fe90::1]/", "refusing to fetch a private address"],
+      ["http://[febf:ffff::1]/", "refusing to fetch a private address"],
+      ["http://[fc00::1]/", "refusing to fetch a private address"],
+      ["http://[fd12:3456::1]/", "refusing to fetch a private address"],
+      ["http://[::ffff:127.0.0.1]/", "refusing to fetch a private address"],
+      ["http://[::ffff:7f00:1]/", "refusing to fetch a private address"],
+      // …including the one asymmetry the old code had and this keeps: a bare 0.0.0.0 host is
+      // reported *local*, but the same 32 bits arriving IPv4-mapped are reported *private*.
+      ["http://[::ffff:0.0.0.0]/", "refusing to fetch a private address"],
+    ];
+    for (const [url, message] of expected) expect(ssrfGuard(url)).toBe(message);
+  });
+
+  // Task 6b Part A (back-ported from the phone's fix-round-2 Critical): every check in this guard
+  // used to be a string comparison against `u.hostname` — the host AFTER WHATWG canonicalized it.
+  // Canonicalization is LOSSY, and the reading WHATWG picks is not the only reading a resolver
+  // accepts: it reads a leading zero as OCTAL (`0127` → 87) while `getaddrinfo` prefers DECIMAL
+  // whenever it fits (`0127` → 127). Every host below was ALLOWED by the old guard and confirmed by
+  // `getaddrinfo` to denote the private address named in the comment — 18 spellings found by
+  // `ssrf-resolver-sweep.test.ts` against the old guard, which is also the gate that proves the
+  // class (not the list) is closed.
+  test("rejects leading-zero-decimal spellings a resolver targets into private space (was a fail-open)", () => {
+    for (const bad of [
+      "http://0127.0.0.1/", "http://0127.1.2.3/", "http://0127.255.255.254/", // → 127.x loopback
+      "http://010.0.0.1/", "http://010.255.255.255/", "http://010.8.8.8/", // → 10.x
+      "http://0172.16.0.1/", "http://0172.20.10.1/", "http://0172.31.255.255/", // → 172.16-31.x
+      "http://010.010.010.010/", // per-octet octal, decimal-read → 10.10.10.10
+    ]) {
+      expect(ssrfGuard(bad)).toBe("refusing to fetch a private address");
+    }
+  });
+
+  test("the leading-zero class is unbounded — extra zeros must not reopen it", () => {
+    // `0127` / `00127` / `000127` all read as 127 decimal; enumerating spellings could never close
+    // this, which is why the guard parses instead of matching.
+    for (const zeros of ["0", "00", "000", "0000000000"]) {
+      expect(ssrfGuard(`http://${zeros}127.0.0.1/`)).toBe("refusing to fetch a private address");
+      expect(ssrfGuard(`http://${zeros}10.0.0.1/`)).toBe("refusing to fetch a private address");
+    }
+  });
+
+  test("percent-encoding the ambiguous spelling does not reopen it either", () => {
+    // WHATWG percent-decodes the host before parsing it, so `%30%31%32%37.0.0.1` canonicalizes to
+    // the same public 87.0.0.1 — the raw-authority reading has to decode too.
+    expect(ssrfGuard("http://%30%31%32%37.0.0.1/")).toBe("refusing to fetch a private address");
+    expect(ssrfGuard("http://%30%31%30.0.0.1/")).toBe("refusing to fetch a private address");
+  });
+
+  test("still refuses the spellings WHATWG canonicalizes INTO the guarded form (both readings consulted)", () => {
+    // The other direction of the same disagreement: here WHATWG's octal reading is the private one
+    // (`0177` → 127) and the resolver's decimal reading (177) is public. Refusing needs the
+    // c-convention reading, so this pins that dropping either policy is a regression.
+    for (const bad of ["http://0177.0.0.1/", "http://0300.0250.0.1/", "http://2130706433/", "http://0x7f000001/", "http://127.1/", "http://3232235777/", "http://0xc0a80101/", "http://0XC0A80101/"]) {
+      expect(ssrfGuard(bad)).not.toBeNull();
+    }
+  });
+
+  test("the raw-authority reading cannot be fooled by userinfo, ports, paths, queries or fragments", () => {
+    for (const bad of [
+      "http://user:pass@0127.0.0.1:8080/p?q#f", // host is after the LAST "@"
+      "http://0127.0.0.1./", // trailing root label
+      "http://a@b@010.0.0.1/x", // multiple "@"
+      "http:\\\\010.0.0.1\\x", // backslashes are slashes for special schemes
+      "http:/010.0.0.1/x", // a single slash still has an authority
+    ]) {
+      expect(ssrfGuard(bad)).not.toBeNull();
+    }
+    // …and it must not mistake a path/query/fragment for the host (the over-blocking direction).
+    for (const ok of [
+      "https://example.com/010.0.0.1", "https://example.com/?redir=0127.0.0.1",
+      "https://example.com/#010.0.0.1", "https://example.com/@010.0.0.1",
+    ]) {
+      expect(ssrfGuard(ok)).toBeNull();
+    }
+  });
+
+  test("still allows ordinary public hosts, including numeric-looking names and non-ASCII domains", () => {
+    for (const ok of [
+      "https://example.com/", "https://8.8.8.8/", "https://1.1.1.1/", "https://223.255.255.255/",
+      "https://172.15.0.1/", "https://172.32.0.1/", "https://192.167.1.1/", "https://169.253.0.1/",
+      "https://8.8.8.8.nip.io/", "https://2021.example.com/", "https://08.example.com/",
+      "https://xn--nicode-2ya.example/", "https://ünicode.example/",
+      "https://[2001:db8::1]/", "https://[2606:4700:4700::1111]/", "https://[::ffff:8.8.8.8]/",
+    ]) {
+      expect(ssrfGuard(ok)).toBeNull();
+    }
+  });
 });
 
 describe("htmlToText", () => {
@@ -140,6 +251,39 @@ describe("htmlToText: linear-time scanning (Critical fix, fix-round-2 — the SA
     htmlToText(html);
     const elapsed = performance.now() - start;
     expect(elapsed).toBeLessThan(500);
+  });
+
+  // Task 6b Part B: the fix above linearized the five PAIRED-tag scans but left the FINAL
+  // `<[^>]+>` strip quadratic, and the shapes probed above all terminate their own tags (`<script
+  // type="text/x">` has a `>`), so nothing in this file ever reached it. The adversarial shape for
+  // the strip is the ABSENT `>`: with no `>` after some point, the regex engine consumes to
+  // end-of-string at EVERY `<` and fails.
+  //
+  // CEILING CALIBRATION — measured, not guessed. `"<p>ok</p>" + "<script x".repeat(n)` on this
+  // branch, before the `stripTags` rewrite and after:
+  //
+  //     opens     bytes     before     after     ratio
+  //      5,000    45 KB       78 ms    0.3 ms      260x
+  //     10,000    90 KB      301 ms    0.3 ms     1000x
+  //     20,000   180 KB     1457 ms    0.6 ms     2400x
+  //     40,000   360 KB     6011 ms    1.2 ms     5000x
+  //
+  // A 200 ms ceiling at 40,000 opens sits ~165x above the linear run and ~30x below the quadratic
+  // one, so it is both non-flaky and genuinely discriminating (verified by reverting `stripTags` to
+  // the regex: 6.0 s, FAILS). The doubling series is asserted too, since a constant-factor
+  // improvement that stayed O(n²) would clear a single absolute bound at some size and not others.
+  test("the FINAL tag strip stays linear when no '>' follows (the absent-close shape the paired passes never reach)", () => {
+    const closedPair = "<p>ok</p>"; // so the strip really runs a pairing-free scan, not an empty one
+    const timings = [5_000, 10_000, 20_000, 40_000].map((opens) => {
+      const html = closedPair + "<script x".repeat(opens);
+      const start = performance.now();
+      const text = htmlToText(html);
+      const elapsed = performance.now() - start;
+      // Byte-identity spot-check at every size: an unterminated tag is NOT a tag, so it survives.
+      expect(text).toBe(("ok\n" + "<script x".repeat(opens)).trim());
+      return elapsed;
+    });
+    for (const t of timings) expect(t).toBeLessThan(200);
   });
 
   test("many WELL-FORMED, properly-closed tags of every shape (the realistic case) still extract correctly and quickly", () => {

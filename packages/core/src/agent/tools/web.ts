@@ -20,72 +20,321 @@ export const WEB_SEARCH_API_KEY_SECRET = "web-search-api-key";
 // module-level, per-process — names saved files webfetch-<n>-<host>.md (USER DESIGN, task-5-brief.md)
 let fetchCounter = 0;
 
-/** First-two-octets private/loopback/link-local IPv4 check — shared by literal IPv4 hosts
+const LOCAL_REFUSAL = `refusing to fetch a local address`;
+const PRIVATE_REFUSAL = `refusing to fetch a private address`;
+
+/** First-two-octets private/loopback/link-local IPv4 table — shared by literal IPv4 hosts
  *  (`10.0.0.1`) AND IPv4-mapped IPv6 addresses (`::ffff:10.0.0.1` / its canonical hex form
  *  `::ffff:a00:1`), which resolve to the exact same 32-bit address and must not evade the guard
  *  just because they're spelled as IPv6. */
 function ipv4Refusal(a: number, b: number): string | null {
   if (a === 127 || a === 10 || a === 0 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)) {
-    return `refusing to fetch a private address`;
+    return PRIVATE_REFUSAL;
   }
   return null;
 }
 
+/** A bare IPv4 HOST. `0.0.0.0` is reported as *local* rather than *private* because that's the
+ *  string this guard has always reported for it (it used to be an explicit `h === "0.0.0.0"` check
+ *  in the local-names branch, ahead of the numeric table) — and WHATWG canonicalizes `http://0/` to
+ *  exactly that host, so the distinction is reachable from a non-canonical spelling too. */
+function ipv4HostRefusal(bits: number): string | null {
+  if (bits === 0) return LOCAL_REFUSAL;
+  return ipv4Refusal((bits >>> 24) & 0xff, (bits >>> 16) & 0xff);
+}
+
+/** `inet_aton`/WHATWG's radix rules (`0x…` hex, a leading `0` octal, else decimal) vs. every part
+ *  read as DECIMAL regardless of a leading zero — what `getaddrinfo` prefers whenever the decimal
+ *  reading fits. See `ipv4Interpretations` for why both are consulted. */
+type RadixPolicy = "c-convention" | "decimal-only";
+
+/** One dotted part under one radix policy, or `null` when it isn't a legal part at all.
+ *
+ *  ASCII digits only: JS's `\d` is already ASCII-only without the `u` flag, and these explicit
+ *  classes keep it that way if the pattern is ever ported. Values are read as doubles — exact below
+ *  2^53 and, above it, only ever rounded by a relative epsilon, so a value that is ≥ 2^32 can never
+ *  round DOWN across the width checks in `dottedIPv4`. Overflow therefore fails the parse rather
+ *  than wrapping (see that function's comment for why wrapping is the thing to avoid). */
+function parsePart(part: string, policy: RadixPolicy): number | null {
+  if (part === "") return null;
+  if (policy === "c-convention") {
+    if (part.startsWith("0x") || part.startsWith("0X")) {
+      const digits = part.slice(2);
+      if (digits === "") return 0; // WHATWG reads a bare `0x` as zero
+      if (!/^[0-9a-fA-F]+$/.test(digits)) return null;
+      return Number.parseInt(digits, 16);
+    }
+    if (part.length > 1 && part.startsWith("0")) {
+      const digits = part.slice(1);
+      if (!/^[0-7]+$/.test(digits)) return null;
+      return Number.parseInt(digits, 8);
+    }
+  }
+  if (!/^[0-9]+$/.test(part)) return null;
+  return Number(part);
+}
+
+/** `inet_aton`'s grammar, parsed exactly: 1-4 parts with the classic widening (`a` / `a.b` /
+ *  `a.b.c` / `a.b.c.d`), every part but the last capped at a byte and the last filling the rest.
+ *
+ *  EXPLICIT WIDTH CHECKS, and that is the point (fix-round-2 finding on the Swift port, back-ported
+ *  here): the platform `inet_aton` silently WRAPS on overflow instead of failing — `0x1c0a80101`
+ *  (2^32 + 0xc0a80101) reads as 192.168.1.1, `4294967296` as 0.0.0.0. A wrapped value is
+ *  indistinguishable from a real parse and invents addresses the string never denoted, so overflow
+ *  fails the parse here instead. */
+function dottedIPv4(host: string, policy: RadixPolicy): number | null {
+  const parts = host.split(".");
+  if (parts.length < 1 || parts.length > 4) return null;
+
+  const values: number[] = [];
+  for (const part of parts) {
+    const value = parsePart(part, policy);
+    if (value === null) return null;
+    values.push(value);
+  }
+
+  const tailBits = (5 - values.length) * 8; // 1 part → 32, 2 → 24, 3 → 16, 4 → 8
+  const tail = values[values.length - 1]!;
+  if (tail >= 2 ** tailBits) return null;
+  let bits = tail;
+  for (let i = 0; i < values.length - 1; i++) {
+    const value = values[i]!;
+    if (value > 255) return null;
+    bits += value * 2 ** (32 - 8 * (i + 1));
+  }
+  return bits >>> 0; // the width checks above already bound this to 32 bits
+}
+
+/** Every 32-bit address this host string could denote to something that will dial it. Empty when the
+ *  host is not an IPv4 literal under any reading.
+ *
+ *  WHY TWO READINGS. `inet_aton`/WHATWG and `getaddrinfo` — the resolver — disagree, and neither is
+ *  a superset of the other. Measured on this machine:
+ *
+ *      host             inet_aton/WHATWG   getaddrinfo    private?
+ *      0300.0250.0.1    192.168.0.1        192.168.0.1    yes  (octal; both agree)
+ *      0xc0a80101       192.168.1.1        192.168.1.1    yes  (hex; both agree)
+ *      010.0.0.1        8.0.0.1            10.0.0.1       yes — ONLY under getaddrinfo
+ *      0177.0.0.1       127.0.0.1          177.0.0.1      yes — ONLY under inet_aton/WHATWG
+ *
+ *  `getaddrinfo` prefers a DECIMAL reading whenever it fits (`010` → 10) and falls back to octal
+ *  only when decimal would overflow the part (`0300` → 192); `inet_aton` always takes the C
+ *  convention (`010` → 8). A guard consulting either alone fails OPEN on one of those two rows, so
+ *  both are returned and ANY private reading refuses. That is fail-closed by construction and costs
+ *  nothing: a genuinely public address is public under both readings.
+ *
+ *  (`getaddrinfo`'s true rule is per-PART — decimal if it fits, else octal — so a host mixing an
+ *  overflowing octal part with an in-range decimal one has a third reading neither policy produces.
+ *  Every such host is either covered by `c-convention` anyway, because a part whose decimal reading
+ *  fits reads the same under both policies unless it carries a leading zero, or rejected outright by
+ *  WHATWG: `0300.168.0.1` → 192.168.0.1 under `c-convention`; `0300.0168.0.1` has an out-of-radix
+ *  octal digit and `new URL()` throws. The resolver sweep is what checks that claim empirically
+ *  rather than by argument — `test/agent/tools/ssrf-resolver-sweep.test.ts`.) */
+function ipv4Interpretations(host: string): number[] {
+  const found: number[] = [];
+  for (const policy of ["c-convention", "decimal-only"] as const) {
+    const bits = dottedIPv4(host, policy);
+    if (bits !== null && !found.includes(bits)) found.push(bits);
+  }
+  return found;
+}
+
+/** WHATWG's strict IPv4-in-IPv6 tail: exactly four 1-3 digit decimal parts, no leading zeros, each
+ *  ≤ 255. Deliberately NOT `dottedIPv4` — inside an IPv6 literal there is no `inet_aton` widening
+ *  and no alternate radix, in either WHATWG's parser or `inet_pton`'s. */
+function strictDottedQuad(text: string): number | null {
+  const parts = text.split(".");
+  if (parts.length !== 4) return null;
+  let bits = 0;
+  for (const part of parts) {
+    if (!/^[0-9]{1,3}$/.test(part)) return null;
+    if (part.length > 1 && part.startsWith("0")) return null;
+    const value = Number(part);
+    if (value > 255) return null;
+    bits = bits * 256 + value;
+  }
+  return bits >>> 0;
+}
+
+/** The 16 bytes of an IPv6 literal (unbracketed, lowercased), or `null` when the host is not one.
+ *  A zone id (`%en0`) is stripped first: a resolver honours scoped link-local addresses, so the
+ *  guard has to see through the suffix rather than let it disguise `fe80::1`.
+ *
+ *  This is what structurally retires the old `wasIpv6Literal` gate: a host that merely LOOKS like an
+ *  IPv6 prefix (`fcc.gov`, `fdic.gov`, `fear.com`) simply fails to parse and never reaches a
+ *  prefix check at all, so the over-blocking class is impossible rather than conditionally avoided. */
+function ipv6Bytes(host: string): Uint8Array | null {
+  const bare = host.split("%")[0]!;
+  if (!bare.includes(":")) return null;
+  const halves = bare.split("::");
+  if (halves.length > 2) return null;
+
+  const groupsOf = (text: string): number[] | null => {
+    if (text === "") return [];
+    const labels = text.split(":");
+    const groups: number[] = [];
+    for (let i = 0; i < labels.length; i++) {
+      const label = labels[i]!;
+      if (i === labels.length - 1 && label.includes(".")) {
+        const quad = strictDottedQuad(label);
+        if (quad === null) return null;
+        groups.push((quad >>> 16) & 0xffff, quad & 0xffff);
+        continue;
+      }
+      if (!/^[0-9a-f]{1,4}$/.test(label)) return null;
+      groups.push(Number.parseInt(label, 16));
+    }
+    return groups;
+  };
+
+  const head = groupsOf(halves[0]!);
+  if (head === null) return null;
+  let groups: number[];
+  if (halves.length === 1) {
+    if (head.length !== 8) return null;
+    groups = head;
+  } else {
+    const tail = groupsOf(halves[1]!);
+    if (tail === null) return null;
+    if (head.length + tail.length > 7) return null; // "::" must elide at least one group
+    groups = [...head, ...new Array<number>(8 - head.length - tail.length).fill(0), ...tail];
+  }
+
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 8; i++) {
+    bytes[i * 2] = (groups[i]! >> 8) & 0xff;
+    bytes[i * 2 + 1] = groups[i]! & 0xff;
+  }
+  return bytes;
+}
+
+/** Numeric range checks over the parsed 16 bytes — the whole-nibble `startsWith("fc")` /
+ *  first-hextet arithmetic this replaces was correct only for the canonical spelling. */
+function ipv6Refusal(bytes: Uint8Array): string | null {
+  if (bytes.every((b) => b === 0)) return LOCAL_REFUSAL; // ::
+  if (bytes.slice(0, 15).every((b) => b === 0) && bytes[15] === 1) return LOCAL_REFUSAL; // ::1
+
+  // IPv4-mapped (`::ffff:a.b.c.d`, and its canonical hex form `::ffff:XXXX:YYYY`) is a real IPv4
+  // address and must go through the SAME table — the textbook v4-blocklist bypass. Deliberately
+  // `ipv4Refusal` and not `ipv4HostRefusal`, preserving this guard's long-standing behavior that
+  // `::ffff:0.0.0.0` is *private* (first octet 0) rather than *local*.
+  if (bytes.slice(0, 10).every((b) => b === 0) && bytes[10] === 0xff && bytes[11] === 0xff) {
+    const refusal = ipv4Refusal(bytes[12]!, bytes[13]!);
+    if (refusal) return refusal;
+  }
+
+  if ((bytes[0]! & 0xfe) === 0xfc) return PRIVATE_REFUSAL; // fc00::/7
+  if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80) return PRIVATE_REFUSAL; // fe80::/10 — wider than fe80::/16
+  return null;
+}
+
+/** One host string — canonical or as-written — judged on its own. */
+function hostRefusal(host: string): string | null {
+  let h = host.toLowerCase();
+  // Trailing-dot FQDN normalization: "localhost." / "10.0.0.1." are the SAME address as their
+  // dot-less forms (a trailing dot is just the DNS root label) but defeat every check below if left
+  // as-is. Strip ONE trailing dot.
+  if (h.endsWith(".")) h = h.slice(0, -1);
+  // IPv6 literals arrive bracketed from URL.hostname ("[fe80::1]") — unwrap BEFORE any check.
+  if (h.startsWith("[") && h.endsWith("]")) h = h.slice(1, -1);
+  if (h === "") return null;
+
+  // Names, not addresses — the one branch that stays a string comparison, because there is nothing
+  // to parse.
+  if (h === "localhost" || h.endsWith(".local")) return LOCAL_REFUSAL;
+
+  // IPv6 is resolved FIRST and completely: an IPv6 literal is unambiguously an address, so the IPv4
+  // readings below must never look at it (`::ffff:1.1.1.1` splits on "." into parts that are not
+  // IPv4 parts at all, and a partial reading of an address is worse than none).
+  const bytes = ipv6Bytes(h);
+  if (bytes) return ipv6Refusal(bytes);
+
+  // ANY reading that lands in private space refuses.
+  for (const bits of ipv4Interpretations(h)) {
+    const refusal = ipv4HostRefusal(bits);
+    if (refusal) return refusal;
+  }
+  return null;
+}
+
+/** The host EXACTLY AS WRITTEN in `raw`, before WHATWG's canonicalizer rewrote it — lowercased and
+ *  percent-decoded, with userinfo and port removed. `null` when there is no authority to extract.
+ *
+ *  This exists because `ssrfGuard` has to judge a spelling that `new URL()` has already thrown away.
+ *  See the guard's own comment for the fail-open class it closes. Everything WHATWG does to a URL
+ *  BEFORE the host parser runs is reproduced here — tab/newline removal, C0-control-or-space
+ *  trimming, `\` treated as `/` (special schemes only, which is all this guard accepts), an
+ *  arbitrary run of leading slashes, userinfo up to the LAST `@`, and percent-decoding — and
+ *  nothing it does after. It is deliberately CONTAINED: a mis-extraction can only produce a host
+ *  that no reading recognises (in which case the canonical check, which is what this guard has
+ *  always done, still stands unchanged), never a weaker verdict than before. */
+function rawAuthorityHost(raw: string): string | null {
+  let rest = raw.replace(/[\t\n\r]/g, "").replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "");
+  const scheme = /^[A-Za-z][A-Za-z0-9+\-.]*:/.exec(rest);
+  if (!scheme) return null;
+  rest = rest.slice(scheme[0].length).replace(/^[/\\]*/, "");
+  const authorityEnd = rest.search(/[/\\?#]/);
+  const authority = authorityEnd === -1 ? rest : rest.slice(0, authorityEnd);
+  const at = authority.lastIndexOf("@");
+  let host = at === -1 ? authority : authority.slice(at + 1);
+  if (host.startsWith("[")) {
+    const close = host.indexOf("]");
+    if (close !== -1) host = host.slice(0, close + 1);
+  } else {
+    const colon = host.indexOf(":");
+    if (colon !== -1) host = host.slice(0, colon);
+  }
+  if (host === "") return null;
+  try { host = decodeURIComponent(host); } catch { /* not valid UTF-8 escapes — judge it as written */ }
+  return host.toLowerCase();
+}
+
 /** Norma's ONLY sanctioned network egress (spec 4g §4.3) — bash stays sandboxed (network denied).
  *  v1 SSRF posture: literal private/loopback/link-local hosts rejected; DNS-rebinding is out of
- *  scope (documented). Response bytes are DATA, never instructions. */
+ *  scope (documented). Response bytes are DATA, never instructions.
+ *
+ *  ## Why this PARSES addresses instead of string-matching them, and why it judges TWO hosts
+ *
+ *  Until this rewrite every check here was a string comparison (`h === "127.0.0.1"`, a dotted-quad
+ *  regex, `h.startsWith("fc")`) against `u.hostname` — i.e. against the host AFTER WHATWG's
+ *  canonicalizer had rewritten it. That is load-bearing and it is also where the hole was:
+ *  canonicalization is LOSSY, and the reading WHATWG picks is not the only reading a resolver will
+ *  accept. `getaddrinfo("0127.0.0.1")` is 127.0.0.1 — loopback — while WHATWG reads the leading zero
+ *  as octal and hands the guard `87.0.0.1`, which is public, so the guard said yes. The class is
+ *  unbounded (leading zeros repeat: `00127`, `000127`, …) and reachable percent-encoded
+ *  (`%30%31%32%37.0.0.1`), so it is a class to close, not a list to enumerate.
+ *
+ *  So both hosts are judged, and any private reading of either refuses:
+ *
+ *  1. `u.hostname` — the CANONICAL host. On this runtime it is also the DIALED host: Bun's `fetch`
+ *     runs the URL through the same WHATWG parser and connects to the canonicalized authority
+ *     (verified with a loopback probe — `http://0177.0.0.1:PORT/` reaches a listener bound to
+ *     127.0.0.1, i.e. WHATWG's octal reading, and arrives with `Host: 127.0.0.1:PORT`). The
+ *     resolver sweep asserts this leg separately, because a hole in it would be a live SSRF rather
+ *     than a latent one.
+ *  2. `rawAuthorityHost(raw)` — the host AS WRITTEN, under BOTH radix readings (see
+ *     `ipv4Interpretations`). This is the leg that closes the class above, and it is what keeps the
+ *     daemon's verdict identical to the phone's (`apple/NormaChatKit/.../SSRFGuard.swift`, whose
+ *     `Foundation.URL` canonicalizes nothing and so has always had to parse).
+ *
+ *  This only ever TIGHTENS: every host the old string checks refused is still refused, with the same
+ *  message. The deliberate new refusals are the ambiguous spellings — `http://010.0.0.1/`,
+ *  `http://0127.0.0.1/`, `http://010.010.010.010/` — which WHATWG would dial as public addresses but
+ *  a resolver handed the same string targets into private space. No legitimate host is spelled that
+ *  way, and `test/agent/tools/ssrf-resolver-sweep.test.ts` is the generator-independent gate that
+ *  proves nothing the guard allows resolves — or dials — into private space. */
 export function ssrfGuard(raw: string): string | null {
   let u: URL; try { u = new URL(raw); } catch { return `invalid url: ${raw}`; }
   if (u.protocol !== "http:" && u.protocol !== "https:") return `only http(s) urls are allowed`;
 
-  let h = u.hostname.toLowerCase();
-  // Trailing-dot FQDN normalization: "localhost." / "10.0.0.1." are the SAME address as their
-  // dot-less forms (a trailing dot is just the DNS root label) but defeat `h === "localhost"` /
-  // the IPv4 regex if left as-is. Strip ONE trailing dot before every check below.
-  if (h.endsWith(".")) h = h.slice(0, -1);
-  // IPv6 literals arrive bracketed from URL.hostname ("[fe80::1]") — unwrap BEFORE any check,
-  // else every prefix/equality check below is structurally dead (nothing starts with "fc" once
-  // bracketed). Remember it WAS a literal so the ULA/link-local prefix check below only applies to
-  // real IPv6 literals, never to a domain that merely starts with "fc"/"fd"/"fe80" (fcc.gov etc.).
-  const wasIpv6Literal = h.startsWith("[") && h.endsWith("]");
-  if (wasIpv6Literal) h = h.slice(1, -1);
+  const canonical = u.hostname.toLowerCase();
+  const canonicalRefusal = hostRefusal(canonical);
+  if (canonicalRefusal) return canonicalRefusal;
 
-  if (h === "localhost" || h.endsWith(".local") || h === "0.0.0.0") return `refusing to fetch a local address`;
-
-  const ip4 = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (ip4) { const refusal = ipv4Refusal(Number(ip4[1]), Number(ip4[2])); if (refusal) return refusal; }
-
-  // IPv6 loopback / unspecified.
-  if (h === "::1" || h === "::" || (h.includes(":") && h.split(":").every((g) => g === "" || /^0+$/.test(g)))) {
-    return `refusing to fetch a local address`;
-  }
-
-  // IPv4-mapped IPv6 (`::ffff:a.b.c.d`, or its canonical hex form `::ffff:XXXX:YYYY` — the form
-  // URL.hostname actually normalizes to) resolves to a real IPv4 address and must be checked
-  // against the SAME private-range table as literal IPv4 hosts (the textbook v4-blocklist bypass).
-  const mappedDotted = h.match(/^::ffff:(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (mappedDotted) { const refusal = ipv4Refusal(Number(mappedDotted[1]), Number(mappedDotted[2])); if (refusal) return refusal; }
-  const mappedHex = h.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (mappedHex) {
-    const g1 = parseInt(mappedHex[1]!, 16);
-    const refusal = ipv4Refusal((g1 >> 8) & 0xff, g1 & 0xff);
-    if (refusal) return refusal;
-  }
-
-  // IPv6 ULA (fc00::/7) + link-local (fe80::/10) — ONLY for actual IPv6 literals, else a bare
-  // string-prefix match wrongly refuses public domains like fcc.gov / fdic.gov / fc-barcelona.com.
-  // fc00::/7 (top 7 bits fixed) is exactly captured by the "fc"/"fd" hex-nibble prefixes. But
-  // fe80::/10 (top 10 bits fixed) is NOT a whole-nibble prefix — the first hextet ranges over
-  // 0xfe80–0xfebf (fe80::, fe90::, fea0::, feb0::, … up to febf::), so a bare `startsWith("fe80")`
-  // string check misses fe90::/fea0::/feb0:: entirely. Range-check the first hextet numerically
-  // instead — a public domain merely starting with "fe" (fear.com) never reaches this branch at
-  // all (wasIpv6Literal gates the whole thing), so this can't over-block those.
-  if (wasIpv6Literal) {
-    if (h.startsWith("fc") || h.startsWith("fd")) return `refusing to fetch a private address`;
-    const firstHextet = parseInt(h.split(":")[0] ?? "", 16);
-    if (!Number.isNaN(firstHextet) && firstHextet >= 0xfe80 && firstHextet <= 0xfebf) {
-      return `refusing to fetch a private address`;
-    }
+  const written = rawAuthorityHost(raw);
+  if (written !== null && written !== canonical) {
+    const writtenRefusal = hostRefusal(written);
+    if (writtenRefusal) return writtenRefusal;
   }
   return null;
 }
@@ -238,6 +487,60 @@ function convertHeadings(html: string): string {
   return out;
 }
 
+const LT = 0x3c; // "<"
+const GT = 0x3e; // ">"
+
+/** The final tag strip, `html.replace(/<[^>]+>/g, "")`, as a single monotonic forward scan.
+ *
+ *  Exactly equivalent, and the equivalence is easy to see: the regex's leftmost match at a `<` is
+ *  `<`, then the run of characters up to the FIRST `>` after it (that run is non-`>` by
+ *  construction), then that `>` — with at least one character in between, since `[^>]+` cannot match
+ *  empty. There is nothing for a regex engine to search for that a forward pointer does not already
+ *  know, so `gtPtr` never rewinds across the whole scan.
+ *
+ *  WHY IT IS HAND-WRITTEN. On markup with no `>` after some point — an unterminated tag, i.e. exactly
+ *  the malformed shape the rest of this cleaner is hardened against — `<[^>]+>` is O(n²): at EVERY
+ *  `<` the engine consumes to end-of-string and then fails. This was the LAST quadratic pass left in
+ *  `htmlToText` after the fix-round-2 rewrite above linearized the five paired-tag scans, and it runs
+ *  on every byte of every HTML fetch, in chat mode and code mode alike. Measured on this branch,
+ *  `"<p>ok</p>" + "<script x".repeat(n)`, a clean 4x per doubling:
+ *
+ *      opens       bytes     before     after
+ *       5,000      45 KB     78 ms      0.2 ms
+ *      10,000      90 KB    301 ms      0.3 ms
+ *      20,000     180 KB   1457 ms      0.5 ms
+ *      40,000     360 KB   6011 ms      0.9 ms
+ *
+ *  Ported back from the phone's `apple/NormaChatKit/Sources/NormaChatKit/HtmlToText.swift`
+ *  (`stripTags`), where the same shape cost 36 s under ICU. Output is byte-identical — the 10,000-doc
+ *  ×2 adversarial differential in `html-to-text-differential.test.ts` runs against a frozen oracle
+ *  whose final step is literally this regex, and `cleaner-vectors.json` regenerates unchanged.
+ *
+ *  The single early exit (`no '>' anywhere after here`) is what makes the worst case cheap: if no `>`
+ *  remains, no match can start at this position or any later one. */
+function stripTags(text: string): string {
+  const n = text.length;
+  let out = "";
+  let copied = 0;
+  let i = 0;
+  let gtPtr = 0; // monotonic — never rewinds across the whole scan
+
+  while (i < n) {
+    if (text.charCodeAt(i) !== LT) { i++; continue; }
+    if (gtPtr <= i) gtPtr = i + 1;
+    while (gtPtr < n && text.charCodeAt(gtPtr) !== GT) gtPtr++;
+    if (gtPtr >= n) break; // no close anywhere after this "<" — nothing more can match
+    if (gtPtr > i + 1) { // `[^>]+` needs at least one character, so "<>" is not a tag
+      out += text.slice(copied, i);
+      copied = gtPtr + 1;
+      i = gtPtr + 1;
+    } else {
+      i++;
+    }
+  }
+  return out + text.slice(copied);
+}
+
 export function htmlToText(html: string): string {
   let out = html;
   out = replacePairedTag(out, SCRIPT_OPEN_RE, SCRIPT_CLOSE_RE, () => "");
@@ -246,10 +549,11 @@ export function htmlToText(html: string): string {
   // structure worth keeping (user design): headings → #, links → text (url), list items → "- "
   out = convertHeadings(out);
   out = replacePairedTag(out, ANCHOR_OPEN_RE, ANCHOR_CLOSE_RE, (m, inner) => `${inner} (${m[1]})`);
-  return out
+  out = out
     .replace(/<li\b[^>]*>/gi, "\n- ")
-    .replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|h[1-6]|li|tr)>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
+    .replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|h[1-6]|li|tr)>/gi, "\n");
+  out = stripTags(out); // == .replace(/<[^>]+>/g, ""), linear — see stripTags
+  return out
     .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ")
     .split("\n").map(l => l.trim()).filter(Boolean).join("\n");
 }
