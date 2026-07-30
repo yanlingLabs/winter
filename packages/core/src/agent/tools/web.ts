@@ -411,14 +411,183 @@ const STYLE_OPEN_RE = /<style/gi;
 const STYLE_CLOSE_RE = /<\/style>/gi;
 const HEAD_OPEN_RE = /<head/gi;
 const HEAD_CLOSE_RE = /<\/head>/gi;
-// Same open/close shape as page-core.ts's own LINK_OPEN_RE/LINK_CLOSE_RE (deliberately NOT
-// imported — that would be a reverse dependency, since page-core.ts already imports FROM this
-// file; a tiny disclosed duplication, same precedent as this file's own `extractTitle`/page-core's
-// separate copy).
-const ANCHOR_OPEN_RE = /<a\s[^>]*href="([^"]+)"[^>]*>/gi;
 const ANCHOR_CLOSE_RE = /<\/a>/gi;
-const HEADING_OPEN_RE = /<h([1-6])[^>]*>/gi;
 const HEADING_CLOSE_RE = /<\/h([1-6])>/gi;
+
+const LT = 0x3c; // "<"
+const GT = 0x3e; // ">"
+
+// ---------------------------------------------------------------------------------------------
+// THE OPEN-TAG SCAN CLASS, and the primitive that closes it (Task 6b fix-round-2, review Critical 2)
+//
+// Three rounds of this task each found the same defect in a different regex in this file, so the
+// fourth stops naming instances. THE CLASS: a pattern with an unbounded quantifier (`[^>]*`, `[^"]+`)
+// followed by a REQUIRED `>` is quadratic on input where that `>` never arrives — at every candidate
+// start position the engine consumes to end-of-string and then fails. `replacePairedTag`'s early
+// `break` does not save it, because the `exec` that scans is evaluated BEFORE the `closes.length`
+// check, so one full scan is always paid. And the anchor pattern stacked THREE unbounded quantifiers
+// on one span (`[^>]*` … `([^"]+)` … `[^>]*`), which is cubic:
+//
+//     regex (as driven by its own caller)         20 KB     39 KB    156-195 KB   growth
+//     /<a\s[^>]*href="([^"]+)"[^>]*>/gi          15.5 s     115 s        hang     x8  => CUBIC
+//     /<a\s[^>]*href="([^"]+)"[^>]*>/gi (no href)  36 ms    152 ms      2.33 s    x4  => quadratic
+//     /<h([1-6])[^>]*>/gi                          45 ms    179 ms      3.85 s    x4  => quadratic
+//
+// End-to-end that was 13.2 s of blocked event loop on a 14.6 KB page of `<a href="x` — charged TWICE,
+// once in `htmlToText`'s anchor pass and again in `page-core.ts`'s `extractLinks`, which used a
+// byte-identical copy of the same regex. ~40 KB reached minutes. Benign pages stay fast (a 383 KB
+// link-heavy page with one unterminated href costs 0.6 ms), which is exactly why three rounds of
+// realistic testing never saw it: it only appears under attack.
+//
+// THE FIX IS STRUCTURAL. Every open-tag pattern here is now split into (a) a candidate regex with NO
+// unbounded quantifier — so driving it with `exec` is linear — and (b) a scan bounded by `makeGtFinder`
+// below, one monotonic `>` pointer that never rewinds. `test/agent/tools/regex-shapes.test.ts` walks
+// the regex literals in this file and in page-core.ts and FAILS on the dangerous shape, so the class
+// cannot come back by someone adding a fourth instance.
+//
+// `stripTags` and `replaceListItems` implement the same monotonic-`>` discipline inline rather than
+// through `makeGtFinder`: they are the two hottest passes (every byte of every fetch) and a closure
+// call per `<` is measurable there. The structural test covers them too.
+
+/** The shared primitive. Returns the index of the first `>` at or after `at`, or -1 when none remains.
+ *
+ *  CONTRACT: `at` must be non-decreasing across calls on one finder. Every caller below scans
+ *  candidates left to right, so this holds. It is what makes the whole scan linear — the pointer
+ *  crosses the document once in total, not once per candidate. It is also why the answer stays
+ *  correct when two candidates share a span: if there is no `>` in `[a1, g)` then there is none in
+ *  `[a2, g)` for any `a2 > a1`, so returning the cached `g` is right, not merely cheap. */
+function makeGtFinder(text: string): (at: number) => number {
+  const n = text.length;
+  let ptr = 0;
+  return (at: number) => {
+    if (ptr < at) ptr = at;
+    while (ptr < n && text.charCodeAt(ptr) !== GT) ptr++;
+    return ptr >= n ? -1 : ptr;
+  };
+}
+
+/** One matched open tag: its span plus whatever capture the renderer needs (an anchor's href, a
+ *  heading's level). The shape every scanner below produces and `replacePairedTag` consumes. */
+interface TagOpen { start: number; end: number; capture: string }
+
+/** Candidate regexes. NONE has an unbounded quantifier, so each `exec` loop is linear; the `\s` in
+ *  the anchor candidate is JS's own (which includes U+00A0, U+000B, U+3000 and U+FEFF — verified
+ *  live), and the `i` flag is JS's own, so neither the whitespace set nor the case folding is
+ *  re-derived by hand here. */
+const ANCHOR_CANDIDATE_RE = /<a\s/gi;
+const HEADING_CANDIDATE_RE = /<h([1-6])/gi;
+
+/** Bare-token opens (`<script`, `<style`, `<head`) — already quantifier-free, so this is just the
+ *  `exec` loop in `TagOpen` clothing. */
+function scanSimpleOpens(html: string, re: RegExp): TagOpen[] {
+  const opens: TagOpen[] = [];
+  re.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) opens.push({ start: m.index, end: re.lastIndex, capture: "" });
+  return opens;
+}
+
+/** `/<h([1-6])[^>]*>/gi`, linearly. The `[^>]*` cannot cross a `>`, so the match ends at the FIRST `>`
+ *  at or after the candidate token — there is nothing to search for that the pointer does not know.
+ *  No `>` after a candidate means no match for it or for any later one, hence the `break`. */
+function scanHeadingOpens(html: string): TagOpen[] {
+  const opens: TagOpen[] = [];
+  const nextGt = makeGtFinder(html);
+  HEADING_CANDIDATE_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = HEADING_CANDIDATE_RE.exec(html))) {
+    const gt = nextGt(HEADING_CANDIDATE_RE.lastIndex);
+    if (gt < 0) break;
+    opens.push({ start: m.index, end: gt + 1, capture: m[1]! });
+    HEADING_CANDIDATE_RE.lastIndex = gt + 1; // the global regex's own jump past the match
+  }
+  return opens;
+}
+
+/** `/<a\s[^>]*href="([^"]+)"[^>]*>/gi`, linearly — the cubic one, and the only site whose equivalence
+ *  is not obvious, so here is the whole derivation. It was checked against the real regex on 300,000
+ *  randomized documents, compared as full `(start, end, capture)` tuple lists, 0 divergences.
+ *
+ *  For a candidate `<a` + one `\s` at `i` (token ending at `i+3`):
+ *
+ *  1. `[^>]*` cannot cross a `>`, so `href="` must lie entirely inside `[i+3, spanEnd)` where
+ *     `spanEnd` is the first `>` at or after `i+3` (entirely, because none of `href="`'s own
+ *     characters is `>`). No `>` at all after `i+3` ⇒ no match here or later ⇒ `break`.
+ *  2. `([^"]+)` cannot match a `"`, and backtracking it to a shorter run would require a `"` where
+ *     there is none — so the href value is EXACTLY the text from after `href="` up to the NEXT `"`,
+ *     and that `"` must exist. It may legitimately cross a `>`; that is PRICE-OF-LINEARITY class (B)
+ *     (`<a href="href=">`), pinned as a cleaner vector, and reproduced here.
+ *  3. The trailing `[^>]*>` then needs a `>` after that closing quote — necessarily the FIRST one.
+ *  4. The leading `[^>]*` is GREEDY, so the engine tries `href="` occurrences RIGHT TO LEFT and takes
+ *     the first that completes steps 2-3. Measured, not assumed: `<a x href="A" href="B">` captures
+ *     `"B"`, and `<a href="A" href="Z>` falls back to `"A"` because the rightmost has no closing
+ *     quote. So the winner is the RIGHTMOST VIABLE occurrence — where "viable" means it has a closing
+ *     `"` and a `>` after that quote, neither of which depends on `i`.
+ *
+ *  That last point is what makes this O(1) per candidate. Viability is a property of the SPAN, so the
+ *  rightmost viable occurrence `R` is computed once per span; a candidate then needs `R >= i+3`, and
+ *  if `R < i+3` no viable occurrence is in range at all (R being the maximum). Candidates sharing a
+ *  span reuse the cached answer instead of re-parsing it — the residual O(span²) the review warned
+ *  about. Every pointer here is monotonic over the whole document, so the total is O(n). */
+function scanAnchorOpens(html: string): TagOpen[] {
+  const n = html.length;
+  const opens: TagOpen[] = [];
+  const nextSpanEnd = makeGtFinder(html);
+  const nextGtAfterQuote = makeGtFinder(html);
+
+  let cachedSpanEnd = -1; // the span the cache below describes
+  let bestHref = -1; // rightmost VIABLE `href="` in that span, or -1
+  let bestQuote = -1; // its closing `"`
+  let bestEnd = -1; // its match end (first `>` after that quote, +1)
+  let hrefScanFrom = 0; // monotonic: no span is ever scanned twice
+
+  ANCHOR_CANDIDATE_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = ANCHOR_CANDIDATE_RE.exec(html))) {
+    const tokenEnd = ANCHOR_CANDIDATE_RE.lastIndex; // just past `<a` + the one whitespace char
+    const spanEnd = nextSpanEnd(tokenEnd);
+    if (spanEnd < 0) break; // no `>` anywhere after this candidate, nor after any later one
+
+    if (spanEnd !== cachedSpanEnd) {
+      cachedSpanEnd = spanEnd;
+      bestHref = bestQuote = bestEnd = -1;
+      for (let p = Math.max(hrefScanFrom, tokenEnd); p + 6 <= spanEnd; ) {
+        const at = indexOfAsciiCI(html, `href="`, p);
+        if (at < 0 || at + 6 > spanEnd) break;
+        // `quote > at + 6` because `([^"]+)` needs at least ONE character: `href=""` does NOT match,
+        // and the engine then keeps backtracking to an EARLIER occurrence rather than giving up — so
+        // an empty value simply is not viable. (Found by the tuple differential below, which caught
+        // 1,503/300,000 before this condition read `quote >= 0`.)
+        const quote = html.indexOf(`"`, at + 6);
+        if (quote > at + 6) {
+          const gt = nextGtAfterQuote(quote + 1);
+          if (gt >= 0) { bestHref = at; bestQuote = quote; bestEnd = gt + 1; } // keep the RIGHTMOST viable
+        }
+        p = at + 1; // occurrences may overlap (`href="href="`), so advance by one
+      }
+      hrefScanFrom = spanEnd;
+    }
+
+    if (bestHref < tokenEnd || bestEnd < 0) continue; // no viable href in range — try the next candidate
+    opens.push({ start: m.index, end: bestEnd, capture: html.slice(bestHref + 6, bestQuote) });
+    ANCHOR_CANDIDATE_RE.lastIndex = bestEnd; // the global regex's own jump past the match
+    if (bestEnd >= n) break;
+  }
+  return opens;
+}
+
+/** `page-core.ts`'s `extractLinks` needs the SAME open-tag scan on the RAW html (the cleaner rewrites
+ *  every `<a>` into `text (href)` prose and so destroys the structure a link list needs). It used to
+ *  carry a byte-identical private copy of the regex, which meant this Critical was charged twice per
+ *  fetch and would have needed fixing twice. One implementation, one audited primitive, one place to
+ *  be wrong — the same de-duplication as `extractTitle` in the previous round. */
+export { scanAnchorOpens as scanAnchorOpensForLinks };
+
+/** Exported ONLY so `test/agent/tools/html-to-text-differential.test.ts` can compare their full
+ *  `(start, end, capture)` tuple lists against the original regexes' — the strongest available gate on
+ *  scanners whose equivalence rests on a derivation rather than on being obviously the same. Neither
+ *  is part of any tool or RPC surface. */
+export { scanAnchorOpens as scanAnchorOpensForTest, scanHeadingOpens as scanHeadingOpensForTest };
 
 /** Linear (single monotonic pass) equivalent of
  *  `html.replace(new RegExp(openSrc + "[\\s\\S]*?" + closeSrc, "gi"), render)` — see the comment
@@ -432,9 +601,9 @@ const HEADING_CLOSE_RE = /<\/h([1-6])>/gi;
  *  original regex's own "no match" outcome for that case. */
 function replacePairedTag(
   html: string,
-  openRe: RegExp,
+  opens: TagOpen[],
   closeRe: RegExp,
-  render: (openMatch: RegExpExecArray, inner: string) => string,
+  render: (open: TagOpen, inner: string) => string,
 ): string {
   const closes: Array<{ start: number; end: number }> = [];
   closeRe.lastIndex = 0;
@@ -444,20 +613,16 @@ function replacePairedTag(
   let out = "";
   let cursor = 0;
   let closePtr = 0;
-  openRe.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = openRe.exec(html))) {
-    const openStart = m.index;
-    const openEnd = openRe.lastIndex;
-    if (openStart < cursor) continue; // nested inside a previously-consumed span
+  for (const open of opens) {
+    if (open.start < cursor) continue; // nested inside a previously-consumed span
 
-    while (closePtr < closes.length && closes[closePtr]!.start < openEnd) closePtr++;
+    while (closePtr < closes.length && closes[closePtr]!.start < open.end) closePtr++;
     if (closePtr >= closes.length) break; // no closing tag anywhere after this open (or any later one)
 
     const close = closes[closePtr]!;
     closePtr++;
-    out += html.slice(cursor, openStart);
-    out += render(m, html.slice(openEnd, close.start));
+    out += html.slice(cursor, open.start);
+    out += render(open, html.slice(open.end, close.start));
     cursor = close.end;
   }
   out += html.slice(cursor);
@@ -482,12 +647,10 @@ function convertHeadings(html: string): string {
   const ptrs: Record<string, number> = { "1": 0, "2": 0, "3": 0, "4": 0, "5": 0, "6": 0 };
   let out = "";
   let cursor = 0;
-  HEADING_OPEN_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = HEADING_OPEN_RE.exec(html))) {
-    const level = m[1]!;
-    const openStart = m.index;
-    const openEnd = HEADING_OPEN_RE.lastIndex;
+  for (const open of scanHeadingOpens(html)) {
+    const level = open.capture;
+    const openStart = open.start;
+    const openEnd = open.end;
     if (openStart < cursor) continue;
 
     const list = closesByLevel[level]!;
@@ -506,9 +669,6 @@ function convertHeadings(html: string): string {
   out += html.slice(cursor);
   return out;
 }
-
-const LT = 0x3c; // "<"
-const GT = 0x3e; // ">"
 
 /** `/<li\b[^>]*>/gi`'s OPEN token only. `(?![0-9A-Za-z_])` is exactly the original's `\b`: the
  *  preceding character is always `i`, a JS word character, so the boundary holds iff the next
@@ -633,12 +793,12 @@ function replaceListItems(html: string): string {
 
 export function htmlToText(html: string): string {
   let out = html;
-  out = replacePairedTag(out, SCRIPT_OPEN_RE, SCRIPT_CLOSE_RE, () => "");
-  out = replacePairedTag(out, STYLE_OPEN_RE, STYLE_CLOSE_RE, () => "");
-  out = replacePairedTag(out, HEAD_OPEN_RE, HEAD_CLOSE_RE, () => "");
+  out = replacePairedTag(out, scanSimpleOpens(out, SCRIPT_OPEN_RE), SCRIPT_CLOSE_RE, () => "");
+  out = replacePairedTag(out, scanSimpleOpens(out, STYLE_OPEN_RE), STYLE_CLOSE_RE, () => "");
+  out = replacePairedTag(out, scanSimpleOpens(out, HEAD_OPEN_RE), HEAD_CLOSE_RE, () => "");
   // structure worth keeping (user design): headings → #, links → text (url), list items → "- "
   out = convertHeadings(out);
-  out = replacePairedTag(out, ANCHOR_OPEN_RE, ANCHOR_CLOSE_RE, (m, inner) => `${inner} (${m[1]})`);
+  out = replacePairedTag(out, scanAnchorOpens(out), ANCHOR_CLOSE_RE, (open, inner) => `${inner} (${open.capture})`);
   out = replaceListItems(out); // == .replace(/<li\b[^>]*>/gi, "\n- "), linear — see replaceListItems
   // `<br\s*\/?>` and `</(p|div|h[1-6]|li|tr)>` are both bounded (no `[^>]*`), so neither has the
   // quadratic shape: measured flat at 0.1 ms across the whole doubling series above.

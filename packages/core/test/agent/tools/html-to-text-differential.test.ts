@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { extractTitle, htmlToText } from "../../../src/agent/tools/web";
+import { extractTitle, htmlToText, scanAnchorOpensForTest, scanHeadingOpensForTest } from "../../../src/agent/tools/web";
 
 /**
  * Differential harness for the whole-branch review's Critical fix-round-2: `htmlToText`'s five
@@ -140,7 +140,13 @@ function makeFuzzer(seed: number) {
   // terminating '>' (the one real divergence class found during development — see web.ts's own
   // comment on SCRIPT_OPEN_RE/STYLE_OPEN_RE/HEAD_OPEN_RE for the fix that closed it).
   const TAGS = ["script", "style", "head", "h1", "h2", "h3", "h4", "h5", "h6", "a", "li", "br", "p", "div", "tr", "span", "b", "SCRIPT", "Style", "Head", "H2", "A"];
-  const ATTR_FRAGS = ["", ' class="x"', ' id="y" data-z="1"', ' href="https://example.com/z"', ' href="/rel"', ' href="", ', " href=noquotes", ' href="mismatched'];
+  // `' href="unclosed-value'` added by Task 6b fix-round-2 (review Critical 2): the anchor OPEN regex
+  // was cubic on an unterminated `href="`, and no existing fragment produced one whose quote never
+  // closes. 0 divergences with it, on both seeds.
+  //
+  // `' href="href="'` is DELIBERATELY ABSENT — see the note on NO_TERMINATOR_TAGS below; it expresses
+  // accepted PRICE-OF-LINEARITY class (B), not a defect in anything this task wrote.
+  const ATTR_FRAGS = ["", ' class="x"', ' id="y" data-z="1"', ' href="https://example.com/z"', ' href="/rel"', ' href="", ', " href=noquotes", ' href="mismatched', ' href="unclosed-value'];
   const TEXT_FRAGS = ["hello", "world &amp; friends", "<3", ">>", "&nbsp;pad", "", " ", "\n", "&#39;quoted&#39;", "text with < and > raw"];
   const ENTITY_FRAGS = ["&amp;", "&lt;", "&gt;", "&quot;", "&#39;", "&nbsp;", "&unknown;"];
   // Tags emitted WITHOUT their own terminating '>' — the shape every quadratic pass in this cleaner is
@@ -168,8 +174,18 @@ function makeFuzzer(seed: number) {
   // classifier for a known-accepted class — both worse than leaving the heading class where its own
   // documentation already is. The `<h1`/`<title` absent-`>` shapes ARE covered at zero divergence in
   // section (c) below, against `extractTitle`, which is the function whose `<h1`/`<title` handling
-  // this round actually changed.
-  const NO_TERMINATOR_TAGS = ["script", "style", "head", "li", "title"];
+  // that round actually changed.
+  //
+  // `a` was added by fix-round-2 (review Critical 2 — the anchor open regex was CUBIC on an
+  // unterminated `href="`), at 0 divergences on both seeds. The `href="href="` trap that expresses
+  // accepted class (B) is NOT in ATTR_FRAGS above, and the reasoning is the same shape as `h1`'s,
+  // attributed the same way: with that fragment present the corpus shows 7/10,000 and 8/10,000, and
+  // holding the pairing constant while swapping ONLY the source of the anchor opens gives the
+  // IDENTICAL count from the original regex (7 and 8) as from `scanAnchorOpens` — while the two
+  // produce byte-identical `(start, end, capture)` tuple lists on 10,000/10,000 of those same
+  // documents, and on 300,000 in section (d). So the divergence lives entirely in
+  // `replacePairedTag`'s anchor PAIRING, which is class (B), pre-existing and untouched.
+  const NO_TERMINATOR_TAGS = ["script", "style", "head", "li", "title", "a"];
 
   function randomToken(): string {
     const kind = int(0, 12);
@@ -313,5 +329,111 @@ describe("extractTitle differential harness: the bounded scan matches the frozen
     }
     if (divergences > 0) console.error("extractTitle divergences", examples);
     expect(divergences).toBe(0);
+  });
+});
+
+// --- (d) the OPEN-TAG SCANNERS, Task 6b fix-round-2 (review Critical 2). `scanAnchorOpens` and
+// `scanHeadingOpens` replaced two regexes whose equivalence is NOT self-evident — the anchor one in
+// particular rests on a four-step derivation about greedy backtracking (see web.ts). So they are
+// compared against the original regexes the strongest way available: full `(start, end, capture)`
+// tuple lists, over a vocabulary built from the exact fragments those regexes are sensitive to.
+//
+// This is what caught the one real bug in the rewrite: `([^"]+)` needs at least ONE character, so
+// `href=""` does not match and the engine falls back to an EARLIER `href="` occurrence. The first
+// implementation treated an empty value as viable and diverged on 1,503/300,000 documents. A
+// whole-pipeline differential would have caught it too, but not localized it; this one names the site.
+
+function anchorOpensViaRegex(html: string): Array<{ start: number; end: number; capture: string }> {
+  const re = /<a\s[^>]*href="([^"]+)"[^>]*>/gi; // the ORIGINAL, frozen here as the oracle
+  const out: Array<{ start: number; end: number; capture: string }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) out.push({ start: m.index, end: re.lastIndex, capture: m[1]! });
+  return out;
+}
+
+function headingOpensViaRegex(html: string): Array<{ start: number; end: number; capture: string }> {
+  const re = /<h([1-6])[^>]*>/gi; // the ORIGINAL, frozen here as the oracle
+  const out: Array<{ start: number; end: number; capture: string }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) out.push({ start: m.index, end: re.lastIndex, capture: m[1]! });
+  return out;
+}
+
+const tuples = (a: Array<{ start: number; end: number; capture: string }>): string =>
+  a.map((x) => `${x.start},${x.end},${JSON.stringify(x.capture)}`).join(" | ");
+
+// Every fragment exists because some clause of the two regexes can turn on it: `\s` variants JS's `\s`
+// includes but a hand-rolled class might miss (U+00A0, U+000B, U+3000, U+FEFF), case-mixed `HrEf`,
+// empty and unterminated values, a value containing `>`, the `href="href="` self-reference, and split
+// fragments (`hre` + `f="`) that only form the token once concatenated.
+const SCANNER_TOKENS = [
+  "<a ", "<a\t", "<a\n", "<a ", "<a", "<a　", "<a﻿", "<a", "<A ", "<ax ", '<a  href="',
+  'href="', 'HREF="', 'HrEf="', "href=", "hre", 'f="', '"', ">", "<", ">>", "<<", "x", " ", "A", "</a>",
+  '<a href="X">', 'href=""', 'href="a>b"', 'href="href="', '""> ', '<a href="',
+  "<h1", "<h1 ", "<h6", "<h0", "<h7", "<h1>", "</h1>", "<H2 ", '<h3 class="x"', "<h1<h2>",
+];
+
+const SCANNER_CASES: Array<{ name: string; html: string }> = [
+  // anchor — the derivation's four steps, plus the edges that broke the first attempt
+  { name: "simple href", html: '<a href="A">' },
+  { name: "RIGHTMOST href wins (greedy backtracking)", html: '<a x href="A" href="B">' },
+  { name: "rightmost with no closing quote falls back to the earlier one", html: '<a href="A" href="Z>' },
+  { name: "three hrefs, rightmost viable wins", html: '<a href="A" href="B" href="C">' },
+  { name: "rightmost broken, middle wins", html: '<a href="A" href="B" href="Z>' },
+  { name: "middle value crosses into the broken one", html: '<a href="A" href="Y href="Z>' },
+  { name: "value may legitimately cross a '>' (class B shape)", html: '<a href="A>B" x>' },
+  { name: "self-referential href value", html: '<a href="href=">' },
+  { name: 'EMPTY href does not match ([^"]+ needs one char)', html: '<a href="">' },
+  { name: "empty href falls back to an earlier non-empty one", html: '<a href="A" href="">' },
+  { name: "empty href with a following '>'", html: '<a  href="">>' },
+  { name: "no '>' at all", html: '<a href="A"' },
+  { name: "no whitespace after <a", html: '<ahref="A">' },
+  { name: "href after the span's own '>'", html: '<a >href="A">' },
+  { name: "quoted attribute containing '>' closes the span early", html: '<a x=">" href="A">' },
+  { name: "two anchors in a row", html: '<a href="A"><a href="B">' },
+  { name: "candidate inside another candidate's match", html: '<a <a href="A">' },
+  { name: "single-quoted href is not matched", html: "<a href='A'>" },
+  { name: "uppercase HREF and tag", html: '<A HREF="A">' },
+  { name: "U+00A0 as the whitespace after <a", html: '<a href="A">' },
+  { name: "U+FEFF as the whitespace after <a", html: '<a﻿href="A">' },
+  { name: "U+000B as the whitespace after <a", html: '<ahref="A">' },
+  { name: "multiple stray quotes in the value region", html: '<a href="a"b"c">' },
+  { name: "distant '>' far after the href", html: '<a href="A"' + " ".repeat(200) + ">" },
+  // heading
+  { name: "heading levels 1-6", html: "<h1>a</h1><h6>b</h6>" },
+  { name: "heading level 0 and 7 are not headings", html: "<h0>a</h0><h7>b</h7>" },
+  { name: "heading with attributes", html: '<h2 class="x" id="y">t</h2>' },
+  { name: "unterminated heading open", html: "<h1 x" },
+  { name: "heading open swallowing a later heading open (class A shape)", html: "<h1<h2>t</h2>" },
+  { name: "many unterminated heading opens", html: "<h1 a<h2 b<h3 c" },
+  { name: "heading open then a distant '>'", html: "<h1" + " ".repeat(50) + ">t</h1>" },
+];
+
+describe("open-tag scanner differential: tuple-for-tuple against the original regexes", () => {
+  for (const { name, html } of SCANNER_CASES) {
+    test(`anchor + heading: ${name}`, () => {
+      expect(tuples(scanAnchorOpensForTest(html))).toBe(tuples(anchorOpensViaRegex(html)));
+      expect(tuples(scanHeadingOpensForTest(html))).toBe(tuples(headingOpensViaRegex(html)));
+    });
+  }
+
+  test("100,000 randomized documents: both scanners match their regex tuple-for-tuple", () => {
+    const rand = mulberry32(0xa9c40);
+    let anchorDivergences = 0;
+    let headingDivergences = 0;
+    const examples: string[] = [];
+    for (let i = 0; i < 100_000; i++) {
+      const len = 1 + Math.floor(rand() * 9);
+      let doc = "";
+      for (let j = 0; j < len; j++) doc += SCANNER_TOKENS[Math.floor(rand() * SCANNER_TOKENS.length)]!;
+      if (tuples(scanAnchorOpensForTest(doc)) !== tuples(anchorOpensViaRegex(doc))) {
+        anchorDivergences++;
+        if (examples.length < 5) examples.push(doc);
+      }
+      if (tuples(scanHeadingOpensForTest(doc)) !== tuples(headingOpensViaRegex(doc))) headingDivergences++;
+    }
+    if (examples.length) console.error("anchor scanner divergences", examples);
+    expect(anchorDivergences).toBe(0);
+    expect(headingDivergences).toBe(0);
   });
 });

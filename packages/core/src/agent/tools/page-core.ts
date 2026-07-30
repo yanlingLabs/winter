@@ -1,4 +1,4 @@
-import { extractTitle, followRedirects, htmlToText } from "./web";
+import { extractTitle, followRedirects, htmlToText, scanAnchorOpensForLinks } from "./web";
 import { SHIPPED_DANGEROUS_DOMAINS, dangerousDomainMatch } from "../dangerous-domains";
 
 /**
@@ -459,7 +459,14 @@ function abortError(signal: AbortSignal): Error {
 // Fixed below by scanning opens and closes with two SEPARATE, single-pass regexes (neither has a
 // "lazy-scan-to-a-later-required-token" shape) and pairing them with a monotonic pointer walk that
 // only ever advances forward across the whole string — O(n) total.
-const LINK_OPEN_RE = /<a\s[^>]*href="([^"]+)"[^>]*>/gi;
+// LINK_OPEN_RE used to live here as a byte-identical copy of web.ts's ANCHOR_OPEN_RE
+// (`/<a\s[^>]*href="([^"]+)"[^>]*>/gi`), deliberately duplicated to avoid a reverse dependency.
+// Task 6b fix-round-2 deleted it: that regex has THREE nested unbounded quantifiers before a required
+// `>` and is CUBIC on the absent-`>` shape (review Critical 2 — 15.5 s per 20 KB, 115 s per 39 KB),
+// and because this file carried its own copy the cost was charged TWICE per fetch, once here and once
+// in `htmlToText`'s anchor pass. `scanAnchorOpensForLinks` is web.ts's single audited linear scanner;
+// see its derivation there. Same de-duplication as `extractTitle` one round earlier, for the same
+// reason: two copies of a quadratic means two places to fix and two places for the next fix to miss.
 const LINK_CLOSE_RE = /<\/a>/gi; // deliberately NOT `\s*`-tolerant — matches the ORIGINAL combined
 // regex's own closing literal exactly (`<\/a>`, no internal whitespace allowance), so this rewrite
 // pairs opens with closes identically to before, never accepting a `</a >` the original wouldn't have.
@@ -497,11 +504,9 @@ export function extractLinks(html: string, baseUrl: string): Array<{ href: strin
   let closePtr = 0; // monotonic — advances forward only across the WHOLE scan, never rewinds
   let consumedUntil = 0; // end of the last matched anchor's closing tag; an open starting before this is "inside" that anchor's span (see doc comment)
 
-  LINK_OPEN_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = LINK_OPEN_RE.exec(html))) {
-    const openStart = m.index;
-    const openEnd = LINK_OPEN_RE.lastIndex;
+  for (const open of scanAnchorOpensForLinks(html)) {
+    const openStart = open.start;
+    const openEnd = open.end;
     if (openStart < consumedUntil) continue; // nested inside a previously consumed anchor's span
 
     while (closePtr < closes.length && closes[closePtr]!.start < openEnd) closePtr++;
@@ -511,7 +516,7 @@ export function extractLinks(html: string, baseUrl: string): Array<{ href: strin
     closePtr++;
     consumedUntil = close.end;
 
-    const rawHref = m[1] ?? "";
+    const rawHref = open.capture;
     if (!rawHref || rawHref.startsWith("#")) continue; // in-page anchor only, never a real link
     let resolved: URL;
     try {

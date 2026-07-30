@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ToolRegistry } from "../../../src/agent/tools/registry";
 import { registerWebTools, ssrfGuard, htmlToText, extractTitle, followRedirects, WEB_SEARCH_API_KEY_SECRET } from "../../../src/agent/tools/web";
+import { extractLinks } from "../../../src/agent/tools/page-core";
 
 function tmp(): string {
   return realpathSync(mkdtempSync(join(tmpdir(), "norma-webfetch-")));
@@ -382,6 +383,101 @@ describe("htmlToText: linear-time scanning (Critical fix, fix-round-2 — the SA
       return performance.now() - start;
     });
     for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+
+  // Task 6b fix-round-2 (review Critical 2). The two rounds above fixed the passes they were handed;
+  // these are the three that were left, all pre-existing, all on the same call path. The anchor open
+  // regex stacked THREE unbounded quantifiers on one span (`[^>]*` … `([^"]+)` … `[^>]*`) before a
+  // required `>`, which is CUBIC — and because `page-core.ts` carried a byte-identical copy of it, the
+  // cost was charged twice per fetch (`htmlToText`'s anchor pass, then `extractLinks`).
+  //
+  // CEILING CALIBRATION — measured on this branch, each regex driven exactly as its own caller drove
+  // it, before the rewrite and after:
+  //
+  //     site                                       opens    bytes     before     after      ratio
+  //     anchor, '<a href="x'  (CUBIC, x8/doubling)   500    4.9 KB    194 ms    0.30 ms      638x
+  //                                                 1000    9.8 KB   1.34 s     0.13 ms   10,331x
+  //                                                 2000   19.5 KB  11.32 s     0.09 ms  124,370x
+  //                                                 4000   39.1 KB  86.12 s     0.15 ms  591,385x
+  //     anchor, '<a x' (no href; quadratic leg)    40,000  156.3 KB   2.26 s     0.24 ms    9,574x
+  //     heading, '<h1 x' (quadratic)               40,000  195.3 KB   3.41 s     0.19 ms   18,358x
+  //
+  // The anchor series stops at 4,000 opens because the NEXT step is ~11 minutes; the cubic growth is
+  // already unambiguous (x6.9, x8.4, x7.6 per doubling) and 39 KB is well inside what a hostile page
+  // can serve under the 5 MB read cap. Ceilings are 200 ms as elsewhere, which at the largest size
+  // asserted sits >800x above the linear run and >11x below the quadratic one.
+
+  test("the anchor open scan stays linear on the CUBIC shape (unterminated href, no '>' anywhere)", () => {
+    const timings = [500, 1_000, 2_000, 4_000].map((opens) => {
+      const html = '<a href="ok">closed</a>' + '<a href="x'.repeat(opens);
+      const start = performance.now();
+      const text = htmlToText(html);
+      const elapsed = performance.now() - start;
+      // Byte-identity spot-check: the one well-formed pair converts, the rest is not a tag at all.
+      expect(text).toBe(`closed (ok)${'<a href="x'.repeat(opens)}`);
+      return elapsed;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+  test("the anchor open scan stays linear on the quadratic leg too (no href at all)", () => {
+    const timings = [10_000, 20_000, 40_000, 80_000].map((opens) => {
+      const html = '<a href="ok">closed</a>' + "<a x".repeat(opens);
+      const start = performance.now();
+      htmlToText(html);
+      return performance.now() - start;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+  test("extractLinks pays the anchor scan ONCE and stays linear (it used to carry its own copy of the regex)", () => {
+    const timings = [500, 1_000, 2_000, 4_000].map((opens) => {
+      const html = '<a href="https://ok.test/">closed</a>' + '<a href="x'.repeat(opens);
+      const start = performance.now();
+      const links = extractLinks(html, "https://base.test/");
+      const elapsed = performance.now() - start;
+      expect(links.map((l) => l.href)).toEqual(["https://ok.test/"]);
+      return elapsed;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+  test("the heading open scan stays linear when no '>' follows", () => {
+    const timings = [10_000, 20_000, 40_000, 80_000].map((opens) => {
+      const html = "<h1>closed</h1>" + "<h1 x".repeat(opens);
+      const start = performance.now();
+      const text = htmlToText(html);
+      const elapsed = performance.now() - start;
+      expect(text).toBe(`# closed\n${"<h1 x".repeat(opens).trim()}`);
+      return elapsed;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+  // Minor 4: the DISTANT-`>` variants. These were measured linear post-fix and are coverage only — the
+  // point is that "absent" and "distant" are different inputs to a monotonic scanner (absent takes the
+  // early exit; distant walks the pointer the whole way and must not re-walk it per candidate), and only
+  // the absent form was asserted anywhere. A pre-fix regex is quadratic on both, so a regression to
+  // either shape is caught here rather than only in the absent case.
+  test("every fixed site stays linear on the DISTANT-'>' variant as well as the absent one (Minor 4)", () => {
+    const filler = " ".repeat(200_000); // one very distant '>' at the end
+    const shapes: Array<{ name: string; html: string; run: (h: string) => void }> = [
+      { name: "final tag strip", html: "<script x".repeat(20_000) + filler + ">", run: (h) => { htmlToText(h); } },
+      { name: "list items", html: "<li x".repeat(20_000) + filler + ">", run: (h) => { htmlToText(h); } },
+      { name: "anchor opens", html: '<a href="x'.repeat(4_000) + filler + ">", run: (h) => { htmlToText(h); } },
+      { name: "anchor opens (no href)", html: "<a x".repeat(20_000) + filler + ">", run: (h) => { htmlToText(h); } },
+      { name: "heading opens", html: "<h1 x".repeat(20_000) + filler + ">", run: (h) => { htmlToText(h); } },
+      { name: "extractLinks", html: '<a href="x'.repeat(4_000) + filler + ">", run: (h) => { extractLinks(h, "https://base.test/"); } },
+      { name: "extractTitle h1", html: "<h1 x".repeat(20_000) + filler + ">", run: (h) => { extractTitle(h); } },
+      { name: "extractTitle title", html: "<title x".repeat(20_000) + filler + ">", run: (h) => { extractTitle(h); } },
+    ];
+    for (const { name, html, run } of shapes) {
+      const start = performance.now();
+      run(html);
+      const elapsed = performance.now() - start;
+      expect(elapsed, `${name} went superlinear on the distant-'>' variant`).toBeLessThan(linearityCeilingMs);
+    }
   });
 
   test("many WELL-FORMED, properly-closed tags of every shape (the realistic case) still extract correctly and quickly", () => {
