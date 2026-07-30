@@ -1118,6 +1118,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           store: opts.store,
           buffers: syncBuffers,
           connId: socket.data.connId,
+          // The SAME catalogue session.setModel validates against, just above — sync.push writes
+          // the same `model` column over the same remote allowlist, so it must not be the one path
+          // that skips Task 1's validation. An unknown slug is dropped rather than fatal (a model
+          // mismatch must never block log replication); see validateSyncMeta.
+          knownModelIds: () => (opts.engine?.knownModels() ?? []).map((m) => m.id),
           // The SAME broadcast session.create performs (see its handler above): a brand-new session
           // has no attachments, so its session_created can't reach anyone through the hub's
           // per-session fan-out — it goes to every authed harness so a sidebar can pick it up.

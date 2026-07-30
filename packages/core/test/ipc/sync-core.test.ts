@@ -98,6 +98,23 @@ function b64(buf: Buffer): string { return buf.toString("base64"); }
 /** A v4 UUID, the id shape a phone mints for a session it created locally. */
 function uuid(): string { return crypto.randomUUID(); }
 
+/** Pushes `raw` split into chunks each within `SYNC_MAX_CHUNK_B64` (the task-2 fix round sized that
+ *  ceiling against the phone's 1 MiB frame limit, so a multi-hundred-KiB log no longer fits in one
+ *  call). Mirrors what a real client does; the reassembly path is the same one the dedicated
+ *  chunking tests above exercise. */
+async function pushChunked(c: TestClient, sessionId: string, baseSeq: number, raw: Buffer): Promise<any> {
+  const chunkRaw = 256 * 1024; // 349,528 base64 chars, under the 384 KiB ceiling
+  let last: any;
+  for (let off = 0; off < raw.length; off += chunkRaw) {
+    const slice = raw.subarray(off, off + chunkRaw);
+    last = await c.request(METHODS.syncPush, {
+      sessionId, baseSeq, data: b64(slice), complete: off + chunkRaw >= raw.length,
+    });
+    if (last.error) return last;
+  }
+  return last;
+}
+
 /** Drains sync.pull page by page and returns the concatenated raw JSONL bytes. */
 async function pullAll(c: TestClient, sessionId: string, fromSeq = 0): Promise<{ bytes: Buffer; pages: number }> {
   const chunks: Buffer[] = [];
@@ -476,7 +493,8 @@ describe("sync.heads / sync.pull / sync.push (Chat Slice D task 2)", () => {
     const raw = jsonl(events);
     expect(raw.length).toBeGreaterThan(SYNC_PAGE_BYTES);
 
-    await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 0, data: b64(raw), complete: true });
+    const pushed = await pushChunked(c, id, 0, raw);
+    expect(pushed.error).toBeUndefined();
     const { bytes, pages } = await pullAll(c, id, 0);
     expect(pages).toBeGreaterThan(1);
     expect(bytes.length).toBe(raw.length);
@@ -491,7 +509,8 @@ describe("sync.heads / sync.pull / sync.push (Chat Slice D task 2)", () => {
     const id = uuid();
     const events: Record<string, unknown>[] = [created(id)];
     for (let i = 2; i <= 41; i++) events.push(asstMsg(id, i, "y".repeat(10 * 1024)));
-    await c.request(METHODS.syncPush, { sessionId: id, baseSeq: 0, data: b64(jsonl(events)), complete: true });
+    const pushed = await pushChunked(c, id, 0, jsonl(events));
+    expect(pushed.error).toBeUndefined();
 
     let cursor: number | undefined;
     for (;;) {
@@ -519,7 +538,9 @@ describe("sync.heads / sync.pull / sync.push (Chat Slice D task 2)", () => {
     expect(pages).toBeGreaterThan(1);
     expect(bytes.equals(raw)).toBe(true);
 
-    // ...and the pulled bytes push back into a SECOND daemon byte-for-byte (the replication loop).
+    // ...and the pulled bytes push back in byte-for-byte under a fresh session id, closing the
+    // replication loop (the same daemon with a re-labelled id — the fixed-point property is what
+    // matters, and a second daemon would prove nothing extra about it).
     const id2 = uuid();
     const relabelled = Buffer.from(bytes.toString("utf8").replaceAll(id, id2), "utf8");
     const res = await c.request(METHODS.syncPush, { sessionId: id2, baseSeq: 0, data: b64(relabelled), complete: true });

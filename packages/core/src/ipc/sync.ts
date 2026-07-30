@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
-import { ERR, SessionEvent, type SyncHeadsResult, type SyncPullParams, type SyncPullResult, type SyncPushParams, type SyncPushResult } from "@norma/protocol";
-import type { SessionStore, SyncedEntry } from "../sessions/store";
+import { ERR, SessionEvent, SESSION_TITLE_MAX_CHARS, type SyncHeadsResult, type SyncPullParams, type SyncPullResult, type SyncPushParams, type SyncPushResult } from "@norma/protocol";
+import { resolveModelAlias } from "../agent/model-aliases";
+import type { SessionForkRef, SessionStore, SyncedEntry } from "../sessions/store";
 
 // ================================================================================================
 // Session sync (Chat Slice D task 2) — the daemon side of `sync.heads` / `sync.pull` / `sync.push`.
@@ -28,6 +29,17 @@ import type { SessionStore, SyncedEntry } from "../sessions/store";
 //
 // Paging is over RAW JSONL BYTES rather than events, which is what makes an event larger than a
 // page a non-issue: it just spans pages. See the protocol's own doc comments for the wire shapes.
+//
+// WHAT A PAIRED CLIENT CAN DO HERE, stated plainly (branch-review adjudication). Replication is
+// bidirectional by design, so a paired phone may push into ANY chat session on this Mac — not only
+// the ones it created, but ones the user opened and authored on the Mac itself. Since a pushed
+// batch may contain any valid SessionEvent, that includes forging an `assistant_message` or
+// `tool_result` that `AgentEngine.historyInput` will replay into the model on the next turn: a
+// prompt-injection primitive scoped to chat sessions. It is NOT an escalation — it stays inside the
+// pairing trust boundary, and chat mode has no filesystem, shell or repo tools — and it is the
+// unavoidable cost of byte-verbatim replication (an event-type allowlist would break both the
+// reasoning_item decision below and the byte-identity contract). Recorded here so the bound is
+// visible at the seam rather than only in a review document.
 // ================================================================================================
 
 /** One `sync.pull` page. A quarter of the phone transport's hard frame limit (`maxFrameBytes`,
@@ -159,6 +171,49 @@ function resolveChatSession(
   return meta;
 }
 
+/** The index-only metadata a push may carry, after validation. */
+export interface SyncMeta { title?: string; model?: string; forkedFrom?: SessionForkRef }
+
+/** Validates `sync.push`'s `meta` before ANY of it reaches the index.
+ *
+ *  `model` runs the SAME idiom `session.setModel` does (`ipc/server.ts`, itself the product of
+ *  Task 1's fix round): resolve an unambiguous alias, then require membership when the provider can
+ *  enumerate its models, and store freely when it can't (an arbitrary OpenAI-compatible endpoint
+ *  can't validate anything, so neither can we). `sync.push` writes the very same column over the
+ *  very same remote allowlist, so skipping this would re-open exactly the failure Task 1 closed:
+ *  `AgentEngine.resolveSel` hands `meta.model` straight to the provider, so one unknown slug bricks
+ *  EVERY subsequent turn on that session, with no UI signal and no way for the phone to clear it.
+ *
+ *  An unknown slug is DROPPED, not fatal. That is a deliberate policy choice between two options:
+ *  failing the whole push would let a phone/Mac model mismatch block log replication indefinitely —
+ *  and the events are the irreplaceable half, while the model is a hint the user can re-set. It
+ *  also cannot half-apply: the batch still lands in full and the column simply keeps whatever it
+ *  already had (in particular, a bad push can never overwrite a good model with a broken one).
+ *
+ *  `title` is clamped as defence in depth — `SyncPushParams` already rejects an over-long one at
+ *  the wire, and `SessionStore` clamps on both write and read; this covers any non-RPC caller. */
+export function validateSyncMeta(
+  meta: { title?: string; model?: string; forkedFrom?: SessionForkRef },
+  knownModelIds: string[],
+  onDroppedModel?: (slug: string) => void,
+): SyncMeta {
+  const out: SyncMeta = {};
+  if (meta.title !== undefined) {
+    out.title = meta.title.length <= SESSION_TITLE_MAX_CHARS ? meta.title : `${meta.title.slice(0, SESSION_TITLE_MAX_CHARS)}…`;
+  }
+  if (meta.forkedFrom !== undefined) out.forkedFrom = meta.forkedFrom;
+  if (meta.model !== undefined) {
+    if (knownModelIds.length === 0) {
+      out.model = meta.model; // provider can't enumerate — nothing to check against
+    } else {
+      const resolved = resolveModelAlias(meta.model, knownModelIds);
+      if (knownModelIds.includes(resolved)) out.model = resolved;
+      else onDroppedModel?.(meta.model);
+    }
+  }
+  return out;
+}
+
 // ------------------------------------------------------------------------------------------------
 // sync.heads
 // ------------------------------------------------------------------------------------------------
@@ -228,6 +283,11 @@ export interface SyncPushContext {
    *  ledgered `session.dispatch` gap — a new session nobody was told about — is exactly what this
    *  parameter exists to avoid reproducing. */
   broadcastCreated(event: SessionEvent): void;
+  /** The daemon's model catalogue, for validating a pushed `meta.model` — the SAME source
+   *  `session.setModel` consults (`AgentEngine.knownModels()`). Absent, or empty, means the
+   *  provider can't enumerate its models, in which case a pushed value is stored freely; see
+   *  `validateSyncMeta`. */
+  knownModelIds?(): string[];
 }
 
 /** Parses a reassembled JSONL batch into raw-line/event pairs. Every line must be JSON AND a valid
@@ -265,9 +325,19 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
   const existing = resolveChatSession(store, p.sessionId, true);
   const creating = existing === null;
 
-  // Pre-flight the CREATE path before buffering a single byte: a client pushing at a base the
-  // daemon can't possibly hold, or under an id this daemon will never accept, must be told
-  // immediately rather than after streaming 32 MiB into memory.
+  // Pre-flight before buffering a single byte: a client pushing at a base the daemon can't
+  // possibly hold, or under an id this daemon will never accept, must be told immediately rather
+  // than after streaming 32 MiB into memory. For an EXISTING session that means checking `baseSeq`
+  // here rather than only on the final chunk (review M5) — a client that is already behind
+  // discovers it on its first frame instead of after uploading the whole batch.
+  if (!creating && p.baseSeq !== store.lastSeq(p.sessionId)) {
+    const head = store.lastSeq(p.sessionId);
+    throw new SyncRpcError(
+      ERR.DIVERGED,
+      `sync.push baseSeq ${p.baseSeq} does not match the daemon's lastSeq ${head} for session ${p.sessionId} — pull and fast-forward, or fork`,
+      { lastSeq: head },
+    );
+  }
   if (creating) {
     if (p.baseSeq !== 0) {
       // The daemon has NOTHING for this id. Reported as divergence rather than NOT_FOUND because
@@ -287,9 +357,14 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
     }
   }
 
-  let chunk: Buffer;
-  try { chunk = Buffer.from(p.data, "base64"); }
-  catch { throw new SyncRpcError(ERR.INVALID_PARAMS, "sync.push data is not valid base64"); }
+  // `Buffer.from(s, "base64")` NEVER throws — it silently discards non-alphabet characters — so a
+  // try/catch here would be dead code and garbage would resurface downstream as a baffling "line 1
+  // is not valid JSON" (review M1). Round-tripping the re-encode is an exact check with none of a
+  // regex's padding subtleties: it accepts precisely what a standard encoder emits.
+  const chunk = Buffer.from(p.data, "base64");
+  if (chunk.toString("base64") !== p.data) {
+    throw new SyncRpcError(ERR.INVALID_PARAMS, "sync.push data is not valid standard (padded) base64");
+  }
 
   if (!p.complete) {
     const buffered = buffers.append(connId, p.sessionId, chunk);
@@ -319,31 +394,42 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
   }
 
   const first = entries[0]!.event;
+  const meta = p.meta
+    ? validateSyncMeta(p.meta, ctx.knownModelIds?.() ?? [], (slug) =>
+        console.warn(`[sync] dropped unknown model ${JSON.stringify(slug)} pushed for session ${p.sessionId} — the log was replicated, the model override was not`))
+    : undefined;
   let lastSeq: number;
   let createdEvent: SessionEvent | undefined;
+
+  // A batch that STARTS a log (seq 1) must open with a chat `session_created`. Keyed on the seq,
+  // NOT on `creating` (review M2): a row can exist at `last_seq === 0` — the narrow window where
+  // `createSynced` succeeded and `appendSynced` then threw — and would otherwise take the
+  // incremental branch below and skip this check entirely, admitting a headerless log. Two
+  // consequences make this a hard requirement rather than a nicety:
+  //   * a full index.db rebuild derives a session's `mode` from the FIRST event of its log
+  //     (SessionStore.recoverAll pass 2, the dispatch-singleton durability fix), so a log that
+  //     doesn't open with a chat `session_created` would silently come back as a CODE session —
+  //     and would then be refused by this very surface, orphaning the conversation; and
+  //   * `sync` creates chat sessions and nothing else, so a `session_created` claiming any other
+  //     mode is a request this handler must not grant.
+  if (first.seq === 1 && (first.type !== "session_created" || first.mode !== "chat")) {
+    throw new SyncRpcError(
+      ERR.INVALID_PARAMS,
+      'a sync.push that starts a log (seq 1) must begin with a session_created event carrying mode:"chat" — nothing was appended',
+    );
+  }
 
   if (creating) {
     if (first.seq !== 1) {
       throw new SyncRpcError(ERR.INVALID_PARAMS, `a creating sync.push must start at seq 1 (got ${first.seq}) — nothing was appended`);
     }
     // The batch's own seq-1 event becomes the log's session_created — the daemon deliberately does
-    // NOT mint one (that would shift every following seq). Two consequences make this a hard
-    // requirement rather than a nicety:
-    //   * a full index.db rebuild derives a session's `mode` from the FIRST event of its log
-    //     (SessionStore.recoverAll pass 2, the dispatch-singleton durability fix), so a log that
-    //     doesn't open with a chat `session_created` would silently come back as a CODE session —
-    //     and would then be refused by this very surface, orphaning the conversation; and
-    //   * `sync` creates chat sessions and nothing else, so a `session_created` claiming any other
-    //     mode is a request this handler must not grant.
-    if (first.type !== "session_created" || first.mode !== "chat") {
-      throw new SyncRpcError(
-        ERR.INVALID_PARAMS,
-        'a creating sync.push must begin with a session_created event carrying mode:"chat" — nothing was appended',
-      );
-    }
+    // NOT mint one (that would shift every following seq); the guard above is what enforces that
+    // the client actually supplied it.
+    const header = first as Extract<SessionEvent, { type: "session_created" }>;
     try {
       store.createSynced(p.sessionId, {
-        scope: first.scope,
+        scope: header.scope,
         // The phone never picks a working directory on this Mac — the same SP3.4 hardening
         // `session.create` applies to remote callers, and the same value `session.dispatch` uses.
         cwd: homedir(),
@@ -352,17 +438,24 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
         approvalPolicy: "chat",
         mode: "chat",
         // Stamped at INSERT so the row is never briefly a fork-less orphan; `applySyncMeta` below
-        // re-applies the same values idempotently (it is the only path for an INCREMENTAL push, so
-        // it has to run unconditionally anyway).
-        ...(p.meta?.model !== undefined ? { model: p.meta.model } : {}),
-        ...(p.meta?.forkedFrom !== undefined ? { forkedFrom: p.meta.forkedFrom } : {}),
+        // re-applies the same VALIDATED values idempotently (it is the only path for an INCREMENTAL
+        // push, so it has to run unconditionally anyway).
+        ...(meta?.model !== undefined ? { model: meta.model } : {}),
+        ...(meta?.forkedFrom !== undefined ? { forkedFrom: meta.forkedFrom } : {}),
       });
     } catch (e) {
       throw new SyncRpcError(ERR.INVALID_PARAMS, `sync.push could not create session ${p.sessionId}: ${(e as Error).message}`);
     }
-    lastSeq = store.appendSynced(p.sessionId, entries);
+    // If this throws the row is left behind at last_seq 0 — harmless, because the seq-1 guard above
+    // is keyed on the batch rather than on `creating`, so the only batch that can ever complete
+    // that row is a properly-headed one. Surfaced as INTERNAL: every validation the store repeats
+    // has already passed here, so reaching it means a real I/O failure, not caller input.
+    try { lastSeq = store.appendSynced(p.sessionId, entries); }
+    catch (e) { throw new SyncRpcError(ERR.INTERNAL, `sync.push could not append to ${p.sessionId}: ${(e as Error).message}`); }
     createdEvent = first;
   } else {
+    // `baseSeq` was already matched against the head before buffering (review M5); re-read it here
+    // because a chunked push may have spanned other work on this daemon in between.
     const head = store.lastSeq(p.sessionId);
     if (p.baseSeq !== head) {
       throw new SyncRpcError(
@@ -380,7 +473,7 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
     lastSeq = store.appendSynced(p.sessionId, entries);
   }
 
-  if (p.meta) store.applySyncMeta(p.sessionId, p.meta);
+  if (meta) store.applySyncMeta(p.sessionId, meta);
   // Only AFTER the events are durably on disk — a harness told about a session must be able to
   // read it. Mirrors session.create's ordering (create, then broadcast).
   if (createdEvent) ctx.broadcastCreated(createdEvent);

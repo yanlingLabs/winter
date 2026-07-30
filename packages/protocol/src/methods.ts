@@ -29,6 +29,30 @@ export const HelloResult = z.object({
   protocolVersion: z.number().int(),
 });
 
+/** The phone transport's hard per-frame ceiling, mirroring Swift's `maxFrameBytes` default
+ *  (`IrohListener.swift` / `IrohDialer.swift`). An oversized frame does NOT produce an error — the
+ *  connection's inbound stream simply ENDS — so every phone-reachable request and response has to
+ *  fit under it by construction, not by hope. Declared here so the TS side can size its own bounds
+ *  against the real number instead of against the local Unix socket's much larger 8 MiB line cap
+ *  (`LineDecoder`'s authed default), which is the wrong transport for anything the phone calls. */
+export const IROH_MAX_FRAME_BYTES = 1 << 20;
+
+/** Hard ceiling on a session's stored (index) title, in characters.
+ *
+ *  Every DAEMON-side writer is already far below it — `SessionTitler` slices to 60 chars and
+ *  `fallbackTitle` truncates at 60 — but `sync.push` made the title remote-settable on two new
+ *  paths (`meta.title`, and a replicated `session_titled` event), and BOTH `session.list` and
+ *  `sync.heads` return every session's title in ONE unpaged response. Without a bound, two
+ *  sessions carrying ~600 KiB titles would push every such response past `IROH_MAX_FRAME_BYTES`
+ *  above — a PERSISTENT phone-connection kill: the value lives in `index.db` so it survives daemon
+ *  and app restarts, and `sync.heads`, the call a client would need to diagnose or repair the
+ *  state, is itself one of the broken ones. This is the write-path twin of the hazard CLAUDE.md
+ *  names for `session.history` ("an unbounded field is a silent connection-killer").
+ *
+ *  200 rather than 60: comfortably above every existing writer (so no current behavior changes)
+ *  and small enough that the title contribution to an unpaged list stays negligible. */
+export const SESSION_TITLE_MAX_CHARS = 200;
+
 /** Chat Slice D task 2 (session sync): where a session was branched from — the parent session's id
  *  plus the seq it was forked AT (every parent event with `seq <= atSeq` is shared history). Index-
  *  only metadata carried by `sync.push`'s `meta` and reported by `sync.heads`/`session.list`; it
@@ -962,12 +986,18 @@ export const SyncPullResult = z.object({
 export type SyncPullParams = z.infer<typeof SyncPullParams>;
 export type SyncPullResult = z.infer<typeof SyncPullResult>;
 
-/** Hard ceiling on a single `sync.push` chunk's base64 payload. The authed socket's own line cap is
- *  8 MiB (LineDecoder's default) and an oversized line kills the connection outright — this bound
- *  sits below it so an over-eager client gets a clean INVALID_PARAMS instead of a dropped socket.
- *  It bounds ONE chunk; total reassembly across chunks is bounded separately (32 MiB, see
+/** Hard ceiling on a single `sync.push` chunk's base64 payload — sized against the PHONE
+ *  transport, `IROH_MAX_FRAME_BYTES` (1 MiB), NOT the local Unix socket's 8 MiB line cap. That
+ *  distinction is the whole point: the phone is the only client this surface exists for, and a
+ *  frame above the iroh limit ENDS the connection rather than returning an error a client could
+ *  log. A chunk at this ceiling plus its JSON-RPC envelope lands around 384 KiB — under 40% of the
+ *  frame budget, the same generous margin `SYNC_PAGE_BYTES` leaves on the pull side.
+ *
+ *  Chosen so a client can push back exactly what it pulled: base64 inflates by 4/3, so a full
+ *  `SYNC_PAGE_BYTES` (256 KiB) page re-encodes to 349,528 characters, which this admits with room
+ *  to spare. It bounds ONE chunk; total reassembly across chunks is bounded separately (32 MiB,
  *  `SYNC_PUSH_BUFFER_MAX_BYTES` in packages/core/src/ipc/sync.ts). */
-export const SYNC_MAX_CHUNK_B64 = 4 * 1024 * 1024;
+export const SYNC_MAX_CHUNK_B64 = 384 * 1024;
 
 /** `baseSeq` is the client's belief about the daemon's head, and it is CHECKED, never trusted: a
  *  mismatch is `ERR.DIVERGED` carrying `data: { lastSeq }`, never a silent overwrite. An UNKNOWN
@@ -976,14 +1006,27 @@ export const SYNC_MAX_CHUNK_B64 = 4 * 1024 * 1024;
  *  Chunking: send `complete: false` for every chunk but the last; the daemon buffers per
  *  (connection, sessionId) and applies the whole batch ATOMICALLY on the final chunk — nothing is
  *  appended unless every line validates. `meta` is index-only session metadata that has no event
- *  of its own (title/model/fork provenance); it is applied only alongside a successful `complete`. */
+ *  of its own (title/model/fork provenance); it is applied only alongside a successful `complete`.
+ *
+ *  READING A `DIVERGED` (`ERR.DIVERGED`, `data: { lastSeq }`) — branch on `data.lastSeq`, never on
+ *  the code alone: `lastSeq: 0` means the daemon holds NOTHING for this id, so the answer is
+ *  "re-push from seq 1" (which creates it), NOT "fork". Only a non-zero `lastSeq` describes a real
+ *  branch point. A client that forks on the bare code will spawn a spurious fork for every session
+ *  it retries after a partial failure.
+ *
+ *  `meta.model` is validated against the daemon's own model catalogue exactly as `session.setModel`
+ *  is (alias-resolved, membership-checked when the provider can enumerate, stored freely when it
+ *  can't) — but an UNKNOWN slug is DROPPED rather than failing the call: a model mismatch between a
+ *  phone and a Mac must never block log replication, which is the irreplaceable half. */
 export const SyncPushParams = z.object({
   sessionId: z.string().min(1),
   baseSeq: z.number().int().nonnegative(),
   data: z.string().max(SYNC_MAX_CHUNK_B64), // base64 of a raw JSONL chunk; may split mid-line
   complete: z.boolean(),
   meta: z.object({
-    title: z.string().optional(),
+    // Bounded at the wire, not just clamped internally — see SESSION_TITLE_MAX_CHARS for why an
+    // unbounded title on an UNPAGED heads/list response is a persistent connection killer.
+    title: z.string().max(SESSION_TITLE_MAX_CHARS).optional(),
     model: z.string().min(1).optional(),
     forkedFrom: SessionForkRef.optional(),
   }).optional(),

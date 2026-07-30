@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
-import { SessionEvent, type NewSessionEvent } from "@norma/protocol";
+import { SessionEvent, SESSION_TITLE_MAX_CHARS, type NewSessionEvent } from "@norma/protocol";
 import type { SessionApprovalPolicy } from "../agent/gate";
 
 // Keep in sync with SessionCreateParams scope regex (packages/protocol/src/methods.ts).
@@ -59,6 +59,19 @@ export interface SessionRow {
    *  reset-on-rebuild caveat as `model` above — the phone re-sends it on its next push, which is
    *  how it heals. Absent for every session that isn't a fork (almost all of them). */
   forkedFrom?: SessionForkRef;
+}
+
+/** Chat Slice D task 2 fix round (review I2): bounds a title at `SESSION_TITLE_MAX_CHARS`.
+ *
+ *  Applied at BOTH ends — where a title enters the index (`append`/`appendSynced`'s `session_titled`
+ *  derivation) and where it leaves it (`list()`, the single read point behind both `session.list`
+ *  and `sync.heads`). Clamping on READ is what makes the bound structural rather than write-path
+ *  only: a row written before this existed — or by any future writer that forgets — still cannot
+ *  produce a response too large for the phone transport to deliver. See `SESSION_TITLE_MAX_CHARS`
+ *  for the failure it prevents. Returns the SAME reference when already within budget (the
+ *  overwhelmingly common case — every daemon-side writer caps at 60). */
+function capTitle(title: string): string {
+  return title.length <= SESSION_TITLE_MAX_CHARS ? title : `${title.slice(0, SESSION_TITLE_MAX_CHARS)}…`;
 }
 
 /** Derives a fallback title from the first line of the session's first main-thread
@@ -253,7 +266,7 @@ export class SessionStore {
     appendFileSync(this.logPath(row.scope, sessionId), JSON.stringify(event) + "\n");
     this.db.run("UPDATE sessions SET last_seq = ? WHERE session_id = ?", [event.seq, sessionId]);
     if (event.type === "session_titled") {
-      this.db.run("UPDATE sessions SET title = ? WHERE session_id = ?", [event.title, sessionId]);
+      this.db.run("UPDATE sessions SET title = ? WHERE session_id = ?", [capTitle(event.title), sessionId]);
     }
     if (event.type === "user_message" && event.threadId === "main") {
       this.db.run(
@@ -289,7 +302,9 @@ export class SessionStore {
         scope: r.scope,
         createdAt: r.created_at,
         lastSeq: r.last_seq,
-        title: r.title ?? fallbackTitle(r.first_message),
+        // capTitle on READ (review I2): the one place both remote title consumers converge, so a
+        // row written before the write-path caps existed still cannot brick the phone transport.
+        title: r.title !== null ? capTitle(r.title) : fallbackTitle(r.first_message),
         cwd: r.cwd ?? undefined,
         origin: r.origin ?? undefined,
         mode: r.mode ?? undefined,
@@ -379,6 +394,12 @@ export class SessionStore {
    *  `origin` is stamped `"sync"` — the same machine-readable "who created this" tag routines use
    *  (`routine/<id>`), so a synced session is identifiable as one without inspecting its log.
    *
+   *  DEPENDENCY WORTH KNOWING: after a full index.db rebuild this row's `approval_policy` reads
+   *  back as the `ask` default (recoverAll pass 2 restores only `mode`, from the log's first
+   *  event). That is harmless ONLY because plan-immunity re-resolves a chat session's policy at
+   *  turn time from `mode` (`AgentEngine`: `if (isChat) meta.approvalPolicy = "chat"`). If that
+   *  coercion ever moves, a rebuilt synced chat would silently start asking for approvals.
+   *
    *  Throws (never silently coerces) on a non-UUID id (see `SYNCED_SESSION_ID_RE` — path safety),
    *  an invalid scope, or an id that already exists. */
   createSynced(
@@ -430,7 +451,10 @@ export class SessionStore {
     // would show no title in session.list/sync.heads even though its log carries session_titled.
     for (const { event } of entries) {
       if (event.type === "session_titled") {
-        this.db.run("UPDATE sessions SET title = ? WHERE session_id = ?", [event.title, sessionId]);
+        // The LOG keeps the client's bytes verbatim (byte-identity); only the INDEX column — the
+        // thing heads/list actually serialize into a phone frame — is bounded. Clamping the event
+        // itself would break replication of a legitimately long title AND fail the whole push.
+        this.db.run("UPDATE sessions SET title = ? WHERE session_id = ?", [capTitle(event.title), sessionId]);
       }
       if (event.type === "user_message" && event.threadId === "main") {
         this.db.run(
@@ -446,7 +470,7 @@ export class SessionStore {
    *  Each field is optional and only the PRESENT ones are written (an omitted field is "unchanged",
    *  never "clear"), so an incremental push that carries only a new title can't wipe the model. */
   applySyncMeta(sessionId: string, meta: { title?: string; model?: string; forkedFrom?: SessionForkRef }): void {
-    if (meta.title !== undefined) this.db.run("UPDATE sessions SET title = ? WHERE session_id = ?", [meta.title, sessionId]);
+    if (meta.title !== undefined) this.db.run("UPDATE sessions SET title = ? WHERE session_id = ?", [capTitle(meta.title), sessionId]);
     if (meta.model !== undefined) this.db.run("UPDATE sessions SET model = ? WHERE session_id = ?", [meta.model, sessionId]);
     if (meta.forkedFrom !== undefined) {
       this.db.run(

@@ -137,9 +137,10 @@ describe("remote chat gate: chat lifted (Slice C), the mechanism survives for co
   // REMOTE_ALLOWED_METHODS entry taking a bare `sessionId`) now SUCCEED against a chat session for
   // remote. sessionSend always requires a prior attach regardless of role/mode (ordinary session
   // semantics, unrelated to the remote-chat gate) — attaching first is harmless for the other
-  // methods too, so it's done uniformly. sync.push is parametrized with an EMPTY non-final chunk:
-  // that buffers nothing and applies nothing, which is precisely what makes it a clean probe of the
-  // gate rather than of the sync machinery (sync-core.test.ts covers the machinery).
+  // methods too, so it's done uniformly. `sync.push` is NOT parametrized here — its `baseSeq` must
+  // match the session's live head, which the uniform attach above changes (attach appends a
+  // `harness_attached` event), so it gets its own test just below rather than a static param that
+  // would silently encode a stale head.
   test.each([
     [METHODS.sessionAttach, {}],
     [METHODS.sessionSend, { text: "hi" }],
@@ -150,7 +151,6 @@ describe("remote chat gate: chat lifted (Slice C), the mechanism survives for co
     [METHODS.askUserRespond, { callId: "c_x", answers: {} }],
     [METHODS.sessionSetModel, { model: "claude-opus-5" }],
     [METHODS.syncPull, { fromSeq: 0 }],
-    [METHODS.syncPush, { baseSeq: 1, data: "", complete: false }],
   ])("%s on a chat session now succeeds for remote (Slice C lifted the gate)", async (method, extra) => {
     const { store, socketPath, remoteToken } = await boot();
     const chat = store.createSession("global", { mode: "chat" });
@@ -159,6 +159,25 @@ describe("remote chat gate: chat lifted (Slice C), the mechanism survives for co
     const attach = await remote.request(METHODS.sessionAttach, { sessionId: chat });
     expect(attach.error).toBeUndefined();
     const res = await remote.request(method, { sessionId: chat, ...extra });
+    expect(res.error).toBeUndefined();
+    remote.close();
+  });
+
+  // sync.push's own gate probe (see the note above the parametrized list): `baseSeq` is read live
+  // rather than hardcoded, because sync.push checks it against the head BEFORE buffering (task 2
+  // fix round M5) and the attach above moves that head.
+  test("sync.push on a chat session now succeeds for remote (Slice C lifted the gate)", async () => {
+    const { store, socketPath, remoteToken } = await boot();
+    const chat = store.createSession("global", { mode: "chat" });
+
+    const remote = await remoteClient(socketPath, remoteToken);
+    const attach = await remote.request(METHODS.sessionAttach, { sessionId: chat });
+    expect(attach.error).toBeUndefined();
+    // An EMPTY non-final chunk buffers nothing and applies nothing — a clean probe of the gate
+    // rather than of the sync machinery (sync-core.test.ts covers the machinery).
+    const res = await remote.request(METHODS.syncPush, {
+      sessionId: chat, baseSeq: store.lastSeq(chat), data: "", complete: false,
+    });
     expect(res.error).toBeUndefined();
     remote.close();
   });
