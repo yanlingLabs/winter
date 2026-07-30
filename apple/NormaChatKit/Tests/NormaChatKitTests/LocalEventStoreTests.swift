@@ -247,14 +247,20 @@ final class LocalEventStoreTests: XCTestCase {
         s.setSyncedMeta(title: .some("Original"), model: .some("gpt-5.4"))
 
         let newId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
-        let forkMeta = try await store.fork(originalId: orig, newId: newId, atSeq: 1)
+        // plan (pure) → commit: a fork is only written locally once its push has landed (review I1).
+        let plan = try await store.planFork(originalId: orig, newId: newId, atSeq: 1)
+        let planned = await store.sessions().count
+        XCTAssertEqual(planned, 1, "planFork writes nothing — a failed push can leave no orphan")
+        let forkMeta = await store.commitFork(plan, syncedSeq: 0)
 
-        // Both sessions exist; the fork's log equals the original's, byte-for-byte, only the id swapped.
+        // Both sessions exist; the fork's log equals the original's, byte-for-byte, with only the
+        // sessionId FIELD swapped (the expectation built independently of the SUT's rewriter).
         let sessionCount = await store.sessions().count
         XCTAssertEqual(sessionCount, 2)
         let origBytes = String(decoding: try Data(contentsOf: logURL(orig)), as: UTF8.self)
         let forkBytes = String(decoding: try Data(contentsOf: logURL(newId)), as: UTF8.self)
-        XCTAssertEqual(forkBytes, origBytes.replacingOccurrences(of: orig, with: newId))
+        XCTAssertEqual(forkBytes, origBytes.replacingOccurrences(of: "\"sessionId\":\"\(orig)\"",
+                                                                 with: "\"sessionId\":\"\(newId)\""))
         XCTAssertFalse(forkBytes.contains(orig))
         // Seqs are preserved; provenance + a marked title are stamped.
         let forkHead = await store.lastSeq(sessionId: newId)
@@ -262,6 +268,198 @@ final class LocalEventStoreTests: XCTestCase {
         XCTAssertEqual(forkMeta.forkedFrom, SessionForkRef(sessionId: orig, atSeq: 1))
         XCTAssertEqual(forkMeta.title, "Original" + LocalEventStore.forkTitleSuffix)
         XCTAssertEqual(forkMeta.model, "gpt-5.4")
+    }
+
+    // MARK: - C1: applyPull's watermark is the head it APPLIED, isolated from the SyncClient
+
+    func testApplyPullRecordsTheHeadItActuallyAppliedNotWhatTheCallerExpected() async throws {
+        // The store-level half of C1, with no SyncClient (and so no divergence-check safety net) in
+        // the way: a pull that carries MORE than the caller's `sync.heads` snapshot advertised — a Mac
+        // append landing inside the pull window — must record the applied head. Recording the stale
+        // snapshot leaves lastSyncedSeq < lastSeq over daemon-authored bytes, which is what made the
+        // next push DIVERGE and mint an "(offline copy)" on every pass.
+        let id = "e5000000-0000-4000-8000-000000000001"
+        let store = try LocalEventStore(directory: dir)
+        var lines = Data()
+        for (seq, obj) in [
+            (1, ["type": "session_created", "sessionId": id, "seq": 1, "ts": 1, "scope": "global", "mode": "chat"] as [String: Any]),
+            (2, ["type": "assistant_message", "sessionId": id, "seq": 2, "ts": 2, "threadId": "main", "text": "a"]),
+            (3, ["type": "assistant_message", "sessionId": id, "seq": 3, "ts": 3, "threadId": "main", "text": "b"]),
+            // seq 4 — appended by the Mac AFTER heads reported lastSeq 3, still served by this pull.
+            (4, ["type": "assistant_message", "sessionId": id, "seq": 4, "ts": 4, "threadId": "main", "text": "raced-in"]),
+        ] {
+            _ = seq
+            lines.append(try JSONSerialization.data(withJSONObject: obj))
+            lines.append(0x0A)
+        }
+
+        let applied = try await store.applyPull(sessionId: id, data: lines, title: .some("Raced"),
+                                                model: .some(nil), forkedFrom: .some(nil))
+        XCTAssertEqual(applied, 4)
+        let head = await store.lastSeq(sessionId: id)
+        let synced = await store.lastSyncedSeq(sessionId: id)
+        XCTAssertEqual(head, 4)
+        XCTAssertEqual(synced, 4, "the watermark is the applied head — never a caller-supplied snapshot")
+        XCTAssertEqual(synced, head, "a pull can never leave the session looking locally-ahead")
+    }
+
+    // MARK: - I3: the fork rewrite is scoped to the sessionId FIELD, never event content
+
+    func testForkNeverRewritesASessionIdQUOTEDInMessageContent() async throws {
+        let orig = "e0000000-0000-4000-8000-000000000003"
+        let newId = "e0000000-0000-4000-8000-0000000000ff"
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: orig)
+        // The user legitimately types the session id into a message — and after a fork+reconcile the
+        // fork is the ONLY surviving copy of this conversation, so a silent edit here is unrecoverable.
+        let typed = "why is session \(orig) stuck?"
+        s.persist(.userMessage(.init(seq: 2, sessionId: orig, ts: 2, threadId: "main", text: typed, clientName: "phone")))
+
+        try await store.commitFork(store.planFork(originalId: orig, newId: newId, atSeq: 1), syncedSeq: 0)
+
+        let forkEvents = await store.read(sessionId: newId, fromSeq: 0)
+        let forkedText = forkEvents.compactMap { ev -> String? in
+            if case .userMessage(let v) = ev.decoded { return v.text } else { return nil }
+        }.first
+        XCTAssertEqual(forkedText, typed, "the user's own words must survive the fork untouched")
+        // ...while every envelope really did move to the new id.
+        XCTAssertTrue(forkEvents.allSatisfy { $0.sessionId == newId })
+        XCTAssertEqual(forkEvents.map { $0.seq }, [1, 2])
+    }
+
+    func testForkRewritesTheEnvelopeFieldOnEveryLine() async throws {
+        let orig = "e1000000-0000-4000-8000-000000000001"
+        let newId = "e1000000-0000-4000-8000-0000000000aa"
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: orig)
+        s.persist(.userMessage(.init(seq: 2, sessionId: orig, ts: 2, threadId: "main", text: "hi", clientName: "phone")))
+        s.appendReasoning(itemJSON: #"{"type":"reasoning","encrypted_content":"BLOB"}"#, seq: 3, ts: 3)
+
+        try await store.commitFork(store.planFork(originalId: orig, newId: newId, atSeq: 2), syncedSeq: 0)
+
+        // Every line — including the reasoning_item, which has no Swift variant — carries the new id.
+        let lines = String(decoding: try Data(contentsOf: logURL(newId)), as: UTF8.self)
+            .split(separator: "\n").map(String.init)
+        XCTAssertEqual(lines.count, 3)
+        for line in lines {
+            let obj = try JSONSerialization.jsonObject(with: Data(line.utf8)) as! [String: Any]
+            XCTAssertEqual(obj["sessionId"] as? String, newId)
+        }
+        XCTAssertTrue(lines.contains { $0.contains("BLOB") }, "the opaque payload is copied verbatim")
+    }
+
+    // MARK: - I2: a rewrite is an ATOMIC REPLACE — the log is never absent mid-write
+
+    func testAtomicWriteReplacesInOneStepAndNeverLeavesTheTargetMissing() throws {
+        let url = dir.appendingPathComponent("atomic.jsonl")
+        try Data("old-content\n".utf8).write(to: url)
+
+        // Poll the path from another thread across many replaces: the file must ALWAYS exist and
+        // always be one complete version — never the "unlinked" window the old removeItem+moveItem
+        // spelling opened, in which a kill would have destroyed the log outright.
+        let stop = NSLock()
+        var stopped = false
+        var sawMissing = false
+        var sawPartial = false
+        let watcher = Thread {
+            while true {
+                if stop.withLock({ stopped }) { break }
+                if !FileManager.default.fileExists(atPath: url.path) { stop.withLock { sawMissing = true } }
+                else if let d = try? Data(contentsOf: url) {
+                    let text = String(decoding: d, as: UTF8.self)
+                    if text != "old-content\n" && !text.hasPrefix("new-") { stop.withLock { sawPartial = true } }
+                }
+            }
+        }
+        watcher.start()
+        for i in 0..<300 { LocalChatSession.atomicWrite(Data("new-\(i)-content\n".utf8), to: url) }
+        stop.withLock { stopped = true }
+        Thread.sleep(forTimeInterval: 0.05)
+
+        XCTAssertFalse(sawMissing, "an atomic replace never unlinks the destination first")
+        XCTAssertFalse(sawPartial, "a reader only ever sees a complete version")
+        XCTAssertTrue(String(decoding: try Data(contentsOf: url), as: UTF8.self).hasPrefix("new-"))
+    }
+
+    // MARK: - M1/M2/M9: the remaining fold + metadata parity items
+
+    func testPriorInputSkipsNonMainThreadEvents() async throws {
+        // engine.ts:1389's filter. Unreachable from the phone's own engine, but sync.push accepts any
+        // valid SessionEvent from any paired client, so a thread-scoped event CAN land here.
+        let id = "e2000000-0000-4000-8000-000000000001"
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: id)
+        s.persist(.userMessage(.init(seq: 2, sessionId: id, ts: 2, threadId: "main", text: "main-thread", clientName: "phone")))
+        s.persist(.assistantMessage(.init(seq: 3, sessionId: id, ts: 3, threadId: "child-7", text: "a child thread's own reply")))
+
+        let texts = s.priorInput().compactMap { if case .message(_, let c) = $0 { return c } else { return nil } }
+        XCTAssertEqual(texts, ["main-thread"], "a child thread's events never enter the main context")
+    }
+
+    func testNormalizeReplayOrderDefersAMessageFoundInsideAToolPair() {
+        // The real reordering path (a steer landing between a call and its result), not just the no-op.
+        let input: [ProviderInputItem] = [
+            .functionCall(callId: "c1", name: "Search", argumentsJSON: "{}"),
+            .message(role: .user, content: "steered mid-pair"),
+            .toolResult(callId: "c1", output: "results", isError: false),
+            .message(role: .assistant, content: "after"),
+        ]
+        let out = LocalChatSession.normalizeReplayOrder(input)
+        // The message defers to immediately AFTER its pair's result — mirroring what the provider saw.
+        guard case .functionCall = out[0] else { return XCTFail() }
+        guard case .toolResult = out[1] else { return XCTFail("the result must follow its call directly") }
+        guard case .message(_, let deferred) = out[2] else { return XCTFail() }
+        XCTAssertEqual(deferred, "steered mid-pair")
+        guard case .message(_, let last) = out[3] else { return XCTFail() }
+        XCTAssertEqual(last, "after")
+    }
+
+    func testTaskNotificationReplaysAsAUserMessage() async throws {
+        let id = "e2000000-0000-4000-8000-000000000002"
+        let store = try LocalEventStore(directory: dir)
+        _ = try await store.createSession(sessionId: id)
+        // task_notification has no Swift SessionEvent variant either — write the raw line.
+        let line = try JSONSerialization.data(withJSONObject: [
+            "type": "task_notification", "sessionId": id, "seq": 2, "ts": 2,
+            "threadId": "main", "content": "a detached agent finished",
+        ])
+        LocalChatSession.appendLine(line, to: logURL(id))
+        let reopened = try LocalEventStore(directory: dir)
+        let s = await reopened.session(id)!
+
+        let items = s.priorInput()
+        XCTAssertEqual(items.count, 1)
+        guard case .message(.user, let content) = items[0] else { return XCTFail("replays as a user-role message") }
+        XCTAssertEqual(content, "a detached agent finished")
+    }
+
+    func testScopeIsDerivedFromTheLogNotLatchedBeforeItExists() async throws {
+        let id = "e3000000-0000-4000-8000-000000000001"
+        let store = try LocalEventStore(directory: dir)
+        _ = try await store.createSession(sessionId: id, scope: "project-alpha", model: "gpt-5.4")
+
+        // The SAME store must already report the real scope — the handle is built before the
+        // session_created line is written, so a latched-in-init scope would read "global" here and
+        // then be persisted into the sidecar permanently.
+        let metas = await store.sessions()
+        XCTAssertEqual(metas[0].scope, "project-alpha")
+        // ...and it survives a reopen (the sidecar did not freeze the wrong value).
+        let reopened = try LocalEventStore(directory: dir)
+        let after = await reopened.sessions()
+        XCTAssertEqual(after[0].scope, "project-alpha")
+    }
+
+    func testAStaleReasoningSeqIsRejectedRatherThanWrittenOutOfOrder() async throws {
+        // The log is folded in FILE order, so a non-advancing seq must never be appended (M7).
+        let id = "e4000000-0000-4000-8000-000000000001"
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: id)
+        s.persist(.assistantMessage(.init(seq: 2, sessionId: id, ts: 2, threadId: "main", text: "current")))
+        s.appendReasoning(itemJSON: #"{"stale":true}"#, seq: 1, ts: 1) // behind the head — dropped
+        XCTAssertEqual(s.lastSeq, 2)
+        let stored = await store.read(sessionId: id, fromSeq: 0)
+        XCTAssertEqual(stored.map { $0.seq }, [1, 2], "seq order still equals file order")
+        XCTAssertFalse(stored.contains { $0.type == "reasoning_item" })
     }
 
     // MARK: - truncate

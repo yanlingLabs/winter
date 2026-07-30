@@ -16,7 +16,14 @@ import NormaProtocol
 // registry; it delegates every file operation to the session's handle, so there is exactly ONE lock
 // per log file no matter whether the engine (sync) or the SyncClient (async, via the actor) is the
 // caller. That is the whole of the concurrency story: the actor serializes registry access, each
-// handle's lock serializes its file.
+// handle's lock serializes its file. `LocalChatSession.init` is internal and every creation path
+// registers into `handles`, so the app cannot mint a second handle for a live session.
+//
+// THE BOUND ON THAT GUARANTEE (review M8): it holds WITHIN one `LocalEventStore`. Two stores opened
+// over the SAME container directory would hold two independent `NSLock`s over one file and could
+// interleave appends. The app must therefore keep a single store per container for the process's
+// lifetime — which is the natural shape (one container, one store, injected once), but it is a
+// caller obligation, not something this type can enforce.
 //
 // RAW BYTES, NOT DECODED EVENTS. The log is stored and replicated as verbatim JSONL bytes, never a
 // re-serialization — the byte-identity contract the whole sync surface rests on (see store.ts's
@@ -70,8 +77,6 @@ enum LocalStoreError: Error, Equatable {
     case notContiguous(expected: Int, got: Int)
     case sessionExists(String)
     case unknownSession(String)
-    case emptyPull
-    case badHeader(String)
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -109,7 +114,12 @@ struct LineEnvelope {
 
 public final class LocalChatSession: LocalSession, @unchecked Sendable {
     public let sessionId: String
-    let scope: String
+    /// Re-derived by `recover()` from the sidecar, else the log's seq-1 `session_created` (review M2:
+    /// it must NOT be latched in `init`, which runs BEFORE `createSession` writes that line — the
+    /// handle would then latch "global" and `persistSidecarLocked` would make the wrong value
+    /// permanent). Guarded by `lock`.
+    private var scopeValue: String = "global"
+    var scope: String { lock.withLock { scopeValue } }
     private let logURL: URL
     private let metaURL: URL
 
@@ -134,11 +144,6 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
         self.sessionId = sessionId
         self.logURL = directory.appendingPathComponent("\(sessionId).jsonl")
         self.metaURL = directory.appendingPathComponent("\(sessionId).meta.json")
-        // Defaults; `recover()` overwrites from disk. Scope is re-derived from the log's
-        // session_created if the sidecar is missing.
-        self.scope = LocalChatSession.readSidecar(metaURL)?.scope
-            ?? LocalChatSession.deriveScope(logURL)
-            ?? "global"
         self.head = 0
         self.syncedSeq = 0
         self.title = nil
@@ -148,15 +153,19 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
 
     // MARK: recovery
 
-    /// Rebuilds `head` from the log and loads the sidecar. Mirrors `SessionStore.recoverAll`'s
+    /// Rebuilds `head`/`scope` from the log and loads the sidecar. Mirrors `SessionStore.recoverAll`'s
     /// posture: read every line, keep only the well-shaped ones, and if ANY line was bad (a torn
     /// final line from a crash mid-append, most commonly) rewrite the file atomically with just the
-    /// good lines so a partial tail never poisons a later fold or append.
+    /// good lines so a partial tail never poisons a later fold or append. Always called AFTER the log
+    /// exists, which is what lets `scope` come from the real seq-1 `session_created` (review M2).
     func recover() {
         lock.withLock {
             let (goodLines, sawBad, lastSeq) = Self.scanLog(logURL)
             if sawBad { Self.atomicWrite(goodLines.isEmpty ? Data() : Self.join(goodLines), to: logURL) }
             head = lastSeq
+            // The LOG is the authority for scope (it rides session_created); the sidecar is the
+            // fallback for a log whose header predates this field.
+            scopeValue = Self.deriveScope(logURL) ?? Self.readSidecar(metaURL)?.scope ?? "global"
             if let s = Self.readSidecar(metaURL) {
                 syncedSeq = min(s.lastSyncedSeq, lastSeq) // never claim to have synced past what we hold
                 title = s.title
@@ -171,16 +180,24 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
     public var lastSeq: Int { lock.withLock { head } }
 
     /// Provider-input reconstruction of the persisted log — the faithful Swift port of
-    /// `engine.ts`'s `historyInput` fold (`eventToInput` + `normalizeReplayOrder`), minus the
-    /// checkpoint fast-forward (a chat session is never compacted, exactly like `childHistoryInput`,
-    /// so there is no checkpoint to skip past). Reads every line at turn start; a `reasoning_item`
-    /// replays VERBATIM through `.reasoning(itemJSON:)` — the T8 reasoning-replay minor, delegated
-    /// here — feeding the provider the encrypted state back for continuity, never rendering it.
+    /// `engine.ts`'s `historyInput` fold (the MAIN-THREAD filter + `eventToInput` +
+    /// `normalizeReplayOrder`), minus only the checkpoint fast-forward (a chat session is never
+    /// compacted, exactly like `childHistoryInput`, so there is no checkpoint to skip past). Reads
+    /// every line at turn start; a `reasoning_item` replays VERBATIM through `.reasoning(itemJSON:)`
+    /// — the T8 reasoning-replay minor, delegated here — feeding the provider the encrypted state
+    /// back for continuity, never rendering it.
+    ///
+    /// The main-thread filter mirrors `engine.ts:1389` (`if ("threadId" in e && e.threadId !==
+    /// MAIN_THREAD) continue`). The phone's own engine only ever stamps `MainThread`, but `sync.push`
+    /// accepts any valid `SessionEvent` from any paired client, so a thread-scoped event CAN reach
+    /// this log by replication — and it must be as invisible to the phone's context as it is to the
+    /// Mac's (review M1).
     public func priorInput() -> [ProviderInputItem] {
         let lines = lock.withLock { Self.scanLog(logURL).lines }
         var input: [ProviderInputItem] = []
         for line in lines {
             guard let env = LineEnvelope(line) else { continue }
+            if let threadId = env.object["threadId"] as? String, threadId != MainThread { continue }
             if let item = Self.eventToInput(env) { input.append(item) }
         }
         return Self.normalizeReplayOrder(input)
@@ -188,6 +205,11 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
 
     /// The only sink for an opaque reasoning item — appended to the log as a `reasoning_item` line
     /// (its ONLY sink, CLAUDE.md §events) and read back by `priorInput()`. Advances the head.
+    ///
+    /// Guards on an ADVANCING seq exactly as `persist` does (review M7): the log is folded in FILE
+    /// order by `priorInput`/`rawTail`/`scanLog`, so writing a stale seq would put a line physically
+    /// after lines that outrank it and silently desynchronize seq order from byte order — the one
+    /// property replication depends on.
     public func appendReasoning(itemJSON: String, seq: Int, ts: Int) {
         let obj: [String: Any] = [
             "type": "reasoning_item", "sessionId": sessionId, "seq": seq, "ts": ts,
@@ -195,8 +217,9 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
         ]
         guard let line = try? JSONSerialization.data(withJSONObject: obj) else { return }
         lock.withLock {
+            guard seq > head else { return }
             Self.appendLine(line, to: logURL)
-            head = max(head, seq)
+            head = seq
         }
     }
 
@@ -286,14 +309,22 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
 
     func metaSnapshot() -> LocalSessionMeta {
         lock.withLock {
-            LocalSessionMeta(sessionId: sessionId, scope: scope, title: title, model: model,
+            LocalSessionMeta(sessionId: sessionId, scope: scopeValue, title: title, model: model,
                              lastSeq: head, lastSyncedSeq: syncedSeq, forkedFrom: forkedFrom)
         }
     }
 
     var lastSyncedSeq: Int { lock.withLock { syncedSeq } }
 
-    func setLastSyncedSeq(_ seq: Int) { lock.withLock { syncedSeq = seq; persistSidecarLocked() } }
+    /// Records the watermark, CLAMPED to the local head — the same fail-safe direction `recover()`
+    /// applies (`min(sidecar, lastSeq)`), now applied on the write side too (review C1). The
+    /// watermark means "the daemon holds these bytes identically", so it can never legitimately
+    /// exceed what this log actually holds: a caller passing a daemon head that ran ahead of our
+    /// copy (a racing append, or a push whose result reflects someone else's events) would otherwise
+    /// record a promise the log cannot keep, and the next push would DIVERGE over bytes we never had.
+    func setLastSyncedSeq(_ seq: Int) {
+        lock.withLock { syncedSeq = min(seq, head); persistSidecarLocked() }
+    }
 
     /// Applies the index-only facts a `sync.heads`/`sync.pull` reported (or a local set): each is
     /// "unchanged" when nil, mirroring `SessionStore.applySyncMeta`'s "omitted → keep" semantics.
@@ -307,7 +338,7 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
     }
 
     private func persistSidecarLocked() {
-        let sidecar = MetaSidecar(scope: scope, title: title, model: model,
+        let sidecar = MetaSidecar(scope: scopeValue, title: title, model: model,
                                   lastSyncedSeq: syncedSeq, forkedFrom: forkedFrom)
         if let data = try? JSONEncoder().encode(sidecar) { Self.atomicWrite(data, to: metaURL) }
     }
@@ -370,17 +401,18 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
         }
     }
 
-    /// Temp-file + rename: a crash never leaves a half-written log/sidecar (mirrors recoverAll's
-    /// `writeFileSync(tmp)` + `renameSync`).
+    /// ATOMIC REPLACE — write-temp + `rename(2)`, in ONE step, exactly the posture the daemon store
+    /// takes (`store.ts`'s `writeFileSync(tmp)` + `renameSync(tmp, path)`).
+    ///
+    /// `Foundation.Data.write(options: .atomic)` is that primitive. The earlier
+    /// `removeItem` + `moveItem` spelling was NOT atomic (review I2): it unlinks the destination
+    /// first, leaving a window in which the log does not exist at all — a kill inside it (iOS jetsam,
+    /// force-quit, panic) destroys the whole conversation rather than leaving a torn tail `recover()`
+    /// could repair. Every rewrite path routes through here — `recover`'s repair, `truncate`,
+    /// `applyPull`'s create branch, `commitFork`, and the sidecar — so the reader always observes
+    /// either the complete old file or the complete new one, never neither.
     static func atomicWrite(_ data: Data, to url: URL) {
-        let tmp = url.appendingPathExtension("tmp-\(UUID().uuidString)")
-        do {
-            try data.write(to: tmp)
-            _ = try? FileManager.default.removeItem(at: url)
-            try FileManager.default.moveItem(at: tmp, to: url)
-        } catch {
-            try? FileManager.default.removeItem(at: tmp)
-        }
+        try? data.write(to: url, options: .atomic)
     }
 
     private static func readSidecar(_ url: URL) -> MetaSidecar? {
@@ -536,8 +568,18 @@ public actor LocalEventStore {
     /// Applies a pulled range. Creates the session from the pulled bytes when the store doesn't hold
     /// it yet (the batch opens with the daemon's own seq-1 `session_created`), else appends verbatim
     /// with a contiguity check. Then records the reported index facts and advances `lastSyncedSeq`.
+    ///
+    /// THE WATERMARK COMES FROM WHAT WAS ACTUALLY APPLIED, never from the caller's `sync.heads`
+    /// snapshot (review C1). A `sync.pull` returns everything past `fromSeq` *as of the moment the
+    /// daemon serves it*, so a Mac append landing inside the pull window makes the applied head
+    /// EXCEED the head `sync.heads` reported moments earlier. Recording the stale snapshot would
+    /// leave `lastSyncedSeq < lastSeq` over bytes the daemon itself authored — and the very next push
+    /// would then declare a `baseSeq` behind the daemon's head, DIVERGE, and mint a spurious
+    /// "(offline copy)" fork on every pass, forever. Everything applied here came FROM the daemon, so
+    /// the post-apply head is exactly the right watermark. Returns it.
+    @discardableResult
     func applyPull(sessionId: String, data: Data, title: String??, model: String??,
-                   forkedFrom: SessionForkRef??, newLastSyncedSeq: Int) throws {
+                   forkedFrom: SessionForkRef??) throws -> Int {
         let handle: LocalChatSession
         if let existing = handles[sessionId] {
             handle = existing
@@ -549,7 +591,9 @@ public actor LocalEventStore {
             handles[sessionId] = handle
         }
         handle.setSyncedMeta(title: title, model: model, forkedFrom: forkedFrom)
-        handle.setLastSyncedSeq(newLastSyncedSeq)
+        let applied = handle.lastSeq
+        handle.setLastSyncedSeq(applied)
+        return applied
     }
 
     func setLastSyncedSeq(sessionId: String, _ seq: Int) { handles[sessionId]?.setLastSyncedSeq(seq) }
@@ -560,25 +604,50 @@ public actor LocalEventStore {
 
     func truncate(sessionId: String, toSeq: Int) { handles[sessionId]?.truncate(toSeq: toSeq) }
 
-    /// The FORK half of a `DIVERGED{lastSeq>0}` reconcile: copies the ENTIRE local log verbatim,
-    /// rewriting the session id (a raw byte substring swap — "byte-identical modulo the id rewrite"),
-    /// keeps every seq, and stamps `forkedFrom = { originalId, atSeq }` plus a marked title. Returns
-    /// the new session's handle, ready to push as a creating session (`baseSeq: 0`). Does NOT touch
-    /// the original — the caller then truncates it and pulls the daemon's branch.
-    @discardableResult
-    func fork(originalId: String, newId: String, atSeq: Int, titleMarker: String = LocalEventStore.forkTitleSuffix) throws -> LocalSessionMeta {
+    /// A fork, computed but NOT yet written: the rewritten bytes plus the metadata the push must
+    /// carry. Splitting preview from commit is what makes a failed fork push leave NOTHING behind
+    /// (review I1's third trigger) — the local copy is only created once the daemon has the bytes.
+    struct ForkPlan: Sendable {
+        let newId: String
+        let bytes: Data
+        let title: String
+        let model: String?
+        let forkedFrom: SessionForkRef
+        let lastSeq: Int
+    }
+
+    /// PURE: computes the fork of `originalId` at `atSeq` without touching the filesystem or the
+    /// registry. The whole log is copied with each event's `sessionId` FIELD rewritten (seqs
+    /// preserved); `forkedFrom` + a marked title are prepared for the push's `meta`.
+    func planFork(originalId: String, newId: String, atSeq: Int,
+                  titleMarker: String = LocalEventStore.forkTitleSuffix) throws -> ForkPlan {
         guard let original = handles[originalId] else { throw LocalStoreError.unknownSession(originalId) }
-        if handles[newId] != nil { throw LocalStoreError.sessionExists(newId) }
-        let sourceBytes = original.snapshotRawLog()
-        let rewritten = LocalEventStore.rewriteSessionId(sourceBytes, from: originalId, to: newId)
-        LocalChatSession.atomicWrite(rewritten, to: logURL(newId))
-        let handle = LocalChatSession(sessionId: newId, directory: directory)
-        handle.recover()
+        let rewritten = LocalEventStore.rewriteSessionId(original.snapshotRawLog(), from: originalId, to: newId)
         let originalMeta = original.metaSnapshot()
-        let markedTitle = (originalMeta.title ?? "Chat") + titleMarker
-        handle.setSyncedMeta(title: .some(markedTitle), model: .some(originalMeta.model),
-                             forkedFrom: .some(SessionForkRef(sessionId: originalId, atSeq: atSeq)))
-        handles[newId] = handle
+        return ForkPlan(newId: newId, bytes: rewritten,
+                        title: (originalMeta.title ?? "Chat") + titleMarker,
+                        model: originalMeta.model,
+                        forkedFrom: SessionForkRef(sessionId: originalId, atSeq: atSeq),
+                        lastSeq: originalMeta.lastSeq)
+    }
+
+    /// Commits a planned fork locally, AFTER its push has landed on the daemon. Idempotent: a fork
+    /// already registered (a retry that got as far as committing last time) just re-records its
+    /// watermark rather than throwing, so a partially-completed reconcile converges instead of
+    /// duplicating. Returns the committed metadata.
+    @discardableResult
+    func commitFork(_ plan: ForkPlan, syncedSeq: Int) -> LocalSessionMeta {
+        let handle: LocalChatSession
+        if let existing = handles[plan.newId] {
+            handle = existing
+        } else {
+            LocalChatSession.atomicWrite(plan.bytes, to: logURL(plan.newId))
+            handle = LocalChatSession(sessionId: plan.newId, directory: directory)
+            handle.recover()
+            handles[plan.newId] = handle
+        }
+        handle.setSyncedMeta(title: .some(plan.title), model: .some(plan.model), forkedFrom: .some(plan.forkedFrom))
+        handle.setLastSyncedSeq(syncedSeq)
         return handle.metaSnapshot()
     }
 
@@ -597,12 +666,27 @@ public actor LocalEventStore {
         return sid
     }
 
-    /// Rewrites every occurrence of the session id in the raw log bytes. Session ids are UUIDs (fork
-    /// targets) or the daemon's `s_<hex>` shape — 36/8+ random chars, so a substring collision with
-    /// unrelated content is not a real risk, and a verbatim swap is what keeps the two logs
-    /// byte-identical modulo the id (a re-serialization would not).
+    /// Rewrites the session id of every line — SCOPED TO THE `sessionId` FIELD, never a whole-document
+    /// substring swap (review I3).
+    ///
+    /// The naive `replacingOccurrences(of: id)` also rewrites an id that legitimately appears in event
+    /// CONTENT — a user who types "why is session <uuid> stuck?" would have their own message silently
+    /// edited. That is not a hypothetical rounding error: after `forkAndReconcile` the original is
+    /// truncated and overwritten with the daemon's branch, so the fork is the ONLY surviving copy of
+    /// the user's divergent offline conversation.
+    ///
+    /// The scoped token is `"sessionId":"<from>"`. That form can ONLY be the envelope's key/value
+    /// pair, because inside a JSON string every quote is escaped (`\"sessionId\":\"…\"`), so the
+    /// unescaped token cannot occur in content — and every writer here emits compact JSON with no
+    /// space around the colon (`JSONEncoder`/`JSONSerialization` and the daemon's `JSON.stringify`
+    /// all agree). A neighbouring key that merely ENDS in `sessionId` (`childSessionId`) does not
+    /// match either: the leading quote must be immediately before `sessionId`. Everything outside
+    /// that token is preserved byte-for-byte, so the postcondition stays literally true — the fork is
+    /// the original's bytes with only the id field rewritten.
     static func rewriteSessionId(_ data: Data, from: String, to: String) -> Data {
         let text = String(decoding: data, as: UTF8.self)
-        return Data(text.replacingOccurrences(of: from, with: to).utf8)
+        let token = "\"sessionId\":\"\(from)\""
+        let replacement = "\"sessionId\":\"\(to)\""
+        return Data(text.replacingOccurrences(of: token, with: replacement).utf8)
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import NormaProtocol
 
 // ================================================================================================
@@ -99,8 +100,16 @@ public actor SyncClient {
     /// 256 KiB the daemon's own `sync-core` drill uses (349,528 base64 chars, well under the cap).
     static let rawChunkBytes = 256 * 1024
 
+    /// The base64 length of `raw` bytes — 4 characters per 3-byte group, padded. The arithmetic the
+    /// `rawChunkBytes` ↔ `maxChunkBase64` relationship rests on; asserted in the suite (review M3).
+    static func base64Length(ofRawBytes raw: Int) -> Int { ((raw + 2) / 3) * 4 }
+
     /// Raw bytes per push chunk for THIS client — `rawChunkBytes` in production; tests inject a tiny
-    /// value to exercise multi-chunk reassembly without a quarter-MiB payload.
+    /// value to exercise multi-chunk reassembly without a quarter-MiB payload. CLAMPED so no caller
+    /// (or future edit) can pick a size whose base64 breaches `maxChunkBase64`, which the daemon
+    /// enforces hard with `data: z.string().max(SYNC_MAX_CHUNK_B64)` — over it, the push is refused
+    /// outright, and on the phone transport an oversized frame ENDS the connection rather than
+    /// returning an error (review M3: the ceiling was a comment, not a guard).
     private let chunkBytes: Int
 
     public init(store: LocalEventStore, conn: RpcConn) {
@@ -110,7 +119,8 @@ public actor SyncClient {
     init(store: LocalEventStore, conn: RpcConn, chunkBytes: Int) {
         self.store = store
         self.conn = conn
-        self.chunkBytes = chunkBytes
+        let maxRaw = (SyncClient.maxChunkBase64 / 4) * 3 // the largest raw size whose base64 still fits
+        self.chunkBytes = max(1, min(chunkBytes, maxRaw))
     }
 
     // MARK: - syncAll
@@ -146,11 +156,16 @@ public actor SyncClient {
 
     /// Pages `sync.pull` from `fromSeq` to the end, concatenates the base64 pages into the verbatim
     /// tail, and applies it to the store (creating the session when the phone doesn't hold it yet).
+    ///
+    /// The watermark is set by `applyPull` from the head it ACTUALLY applied — never from `head`,
+    /// the `sync.heads` snapshot taken before the pull (review C1). A Mac append landing inside the
+    /// pull window makes the pull return more than the snapshot advertised; recording the snapshot
+    /// would then leave the session permanently one push away from a spurious fork.
     private func pull(head: SyncHead, fromSeq: Int) async throws {
         let bytes = try await pullBytes(sessionId: head.sessionId, fromSeq: fromSeq)
         try await store.applyPull(sessionId: head.sessionId, data: bytes,
                                   title: .some(head.title), model: .some(head.model),
-                                  forkedFrom: .some(head.forkedFrom), newLastSyncedSeq: head.lastSeq)
+                                  forkedFrom: .some(head.forkedFrom))
     }
 
     /// Drains `sync.pull` page by page (cursor-resumed) and returns the concatenated raw JSONL bytes.
@@ -194,37 +209,112 @@ public actor SyncClient {
                 let result = try await pushChunked(sessionId: sessionId, baseSeq: 0, data: whole, meta: pushMeta)
                 await store.setLastSyncedSeq(sessionId: sessionId, result.lastSeq)
             } else {
-                try await forkAndReconcile(originalId: sessionId, atSeq: baseSeq,
-                                           daemonHead: headsById[sessionId])
+                try await reconcileDivergence(sessionId: sessionId, baseSeq: baseSeq,
+                                              localTail: tail, pushMeta: pushMeta,
+                                              daemonHead: headsById[sessionId])
             }
         }
     }
 
-    /// The full `DIVERGED{lastSeq>0}` reconcile:
-    ///   1. fork the ENTIRE local log to a fresh UUID (byte-identical modulo the id rewrite),
-    ///      stamping `forkedFrom = { originalId, atSeq }` and a marked title,
-    ///   2. push the fork as a NEW session (`baseSeq: 0`, its own `session_created` opening it),
+    /// `DIVERGED{lastSeq > 0}` means only that `baseSeq != daemonHead` — it is NOT proof that anything
+    /// diverged (review I1). Three ordinary failures produce the identical error while the two logs
+    /// agree completely:
+    ///   • a push the daemon APPLIED whose acknowledgement was lost (connection drop, iOS suspending
+    ///     the app mid-call — routine on this transport),
+    ///   • a crash between the daemon's append and this side's sidecar write, and
+    ///   • a retry after a fork push failed partway.
+    /// Forking on any of them duplicates the conversation on BOTH devices, permanently, by hand-delete
+    /// only. So: establish what actually differs before doing anything destructive. Pull the daemon's
+    /// range from our own watermark and compare it byte-for-byte against the same local range.
+    ///   • daemon ⊇ local (our bytes are a prefix of theirs) → they already HAVE our events; adopt
+    ///     their remainder and fast-forward the watermark. NO fork.
+    ///   • local ⊃ daemon (they are a strict prefix of us) → a plain fast-forward push from their head.
+    ///   • otherwise → the branches genuinely differ: fork.
+    private func reconcileDivergence(sessionId: String, baseSeq: Int, localTail: Data,
+                                     pushMeta: PushMetaParams, daemonHead: SyncHead?) async throws {
+        let daemonTail = try await pullBytes(sessionId: sessionId, fromSeq: baseSeq)
+
+        if daemonTail.starts(with: localTail) {
+            // Lost ACK (or a crash before the sidecar write): the daemon holds our bytes verbatim,
+            // possibly plus events of its own. Append only what we are missing and adopt their head.
+            let remainder = daemonTail.subdata(in: localTail.count..<daemonTail.count)
+            if remainder.isEmpty {
+                await store.setLastSyncedSeq(sessionId: sessionId, await store.lastSeq(sessionId: sessionId))
+            } else {
+                try await store.applyPull(sessionId: sessionId, data: remainder,
+                                          title: .some(daemonHead?.title ?? nil), model: .some(daemonHead?.model ?? nil),
+                                          forkedFrom: .some(daemonHead?.forkedFrom ?? nil))
+            }
+            return
+        }
+
+        if localTail.starts(with: daemonTail) {
+            // The daemon is a strict PREFIX of us — nothing diverged, we are simply further ahead
+            // than our watermark claimed. Push the remainder from their real head.
+            let ahead = localTail.subdata(in: daemonTail.count..<localTail.count)
+            guard !ahead.isEmpty else { return }
+            let daemonLast = baseSeq + LocalChatSession.split(daemonTail).count
+            let result = try await pushChunked(sessionId: sessionId, baseSeq: daemonLast, data: ahead, meta: pushMeta)
+            await store.setLastSyncedSeq(sessionId: sessionId, result.lastSeq)
+            return
+        }
+
+        // Genuine two-sided divergence.
+        try await forkAndReconcile(originalId: sessionId, atSeq: baseSeq, daemonHead: daemonHead)
+    }
+
+    /// The full reconcile for a GENUINE divergence (only ever reached once `reconcileDivergence` has
+    /// byte-proved the branches differ):
+    ///   1. PLAN the fork of the entire local log at a DETERMINISTIC id (bytes rewritten at the
+    ///      `sessionId` field only, seqs preserved) — computed, not yet written,
+    ///   2. push it as a NEW session (`baseSeq: 0`, its own `session_created` opening it), and only
+    ///      once that LANDS commit the local copy,
     ///   3. truncate the original's local log back to `atSeq` (the divergent tail now lives in the
     ///      fork) and pull the daemon's branch in its place.
     /// Postcondition: both stores hold BOTH sessions; the fork's log equals the original's pre-fork
-    /// log with only the id rewritten.
+    /// log with only the id field rewritten.
+    ///
+    /// PUSH-THEN-COMMIT, and a deterministic id, together close review I1's third trigger. The old
+    /// order (create locally, then push) left an orphaned local fork behind whenever the push failed:
+    /// the next pass pushed that orphan as another creating session AND minted a second fresh UUID —
+    /// a transient network error accumulating duplicates. Now a failed push leaves nothing at all,
+    /// and because the retry derives the SAME id from `originalId + atSeq`, a push that actually
+    /// landed before the failure is recognised rather than duplicated.
     private func forkAndReconcile(originalId: String, atSeq: Int, daemonHead: SyncHead?) async throws {
-        let newId = UUID().uuidString.lowercased()
-        let forkMeta = try await store.fork(originalId: originalId, newId: newId, atSeq: atSeq)
+        let newId = Self.forkId(originalId: originalId, atSeq: atSeq)
+        let plan = try await store.planFork(originalId: originalId, newId: newId, atSeq: atSeq)
+        let forkPushMeta = PushMetaParams(title: plan.title, model: plan.model, forkedFrom: plan.forkedFrom)
+        do {
+            let result = try await pushChunked(sessionId: newId, baseSeq: 0, data: plan.bytes, meta: forkPushMeta)
+            await store.commitFork(plan, syncedSeq: result.lastSeq)
+        } catch let e as RpcError where e.code == ERR_DIVERGED {
+            // The deterministic id already exists on the daemon — this fork landed on an earlier
+            // attempt whose acknowledgement we lost. Adopt it instead of minting a duplicate.
+            guard let head = e.divergedLastSeq, head > 0 else { throw e }
+            await store.commitFork(plan, syncedSeq: min(head, plan.lastSeq))
+        }
 
-        // Push the fork as a new session.
-        let forkBytes = await store.rawTail(sessionId: newId, fromSeq: 0)
-        let forkPushMeta = PushMetaParams(title: forkMeta.title, model: forkMeta.model, forkedFrom: forkMeta.forkedFrom)
-        let forkResult = try await pushChunked(sessionId: newId, baseSeq: 0, data: forkBytes, meta: forkPushMeta)
-        await store.setLastSyncedSeq(sessionId: newId, forkResult.lastSeq)
-
-        // Reconcile the original: drop the divergent tail, then pull the daemon's branch.
+        // Reconcile the original: drop the divergent tail, then pull the daemon's branch. The
+        // watermark again comes from what was applied, not from the heads snapshot (C1).
         await store.truncate(sessionId: originalId, toSeq: atSeq)
         let branch = try await pullBytes(sessionId: originalId, fromSeq: atSeq)
         try await store.applyPull(sessionId: originalId, data: branch,
                                   title: .some(daemonHead?.title ?? nil), model: .some(daemonHead?.model ?? nil),
-                                  forkedFrom: .some(daemonHead?.forkedFrom ?? nil),
-                                  newLastSyncedSeq: daemonHead?.lastSeq ?? atSeq)
+                                  forkedFrom: .some(daemonHead?.forkedFrom ?? nil))
+    }
+
+    /// A fork's id, derived DETERMINISTICALLY from its branch point so a retried reconcile targets the
+    /// same session instead of minting a new one each attempt. Shaped as a v4-looking UUID because the
+    /// daemon's creating-push path requires that form (`sync.ts`'s `SYNCED_SESSION_ID_RE`).
+    static func forkId(originalId: String, atSeq: Int) -> String {
+        var hasher = SHA256()
+        hasher.update(data: Data("norma-chat-fork:\(originalId):\(atSeq)".utf8))
+        var bytes = Array(hasher.finalize().prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x40 // version 4
+        bytes[8] = (bytes[8] & 0x3F) | 0x80 // RFC 4122 variant
+        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+        let s = { (lo: Int, hi: Int) in String(hex[hex.index(hex.startIndex, offsetBy: lo)..<hex.index(hex.startIndex, offsetBy: hi)]) }
+        return "\(s(0, 8))-\(s(8, 12))-\(s(12, 16))-\(s(16, 20))-\(s(20, 32))"
     }
 
     /// Splits `data` into base64 chunks under `maxChunkBase64` and pushes them in order. `meta` rides

@@ -147,16 +147,21 @@ final class SyncClientTests: XCTestCase {
         let id = "10000000-0000-4000-8000-000000000006"
         let daemon = FakeDaemon()
         let store = try LocalEventStore(directory: dir)
-        // Shared prefix synced at seq 1 (the session_created). Then BOTH sides diverged offline.
+        // Shared prefix synced at seq 1 (the session_created). A genuinely shared prefix means the
+        // phone PUSHED that line, so the daemon holds the phone's exact bytes for it — seed the
+        // daemon's branch on top of the real seq-1 line rather than a separately-built one, or the
+        // final byte-comparison would be measuring the test's own inconsistency.
         let s = try await store.createSession(sessionId: id)
         s.setLastSyncedSeq(1)
         s.setSyncedMeta(title: .some("Shared"))
+        let sharedPrefix = LocalChatSession.split(try Data(contentsOf: logURL(id)))
+        // The daemon's OWN branch off that same seq-1 prefix.
+        daemon.seed(id, sharedPrefix + [user(id, 2, "mac-x"), asst(id, 3, "mac-y"), asst(id, 4, "mac-z")], title: "Shared")
+
+        // ...and the phone's divergent offline tail.
         s.persist(.userMessage(.init(seq: 2, sessionId: id, ts: 2, threadId: "main", text: "phone-a", clientName: "phone")))
         s.persist(.assistantMessage(.init(seq: 3, sessionId: id, ts: 3, threadId: "main", text: "phone-b")))
         let phonePreForkBytes = try Data(contentsOf: logURL(id)) // seq 1,2,3 — what the fork must copy
-
-        // The daemon's OWN branch off the same seq-1 prefix.
-        daemon.seed(id, [created(id), user(id, 2, "mac-x"), asst(id, 3, "mac-y"), asst(id, 4, "mac-z")], title: "Shared")
 
         let client = SyncClient(store: store, conn: daemon)
         try await client.syncAll()
@@ -167,9 +172,13 @@ final class SyncClientTests: XCTestCase {
         let forkId = metas.map { $0.sessionId }.first { $0 != id }!
         XCTAssertEqual(daemon.sessionIds().sorted(), [id, forkId].sorted())
 
-        // ---- The fork is the phone's pre-fork log, byte-identical modulo the id rewrite ----
+        // ---- The fork is the phone's pre-fork log, byte-identical modulo the id-FIELD rewrite ----
+        // The expectation is built INDEPENDENTLY (Foundation's own replace over the exact key/value
+        // token), never by calling the SUT's rewriter — a wrong rewrite must not be wrong identically
+        // on both sides of the assertion (review M4).
         let forkBytes = try Data(contentsOf: logURL(forkId))
-        let expected = LocalEventStore.rewriteSessionId(phonePreForkBytes, from: id, to: forkId)
+        let expected = Data(String(decoding: phonePreForkBytes, as: UTF8.self)
+            .replacingOccurrences(of: "\"sessionId\":\"\(id)\"", with: "\"sessionId\":\"\(forkId)\"").utf8)
         XCTAssertEqual(forkBytes, expected)
         XCTAssertEqual(daemon.rawLog(forkId), forkBytes, "the daemon stored the pushed fork verbatim")
 
@@ -180,7 +189,10 @@ final class SyncClientTests: XCTestCase {
         let forkSynced = await store.lastSyncedSeq(sessionId: forkId)
         XCTAssertEqual(forkSynced, 3)
 
-        // ---- The original now carries the DAEMON's branch (the divergent local tail moved to the fork) ----
+        // ---- The original now carries the DAEMON's branch (the divergent local tail moved to the
+        // fork) — BYTE-compared against the daemon's copy, not merely shape-asserted (review M4). ----
+        XCTAssertEqual(try Data(contentsOf: logURL(id)), daemon.rawLog(id),
+                       "the original converged byte-identically with the daemon's branch")
         let originalTexts = await store.read(sessionId: id, fromSeq: 0).compactMap { ev -> String? in
             if case .assistantMessage(let v) = ev.decoded { return v.text }
             if case .userMessage(let v) = ev.decoded { return v.text }
@@ -191,6 +203,197 @@ final class SyncClientTests: XCTestCase {
         XCTAssertEqual(origHead, 4)
         let origSynced = await store.lastSyncedSeq(sessionId: id)
         XCTAssertEqual(origSynced, 4)
+    }
+
+    // MARK: - C1: a daemon append RACING the pull must not wedge the session into forking forever
+
+    func testARacingDaemonAppendDoesNotLeaveAStaleWatermarkOrMintForks() async throws {
+        let id = "10000000-0000-4000-8000-000000000007"
+        let daemon = FakeDaemon()
+        daemon.seed(id, [created(id), user(id, 2, "mac-a"), asst(id, 3, "mac-b")], title: "Racy")
+        // The Mac appends seq 4 INSIDE the pull window: heads said 3, the pull will return 1..4.
+        daemon.beforePull[id] = { daemon.daemonAppend(id, self.asst(id, 4, "mac-c-appended-mid-pull")) }
+
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+        try await client.syncAll()
+
+        // The watermark must equal the head that was ACTUALLY applied (4), not the stale heads
+        // snapshot (3). A stale watermark here is what made the next push DIVERGE over daemon-authored
+        // bytes and mint an "(offline copy)" every pass.
+        let head = await store.lastSeq(sessionId: id)
+        let synced = await store.lastSyncedSeq(sessionId: id)
+        XCTAssertEqual(head, 4)
+        XCTAssertEqual(synced, 4, "watermark comes from the applied head, not the pre-pull heads snapshot")
+
+        // ...and the session count is stable across further passes — no fork, ever.
+        for _ in 0..<3 { try await client.syncAll() }
+        let localCount = await store.sessions().count
+        XCTAssertEqual(localCount, 1, "no spurious fork across repeated syncs")
+        XCTAssertEqual(daemon.sessionIds().count, 1)
+        let forks = await store.sessions().filter { $0.forkedFrom != nil }
+        XCTAssertTrue(forks.isEmpty)
+    }
+
+    func testTheWatermarkIsClampedToTheLocalHead() async throws {
+        // Defence in depth for C1: even a caller handing over a head that ran ahead of our copy (a
+        // push result reflecting someone else's events) can never record a promise the log can't keep.
+        let id = "10000000-0000-4000-8000-000000000008"
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: id)
+        s.setLastSyncedSeq(999)
+        XCTAssertEqual(s.lastSyncedSeq, 1, "clamped to the real head")
+    }
+
+    // MARK: - I1: DIVERGED{>0} must not fork unless the branches genuinely differ
+
+    func testLostPushAckAdoptsTheDaemonHeadInsteadOfForking() async throws {
+        // The daemon APPLIED our push; the acknowledgement never arrived, so lastSyncedSeq stayed put.
+        let id = "10000000-0000-4000-8000-000000000009"
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: id)
+        s.persist(.userMessage(.init(seq: 2, sessionId: id, ts: 2, threadId: "main", text: "a", clientName: "phone")))
+        s.persist(.assistantMessage(.init(seq: 3, sessionId: id, ts: 3, threadId: "main", text: "b")))
+        // The daemon already holds ALL of it; the phone thinks it only synced seq 1.
+        daemon.replace(id, phoneBytes: try Data(contentsOf: logURL(id)), plus: [])
+        s.setLastSyncedSeq(1)
+
+        let client = SyncClient(store: store, conn: daemon)
+        try await client.syncAll()
+
+        let count = await store.sessions().count
+        XCTAssertEqual(count, 1, "a lost ACK must never fork — the daemon already had our bytes")
+        XCTAssertEqual(daemon.sessionIds(), [id])
+        let synced = await store.lastSyncedSeq(sessionId: id)
+        XCTAssertEqual(synced, 3, "adopted the daemon head after byte-verifying it holds our events")
+    }
+
+    func testLostAckWithDaemonSideExtraEventsAdoptsTheRemainderWithoutForking() async throws {
+        // Same lost ACK, but the Mac then added its own events on TOP of ours. Our bytes are still a
+        // prefix of theirs, so the answer is "append their remainder", not "fork".
+        let id = "10000000-0000-4000-8000-00000000000a"
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: id)
+        s.persist(.userMessage(.init(seq: 2, sessionId: id, ts: 2, threadId: "main", text: "ours", clientName: "phone")))
+        daemon.replace(id, phoneBytes: try Data(contentsOf: logURL(id)), plus: [asst(id, 3, "mac-added")])
+        s.setLastSyncedSeq(1)
+
+        let client = SyncClient(store: store, conn: daemon)
+        try await client.syncAll()
+
+        let count = await store.sessions().count
+        XCTAssertEqual(count, 1)
+        let head = await store.lastSeq(sessionId: id)
+        let synced = await store.lastSyncedSeq(sessionId: id)
+        XCTAssertEqual(head, 3)
+        XCTAssertEqual(synced, 3)
+        XCTAssertEqual(try Data(contentsOf: logURL(id)), daemon.rawLog(id), "converged byte-identically")
+    }
+
+    func testAFailedForkPushLeavesNoOrphanAndTheRetryDoesNotDuplicate() async throws {
+        // The third I1 trigger: a genuine divergence whose FORK PUSH fails. The old order (create
+        // locally, then push) left an orphan that the next pass pushed as yet another new session
+        // while minting a second fresh UUID.
+        let id = "10000000-0000-4000-8000-00000000000b"
+        let daemon = FailingForkPushDaemon()
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: id)
+        s.setLastSyncedSeq(1)
+        s.persist(.userMessage(.init(seq: 2, sessionId: id, ts: 2, threadId: "main", text: "phone-branch", clientName: "phone")))
+        daemon.seed(id, [created(id), asst(id, 2, "mac-branch")])
+
+        let client = SyncClient(store: store, conn: daemon)
+        // Pass 1: the fork push is made to fail — nothing may be left behind.
+        daemon.failCreatingPush = true
+        do { try await client.syncAll(); XCTFail("the fork push should have thrown") } catch {}
+        let afterFailure = await store.sessions().count
+        XCTAssertEqual(afterFailure, 1, "a failed fork push must leave NO orphan local fork")
+
+        // Pass 2: the network recovers. Exactly one fork is created, not two.
+        daemon.failCreatingPush = false
+        try await client.syncAll()
+        let metas = await store.sessions()
+        XCTAssertEqual(metas.count, 2, "exactly one fork after recovery")
+        XCTAssertEqual(daemon.sessionIds().count, 2)
+
+        // Pass 3: a steady state — no further forks.
+        try await client.syncAll()
+        let settled = await store.sessions().count
+        XCTAssertEqual(settled, 2)
+    }
+
+    func testTheForkIdIsDeterministicInItsBranchPoint() {
+        // What makes a retried reconcile converge rather than mint a new session each attempt.
+        let a = SyncClient.forkId(originalId: "10000000-0000-4000-8000-0000000000ff", atSeq: 5)
+        let b = SyncClient.forkId(originalId: "10000000-0000-4000-8000-0000000000ff", atSeq: 5)
+        let c = SyncClient.forkId(originalId: "10000000-0000-4000-8000-0000000000ff", atSeq: 6)
+        XCTAssertEqual(a, b)
+        XCTAssertNotEqual(a, c)
+        // ...and it must be the UUID shape the daemon's creating-push path requires.
+        XCTAssertNotNil(UUID(uuidString: a))
+        XCTAssertEqual(a.count, 36)
+    }
+
+    // MARK: - I4: the Swift cursor-resume loops must actually execute
+
+    func testPullResumesAcrossCursorPagesAndReassemblesByteIdentically() async throws {
+        let id = "10000000-0000-4000-8000-00000000000c"
+        let daemon = FakeDaemon()
+        var lines = [created(id)]
+        for seq in 2...12 { lines.append(asst(id, seq, String(repeating: "p", count: 200))) }
+        daemon.seed(id, lines)
+        daemon.pageBytes = 128 // forces many cursor-resumed pages
+
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+        try await client.syncAll()
+
+        XCTAssertGreaterThan(daemon.pullPages, 1, "the Swift client's cursor-resume loop ran")
+        XCTAssertEqual(try Data(contentsOf: logURL(id)), daemon.rawLog(id), "pages reassembled byte-identically")
+        let synced = await store.lastSyncedSeq(sessionId: id)
+        XCTAssertEqual(synced, 12)
+    }
+
+    func testFetchMemoryWalksEveryPage() async throws {
+        let daemon = FakeDaemon()
+        daemon.memory = (1...7).map { SyncMemoryFile(name: "m\($0).md", content: "body-\($0)") }
+        daemon.memoryPageSize = 2
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        let files = try await client.fetchMemory()
+        XCTAssertEqual(files.map { $0.name }, ["m1.md", "m2.md", "m3.md", "m4.md", "m5.md", "m6.md", "m7.md"])
+        XCTAssertGreaterThan(daemon.memoryPages, 1, "the memory cursor loop ran")
+    }
+
+    // MARK: - M3: the 384 KiB ceiling is a guard, not a comment
+
+    func testChunkSizeAlwaysFitsTheBase64Ceiling() {
+        // The production size, and the clamp that stops any caller breaching the daemon's hard cap.
+        XCTAssertLessThanOrEqual(SyncClient.base64Length(ofRawBytes: SyncClient.rawChunkBytes),
+                                 SyncClient.maxChunkBase64)
+        XCTAssertEqual(SyncClient.base64Length(ofRawBytes: 256 * 1024), 349_528)
+        XCTAssertEqual(SyncClient.maxChunkBase64, 384 * 1024)
+    }
+
+    func testAnOversizedChunkSizeIsClampedRatherThanBreachingTheCap() async throws {
+        // A caller (or a future edit) asking for a 4 MiB chunk must not be able to emit a frame the
+        // daemon refuses outright — and that on the phone transport would end the connection.
+        let id = "10000000-0000-4000-8000-00000000000d"
+        let daemon = RecordingChunkDaemon()
+        let store = try LocalEventStore(directory: dir)
+        let s = try await store.createSession(sessionId: id)
+        s.persist(.assistantMessage(.init(seq: 2, sessionId: id, ts: 2, threadId: "main",
+                                           text: String(repeating: "q", count: 900 * 1024))))
+        let client = SyncClient(store: store, conn: daemon, chunkBytes: 4 * 1024 * 1024)
+        try await client.syncAll()
+
+        XCTAssertGreaterThan(daemon.base64Lengths.count, 1, "the oversized request was split")
+        for length in daemon.base64Lengths {
+            XCTAssertLessThanOrEqual(length, SyncClient.maxChunkBase64)
+        }
     }
 
     // MARK: - config / memory bootstrap
@@ -210,16 +413,31 @@ final class SyncClientTests: XCTestCase {
 }
 
 // ================================================================================================
-// FakeDaemon — an in-memory scripted `RpcConn` that honours the daemon's sync semantics. NOT the
-// real daemon (that is the TS drill's job); enough to drive the client through every branch.
+// FakeDaemon — an in-memory scripted `RpcConn` honouring the daemon's sync semantics. NOT the real
+// daemon (that is the TS drill's job), but deliberately held to the SAME validation the real one
+// applies (review M5), so a client regression cannot pass here and fail on a real socket:
+//   • `lastSeq` is the last event's SEQ, never the line count,
+//   • a batch's seqs must be contiguous from `head + 1`,
+//   • every event must carry the target `sessionId`,
+//   • a batch starting at seq 1 must open with a `session_created` carrying `mode:"chat"`,
+//   • `baseSeq` must equal the head exactly (else DIVERGED with the real head).
+// It also PAGES (`pageBytes`) so the Swift client's cursor-resume loops actually execute (review I4),
+// and can run a hook on first pull to simulate a Mac append racing the pull window (review C1).
 // ================================================================================================
 
-final class FakeDaemon: RpcConn, @unchecked Sendable {
+class FakeDaemon: RpcConn, @unchecked Sendable {
     private let lock = NSLock()
     private var logs: [String: [Data]] = [:]                                  // sessionId → lines (seq order)
     private var metas: [String: (title: String?, model: String?, forkedFrom: SessionForkRef?)] = [:]
     private var buffer: [String: Data] = [:]                                  // reassembly (single conn)
     private(set) var pushFrames = 0
+    private(set) var pullPages = 0
+    private(set) var memoryPages = 0
+    /// Max raw bytes per pull page / files per memory page — `nil` means "one complete page".
+    var pageBytes: Int? = nil
+    var memoryPageSize: Int? = nil
+    /// Runs before a pull is served, once, keyed by session — the racing-daemon-append hook.
+    var beforePull: [String: () -> Void] = [:]
     var config = SyncConfig(exaKey: nil, dangerousDomains: [], defaultModel: "gpt-5.4")
     var memory: [SyncMemoryFile] = []
 
@@ -232,10 +450,16 @@ final class FakeDaemon: RpcConn, @unchecked Sendable {
     func replace(_ id: String, phoneBytes: Data, plus extra: [Data]) {
         lock.withLock { logs[id] = LocalChatSession.split(phoneBytes) + extra }
     }
+    /// Appends one line as the DAEMON would (used by the racing-append hook).
+    func daemonAppend(_ id: String, _ line: Data) { lock.withLock { logs[id, default: []].append(line) } }
     func has(_ id: String) -> Bool { lock.withLock { logs[id] != nil } }
     func sessionIds() -> [String] { lock.withLock { Array(logs.keys) } }
     func rawLog(_ id: String) -> Data { lock.withLock { LocalChatSession.join(logs[id] ?? []) } }
     func meta(_ id: String) -> (title: String?, model: String?, forkedFrom: SessionForkRef?)? { lock.withLock { metas[id] } }
+    /// The head as the daemon computes it: the LAST EVENT'S SEQ (M5 — not the line count).
+    func head(_ id: String) -> Int {
+        lock.withLock { (logs[id]?.last.flatMap { LineEnvelope($0)?.seq }) ?? 0 }
+    }
 
     // MARK: RpcConn
 
@@ -246,31 +470,41 @@ final class FakeDaemon: RpcConn, @unchecked Sendable {
         case METHODS.syncPull:   return try pull(params)
         case METHODS.syncPush:   return try push(params)
         case METHODS.syncConfig: return try JSONEncoder().encode(config)
-        case METHODS.syncMemory: return try encodeMemory()
+        case METHODS.syncMemory: return try encodeMemory(params)
         default: throw RpcError(code: -32601, message: "method not found: \(method)")
         }
     }
 
     private func heads() throws -> Data {
-        let rows: [[String: Any]] = lock.withLock {
-            logs.keys.sorted().map { id in
-                var row: [String: Any] = ["sessionId": id, "lastSeq": logs[id]!.count, "title": (metas[id]?.title as String?) ?? NSNull()]
-                if let m = metas[id]?.model { row["model"] = m }
-                if let f = metas[id]?.forkedFrom { row["forkedFrom"] = ["sessionId": f.sessionId, "atSeq": f.atSeq] }
-                return row
-            }
+        let ids = lock.withLock { logs.keys.sorted() }
+        let rows: [[String: Any]] = ids.map { id in
+            var row: [String: Any] = ["sessionId": id, "lastSeq": head(id),
+                                      "title": (lock.withLock { metas[id]?.title } as String?) ?? NSNull()]
+            if let m = lock.withLock({ metas[id]?.model }) { row["model"] = m }
+            if let f = lock.withLock({ metas[id]?.forkedFrom }) { row["forkedFrom"] = ["sessionId": f.sessionId, "atSeq": f.atSeq] }
+            return row
         }
         return try JSONSerialization.data(withJSONObject: ["sessions": rows])
     }
 
+    /// Byte-offset-cursor paging over the tail, exactly as `SessionStore.readRawTail` does.
     private func pull(_ p: [String: Any]) throws -> Data {
         let id = p["sessionId"] as! String
         let fromSeq = (p["fromSeq"] as! NSNumber).intValue
+        let cursor = (p["cursor"] as? NSNumber)?.intValue ?? 0
+        if let hook = beforePull[id] { beforePull[id] = nil; hook() } // the racing-append window
+        pullPages += 1
         let tail: Data = lock.withLock {
             let kept = (logs[id] ?? []).filter { (LineEnvelope($0)?.seq ?? 0) > fromSeq }
             return kept.isEmpty ? Data() : LocalChatSession.join(kept)
         }
-        return try JSONSerialization.data(withJSONObject: ["data": tail.base64EncodedString(), "complete": true])
+        guard cursor <= tail.count else { throw RpcError(code: -32602, message: "cursor past the end of the tail") }
+        let limit = pageBytes ?? max(tail.count, 1)
+        let end = min(cursor + limit, tail.count)
+        let page = tail.subdata(in: cursor..<end)
+        var out: [String: Any] = ["data": page.base64EncodedString(), "complete": end >= tail.count]
+        if end < tail.count { out["nextCursor"] = end }
+        return try JSONSerialization.data(withJSONObject: out)
     }
 
     private func push(_ p: [String: Any]) throws -> Data {
@@ -281,19 +515,38 @@ final class FakeDaemon: RpcConn, @unchecked Sendable {
         lock.lock(); pushFrames += 1; buffer[id, default: Data()].append(chunk); lock.unlock()
 
         if !complete {
-            let head = lock.withLock { logs[id]?.count ?? 0 }
             let buffered = lock.withLock { buffer[id]?.count ?? 0 }
-            return try JSONSerialization.data(withJSONObject: ["applied": false, "lastSeq": head, "buffered": buffered])
+            return try JSONSerialization.data(withJSONObject: ["applied": false, "lastSeq": head(id), "buffered": buffered])
         }
 
         let batch = lock.withLock { () -> Data in let b = buffer[id] ?? Data(); buffer[id] = nil; return b }
-        let head = lock.withLock { logs[id]?.count ?? 0 }
+        let currentHead = head(id)
         let creating = lock.withLock { logs[id] == nil }
         if creating && baseSeq != 0 { throw RpcError(code: ERR_DIVERGED, message: "unknown session", divergedLastSeq: 0) }
-        if !creating && baseSeq != head {
-            throw RpcError(code: ERR_DIVERGED, message: "baseSeq mismatch", divergedLastSeq: head)
+        if !creating && baseSeq != currentHead {
+            throw RpcError(code: ERR_DIVERGED, message: "baseSeq mismatch", divergedLastSeq: currentHead)
         }
+
+        // The daemon's own batch validation (M5) — every one of these is a hard refusal server-side.
         let lines = LocalChatSession.split(batch)
+        guard !lines.isEmpty else { throw RpcError(code: -32602, message: "complete push carried no events") }
+        var expected = currentHead + 1
+        for line in lines {
+            guard let env = LineEnvelope(line) else { throw RpcError(code: -32602, message: "unparseable event line") }
+            guard env.sessionId == id else {
+                throw RpcError(code: -32602, message: "event carries sessionId \(env.sessionId), not \(id)")
+            }
+            guard env.seq == expected else {
+                throw RpcError(code: -32602, message: "seqs must be contiguous: got \(env.seq), expected \(expected)")
+            }
+            if env.seq == 1 {
+                guard env.type == "session_created", env.object["mode"] as? String == "chat" else {
+                    throw RpcError(code: -32602, message: #"a log-starting push must open with session_created mode:"chat""#)
+                }
+            }
+            expected += 1
+        }
+
         lock.withLock {
             logs[id, default: []].append(contentsOf: lines)
             if let metaObj = p["meta"] as? [String: Any] {
@@ -305,12 +558,49 @@ final class FakeDaemon: RpcConn, @unchecked Sendable {
                              metaObj["model"] as? String ?? metas[id]?.model, fork)
             }
         }
-        let newHead = lock.withLock { logs[id]!.count }
-        return try JSONSerialization.data(withJSONObject: ["applied": true, "lastSeq": newHead, "buffered": 0])
+        return try JSONSerialization.data(withJSONObject: ["applied": true, "lastSeq": head(id), "buffered": 0])
     }
 
-    private func encodeMemory() throws -> Data {
-        let files = memory.map { ["name": $0.name, "content": $0.content] }
-        return try JSONSerialization.data(withJSONObject: ["files": files, "complete": true])
+    /// Whole-file paging over a stable sorted list, mirroring `syncMemory`'s index cursor.
+    private func encodeMemory(_ p: [String: Any]) throws -> Data {
+        memoryPages += 1
+        let cursor = (p["cursor"] as? NSNumber)?.intValue ?? 0
+        let size = memoryPageSize ?? max(memory.count, 1)
+        let end = min(cursor + size, memory.count)
+        let slice = cursor < end ? Array(memory[cursor..<end]) : []
+        var out: [String: Any] = ["files": slice.map { ["name": $0.name, "content": $0.content] },
+                                  "complete": end >= memory.count]
+        if end < memory.count { out["nextCursor"] = end }
+        return try JSONSerialization.data(withJSONObject: out)
+    }
+}
+
+/// A `FakeDaemon` whose CREATING pushes can be made to fail — the network failure that used to leave
+/// an orphaned local fork behind (review I1, third trigger).
+final class FailingForkPushDaemon: FakeDaemon, @unchecked Sendable {
+    var failCreatingPush = false
+
+    override func call(method: String, paramsJSON: Data) async throws -> Data {
+        if method == METHODS.syncPush, failCreatingPush,
+           let p = (try? JSONSerialization.jsonObject(with: paramsJSON)) as? [String: Any],
+           (p["baseSeq"] as? NSNumber)?.intValue == 0,
+           let sid = p["sessionId"] as? String, !has(sid) {
+            throw RpcError(code: -32603, message: "simulated network failure during the fork push")
+        }
+        return try await super.call(method: method, paramsJSON: paramsJSON)
+    }
+}
+
+/// Records the base64 length of every push frame — the evidence for the chunk-ceiling clamp.
+final class RecordingChunkDaemon: FakeDaemon, @unchecked Sendable {
+    private(set) var base64Lengths: [Int] = []
+
+    override func call(method: String, paramsJSON: Data) async throws -> Data {
+        if method == METHODS.syncPush,
+           let p = (try? JSONSerialization.jsonObject(with: paramsJSON)) as? [String: Any],
+           let data = p["data"] as? String {
+            base64Lengths.append(data.count)
+        }
+        return try await super.call(method: method, paramsJSON: paramsJSON)
     }
 }
