@@ -568,9 +568,18 @@ function truncateUtf8(buf: Buffer, maxBytes: number): string {
  *  alone. Hidden/dotfile entries (`.dream-state.json.tmp`, `.MEMORY.md.tmp` — the Dreamer's own
  *  atomic-write temporaries, dreamer.ts) are excluded: they are mid-write artifacts, never durable
  *  memory, and replicating one would be a flaky accident of paging timing rather than a real memory
- *  file. A missing or empty bucket (no dream cycle has ever run) returns `{files: [], complete:
- *  true}` — never an error, same "typed no-op" precedent as every other optional-dependency
- *  degrade in this file. */
+ *  file. A missing bucket (no dream cycle has ever run) returns `{files: [], complete: true}` —
+ *  never an error, same "typed no-op" precedent as every other optional-dependency degrade in this
+ *  file.
+ *
+ *  ONLY a MISSING bucket, though (T12 review I-2). This catch used to swallow every errno, so
+ *  EACCES / EIO / ENOTDIR / a directory the Dreamer was mid-swap on all rendered as "no memory" —
+ *  and an empty page set is indistinguishable on the wire from "the user has no memory yet". The
+ *  phone replicates this bucket and prunes what it is not sent, so one transient read error here
+ *  wiped a device's entire memory replica and every chat turn after it silently ran with no memory
+ *  section. A real read failure must be an ERROR the client can see and ignore, not an empty
+ *  success it will act on. (The phone also refuses to prune on an empty reply, which is what keeps
+ *  it safe against a daemon older than this change — version skew guarantees it meets one.) */
 export function syncMemory(normaHome: string, cursor: number): SyncMemoryResult {
   const dir = assistantMemoryDirFor({ normaHome });
   let names: string[];
@@ -579,8 +588,12 @@ export function syncMemory(normaHome: string, cursor: number): SyncMemoryResult 
       .filter((e) => e.isFile() && !e.name.startsWith("."))
       .map((e) => e.name)
       .sort();
-  } catch {
-    names = []; // bucket doesn't exist yet — no dream cycle has ever run
+  } catch (e) {
+    // ENOENT (and ENOTDIR for a path whose parent is a file) is the honest "bucket doesn't exist
+    // yet". Anything else means the bucket may well have contents we simply could not read — throw.
+    const code = (e as NodeJS.ErrnoException | null)?.code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw e;
+    names = [];
   }
   if (cursor >= names.length) return { files: [], complete: true };
 
@@ -592,8 +605,14 @@ export function syncMemory(normaHome: string, cursor: number): SyncMemoryResult 
     let raw: Buffer;
     try {
       raw = readFileSync(join(dir, name));
-    } catch {
-      continue; // vanished between readdir and read (e.g. a concurrent Dreamer delete) — skip it
+    } catch (e) {
+      // Same distinction, one level down. A file that VANISHED between readdir and read (a
+      // concurrent Dreamer delete) is genuinely gone and skipping it is correct — the client
+      // pruning it is the right outcome. A file that exists but could not be read is not gone, and
+      // omitting it from the page is how the client comes to delete a memory the user still has.
+      const code = (e as NodeJS.ErrnoException | null)?.code;
+      if (code !== "ENOENT") throw e;
+      continue;
     }
     if (files.length === 0 && raw.length > budget) {
       // The lone oversized file on this page: truncate to fit and move past it — never split

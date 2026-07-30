@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
@@ -367,5 +367,64 @@ describe("sync.memory (Chat Slice D task 3)", () => {
     writeFileSync(join(assistantDir(home), "only.md"), "x");
     const result = syncMemory(home, 5);
     expect(result).toEqual({ files: [], complete: true });
+  });
+
+  // ----------------------------------------------------------------------------------------------
+  // T12 review I-2: an UNREADABLE bucket is an error, not an empty success.
+  //
+  // The phone replicates this bucket and prunes what it is not sent. "No dream cycle has ever run"
+  // and "I could not read the directory" used to be the SAME reply — so one transient EACCES here
+  // wiped a device's whole memory replica and every chat turn after it silently ran with no memory
+  // section. Only a genuinely MISSING bucket may degrade to empty.
+  // ----------------------------------------------------------------------------------------------
+
+  test("syncMemory() -> empty+complete for a bucket that does not exist (ENOENT is the honest empty)", () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-sync-memory-unit-"));
+    // No assistant dir at all — no dream cycle has ever run.
+    expect(syncMemory(home, 0)).toEqual({ files: [], complete: true });
+  });
+
+  test("syncMemory() THROWS on an unreadable bucket rather than reporting it empty", () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-sync-memory-unit-"));
+    const dir = assistantDir(home);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "MEMORY.md"), "- [tea](tea.md)");
+    // 0o000: readdir fails EACCES while the contents are very much still there.
+    chmodSync(dir, 0o000);
+    try {
+      // Skip when running as a user that ignores mode bits (root in a container) — the point of the
+      // test is the errno branch, and a run that cannot produce EACCES proves nothing either way.
+      let readable = true;
+      try { readdirSync(dir); } catch { readable = false; }
+      if (readable) return;
+      expect(() => syncMemory(home, 0)).toThrow();
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+  });
+
+  test("syncMemory() THROWS when a listed file cannot be read (but still skips one that VANISHED)", () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-sync-memory-unit-"));
+    const dir = assistantDir(home);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "MEMORY.md"), "- [tea](tea.md)");
+    writeFileSync(join(dir, "tea.md"), "oolong");
+    chmodSync(join(dir, "tea.md"), 0o000);
+    try {
+      let readable = true;
+      try { readFileSync(join(dir, "tea.md")); } catch { readable = false; }
+      if (readable) return; // running as root — see above
+      // An EXISTING file we cannot read must not be silently omitted: omitting it is how the phone
+      // comes to delete a memory the user still has.
+      expect(() => syncMemory(home, 0)).toThrow();
+    } finally {
+      chmodSync(join(dir, "tea.md"), 0o600);
+    }
+    // A file that genuinely VANISHED between readdir and read is still skipped, not thrown: it is
+    // gone, and the client pruning it is the correct outcome.
+    rmSync(join(dir, "tea.md"));
+    const result = syncMemory(home, 0);
+    expect(result.files.map((f) => f.name)).toEqual(["MEMORY.md"]);
+    expect(result.complete).toBe(true);
   });
 });
