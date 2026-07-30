@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
+import { ERR, LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { syncConfig, syncMemory, SYNC_PAGE_BYTES, SYNC_MEMORY_TRUNCATION_MARKER } from "../../src/ipc/sync";
 import { EXA_API_KEY_SECRET } from "../../src/agent/tools/search";
@@ -426,5 +426,37 @@ describe("sync.memory (Chat Slice D task 3)", () => {
     const result = syncMemory(home, 0);
     expect(result.files.map((f) => f.name)).toEqual(["MEMORY.md"]);
     expect(result.complete).toBe(true);
+  });
+
+  /// The throw above has to reach the client as a JSON-RPC error, and that requires the WIRE shape
+  /// to be right, not just the throw. Rethrowing the raw `ErrnoException` put `"code":"EACCES"` — a
+  /// STRING — on a wire whose `code` is `Int` on both Swift sides, so the line failed to decode, was
+  /// dropped as unrecognized, and the request hung to its timeout instead of failing. A read error
+  /// became a stalled sync pass. This drives the REAL server, so the assertion depends on the pump's
+  /// `e.code ?? ERR.INTERNAL` seeing a number.
+  test("an unreadable bucket surfaces as a NUMERIC JSON-RPC error code, not an errno string", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-sync-memory-"));
+    const dir = assistantDir(home);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "MEMORY.md"), "- [tea](tea.md)");
+    chmodSync(dir, 0o000);
+    let readable = true;
+    try { readdirSync(dir); } catch { readable = false; }
+    if (!readable) {
+      const { socketPath, harnessToken } = await boot(home);
+      const c = await TestClient.connect(socketPath);
+      await c.hello(harnessToken, "phone");
+      const res = await c.request(METHODS.syncMemory, {});
+      chmodSync(dir, 0o700);
+      expect(res.result).toBeUndefined();
+      expect(typeof res.error?.code).toBe("number");
+      expect(res.error?.code).toBe(ERR.INTERNAL);
+      // The errno is diagnosable, but the absolute path it came with is NOT serialized to a phone.
+      expect(res.error?.message).toContain("EACCES");
+      expect(res.error?.message).not.toContain(home);
+      c.close();
+    } else {
+      chmodSync(dir, 0o700); // running as a user that ignores mode bits (root) — nothing to prove
+    }
   });
 });

@@ -580,6 +580,23 @@ function truncateUtf8(buf: Buffer, maxBytes: number): string {
  *  section. A real read failure must be an ERROR the client can see and ignore, not an empty
  *  success it will act on. (The phone also refuses to prune on an empty reply, which is what keeps
  *  it safe against a daemon older than this change — version skew guarantees it meets one.) */
+/** The typed failure `syncMemory` raises when the bucket exists but cannot be read.
+ *
+ *  It must be a `SyncRpcError`, NOT the raw `ErrnoException` (T12 re-review I-8). The RPC pump reads
+ *  `code` STRUCTURALLY off whatever was thrown (`ipc/server.ts`'s `e.code ?? ERR.INTERNAL`), and an
+ *  errno's `code` is a STRING — so rethrowing put `"code":"EACCES"` on a wire whose `code` is typed
+ *  `Int` at both the Mac's `InboundLine.ErrorPayload` and the phone's decode. The line then fails to
+ *  decode entirely, is dropped as unrecognized, and the request hangs to its timeout instead of
+ *  failing — turning a read error into a stalled connect pass. Same shape every other throw in this
+ *  file already uses.
+ *
+ *  The errno CODE rides the message; the errno's own `message` does NOT, because it embeds the
+ *  absolute path (`/Users/<name>/.norma/…`) and this error is serialized to a paired phone. The code
+ *  alone is what makes the failure diagnosable. */
+function memoryReadFailure(code: string | undefined): SyncRpcError {
+  return new SyncRpcError(ERR.INTERNAL, `sync.memory could not read the assistant memory bucket (${code ?? "unknown"})`);
+}
+
 export function syncMemory(normaHome: string, cursor: number): SyncMemoryResult {
   const dir = assistantMemoryDirFor({ normaHome });
   let names: string[];
@@ -592,7 +609,7 @@ export function syncMemory(normaHome: string, cursor: number): SyncMemoryResult 
     // ENOENT (and ENOTDIR for a path whose parent is a file) is the honest "bucket doesn't exist
     // yet". Anything else means the bucket may well have contents we simply could not read — throw.
     const code = (e as NodeJS.ErrnoException | null)?.code;
-    if (code !== "ENOENT" && code !== "ENOTDIR") throw e;
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw memoryReadFailure(code);
     names = [];
   }
   if (cursor >= names.length) return { files: [], complete: true };
@@ -611,7 +628,7 @@ export function syncMemory(normaHome: string, cursor: number): SyncMemoryResult 
       // pruning it is the right outcome. A file that exists but could not be read is not gone, and
       // omitting it from the page is how the client comes to delete a memory the user still has.
       const code = (e as NodeJS.ErrnoException | null)?.code;
-      if (code !== "ENOENT") throw e;
+      if (code !== "ENOENT") throw memoryReadFailure(code);
       continue;
     }
     if (files.length === 0 && raw.length > budget) {
