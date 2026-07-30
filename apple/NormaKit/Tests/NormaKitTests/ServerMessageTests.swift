@@ -18,6 +18,22 @@ final class ServerMessageTests: XCTestCase {
         XCTAssertEqual(e, RpcError(code: -32001, message: "invalid token for role"))
     }
 
+    /// WB-C1's decode half: a JSON-RPC error's optional `data` is kept, not discarded. The shape
+    /// driven here is the real one — `sync.push`'s `ERR.DIVERGED` (-32006), whose `data.lastSeq` is
+    /// the branch point the phone's fork/re-push logic keys on and which used to be dropped right
+    /// here, one layer below the gateway that then dropped it a second time.
+    func testResponseErrorKeepsStructuredData() throws {
+        let m = parseServerLine(#"{"jsonrpc":"2.0","id":4,"error":{"code":-32006,"message":"diverged","data":{"lastSeq":17}}}"#)
+        guard case .response(let id, .failure(let e)) = m else { return XCTFail("\(m)") }
+        XCTAssertEqual(id, 4)
+        XCTAssertEqual(e.code, -32006)
+        XCTAssertEqual(e.data?["lastSeq"]?.intValue, 17)
+        // An error WITHOUT `data` still decodes to nil — nothing invented, and the existing
+        // `RpcError(code:message:)` equality above keeps holding.
+        guard case .response(_, .failure(let plain)) = parseServerLine(#"{"jsonrpc":"2.0","id":5,"error":{"code":-1,"message":"x"}}"#) else { return XCTFail() }
+        XCTAssertNil(plain.data)
+    }
+
     func testEventNotificationDecodesSessionEvent() throws {
         let line = #"{"jsonrpc":"2.0","method":"event","params":{"type":"assistant_delta","seq":7,"sessionId":"s_1","ts":1,"threadId":"main","delta":"tok"}}"#
         guard case .event(.assistantDelta(let d)) = parseServerLine(line) else { return XCTFail() }

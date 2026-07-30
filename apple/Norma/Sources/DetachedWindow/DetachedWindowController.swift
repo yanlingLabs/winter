@@ -95,7 +95,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         let feedClient = feed.client
         let sessionDirectory = SessionDirectory(lister: {
             try await feedClient.listSessions().map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId)
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model)
             }
         })
         directory = sessionDirectory
@@ -219,6 +219,24 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
                 let ok = (try? await client.setPolicy(sessionId: self.sessionId, policy: policy)) != nil
                 adapter?.policyChangeInFlight = false
                 if ok { adapter?.sessionPolicy = policy }
+            }
+        }
+
+        // Task 10 (Chat Slice D): the model menu — same seam/discipline as the policy picker just
+        // above, EXCEPT there's no local cache to bump on success: the model menu reads the CURRENT
+        // session's `model` straight off `directory`'s own row (`currentSidebarSessionSummary`,
+        // WorkSidebar.swift), which `session.list` already carries (T1) — so a successful change
+        // just needs THAT row refreshed, not a second source of truth kept in sync by hand.
+        // Refresh happens BEFORE clearing `modelChangeInFlight` so the same re-render its `@Published`
+        // flip forces already sees the fresh row.
+        adapter.onSetModel = { [weak self, weak adapter] model in
+            guard let adapter else { return }
+            adapter.modelChangeInFlight = true
+            Task { @MainActor [weak self, weak adapter] in
+                guard let self else { return }
+                let ok = (try? await client.setModel(sessionId: self.sessionId, model: model)) != nil
+                if ok { await self.directory.refresh() }
+                adapter?.modelChangeInFlight = false
             }
         }
 

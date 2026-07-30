@@ -261,7 +261,10 @@ extension WindowContentView {
 
     /// The directory row for the currently focused/pinned session, or `nil` (no wiring / not listed
     /// yet). `sidebars` is always non-nil where the WorkSidebar renders, but read optionally here.
-    private var currentSidebarSessionSummary: SessionSummary? {
+    /// Internal (not `private`) — Task 10 (Chat Slice D): `WindowContentView`'s model-menu content
+    /// (WindowContentView.swift) reads `.model` off this same row, same cross-file-access precedent
+    /// as `policyPickerRow`'s own doc comment above.
+    var currentSidebarSessionSummary: SessionSummary? {
         guard let sidebars, let sid = sidebars.currentSessionId() else { return nil }
         return sidebars.directory.rows.first { $0.sessionId == sid }
     }

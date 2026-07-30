@@ -239,12 +239,20 @@ extension NormaClient {
         return (id, created)
     }
 
-    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?)] {
+    /// Chat Slice D Task 10: `model` (T1's per-session override, round-tripped by
+    /// `session.list`'s own row — see `SessionListResult` in methods.ts) appended at the END of
+    /// the tuple, same "purely additive, positional destructuring never used" precedent as
+    /// `pluginsList()`'s own `version` field above — every existing labeled call site
+    /// (`.sessionId`, `.mode`, etc.) is unaffected. `nil` for every session created/left without an
+    /// explicit override, or created before this field existed. T1 itself deferred this threading
+    /// ("no consumer yet") — the Mac model picker (`WindowContentView`'s model menu) is that
+    /// consumer: it reads a session row's current override straight off this tuple.
+    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?)] {
         let r = try await request("session.list", params: nil)
         return (r["sessions"]?.arrayValue ?? []).compactMap { s in
             guard let id = s["sessionId"]?.stringValue, let scope = s["scope"]?.stringValue,
                   let created = s["createdAt"]?.intValue, let last = s["lastSeq"]?.intValue else { return nil }
-            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue)
+            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue)
         }
     }
 
@@ -327,6 +335,21 @@ extension NormaClient {
 
     public func setPolicy(sessionId: String, policy: String) async throws {
         _ = try await request("session.setPolicy", params: obj(["sessionId": .string(sessionId), "policy": .string(policy)]))
+    }
+
+    /// `session.setModel {sessionId, model}` (Chat Slice D task 1) — per-session model override,
+    /// mode-agnostic (unlike `setPolicy` above, this has no chat/dispatch special case: there is no
+    /// "fixed model" concept for any mode). `model: nil` CLEARS the override on the wire (the param
+    /// is required-but-nullable there, `SessionSetModelParams.model: z.string().min(1).nullable()`
+    /// — NOT optional), so this always sends the `"model"` key: `.string(...)` when set, `.null`
+    /// when clearing. Result is a bare `{}` (skills.write's idiom) — nothing to report beyond
+    /// success; an unresolvable sessionId throws `RpcError` via the daemon's own NOT_FOUND, same
+    /// precedent as `setPolicy`.
+    public func setModel(sessionId: String, model: String?) async throws {
+        _ = try await request("session.setModel", params: obj([
+            "sessionId": .string(sessionId),
+            "model": model.map { JSONValue.string($0) } ?? JSONValue.null,
+        ]))
     }
 
     public func taskList(sessionId: String) async throws -> [(id: String, subject: String, status: String, activeForm: String?)] {

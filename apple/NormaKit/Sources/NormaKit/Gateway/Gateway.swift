@@ -29,9 +29,18 @@ import NormaSessionKit
 public actor Gateway {
     /// Mirrors the daemon's own `REMOTE_ALLOWED_METHODS` (packages/core/src/ipc/server.ts) as an
     /// independent Swift constant — defense in depth: the gateway rejects an off-list method
-    /// BEFORE it ever reaches the daemon, which enforces the identical 12-method allowlist itself.
+    /// BEFORE it ever reaches the daemon, which enforces the identical 16-method allowlist itself.
     /// SP3 T4b added `approval.list` (10th). SP3.4 added `session.create` (11th). Session history
     /// (design 2026-07-23) added `session.history` (12th) — a pure passthrough, no special-casing.
+    /// Chat Slice D task 1 added `session.setModel` (13th) — the phone sets the model on a
+    /// remote-driven code/dispatch/chat session; also a pure passthrough.
+    /// Chat Slice D task 2 added `sync.heads`/`sync.pull`/`sync.push` (14th–16th) — chat-session
+    /// log replication; also pure passthroughs (the daemon owns the chat-only gate, the byte
+    /// paging, and the divergence check).
+    /// Chat Slice D task 3 added `sync.config`/`sync.memory` (17th–18th) — the phone's OWN
+    /// standalone-chat bootstrap config (Exa key + user dangerous domains + default model) and its
+    /// read-only `_assistant` memory-bucket replica. Neither carries a sessionId; both are pure
+    /// passthroughs, same as every other sync verb.
     static let remoteAllowedMethods: Set<String> = [
         "protocol.hello", "session.list", "session.attach", "session.send",
         "session.dispatch", "approval.respond", "ask_user.respond",
@@ -40,6 +49,12 @@ public actor Gateway {
         "session.create",
         // Session history (design 2026-07-23): the phone reads past events over a paged RPC.
         "session.history",
+        // Chat Slice D task 1: the phone sets the model on a remote-driven session.
+        "session.setModel",
+        // Chat Slice D task 2: the phone replicates its own chat-session logs both ways.
+        "sync.heads", "sync.pull", "sync.push",
+        // Chat Slice D task 3: the phone's standalone-chat config bundle + memory-bucket replica.
+        "sync.config", "sync.memory",
     ]
 
     /// Session-map cap (SP2b Task 4) — see `evictIfNeeded()`.
@@ -709,7 +724,10 @@ public actor Gateway {
             let result = try await session.daemonClient.request(rpc.method, params: rpc.params, commandId: rpc.commandId)
             await sendRpcResult(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, streamID: envelope.streamID, result: result)
         } catch let e as RpcError {
-            await sendRpcError(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, code: e.code, message: e.message)
+            // `data` rides along (WB-C1): the relay is transparent for the whole JSON-RPC error
+            // object, not just its two required members. `sync.push`'s DIVERGED carries the
+            // daemon's `lastSeq` there and the phone's reconcile is unreachable without it.
+            await sendRpcError(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, code: e.code, message: e.message, data: e.data)
         } catch {
             await sendRpcError(conn, epoch: session.epoch, id: rpc.id, sessionID: envelope.sessionID, code: -1, message: "\(error)")
         }
@@ -782,8 +800,13 @@ public actor Gateway {
         await send(conn, epoch: epoch, kind: .rpcResponse, sessionID: sessionID, streamID: streamID, seq: nil, payload: payload)
     }
 
-    private func sendRpcError(_ conn: RemoteConn, epoch: Int, id: JSONValue, sessionID: String?, code: Int, message: String) async {
-        let body = JSONValue.object(["jsonrpc": .string("2.0"), "id": id, "error": .object(["code": .number(Double(code)), "message": .string(message)])])
+    /// `data`: the daemon's OPTIONAL structured error payload, forwarded verbatim (Chat Slice D
+    /// whole-branch Critical WB-C1). Omitted from the body when absent, so every error that doesn't
+    /// carry one stays byte-identical on the wire to what this relay sent before.
+    private func sendRpcError(_ conn: RemoteConn, epoch: Int, id: JSONValue, sessionID: String?, code: Int, message: String, data: JSONValue? = nil) async {
+        var error: [String: JSONValue] = ["code": .number(Double(code)), "message": .string(message)]
+        if let data { error["data"] = data }
+        let body = JSONValue.object(["jsonrpc": .string("2.0"), "id": id, "error": .object(error)])
         guard let payload = try? JSONEncoder().encode(body) else { return }
         await send(conn, epoch: epoch, kind: .rpcResponse, sessionID: sessionID, streamID: nil, seq: nil, payload: payload)
     }

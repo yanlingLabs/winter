@@ -856,6 +856,102 @@ describe("daemon IPC", () => {
     c.close();
   });
 
+  // I1 review fix (Chat Slice D task 1): session.setModel used to validate nothing, so a bad slug
+  // (a typo, or a since-deprecated model) succeeded at set time and then silently broke every
+  // subsequent turn. Reuses spawn_agent's own `known.length > 0`-guarded idiom (engine.ts) — a
+  // real AgentEngine must be wired (`boot({}, fake)`) so `opts.engine?.knownModels()` has a live
+  // provider to enumerate.
+  describe("session.setModel model validation (I1 review fix)", () => {
+    test("rejects an unknown model when the provider CAN enumerate its models, naming the known list", async () => {
+      const { FakeProvider } = await import("../src/agent/fake-provider");
+      const models = [
+        { id: "model-a", family: "fake", contextWindow: 100_000, supportsVision: false },
+        { id: "model-b", family: "fake", contextWindow: 100_000, supportsVision: false },
+      ];
+      await boot({}, new FakeProvider([], models));
+      const c = await TestClient.connect(daemon.socketPath);
+      await c.hello(harnessToken, "model-validator");
+      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
+
+      const res = await c.request(METHODS.sessionSetModel, { sessionId: created.sessionId, model: "nonexistent-model" });
+      expect(res.error).toBeTruthy();
+      expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+      expect(res.error.message).toContain("model-a");
+      expect(res.error.message).toContain("model-b");
+
+      // rejected — never stored (the reject path must leave no trace, same precedent as
+      // session_spawn's own pre-flight rejections).
+      const listed = await c.request(METHODS.sessionList, {});
+      const row = listed.result.sessions.find((r: any) => r.sessionId === created.sessionId);
+      expect(row.model).toBeUndefined();
+      c.close();
+    });
+
+    test("accepts a KNOWN model id and stores it", async () => {
+      const { FakeProvider } = await import("../src/agent/fake-provider");
+      const models = [
+        { id: "model-a", family: "fake", contextWindow: 100_000, supportsVision: false },
+        { id: "model-b", family: "fake", contextWindow: 100_000, supportsVision: false },
+      ];
+      await boot({}, new FakeProvider([], models));
+      const c = await TestClient.connect(daemon.socketPath);
+      await c.hello(harnessToken, "model-validator");
+      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
+
+      const res = await c.request(METHODS.sessionSetModel, { sessionId: created.sessionId, model: "model-b" });
+      expect(res.error).toBeUndefined();
+      expect(res.result).toEqual({});
+
+      const listed = await c.request(METHODS.sessionList, {});
+      const row = listed.result.sessions.find((r: any) => r.sessionId === created.sessionId);
+      expect(row.model).toBe("model-b");
+      c.close();
+    });
+
+    test("resolves a short alias against the known list before storing (same idiom as spawn_agent)", async () => {
+      const { FakeProvider } = await import("../src/agent/fake-provider");
+      const models = [{ id: "gpt-5.6-sol", family: "fake", contextWindow: 100_000, supportsVision: false }];
+      await boot({}, new FakeProvider([], models));
+      const c = await TestClient.connect(daemon.socketPath);
+      await c.hello(harnessToken, "model-validator");
+      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
+
+      const res = await c.request(METHODS.sessionSetModel, { sessionId: created.sessionId, model: "sol" });
+      expect(res.error).toBeUndefined();
+
+      const listed = await c.request(METHODS.sessionList, {});
+      const row = listed.result.sessions.find((r: any) => r.sessionId === created.sessionId);
+      expect(row.model).toBe("gpt-5.6-sol"); // canonicalized to the full id, not the raw alias
+      c.close();
+    });
+
+    test("accepts ANY value when the provider CANNOT enumerate its models (empty models() list) — same fallback as spawn_agent", async () => {
+      const { FakeProvider } = await import("../src/agent/fake-provider");
+      await boot({}, new FakeProvider([], [])); // empty models() — can't enumerate
+      const c = await TestClient.connect(daemon.socketPath);
+      await c.hello(harnessToken, "model-validator");
+      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
+
+      const res = await c.request(METHODS.sessionSetModel, { sessionId: created.sessionId, model: "anything-goes" });
+      expect(res.error).toBeUndefined();
+
+      const listed = await c.request(METHODS.sessionList, {});
+      const row = listed.result.sessions.find((r: any) => r.sessionId === created.sessionId);
+      expect(row.model).toBe("anything-goes");
+      c.close();
+    });
+
+    test("without an engine wired at all, validates nothing (no known list to check against) — same as an unenumerable provider", async () => {
+      await boot(); // no provider → no engine
+      const c = await TestClient.connect(daemon.socketPath);
+      await c.hello(harnessToken, "model-validator-noeng");
+      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
+      const res = await c.request(METHODS.sessionSetModel, { sessionId: created.sessionId, model: "anything-goes" });
+      expect(res.error).toBeUndefined();
+      c.close();
+    });
+  });
+
   test("thread.list without an engine → empty threads", async () => {
     await boot(); // no provider → no engine
     const c = await TestClient.connect(daemon.socketPath);

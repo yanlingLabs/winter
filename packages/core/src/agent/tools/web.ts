@@ -20,72 +20,355 @@ export const WEB_SEARCH_API_KEY_SECRET = "web-search-api-key";
 // module-level, per-process — names saved files webfetch-<n>-<host>.md (USER DESIGN, task-5-brief.md)
 let fetchCounter = 0;
 
-/** First-two-octets private/loopback/link-local IPv4 check — shared by literal IPv4 hosts
+const LOCAL_REFUSAL = `refusing to fetch a local address`;
+const PRIVATE_REFUSAL = `refusing to fetch a private address`;
+
+/** First-two-octets private/loopback/link-local IPv4 table — shared by literal IPv4 hosts
  *  (`10.0.0.1`) AND IPv4-mapped IPv6 addresses (`::ffff:10.0.0.1` / its canonical hex form
  *  `::ffff:a00:1`), which resolve to the exact same 32-bit address and must not evade the guard
  *  just because they're spelled as IPv6. */
 function ipv4Refusal(a: number, b: number): string | null {
   if (a === 127 || a === 10 || a === 0 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)) {
-    return `refusing to fetch a private address`;
+    return PRIVATE_REFUSAL;
   }
   return null;
 }
 
+/** A bare IPv4 HOST. `0.0.0.0` is reported as *local* rather than *private* because that's the
+ *  string this guard has always reported for it (it used to be an explicit `h === "0.0.0.0"` check
+ *  in the local-names branch, ahead of the numeric table) — and WHATWG canonicalizes `http://0/` to
+ *  exactly that host, so the distinction is reachable from a non-canonical spelling too. */
+function ipv4HostRefusal(bits: number): string | null {
+  if (bits === 0) return LOCAL_REFUSAL;
+  return ipv4Refusal((bits >>> 24) & 0xff, (bits >>> 16) & 0xff);
+}
+
+/** `inet_aton`/WHATWG's radix rules (`0x…` hex, a leading `0` octal, else decimal) vs. every part
+ *  read as DECIMAL regardless of a leading zero — the reading Darwin's resolver takes whenever the
+ *  host is a four-part all-decimal quad. See `ipv4Interpretations` for why both are consulted. */
+type RadixPolicy = "c-convention" | "decimal-only";
+
+/** One dotted part under one radix policy, or `null` when it isn't a legal part at all.
+ *
+ *  ASCII digits only: JS's `\d` is already ASCII-only without the `u` flag, and these explicit
+ *  classes keep it that way if the pattern is ever ported. Values are read as doubles — exact below
+ *  2^53 and, above it, only ever rounded by a relative epsilon, so a value that is ≥ 2^32 can never
+ *  round DOWN across the width checks in `dottedIPv4`. Overflow therefore fails the parse rather
+ *  than wrapping (see that function's comment for why wrapping is the thing to avoid). */
+function parsePart(part: string, policy: RadixPolicy): number | null {
+  if (part === "") return null;
+  if (policy === "c-convention") {
+    if (part.startsWith("0x") || part.startsWith("0X")) {
+      const digits = part.slice(2);
+      if (digits === "") return 0; // WHATWG reads a bare `0x` as zero
+      if (!/^[0-9a-fA-F]+$/.test(digits)) return null;
+      return Number.parseInt(digits, 16);
+    }
+    if (part.length > 1 && part.startsWith("0")) {
+      const digits = part.slice(1);
+      if (!/^[0-7]+$/.test(digits)) return null;
+      return Number.parseInt(digits, 8);
+    }
+  }
+  if (!/^[0-9]+$/.test(part)) return null;
+  return Number(part);
+}
+
+/** `inet_aton`'s grammar, parsed exactly: 1-4 parts with the classic widening (`a` / `a.b` /
+ *  `a.b.c` / `a.b.c.d`), every part but the last capped at a byte and the last filling the rest.
+ *
+ *  EXPLICIT WIDTH CHECKS, and that is the point (fix-round-2 finding on the Swift port, back-ported
+ *  here): the platform `inet_aton` silently WRAPS on overflow instead of failing — `0x1c0a80101`
+ *  (2^32 + 0xc0a80101) reads as 192.168.1.1, `4294967296` as 0.0.0.0. A wrapped value is
+ *  indistinguishable from a real parse and invents addresses the string never denoted, so overflow
+ *  fails the parse here instead. */
+function dottedIPv4(host: string, policy: RadixPolicy): number | null {
+  const parts = host.split(".");
+  if (parts.length < 1 || parts.length > 4) return null;
+
+  const values: number[] = [];
+  for (const part of parts) {
+    const value = parsePart(part, policy);
+    if (value === null) return null;
+    values.push(value);
+  }
+
+  const tailBits = (5 - values.length) * 8; // 1 part → 32, 2 → 24, 3 → 16, 4 → 8
+  const tail = values[values.length - 1]!;
+  if (tail >= 2 ** tailBits) return null;
+  let bits = tail;
+  for (let i = 0; i < values.length - 1; i++) {
+    const value = values[i]!;
+    if (value > 255) return null;
+    bits += value * 2 ** (32 - 8 * (i + 1));
+  }
+  return bits >>> 0; // the width checks above already bound this to 32 bits
+}
+
+/** Every 32-bit address this host string could denote to something that will dial it. Empty when the
+ *  host is not an IPv4 literal under any reading.
+ *
+ *  WHY TWO READINGS. `inet_aton`/WHATWG and `getaddrinfo` — the resolver — disagree, and neither is
+ *  a superset of the other. Measured on this machine:
+ *
+ *      host             inet_aton/WHATWG   getaddrinfo    private?
+ *      0300.0250.0.1    192.168.0.1        192.168.0.1    yes  (octal; both agree)
+ *      0xc0a80101       192.168.1.1        192.168.1.1    yes  (hex; both agree)
+ *      010.0.0.1        8.0.0.1            10.0.0.1       yes — ONLY under getaddrinfo
+ *      0177.0.0.1       127.0.0.1          177.0.0.1      yes — ONLY under inet_aton/WHATWG
+ *
+ *  `getaddrinfo` reads a leading zero as DECIMAL (`010` → 10) where `inet_aton` takes the C
+ *  convention (`010` → 8). A guard consulting either alone fails OPEN on one of those two rows, so
+ *  both are returned and ANY private reading refuses. That is fail-closed by construction and costs
+ *  nothing: a genuinely public address is public under both readings.
+ *
+ *  DARWIN'S ACTUAL RULE, since the obvious guess is wrong and the wrong guess was in this comment
+ *  until the review corrected it: it is not per-part. `getaddrinfo` tries a STRICT FOUR-PART
+ *  ALL-DECIMAL parse first (leading zeros allowed, every part ≤ 255) and falls back to whole-host
+ *  `inet_aton` when that fails — never a mix. Measured:
+ *
+ *      host              new URL        getaddrinfo    inet_aton
+ *      010.0.0.1         8.0.0.1        10.0.0.1       8.0.0.1      4 parts: the decimal quad wins
+ *      010.0.1           8.0.0.1        8.0.0.1        8.0.0.1      3 parts: no quad, so C convention
+ *      0172.020.0300.1   122.16.192.1   122.16.192.1   122.16.192.1 quad FAILS (300 > 255) → aton
+ *      0172.020.192.1    122.16.192.1   172.20.192.1   122.16.192.1 quad succeeds
+ *
+ *  `decimal-only` ∪ `c-convention` is a strict SUPERSET of that rule for every part count — which is
+ *  the fail-closed property this needs, and it is what makes the mechanism correction a comment fix
+ *  rather than a code fix. Checked empirically, not by argument: a 46,598-host mixed-radix corpus
+ *  (including the `0172.020.0300.1` shape built specifically to break it) found 0 resolver holes and
+ *  0 dial holes. `test/agent/tools/ssrf-resolver-sweep.test.ts` carries the transform that keeps a
+ *  regression here visible. */
+function ipv4Interpretations(host: string): number[] {
+  const found: number[] = [];
+  for (const policy of ["c-convention", "decimal-only"] as const) {
+    const bits = dottedIPv4(host, policy);
+    if (bits !== null && !found.includes(bits)) found.push(bits);
+  }
+  return found;
+}
+
+/** WHATWG's strict IPv4-in-IPv6 tail: exactly four 1-3 digit decimal parts, no leading zeros, each
+ *  ≤ 255. Deliberately NOT `dottedIPv4` — inside an IPv6 literal there is no `inet_aton` widening
+ *  and no alternate radix, in either WHATWG's parser or `inet_pton`'s. */
+function strictDottedQuad(text: string): number | null {
+  const parts = text.split(".");
+  if (parts.length !== 4) return null;
+  let bits = 0;
+  for (const part of parts) {
+    if (!/^[0-9]{1,3}$/.test(part)) return null;
+    if (part.length > 1 && part.startsWith("0")) return null;
+    const value = Number(part);
+    if (value > 255) return null;
+    bits = bits * 256 + value;
+  }
+  return bits >>> 0;
+}
+
+/** The 16 bytes of an IPv6 literal (unbracketed, lowercased), or `null` when the host is not one.
+ *  A zone id (`%en0`) is stripped first: a resolver honours scoped link-local addresses, so the
+ *  guard has to see through the suffix rather than let it disguise `fe80::1`.
+ *
+ *  This is what structurally retires the old `wasIpv6Literal` gate: a host that merely LOOKS like an
+ *  IPv6 prefix (`fcc.gov`, `fdic.gov`, `fear.com`) simply fails to parse and never reaches a
+ *  prefix check at all, so the over-blocking class is impossible rather than conditionally avoided. */
+function ipv6Bytes(host: string): Uint8Array | null {
+  const bare = host.split("%")[0]!;
+  if (!bare.includes(":")) return null;
+  const halves = bare.split("::");
+  if (halves.length > 2) return null;
+
+  const groupsOf = (text: string): number[] | null => {
+    if (text === "") return [];
+    const labels = text.split(":");
+    const groups: number[] = [];
+    for (let i = 0; i < labels.length; i++) {
+      const label = labels[i]!;
+      if (i === labels.length - 1 && label.includes(".")) {
+        const quad = strictDottedQuad(label);
+        if (quad === null) return null;
+        groups.push((quad >>> 16) & 0xffff, quad & 0xffff);
+        continue;
+      }
+      if (!/^[0-9a-f]{1,4}$/.test(label)) return null;
+      groups.push(Number.parseInt(label, 16));
+    }
+    return groups;
+  };
+
+  const head = groupsOf(halves[0]!);
+  if (head === null) return null;
+  let groups: number[];
+  if (halves.length === 1) {
+    if (head.length !== 8) return null;
+    groups = head;
+  } else {
+    const tail = groupsOf(halves[1]!);
+    if (tail === null) return null;
+    if (head.length + tail.length > 7) return null; // "::" must elide at least one group
+    groups = [...head, ...new Array<number>(8 - head.length - tail.length).fill(0), ...tail];
+  }
+
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 8; i++) {
+    bytes[i * 2] = (groups[i]! >> 8) & 0xff;
+    bytes[i * 2 + 1] = groups[i]! & 0xff;
+  }
+  return bytes;
+}
+
+/** Numeric range checks over the parsed 16 bytes — the whole-nibble `startsWith("fc")` /
+ *  first-hextet arithmetic this replaces was correct only for the canonical spelling. */
+function ipv6Refusal(bytes: Uint8Array): string | null {
+  if (bytes.every((b) => b === 0)) return LOCAL_REFUSAL; // ::
+  if (bytes.slice(0, 15).every((b) => b === 0) && bytes[15] === 1) return LOCAL_REFUSAL; // ::1
+
+  // IPv4-mapped (`::ffff:a.b.c.d`, and its canonical hex form `::ffff:XXXX:YYYY`) is a real IPv4
+  // address and must go through the SAME table — the textbook v4-blocklist bypass. Deliberately
+  // `ipv4Refusal` and not `ipv4HostRefusal`, preserving this guard's long-standing behavior that
+  // `::ffff:0.0.0.0` is *private* (first octet 0) rather than *local*.
+  if (bytes.slice(0, 10).every((b) => b === 0) && bytes[10] === 0xff && bytes[11] === 0xff) {
+    const refusal = ipv4Refusal(bytes[12]!, bytes[13]!);
+    if (refusal) return refusal;
+  }
+
+  if ((bytes[0]! & 0xfe) === 0xfc) return PRIVATE_REFUSAL; // fc00::/7
+  if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80) return PRIVATE_REFUSAL; // fe80::/10 — wider than fe80::/16
+  return null;
+}
+
+/** One host string — canonical or as-written — judged on its own. */
+function hostRefusal(host: string): string | null {
+  let h = host.toLowerCase();
+  // Trailing-dot FQDN normalization: "localhost." / "10.0.0.1." are the SAME address as their
+  // dot-less forms (a trailing dot is just the DNS root label) but defeat every check below if left
+  // as-is. Strip ONE trailing dot.
+  if (h.endsWith(".")) h = h.slice(0, -1);
+  // IPv6 literals arrive bracketed from URL.hostname ("[fe80::1]") — unwrap BEFORE any check.
+  if (h.startsWith("[") && h.endsWith("]")) h = h.slice(1, -1);
+  if (h === "") return null;
+
+  // Names, not addresses — the one branch that stays a string comparison, because there is nothing
+  // to parse.
+  if (h === "localhost" || h.endsWith(".local")) return LOCAL_REFUSAL;
+
+  // IPv6 is resolved FIRST and completely: an IPv6 literal is unambiguously an address, so the IPv4
+  // readings below must never look at it (`::ffff:1.1.1.1` splits on "." into parts that are not
+  // IPv4 parts at all, and a partial reading of an address is worse than none).
+  const bytes = ipv6Bytes(h);
+  if (bytes) return ipv6Refusal(bytes);
+
+  // ANY reading that lands in private space refuses.
+  for (const bits of ipv4Interpretations(h)) {
+    const refusal = ipv4HostRefusal(bits);
+    if (refusal) return refusal;
+  }
+  return null;
+}
+
+/** The host EXACTLY AS WRITTEN in `raw`, before WHATWG's canonicalizer rewrote it — lowercased and
+ *  percent-decoded, with userinfo and port removed. `null` when there is no authority to extract.
+ *
+ *  This exists because `ssrfGuard` has to judge a spelling that `new URL()` has already thrown away.
+ *  See the guard's own comment for the fail-open class it closes. Everything WHATWG does to a URL
+ *  BEFORE the host parser runs is reproduced here — tab/newline removal, C0-control-or-space
+ *  trimming, `\` treated as `/` (special schemes only, which is all this guard accepts), an
+ *  arbitrary run of leading slashes, userinfo up to the LAST `@`, and percent-decoding — and
+ *  nothing it does after. It is deliberately CONTAINED: a mis-extraction can only produce a host
+ *  that no reading recognises (in which case the canonical check, which is what this guard has
+ *  always done, still stands unchanged), never a weaker verdict than before.
+ *
+ *  The UTS-46 MAPPING step (review Minor 1) is the last thing WHATWG does before parsing the host,
+ *  and skipping it let six measured spellings of the ambiguous class walk straight past this leg:
+ *  `０１０.0.0.1` (FULLWIDTH DIGIT ZERO/ONE), its percent-encoded UTF-8 form
+ *  `%EF%BC%90%EF%BC%91%EF%BC%90.0.0.1`, `０１２７.0.0.1`, and `010。0.0.1` / `010．0.0.1` /
+ *  `010｡0.0.1` (U+3002 IDEOGRAPHIC, U+FF0E FULLWIDTH and U+FF61 HALFWIDTH IDEOGRAPHIC FULL STOP —
+ *  UTS-46 folds all three to `.`). `NFKC` covers the fullwidth digits and U+FF0E, and folds U+FF61 to
+ *  U+3002; U+3002 is itself NFKC-stable, so it is folded explicitly. Order matters: percent-decode
+ *  first (those escapes ARE the UTF-8 of those characters), then normalize, then fold, then
+ *  lowercase. This is the mapping step only, not a reimplementation of IDNA — Punycode conversion
+ *  cannot turn a host into a private IPv4 literal, so it buys nothing here. */
+function rawAuthorityHost(raw: string): string | null {
+  // C0-control-or-space trim, as an INDEX WALK (review Important 5). This was
+  // `.replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "")`, whose second alternative is unbounded and
+  // NOT anchored, so on a run of spaces followed by any non-space the engine retried it at every
+  // position in the run — quadratic, and reachable straight from `ssrfGuard` with a long
+  // model-supplied URL (`z.string().min(1)` has no length cap): measured 758 ms at 39 KB, 17.7 s at
+  // 195 KB, 58.4 s at 391 KB. Splitting it into two anchored replacements does NOT fix it, because
+  // `/[\u0000-\u0020]+$/` still has to be tried at every start position. A walk from each end is
+  // obviously linear and byte-identical: the regex could only ever strip a LEADING run (`^`-anchored)
+  // and a TRAILING one (`$`-anchored), never an interior one.
+  const stripped = raw.replace(/[\t\n\r]/g, "");
+  let head = 0;
+  let tail = stripped.length;
+  while (head < tail && stripped.charCodeAt(head) <= 0x20) head++;
+  while (tail > head && stripped.charCodeAt(tail - 1) <= 0x20) tail--;
+  let rest = stripped.slice(head, tail);
+  const scheme = /^[A-Za-z][A-Za-z0-9+\-.]*:/.exec(rest);
+  if (!scheme) return null;
+  rest = rest.slice(scheme[0].length).replace(/^[/\\]*/, "");
+  const authorityEnd = rest.search(/[/\\?#]/);
+  const authority = authorityEnd === -1 ? rest : rest.slice(0, authorityEnd);
+  const at = authority.lastIndexOf("@");
+  let host = at === -1 ? authority : authority.slice(at + 1);
+  if (host.startsWith("[")) {
+    const close = host.indexOf("]");
+    if (close !== -1) host = host.slice(0, close + 1);
+  } else {
+    const colon = host.indexOf(":");
+    if (colon !== -1) host = host.slice(0, colon);
+  }
+  if (host === "") return null;
+  try { host = decodeURIComponent(host); } catch { /* not valid UTF-8 escapes — judge it as written */ }
+  return host.normalize("NFKC").replace(/\u3002/g, ".").toLowerCase();
+}
+
 /** Norma's ONLY sanctioned network egress (spec 4g §4.3) — bash stays sandboxed (network denied).
  *  v1 SSRF posture: literal private/loopback/link-local hosts rejected; DNS-rebinding is out of
- *  scope (documented). Response bytes are DATA, never instructions. */
+ *  scope (documented). Response bytes are DATA, never instructions.
+ *
+ *  ## Why this PARSES addresses instead of string-matching them, and why it judges TWO hosts
+ *
+ *  Until this rewrite every check here was a string comparison (`h === "127.0.0.1"`, a dotted-quad
+ *  regex, `h.startsWith("fc")`) against `u.hostname` — i.e. against the host AFTER WHATWG's
+ *  canonicalizer had rewritten it. That is load-bearing and it is also where the hole was:
+ *  canonicalization is LOSSY, and the reading WHATWG picks is not the only reading a resolver will
+ *  accept. `getaddrinfo("0127.0.0.1")` is 127.0.0.1 — loopback — while WHATWG reads the leading zero
+ *  as octal and hands the guard `87.0.0.1`, which is public, so the guard said yes. The class is
+ *  unbounded (leading zeros repeat: `00127`, `000127`, …) and reachable percent-encoded
+ *  (`%30%31%32%37.0.0.1`), so it is a class to close, not a list to enumerate.
+ *
+ *  So both hosts are judged, and any private reading of either refuses:
+ *
+ *  1. `u.hostname` — the CANONICAL host. On this runtime it is also the DIALED host: Bun's `fetch`
+ *     runs the URL through the same WHATWG parser and connects to the canonicalized authority
+ *     (verified with a loopback probe — `http://0177.0.0.1:PORT/` reaches a listener bound to
+ *     127.0.0.1, i.e. WHATWG's octal reading, and arrives with `Host: 127.0.0.1:PORT`). The
+ *     resolver sweep asserts this leg separately, because a hole in it would be a live SSRF rather
+ *     than a latent one.
+ *  2. `rawAuthorityHost(raw)` — the host AS WRITTEN, under BOTH radix readings (see
+ *     `ipv4Interpretations`). This is the leg that closes the class above, and it is what keeps the
+ *     daemon's verdict identical to the phone's (`apple/NormaChatKit/.../SSRFGuard.swift`, whose
+ *     `Foundation.URL` canonicalizes nothing and so has always had to parse).
+ *
+ *  This only ever TIGHTENS: every host the old string checks refused is still refused, with the same
+ *  message. The deliberate new refusals are the ambiguous spellings — `http://010.0.0.1/`,
+ *  `http://0127.0.0.1/`, `http://010.010.010.010/` — which WHATWG would dial as public addresses but
+ *  a resolver handed the same string targets into private space. No legitimate host is spelled that
+ *  way, and `test/agent/tools/ssrf-resolver-sweep.test.ts` is the generator-independent gate that
+ *  proves nothing the guard allows resolves — or dials — into private space. */
 export function ssrfGuard(raw: string): string | null {
   let u: URL; try { u = new URL(raw); } catch { return `invalid url: ${raw}`; }
   if (u.protocol !== "http:" && u.protocol !== "https:") return `only http(s) urls are allowed`;
 
-  let h = u.hostname.toLowerCase();
-  // Trailing-dot FQDN normalization: "localhost." / "10.0.0.1." are the SAME address as their
-  // dot-less forms (a trailing dot is just the DNS root label) but defeat `h === "localhost"` /
-  // the IPv4 regex if left as-is. Strip ONE trailing dot before every check below.
-  if (h.endsWith(".")) h = h.slice(0, -1);
-  // IPv6 literals arrive bracketed from URL.hostname ("[fe80::1]") — unwrap BEFORE any check,
-  // else every prefix/equality check below is structurally dead (nothing starts with "fc" once
-  // bracketed). Remember it WAS a literal so the ULA/link-local prefix check below only applies to
-  // real IPv6 literals, never to a domain that merely starts with "fc"/"fd"/"fe80" (fcc.gov etc.).
-  const wasIpv6Literal = h.startsWith("[") && h.endsWith("]");
-  if (wasIpv6Literal) h = h.slice(1, -1);
+  const canonical = u.hostname.toLowerCase();
+  const canonicalRefusal = hostRefusal(canonical);
+  if (canonicalRefusal) return canonicalRefusal;
 
-  if (h === "localhost" || h.endsWith(".local") || h === "0.0.0.0") return `refusing to fetch a local address`;
-
-  const ip4 = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (ip4) { const refusal = ipv4Refusal(Number(ip4[1]), Number(ip4[2])); if (refusal) return refusal; }
-
-  // IPv6 loopback / unspecified.
-  if (h === "::1" || h === "::" || (h.includes(":") && h.split(":").every((g) => g === "" || /^0+$/.test(g)))) {
-    return `refusing to fetch a local address`;
-  }
-
-  // IPv4-mapped IPv6 (`::ffff:a.b.c.d`, or its canonical hex form `::ffff:XXXX:YYYY` — the form
-  // URL.hostname actually normalizes to) resolves to a real IPv4 address and must be checked
-  // against the SAME private-range table as literal IPv4 hosts (the textbook v4-blocklist bypass).
-  const mappedDotted = h.match(/^::ffff:(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (mappedDotted) { const refusal = ipv4Refusal(Number(mappedDotted[1]), Number(mappedDotted[2])); if (refusal) return refusal; }
-  const mappedHex = h.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (mappedHex) {
-    const g1 = parseInt(mappedHex[1]!, 16);
-    const refusal = ipv4Refusal((g1 >> 8) & 0xff, g1 & 0xff);
-    if (refusal) return refusal;
-  }
-
-  // IPv6 ULA (fc00::/7) + link-local (fe80::/10) — ONLY for actual IPv6 literals, else a bare
-  // string-prefix match wrongly refuses public domains like fcc.gov / fdic.gov / fc-barcelona.com.
-  // fc00::/7 (top 7 bits fixed) is exactly captured by the "fc"/"fd" hex-nibble prefixes. But
-  // fe80::/10 (top 10 bits fixed) is NOT a whole-nibble prefix — the first hextet ranges over
-  // 0xfe80–0xfebf (fe80::, fe90::, fea0::, feb0::, … up to febf::), so a bare `startsWith("fe80")`
-  // string check misses fe90::/fea0::/feb0:: entirely. Range-check the first hextet numerically
-  // instead — a public domain merely starting with "fe" (fear.com) never reaches this branch at
-  // all (wasIpv6Literal gates the whole thing), so this can't over-block those.
-  if (wasIpv6Literal) {
-    if (h.startsWith("fc") || h.startsWith("fd")) return `refusing to fetch a private address`;
-    const firstHextet = parseInt(h.split(":")[0] ?? "", 16);
-    if (!Number.isNaN(firstHextet) && firstHextet >= 0xfe80 && firstHextet <= 0xfebf) {
-      return `refusing to fetch a private address`;
-    }
+  const written = rawAuthorityHost(raw);
+  if (written !== null && written !== canonical) {
+    const writtenRefusal = hostRefusal(written);
+    if (writtenRefusal) return writtenRefusal;
   }
   return null;
 }
@@ -142,14 +425,195 @@ const STYLE_OPEN_RE = /<style/gi;
 const STYLE_CLOSE_RE = /<\/style>/gi;
 const HEAD_OPEN_RE = /<head/gi;
 const HEAD_CLOSE_RE = /<\/head>/gi;
-// Same open/close shape as page-core.ts's own LINK_OPEN_RE/LINK_CLOSE_RE (deliberately NOT
-// imported — that would be a reverse dependency, since page-core.ts already imports FROM this
-// file; a tiny disclosed duplication, same precedent as this file's own `extractTitle`/page-core's
-// separate copy).
-const ANCHOR_OPEN_RE = /<a\s[^>]*href="([^"]+)"[^>]*>/gi;
 const ANCHOR_CLOSE_RE = /<\/a>/gi;
-const HEADING_OPEN_RE = /<h([1-6])[^>]*>/gi;
 const HEADING_CLOSE_RE = /<\/h([1-6])>/gi;
+
+const LT = 0x3c; // "<"
+const GT = 0x3e; // ">"
+
+// ---------------------------------------------------------------------------------------------
+// THE OPEN-TAG SCAN CLASS, and the primitive that closes it (Task 6b fix-round-2, review Critical 2)
+//
+// Three rounds of this task each found the same defect in a different regex in this file, so the
+// fourth stops naming instances. THE CLASS: a pattern with an unbounded quantifier (`[^>]*`, `[^"]+`)
+// followed by a REQUIRED `>` is quadratic on input where that `>` never arrives — at every candidate
+// start position the engine consumes to end-of-string and then fails. `replacePairedTag`'s early
+// `break` does not save it, because the `exec` that scans is evaluated BEFORE the `closes.length`
+// check, so one full scan is always paid. And the anchor pattern stacked THREE unbounded quantifiers
+// on one span (`[^>]*` … `([^"]+)` … `[^>]*`), which is cubic:
+//
+//     regex (as driven by its own caller)         20 KB     39 KB    156-195 KB   growth
+//     /<a\s[^>]*href="([^"]+)"[^>]*>/gi          15.5 s     115 s        hang     x8  => CUBIC
+//     /<a\s[^>]*href="([^"]+)"[^>]*>/gi (no href)  36 ms    152 ms      2.33 s    x4  => quadratic
+//     /<h([1-6])[^>]*>/gi                          45 ms    179 ms      3.85 s    x4  => quadratic
+//
+// End-to-end that was 13.2 s of blocked event loop on a 14.6 KB page of `<a href="x` — charged TWICE,
+// once in `htmlToText`'s anchor pass and again in `page-core.ts`'s `extractLinks`, which used a
+// byte-identical copy of the same regex. ~40 KB reached minutes. Benign pages stay fast (a 383 KB
+// link-heavy page with one unterminated href costs 0.6 ms), which is exactly why three rounds of
+// realistic testing never saw it: it only appears under attack.
+//
+// THE FIX IS STRUCTURAL. Every open-tag pattern here is now split into (a) a candidate regex with NO
+// unbounded quantifier — so driving it with `exec` is linear — and (b) a scan bounded by `makeGtFinder`
+// below, one monotonic `>` pointer that never rewinds. `test/agent/tools/regex-shapes.test.ts` walks
+// the regex literals in this file and in page-core.ts and FAILS on the dangerous shape, so the class
+// cannot come back by someone adding a fourth instance.
+//
+// `stripTags` and `replaceListItems` implement the same monotonic-`>` discipline inline rather than
+// through `makeGtFinder`: they are the two hottest passes (every byte of every fetch) and a closure
+// call per `<` is measurable there. The structural test covers them too.
+
+/** The shared primitive. Returns the index of the first `>` at or after `at`, or -1 when none remains.
+ *
+ *  CONTRACT: `at` must be non-decreasing across calls on one finder. Every caller below scans
+ *  candidates left to right, so this holds. It is what makes the whole scan linear — the pointer
+ *  crosses the document once in total, not once per candidate. It is also why the answer stays
+ *  correct when two candidates share a span: if there is no `>` in `[a1, g)` then there is none in
+ *  `[a2, g)` for any `a2 > a1`, so returning the cached `g` is right, not merely cheap. */
+function makeGtFinder(text: string): (at: number) => number {
+  const n = text.length;
+  let ptr = 0;
+  return (at: number) => {
+    if (ptr < at) ptr = at;
+    while (ptr < n && text.charCodeAt(ptr) !== GT) ptr++;
+    return ptr >= n ? -1 : ptr;
+  };
+}
+
+/** One matched open tag: its span plus whatever capture the renderer needs (an anchor's href, a
+ *  heading's level). The shape every scanner below produces and `replacePairedTag` consumes. */
+interface TagOpen { start: number; end: number; capture: string }
+
+/** Candidate regexes. NONE has an unbounded quantifier, so each `exec` loop is linear; the `\s` in
+ *  the anchor candidate is JS's own (which includes U+00A0, U+000B, U+3000 and U+FEFF — verified
+ *  live), and the `i` flag is JS's own, so neither the whitespace set nor the case folding is
+ *  re-derived by hand here. */
+const ANCHOR_CANDIDATE_RE = /<a\s/gi;
+const HEADING_CANDIDATE_RE = /<h([1-6])/gi;
+
+/** Bare-token opens (`<script`, `<style`, `<head`) — already quantifier-free, so this is just the
+ *  `exec` loop in `TagOpen` clothing. */
+function scanSimpleOpens(html: string, re: RegExp): TagOpen[] {
+  const opens: TagOpen[] = [];
+  re.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) opens.push({ start: m.index, end: re.lastIndex, capture: "" });
+  return opens;
+}
+
+/** `/<h([1-6])[^>]*>/gi`, linearly. The `[^>]*` cannot cross a `>`, so the match ends at the FIRST `>`
+ *  at or after the candidate token — there is nothing to search for that the pointer does not know.
+ *  No `>` after a candidate means no match for it or for any later one, hence the `break`. */
+function scanHeadingOpens(html: string): TagOpen[] {
+  const opens: TagOpen[] = [];
+  const nextGt = makeGtFinder(html);
+  HEADING_CANDIDATE_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = HEADING_CANDIDATE_RE.exec(html))) {
+    const gt = nextGt(HEADING_CANDIDATE_RE.lastIndex);
+    if (gt < 0) break;
+    opens.push({ start: m.index, end: gt + 1, capture: m[1]! });
+    HEADING_CANDIDATE_RE.lastIndex = gt + 1; // the global regex's own jump past the match
+  }
+  return opens;
+}
+
+/** `/<a\s[^>]*href="([^"]+)"[^>]*>/gi`, linearly — the cubic one, and the only site whose equivalence
+ *  is not obvious, so here is the whole derivation. It was checked against the real regex on 300,000
+ *  randomized documents, compared as full `(start, end, capture)` tuple lists, 0 divergences.
+ *
+ *  For a candidate `<a` + one `\s` at `i` (token ending at `i+3`):
+ *
+ *  1. `[^>]*` cannot cross a `>`, so `href="` must lie entirely inside `[i+3, spanEnd)` where
+ *     `spanEnd` is the first `>` at or after `i+3` (entirely, because none of `href="`'s own
+ *     characters is `>`). No `>` at all after `i+3` ⇒ no match here or later ⇒ `break`.
+ *  2. `([^"]+)` cannot match a `"`, and backtracking it to a shorter run would require a `"` where
+ *     there is none — so the href value is EXACTLY the text from after `href="` up to the NEXT `"`,
+ *     and that `"` must exist. It may legitimately cross a `>`; that is PRICE-OF-LINEARITY class (B)
+ *     (`<a href="href=">`), pinned as a cleaner vector, and reproduced here.
+ *  3. The trailing `[^>]*>` then needs a `>` after that closing quote — necessarily the FIRST one.
+ *  4. The leading `[^>]*` is GREEDY, so the engine tries `href="` occurrences RIGHT TO LEFT and takes
+ *     the first that completes steps 2-3. Measured, not assumed: `<a x href="A" href="B">` captures
+ *     `"B"`, and `<a href="A" href="Z>` falls back to `"A"` because the rightmost has no closing
+ *     quote. So the winner is the RIGHTMOST VIABLE occurrence — where "viable" means it has a closing
+ *     `"` and a `>` after that quote, neither of which depends on `i`.
+ *
+ *  That last point is what makes this O(1) per candidate. Viability is a property of the SPAN, so the
+ *  rightmost viable occurrence `R` is computed once per span; a candidate then needs `R >= i+3`, and
+ *  if `R < i+3` no viable occurrence is in range at all (R being the maximum). Candidates sharing a
+ *  span reuse the cached answer instead of re-parsing it — the residual O(span²) the review warned
+ *  about. Every pointer here is monotonic over the whole document, so the total is O(n). */
+function scanAnchorOpens(html: string): TagOpen[] {
+  const n = html.length;
+  const opens: TagOpen[] = [];
+  const nextSpanEnd = makeGtFinder(html);
+  const nextGtAfterQuote = makeGtFinder(html);
+
+  let cachedSpanEnd = -1; // the span the cache below describes
+  let bestHref = -1; // rightmost VIABLE `href="` in that span, or -1
+  let bestQuote = -1; // its closing `"`
+  let bestEnd = -1; // its match end (first `>` after that quote, +1)
+  // Monotonic: together with the `until` bound on the search below, the regions examined across spans
+  // are DISJOINT, so the whole scan is O(n). (Before Critical 3's fix this comment read "no span is ever
+  // scanned twice", which was true of the span bookkeeping and false of the search it was guarding —
+  // exactly the gap that let the regression through. The bound is what makes the claim true.)
+  let hrefScanFrom = 0;
+
+  ANCHOR_CANDIDATE_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = ANCHOR_CANDIDATE_RE.exec(html))) {
+    const tokenEnd = ANCHOR_CANDIDATE_RE.lastIndex; // just past `<a` + the one whitespace char
+    const spanEnd = nextSpanEnd(tokenEnd);
+    if (spanEnd < 0) break; // no `>` anywhere after this candidate, nor after any later one
+
+    if (spanEnd !== cachedSpanEnd) {
+      cachedSpanEnd = spanEnd;
+      bestHref = bestQuote = bestEnd = -1;
+      for (let p = Math.max(hrefScanFrom, tokenEnd); p + 6 <= spanEnd; ) {
+        // BOUNDED BY `spanEnd` (review Critical 3). Without the bound this search ran forward past the
+        // span — to the next `href="` anywhere in the document, or to end-of-string — and the result was
+        // then thrown away by the range test below, while `hrefScanFrom` advanced only to `spanEnd`, so
+        // the next href-less span re-walked the same ground. That is quadratic on ORDINARY markup, with
+        // no hostile input at all: `<a name="sN">Section</a>` repeated (a classic named-anchor page) cost
+        // 12.13 s at 510 KB, charged twice per fetch, against 0.32 ms for the regex this scanner
+        // replaced. An occurrence at or past `spanEnd` can never be viable for this span, so there was
+        // never a reason to look there.
+        const at = indexOfAsciiCI(html, `href="`, p, spanEnd);
+        if (at < 0) break;
+        // `quote > at + 6` because `([^"]+)` needs at least ONE character: `href=""` does NOT match,
+        // and the engine then keeps backtracking to an EARLIER occurrence rather than giving up — so
+        // an empty value simply is not viable. (Found by the tuple differential below, which caught
+        // 1,503/300,000 before this condition read `quote >= 0`.)
+        const quote = html.indexOf(`"`, at + 6);
+        if (quote > at + 6) {
+          const gt = nextGtAfterQuote(quote + 1);
+          if (gt >= 0) { bestHref = at; bestQuote = quote; bestEnd = gt + 1; } // keep the RIGHTMOST viable
+        }
+        p = at + 1; // occurrences may overlap (`href="href="`), so advance by one
+      }
+      hrefScanFrom = spanEnd;
+    }
+
+    if (bestHref < tokenEnd || bestEnd < 0) continue; // no viable href in range — try the next candidate
+    opens.push({ start: m.index, end: bestEnd, capture: html.slice(bestHref + 6, bestQuote) });
+    ANCHOR_CANDIDATE_RE.lastIndex = bestEnd; // the global regex's own jump past the match
+    if (bestEnd >= n) break;
+  }
+  return opens;
+}
+
+/** `page-core.ts`'s `extractLinks` needs the SAME open-tag scan on the RAW html (the cleaner rewrites
+ *  every `<a>` into `text (href)` prose and so destroys the structure a link list needs). It used to
+ *  carry a byte-identical private copy of the regex, which meant this Critical was charged twice per
+ *  fetch and would have needed fixing twice. One implementation, one audited primitive, one place to
+ *  be wrong — the same de-duplication as `extractTitle` in the previous round. */
+export { scanAnchorOpens as scanAnchorOpensForLinks };
+
+/** Exported ONLY so `test/agent/tools/html-to-text-differential.test.ts` can compare their full
+ *  `(start, end, capture)` tuple lists against the original regexes' — the strongest available gate on
+ *  scanners whose equivalence rests on a derivation rather than on being obviously the same. Neither
+ *  is part of any tool or RPC surface. */
+export { scanAnchorOpens as scanAnchorOpensForTest, scanHeadingOpens as scanHeadingOpensForTest };
 
 /** Linear (single monotonic pass) equivalent of
  *  `html.replace(new RegExp(openSrc + "[\\s\\S]*?" + closeSrc, "gi"), render)` — see the comment
@@ -163,9 +627,9 @@ const HEADING_CLOSE_RE = /<\/h([1-6])>/gi;
  *  original regex's own "no match" outcome for that case. */
 function replacePairedTag(
   html: string,
-  openRe: RegExp,
+  opens: TagOpen[],
   closeRe: RegExp,
-  render: (openMatch: RegExpExecArray, inner: string) => string,
+  render: (open: TagOpen, inner: string) => string,
 ): string {
   const closes: Array<{ start: number; end: number }> = [];
   closeRe.lastIndex = 0;
@@ -175,20 +639,16 @@ function replacePairedTag(
   let out = "";
   let cursor = 0;
   let closePtr = 0;
-  openRe.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = openRe.exec(html))) {
-    const openStart = m.index;
-    const openEnd = openRe.lastIndex;
-    if (openStart < cursor) continue; // nested inside a previously-consumed span
+  for (const open of opens) {
+    if (open.start < cursor) continue; // nested inside a previously-consumed span
 
-    while (closePtr < closes.length && closes[closePtr]!.start < openEnd) closePtr++;
+    while (closePtr < closes.length && closes[closePtr]!.start < open.end) closePtr++;
     if (closePtr >= closes.length) break; // no closing tag anywhere after this open (or any later one)
 
     const close = closes[closePtr]!;
     closePtr++;
-    out += html.slice(cursor, openStart);
-    out += render(m, html.slice(openEnd, close.start));
+    out += html.slice(cursor, open.start);
+    out += render(open, html.slice(open.end, close.start));
     cursor = close.end;
   }
   out += html.slice(cursor);
@@ -213,12 +673,10 @@ function convertHeadings(html: string): string {
   const ptrs: Record<string, number> = { "1": 0, "2": 0, "3": 0, "4": 0, "5": 0, "6": 0 };
   let out = "";
   let cursor = 0;
-  HEADING_OPEN_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = HEADING_OPEN_RE.exec(html))) {
-    const level = m[1]!;
-    const openStart = m.index;
-    const openEnd = HEADING_OPEN_RE.lastIndex;
+  for (const open of scanHeadingOpens(html)) {
+    const level = open.capture;
+    const openStart = open.start;
+    const openEnd = open.end;
     if (openStart < cursor) continue;
 
     const list = closesByLevel[level]!;
@@ -238,28 +696,185 @@ function convertHeadings(html: string): string {
   return out;
 }
 
+/** `/<li\b[^>]*>/gi`'s OPEN token only. `(?![0-9A-Za-z_])` is exactly the original's `\b`: the
+ *  preceding character is always `i`, a JS word character, so the boundary holds iff the next
+ *  character is a non-word one (or the string ends — where the original then fails for want of a `>`,
+ *  as does the scan below). No unbounded quantifier, so driving this with `exec` is linear; the
+ *  `[^>]*>` tail is what `replaceListItems` pairs with a pointer instead of a re-scan. */
+const LIST_ITEM_OPEN_RE = /<li(?![0-9A-Za-z_])/gi;
+
+/** ASCII-case-insensitive `indexOf`, searching `[from, until)`. `needleLower` must already be lowercase
+ *  ASCII.
+ *
+ *  Why not `/needle/i`: JS's non-`u` `i` flag folds exactly the ASCII letters and nothing else (the
+ *  spec's `Canonicalize` refuses to map a non-ASCII code unit onto an ASCII one, which is why
+ *  `/k/i` does NOT match U+212A KELVIN SIGN), so an explicit ASCII fold is the faithful equivalent —
+ *  the same discipline the Swift port spells out. Needles here are 3-8 characters, so the naive
+ *  scan is linear in the searched range with a small constant.
+ *
+ *  `until` IS THE FIX FOR REVIEW CRITICAL 3, and it is not optional politeness: an unbounded search
+ *  followed by a required terminator is the same defect whether a regex engine or a hand-written loop
+ *  performs it. `scanAnchorOpens` passes the span end, so a caller can no longer walk past the region
+ *  its answer could possibly come from. See that function for the measurements. */
+function indexOfAsciiCI(haystack: string, needleLower: string, from: number, until: number = haystack.length): number {
+  const n = Math.min(until, haystack.length);
+  const m = needleLower.length;
+  outer: for (let i = Math.max(0, from); i + m <= n; i++) {
+    for (let k = 0; k < m; k++) {
+      let c = haystack.charCodeAt(i + k);
+      if (c >= 65 && c <= 90) c += 32; // fold A-Z only
+      if (c !== needleLower.charCodeAt(k)) continue outer;
+    }
+    return i;
+  }
+  return -1;
+}
+
+/** The final tag strip, `html.replace(/<[^>]+>/g, "")`, as a single monotonic forward scan.
+ *
+ *  Exactly equivalent, and the equivalence is easy to see: the regex's leftmost match at a `<` is
+ *  `<`, then the run of characters up to the FIRST `>` after it (that run is non-`>` by
+ *  construction), then that `>` — with at least one character in between, since `[^>]+` cannot match
+ *  empty. There is nothing for a regex engine to search for that a forward pointer does not already
+ *  know, so `gtPtr` never rewinds across the whole scan.
+ *
+ *  WHY IT IS HAND-WRITTEN. On markup with no `>` after some point — an unterminated tag, i.e. exactly
+ *  the malformed shape the rest of this cleaner is hardened against — `<[^>]+>` is O(n²): at EVERY
+ *  `<` the engine consumes to end-of-string and then fails. This was the LAST quadratic pass left in
+ *  `htmlToText` after the fix-round-2 rewrite above linearized the five paired-tag scans, and it runs
+ *  on every byte of every HTML fetch, in chat mode and code mode alike. Measured on this branch,
+ *  `"<p>ok</p>" + "<script x".repeat(n)`, a clean 4x per doubling:
+ *
+ *      opens       bytes     before     after
+ *       5,000      45 KB     78 ms      0.2 ms
+ *      10,000      90 KB    301 ms      0.3 ms
+ *      20,000     180 KB   1457 ms      0.5 ms
+ *      40,000     360 KB   6011 ms      0.9 ms
+ *
+ *  Ported back from the phone's `apple/NormaChatKit/Sources/NormaChatKit/HtmlToText.swift`
+ *  (`stripTags`), where the same shape cost 36 s under ICU. Output is byte-identical — the 10,000-doc
+ *  ×2 adversarial differential in `html-to-text-differential.test.ts` runs against a frozen oracle
+ *  whose final step is literally this regex, and `cleaner-vectors.json` regenerates unchanged.
+ *
+ *  The single early exit (`no '>' anywhere after here`) is what makes the worst case cheap: if no `>`
+ *  remains, no match can start at this position or any later one. */
+function stripTags(text: string): string {
+  const n = text.length;
+  let out = "";
+  let copied = 0;
+  let i = 0;
+  let gtPtr = 0; // monotonic — never rewinds across the whole scan
+
+  while (i < n) {
+    if (text.charCodeAt(i) !== LT) { i++; continue; }
+    if (gtPtr <= i) gtPtr = i + 1;
+    while (gtPtr < n && text.charCodeAt(gtPtr) !== GT) gtPtr++;
+    if (gtPtr >= n) break; // no close anywhere after this "<" — nothing more can match
+    if (gtPtr > i + 1) { // `[^>]+` needs at least one character, so "<>" is not a tag
+      out += text.slice(copied, i);
+      copied = gtPtr + 1;
+      i = gtPtr + 1;
+    } else {
+      i++;
+    }
+  }
+  return out + text.slice(copied);
+}
+
+/** `html.replace(/<li\b[^>]*>/gi, "\n- ")` as a monotonic forward scan.
+ *
+ *  SAME BUG, SAME FIX AS `stripTags` — and this pass was measurably WORSE per byte than the strip
+ *  (review Critical 1). `[^>]*` followed by a required `>` is O(n²) on the absent-`>` shape: at every
+ *  `<li` the engine consumes to end-of-string and then fails. It runs on the full, un-truncated body
+ *  of every `text/html` fetch (`web_fetch`, and `fetchCleanPage` for ReadPage / FetchPage / the
+ *  research runner), where the only cap in front of it is `MAX_FETCH_BYTES` — 5 MB. Measured on the
+ *  real `htmlToText`, `"<li x".repeat(n)`, ×4.3 per doubling:
+ *
+ *      opens      bytes     before      after
+ *       5,000      25 KB      44 ms     0.2 ms
+ *      20,000      98 KB     903 ms     0.3 ms
+ *      40,000     195 KB    3,254 ms    0.4 ms
+ *      80,000     391 KB   13,586 ms    0.7 ms
+ *     160,000     781 KB   53,300 ms    1.4 ms   (~39 min extrapolated to the 5 MB cap)
+ *
+ *  Equivalence: `[^>]*` cannot cross a `>`, so the match at a given `<li` open ends at the FIRST `>`
+ *  at or after the open token — there is nothing to search for that a forward pointer does not
+ *  already know. `lastIndex` is driven to just past each match, reproducing the global replace's own
+ *  jump (so a `<li` nested inside an already-consumed match is not separately matched, exactly as
+ *  before), and the early `break` is what makes the worst case cheap: if no `>` follows this open,
+ *  none follows any later one either. */
+function replaceListItems(html: string): string {
+  const n = html.length;
+  let out = "";
+  let copied = 0;
+  let gtPtr = 0; // monotonic — never rewinds across the whole scan
+  LIST_ITEM_OPEN_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = LIST_ITEM_OPEN_RE.exec(html))) {
+    if (m.index < copied) continue; // inside an already-consumed match
+    const tokenEnd = LIST_ITEM_OPEN_RE.lastIndex; // just past "<li"
+    if (gtPtr < tokenEnd) gtPtr = tokenEnd;
+    while (gtPtr < n && html.charCodeAt(gtPtr) !== GT) gtPtr++;
+    if (gtPtr >= n) break; // no ">" after this open, nor after any later one
+    out += html.slice(copied, m.index) + "\n- ";
+    copied = gtPtr + 1;
+    LIST_ITEM_OPEN_RE.lastIndex = copied;
+  }
+  return out + html.slice(copied);
+}
+
 export function htmlToText(html: string): string {
   let out = html;
-  out = replacePairedTag(out, SCRIPT_OPEN_RE, SCRIPT_CLOSE_RE, () => "");
-  out = replacePairedTag(out, STYLE_OPEN_RE, STYLE_CLOSE_RE, () => "");
-  out = replacePairedTag(out, HEAD_OPEN_RE, HEAD_CLOSE_RE, () => "");
+  out = replacePairedTag(out, scanSimpleOpens(out, SCRIPT_OPEN_RE), SCRIPT_CLOSE_RE, () => "");
+  out = replacePairedTag(out, scanSimpleOpens(out, STYLE_OPEN_RE), STYLE_CLOSE_RE, () => "");
+  out = replacePairedTag(out, scanSimpleOpens(out, HEAD_OPEN_RE), HEAD_CLOSE_RE, () => "");
   // structure worth keeping (user design): headings → #, links → text (url), list items → "- "
   out = convertHeadings(out);
-  out = replacePairedTag(out, ANCHOR_OPEN_RE, ANCHOR_CLOSE_RE, (m, inner) => `${inner} (${m[1]})`);
+  out = replacePairedTag(out, scanAnchorOpens(out), ANCHOR_CLOSE_RE, (open, inner) => `${inner} (${open.capture})`);
+  out = replaceListItems(out); // == .replace(/<li\b[^>]*>/gi, "\n- "), linear — see replaceListItems
+  // `<br\s*\/?>` and `</(p|div|h[1-6]|li|tr)>` are both bounded (no `[^>]*`), so neither has the
+  // quadratic shape: measured flat at 0.1 ms across the whole doubling series above.
+  out = out.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|h[1-6]|li|tr)>/gi, "\n");
+  out = stripTags(out); // == .replace(/<[^>]+>/g, ""), linear — see stripTags
   return out
-    .replace(/<li\b[^>]*>/gi, "\n- ")
-    .replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|h[1-6]|li|tr)>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
     .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ")
     .split("\n").map(l => l.trim()).filter(Boolean).join("\n");
 }
 
+/** `html.match(/<TAG[^>]*>([\s\S]*?)<\/TAG>/i)?.[1]` — the first such element's inner text, or `null`
+ *  when the regex would not have matched at all — as a bounded forward scan.
+ *
+ *  Equivalence, and why only the FIRST `<TAG` occurrence needs looking at (review Critical 1: the
+ *  regex is non-global, but a FAILING match still retries at every `<h1` position, which is where the
+ *  O(n²) came from). For a candidate open at `i`, `[^>]*` cannot cross a `>`, so the open tag's end
+ *  is FORCED to the first `>` at or after `i + 1 + tag.length` — the engine can never backtrack to a
+ *  different one. And the first `>` after a LATER candidate is at or after that same position, so if
+ *  no `</TAG>` exists after the first candidate's `>`, none exists after any later candidate's
+ *  either. The first candidate therefore decides the whole match: no loop, no retry, no re-scan. */
+function firstElementInner(html: string, tag: string): string | null {
+  const open = indexOfAsciiCI(html, `<${tag}`, 0);
+  if (open < 0) return null;
+  const openEnd = html.indexOf(">", open + tag.length + 1);
+  if (openEnd < 0) return null;
+  const close = indexOfAsciiCI(html, `</${tag}>`, openEnd + 1);
+  if (close < 0) return null;
+  return html.slice(openEnd + 1, close);
+}
+
 /** Title extraction happens on the RAW html, before htmlToText runs on the whole page (which
  *  destroys the tags this looks for). Reuses htmlToText only on the small extracted h1/title
- *  snippet — that's just tag-stripping + entity-decoding, not the whole-page conversion. */
-function extractTitle(html: string): string {
-  const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-  const src = h1?.[1] ?? html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+ *  snippet — that's just tag-stripping + entity-decoding, not the whole-page conversion.
+ *
+ *  EXPORTED, and page-core.ts's byte-identical private copy deleted, as part of the Critical-1 fix
+ *  (review: "both `extractTitle` regexes … **two copies**"). Two copies of a quadratic meant two
+ *  places to fix and two places for the next fix to miss; the duplication was only ever there to
+ *  avoid exporting a web.ts internal, and page-core.ts already imports `htmlToText` and
+ *  `followRedirects` from here.
+ *
+ *  `??` and not `||` is deliberate and preserved: an h1 that matched but captured the EMPTY string
+ *  short-circuits to `"-"` rather than falling through to `<title>`, because `""` is not nullish. */
+export function extractTitle(html: string): string {
+  const src = firstElementInner(html, "h1") ?? firstElementInner(html, "title");
   if (!src) return "-";
   const text = htmlToText(src).replace(/\n+/g, " ").trim();
   return text || "-";
@@ -313,7 +928,18 @@ export type FollowResult = FetchSuccess | FetchFailure;
 
 /** SSRF-guarded manual-redirect loop: guards EVERY hop (including the first) — a compliant first
  *  URL must not be able to 302 into a private address. `fetchFn` is injectable so tests drive this
- *  with a fake (no live network in unit tests); it defaults to the global fetch. */
+ *  with a fake (no live network in unit tests); it defaults to the global fetch.
+ *
+ *  DISCLOSED ASYMMETRY on the raw-authority leg (review Minor 3). Each hop is resolved with
+ *  `new URL(loc, current).toString()` below — necessarily, since a `Location` may be relative — which
+ *  RE-SERIALIZES it in canonical form. So a `Location: http://0127.0.0.1/` reaches the next
+ *  `ssrfGuard` call already rewritten to `http://87.0.0.1/`, and `rawAuthorityHost` has nothing left
+ *  to judge: the ambiguous spelling is refused as a model-supplied URL and accepted as a redirect
+ *  target. This is not a hole — the dial IS that public canonical address, on the same
+ *  WHATWG-canonicalizing `fetch` the guard's canonical leg matches — but it does mean the
+ *  defense-in-depth layer stops at hop 0. Closing it properly needs the raw `Location` string carried
+ *  alongside the resolved one (only meaningful when `loc` is absolute), which is a shape change to
+ *  this loop's contract; deliberately not taken in a fix round whose subject is elsewhere. */
 export async function followRedirects(startUrl: string, opts: FollowRedirectsOptions = {}): Promise<FollowResult> {
   const fetchFn = opts.fetchFn ?? fetch;
   const maxHops = opts.maxHops ?? MAX_REDIRECT_HOPS;

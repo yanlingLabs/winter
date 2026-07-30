@@ -77,7 +77,7 @@ final class AppModel: ObservableObject {
         let feedClient = feed.client
         directory = SessionDirectory(lister: {
             try await feedClient.listSessions().map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId)
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model)
             }
         })
         // FINAL-REVIEW FIX (M1): cold-window bootstrap — session.list on construction, not only on
@@ -245,6 +245,17 @@ final class AppModel: ObservableObject {
     func setSessionPolicy(_ policy: String) async -> Bool {
         guard let sid = focusedSessionId else { return false }
         return (try? await client.setPolicy(sessionId: sid, policy: policy)) != nil
+    }
+
+    /// Task 10 (Chat Slice D): the model menu's own focused-session surface for an EXPLICIT,
+    /// user-driven model change — mirrors `setSessionPolicy` just above exactly (guard a focused
+    /// session, `try?` the RPC, `nil`/throw means failure). `model: nil` clears the override
+    /// (`NormaClient.setModel` sends a literal wire `null`, never an omitted key). Unlike
+    /// `setSessionPolicy`, there is no mode-agnostic special case to guard here — `session.setModel`
+    /// itself has none (ipc/server.ts's own doc comment: "no chat/dispatch special case").
+    func setSessionModel(_ model: String?) async -> Bool {
+        guard let sid = focusedSessionId else { return false }
+        return (try? await client.setModel(sessionId: sid, model: model)) != nil
     }
 
     func interruptTurn() async {

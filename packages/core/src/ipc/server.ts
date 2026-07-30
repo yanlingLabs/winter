@@ -12,6 +12,7 @@ import {
   SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams,
   SkillsReadParams, SkillsWriteParams, SkillsDeleteParams,
   PluginsListParams, AskUserRespondParams, TaskListParams, PlanRespondParams, SessionSetPolicyParams,
+  SessionSetModelParams,
   ThreadListParams, ThreadSendParams, AgentStopParams,
   PeripheralLeaseParams, PeripheralRenewParams, PeripheralReleaseParams, PeripheralAdvertiseParams,
   PeripheralRevokeParams, PeripheralRespondParams, DaemonStatusParams, EngineActivityParams, QuotaStateParams,
@@ -24,6 +25,7 @@ import {
   MemoryListParams, MemoryReadParams, MemoryWriteParams, MemoryDeleteParams, MemoryAuditParams,
   ProviderConfigureParams,
   WorkflowListParams, WorkflowRunParams, WorkflowStopParams, WorkflowGetParams,
+  SyncHeadsParams, SyncPullParams, SyncPushParams, SyncConfigParams, SyncMemoryParams,
   SYSTEM_SESSION_ID,
   type SessionEvent, ConnWriter, type WritableSocket,
 } from "@norma/protocol";
@@ -37,8 +39,10 @@ import type { MemoryStore, MemoryErrorKind } from "../agent/memory";
 import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTailMemDir } from "../agent/memory-file-ops";
 import type { SessionStore } from "../sessions/store";
 import { readHistoryPage } from "../sessions/history";
+import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { AgentEngine } from "../agent/engine";
+import { resolveModelAlias } from "../agent/model-aliases";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionRules } from "../agent/permission-rules";
 import { repoRootFor } from "../agent/memory-dir";
@@ -69,6 +73,11 @@ import {
 } from "../plugins/lifecycle";
 
 interface ConnState {
+  /** Chat Slice D task 2: a process-unique id for this socket, minted at `open`. The first key of
+   *  the `sync.push` reassembly buffer — a number rather than the ConnState object itself so the
+   *  buffer map holds nothing that could keep a dead connection's state alive, and so `close()` can
+   *  drop everything the connection owned with a single call. */
+  connId: number;
   decoder: LineDecoder;
   authedRole: string | null;
   clientName: string;
@@ -128,8 +137,23 @@ export interface IpcServerOptions {
   // as `normaHome` above: a server built without one (most existing tests) makes
   // `provider.configure` a typed failure rather than throwing on construction. daemon.ts always
   // wires its own `secrets` (KeychainSecretStore by default, `startDaemon({secrets})`-injectable
-  // for tests) into this field.
+  // for tests) into this field. Also `sync.config`'s ONLY route to the Exa key (Chat Slice D task
+  // 3) — the SAME instance, never a second read path.
   secrets?: SecretStore;
+  // Chat Slice D task 3 (`sync.config`): the user-ADDED half of the dangerous-domains list —
+  // daemon.ts's own shared `dangerousDomainsAdded` const, the SAME live getter Search/ReadPage/the
+  // research runner already consult (see those callers' own doc comments). `sync.config` calls
+  // this with NO cwd (it carries no session/project context), which resolves against the daemon's
+  // base settings — same "no cwd" behavior every other cwd-less caller in this codebase already
+  // gets. Optional — same "typed no-op, never a crash" precedent as the rest of this options
+  // object: a server built without one (most existing tests) reports an empty list.
+  dangerousDomainsAdded?: (cwd?: string) => string[] | undefined;
+  // Chat Slice D task 3 (`sync.config`): the provider's LIVE model, re-resolved at call time —
+  // mirrors `AgentEngine`'s own `provider.live?.() ?? {model: provider.model}` idiom (engine.ts)
+  // rather than a boot-time snapshot like `providerInfo` below. Optional: a server built without
+  // one (most existing tests, or a no-agentProvider daemon) reports `""` — `defaultModel` is a
+  // plain string, never nullable.
+  liveModel?: () => string;
   // Phase 4b Task 4 (spec §3): the plugin tool bridge. `registry` is the SAME ToolRegistry the
   // AgentEngine executes tool calls against (daemon.ts shares the one instance) — tool.register
   // registers `plugin__<pluginId>__<tool>` into it; the socket close() handler and the
@@ -293,6 +317,27 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   // Session history: the phone reads past events to render history without
   // an unbounded attach replay. Pure passthrough — all filtering/budgeting is daemon-side.
   METHODS.sessionHistory,
+  // Chat Slice D task 1: the phone sets the model on a remote-driven code (or dispatch/chat)
+  // session — mode-agnostic, unlike session.setPolicy (which stays OFF this list entirely: chat's
+  // fixed policy has no remote-meaningful "set" at all). Guarded by assertRemoteMayUseSession below,
+  // same as every other bare-sessionId entry on this list.
+  METHODS.sessionSetModel,
+  // Chat Slice D task 2 (session sync): the phone replicates its own chat-session logs both ways.
+  // The phone is the ONLY client that has ever needed these three — they exist for exactly this
+  // role. All three are additionally CHAT-ONLY and fail closed on an absent/unknown session mode
+  // (ipc/sync.ts), a strictly tighter gate than assertRemoteMayUseSession's eligible-mode set; the
+  // two bare-sessionId verbs run BOTH, so removing "chat" from REMOTE_ELIGIBLE_SESSION_MODES would
+  // close this surface too rather than silently leaving it open.
+  METHODS.syncHeads,
+  METHODS.syncPull,
+  METHODS.syncPush,
+  // Chat Slice D task 3: `sync.config`/`sync.memory` — the phone's OWN standalone-chat bootstrap
+  // (Exa key + user dangerous domains + default model) and its read-only `_assistant` memory-bucket
+  // replica. Neither carries a `sessionId` (there is no per-session gate to run), but both stay on
+  // this list for the same reason the three verbs above do: the phone is the only client that has
+  // ever needed them.
+  METHODS.syncConfig,
+  METHODS.syncMemory,
 ]);
 
 /** The session `mode`s a remote (iPhone) client may target at all — every other mode is Mac-local
@@ -319,7 +364,7 @@ const REMOTE_ELIGIBLE_SESSION_MODES = new Set(["code", "dispatch", "chat"]);
  *  phone, including one that never does. Used by session.attach/send/history/interrupt plus
  *  approval.respond, approval.list, and ask_user.respond — all three also carry a caller-supplied
  *  `sessionId` with no other mode check, and ask_user.respond in particular is exactly the RPC the
- *  AskQuestion tool resolves through. */
+ *  AskQuestion tool resolves through. Chat Slice D task 1 added session.setModel to this set too. */
 function assertRemoteMayUseSession(store: SessionStore, role: string | undefined | null, sessionId: string): void {
   if (role !== "remote") return;
   let mode: string | undefined;
@@ -360,6 +405,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   // orb attached to a different, older session) learn about it and can offer to follow (spec §4.4).
   // Added on successful hello (role === "harness"); removed on socket close.
   const harnessConns = new Set<ConnState>();
+
+  // Chat Slice D task 2 (session sync): the `sync.push` reassembly buffers, one server-wide holder
+  // keyed by (connId, sessionId). Not per-ConnState so the whole structure is testable on its own
+  // and so its caps are enforced in one place; `close()` below drops a connection's buffers.
+  const syncBuffers = new SyncPushBuffers();
+  let nextConnId = 1;
 
   // session_titled (Task 3) is broadcast to EVERY authed harness, not just clients attached to
   // that session — mirrors the session.create broadcast above for the same reason: a harness
@@ -560,6 +611,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         }
         connections++;
         socket.data = {
+          connId: nextConnId++,
           decoder: new LineDecoder(preAuthMaxLine),
           authedRole: null,
           clientName: "",
@@ -579,6 +631,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (socket.data.helloTimer) clearTimeout(socket.data.helloTimer);
         if (socket.data.hubClient) hub.detach(socket.data.hubClient);
         harnessConns.delete(socket.data);
+        // Chat Slice D task 2: an in-flight chunked sync.push dies with its connection — the
+        // partial bytes are dropped, never carried over to whatever reconnects next (a resumed
+        // push must start over, which is exactly what makes the apply atomic).
+        syncBuffers.dropConnection(socket.data.connId);
         // Provider disconnect (spec §A3): only the connection that most recently advertised
         // counts — isProvider() is checked BEFORE providerGone() resets the broker's identity.
         if (opts.peripheral?.isProvider(socket.data)) {
@@ -641,10 +697,19 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             }
             socket.data.writer.enqueue(encodeLine({ jsonrpc: "2.0", id, result }));
           } catch (err) {
-            const e = err as Partial<RpcFailure>;
+            const e = err as Partial<RpcFailure> & { data?: unknown };
             const code = e.code ?? ERR.INTERNAL;
             const message = e.message ?? "internal error";
-            socket.data.writer.enqueue(encodeLine({ jsonrpc: "2.0", id, error: { code, message } }));
+            // Chat Slice D task 2: a thrown error may carry a structured `data` payload
+            // (`RpcError.data`, already part of the JSON-RPC envelope schema) — `sync.push`'s
+            // DIVERGED uses it to hand back the daemon's `lastSeq` so a client can branch
+            // programmatically instead of string-matching a message. Read structurally off
+            // whatever was thrown, so no error class needs to know about this pump; omitted
+            // entirely when absent, leaving every existing error byte-identical on the wire.
+            const data = e.data;
+            socket.data.writer.enqueue(encodeLine({
+              jsonrpc: "2.0", id, error: { code, message, ...(data !== undefined ? { data } : {}) },
+            }));
           }
         }
       },
@@ -733,7 +798,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // SessionApprovalPolicy doc comment), so this coercion is the ONLY way a session's stored
         // policy ever becomes "chat".
         const approvalPolicy = p.mode === "chat" ? "chat" : p.approvalPolicy;
-        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy, origin: p.origin, mode: p.mode });
+        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy, origin: p.origin, mode: p.mode, model: p.model });
         const trusted = cwd ? (opts.trust?.isTrusted(cwd) ?? false) : false;
         // Broadcast the session_created event to every authed harness (not just attachments —
         // a brand-new session has none) so other harnesses can offer to follow (spec §4.4).
@@ -1012,6 +1077,106 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
         return { ok: true };
+      }
+      // Chat Slice D task 1: per-session model override — mode-agnostic (unlike session.setPolicy
+      // just above, this has NO chat/dispatch special case: there is no "fixed model" concept for
+      // any mode). `assertRemoteMayUseSession` guards it since it's REMOTE_ALLOWED_METHODS-listed
+      // and takes a bare caller-supplied sessionId, same as session.attach/send/history/interrupt
+      // above. `model: null` clears the override (AgentEngine.resolveSel falls back to the
+      // live/boot default on the NEXT turn — this never affects an already-running turn, mirroring
+      // how a live model-settings edit doesn't retroactively change the CURRENT turn either).
+      case METHODS.sessionSetModel: {
+        const p = parseParams(SessionSetModelParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        let model = p.model;
+        // I1 review fix: this method is remote-reachable and hand-callable, so a future picker's
+        // UI list must never be the only guard — reuse spawn_agent's own `known.length > 0`-guarded
+        // validation idiom (engine.ts's spawn bridge, and session_spawn's mirror of it) rather than
+        // inventing a second one. `null` (clearing) is never validated — there's no model id to
+        // check. A provider that can't enumerate its models (empty `knownModels()`, e.g. an
+        // arbitrary openai-compatible endpoint) can't validate anything either, so the value is
+        // stored freely, same as spawn_agent's own fallback for that case.
+        if (model !== null) {
+          const known = opts.engine?.knownModels() ?? [];
+          if (known.length > 0) model = resolveModelAlias(model, known.map((m) => m.id));
+          if (known.length > 0 && !known.some((m) => m.id === model)) {
+            throw new RpcFailure(ERR.INVALID_PARAMS, `unknown model '${model}' — available models: ${known.map((m) => m.id).join(", ")}`);
+          }
+        }
+        try {
+          opts.store.setModel(p.sessionId, model);
+        } catch (e) {
+          throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
+        }
+        return {};
+      }
+
+      // -----------------------------------------------------------------------------------------
+      // Session sync (Chat Slice D task 2): `sync.heads`/`sync.pull`/`sync.push` — the replication
+      // wire between a phone's own chat-session logs and this daemon's. The handlers themselves
+      // live in ipc/sync.ts (chat-only gate, byte paging, reassembly buffer, divergence); this
+      // switch only routes, exactly like session.history delegates to readHistoryPage.
+      //
+      // The two bare-sessionId verbs run assertRemoteMayUseSession FIRST, ahead of sync's own
+      // stricter chat-only gate, so a Mac-local-only mode produces the SAME "not available to
+      // remote clients" answer as every other remote verb rather than a sync-specific message —
+      // and so the remote-eligibility rule stays the single place that decides what a phone may
+      // reach at all. Errors thrown by ipc/sync.ts are SyncRpcError, which the data() pump's catch
+      // reads structurally (code/message/data) — that's how DIVERGED carries `{ lastSeq }`.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.syncHeads: {
+        parseParams(SyncHeadsParams, params);
+        return syncHeads(opts.store);
+      }
+      case METHODS.syncPull: {
+        const p = parseParams(SyncPullParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        return syncPull(opts.store, p);
+      }
+      case METHODS.syncPush: {
+        const p = parseParams(SyncPushParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        return syncPush({
+          store: opts.store,
+          buffers: syncBuffers,
+          connId: socket.data.connId,
+          // The SAME catalogue session.setModel validates against, just above — sync.push writes
+          // the same `model` column over the same remote allowlist, so it must not be the one path
+          // that skips Task 1's validation. An unknown slug is dropped rather than fatal (a model
+          // mismatch must never block log replication); see validateSyncMeta.
+          knownModelIds: () => (opts.engine?.knownModels() ?? []).map((m) => m.id),
+          // The SAME broadcast session.create performs (see its handler above): a brand-new session
+          // has no attachments, so its session_created can't reach anyone through the hub's
+          // per-session fan-out — it goes to every authed harness so a sidebar can pick it up.
+          broadcastCreated(event) {
+            for (const conn of harnessConns) {
+              try { conn.writer.enqueue(encodeLine({ jsonrpc: "2.0", method: METHODS.event, params: event })); }
+              catch { /* dead socket — its close() handler will evict it from harnessConns */ }
+            }
+          },
+        }, p);
+      }
+
+      // -----------------------------------------------------------------------------------------
+      // Chat Slice D task 3: `sync.config` / `sync.memory` — the two remaining sync surfaces,
+      // for the phone's OWN standalone chat rather than log replication. Neither carries a
+      // `sessionId` (no `assertRemoteMayUseSession` call — there is no session to gate on), unlike
+      // every verb above this comment.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.syncConfig: {
+        parseParams(SyncConfigParams, params);
+        return await syncConfig({
+          secret: opts.secrets ? (name) => opts.secrets!.get(name) : undefined,
+          dangerousDomainsAdded: opts.dangerousDomainsAdded ? () => opts.dangerousDomainsAdded!() : undefined,
+          liveModel: opts.liveModel,
+        });
+      }
+      case METHODS.syncMemory: {
+        const p = parseParams(SyncMemoryParams, params);
+        // No `normaHome` wired (most existing tests) → no bucket to page over — same typed no-op
+        // shape as `syncMemory`'s own missing-directory branch, not a crash.
+        if (!opts.normaHome) return { files: [], complete: true };
+        return syncMemory(opts.normaHome, p.cursor ?? 0);
       }
 
       // -----------------------------------------------------------------------------------------

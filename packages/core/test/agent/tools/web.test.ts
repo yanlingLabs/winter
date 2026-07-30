@@ -3,7 +3,8 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } fr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ToolRegistry } from "../../../src/agent/tools/registry";
-import { registerWebTools, ssrfGuard, htmlToText, followRedirects, WEB_SEARCH_API_KEY_SECRET } from "../../../src/agent/tools/web";
+import { registerWebTools, ssrfGuard, htmlToText, extractTitle, followRedirects, WEB_SEARCH_API_KEY_SECRET } from "../../../src/agent/tools/web";
+import { extractLinks } from "../../../src/agent/tools/page-core";
 
 function tmp(): string {
   return realpathSync(mkdtempSync(join(tmpdir(), "norma-webfetch-")));
@@ -62,6 +63,142 @@ describe("ssrfGuard", () => {
 
   test("rejects the IPv6 unspecified address", () => {
     expect(ssrfGuard("http://[::]/")).not.toBeNull();
+  });
+
+  // Task 6b Part A: the guard was rewritten from string comparisons to a parser (see below). These
+  // messages are the audit-line and model-transcript surface AND the phone mirrors them byte for
+  // byte, so the rewrite must not reword a single one. Pinned verbatim, not just as "non-null".
+  test("every pre-existing refusal keeps its exact message (the rewrite tightens, never rewords)", () => {
+    const expected: Array<[string, string]> = [
+      ["ftp://x.com", "only http(s) urls are allowed"],
+      ["file:///etc/passwd", "only http(s) urls are allowed"],
+      ["http://not a url", "invalid url: http://not a url"],
+      ["http://localhost/x", "refusing to fetch a local address"],
+      ["http://localhost./x", "refusing to fetch a local address"],
+      ["http://foo.local/", "refusing to fetch a local address"],
+      ["http://foo.local./x", "refusing to fetch a local address"],
+      ["http://0.0.0.0/", "refusing to fetch a local address"],
+      ["http://0/", "refusing to fetch a local address"], // WHATWG canonicalizes this to 0.0.0.0
+      ["http://[::1]/", "refusing to fetch a local address"],
+      ["http://[::]/", "refusing to fetch a local address"],
+      ["http://127.0.0.1", "refusing to fetch a private address"],
+      ["http://10.0.0.5", "refusing to fetch a private address"],
+      ["http://10.0.0.1./x", "refusing to fetch a private address"],
+      ["http://172.16.9.1", "refusing to fetch a private address"],
+      ["http://192.168.1.1", "refusing to fetch a private address"],
+      ["http://169.254.169.254", "refusing to fetch a private address"],
+      ["http://[fe80::1]/", "refusing to fetch a private address"],
+      ["http://[fe90::1]/", "refusing to fetch a private address"],
+      ["http://[febf:ffff::1]/", "refusing to fetch a private address"],
+      ["http://[fc00::1]/", "refusing to fetch a private address"],
+      ["http://[fd12:3456::1]/", "refusing to fetch a private address"],
+      ["http://[::ffff:127.0.0.1]/", "refusing to fetch a private address"],
+      ["http://[::ffff:7f00:1]/", "refusing to fetch a private address"],
+      // …including the one asymmetry the old code had and this keeps: a bare 0.0.0.0 host is
+      // reported *local*, but the same 32 bits arriving IPv4-mapped are reported *private*.
+      ["http://[::ffff:0.0.0.0]/", "refusing to fetch a private address"],
+    ];
+    for (const [url, message] of expected) expect(ssrfGuard(url)).toBe(message);
+  });
+
+  // Task 6b Part A (back-ported from the phone's fix-round-2 Critical): every check in this guard
+  // used to be a string comparison against `u.hostname` — the host AFTER WHATWG canonicalized it.
+  // Canonicalization is LOSSY, and the reading WHATWG picks is not the only reading a resolver
+  // accepts: it reads a leading zero as OCTAL (`0127` → 87) while `getaddrinfo`, for a four-part
+  // all-decimal quad, reads it as DECIMAL (`0127` → 127). Every host below was ALLOWED by the old
+  // guard and confirmed by
+  // `getaddrinfo` to denote the private address named in the comment — 18 spellings found by
+  // `ssrf-resolver-sweep.test.ts` against the old guard, which is also the gate that proves the
+  // class (not the list) is closed.
+  test("rejects leading-zero-decimal spellings a resolver targets into private space (was a fail-open)", () => {
+    for (const bad of [
+      "http://0127.0.0.1/", "http://0127.1.2.3/", "http://0127.255.255.254/", // → 127.x loopback
+      "http://010.0.0.1/", "http://010.255.255.255/", "http://010.8.8.8/", // → 10.x
+      "http://0172.16.0.1/", "http://0172.20.10.1/", "http://0172.31.255.255/", // → 172.16-31.x
+      "http://010.010.010.010/", // per-octet octal, decimal-read → 10.10.10.10
+    ]) {
+      expect(ssrfGuard(bad)).toBe("refusing to fetch a private address");
+    }
+  });
+
+  test("the leading-zero class is unbounded — extra zeros must not reopen it", () => {
+    // `0127` / `00127` / `000127` all read as 127 decimal; enumerating spellings could never close
+    // this, which is why the guard parses instead of matching.
+    for (const zeros of ["0", "00", "000", "0000000000"]) {
+      expect(ssrfGuard(`http://${zeros}127.0.0.1/`)).toBe("refusing to fetch a private address");
+      expect(ssrfGuard(`http://${zeros}10.0.0.1/`)).toBe("refusing to fetch a private address");
+    }
+  });
+
+  test("percent-encoding the ambiguous spelling does not reopen it either", () => {
+    // WHATWG percent-decodes the host before parsing it, so `%30%31%32%37.0.0.1` canonicalizes to
+    // the same public 87.0.0.1 — the raw-authority reading has to decode too.
+    expect(ssrfGuard("http://%30%31%32%37.0.0.1/")).toBe("refusing to fetch a private address");
+    expect(ssrfGuard("http://%30%31%30.0.0.1/")).toBe("refusing to fetch a private address");
+  });
+
+  // Task 6b fix-round-1, review Minor 1: `rawAuthorityHost` reproduced everything WHATWG does to a
+  // URL before the host parser runs EXCEPT the UTS-46 mapping step, which folds fullwidth digits and
+  // the three alternate full-stop characters into ASCII. All six of these canonicalize to the same
+  // public address the ambiguous class does (`8.0.0.1` / `87.0.0.1`), so they defeated exactly the leg
+  // that exists to survive a dialer that does NOT canonicalize.
+  test("UTS-46-mapped spellings of the ambiguous class are refused too (fullwidth digits, alternate full stops)", () => {
+    for (const bad of [
+      "http://０１０.0.0.1/", // FULLWIDTH DIGIT ZERO/ONE/ZERO → 010
+      "http://%EF%BC%90%EF%BC%91%EF%BC%90.0.0.1/", // …the same, percent-encoded UTF-8
+      "http://０１２７.0.0.1/", // → 0127
+      "http://010。0.0.1/", // U+3002 IDEOGRAPHIC FULL STOP
+      "http://010．0.0.1/", // U+FF0E FULLWIDTH FULL STOP
+      "http://010｡0.0.1/", // U+FF61 HALFWIDTH IDEOGRAPHIC FULL STOP
+    ]) {
+      expect(ssrfGuard(bad)).toBe("refusing to fetch a private address");
+    }
+  });
+
+  test("the UTS-46 mapping does not over-block non-ASCII hostnames", () => {
+    for (const ok of ["https://ünicode.example/", "https://日本.example/", "https://xn--nicode-2ya.example/", "https://ｅxample.com/"]) {
+      expect(ssrfGuard(ok)).toBeNull();
+    }
+  });
+
+  test("still refuses the spellings WHATWG canonicalizes INTO the guarded form (both readings consulted)", () => {
+    // The other direction of the same disagreement: here WHATWG's octal reading is the private one
+    // (`0177` → 127) and the resolver's decimal reading (177) is public. Refusing needs the
+    // c-convention reading, so this pins that dropping either policy is a regression.
+    for (const bad of ["http://0177.0.0.1/", "http://0300.0250.0.1/", "http://2130706433/", "http://0x7f000001/", "http://127.1/", "http://3232235777/", "http://0xc0a80101/", "http://0XC0A80101/"]) {
+      expect(ssrfGuard(bad)).not.toBeNull();
+    }
+  });
+
+  test("the raw-authority reading cannot be fooled by userinfo, ports, paths, queries or fragments", () => {
+    for (const bad of [
+      "http://user:pass@0127.0.0.1:8080/p?q#f", // host is after the LAST "@"
+      "http://0127.0.0.1./", // trailing root label
+      "http://a@b@010.0.0.1/x", // multiple "@"
+      "http:\\\\010.0.0.1\\x", // backslashes are slashes for special schemes
+      "http:/010.0.0.1/x", // a single slash still has an authority
+    ]) {
+      expect(ssrfGuard(bad)).not.toBeNull();
+    }
+    // …and it must not mistake a path/query/fragment for the host (the over-blocking direction).
+    for (const ok of [
+      "https://example.com/010.0.0.1", "https://example.com/?redir=0127.0.0.1",
+      "https://example.com/#010.0.0.1", "https://example.com/@010.0.0.1",
+    ]) {
+      expect(ssrfGuard(ok)).toBeNull();
+    }
+  });
+
+  test("still allows ordinary public hosts, including numeric-looking names and non-ASCII domains", () => {
+    for (const ok of [
+      "https://example.com/", "https://8.8.8.8/", "https://1.1.1.1/", "https://223.255.255.255/",
+      "https://172.15.0.1/", "https://172.32.0.1/", "https://192.167.1.1/", "https://169.253.0.1/",
+      "https://8.8.8.8.nip.io/", "https://2021.example.com/", "https://08.example.com/",
+      "https://xn--nicode-2ya.example/", "https://ünicode.example/",
+      "https://[2001:db8::1]/", "https://[2606:4700:4700::1111]/", "https://[::ffff:8.8.8.8]/",
+    ]) {
+      expect(ssrfGuard(ok)).toBeNull();
+    }
   });
 });
 
@@ -140,6 +277,280 @@ describe("htmlToText: linear-time scanning (Critical fix, fix-round-2 — the SA
     htmlToText(html);
     const elapsed = performance.now() - start;
     expect(elapsed).toBeLessThan(500);
+  });
+
+  // Task 6b Part B: the fix above linearized the five PAIRED-tag scans but left the FINAL
+  // `<[^>]+>` strip quadratic, and the shapes probed above all terminate their own tags (`<script
+  // type="text/x">` has a `>`), so nothing in this file ever reached it. The adversarial shape for
+  // the strip is the ABSENT `>`: with no `>` after some point, the regex engine consumes to
+  // end-of-string at EVERY `<` and fails.
+  //
+  // CEILING CALIBRATION — measured, not guessed. `"<p>ok</p>" + "<script x".repeat(n)` on this
+  // branch, before the `stripTags` rewrite and after:
+  //
+  //     opens     bytes     before     after     ratio
+  //      5,000    45 KB       78 ms    0.3 ms      260x
+  //     10,000    90 KB      301 ms    0.3 ms     1000x
+  //     20,000   180 KB     1457 ms    0.6 ms     2400x
+  //     40,000   360 KB     6011 ms    1.2 ms     5000x
+  //
+  // A 200 ms ceiling at 40,000 opens sits ~165x above the linear run and ~30x below the quadratic
+  // one, so it is both non-flaky and genuinely discriminating (verified by reverting `stripTags` to
+  // the regex: 6.0 s, FAILS). The doubling series is asserted too, since a constant-factor
+  // improvement that stayed O(n²) would clear a single absolute bound at some size and not others.
+  test("the FINAL tag strip stays linear when no '>' follows (the absent-close shape the paired passes never reach)", () => {
+    const closedPair = "<p>ok</p>"; // so the strip really runs a pairing-free scan, not an empty one
+    const timings = [5_000, 10_000, 20_000, 40_000].map((opens) => {
+      const html = closedPair + "<script x".repeat(opens);
+      const start = performance.now();
+      const text = htmlToText(html);
+      const elapsed = performance.now() - start;
+      // Byte-identity spot-check at every size: an unterminated tag is NOT a tag, so it survives.
+      expect(text).toBe(("ok\n" + "<script x".repeat(opens)).trim());
+      return elapsed;
+    });
+    for (const t of timings) expect(t).toBeLessThan(200);
+  });
+
+  // Task 6b fix-round-1 (review Critical 1). The strip fixed above was NOT the last quadratic on this
+  // path: `<li\b[^>]*>` — in the very statement that rewrite split — and BOTH of `extractTitle`'s
+  // regexes have the identical unbounded-`[^>]*`-then-required-`>` shape, and all three run on the
+  // full, un-truncated body of every `text/html` fetch (`web_fetch`; and `fetchCleanPage` for
+  // ReadPage / FetchPage / the research runner), where the only cap in front of them is the 5 MB
+  // `MAX_FETCH_BYTES`. `extractTitle`'s regexes are non-global and "run once", which is what hid them:
+  // a FAILING match still retries at every `<h1` position, so being lazy saves nothing.
+  //
+  // CEILING CALIBRATION — measured on the real functions, before this round's fix and after.
+  // The three probes are deliberately separated by tag so each ceiling can only be met by fixing its
+  // own site (the `<script x` probe above isolates the strip the same way):
+  //
+  //     probe                        opens    bytes      before      after     ratio
+  //     "<li x"      htmlToText      40,000   195 KB    3,254 ms    0.4 ms     8100x
+  //                                 160,000   781 KB   53,300 ms    1.4 ms    38000x
+  //     "<h1 x"      extractTitle    40,000   195 KB    2,780 ms    0.6 ms     4600x
+  //     "<title x"   extractTitle    40,000   312 KB    4,490 ms    0.5 ms     9000x
+  //
+  // A 200 ms ceiling sits >100x above every linear run and >13x below every quadratic one at the
+  // largest size asserted, and the whole doubling series is asserted (not just the top size) because a
+  // constant-factor win that stayed O(n²) can clear a single absolute bound at one size and not
+  // others. Verified discriminating by mutating each site back independently — see the report.
+  const linearityCeilingMs = 200;
+
+  test("the <li> pass stays linear when no '>' follows (was 3.2s/195KB, 53s/781KB — worse per byte than the strip)", () => {
+    const timings = [5_000, 20_000, 40_000, 80_000].map((opens) => {
+      const html = "<ul><li>closed</li>" + "<li x".repeat(opens); // one real pair first, so the pass isn't short-circuited
+      const start = performance.now();
+      const text = htmlToText(html);
+      const elapsed = performance.now() - start;
+      // Byte-identity spot-check: an unterminated `<li` is NOT a list item, so it survives verbatim.
+      expect(text).toBe(`- closed\n${"<li x".repeat(opens).trim()}`);
+      return elapsed;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+  test("extractTitle's <h1> regex stays linear when no '>' follows (was 2.8s/195KB; a FAILING match retried at every <h1)", () => {
+    const timings = [5_000, 20_000, 40_000, 80_000].map((opens) => {
+      const html = "<h1 x".repeat(opens);
+      const start = performance.now();
+      const title = extractTitle(html);
+      const elapsed = performance.now() - start;
+      expect(title).toBe("-"); // no `>` and no `</h1>` ⇒ no match, and no `<title>` either
+      return elapsed;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+  test("extractTitle's <title> fallback stays linear when no '>' follows (was 4.5s/312KB)", () => {
+    const timings = [5_000, 20_000, 40_000, 80_000].map((opens) => {
+      const html = "<title x".repeat(opens); // no `<h1` at all, so the fallback is what's exercised
+      const start = performance.now();
+      const title = extractTitle(html);
+      const elapsed = performance.now() - start;
+      expect(title).toBe("-");
+      return elapsed;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+  test("extractTitle stays linear on the shape where the h1 open IS terminated but never closes", () => {
+    // A different failing path: the open tag's `>` exists (so the scan gets past it) but `</h1>` never
+    // does, which is where the original's lazy `[\s\S]*?` scanned to end-of-string per candidate.
+    const timings = [5_000, 20_000, 40_000, 80_000].map((opens) => {
+      const html = "<h1>t</h1x>".repeat(opens); // `</h1x>` is not `</h1>`
+      const start = performance.now();
+      extractTitle(html);
+      return performance.now() - start;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+
+  // Task 6b fix-round-2 (review Critical 2). The two rounds above fixed the passes they were handed;
+  // these are the three that were left, all pre-existing, all on the same call path. The anchor open
+  // regex stacked THREE unbounded quantifiers on one span (`[^>]*` … `([^"]+)` … `[^>]*`) before a
+  // required `>`, which is CUBIC — and because `page-core.ts` carried a byte-identical copy of it, the
+  // cost was charged twice per fetch (`htmlToText`'s anchor pass, then `extractLinks`).
+  //
+  // CEILING CALIBRATION — measured on this branch, each regex driven exactly as its own caller drove
+  // it, before the rewrite and after:
+  //
+  //     site                                       opens    bytes     before     after      ratio
+  //     anchor, '<a href="x'  (CUBIC, x8/doubling)   500    4.9 KB    194 ms    0.30 ms      638x
+  //                                                 1000    9.8 KB   1.34 s     0.13 ms   10,331x
+  //                                                 2000   19.5 KB  11.32 s     0.09 ms  124,370x
+  //                                                 4000   39.1 KB  86.12 s     0.15 ms  591,385x
+  //     anchor, '<a x' (no href; quadratic leg)    40,000  156.3 KB   2.26 s     0.24 ms    9,574x
+  //     heading, '<h1 x' (quadratic)               40,000  195.3 KB   3.41 s     0.19 ms   18,358x
+  //
+  // The anchor series stops at 4,000 opens because the NEXT step is ~11 minutes; the cubic growth is
+  // already unambiguous (x6.9, x8.4, x7.6 per doubling) and 39 KB is well inside what a hostile page
+  // can serve under the 5 MB read cap. Ceilings are 200 ms as elsewhere, which at the largest size
+  // asserted sits >800x above the linear run and >11x below the quadratic one.
+
+  test("the anchor open scan stays linear on the CUBIC shape (unterminated href, no '>' anywhere)", () => {
+    const timings = [500, 1_000, 2_000, 4_000].map((opens) => {
+      const html = '<a href="ok">closed</a>' + '<a href="x'.repeat(opens);
+      const start = performance.now();
+      const text = htmlToText(html);
+      const elapsed = performance.now() - start;
+      // Byte-identity spot-check: the one well-formed pair converts, the rest is not a tag at all.
+      expect(text).toBe(`closed (ok)${'<a href="x'.repeat(opens)}`);
+      return elapsed;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+  test("the anchor open scan stays linear on the quadratic leg too (no href at all)", () => {
+    const timings = [10_000, 20_000, 40_000, 80_000].map((opens) => {
+      const html = '<a href="ok">closed</a>' + "<a x".repeat(opens);
+      const start = performance.now();
+      htmlToText(html);
+      return performance.now() - start;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+  test("extractLinks pays the anchor scan ONCE and stays linear (it used to carry its own copy of the regex)", () => {
+    const timings = [500, 1_000, 2_000, 4_000].map((opens) => {
+      const html = '<a href="https://ok.test/">closed</a>' + '<a href="x'.repeat(opens);
+      const start = performance.now();
+      const links = extractLinks(html, "https://base.test/");
+      const elapsed = performance.now() - start;
+      expect(links.map((l) => l.href)).toEqual(["https://ok.test/"]);
+      return elapsed;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+  test("the heading open scan stays linear when no '>' follows", () => {
+    const timings = [10_000, 20_000, 40_000, 80_000].map((opens) => {
+      const html = "<h1>closed</h1>" + "<h1 x".repeat(opens);
+      const start = performance.now();
+      const text = htmlToText(html);
+      const elapsed = performance.now() - start;
+      expect(text).toBe(`# closed\n${"<h1 x".repeat(opens).trim()}`);
+      return elapsed;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+  // Minor 4: the DISTANT-`>` variants. These were measured linear post-fix and are coverage only — the
+  // point is that "absent" and "distant" are different inputs to a monotonic scanner (absent takes the
+  // early exit; distant walks the pointer the whole way and must not re-walk it per candidate), and only
+  // the absent form was asserted anywhere. A pre-fix regex is quadratic on both, so a regression to
+  // either shape is caught here rather than only in the absent case.
+  test("every fixed site stays linear on the DISTANT-'>' variant as well as the absent one (Minor 4)", () => {
+    const filler = " ".repeat(200_000); // one very distant '>' at the end
+    const shapes: Array<{ name: string; html: string; run: (h: string) => void }> = [
+      { name: "final tag strip", html: "<script x".repeat(20_000) + filler + ">", run: (h) => { htmlToText(h); } },
+      { name: "list items", html: "<li x".repeat(20_000) + filler + ">", run: (h) => { htmlToText(h); } },
+      { name: "anchor opens", html: '<a href="x'.repeat(4_000) + filler + ">", run: (h) => { htmlToText(h); } },
+      { name: "anchor opens (no href)", html: "<a x".repeat(20_000) + filler + ">", run: (h) => { htmlToText(h); } },
+      { name: "heading opens", html: "<h1 x".repeat(20_000) + filler + ">", run: (h) => { htmlToText(h); } },
+      { name: "extractLinks", html: '<a href="x'.repeat(4_000) + filler + ">", run: (h) => { extractLinks(h, "https://base.test/"); } },
+      { name: "extractTitle h1", html: "<h1 x".repeat(20_000) + filler + ">", run: (h) => { extractTitle(h); } },
+      { name: "extractTitle title", html: "<title x".repeat(20_000) + filler + ">", run: (h) => { extractTitle(h); } },
+    ];
+    for (const { name, html, run } of shapes) {
+      const start = performance.now();
+      run(html);
+      const elapsed = performance.now() - start;
+      expect(elapsed, `${name} went superlinear on the distant-'>' variant`).toBeLessThan(linearityCeilingMs);
+    }
+  });
+
+
+  // Task 6b fix-round-3 (review Critical 3 + Minor 5's highest-value item). THE SHAPE NO CEILING
+  // COVERED: **many candidates, no LOCAL match, one distant match** — or no match at all. Every ceiling
+  // above uses either spans with under 6 characters of room (`<a x>`, which never enters the href scan)
+  // or an `href` inside every span, so all of them stayed green while `scanAnchorOpens` was quadratic on
+  // ordinary named-anchor markup: its `href="` search was bounded only by the document, so each
+  // href-less span re-walked the same ground looking for an occurrence it would then discard.
+  //
+  // This is the gate that would have caught it, and it is deliberately a SCAN-CODE ceiling rather than
+  // anything the regex tripwire could express: an unbounded search followed by a required terminator is
+  // the same defect whether a regex engine or a hand-written `indexOf` loop performs it.
+  //
+  // CALIBRATION — `<a name="sN">Section</a>` repeated, the shape the review measured, before the bound
+  // was added and after:
+  //
+  //     reps      bytes    before (htmlToText + extractLinks)     after
+  //     2,500     65 KB    189 ms                                 2.5 ms
+  //     5,000    131 KB    735 ms                                 2.0 ms
+  //    10,000    263 KB      2.79 s                               3.2 ms
+  //    20,000    536 KB     12.13 s                               5.6 ms
+  //
+  // x4 per doubling before, flat after; the 200 ms ceiling first breaches at the smallest size in the
+  // series, which is what makes it a gate rather than a formality.
+  test("ORDINARY named-anchor markup stays linear — many candidates, no local href (review Critical 3)", () => {
+    const timings = [2_500, 5_000, 10_000, 20_000].map((reps) => {
+      let html = "";
+      for (let i = 0; i < reps; i++) html += `<a name="s${i}">Section</a>`;
+      const start = performance.now();
+      htmlToText(html);
+      extractLinks(html, "https://base.test/"); // charged a SECOND time per fetch, so timed together
+      return performance.now() - start;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
+  });
+
+  test("every scanner stays linear on 'many candidates, no local match, one distant match'", () => {
+    // One distant match at the very end, so no scanner can pass by taking an early exit: each must walk
+    // its candidates without re-walking the document per candidate.
+    const shapes: Array<{ name: string; html: string; run: (h: string) => void }> = [
+      // anchors: 12-char spans (past the 6-char floor that hid Critical 3), no local href, one at the end
+      { name: "anchor opens", html: "<a xxxxxxxx>".repeat(45_000) + '<a href="y">t</a>', run: (h) => { htmlToText(h); } },
+      { name: "extractLinks", html: "<a xxxxxxxx>".repeat(45_000) + '<a href="y">t</a>', run: (h) => { extractLinks(h, "https://base.test/"); } },
+      // anchors where a quoted attribute closes the span early, so the href is never in range
+      { name: "anchor opens, quoted '>' in attrs", html: '<a x=">" y>'.repeat(45_000) + '<a href="y">t</a>', run: (h) => { htmlToText(h); } },
+      // headings/list-items/strip: many candidates, the only '>' at the very end
+      { name: "heading opens", html: "<h1 xxxxxxxx".repeat(20_000) + ">t</h1>", run: (h) => { htmlToText(h); } },
+      { name: "list items", html: "<li xxxxxxxx".repeat(20_000) + ">t", run: (h) => { htmlToText(h); } },
+      { name: "final tag strip", html: "<zz xxxxxxxx".repeat(20_000) + ">t", run: (h) => { htmlToText(h); } },
+      // extractTitle: many candidates whose close only appears once, at the end
+      { name: "extractTitle h1", html: "<h1 xxxxxxxx".repeat(20_000) + ">t</h1>", run: (h) => { extractTitle(h); } },
+      { name: "extractTitle title", html: "<title xxxxxxxx".repeat(20_000) + ">t</title>", run: (h) => { extractTitle(h); } },
+    ];
+    for (const { name, html, run } of shapes) {
+      const start = performance.now();
+      run(html);
+      const elapsed = performance.now() - start;
+      expect(elapsed, `${name} went superlinear on the no-local-match shape`).toBeLessThan(linearityCeilingMs);
+    }
+  });
+
+  test("ssrfGuard stays linear in a URL's whitespace run (review Important 5)", () => {
+    // `rawAuthorityHost`'s C0/space trim used an unanchored `[ - ]+$` alternative, which the
+    // engine retried at every position in the run: 758 ms at 39 KB, 17.7 s at 195 KB, 58.4 s at 391 KB.
+    // Reachable from a model-supplied URL — `web_fetch`'s `url` is `z.string().min(1)`, uncapped.
+    const timings = [39, 78, 195, 391].map((kb) => {
+      const url = `http://example.com/${" ".repeat(kb * 1024)}x`;
+      const start = performance.now();
+      expect(ssrfGuard(url)).toBeNull(); // still ALLOWED, exactly as before — this is a cost fix only
+      return performance.now() - start;
+    });
+    for (const t of timings) expect(t).toBeLessThan(linearityCeilingMs);
   });
 
   test("many WELL-FORMED, properly-closed tags of every shape (the realistic case) still extract correctly and quickly", () => {

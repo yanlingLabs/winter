@@ -144,6 +144,11 @@ final class OrbWindowController: ObservableObject {
     /// string in, success out.
     var onSetPolicy: ((String) async -> Bool)?
 
+    /// Task 10 (Chat Slice D): the model menu — same seam as `onSetPolicy` just above
+    /// (`AppDelegate.boot()` wires this to `AppModel.setSessionModel`), widened to the nilable wire
+    /// shape `session.setModel` itself takes (`nil` clears the override).
+    var onSetModel: ((String?) async -> Bool)?
+
     /// Task 6 (2e-iii): the morph window's width-responsive sidebar wiring — this controller exposes
     /// it (it does NOT import `AppModel`), `AppDelegate.boot()` wires it to the app model's
     /// `directory`/`focusSession`/create-primitive plus AppDelegate's own detached-window spawn.

@@ -23,6 +23,11 @@ struct WindowContentView<Accessory: View>: View {
     /// adapter only owns the DATA the menu reads/writes (`sessionPolicy`/`policyChangeInFlight`).
     @State private var showingPolicyMenu = false
 
+    /// Task 10 (Chat Slice D): the model menu's own popover presentation state — same local,
+    /// presentational-only convention as `showingPolicyMenu` above (a separate flag: the two menus
+    /// are independent popovers, never shown together off one boolean).
+    @State private var showingModelMenu = false
+
     /// Task 3 (2e-i): whether the "… +N completed" tail is expanded to the full completed list.
     /// Local presentational state, same convention as `showingPolicyMenu` above — resets whenever
     /// this view is recreated (e.g. a new session), which is fine: there's nothing worth
@@ -68,6 +73,13 @@ struct WindowContentView<Accessory: View>: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer()
+                // Task 10 (Chat Slice D): the model menu — deliberately the OPPOSITE gate from the
+                // policy button just below (`modelMenuIsVisible`'s own doc comment explains the
+                // asymmetry: chat hides POLICY but shows MODEL). Placed beside the policy button,
+                // same header slot, same plain-icon-button idiom.
+                if modelMenuIsVisible(isChatSession: adapter.isChatSession) {
+                    modelMenuButton
+                }
                 // Plan-immunity (2026-07-28 design): chat's approval policy is fixed and can never
                 // be changed — the picker behind this button is meaningless (and every row's
                 // onSetPolicy call would now come back as an RPC error) for a chat-pinned window, so
@@ -286,6 +298,71 @@ struct WindowContentView<Accessory: View>: View {
         .frame(minWidth: 160)
     }
 
+    // MARK: - Task 10 (Chat Slice D): the header's model menu — `session.setModel`, ALL modes
+
+    /// The header's model-menu button — opens `modelMenuContent`'s popover. Same plain-icon-button
+    /// idiom as `policyMenuButton` above (brief: "same control style/placement conventions as the
+    /// policy picker") — a different glyph ("cpu") so the two affordances are visually distinct.
+    @ViewBuilder
+    private var modelMenuButton: some View {
+        Button {
+            showingModelMenu = true
+        } label: {
+            Image(systemName: "cpu")
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showingModelMenu, arrowEdge: .bottom) {
+            modelMenuContent
+        }
+    }
+
+    /// The model menu's rows: "Default" (clears the override, `nil`) first, then every
+    /// `sessionModelOptions` slug (WorkSidebar.swift's own MARK-section precedent for
+    /// `sessionPolicyModes`) — a checkmark on whichever matches the CURRENT session's row
+    /// (`currentSidebarSessionSummary.model`, WorkSidebar.swift). Read once per popover render
+    /// (`current`), same "read fresh at render" convention `sidebarSessionInfo` already uses for
+    /// title/scope/cwd.
+    @ViewBuilder
+    private var modelMenuContent: some View {
+        let current = currentSidebarSessionSummary?.model
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Model")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 4)
+            modelPickerRow(nil, current: current)
+            ForEach(sessionModelOptions, id: \.self) { model in
+                modelPickerRow(model, current: current)
+            }
+        }
+        .padding(12)
+        .frame(minWidth: 160)
+    }
+
+    /// One model-menu row — `model: nil` is the "Default" row (clears the override). Selecting a
+    /// row fires `adapter.onSetModel` directly, same "the wirer owns in-flight/success bookkeeping"
+    /// convention as `policyPickerRow`'s own doc comment.
+    @ViewBuilder
+    private func modelPickerRow(_ model: String?, current: String?) -> some View {
+        Button {
+            adapter.onSetModel(model)
+        } label: {
+            HStack {
+                Text(modelDisplayLabel(model))
+                Spacer()
+                if current == model {
+                    Image(systemName: "checkmark")
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(adapter.modelChangeInFlight)
+        .padding(.vertical, 4)
+    }
+
     /// LIVE-GATE G4, Task 3 (2e-i) redesign: the CC-tree-style pinned task list — blue bold `■`
     /// in_progress row (with a live elapsed suffix), dim `☐` pending rows, and `✓` completed rows
     /// pushed to the bottom and capped at 2 with a tappable "… +N completed" affordance. Hidden
@@ -438,4 +515,39 @@ func buildTaskSection(_ tasks: [TaskItem]) -> (rows: [TaskRow], collapsedComplet
 /// is the tick-mount gate (WindowSubagentSectionTests drives this directly).
 func buildSubagentSection(_ items: [SubagentItem]) -> (rows: [SubagentItem], anyWorking: Bool) {
     (items, items.contains { $0.status == "working" })
+}
+
+// MARK: - Task 10 (Chat Slice D): the model picker's pure decisions — `ModelPickerTests` drives
+// these directly, same "SwiftUI body isn't unit-testable, the decision behind it is" posture as
+// `buildTaskSection`/`buildSubagentSection` above.
+
+/// The model menu's offered slugs — a hardcoded Swift mirror of `CODEX_MODELS`
+/// (`packages/core/src/providers/codex-config.ts`), same "Swift constant mirrors a TS one, no
+/// generated binding" precedent as `sessionPolicyModes` (WorkSidebar.swift) mirrors the protocol's
+/// `ApprovalPolicy` enum. These three slugs are the FULL catalogue `session.setModel`'s server-side
+/// validation (`AgentEngine.knownModels()`, ipc/server.ts) currently accepts for the shipped
+/// codex-oauth provider; an openai-compatible BYOK provider is non-enumerable server-side (any
+/// non-empty slug passes there), so this list is deliberately not exhaustive for every provider —
+/// only the sanctioned default's. A drift here (a future model added/removed server-side) fails
+/// OPEN, not closed: the picker simply doesn't offer a slug that would still be settable by hand
+/// (`norma-probe`, the CLI's `/model`), never the reverse.
+let sessionModelOptions: [String] = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+
+/// The model menu's current-selection LABEL — the row's `model` if set, else "Default" (brief's
+/// own wording: labeled so the user can tell inherited-from-default apart from explicitly-pinned).
+func modelDisplayLabel(_ model: String?) -> String {
+    model ?? "Default"
+}
+
+/// Visibility rule behind the model-menu button (`modelMenuButton`'s own `if` in `body` above) —
+/// deliberately the OPPOSITE of the policy button's `!adapter.isChatSession` chat-hiding predicate:
+/// chat hides POLICY (plan-immunity: the policy is fixed server-side, `engine.ts` resolves it to
+/// the internal "chat" policy every turn regardless of the stored row, and the picker behind it
+/// would be meaningless) but the MODEL stays user-choosable in chat — `session.setModel`'s own doc
+/// comment (`ipc/server.ts`) is explicit that there is no "fixed model" concept for ANY mode, chat
+/// included. Always `true` — kept as a named function (not an inlined literal in the view body) so
+/// a regression that copies the policy predicate here is a one-line, obviously-wrong diff, and so
+/// this asymmetry has a concrete symbol `ModelPickerTests` can assert against instead of nothing.
+func modelMenuIsVisible(isChatSession _: Bool) -> Bool {
+    true
 }

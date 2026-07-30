@@ -55,3 +55,34 @@ test("the spawned agent's tool set excludes every chat-only tool name too (chat-
     expect(call[0].excludeTools?.has(name)).toBe(true);
   }
 });
+
+// I3 review fix (Chat Slice D task 1): runWorkflowAgent used to resolve its child's model off the
+// raw BOOT snapshot (`this.cfg.provider.model`), a THIRD model-resolution path bypassing both
+// `live()` and a per-session override — unlike turn()/sendToAgent(), which both route through
+// AgentEngine's resolveSel(). Now it does too, so a workflow-spawned agent honors the same
+// per-session override the rest of the feature promises.
+test("runWorkflowAgent routes model resolution through resolveSel — honors a per-session override (I3 review fix)", async () => {
+  const { engine, sessionId, store, provider } = await makeWorkflowAgentHarness({ childReply: "ok" });
+  store.setModel(sessionId, "session-override-model");
+  await engine.runWorkflowAgent(sessionId, "do a thing", undefined, new AbortController().signal);
+  expect(provider.requests[0]!.model).toBe("session-override-model");
+});
+
+// Control: an explicit `opts.model` (the workflow script's OWN model arg) still wins over a
+// per-session override — resolveSel is only consulted as the FALLBACK, exactly mirroring how
+// turn()'s own explicit tool-arg overrides (spawn_agent's modelOverride) already take precedence
+// over the inherited session default.
+test("runWorkflowAgent's own explicit opts.model still wins over a per-session override", async () => {
+  const { engine, sessionId, store, provider } = await makeWorkflowAgentHarness({ childReply: "ok" });
+  store.setModel(sessionId, "session-override-model");
+  await engine.runWorkflowAgent(sessionId, "do a thing", { model: "explicit-workflow-model" }, new AbortController().signal);
+  expect(provider.requests[0]!.model).toBe("explicit-workflow-model");
+});
+
+// Control: no per-session override at all → falls back to the live/boot default exactly as
+// before this fix (byte-identical behavior for the untouched case).
+test("runWorkflowAgent falls back to the live/boot default when there is no per-session override (control, unchanged)", async () => {
+  const { engine, sessionId, provider } = await makeWorkflowAgentHarness({ childReply: "ok" });
+  await engine.runWorkflowAgent(sessionId, "do a thing", undefined, new AbortController().signal);
+  expect(provider.requests[0]!.model).toBe("fake-1"); // this harness's boot model (workflow-agent.testkit.ts)
+});

@@ -99,6 +99,21 @@ struct GlassRootView: View {
                 if ok { adapter.sessionPolicy = policy }
             }
         }
+
+        // Task 10 (Chat Slice D): the model menu — same seam/discipline as `onSetPolicy` just
+        // above, EXCEPT there's no adapter-side cache to bump: the menu reads the current session's
+        // `model` straight off `controller.sidebars`' own directory row (`session.list` already
+        // carries it, T1), so a successful change just refreshes THAT row. Refresh happens BEFORE
+        // clearing `modelChangeInFlight` so the re-render its `@Published` flip forces already sees
+        // the fresh row (same ordering as `DetachedWindowController`'s twin wiring).
+        adapter.onSetModel = { [adapter, controller] model in
+            adapter.modelChangeInFlight = true
+            Task { @MainActor in
+                let ok = await controller.onSetModel?(model) ?? false
+                if ok { await controller.sidebars?.directory.refresh() }
+                adapter.modelChangeInFlight = false
+            }
+        }
     }
 
     var body: some View {

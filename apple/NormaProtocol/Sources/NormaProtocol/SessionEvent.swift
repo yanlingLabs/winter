@@ -77,6 +77,12 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let threadId: String
         public let text: String
         public let clientName: String
+        // Public init so a Swift PRODUCER (NormaChatKit's phone ChatEngine) can construct this event
+        // — the synthesized memberwise init is `internal`. Additive; no wire/shape change.
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String, text: String, clientName: String) {
+            self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
+            self.text = text; self.clientName = clientName
+        }
     }
 
     public struct TurnStarted: Codable, Equatable, Sendable {
@@ -84,6 +90,9 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let sessionId: String
         public let ts: Int
         public let threadId: String
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String) {
+            self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
+        }
     }
 
     public struct AssistantMessage: Codable, Equatable, Sendable {
@@ -92,6 +101,9 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let ts: Int
         public let threadId: String
         public let text: String
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String, text: String) {
+            self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId; self.text = text
+        }
     }
 
     /// TRANSIENT streaming chunk — broadcast-only, never persisted/replayed; seq is the store's
@@ -102,6 +114,9 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let ts: Int
         public let threadId: String
         public let delta: String
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String, delta: String) {
+            self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId; self.delta = delta
+        }
     }
 
     public struct ToolCall: Codable, Equatable, Sendable {
@@ -112,6 +127,10 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let callId: String
         public let name: String
         public let argsJson: String
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String, callId: String, name: String, argsJson: String) {
+            self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
+            self.callId = callId; self.name = name; self.argsJson = argsJson
+        }
     }
 
     public struct ToolResult: Codable, Equatable, Sendable {
@@ -122,6 +141,10 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let callId: String
         public let output: String
         public let isError: Bool
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String, callId: String, output: String, isError: Bool) {
+            self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
+            self.callId = callId; self.output = output; self.isError = isError
+        }
     }
 
     /// SP-approvals T4: a caller-facing "grant a rule" choice offered alongside plain approve/
@@ -190,6 +213,11 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let stopReason: String
         public let inputTokens: Int
         public let outputTokens: Int
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String, stopReason: String,
+                    inputTokens: Int, outputTokens: Int) {
+            self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
+            self.stopReason = stopReason; self.inputTokens = inputTokens; self.outputTokens = outputTokens
+        }
     }
 
     public struct AgentError: Codable, Equatable, Sendable {
@@ -198,6 +226,9 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let ts: Int
         public let threadId: String
         public let message: String
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String, message: String) {
+            self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId; self.message = message
+        }
     }
 
     public struct DirectoryAdded: Codable, Equatable, Sendable {
@@ -253,6 +284,9 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         /// e.g. a diff/scheme snippet rendered alongside the option. Optional/additive — decode
         /// only, absent in older-shaped payloads.
         public let preview: String?
+        public init(label: String, description: String? = nil, preview: String? = nil) {
+            self.label = label; self.description = description; self.preview = preview
+        }
     }
 
     public struct Question: Codable, Equatable, Sendable {
@@ -263,6 +297,9 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let header: String?
         public let options: [QuestionOption]
         public let multiSelect: Bool
+        public init(question: String, header: String? = nil, options: [QuestionOption], multiSelect: Bool) {
+            self.question = question; self.header = header; self.options = options; self.multiSelect = multiSelect
+        }
     }
 
     public struct Task: Codable, Equatable, Sendable {
@@ -290,6 +327,11 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let questions: [Question]
         /// Dispatch relay (Phase 7): see ApprovalRequested.
         public let childSessionId: String?
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String, callId: String,
+                    questions: [Question], childSessionId: String? = nil) {
+            self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
+            self.callId = callId; self.questions = questions; self.childSessionId = childSessionId
+        }
     }
 
     public struct QuestionResolved: Codable, Equatable, Sendable {
@@ -305,6 +347,13 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let notes: [String: String]?
         /// Dispatch relay (Phase 7): see ApprovalRequested.
         public let childSessionId: String?
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String, callId: String,
+                    answers: [String: String], by: String, notes: [String: String]? = nil,
+                    childSessionId: String? = nil) {
+            self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
+            self.callId = callId; self.answers = answers; self.by = by; self.notes = notes
+            self.childSessionId = childSessionId
+        }
     }
 
     public struct TaskUpdated: Codable, Equatable, Sendable {

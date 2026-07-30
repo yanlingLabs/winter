@@ -4,7 +4,24 @@ import NormaProtocol
 public struct RpcError: Error, Equatable, Sendable {
     public let code: Int
     public let message: String
-    public init(code: Int, message: String) { self.code = code; self.message = message }
+    /// The JSON-RPC envelope's OPTIONAL `error.data` — a structured payload a handler attaches so a
+    /// client can branch programmatically instead of string-matching `message`.
+    ///
+    /// Chat Slice D whole-branch review, Critical WB-C1: this field used not to exist, and the
+    /// gateway (the ONLY route a phone has to the daemon) therefore relayed every error as
+    /// `{code, message}`. The one consumer that keys on it — `sync.push`'s `ERR.DIVERGED` (-32006),
+    /// whose `data.lastSeq` is the branch point the phone's fork/re-push logic reads — saw the
+    /// field vanish somewhere between two layers that each tested their own half correctly, so on
+    /// the real wire divergence recovery could never run. Kept generic (`JSONValue?`) rather than
+    /// DIVERGED-specific: this is the JSON-RPC envelope's own field, and the relay must forward
+    /// whatever a handler put there, including from a NEWER daemon this kit knows nothing about.
+    /// Defaulted in the initializer, so every existing construction site is unchanged.
+    public let data: JSONValue?
+    public init(code: Int, message: String, data: JSONValue? = nil) {
+        self.code = code
+        self.message = message
+        self.data = data
+    }
 }
 
 public enum ServerMessage: Sendable {
@@ -17,7 +34,7 @@ public enum ServerMessage: Sendable {
 }
 
 private struct InboundLine: Decodable {
-    struct ErrorPayload: Decodable { let code: Int; let message: String }
+    struct ErrorPayload: Decodable { let code: Int; let message: String; let data: JSONValue? }
     let id: Int?
     let result: JSONValue?
     let error: ErrorPayload?
@@ -33,7 +50,7 @@ public func parseServerLine(_ line: String) -> ServerMessage {
         return .unrecognized(raw: line)
     }
     if let id = inbound.id {
-        if let err = inbound.error { return .response(id: id, result: .failure(RpcError(code: err.code, message: err.message))) }
+        if let err = inbound.error { return .response(id: id, result: .failure(RpcError(code: err.code, message: err.message, data: err.data))) }
         return .response(id: id, result: .success(inbound.result ?? .null))
     }
     if inbound.method == "event", let params = inbound.params {

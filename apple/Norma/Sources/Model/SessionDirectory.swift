@@ -82,5 +82,11 @@ struct SessionSummary: Equatable, Identifiable {
     // set.
     var mode: String? = nil
     var parentSessionId: String? = nil
+    // Chat Slice D Task 10: threaded through from listSessions() (T1's per-session model override,
+    // deferred by T1 itself — "no consumer yet") — `WindowContentView`'s model menu reads this
+    // straight off the current session's row (`currentSidebarSessionSummary`, WorkSidebar.swift)
+    // to know what's currently pinned, same "read fresh from the directory" convention as
+    // `sidebarSessionInfo`'s title/scope/cwd rows. Defaulted, same reasoning as `mode` above.
+    var model: String? = nil
     var id: String { sessionId }
 }

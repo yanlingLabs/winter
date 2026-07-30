@@ -29,6 +29,54 @@ export const HelloResult = z.object({
   protocolVersion: z.number().int(),
 });
 
+/** The phone transport's hard per-frame ceiling, mirroring Swift's `maxFrameBytes` default
+ *  (`IrohListener.swift` / `IrohDialer.swift`). An oversized frame does NOT produce an error — the
+ *  connection's inbound stream simply ENDS — so every phone-reachable request and response has to
+ *  fit under it by construction, not by hope. Declared here so the TS side can size its own bounds
+ *  against the real number instead of against the local Unix socket's much larger 8 MiB line cap
+ *  (`LineDecoder`'s authed default), which is the wrong transport for anything the phone calls. */
+export const IROH_MAX_FRAME_BYTES = 1 << 20;
+
+/** Hard ceiling on a session's stored (index) title, in characters.
+ *
+ *  Every DAEMON-side writer is already far below it — `SessionTitler` slices to 60 chars and
+ *  `fallbackTitle` truncates at 60 — but `sync.push` made the title remote-settable on two new
+ *  paths (`meta.title`, and a replicated `session_titled` event), and BOTH `session.list` and
+ *  `sync.heads` return every session's title in ONE unpaged response. Without a bound, two
+ *  sessions carrying ~600 KiB titles would push every such response past `IROH_MAX_FRAME_BYTES`
+ *  above — a PERSISTENT phone-connection kill: the value lives in `index.db` so it survives daemon
+ *  and app restarts, and `sync.heads`, the call a client would need to diagnose or repair the
+ *  state, is itself one of the broken ones. This is the write-path twin of the hazard CLAUDE.md
+ *  names for `session.history` ("an unbounded field is a silent connection-killer").
+ *
+ *  200 rather than 60: comfortably above every existing writer (so no current behavior changes)
+ *  and small enough that the title contribution to an unpaged list stays negligible. */
+export const SESSION_TITLE_MAX_CHARS = 200;
+
+/** Chat Slice D task 1 review (M2), landed in the whole-branch fix round: the same unbounded-field
+ *  hazard as `SESSION_TITLE_MAX_CHARS`, one column over. `model` is remote-settable on three
+ *  ingress paths (`session.create`, `session.setModel`, `sync.push`'s `meta`) and rides EVERY
+ *  `session.list`/`sync.heads` row, both unpaged. When the provider cannot enumerate its catalogue
+ *  the daemon deliberately stores an unrecognized slug rather than refusing it — correct for a
+ *  BYO-endpoint deployment, but it means nothing else bounds the value. A multi-megabyte "model"
+ *  would then make every subsequent list response exceed the phone transport's frame limit
+ *  (`WireError.oversize`), permanently and across restarts, with the repair calls among the broken
+ *  ones. Bounded at the SCHEMA, so every ingress inherits it without remembering to.
+ *
+ *  200 for the same reason the title cap is: far above every real slug (the longest today is under
+ *  40 characters), far below anything that could bloat a row. */
+export const SESSION_MODEL_MAX_CHARS = 200;
+
+/** Chat Slice D task 2 (session sync): where a session was branched from — the parent session's id
+ *  plus the seq it was forked AT (every parent event with `seq <= atSeq` is shared history). Index-
+ *  only metadata carried by `sync.push`'s `meta` and reported by `sync.heads`/`session.list`; it
+ *  does NOT ride the event log, so it resets to absent on a full index rebuild, same as
+ *  `cwd`/`model` (see `SessionRow` in packages/core/src/sessions/store.ts). */
+export const SessionForkRef = z.object({
+  sessionId: z.string().min(1),
+  atSeq: z.number().int().nonnegative(),
+});
+
 export const SessionCreateParams = z.object({
   scope: z.string().regex(/^[a-z0-9]([a-z0-9-]{0,39}[a-z0-9])?$/), // slug: no leading/trailing hyphen, ≤41 chars
   cwd: AbsoluteDirPath.optional(),        // absolute path (not '/'); session working directory for tools
@@ -46,6 +94,12 @@ export const SessionCreateParams = z.object({
   // Chat Mode Slice A: "chat" added — additive, NOT a singleton (many chat sessions may exist).
   // The handler rejects it for remote callers only (Mac-local for this slice).
   mode: z.enum(["code", "dispatch", "chat"]).optional(),
+  // Chat Slice D Task 1: an optional per-session model override, stamped at creation time —
+  // additive/optional so every existing caller (CLI, NormaKit, the phone) that never sends it is
+  // unaffected. Index-only metadata (like `cwd`/`approvalPolicy`, NOT `mode` — see
+  // `SessionRow.model`'s own doc comment in store.ts), so it does NOT ride the `session_created`
+  // event and resets to absent on a full index rebuild. Bounded — see SESSION_MODEL_MAX_CHARS.
+  model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).optional(),
 });
 export const SessionCreateResult = z.object({ sessionId: z.string(), trusted: z.boolean() });
 
@@ -64,6 +118,14 @@ export const SessionListResult = z.object({
     origin: z.string().optional(),
     mode: z.string().optional(),            // "dispatch" for the singleton; absent = code
     parentSessionId: z.string().optional(), // set on dispatch children
+    // Chat Slice D Task 1: round-trips SessionRow.model (store.ts) — absent for every session
+    // created before this field existed, or created/left without an explicit override.
+    model: z.string().optional(),
+    // Chat Slice D Task 2: round-trips SessionRow.forkedFrom (store.ts). Declared here — rather
+    // than left to smuggle through undeclared — for the same reason `title` above is: the value
+    // really does flow out of `store.list()`, so a schema-validating client must be able to read
+    // it. Absent for every session that isn't a fork.
+    forkedFrom: SessionForkRef.optional(),
   })),
 });
 
@@ -292,6 +354,17 @@ export const PlanRespondResult = z.object({ ok: z.literal(true), alreadyResolved
 
 export const SessionSetPolicyParams = z.object({ sessionId: z.string().min(1), policy: ApprovalPolicy });
 export const SessionSetPolicyResult = z.object({ ok: z.literal(true) });
+
+// Chat Slice D Task 1: per-session model override, mode-agnostic — unlike session.setPolicy
+// (chat rejects EVERY value, plan-immunity's fixed policy), session.setModel works identically
+// for code/dispatch/chat: there is no "fixed model" concept for any mode. `model: null` CLEARS the
+// override (falls back to the live/boot default — AgentEngine.resolveSel) rather than being
+// omittable — the field is required-but-nullable so a caller can't confuse "didn't send it" with
+// "explicitly clearing it". Result mirrors skills.write's bare-`{}` idiom (nothing to report beyond
+// success — a thrown RpcFailure is how the daemon reports an unknown sessionId, same NOT_FOUND
+// precedent as session.setPolicy).
+export const SessionSetModelParams = z.object({ sessionId: z.string().min(1), model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).nullable() });
+export const SessionSetModelResult = z.object({});
 
 export const ThreadInfoSchema = z.object({
   threadId: z.string(), parentThreadId: z.string().optional(), agentType: z.string().optional(),
@@ -875,6 +948,173 @@ export const WorkflowStopResult = z.object({ ok: z.literal(true), stopped: z.boo
 export const WorkflowGetParams = z.object({ runId: z.string().min(1) });
 export const WorkflowGetResult = z.object({ run: WorkflowRunViewSchema });
 
+// ---------------------------------------------------------------------------------------------
+// Session sync (Chat Slice D task 2) — `sync.heads` / `sync.pull` / `sync.push`.
+//
+// The replication wire between a phone's own chat-session logs and the daemon's. All three are
+// CHAT-ONLY and fail closed on an absent/unknown session `mode` (the plan-immunity composing-seam
+// rule — `mode ?? "code"` is the store-wide convention, so an absent mode is a CODE session and is
+// refused, never waved through). All three are REMOTE_ALLOWED_METHODS-listed: the phone is the
+// only client that has ever needed them.
+//
+// Paging is over RAW JSONL BYTES, not events. That is the load-bearing design choice: a single
+// event larger than a page is a non-problem BY CONSTRUCTION (it simply spans pages), where an
+// event-granular pager would have to either drop it or blow the transport's frame limit. It also
+// keeps the replica byte-identical — the daemon stores the client's exact line bytes rather than a
+// re-serialization, so pull → push → pull is a fixed point and a future content hash stays stable.
+// ---------------------------------------------------------------------------------------------
+
+/** No params: the daemon reports the head of every chat session it holds, and the client diffs. */
+export const SyncHeadsParams = z.object({});
+export const SyncHeadsResult = z.object({
+  sessions: z.array(z.object({
+    sessionId: z.string(),
+    /** The daemon's current head — the `baseSeq` a subsequent `sync.push` must declare. */
+    lastSeq: z.number().int().nonnegative(),
+    /** `null`, never absent, when the session has neither a generated title nor a first message. */
+    title: z.string().nullable(),
+    model: z.string().optional(),
+    forkedFrom: SessionForkRef.optional(),
+  })),
+});
+export type SyncHeadsResult = z.infer<typeof SyncHeadsResult>;
+
+/** `fromSeq` is an EXCLUSIVE lower bound (matches `SessionStore.read`'s own `seq > fromSeq`), so
+ *  `fromSeq: 0` is "the whole log" and `fromSeq: lastSeq` is "nothing new". `cursor` is a BYTE
+ *  offset into the tail slice that starts at `fromSeq` — echo back the previous page's
+ *  `nextCursor`, never a value you computed yourself. The tail only ever grows at the end (the log
+ *  is append-only), so a cursor stays valid across a concurrent append; one past the end of the
+ *  tail is refused rather than silently emptied. */
+export const SyncPullParams = z.object({
+  sessionId: z.string().min(1),
+  fromSeq: z.number().int().nonnegative(),
+  cursor: z.number().int().nonnegative().optional(),
+});
+export const SyncPullResult = z.object({
+  /** base64 of raw JSONL bytes — verbatim log lines, NOT re-serialized events. `""` when empty. */
+  data: z.string(),
+  /** Present iff `complete` is false: the byte offset to pass as the next call's `cursor`. */
+  nextCursor: z.number().int().nonnegative().optional(),
+  complete: z.boolean(),
+});
+export type SyncPullParams = z.infer<typeof SyncPullParams>;
+export type SyncPullResult = z.infer<typeof SyncPullResult>;
+
+/** Hard ceiling on a single `sync.push` chunk's base64 payload — sized against the PHONE
+ *  transport, `IROH_MAX_FRAME_BYTES` (1 MiB), NOT the local Unix socket's 8 MiB line cap. That
+ *  distinction is the whole point: the phone is the only client this surface exists for, and a
+ *  frame above the iroh limit ENDS the connection rather than returning an error a client could
+ *  log. A chunk at this ceiling plus its JSON-RPC envelope lands around 384 KiB — under 40% of the
+ *  frame budget, the same generous margin `SYNC_PAGE_BYTES` leaves on the pull side.
+ *
+ *  Chosen so a client can push back exactly what it pulled: base64 inflates by 4/3, so a full
+ *  `SYNC_PAGE_BYTES` (256 KiB) page re-encodes to 349,528 characters, which this admits with room
+ *  to spare. It bounds ONE chunk; total reassembly across chunks is bounded separately (32 MiB,
+ *  `SYNC_PUSH_BUFFER_MAX_BYTES` in packages/core/src/ipc/sync.ts). */
+export const SYNC_MAX_CHUNK_B64 = 384 * 1024;
+
+/** `baseSeq` is the client's belief about the daemon's head, and it is CHECKED, never trusted: a
+ *  mismatch is `ERR.DIVERGED` carrying `data: { lastSeq }`, never a silent overwrite. An UNKNOWN
+ *  `sessionId` with `baseSeq: 0` CREATES the session (chat mode, fixed "chat" policy, cwd $HOME,
+ *  and the id must be a UUID — a phone-minted id, distinct from the daemon's own `s_<hex>` shape).
+ *  Chunking: send `complete: false` for every chunk but the last; the daemon buffers per
+ *  (connection, sessionId) and applies the whole batch ATOMICALLY on the final chunk — nothing is
+ *  appended unless every line validates. `meta` is index-only session metadata that has no event
+ *  of its own (title/model/fork provenance); it is applied only alongside a successful `complete`.
+ *
+ *  READING A `DIVERGED` (`ERR.DIVERGED`, `data: { lastSeq }`) — branch on `data.lastSeq`, never on
+ *  the code alone: `lastSeq: 0` means the daemon holds NOTHING for this id, so the answer is
+ *  "re-push from seq 1" (which creates it), NOT "fork". Only a non-zero `lastSeq` describes a real
+ *  branch point. A client that forks on the bare code will spawn a spurious fork for every session
+ *  it retries after a partial failure.
+ *
+ *  `meta.model` is validated against the daemon's own model catalogue exactly as `session.setModel`
+ *  is (alias-resolved, membership-checked when the provider can enumerate, stored freely when it
+ *  can't) — but an UNKNOWN slug is DROPPED rather than failing the call: a model mismatch between a
+ *  phone and a Mac must never block log replication, which is the irreplaceable half. */
+export const SyncPushParams = z.object({
+  sessionId: z.string().min(1),
+  baseSeq: z.number().int().nonnegative(),
+  data: z.string().max(SYNC_MAX_CHUNK_B64), // base64 of a raw JSONL chunk; may split mid-line
+  complete: z.boolean(),
+  meta: z.object({
+    // Bounded at the wire, not just clamped internally — see SESSION_TITLE_MAX_CHARS for why an
+    // unbounded title on an UNPAGED heads/list response is a persistent connection killer.
+    title: z.string().max(SESSION_TITLE_MAX_CHARS).optional(),
+    model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).optional(),
+    forkedFrom: SessionForkRef.optional(),
+  }).optional(),
+});
+export const SyncPushResult = z.object({
+  /** True only on the final chunk, once the batch has actually landed on disk. */
+  applied: z.boolean(),
+  /** The daemon's head AFTER this call: the new head when `applied`, the unchanged current head
+   *  (0 for a session that does not exist yet) while chunks are still being buffered. */
+  lastSeq: z.number().int().nonnegative(),
+  /** Bytes currently held in the reassembly buffer for this (connection, sessionId) — 0 once
+   *  applied. Lets a client see its own chunking progress without guessing. */
+  buffered: z.number().int().nonnegative(),
+});
+export type SyncPushParams = z.infer<typeof SyncPushParams>;
+export type SyncPushResult = z.infer<typeof SyncPushResult>;
+export type SessionForkRef = z.infer<typeof SessionForkRef>;
+
+// ---------------------------------------------------------------------------------------------
+// Chat Slice D task 3 — `sync.config` + `sync.memory`, the two remaining sync surfaces for the
+// phone's OWN standalone chat (no Mac session in the loop at all): the bootstrap config bundle a
+// freshly-paired phone needs to run chat locally, and a read-only replica of the shared
+// `_assistant` memory bucket so its own context assembler can inject the SAME memory the Mac's
+// chat sessions see. Neither carries a `sessionId` — there is no session to gate on — but both stay
+// REMOTE_ALLOWED_METHODS-listed for the same reason `sync.heads`/`pull`/`push` are: the phone is
+// the only client that has ever needed them.
+// ---------------------------------------------------------------------------------------------
+
+/** No params: everything returned is either global (the Exa key, the user's added dangerous
+ *  domains) or a live daemon-wide default (the current model) — nothing here is per-project or
+ *  per-session. Every field is read AT CALL TIME (hot, no daemon restart), same discipline as
+ *  every other settings-backed getter in this codebase. */
+export const SyncConfigParams = z.object({});
+export const SyncConfigResult = z.object({
+  /** `null` when no key is stored — never an empty string (indistinguishable from "stored but
+   *  blank"). Sourced from `Bun.secrets` (`EXA_API_KEY_SECRET`), the SAME keychain item Search's
+   *  own accessor reads — never written to disk anywhere in this envelope. */
+  exaKey: z.string().nullable(),
+  /** The USER-ADDED half of the dangerous-domains list ONLY (`settings.permissions.dangerousDomains.added`)
+   *  — the shipped baseline list ships baked into the phone kit itself (Task 6), so sending it here
+   *  too would be redundant on every call and would need to stay in lockstep with the kit release
+   *  forever. An empty array, never omitted, when the user has added nothing. */
+  dangerousDomains: z.array(z.string()),
+  /** The provider's LIVE model (re-resolved every call, mirroring `AgentEngine`'s own
+   *  `provider.live?.() ?? {model: provider.model}` idiom) — the phone's starting point for a brand
+   *  new local chat session, not a value it re-validates against anything. */
+  defaultModel: z.string(),
+});
+export type SyncConfigParams = z.infer<typeof SyncConfigParams>;
+export type SyncConfigResult = z.infer<typeof SyncConfigResult>;
+
+/** `cursor` echoes back a previous page's `nextCursor` — an index into the bucket's STABLE
+ *  (sorted-by-name) file list, not a byte offset (contrast `sync.pull`'s `cursor`, which IS a byte
+ *  offset into one file's tail): this bucket is many small files, not one growing log, so paging
+ *  over whole files is the natural unit. Omitted/`0` starts from the beginning.
+ *
+ *  "STABLE" means stable ORDERING (sorted by name), NOT a snapshot: the handler re-reads the
+ *  directory on every call, so a write landing between two pages of the same walk — a Dreamer cycle
+ *  adding a topic file that sorts before the cursor — shifts what that index means, and one file can
+ *  be served twice or skipped for that walk (T3 review Minor). Harmless by design: this is a
+ *  stale-is-fine replica, and the client's next walk from cursor 0 self-heals it. Do not read it as
+ *  "consistent under concurrent writes". */
+export const SyncMemoryParams = z.object({
+  cursor: z.number().int().nonnegative().optional(),
+});
+export const SyncMemoryResult = z.object({
+  files: z.array(z.object({ name: z.string(), content: z.string() })),
+  /** Present iff `complete` is false. */
+  nextCursor: z.number().int().nonnegative().optional(),
+  complete: z.boolean(),
+});
+export type SyncMemoryParams = z.infer<typeof SyncMemoryParams>;
+export type SyncMemoryResult = z.infer<typeof SyncMemoryResult>;
+
 export const METHODS = {
   hello: "protocol.hello",
   sessionCreate: "session.create",
@@ -906,6 +1146,7 @@ export const METHODS = {
   taskList: "task.list",
   planRespond: "plan.respond",
   sessionSetPolicy: "session.setPolicy",
+  sessionSetModel: "session.setModel",
   threadList: "thread.list",
   threadSend: "thread.send",
   agentStop: "agent.stop",
@@ -952,4 +1193,9 @@ export const METHODS = {
   workflowRun: "workflow.run",
   workflowStop: "workflow.stop",
   workflowGet: "workflow.get",
+  syncHeads: "sync.heads",
+  syncPull: "sync.pull",
+  syncPush: "sync.push",
+  syncConfig: "sync.config",
+  syncMemory: "sync.memory",
 } as const;
