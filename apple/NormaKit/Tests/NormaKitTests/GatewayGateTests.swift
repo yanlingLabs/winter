@@ -989,4 +989,206 @@ final class GatewayGateTests: XCTestCase {
         let serverHello = try JSONDecoder().decode(ServerHello.self, from: env3.payload)
         XCTAssertEqual(serverHello.hostID, "host-test")
     }
+
+    // MARK: - T6b: TWO connections on ONE PhoneSession
+    //
+    // Since the iOS connection pool landed, a single install genuinely holds two connections at
+    // once — a short-lived SHELL conn (`session.list`/`sync.*`/`session.create`, always a
+    // resume-less handshake) alongside a `CodeSessionModel`'s own attached conn — and both carry
+    // the same `PhoneClientInstanceID.stable()`, so both land on the SAME `PhoneSession`. Every
+    // OTHER case in this file uses a distinct `clientInstanceID` per connection, so nothing here
+    // covered that shape at all. These three tests do, and each one fails without its own fix.
+
+    /// **T6b review, Important 1.** A resume-less hello must not disturb ANOTHER connection's
+    /// in-flight `session.attach` replay flush.
+    ///
+    /// `handle` used to raise a live hold before it knew whether the hello carried resumes. Post-6b
+    /// a resume-less hello can neither move `liveConn` nor receive a live frame, so its hold
+    /// protects nothing — but `drainHeldLive` targets `liveConn`, so that hold's drain flushed a
+    /// DIFFERENT connection's queued live events onto that connection's wire, mid-replay, and
+    /// lowered the hold behind it. The phone cannot repair the reorder on this path:
+    /// `NormaSessionClient` buffers only while `replaying`, which is set from a `ServerHello`
+    /// verdict, and the attach rpc returns only `lastSeq` — so the higher-seq live event advances
+    /// the durable cursor and the still-pending lower-seq replay frames are dropped as duplicates.
+    /// Silent, permanent transcript loss, on exactly the two paths this task exists to make work
+    /// (the foreground-hop probe and the adopted "+ New Chat" connection).
+    ///
+    /// The interleave is made deterministic rather than raced: `blockSendsFrom` parks conn A inside
+    /// its FIRST replay frame's `send`, which suspends the actor exactly where a real transport
+    /// would, and the shell hello is driven into that window.
+    func testT6b_ResumelessHelloDoesNotReorderAnotherConnectionsReplayFlush() async throws {
+        let daemon = try await RealDaemon.start()
+        defer { daemon.stop() }
+        let listener = LoopbackListener()
+        let gateway = realGateway(socketPath: daemon.socketPath, remoteToken: daemon.remoteToken, listener: listener)
+        let runTask = Task { await gateway.run() }
+        defer { runTask.cancel() }
+
+        let seeded = try await seedTwoMessages(socketPath: daemon.socketPath, harnessToken: daemon.harnessToken)
+
+        // Conn A — the session connection. Resume-less hello, then the live `session.attach` rpc
+        // (the probe / adopted-connection path), which has a real two-event replay window.
+        let sessionConn = ScriptedRemoteConn()
+        listener.simulateConnection(sessionConn)
+        sessionConn.enqueueInbound(try helloFrame(clientInstanceID: "phone-pooled", resumes: []))
+        _ = try await waitForOutbound(sessionConn, count: 1) // helloAck
+
+        // Park conn A inside the FIRST frame the attach flush sends (frame #2 overall).
+        sessionConn.blockSendsFrom(2)
+        sessionConn.enqueueInbound(try rpcRequestFrame(id: 1, method: "session.attach", params: .object([
+            "sessionId": .string(seeded.sid), "fromSeq": .number(Double(seeded.afterHarnessAttach)),
+        ])))
+        _ = try await waitForOutbound(sessionConn, count: 2) // the first replay frame, recorded then parked
+
+        // A live event lands while conn A is parked: it must queue on `heldLive` behind the replay.
+        let harness = NormaClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.harnessToken, clientName: "t6b-live")
+        try await harness.connect(role: "harness")
+        _ = try await harness.attach(sessionId: seeded.sid, fromSeq: seeded.seqM2)
+        let seqM3 = try await harness.send(sessionId: seeded.sid, text: "m3")
+        defer { Task { await harness.close() } }
+        // Settle so the gateway's own pump has enqueued it before the shell hello (this file's
+        // established precondition-settle idiom — the assertion below is not timing-based).
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        // Conn B — the pool's shell connection, SAME install id, resume-less. Pre-fix its drain
+        // fires here and lands `m3` on conn A's wire between conn A's two replay frames.
+        let shellConn = ScriptedRemoteConn()
+        listener.simulateConnection(shellConn)
+        shellConn.enqueueInbound(try helloFrame(clientInstanceID: "phone-pooled", resumes: []))
+        _ = try await waitForOutbound(shellConn, count: 1) // shell helloAck
+        try await Task.sleep(nanoseconds: 300_000_000) // give a (pre-fix) drain time to land
+
+        sessionConn.releaseSends()
+
+        // Wait for the WHOLE flush, not just for `m3` — pre-fix `m3` arrives BEFORE the second
+        // replay frame, so waiting on it alone would snapshot `outbound` mid-flush and fail on a
+        // count assertion instead of on the ordering one that is the actual subject here. The
+        // attach's rpcResponse is emitted after the replay loop, so "3 events + a response" is the
+        // honest "flush complete" condition under both orderings.
+        func eventSeqsSoFar() -> [Int] {
+            sessionConn.outbound.compactMap { frame -> Int? in
+                guard let env = try? decodeEnvelope(frame), env.kind == .event else { return nil }
+                return env.seq
+            }
+        }
+        let flushDeadline = Date().addingTimeInterval(5)
+        while Date() < flushDeadline {
+            let sawResponse = sessionConn.outbound.contains { (try? decodeEnvelope($0))?.kind == .rpcResponse }
+            if eventSeqsSoFar().count >= 3, sawResponse { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        let eventSeqs = eventSeqsSoFar()
+        XCTAssertTrue(eventSeqs.contains(seqM3), "sanity: the live event must reach the session connection at all")
+        XCTAssertGreaterThanOrEqual(eventSeqs.count, 3, "sanity: two replay frames plus the live one")
+        XCTAssertEqual(eventSeqs, eventSeqs.sorted(),
+                       "a resume-less hello on ANOTHER connection must not flush live events into the middle of this one's replay — the phone's reorder buffer is inactive on the attach-rpc path, so an out-of-order seq here is permanently lost transcript. Got \(eventSeqs)")
+    }
+
+    /// **T6b review, Important 2a.** `revoke` must close EVERY connection the phone holds.
+    ///
+    /// Pre-6b it closed `currentConn` — whichever connection handshook most recently — so the other
+    /// one stayed open indefinitely. That is precisely the hole SP2a Task 4 closed ("a real phone's
+    /// connection must actually drop, not just get ignored going forward"), silently re-opened by
+    /// the phone growing a second connection underneath it. G5 above pins the single-connection
+    /// case; nothing pinned this one, so reverting the fix would have left the suite green.
+    func testT6b_RevokeClosesEveryConnectionThePhoneHolds() async throws {
+        let daemonTransport = ScriptedTransport()
+        let listener = LoopbackListener()
+        let directory = InMemoryDirectory(peerID: "peer-stub")
+        let gateway = Gateway(
+            listener: listener,
+            daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
+            hostID: "host-test",
+            directory: directory
+        )
+        let runTask = Task { await gateway.run() }
+        defer { runTask.cancel() }
+
+        // Conn A first, conn B second — same install id, so ONE PhoneSession. Only conn A's hello
+        // opens the daemon client (`session.connected` is already true for conn B).
+        let connA = ScriptedRemoteConn()
+        listener.simulateConnection(connA)
+        connA.enqueueInbound(try helloFrame(clientInstanceID: "phone-pooled", resumes: []))
+        try await feedDaemonHelloResponse(daemonTransport)
+        _ = try await waitForOutbound(connA, count: 1)
+
+        let connB = ScriptedRemoteConn()
+        listener.simulateConnection(connB)
+        connB.enqueueInbound(try helloFrame(clientInstanceID: "phone-pooled", resumes: []))
+        _ = try await waitForOutbound(connB, count: 1)
+
+        directory.remove("peer-stub")
+        await gateway.revoke(clientInstanceID: "phone-pooled")
+
+        try await waitForClosed(connB)
+        try await waitForClosed(connA)
+        XCTAssertTrue(connA.isClosed, "revoke must close the OLDER connection too — pre-T6b only the most recent one was closed, leaving an authenticated peer's transport open after its authorization was withdrawn")
+        XCTAssertTrue(connB.isClosed)
+    }
+
+    /// **T6b review, Important 2b.** Eviction's liveness signal must be "any open connection", not
+    /// "the most recent connection".
+    ///
+    /// `evictIfNeeded` read `currentConn == nil` — the same pointer live forwarding used. When a
+    /// phone holds two connections and the NEWER one hangs up (the pool's shell conn after its
+    /// linger, the common case), that cleared the pointer and the phone looked disconnected — so
+    /// eviction could tear down the daemon client and event pump of a phone still attached on its
+    /// other connection. The pooled phone here is deliberately the OLDEST session in the map, so it
+    /// is the eviction candidate the pre-fix code would pick FIRST.
+    func testT6b_APhoneWithAnotherOpenConnectionIsNotEvictable() async throws {
+        let daemon = try await RealDaemon.start()
+        defer { daemon.stop() }
+        let listener = LoopbackListener()
+        let gateway = realGateway(socketPath: daemon.socketPath, remoteToken: daemon.remoteToken, listener: listener)
+        let runTask = Task { await gateway.run() }
+        defer { runTask.cancel() }
+
+        func connect(_ id: String) async throws -> ScriptedRemoteConn {
+            let conn = ScriptedRemoteConn()
+            listener.simulateConnection(conn)
+            conn.enqueueInbound(try helloFrame(clientInstanceID: id, resumes: []))
+            _ = try await waitForOutbound(conn, count: 1) // helloAck
+            return conn
+        }
+
+        // The pooled phone goes FIRST so its `lastActiveAt` is the oldest in the map — i.e. it is
+        // the first candidate `evictIfNeeded` would take if it looked disconnected.
+        let connA = try await connect("phone-pooled")
+        let connB = try await connect("phone-pooled")   // same install id → same PhoneSession
+
+        for i in 0..<30 {
+            let filler = try await connect("phone-\(i)")
+            filler.endInbound() // hang up — evictable
+        }
+        // sessions: phone-pooled (2 conns) + phone-0..29 disconnected = 31.
+
+        connB.endInbound() // the NEWER connection hangs up; conn A is still attached
+        try await Task.sleep(nanoseconds: 300_000_000) // let the disconnect bookkeeping land
+
+        _ = try await connect("filler-a")   // 31 < cap: inserts, no eviction. Map is now 32.
+        _ = try await connect("filler-b")   // 32 >= cap: eviction runs, oldest disconnected first.
+
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline, await gateway.pumpTaskForTesting("phone-0") != nil {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let pooledPump = await gateway.pumpTaskForTesting("phone-pooled")
+        XCTAssertNotNil(pooledPump, "a phone with ANOTHER connection still open must never be evicted — pre-T6b the newer connection's hang-up cleared the liveness pointer and this phone, the oldest in the map, was taken first")
+        XCTAssertEqual(pooledPump?.isCancelled, false, "...and its event pump must still be running")
+        let evicted = await gateway.pumpTaskForTesting("phone-0")
+        XCTAssertNil(evicted, "sanity: eviction really did run, and took the oldest genuinely-disconnected session instead")
+
+        // ...and the signal is symmetric: once the LAST connection goes, the phone is evictable.
+        connA.endInbound()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        _ = try await connect("filler-c")   // trips the cap again; phone-pooled is now the oldest evictable
+
+        let deadline2 = Date().addingTimeInterval(3)
+        while Date() < deadline2, await gateway.pumpTaskForTesting("phone-pooled") != nil {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let pooledAfter = await gateway.pumpTaskForTesting("phone-pooled")
+        XCTAssertNil(pooledAfter, "once its last connection closes the phone must become evictable again — `openConns` must empty, not just shrink")
+    }
 }

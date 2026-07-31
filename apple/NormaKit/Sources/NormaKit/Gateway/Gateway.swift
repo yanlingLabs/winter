@@ -252,7 +252,22 @@ public actor Gateway {
         //   3. send `helloAck`/`ServerHello` FIRST (G3), THEN flush the buffered replay frames.
         //   4. drain the held live queue (already in seq order — single pump) and lift the hold:
         //      replay and live can never interleave, in that order: ack → replay → live.
-        let myHold = session.raiseLiveHold()
+        //
+        // **The hold is raised ONLY for a hello that actually carries resumes (T6b review,
+        // Important 1).** A resume-less hello has nothing to order: post-T6b it cannot move
+        // `liveConn` and its own connection can therefore never receive a live frame, so its hold
+        // protects nothing — while the drain, which now targets `liveConn`, would operate entirely
+        // on ANOTHER connection's stream. Raising it unconditionally meant a pool shell handshake
+        // could flush a code session's queued live events onto that session's wire in the MIDDLE of
+        // its `session.attach` replay flush, and lower the hold behind it. The phone does not catch
+        // that reorder on the attach path — `NormaSessionClient` only buffers while `replaying`,
+        // which is set from a `ServerHello` verdict, and the attach rpc returns just `lastSeq` — so
+        // the higher-seq live events advance the durable cursor and the pending lower-seq replay
+        // frames are dropped as duplicates: silent, permanent transcript loss. Skipping the raise
+        // also stops an unrelated connection's handshake latency from stalling a live stream it has
+        // nothing to do with. Every REMAINING raiser re-points `liveConn` to its own connection
+        // before draining, which is exactly what makes `drainHeldLive`'s per-event re-read safe.
+        let myHold = clientHello.resumes.isEmpty ? nil : session.raiseLiveHold()
         var verdicts: [ResumeVerdict] = []
         var pendingReplay: [SessionEvent] = []
         for resume in clientHello.resumes {
@@ -282,7 +297,7 @@ public actor Gateway {
         for event in pendingReplay {
             await sendEventFrame(conn, epoch: session.epoch, event: event)
         }
-        await drainHeldLive(session: session, hold: myHold)
+        if let myHold { await drainHeldLive(session: session, hold: myHold) }
 
         while let frame = await iter.next() {
             await handleLiveFrame(frame, conn: conn, generation: myGeneration, session: session)
@@ -296,6 +311,7 @@ public actor Gateway {
         session.openConns[myGeneration] = nil
         if session.liveConnGeneration == myGeneration {
             session.liveConn = nil
+            session.liveConnGeneration = 0
         }
     }
 
@@ -423,6 +439,7 @@ public actor Gateway {
         for conn in session.openConns.values { conn.close() }
         session.openConns.removeAll()
         session.liveConn = nil
+        session.liveConnGeneration = 0
         sessions[clientInstanceID] = nil
     }
 
@@ -570,13 +587,18 @@ public actor Gateway {
     /// `connGeneration` comparison, which conflated "a newer hold exists" with "a newer CONNECTION
     /// exists". The two stopped being the same thing the moment a phone could hold two connections
     /// at once: a live `session.attach` arriving on the older of them would have compared its own
-    /// connection's generation against a newer conn's and bailed on the very first check —
-    /// wedging `holdLiveEvents` at `true` forever, i.e. total silence, the exact symptom this task
-    /// exists to remove.
+    /// connection's generation against a newer conn's and bailed on the very first check — leaving
+    /// `holdLiveEvents` stuck at `true` until the phone's NEXT handshake happened to raise a hold
+    /// whose generation did match. Unbounded, not literally permanent (T6b review, Minor 1) — but
+    /// total silence for the whole window, the exact symptom this task exists to remove.
     ///
     /// The events go to `session.liveConn`, re-read per event, because the queue holds events for
     /// `liveSessionID` and those belong on whatever connection currently owns that attach — which,
-    /// for both callers, is the connection they just flushed replay on, so ordering is preserved.
+    /// for every caller, is the connection they just flushed replay on, so ordering is preserved.
+    /// **What keeps that true is an invariant, not a coincidence:** every write to `liveConn` is
+    /// preceded by a `raiseLiveHold()` in the same call, so a competing owner always bumps the
+    /// token BEFORE it moves the pointer and this loop's `while` guard stops us first. Anyone who
+    /// later writes `liveConn` without raising a hold silently breaks ack → replay → live ordering.
     private func drainHeldLive(session: PhoneSession, hold: Int) async {
         while session.holdToken == hold, !session.heldLive.isEmpty {
             let e = session.heldLive.removeFirst()
@@ -925,14 +947,23 @@ private final class PhoneSession: @unchecked Sendable {
     /// arrives on, the orphaned connection's keepalive kept succeeding: the session looked
     /// perfectly connected and just went quiet, with no reconnect and nothing logged.
     ///
+    /// **Write it only while holding a hold.** Every write to this pointer is preceded by a
+    /// `raiseLiveHold()` in the same call, and `Gateway.drainHeldLive` depends on that: it re-reads
+    /// `liveConn` per event, which is safe only because a competing owner bumps `holdToken` BEFORE
+    /// it moves the pointer, so an older drain's guard stops it first. A write without a hold
+    /// silently breaks ack → replay → live ordering, with no test to catch it.
+    ///
     /// **Cross-repo interaction — read before tuning either side.** `SessionConnectionPool`
     /// (norma-ios) documents this pointer as a reason its idle linger is deliberately SHORT (2 s):
     /// while forwarding was stealable, a long-lived pooled connection held the stolen pointer for
-    /// as long as it lived. That constraint is GONE — a pooled connection never handshakes with a
-    /// resume and never sends `session.attach`, so it can no longer acquire this pointer at all,
-    /// and the linger is now free to be chosen on reuse-versus-cost grounds alone. Whoever changes
-    /// the linger should update that type's doc; whoever changes THIS pointer's ownership rule
-    /// should remember the phone is sizing a timeout against it.
+    /// as long as it lived. That constraint is GONE — a connection still IN the pool handshakes
+    /// resume-less and never sends `session.attach`, so it can no longer acquire this pointer at
+    /// all, and the linger is now free to be chosen on reuse-versus-cost grounds alone. (The
+    /// handoff path is the deliberate exception, and not a counter-example: `CodeSessionModel`
+    /// DOES send `session.attach` on an adopted connection, but `claimHandoff` is single-use and
+    /// that connection has left the pool, so the linger no longer governs it.) Whoever changes the
+    /// linger should update that type's doc; whoever changes THIS pointer's ownership rule should
+    /// remember the phone is sizing a timeout against it.
     var liveConn: RemoteConn?
     /// The `connGeneration` of the connection `liveConn` points at, so a disconnecting connection
     /// clears the forwarding pointer only when it is the one holding it — a newer attach on a
@@ -946,6 +977,15 @@ private final class PhoneSession: @unchecked Sendable {
     /// with any open connection is never evicted) and the set `Gateway.revoke` closes. A dictionary
     /// keyed by generation rather than a set of connections because `RemoteConn` is a bare
     /// `Sendable` protocol with no identity — the generation IS the gateway's own per-connection id.
+    ///
+    /// **Its correctness now rests on a property that lives in another file** (T6b review, Minor
+    /// 2): an entry is removed only when its `handle` frame's `for await` over `conn.inbound` ends.
+    /// If a transport ever failed to terminate that stream on close, the entry would leak and this
+    /// phone would become permanently un-evictable — the session cap silently stops working for it.
+    /// Pre-T6b the equivalent leak was self-limiting, because the next connection simply overwrote
+    /// a single pointer; a per-generation dictionary accumulates instead. Termination is pinned by
+    /// `IrohCloseDeterminismTests`, and `handle` is never cancelled — so this is a note for whoever
+    /// changes the transport, not a live defect.
     var openConns: [Int: RemoteConn] = [:]
     /// Bumped on every new connection for this phone; the unique id of one `handle` frame.
     var connGeneration = 0
