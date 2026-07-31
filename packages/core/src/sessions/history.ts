@@ -113,6 +113,18 @@ export const DEFAULT_OUTPUT_CAP = 64 * 1024;
  *  marker still says "by history" on both paths: identical bytes matter more than a per-path
  *  wording, and the phone reconciles the two by seq. */
 export function capEvent(event: SessionEvent, outputCap: number = DEFAULT_OUTPUT_CAP): SessionEvent {
+  // FAST PATH — the overwhelmingly common case, and the reason it matters: since the live remote
+  // stream reuses this helper (`sessions/remote-stream.ts`), it now runs per ASSISTANT_DELTA, i.e.
+  // hundreds of times per reply, on top of the NDJSON writer's own serialization.
+  //
+  // It is exact, not a heuristic: every string inside the event appears in that event's own JSON,
+  // escaped — and escaping only ever ADDS bytes — so `byteLength(s) <= byteLength(JSON(s)) <=
+  // byteLength(JSON(event))`. If the WHOLE event fits `outputCap`, no string in it can exceed
+  // `outputCap`, so `capJson` is provably a no-op; and the total is under the aggregate ceiling too,
+  // so the second pass is provably a no-op as well. `Math.min` because a caller may pass an
+  // `outputCap` LARGER than `WHOLE_EVENT_CEILING`, where only the aggregate bound is binding.
+  // Returning `event` itself preserves the documented same-reference-on-no-op contract exactly.
+  if (Buffer.byteLength(JSON.stringify(event), "utf8") <= Math.min(outputCap, WHOLE_EVENT_CEILING)) return event;
   const capped = capJson(event, outputCap);
   const size = Buffer.byteLength(JSON.stringify(capped), "utf8");
   if (size <= WHOLE_EVENT_CEILING) return capped as SessionEvent;
@@ -157,7 +169,3 @@ export function readHistoryPage(
   const hasMore = filtered.some((e) => e.seq < (oldestSeq ?? upper));
   return { events: kept, hasMore, oldestSeq };
 }
-
-/** Test-only export of the deep cap (the page-level tests can't reach a nested-string event until
- *  question_asked joins the allowlist in the next commit). */
-export const capEventForTest = capEvent;

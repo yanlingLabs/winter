@@ -618,6 +618,28 @@ public actor NormaSessionClient {
 
         guard !st.gapped, !st.needsSnapshot else { return }
 
+        let decoded = decode(env, session: session)
+
+        // TRANSIENTS BYPASS THE REPLAY HOLD (the third and last exemption — see
+        // `transientEventTypes`). The hold below exists for ONE reason, stated in its own comment:
+        // cursor safety. A transient never touches the cursor (`applyEvent` yields and returns
+        // before both the dedupe check and `cursors.advance`), so parking one protects nothing and
+        // costs the exact symptom the exemption exists to kill — the deltas of a turn in flight go
+        // silent while a replay batch drains, then arrive in a burst. It also keeps them off
+        // `liveBufferCap`, whose overflow does not merely drop the buffer: it marks the stream
+        // `gapped`, killing every further event on it until a fresh handshake. A burst of deltas
+        // must never be able to raise that alarm.
+        //
+        // Nothing downstream is skipped by returning here. The drain check at the bottom fires on
+        // `currentCursor >= highWatermark`, which only a cursor-advancing (i.e. non-transient) event
+        // can newly satisfy: `recordVerdicts` enters `replaying` only when `cursor < hw`, and a
+        // replay event can advance the cursor at most to `hw` — at which point that same call drains
+        // and clears the flag. A transient can therefore never be the event that completes a batch.
+        if isTransient(decoded) {
+            eventsCont.yield(decoded)
+            return
+        }
+
         // Replay→live handoff: a live event (past the replay ceiling) arriving mid-replay is held,
         // not applied — applying it immediately would advance the cursor past the still-pending
         // replay events, which would then all be dropped as duplicates (replay lost, reordered
@@ -637,11 +659,11 @@ public actor NormaSessionClient {
                 st.liveBuffer = []
                 return
             }
-            st.liveBuffer.append((seq: seq, env: decode(env, session: session)))
+            st.liveBuffer.append((seq: seq, env: decoded))
             return
         }
 
-        applyEvent(session: session, stream: stream, seq: seq, decoded: decode(env, session: session))
+        applyEvent(session: session, stream: stream, seq: seq, decoded: decoded)
 
         // Replay complete → drain the held live events, in seq order, through the same apply path.
         if st.replaying, currentCursor(session, stream) >= st.highWatermark {
@@ -675,6 +697,10 @@ public actor NormaSessionClient {
     /// on `liveBuffer` overflow (a genuine "too far behind, snapshot" signal).
     private func applyEvent(session: String, stream: String, seq: Int, decoded: SessionEnvelope) {
         // TRANSIENT events bypass the dedupe/advance core entirely — see `transientEventTypes`.
+        // Kept even though `handleEvent` now short-circuits transients one level up (so nothing
+        // reaches here or the liveBuffer drain with a transient today): this is the dedupe core's
+        // OWN invariant, and it must stay true of any future caller rather than depend on one
+        // caller's filtering. Two set lookups on a path that costs a file write is not a cost.
         if isTransient(decoded) {
             eventsCont.yield(decoded)
             return

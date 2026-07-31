@@ -101,9 +101,26 @@ public enum WireFrame {
         guard String(data: frame, encoding: .utf8) != nil else { throw WireError.invalidUTF8 }
 
         // Foundation's JSONDecoder/JSONSerialization neither bound nesting depth nor reject
-        // duplicate object keys by default — catch both with a byte scan before decoding.
+        // duplicate object keys by default — catch both with a byte scan before decoding. This is
+        // a SECURITY check, not a classification aid: it must run on every frame, including the
+        // fast path below (a `{"v":1,"v":1,…}` frame decodes perfectly well as a `WireEnvelope`).
         try validateJSONShape(frame, maxDepth: maxDepth)
 
+        // FAST PATH — a well-formed, current-version frame is parsed ONCE. This function used to
+        // run `JSONSerialization.jsonObject` over the whole frame purely to read `v` and `kind` for
+        // precise error classification, and then parse the SAME bytes again with `JSONDecoder`. On
+        // the live remote stream that ran per event, i.e. per assistant_delta. `WireEnvelope`'s own
+        // decode already rejects an unknown `kind` (`WireKind` is a `Codable` enum), so the only
+        // thing left to check on success is the version. Every rejection is classified exactly as
+        // before by falling through to the slow path — which is the original code, unchanged.
+        if let envelope = try? JSONDecoder().decode(WireEnvelope.self, from: frame),
+           envelope.v == supportedVersion {
+            return envelope
+        }
+
+        // SLOW PATH — the frame is bad, or is a version we don't speak. Re-read it with
+        // JSONSerialization to say precisely WHICH, in the same precedence order as before:
+        // malformed < unknownVersion < unknownKind.
         guard let obj = try? JSONSerialization.jsonObject(with: frame) as? [String: Any] else {
             throw WireError.malformed
         }
@@ -149,30 +166,35 @@ public enum WireFrame {
     /// daemon). Depth-only (no duplicate-key bookkeeping): the daemon re-validates shape itself;
     /// this is the gateway's cheap pre-forward tripwire. Throws `WireError.tooDeep`.
     public static func validateJSONDepth(_ bytes: Data, maxDepth: Int = 32) throws {
-        var depth = 0
-        var inString = false
-        var escapeNext = false
-        for byte in bytes {
-            if inString {
-                if escapeNext {
-                    escapeNext = false
-                } else if byte == UInt8(ascii: "\\") {
-                    escapeNext = true
-                } else if byte == UInt8(ascii: "\"") {
-                    inString = false
+        // `withUnsafeBytes` purely for speed: iterating `Data` as a `Sequence` goes through
+        // Foundation's generic element accessor per byte, which dominates this scan on a small
+        // frame. Same algorithm, same bytes, same throws — only the buffer access changes.
+        try bytes.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            var depth = 0
+            var inString = false
+            var escapeNext = false
+            for byte in raw {
+                if inString {
+                    if escapeNext {
+                        escapeNext = false
+                    } else if byte == UInt8(ascii: "\\") {
+                        escapeNext = true
+                    } else if byte == UInt8(ascii: "\"") {
+                        inString = false
+                    }
+                    continue
                 }
-                continue
-            }
-            switch byte {
-            case UInt8(ascii: "\""):
-                inString = true
-            case UInt8(ascii: "{"), UInt8(ascii: "["):
-                depth += 1
-                if depth > maxDepth { throw WireError.tooDeep }
-            case UInt8(ascii: "}"), UInt8(ascii: "]"):
-                depth -= 1
-            default:
-                break
+                switch byte {
+                case UInt8(ascii: "\""):
+                    inString = true
+                case UInt8(ascii: "{"), UInt8(ascii: "["):
+                    depth += 1
+                    if depth > maxDepth { throw WireError.tooDeep }
+                case UInt8(ascii: "}"), UInt8(ascii: "]"):
+                    depth -= 1
+                default:
+                    break
+                }
             }
         }
     }
@@ -182,62 +204,70 @@ public enum WireFrame {
     /// open OBJECT, the set of keys seen so far — a string immediately followed by `:` is a key;
     /// arrays don't have keys, so `[`/`]` only affect depth, never the key stack.
     private static func validateJSONShape(_ bytes: Data, maxDepth: Int) throws {
-        var depth = 0
-        var inString = false
-        var escapeNext = false
-        var stringBuffer: [UInt8] = []
-        var lastCompletedString: String?
-        var keyStack: [Set<String>] = []
+        // `withUnsafeBytes` purely for speed — see `validateJSONDepth`. The `stringBuffer`
+        // accumulation is kept byte-for-byte (rather than slicing the underlying buffer, which
+        // would be faster still) because it defines what a "key" IS for the duplicate check: it
+        // drops the backslash of an escape and keeps the escaped byte raw. Slicing would compare
+        // keys with their escape sequences intact — a different equivalence relation on a security
+        // check, for a few hundred nanoseconds. Not worth changing here.
+        try bytes.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            var depth = 0
+            var inString = false
+            var escapeNext = false
+            var stringBuffer: [UInt8] = []
+            var lastCompletedString: String?
+            var keyStack: [Set<String>] = []
 
-        for byte in bytes {
-            if inString {
-                if escapeNext {
-                    escapeNext = false
-                    stringBuffer.append(byte)
-                } else if byte == UInt8(ascii: "\\") {
-                    escapeNext = true
-                } else if byte == UInt8(ascii: "\"") {
-                    inString = false
-                    lastCompletedString = String(decoding: stringBuffer, as: UTF8.self)
-                    stringBuffer = []
-                } else {
-                    stringBuffer.append(byte)
-                }
-                continue
-            }
-
-            switch byte {
-            case UInt8(ascii: "\""):
-                inString = true
-                stringBuffer = []
-            case UInt8(ascii: "{"):
-                depth += 1
-                if depth > maxDepth { throw WireError.tooDeep }
-                keyStack.append(Set<String>())
-                lastCompletedString = nil
-            case UInt8(ascii: "["):
-                depth += 1
-                if depth > maxDepth { throw WireError.tooDeep }
-                lastCompletedString = nil
-            case UInt8(ascii: "}"):
-                depth -= 1
-                if !keyStack.isEmpty { keyStack.removeLast() }
-                lastCompletedString = nil
-            case UInt8(ascii: "]"):
-                depth -= 1
-                lastCompletedString = nil
-            case UInt8(ascii: ":"):
-                if let key = lastCompletedString, !keyStack.isEmpty {
-                    if keyStack[keyStack.count - 1].contains(key) {
-                        throw WireError.duplicateKey
+            for byte in raw {
+                if inString {
+                    if escapeNext {
+                        escapeNext = false
+                        stringBuffer.append(byte)
+                    } else if byte == UInt8(ascii: "\\") {
+                        escapeNext = true
+                    } else if byte == UInt8(ascii: "\"") {
+                        inString = false
+                        lastCompletedString = String(decoding: stringBuffer, as: UTF8.self)
+                        stringBuffer.removeAll(keepingCapacity: true)
+                    } else {
+                        stringBuffer.append(byte)
                     }
-                    keyStack[keyStack.count - 1].insert(key)
+                    continue
                 }
-                lastCompletedString = nil
-            case UInt8(ascii: ","):
-                lastCompletedString = nil
-            default:
-                break
+
+                switch byte {
+                case UInt8(ascii: "\""):
+                    inString = true
+                    stringBuffer.removeAll(keepingCapacity: true)
+                case UInt8(ascii: "{"):
+                    depth += 1
+                    if depth > maxDepth { throw WireError.tooDeep }
+                    keyStack.append(Set<String>())
+                    lastCompletedString = nil
+                case UInt8(ascii: "["):
+                    depth += 1
+                    if depth > maxDepth { throw WireError.tooDeep }
+                    lastCompletedString = nil
+                case UInt8(ascii: "}"):
+                    depth -= 1
+                    if !keyStack.isEmpty { keyStack.removeLast() }
+                    lastCompletedString = nil
+                case UInt8(ascii: "]"):
+                    depth -= 1
+                    lastCompletedString = nil
+                case UInt8(ascii: ":"):
+                    if let key = lastCompletedString, !keyStack.isEmpty {
+                        if keyStack[keyStack.count - 1].contains(key) {
+                            throw WireError.duplicateKey
+                        }
+                        keyStack[keyStack.count - 1].insert(key)
+                    }
+                    lastCompletedString = nil
+                case UInt8(ascii: ","):
+                    lastCompletedString = nil
+                default:
+                    break
+                }
             }
         }
     }

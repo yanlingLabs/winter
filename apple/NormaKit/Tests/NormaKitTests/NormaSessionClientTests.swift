@@ -591,6 +591,86 @@ final class NormaSessionClientTests: XCTestCase {
                        "persisted events still advance the cursor")
     }
 
+    // MARK: - T7: transients are exempt from the REPLAY HOLD too, not just the dedupe core
+
+    /// **The third exemption, and the last place a transient could still be swallowed.** The replay
+    /// hold parks any event whose seq is past the batch ceiling until the batch completes. Its only
+    /// stated reason (see `handleEvent`) is cursor safety: applying a live event mid-replay would
+    /// drag the cursor past the still-pending replay events and they would all be dropped as
+    /// duplicates. A TRANSIENT cannot do that — it never advances the cursor — so the hold buys
+    /// nothing for one and costs the exact user-visible symptom the transient exemption exists to
+    /// kill: the deltas of a turn in flight go silent while the batch drains, then land in a burst.
+    ///
+    /// The shape is the one the daemon actually produces on the open-a-session-mid-turn path: the
+    /// attach's replay ceiling is the `harness_attached` seq, and any delta broadcast afterwards
+    /// borrows a LATER `lastSeq` — i.e. `seq > highWatermark` by construction, so it takes the hold.
+    ///
+    /// Pre-fix the deliveries are `[1, 2, 3, delta]`; the fix makes them `[1, delta, 2, 3]` — the
+    /// delta arrives when it was sent, and the replay batch is still delivered whole and in order.
+    func testTransientDuringReplayIsDeliveredImmediatelyNotParkedUntilTheBatchEnds() async throws {
+        let conn = ScriptedRemoteConn()
+        let cursors = InMemoryCursorStore()
+        let client = makeClient(conn: conn, cursors: cursors)
+        let (events, evTask) = drain(client.events)
+        let (gaps, gapTask) = drain(client.gaps)
+        defer { evTask.cancel(); gapTask.cancel() }
+
+        conn.enqueueInbound(helloAckFrame(verdicts: [.replayBegin(sessionID: "s1", fromSeq: 0, highWatermark: 3)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0)])
+
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 1))                       // replay
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 7, type: "assistant_delta",
+                                       extra: ["delta": .string("live")]))           // live delta, seq > 3
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 2))                       // replay
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 3))                       // replay, completes batch
+
+        try await waitUntil({ self.seqs(events.items).count >= 4 }, "the replay batch plus the live delta")
+        XCTAssertEqual(types(events.items),
+                       ["assistant_message", "assistant_delta", "assistant_message", "assistant_message"],
+                       "the delta must reach the UI WHEN IT ARRIVED, not be parked behind the replay batch")
+        XCTAssertEqual(seqs(events.items), [1, 7, 2, 3])
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 3,
+                       "bypassing the hold must not let the transient touch the cursor")
+        XCTAssertTrue(gaps.items.isEmpty)
+    }
+
+    /// The same hold ALSO counts transients against `liveBufferCap`, so a long enough stream of
+    /// deltas during a replay that has not completed trips the overflow path — which does not merely
+    /// drop the deltas, it marks the whole stream `gapped` and yields a `GapSignal`, killing every
+    /// further event on it until a fresh handshake. That is a false alarm by construction: the cap
+    /// exists to bound a buffer that only exists to protect the cursor, and a transient is never in
+    /// that buffer's remit.
+    ///
+    /// Pre-fix: `cap = 3` ⇒ deltas 1-3 are parked (never delivered) and delta 4 raises the gap.
+    /// Post-fix: all four are delivered and the buffer stays empty. The persisted-event half of the
+    /// cap is unchanged and stays pinned by
+    /// `testLiveBufferOverflowSurfacesGapInsteadOfGrowingUnbounded` above.
+    func testTransientsDuringReplayNeverConsumeTheLiveBufferCapOrFalselyGap() async throws {
+        let conn = ScriptedRemoteConn()
+        let cursors = InMemoryCursorStore()
+        let client = makeClient(conn: conn, cursors: cursors, liveBufferCap: 3)
+        let (events, evTask) = drain(client.events)
+        let (gaps, gapTask) = drain(client.gaps)
+        defer { evTask.cancel(); gapTask.cancel() }
+
+        // Replay window 1..2; seq 2 never arrives, so the batch never completes and the hold stays up.
+        conn.enqueueInbound(helloAckFrame(verdicts: [.replayBegin(sessionID: "s1", fromSeq: 0, highWatermark: 2)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0)])
+
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 1)) // replay; cursor 1, still replaying
+        for i in 1...4 {
+            conn.enqueueInbound(eventFrame(session: "s1", seq: 9, type: "assistant_delta",
+                                           extra: ["delta": .string("chunk-\(i)")]))
+        }
+
+        try await waitUntil({ self.deltas(events.items).count >= 4 }, "all four deltas to stream through the hold")
+        XCTAssertEqual(deltas(events.items), ["chunk-1", "chunk-2", "chunk-3", "chunk-4"])
+        XCTAssertTrue(gaps.items.isEmpty,
+                      "a burst of transients must never trip the live-buffer cap — that gap kills the stream")
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 1,
+                       "the replay event advanced the cursor; no transient did")
+    }
+
     // MARK: - Step 6: idempotency (commandId) + approval state machine
 
     func testSendCarriesStableCommandIdAcrossRetries() async throws {

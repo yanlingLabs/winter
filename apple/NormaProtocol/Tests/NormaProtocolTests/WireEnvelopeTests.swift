@@ -120,6 +120,11 @@ final class WireEnvelopeTests: XCTestCase {
         }
     }
 
+    /// Also the tripwire for `decodeStructural`'s fast path (T7): this frame is a PERFECTLY VALID
+    /// `WireEnvelope` at the current version — `JSONDecoder` accepts it and Foundation keeps the
+    /// last duplicate — so it is only rejected because the byte scan runs BEFORE the decode. Move
+    /// `validateJSONShape` after the fast path "since the decode already validates" and this test,
+    /// alone, is what fails.
     func testDecodeThrowsDuplicateKey() throws {
         let json = #"{"v":1,"v":1,"pairingEpoch":1,"hostID":"h","kind":"event","timestamp":0,"payload":""}"#
         let frame = Data(json.utf8)
