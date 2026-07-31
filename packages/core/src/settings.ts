@@ -5,10 +5,28 @@ import { z } from "zod";
 import { DEFAULT_CODEX_MODEL } from "./providers/codex-config";
 import { ensureGlobalGitignore, NORMA_PERSONAL_IGNORES } from "./global-gitignore";
 
-/** Reasoning-effort slugs — the live /models payload (2026-07-10) lists exactly these across
- *  the gpt-5.6 family (luna lacks "ultra", but validating per-model effort support is NOT done
- *  here — the backend rejects unsupported combos itself; this enum is the full universe). */
-export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
+/** Reasoning-effort slugs valid on the wire — measured LIVE against the Codex OAuth endpoint
+ *  (2026-07-31), one model at a time, NOT read off the /models catalogue text. That distinction
+ *  matters: "ultra" was added here on 2026-07-10 from exactly that catalogue reading and was
+ *  never checked against the request validator. Effort is global and hot-reloaded (every session
+ *  re-resolves it every turn), so a persisted invalid slug doesn't fail at set-time — it breaks
+ *  EVERY session with an opaque HTTP 400 one turn later.
+ *
+ *  There are TWO validation layers on the wire, and they disagree per-model — never infer one
+ *  model's answer from another's:
+ *   - "none" is genuinely HONOURED on all three gpt-5.6 models: the server echoes back
+ *     `effort: "none"` in both response.created and response.completed, emits no reasoning item
+ *     at all, and reports 0 reasoning tokens (the same model at "max" reports 42, proving the
+ *     counter is live rather than always zero).
+ *   - "ultra" is rejected by a DIFFERENT, GLOBAL enum layer (`invalid_value`, model-agnostic) —
+ *     it is not a per-model gap, it is invalid everywhere. It must never be re-added here.
+ *
+ *  "minimal" is deliberately ABSENT from this list: it is rejected PER-MODEL (`unsupported_value`,
+ *  the error naming the slug) rather than globally. A future read of the /models catalogue will
+ *  list it right alongside the others that ARE valid — do not re-add it from that reading alone.
+ *  That is exactly the mistake that put "ultra" here on 2026-07-10; verify per-model wire support
+ *  first, the same way "none" and "ultra" were verified for this list. */
+export const REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
 
 export const ProviderSettings = z.discriminatedUnion("type", [
   z.object({ type: z.literal("codex-oauth"), model: z.string().min(1), reasoningEffort: z.enum(REASONING_EFFORTS).optional() }),

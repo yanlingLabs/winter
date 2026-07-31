@@ -50,7 +50,8 @@ export interface TurnRequest {
   input: TurnInputItem[];
   tools?: ToolSpec[];
   signal?: AbortSignal;
-  /** Reasoning-effort slug (settings.ts REASONING_EFFORTS: low/medium/high/xhigh/max/ultra).
+  /** Reasoning-effort slug (settings.ts REASONING_EFFORTS: none/low/medium/high/xhigh/max — see
+   *  that constant's own comment for why "ultra" is excluded and "minimal" was never added).
    *  Optional — omitted means no `reasoning` field is sent (openai-compatible.ts's
    *  buildRequestBody must stay byte-identical to today's body when this is unset). */
   reasoningEffort?: string;

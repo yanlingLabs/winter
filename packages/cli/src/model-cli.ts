@@ -61,10 +61,11 @@ export function validateModelSlug(providerType: "codex-oauth" | "openai-compatib
   return `invalid model "${slug}" for codex-oauth — valid slugs: ${CODEX_MODELS.map((m) => m.id).join(", ")}`;
 }
 
-/** Validates a reasoning-effort slug against REASONING_EFFORTS (settings.ts — the full slug
- *  universe across the live /models payload; per-model support, e.g. luna lacking "ultra", is
- *  NOT validated here — the backend rejects unsupported combos itself). Returns an error
- *  message, or null when valid. */
+/** Validates a reasoning-effort slug against REASONING_EFFORTS (settings.ts — the wire-valid
+ *  universe, measured live against the endpoint, not read off the /models catalogue; see that
+ *  constant's own comment). Per-model rejection (e.g. "minimal", which the backend rejects on a
+ *  per-model basis) is NOT validated here — the backend rejects unsupported combos itself.
+ *  Returns an error message, or null when valid. */
 export function validateEffort(effort: string): string | null {
   if ((REASONING_EFFORTS as readonly string[]).includes(effort)) return null;
   return `invalid effort "${effort}" — must be one of: ${REASONING_EFFORTS.join(", ")}`;

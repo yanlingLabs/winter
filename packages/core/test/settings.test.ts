@@ -295,12 +295,38 @@ describe("loadSettings", () => {
   });
 
   test("every documented reasoning-effort slug parses; an invalid slug is rejected", () => {
-    expect(REASONING_EFFORTS).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
+    expect(REASONING_EFFORTS).toEqual(["none", "low", "medium", "high", "xhigh", "max"]);
     for (const effort of REASONING_EFFORTS) {
       const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: effort } });
       expect(s.provider.reasoningEffort).toBe(effort);
     }
     expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: "bogus" } })).toThrow();
+  });
+
+  // Task 1 (provider-correctness, 2026-07-31): pins the live bug this task exists to fix.
+  // "ultra" was added to REASONING_EFFORTS on 2026-07-10 from a reading of the live /models
+  // catalogue that was never checked against the request validator. Effort is GLOBAL and
+  // HOT-RELOADED (providers/manager.ts's live resolver re-reads settings.json every turn), so
+  // `norma model --effort ultra` doesn't fail at set-time — it silently PERSISTS, and then breaks
+  // EVERY session with an opaque HTTP 400 one turn later. Measured live against the Codex OAuth
+  // endpoint this session (do not re-derive, do not weaken): "ultra" is rejected by a DIFFERENT,
+  // GLOBAL enum layer (`invalid_value`, model-agnostic) than per-model rejections; "none" is
+  // genuinely honoured on all three gpt-5.6 models — the server echoes `effort: "none"` in both
+  // response.created and response.completed, emits no reasoning item, and reports 0 reasoning
+  // tokens (the same model at `max` reports 42, proving the counter is live, not always zero).
+  test("ultra must never be wire-valid again; none must always be (the live 400 this task fixes)", () => {
+    expect(REASONING_EFFORTS as readonly string[]).not.toContain("ultra");
+    expect(REASONING_EFFORTS as readonly string[]).toContain("none");
+    expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: "ultra" } })).toThrow();
+    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: "none" } });
+    expect(s.provider.reasoningEffort).toBe("none");
+
+    // The actual `norma model --effort ultra` path: setReasoningEffort + saveSettings (which
+    // validates before writing). Before this task's fix, this round-trip SUCCEEDED and wrote
+    // "ultra" to settings.json on disk — exactly the write that then 400s every session's next
+    // turn against the live endpoint.
+    const p = tmpSettings({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } });
+    expect(() => saveSettings(p, setReasoningEffort(loadSettings(p), "ultra" as any))).toThrow();
   });
 
   test("hooks config parses; absent → undefined", () => {
