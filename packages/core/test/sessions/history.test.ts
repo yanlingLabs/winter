@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionEvent } from "@norma/protocol";
 import { SessionStore } from "../../src/sessions/store";
-import { HISTORY_EVENT_TYPES, readHistoryPage, capEventForTest, WHOLE_EVENT_CEILING } from "../../src/sessions/history";
+import { HISTORY_EVENT_TYPES, readHistoryPage, capEvent, WHOLE_EVENT_CEILING } from "../../src/sessions/history";
 
 describe("readHistoryPage", () => {
   let home: string | undefined;
@@ -228,7 +228,7 @@ describe("readHistoryPage", () => {
     expect(resolved.by).toBe("cli");
   });
 
-  test("DEEP CAP (unit): capEventForTest walks arrays and objects at any depth", () => {
+  test("DEEP CAP (unit): capEvent walks arrays and objects at any depth", () => {
     const big = "z".repeat(70 * 1024);
     const event = {
       type: "question_asked", sessionId: "s", threadId: "main", callId: "q", seq: 1, ts: 1,
@@ -237,13 +237,13 @@ describe("readHistoryPage", () => {
         options: [{ label: "A", description: big }, { label: "B" }],
       }],
     } as any;
-    const capped = capEventForTest(event, 64 * 1024) as any;
+    const capped = capEvent(event, 64 * 1024) as any;
     expect(capped.questions[0].options[0].description).toContain("…[truncated by history:");
     expect(capped).not.toBe(event); // copy on change
     // Sibling untouched by the change elsewhere in the spine keeps its original reference.
     expect(capped.questions[0].options[1]).toBe(event.questions[0].options[1]);
     const small = { type: "user_message", sessionId: "s", threadId: "main", text: "ok", seq: 2, ts: 1 } as any;
-    expect(capEventForTest(small, 64 * 1024)).toBe(small); // SAME reference on no-op
+    expect(capEvent(small, 64 * 1024)).toBe(small); // SAME reference on no-op
   });
 
   test("WHOLE-EVENT CEILING: a question_asked with many large options serializes under the ceiling, structure intact, deterministic", () => {
@@ -276,5 +276,24 @@ describe("readHistoryPage", () => {
     }
     // Page determinism: two reads of the same page are byte-identical.
     expect(JSON.stringify(p1.events)).toBe(JSON.stringify(p2.events));
+  });
+
+  /** T7: `capEvent`'s fast path returns the event untouched when its WHOLE serialization already
+   *  fits the per-string cap — sound because a string is always shorter than its own escaped JSON.
+   *  The one way that reasoning breaks is an `outputCap` LARGER than `WHOLE_EVENT_CEILING`, where
+   *  "fits the per-string cap" no longer implies "fits the aggregate ceiling". The fast path's
+   *  threshold is `min(outputCap, WHOLE_EVENT_CEILING)` for exactly that; drop the `min` and this
+   *  test hands the phone a 300 KiB event on a transport whose overflow silently kills the link. */
+  test("FAST PATH: an outputCap above the whole-event ceiling still gets the aggregate pass", () => {
+    const event = {
+      type: "assistant_message", sessionId: "s", threadId: "main", seq: 1, ts: 1,
+      text: "y".repeat(300 * 1024), // one string: under a 512 KiB per-string cap, over the ceiling
+    } as any;
+    const capped = capEvent(event, 512 * 1024);
+    expect(capped).not.toBe(event);
+    expect(Buffer.byteLength(JSON.stringify(capped), "utf8")).toBeLessThanOrEqual(WHOLE_EVENT_CEILING);
+    // Control: at the same cap, an event genuinely under the ceiling still short-circuits.
+    const small = { type: "assistant_message", sessionId: "s", threadId: "main", seq: 2, ts: 1, text: "ok" } as any;
+    expect(capEvent(small, 512 * 1024)).toBe(small);
   });
 });
