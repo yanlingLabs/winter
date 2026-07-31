@@ -482,6 +482,192 @@ final class FakePhoneConformanceTests: XCTestCase {
         XCTAssertTrue(gapSink.items.isEmpty, "no GapSignal across a full streamed turn")
     }
 
+    // MARK: - iOS remote-path T6b: live forwarding follows the ATTACH, not the connection
+
+    /// One phone, two connections, ONE `clientInstanceID` — production shape since the iOS
+    /// connection pool landed (T6). `PhoneClientInstanceID.stable()` mints exactly one install-wide
+    /// id, and every connection the app opens carries it: the pool's short-lived SHELL connection
+    /// (`session.list` / `sync.*` / `session.create`, always a resume-less handshake) and a
+    /// `CodeSessionModel`'s own long-lived attached connection. Both therefore land on the SAME
+    /// `Gateway.PhoneSession`.
+    private func dialPhone(
+        setup: TestSetup, secret: Data, epoch: Int, installID: String,
+        heartbeat: HeartbeatConfig
+    ) async throws -> NormaSessionClient {
+        let phoneEndpointID = try SecretKey.fromBytes(bytes: secret).public().description
+        let conn = try await IrohDialer.dialInternal(
+            secret: secret, macEndpointID: setup.macEndpointID, alpn: IrohListener.defaultALPN,
+            relayURLs: [], addrOverride: setup.irohListener.endpointAddr
+        )
+        return NormaSessionClient(
+            conn: conn, hostID: phoneEndpointID, epoch: epoch, cursors: InMemoryCursorStore(),
+            clientInstanceID: installID, clock: { Int(Date().timeIntervalSince1970 * 1000) },
+            idgen: { UUID().uuidString }, heartbeat: heartbeat
+        )
+    }
+
+    private func sawUserMessage(_ sink: Sink<SessionEnvelope>, sessionID: String, text: String) -> Bool {
+        sink.items.contains {
+            $0.sessionID == sessionID && $0.json["type"]?.stringValue == "user_message"
+                && $0.json["text"]?.stringValue == text
+        }
+    }
+
+    /// An aggressive keepalive: two unanswered pings kill the connection inside ~900 ms, so the
+    /// "and its keepalive still succeeds" half of the assertion below is real, not nominal — the
+    /// shipped watchdog genuinely runs several full ping cycles during the quiet window.
+    private static let twitchyHeartbeat = HeartbeatConfig(quietMs: 300, secondWindowMs: 300, graceMs: 300, tickMs: 50)
+
+    /// **T6b RED — the diagnostic combination.** `Gateway` used to re-point
+    /// `PhoneSession.currentConn` on EVERY hello, while `liveSessionID` was only ever written from
+    /// `resumes.last`. So any resume-less shell round trip on a second connection from the same
+    /// phone (mode entry, a session-list refresh, a post-turn chat sync, opening the drawer) moved
+    /// the live-forwarding target off an attached session's connection — and, because
+    /// `handleLiveFrame` answers `.ping` with `.pong` on WHATEVER connection it arrives on, the
+    /// orphaned session's keepalive kept succeeding and the phone never learned it had been
+    /// orphaned. The session looked perfectly connected and simply went quiet.
+    ///
+    /// That pairing is the whole bug: silence ALONE would look like a stall, and a dead keepalive
+    /// alone would just reconnect. Both assertions therefore live in one test — the second is what
+    /// makes the first non-recoverable.
+    ///
+    /// (This is the SILENCE half of the user's report. The visible "it reconnects every time"
+    /// half is the oversize-frame kill fixed in T2 and pinned by
+    /// `testStreamingDeltasReachThePhone_...` above — different symptom, different bug, both real.)
+    func testResumelessShellHandshakeDoesNotStealLiveForwarding_WhileTheOrphanedSessionKeepsPonging() async throws {
+        let daemon = try await RealDaemon.start()
+        defer { daemon.stop() }
+        let setup = try await makeHost(daemon: daemon)
+
+        let secret = SecretKey.generate().toBytes()
+        let accepted = try await pairPhone(setup: setup, secret: secret)
+        let installID = "norma-ios-install-6b"
+
+        // ---- The session connection: handshake, dispatch, attach, and prove events flow ----
+        let sessionClient = try await dialPhone(
+            setup: setup, secret: secret, epoch: accepted.epoch, installID: installID,
+            heartbeat: Self.twitchyHeartbeat
+        )
+        let (sessionEvents, sessionEventTask) = drain(sessionClient.events)
+        defer { sessionEventTask.cancel() }
+
+        _ = try await sessionClient.handshake(resumes: [])
+        let dispatched = try await sessionClient.send(method: "session.dispatch", params: .object([:]))
+        guard let sid = dispatched["sessionId"]?.stringValue else {
+            return XCTFail("session.dispatch must return a sessionId")
+        }
+        _ = try await sessionClient.send(method: "session.attach", params: .object([
+            "sessionId": .string(sid), "fromSeq": .number(0),
+        ]))
+
+        let before = "before the shell round trip"
+        _ = try await sessionClient.send(method: "session.send", params: .object([
+            "sessionId": .string(sid), "text": .string(before),
+        ]))
+        try await waitUntil("baseline: an attached session receives its own live events") {
+            self.sawUserMessage(sessionEvents, sessionID: sid, text: before)
+        }
+
+        // ---- The resume-less shell round trip: exactly what the iOS pool does, on its own conn ----
+        let shellClient = try await dialPhone(
+            setup: setup, secret: secret, epoch: accepted.epoch, installID: installID,
+            heartbeat: .disabled
+        )
+        let (shellEvents, shellEventTask) = drain(shellClient.events)
+        defer { shellEventTask.cancel() }
+        _ = try await shellClient.handshake(resumes: [])   // resume-less — the trigger
+        let shellList = try await shellClient.send(method: "session.list", params: .object([:]))
+        XCTAssertNotNil(shellList["sessions"]?.arrayValue, "the shell round trip itself must still work")
+
+        // ---- Half 1 of the signature: the orphaned session's keepalive still succeeds ----
+        // Three quiet seconds with `twitchyHeartbeat` running: the watchdog pings, and only a
+        // gateway that keeps ponging this connection stops it closing. If it closed, `send` below
+        // throws `.connectionClosed` — i.e. the phone WOULD have noticed and reconnected, and this
+        // bug would have been found years ago.
+        try await Task.sleep(nanoseconds: 3_000_000_000)
+        do {
+            _ = try await sessionClient.send(method: "session.list", params: .object([:]))
+        } catch {
+            XCTFail("the attached session's connection must still be alive and answering — got \(error)")
+        }
+
+        // ---- Half 2: ...and yet it receives nothing. That is the bug. ----
+        let after = "after the shell round trip"
+        _ = try await sessionClient.send(method: "session.send", params: .object([
+            "sessionId": .string(sid), "text": .string(after),
+        ]))
+        try await waitUntil(timeout: 15, "the attached session must STILL receive live events after another connection's RESUME-LESS handshake — a shell round trip must not steal the forwarding target") {
+            self.sawUserMessage(sessionEvents, sessionID: sid, text: after)
+        }
+        XCTAssertFalse(self.sawUserMessage(shellEvents, sessionID: sid, text: after),
+                       "an attached session's live events must never be forwarded to a resume-less shell connection that never asked for them")
+    }
+
+    /// **T6b RED — the probe path.** `probeExistingConnection` (iOS, the foreground hop) confirms a
+    /// kept connection by sending `session.attach` on it. The gateway's `session.attach` rpc branch
+    /// set `liveSessionID` but never re-pointed the forwarding target, so the probe answered
+    /// `alive == true` while delivery stayed dead — the phone re-confirmed itself healthy and only a
+    /// real transport death, `NWPathMonitor` or a relaunch ever recovered it. (And
+    /// `seedHistoryIfNeeded` never runs from that path, so nothing backfilled either.)
+    ///
+    /// The discriminating shape: a SECOND connection legitimately attaches to the same session and
+    /// takes live forwarding (last attach wins — one daemon client, one attach). The first
+    /// connection then probes exactly as the foreground hop does, and must take forwarding back.
+    /// Pre-fix the probe succeeds and the events keep going to the other connection.
+    func testLiveAttachRepointsForwardingToItsOwnConnection_TheProbeTheForegroundHopSends() async throws {
+        let daemon = try await RealDaemon.start()
+        defer { daemon.stop() }
+        let setup = try await makeHost(daemon: daemon)
+
+        let secret = SecretKey.generate().toBytes()
+        let accepted = try await pairPhone(setup: setup, secret: secret)
+        let installID = "norma-ios-install-6b-probe"
+
+        let first = try await dialPhone(setup: setup, secret: secret, epoch: accepted.epoch, installID: installID, heartbeat: .disabled)
+        let (firstEvents, firstTask) = drain(first.events)
+        defer { firstTask.cancel() }
+        _ = try await first.handshake(resumes: [])
+        let dispatched = try await first.send(method: "session.dispatch", params: .object([:]))
+        guard let sid = dispatched["sessionId"]?.stringValue else {
+            return XCTFail("session.dispatch must return a sessionId")
+        }
+        _ = try await first.send(method: "session.attach", params: .object([
+            "sessionId": .string(sid), "fromSeq": .number(0),
+        ]))
+
+        // A second connection from the same install attaches to the same session and legitimately
+        // takes live forwarding.
+        let second = try await dialPhone(setup: setup, secret: secret, epoch: accepted.epoch, installID: installID, heartbeat: .disabled)
+        let (secondEvents, secondTask) = drain(second.events)
+        defer { secondTask.cancel() }
+        _ = try await second.handshake(resumes: [])
+        _ = try await second.send(method: "session.attach", params: .object([
+            "sessionId": .string(sid), "fromSeq": .number(0),
+        ]))
+        let toSecond = "belongs to the second connection"
+        _ = try await second.send(method: "session.send", params: .object([
+            "sessionId": .string(sid), "text": .string(toSecond),
+        ]))
+        try await waitUntil("the most recent attach owns live forwarding") {
+            self.sawUserMessage(secondEvents, sessionID: sid, text: toSecond)
+        }
+
+        // The foreground hop's probe, verbatim: `session.attach` on the kept connection. It reports
+        // healthy — and must actually BE healthy, i.e. take forwarding back.
+        let probed = try await first.send(method: "session.attach", params: .object([
+            "sessionId": .string(sid), "fromSeq": .number(0),
+        ]))
+        XCTAssertNotNil(probed["lastSeq"]?.intValue, "the probe reports alive — that half was never broken")
+
+        let toFirst = "belongs to the probing connection"
+        _ = try await first.send(method: "session.send", params: .object([
+            "sessionId": .string(sid), "text": .string(toFirst),
+        ]))
+        try await waitUntil(timeout: 15, "a live session.attach must re-point live forwarding at the connection it arrived on — otherwise a foreground-hop probe answers `alive` while delivering nothing") {
+            self.sawUserMessage(firstEvents, sessionID: sid, text: toFirst)
+        }
+    }
+
     /// SP3.1 T1 (the whole point): a REAL revoke, reached through the REAL router/gateway stack, must
     /// surface on the shipped `NormaSessionClient` as a TYPED `.handshakeRejected` with a re-pair code
     /// — the signal the iOS app maps to its honest `.revoked` state — NOT a bare `connectionClosed`/
