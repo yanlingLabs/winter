@@ -591,23 +591,27 @@ final class NormaSessionClientTests: XCTestCase {
                        "persisted events still advance the cursor")
     }
 
-    // MARK: - T7: transients are exempt from the REPLAY HOLD too, not just the dedupe core
+    // MARK: - T7: the replay hold parks transients too — for ORDER — but never counts them
 
-    /// **The third exemption, and the last place a transient could still be swallowed.** The replay
-    /// hold parks any event whose seq is past the batch ceiling until the batch completes. Its only
-    /// stated reason (see `handleEvent`) is cursor safety: applying a live event mid-replay would
-    /// drag the cursor past the still-pending replay events and they would all be dropped as
-    /// duplicates. A TRANSIENT cannot do that — it never advances the cursor — so the hold buys
-    /// nothing for one and costs the exact user-visible symptom the transient exemption exists to
-    /// kill: the deltas of a turn in flight go silent while the batch drains, then land in a burst.
+    /// **The ordering the phone's transcript depends on, pinned so it cannot be "optimised" away.**
+    /// A transient cannot move the cursor, so cursor safety — the hold's stated reason — does not
+    /// apply to one, and releasing it immediately looks like a strict improvement (the deltas of a
+    /// turn in flight stop going silent while a replay batch drains). **It is a regression.** The
+    /// phone folds this stream in ARRIVAL order (`norma-ios` `TranscriptBuilder`), and the
+    /// order-safe fold that repairs out-of-order arrivals covers PERSISTED events only —
+    /// `assistant_delta` is excluded from `mergedEnvelopes`/`maxFoldedSeq` by design. Release the
+    /// delta early and its streaming row lands above the replay frames it outran; the canonical
+    /// `assistant_message` then replaces that row in place, rendering the newest message above two
+    /// older ones. Nor does it self-heal: `seedHistoryIfNeeded` returns early on exactly this path
+    /// (`resumeWasReplay`).
     ///
     /// The shape is the one the daemon actually produces on the open-a-session-mid-turn path: the
     /// attach's replay ceiling is the `harness_attached` seq, and any delta broadcast afterwards
     /// borrows a LATER `lastSeq` — i.e. `seq > highWatermark` by construction, so it takes the hold.
     ///
-    /// Pre-fix the deliveries are `[1, 2, 3, delta]`; the fix makes them `[1, delta, 2, 3]` — the
-    /// delta arrives when it was sent, and the replay batch is still delivered whole and in order.
-    func testTransientDuringReplayIsDeliveredImmediatelyNotParkedUntilTheBatchEnds() async throws {
+    /// So: `[1, 2, 3, delta]`. Make the transient bypass the hold and this test reads `[1, delta,
+    /// 2, 3]` — which is precisely the mis-ordered transcript.
+    func testTransientDuringReplayIsHeldWithTheBatchSoTheTranscriptStaysInArrivalOrder() async throws {
         let conn = ScriptedRemoteConn()
         let cursors = InMemoryCursorStore()
         let client = makeClient(conn: conn, cursors: cursors)
@@ -624,51 +628,101 @@ final class NormaSessionClientTests: XCTestCase {
         conn.enqueueInbound(eventFrame(session: "s1", seq: 2))                       // replay
         conn.enqueueInbound(eventFrame(session: "s1", seq: 3))                       // replay, completes batch
 
-        try await waitUntil({ self.seqs(events.items).count >= 4 }, "the replay batch plus the live delta")
+        try await waitUntil({ self.seqs(events.items).count >= 4 }, "the replay batch plus the held delta")
         XCTAssertEqual(types(events.items),
-                       ["assistant_message", "assistant_delta", "assistant_message", "assistant_message"],
-                       "the delta must reach the UI WHEN IT ARRIVED, not be parked behind the replay batch")
-        XCTAssertEqual(seqs(events.items), [1, 7, 2, 3])
+                       ["assistant_message", "assistant_message", "assistant_message", "assistant_delta"],
+                       "the delta must be released AFTER the batch it outran — the transcript folds in arrival order")
+        XCTAssertEqual(seqs(events.items), [1, 2, 3, 7])
         XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 3,
-                       "bypassing the hold must not let the transient touch the cursor")
+                       "released from the hold, the transient still must not touch the cursor")
         XCTAssertTrue(gaps.items.isEmpty)
     }
 
-    /// The same hold ALSO counts transients against `liveBufferCap`, so a long enough stream of
-    /// deltas during a replay that has not completed trips the overflow path — which does not merely
-    /// drop the deltas, it marks the whole stream `gapped` and yields a `GapSignal`, killing every
-    /// further event on it until a fresh handshake. That is a false alarm by construction: the cap
-    /// exists to bound a buffer that only exists to protect the cursor, and a transient is never in
-    /// that buffer's remit.
+    /// **The genuinely dangerous half, and the one this task fixes.** The hold also counted
+    /// transients against `liveBufferCap`, so a long enough stream of deltas during a replay batch
+    /// tripped the overflow path — which does not merely drop the buffer, it marks the whole stream
+    /// `gapped` and yields a `GapSignal`, killing every further event on it until a fresh handshake.
+    /// That is a false alarm by construction: the cap bounds the events the hold exists FOR (the
+    /// persisted ones, which is what a stalled replay accumulates), and a transient is not one of
+    /// them. Deltas are still parked — see the ordering test above — they are simply not counted,
+    /// and can no longer displace a persisted event's budget either.
     ///
-    /// Pre-fix: `cap = 3` ⇒ deltas 1-3 are parked (never delivered) and delta 4 raises the gap.
-    /// Post-fix: all four are delivered and the buffer stays empty. The persisted-event half of the
-    /// cap is unchanged and stays pinned by
-    /// `testLiveBufferOverflowSurfacesGapInsteadOfGrowingUnbounded` above.
+    /// Pre-fix at `cap = 5`: the four deltas and the first persisted live event fill the shared
+    /// count, so the SECOND persisted live event raises the gap, the stream dies, and it plus the
+    /// two batch-completing replay frames are all dropped by the `gapped` guard — 1 event delivered
+    /// in total. Post-fix: everything is delivered. The persisted-event half of the cap is unchanged
+    /// and stays pinned by `testLiveBufferOverflowSurfacesGapInsteadOfGrowingUnbounded` above.
     func testTransientsDuringReplayNeverConsumeTheLiveBufferCapOrFalselyGap() async throws {
         let conn = ScriptedRemoteConn()
         let cursors = InMemoryCursorStore()
-        let client = makeClient(conn: conn, cursors: cursors, liveBufferCap: 3)
+        let client = makeClient(conn: conn, cursors: cursors, liveBufferCap: 5)
         let (events, evTask) = drain(client.events)
         let (gaps, gapTask) = drain(client.gaps)
         defer { evTask.cancel(); gapTask.cancel() }
 
-        // Replay window 1..2; seq 2 never arrives, so the batch never completes and the hold stays up.
-        conn.enqueueInbound(helloAckFrame(verdicts: [.replayBegin(sessionID: "s1", fromSeq: 0, highWatermark: 2)]))
+        conn.enqueueInbound(helloAckFrame(verdicts: [.replayBegin(sessionID: "s1", fromSeq: 0, highWatermark: 3)]))
         _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0)])
 
         conn.enqueueInbound(eventFrame(session: "s1", seq: 1)) // replay; cursor 1, still replaying
-        for i in 1...4 {
+        // FOUR transients interleaved with TWO persisted live events, against a cap of five. Both
+        // classes are individually under it; only a SHARED count overflows — which is the bug.
+        for i in 1...2 {
             conn.enqueueInbound(eventFrame(session: "s1", seq: 9, type: "assistant_delta",
                                            extra: ["delta": .string("chunk-\(i)")]))
         }
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 5)) // live, held
+        for i in 3...4 {
+            conn.enqueueInbound(eventFrame(session: "s1", seq: 9, type: "assistant_delta",
+                                           extra: ["delta": .string("chunk-\(i)")]))
+        }
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 6)) // live, held — the 6th shared slot
+        // ...and now the rest of the replay batch, which completes it and drains the hold.
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 2))
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 3))
 
-        try await waitUntil({ self.deltas(events.items).count >= 4 }, "all four deltas to stream through the hold")
-        XCTAssertEqual(deltas(events.items), ["chunk-1", "chunk-2", "chunk-3", "chunk-4"])
+        try await waitUntil({ self.deltas(events.items).count >= 4 }, "all four deltas to drain with the hold")
         XCTAssertTrue(gaps.items.isEmpty,
                       "a burst of transients must never trip the live-buffer cap — that gap kills the stream")
-        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 1,
-                       "the replay event advanced the cursor; no transient did")
+        XCTAssertEqual(deltas(events.items), ["chunk-1", "chunk-2", "chunk-3", "chunk-4"],
+                       "all four survive: none was dropped for a budget that was never theirs")
+        // Replay batch first, then the hold drained in seq order — the two persisted live events
+        // ahead of the deltas that borrowed the later seq 9.
+        XCTAssertEqual(seqs(events.items), [1, 2, 3, 5, 6, 9, 9, 9, 9])
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 6,
+                       "only the persisted events moved the cursor")
+    }
+
+    /// Not counting transients against the cap must not mean not bounding them at all — so they get
+    /// their OWN budget of `liveBufferCap`, and past it a transient is DROPPED rather than allowed
+    /// to grow the buffer or to raise the gap that would take the stream down. A dropped delta is
+    /// cosmetic (the turn's canonical `assistant_message` carries the whole text); a gap is not.
+    /// This is the branch that keeps the worst case at 2 × cap instead of unbounded.
+    func testTransientsPastTheirOwnBudgetAreDroppedNeverGapped() async throws {
+        let conn = ScriptedRemoteConn()
+        let cursors = InMemoryCursorStore()
+        let client = makeClient(conn: conn, cursors: cursors, liveBufferCap: 2)
+        let (events, evTask) = drain(client.events)
+        let (gaps, gapTask) = drain(client.gaps)
+        defer { evTask.cancel(); gapTask.cancel() }
+
+        conn.enqueueInbound(helloAckFrame(verdicts: [.replayBegin(sessionID: "s1", fromSeq: 0, highWatermark: 3)]))
+        _ = try await client.handshake(resumes: [StreamResume(sessionID: "s1", streamID: "s1", lastAppliedSeq: 0)])
+
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 1)) // replay; still replaying
+        for i in 1...5 { // FIVE deltas against a transient budget of two
+            conn.enqueueInbound(eventFrame(session: "s1", seq: 9, type: "assistant_delta",
+                                           extra: ["delta": .string("chunk-\(i)")]))
+        }
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 5)) // a persisted live event still fits
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 2))
+        conn.enqueueInbound(eventFrame(session: "s1", seq: 3)) // completes the batch → drain
+
+        try await waitUntil({ self.seqs(events.items).count >= 6 }, "the batch plus the surviving hold")
+        XCTAssertTrue(gaps.items.isEmpty, "overflowing transients are dropped, never escalated to a gap")
+        XCTAssertEqual(deltas(events.items), ["chunk-1", "chunk-2"], "only the budgeted two are parked")
+        XCTAssertEqual(seqs(events.items), [1, 2, 3, 5, 9, 9])
+        XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 5,
+                       "the persisted live event kept its own budget and was delivered")
     }
 
     // MARK: - Step 6: idempotency (commandId) + approval state machine

@@ -10,9 +10,17 @@ import os
 public protocol CursorStore: Sendable {
     /// The last durably-applied seq for a stream, or `nil` if this stream was never seen.
     func cursor(host: String, session: String, stream: String) -> Int?
-    /// Persist `seq` as the new durable cursor for a stream. MUST be durable before it returns
-    /// (`FileCursorStore` fsyncs via an atomic temp-file rename) so a crash immediately after can
-    /// never lose the fact that `seq` was applied.
+    /// Persist `seq` as the new durable cursor for a stream, before it returns, so a crash
+    /// immediately after can never lose the fact that `seq` was applied.
+    ///
+    /// **What `FileCursorStore` actually delivers is ATOMICITY, not durability** — write-temp +
+    /// `rename(2)`, with **no `fsync`** on the temp file or its directory. A reader therefore always
+    /// sees a complete table (never a torn one), and a PROCESS crash cannot lose an advance; a
+    /// KERNEL panic or power loss inside the writeback window can. That is the right trade here (the
+    /// direction of loss is safe: a stale cursor re-delivers events that dedup absorbs, never skips
+    /// one) — but it is not what "durable" usually promises, and the comment used to say "fsyncs",
+    /// which it has never done. Recorded so nobody weakens this believing they are giving up an
+    /// fsync that is not there.
     func advance(host: String, session: String, stream: String, to seq: Int) throws
 }
 

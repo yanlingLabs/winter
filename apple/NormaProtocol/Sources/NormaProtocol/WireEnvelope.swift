@@ -103,7 +103,10 @@ public enum WireFrame {
         // Foundation's JSONDecoder/JSONSerialization neither bound nesting depth nor reject
         // duplicate object keys by default — catch both with a byte scan before decoding. This is
         // a SECURITY check, not a classification aid: it must run on every frame, including the
-        // fast path below (a `{"v":1,"v":1,…}` frame decodes perfectly well as a `WireEnvelope`).
+        // fast path below. A `{"v":1,"v":1,…}` frame decodes perfectly well as a `WireEnvelope` —
+        // Foundation silently resolves a duplicate key to the FIRST occurrence (verified for both
+        // `JSONDecoder` and `JSONSerialization`) rather than rejecting the document — so this scan
+        // is the ONLY thing that rejects it, whichever parser runs afterwards.
         try validateJSONShape(frame, maxDepth: maxDepth)
 
         // FAST PATH — a well-formed, current-version frame is parsed ONCE. This function used to
@@ -120,7 +123,10 @@ public enum WireFrame {
 
         // SLOW PATH — the frame is bad, or is a version we don't speak. Re-read it with
         // JSONSerialization to say precisely WHICH, in the same precedence order as before:
-        // malformed < unknownVersion < unknownKind.
+        // malformed < unknownVersion < unknownKind. This costs one MORE parse than the old shape
+        // did (the failed fast-path attempt, then these two), which is the right trade: it is a
+        // rejection path — reached once, for a frame that is about to be refused — whereas the fast
+        // path above is what runs per event, forever.
         guard let obj = try? JSONSerialization.jsonObject(with: frame) as? [String: Any] else {
             throw WireError.malformed
         }

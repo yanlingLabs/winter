@@ -163,6 +163,11 @@ public actor NormaSessionClient {
         var gapped = false
         /// Live events (`seq > highWatermark`) arriving during replay, released in seq order after.
         var liveBuffer: [(seq: Int, env: SessionEnvelope)] = []
+        /// How many of `liveBuffer`'s entries are PERSISTED events — the only ones `liveBufferCap`
+        /// bounds, and the only ones whose overflow may raise a `GapSignal`. Kept as a counter
+        /// rather than derived from `liveBuffer` so parking stays O(1); see `handleEvent` for why
+        /// transients are parked but never counted.
+        var bufferedPersistedCount = 0
     }
 
     // MARK: - Init
@@ -618,38 +623,55 @@ public actor NormaSessionClient {
 
         guard !st.gapped, !st.needsSnapshot else { return }
 
+        // Decoded once, up front, because the hold below needs the event's TYPE to size it against
+        // the cap. That costs one `decode` on the overflow path, where the previous shape returned
+        // before decoding — a decode on the one path that is about to tear the stream down and force
+        // a snapshot resume, which is not a cost worth an extra branch to avoid.
         let decoded = decode(env, session: session)
-
-        // TRANSIENTS BYPASS THE REPLAY HOLD (the third and last exemption — see
-        // `transientEventTypes`). The hold below exists for ONE reason, stated in its own comment:
-        // cursor safety. A transient never touches the cursor (`applyEvent` yields and returns
-        // before both the dedupe check and `cursors.advance`), so parking one protects nothing and
-        // costs the exact symptom the exemption exists to kill — the deltas of a turn in flight go
-        // silent while a replay batch drains, then arrive in a burst. It also keeps them off
-        // `liveBufferCap`, whose overflow does not merely drop the buffer: it marks the stream
-        // `gapped`, killing every further event on it until a fresh handshake. A burst of deltas
-        // must never be able to raise that alarm.
-        //
-        // Nothing downstream is skipped by returning here. The drain check at the bottom fires on
-        // `currentCursor >= highWatermark`, which only a cursor-advancing (i.e. non-transient) event
-        // can newly satisfy: `recordVerdicts` enters `replaying` only when `cursor < hw`, and a
-        // replay event can advance the cursor at most to `hw` — at which point that same call drains
-        // and clears the flag. A transient can therefore never be the event that completes a batch.
-        if isTransient(decoded) {
-            eventsCont.yield(decoded)
-            return
-        }
 
         // Replay→live handoff: a live event (past the replay ceiling) arriving mid-replay is held,
         // not applied — applying it immediately would advance the cursor past the still-pending
         // replay events, which would then all be dropped as duplicates (replay lost, reordered
         // delivery). Held events are released in seq order once the batch completes.
         if st.replaying && seq > st.highWatermark {
+            // TRANSIENTS ARE PARKED HERE TOO — DELIBERATELY, AND THIS ORDERING IS LOAD-BEARING.
+            // A transient cannot move the cursor, so cursor safety (the paragraph above) is not why
+            // it waits; ARRIVAL ORDER is. The phone folds this stream in the order it is handed the
+            // events (`norma-ios` `TranscriptBuilder`), and the order-safe fold that repairs
+            // out-of-order arrivals covers PERSISTED events only — `assistant_delta` is excluded
+            // from `mergedEnvelopes`/`maxFoldedSeq` by design. Release a delta ahead of the replay
+            // frames it outran and its streaming row lands ABOVE them; the canonical
+            // `assistant_message` then replaces that row in place, rendering the newest message
+            // above two older ones — and it does not self-heal, because `seedHistoryIfNeeded`
+            // returns early on exactly this path (`resumeWasReplay`). Delivering a transient
+            // immediately is therefore a REGRESSION, not an improvement. Do not "fix" this.
+            //
+            // What a transient must never do is trip the cap below. That overflow does not merely
+            // drop the buffer: it marks the stream `gapped`, killing every further event on it until
+            // a fresh handshake. The cap exists to bound the events the hold exists FOR — the
+            // persisted ones — so only those are counted, and a burst of deltas can no longer raise
+            // an alarm about a hold it is not the subject of.
+            if isTransient(decoded) {
+                // Still bounded, just bounded SEPARATELY: at most `liveBufferCap` parked transients,
+                // counted independently of the persisted budget so neither class can starve the
+                // other (bounding both against one shared total would reintroduce the displacement
+                // this branch exists to remove, merely in the other direction). Worst-case buffer is
+                // therefore 2 × cap entries, on a stream whose replay has already stalled. Past that,
+                // DROP the transient rather than park it: a dropped delta is cosmetic — the turn's
+                // canonical `assistant_message` carries the full text — whereas gapping takes the
+                // whole stream down until a fresh handshake.
+                if st.liveBuffer.count - st.bufferedPersistedCount >= liveBufferCap {
+                    Self.logger.warning("live buffer full, dropping transient session=\(session, privacy: .public) stream=\(stream, privacy: .public) cap=\(self.liveBufferCap)")
+                    return
+                }
+                st.liveBuffer.append((seq: seq, env: decoded))
+                return
+            }
             // T4 review minor 2b: bound the hold. A replay batch that never completes (the
             // exact-watermark event lost on the wire) would otherwise buffer live events without
             // limit. On overflow, surface a gap — the snapshot resume it forces is exactly the
             // recovery for a replay that can no longer complete — and drop the buffer.
-            guard st.liveBuffer.count < liveBufferCap else {
+            guard st.bufferedPersistedCount < liveBufferCap else {
                 Self.logger.warning("live buffer overflow session=\(session, privacy: .public) stream=\(stream, privacy: .public) cap=\(self.liveBufferCap)")
                 gapsCont.yield(GapSignal(
                     sessionID: session, streamID: stream,
@@ -657,9 +679,11 @@ public actor NormaSessionClient {
                 ))
                 st.gapped = true
                 st.liveBuffer = []
+                st.bufferedPersistedCount = 0
                 return
             }
             st.liveBuffer.append((seq: seq, env: decoded))
+            st.bufferedPersistedCount += 1
             return
         }
 
@@ -670,6 +694,7 @@ public actor NormaSessionClient {
             st.replaying = false
             let buffered = st.liveBuffer.sorted { $0.seq < $1.seq }
             st.liveBuffer = []
+            st.bufferedPersistedCount = 0
             for item in buffered {
                 applyEvent(session: session, stream: stream, seq: item.seq, decoded: item.env)
             }
@@ -697,10 +722,9 @@ public actor NormaSessionClient {
     /// on `liveBuffer` overflow (a genuine "too far behind, snapshot" signal).
     private func applyEvent(session: String, stream: String, seq: Int, decoded: SessionEnvelope) {
         // TRANSIENT events bypass the dedupe/advance core entirely — see `transientEventTypes`.
-        // Kept even though `handleEvent` now short-circuits transients one level up (so nothing
-        // reaches here or the liveBuffer drain with a transient today): this is the dedupe core's
-        // OWN invariant, and it must stay true of any future caller rather than depend on one
-        // caller's filtering. Two set lookups on a path that costs a file write is not a cost.
+        // Reached both directly and via the `liveBuffer` drain, which parks transients on purpose
+        // (see `handleEvent`) — so this branch is what keeps a delta released from the hold from
+        // advancing the cursor over the replay events it was parked behind.
         if isTransient(decoded) {
             eventsCont.yield(decoded)
             return
