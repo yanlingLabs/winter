@@ -566,10 +566,25 @@ export function effortsForModel(_modelId: string): string[] {
  *  edit, or a provider swap is visible on the very next `sync.config`, no daemon restart (the same
  *  "hot" contract every other settings-backed getter in this codebase already keeps).
  *
+ *  "Hot" is exact about its scope (T3 review m2): the model/effort SELECTION re-reads settings.json
+ *  every call, so `norma model … --effort …` lands with no restart. The CATALOGUE tracks the engine's
+ *  boot-bound provider instance — a settings.json edit that changes `provider.type` still needs a
+ *  restart (providers/manager.ts says so), and until then this reports the old provider's lineup.
+ *
  *  The catalogue half (provider-correctness T3) is projected down to `{id, efforts}`: `ModelInfo`
  *  also carries `family`/`contextWindow`/`supportsVision`, none of which is the phone's business
  *  (it does not size its own context window off the Mac's catalogue), and every field on this wire
- *  is one more thing that has to stay true. */
+ *  is one more thing that has to stay true.
+ *
+ *  T3 review m4 — the array is UNCAPPED, and that is a considered choice on a phone-facing wire
+ *  where oversized frames hard-fail the transport (see `SESSION_TITLE_MAX_CHARS` for the class of
+ *  bug that motivates caps here). Both dimensions are bounded by construction rather than by a
+ *  literal: the rows are whatever the active provider enumerates (three today, single digits for
+ *  any plausible catalogue) and each row is a slug plus six short words. The realistic worst case is
+ *  a few hundred bytes — orders of magnitude under any frame limit — and unlike a session title,
+ *  none of this is user-authored, so there is no input an attacker or a careless user can grow. If a
+ *  provider ever enumerates hundreds of models, cap it HERE, at the projection, rather than trusting
+ *  that observation to stay true. */
 export async function syncConfig(ctx: SyncConfigContext): Promise<SyncConfigResult> {
   const exaKey = (await ctx.secret?.(EXA_API_KEY_SECRET)) ?? null;
   const dangerousDomains = ctx.dangerousDomainsAdded?.() ?? [];

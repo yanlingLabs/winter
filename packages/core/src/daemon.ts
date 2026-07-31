@@ -1208,12 +1208,20 @@ export async function startDaemon(opts: {
   // `providerInfo` above, which is a boot-time snapshot. `undefined` on a no-agentProvider daemon —
   // `ipc/server.ts` degrades that to `""`.
   //
-  // provider-correctness T3 adds the EFFORT beside it. Both read the ONE `live()` selection — a
-  // `LiveModelSelection` carries `{model, reasoningEffort?}` together — so the pair a phone is told
-  // is the pair a turn on this Mac would actually run, never a model from one settings read paired
-  // with an effort from another. `reasoningEffort` is genuinely optional in settings, and an unset
-  // one reports `""`: unset is NOT `"none"` (unset omits the `reasoning` block entirely), and
+  // provider-correctness T3 adds the EFFORT beside it, off the same `LiveModelSelection`
+  // (`{model, reasoningEffort?}`). `reasoningEffort` is genuinely optional in settings, and an
+  // unset one reports `""`: unset is NOT `"none"` (unset omits the `reasoning` block entirely), and
   // `SyncConfigResult.defaultEffort` documents why the phone must not collapse the two.
+  //
+  // T3 review m3 — TWO calls, not one selection, and the honest reading of that: `syncConfig` calls
+  // `liveModel()` and `liveEffort()` separately, so a settings.json write landing exactly between
+  // them could pair a new model with the old effort. Real, and immaterial: both hit the same
+  // mtime-cached resolver microseconds apart, neither can throw, and the worst outcome is one
+  // `sync.config` reply carrying a one-edit-stale effort that the phone's very next connect
+  // corrects. Collapsing them into a single call would need `syncConfig` to take a selection object
+  // instead of two independent getters — a wider seam for a race nobody can observe. Not done
+  // deliberately; do not "fix" it by caching the selection across calls, which would break the hot
+  // read that is the actual contract here.
   const liveSelection = agentProvider
     ? () => agentProvider!.live?.() ?? { model: agentProvider!.model }
     : undefined;

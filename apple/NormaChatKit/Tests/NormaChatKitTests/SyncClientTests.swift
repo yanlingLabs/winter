@@ -893,15 +893,39 @@ final class SyncClientTests: XCTestCase {
         }
     }
 
-    /// A malformed catalogue ROW is refused, not silently dropped — the double and the wire agree
-    /// that `id` is a non-empty string and `efforts` an array of them (`SyncConfigModel`, zod).
-    /// Accepting a half-row here would put a `""` slug in a picker and a 400 on the next turn.
+    /// A malformed catalogue ROW is refused, not silently dropped.
+    ///
+    /// T3 review I2: this used to assert only the cases Swift's SYNTHESIZED `Decodable` already
+    /// rejected (missing key, wrong type) and claimed the min-length rules in prose. It did not
+    /// hold — `{"id":"","efforts":[""]}` decoded cleanly while zod refuses both. The empty-string
+    /// cases below are the ones that matter: an empty slug reaches a request body verbatim and
+    /// returns an opaque 400, so the decoder now enforces `z.string().min(1)` on both fields and
+    /// this test is what keeps that true.
     func testAMalformedCatalogueRowRefusesTheWholeBody() {
-        for models in [#"[{"efforts":["low"]}]"#, #"[{"id":"gpt-5.6-sol"}]"#, #"[{"id":"gpt-5.6-sol","efforts":"low"}]"#] {
+        for models in [
+            #"[{"efforts":["low"]}]"#,                          // id missing
+            #"[{"id":"gpt-5.6-sol"}]"#,                         // efforts missing
+            #"[{"id":"gpt-5.6-sol","efforts":"low"}]"#,         // efforts not an array
+            #"[{"id":"","efforts":["low"]}]"#,                  // z.string().min(1) on id
+            #"[{"id":"gpt-5.6-sol","efforts":[""]}]"#,          // z.string().min(1) inside efforts
+            #"[{"id":"gpt-5.6-sol","efforts":["low",""]}]"#,    // ...including a LATER element
+            // One bad row poisons the whole body rather than being dropped: a catalogue silently
+            // short by one model is indistinguishable from a Mac that genuinely stopped offering it.
+            #"[{"id":"gpt-5.6-sol","efforts":["low"]},{"id":"","efforts":["low"]}]"#,
+        ] {
             let body = #"{"exaKey":null,"dangerousDomains":[],"defaultModel":"m","defaultEffort":"","models":\#(models)}"#
             XCTAssertThrowsError(try JSONDecoder().decode(SyncConfig.self, from: Data(body.utf8)),
                                  "a malformed catalogue row must refuse the body: \(models)")
         }
+    }
+
+    /// The boundary the rule above must NOT overshoot: an empty `efforts` ARRAY is legal
+    /// (`z.array(...)` with no `.min()`), and so is an empty `models` array. "This model accepts no
+    /// effort levels" is a statement the wire can make; "" as a level is not.
+    func testAnEmptyEffortsArrayIsLegalUnlikeAnEmptyEffortString() throws {
+        let body = #"{"exaKey":null,"dangerousDomains":[],"defaultModel":"m","defaultEffort":"","models":[{"id":"m","efforts":[]}]}"#
+        let config = try JSONDecoder().decode(SyncConfig.self, from: Data(body.utf8))
+        XCTAssertEqual(config.models, [SyncConfigModel(id: "m", efforts: [])])
     }
 
     // MARK: - T11-review F-8: the per-session leg

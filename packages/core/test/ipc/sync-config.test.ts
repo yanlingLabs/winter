@@ -6,8 +6,10 @@ import { ERR, LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, Sy
 import { startIpcServer } from "../../src/ipc/server";
 import { syncConfig, syncMemory, effortsForModel, SYNC_PAGE_BYTES, SYNC_MEMORY_TRUNCATION_MARKER } from "../../src/ipc/sync";
 import { EXA_API_KEY_SECRET } from "../../src/agent/tools/search";
-import { REASONING_EFFORTS } from "../../src/settings";
+import { REASONING_EFFORTS, loadSettings } from "../../src/settings";
 import { CODEX_MODELS, DEFAULT_CODEX_MODEL } from "../../src/providers/codex-config";
+import { createProvider } from "../../src/providers/manager";
+import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import type { ModelInfo } from "../../src/providers/types";
 import type { SecretStore } from "../../src/auth/secret-store";
 import { SessionStore } from "../../src/sessions/store";
@@ -111,7 +113,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
       secrets: over.secrets, dangerousDomainsAdded: over.dangerousDomainsAdded, liveModel: over.liveModel,
       liveEffort: over.liveEffort,
       ...(over.models ? { engine: fakeEngine(over.models), hub: new SessionHub(store) } : {}),
-    } as any);
+    });
     stop = () => { server.stop(); store.close(); };
     return { home, socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote };
   }
@@ -283,7 +285,7 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
       socketPath, serverVersion: "test", tokens: authority, store,
       liveModel: over.liveModel, liveEffort: over.liveEffort,
       ...(over.models ? { engine: fakeEngine(over.models), hub: new SessionHub(store) } : {}),
-    } as any);
+    });
     stop = () => { server.stop(); store.close(); };
     return { socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote };
   }
@@ -425,6 +427,116 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
     });
     expect(result.models).toEqual([{ id: "gpt-5.6-sol", efforts: [...REASONING_EFFORTS] }]);
   });
+});
+
+// ================================================================================================
+// T3 review I1 — the REAL `startDaemon` wiring, driven off a real settings.json.
+//
+// Every other test in this file constructs `startIpcServer` directly and hands it its own
+// `liveModel`/`liveEffort` closures. That proves the handler and skips the thing most likely to
+// break: daemon.ts's `liveSelection`/`liveEffort` construction and the one line that passes
+// `liveEffort` into the options object.
+//
+// WHY THAT GAP IS WORSE THAN IT LOOKS. Dropping `liveEffort` from that object does not throw, does
+// not warn, and does not fail a type-check — `SyncConfigContext.liveEffort` is optional and
+// degrades to `""`. `""` is a MEANINGFUL value on this wire ("the Mac has configured no effort"),
+// so the phone would quietly run every turn with no reasoning block while the Mac sends
+// `{effort:"high"}`, forever, with nothing anywhere reporting a problem. Contrast the `defaultModel`
+// half it sits beside: its failure is LOUD, because an empty model makes the phone refuse the turn
+// outright. A silent wrong answer needs the stronger test, so this boots the actual daemon.
+//
+// It uses `createProvider` to build the SAME live resolver production uses (mtime-cached, re-reads
+// settings.json per call) rather than a hand-written closure — the point is to exercise the real
+// path end to end. codex-oauth is chosen deliberately: its provider constructs without a
+// credential (the token is only read at stream time, and no turn is ever driven here), and its
+// `models()` returns the real `CODEX_MODELS`, so one test covers the catalogue AND the effort
+// through the genuine wiring. Nothing here touches `~/.norma` — temp home, temp secret store.
+// ================================================================================================
+
+describe("sync.config through a real startDaemon (T3 review I1)", () => {
+  let daemon: RunningDaemon | undefined;
+  afterEach(async () => { await daemon?.stop(); daemon = undefined; });
+
+  function writeProviderSettings(home: string, model: string, effort?: string): void {
+    writeFileSync(join(home, "settings.json"), JSON.stringify({
+      schemaVersion: 2,
+      provider: { type: "codex-oauth", model, ...(effort ? { reasoningEffort: effort } : {}) },
+      titles: { enabled: false },
+      toolSearch: { enabled: false },
+    }, null, 2) + "\n");
+  }
+
+  /** Boots a daemon over a real settings.json, wiring `agentProvider` EXACTLY as daemon.ts's own
+   *  boot does (`{provider, model: active.liveModel().model, live: active.liveModel}`) — so the
+   *  `live()` resolver under test is the production one, not a test closure. */
+  async function bootReal(home: string): Promise<RunningDaemon> {
+    const settingsPath = join(home, "settings.json");
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    const active = await createProvider(loadSettings(settingsPath), secrets, settingsPath);
+    return startDaemon({
+      home, secrets,
+      agentProvider: { provider: active.provider, model: active.liveModel().model, live: active.liveModel },
+    });
+  }
+
+  test("a real daemon serves the effort AND the catalogue from settings.json, and re-reads both live", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-sync-config-real-"));
+    writeProviderSettings(home, "gpt-5.6-terra", "xhigh");
+
+    daemon = await bootReal(home);
+    const daemonRef = daemon; // captured ONCE — the no-restart proof is that this is never re-created
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(daemon.tokens.harness, "phone");
+
+    const before = await c.request(METHODS.syncConfig, {});
+    expect(before.error).toBeUndefined();
+    expect(before.result.defaultModel).toBe("gpt-5.6-terra");
+    // THE ASSERTION I1 IS ABOUT: without `liveEffort` wired in daemon.ts this is `""` — a value
+    // that is legal, meaningful, and wrong, which is exactly why it needs pinning here.
+    expect(before.result.defaultEffort).toBe("xhigh");
+    // The catalogue rides the same real boot: CODEX_MODELS, in order, with the real effort lists.
+    expect(before.result.models).toEqual(CODEX_MODELS.map((m) => ({ id: m.id, efforts: [...REASONING_EFFORTS] })));
+
+    // A live `norma model gpt-5.6-luna --effort low` — a plain settings.json rewrite, no restart,
+    // no RPC. The provider's resolver is mtime-cached, so poll rather than assuming the first read
+    // past the write already sees it.
+    writeProviderSettings(home, "gpt-5.6-luna", "low");
+    let after: any;
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      after = await c.request(METHODS.syncConfig, {});
+      if (after.result.defaultModel === "gpt-5.6-luna" && after.result.defaultEffort === "low") break;
+      if (Date.now() > deadline) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(after.result.defaultModel).toBe("gpt-5.6-luna");
+    expect(after.result.defaultEffort).toBe("low");
+
+    // Same daemon object, same socket — nothing was restarted to make the above true.
+    expect(daemon).toBe(daemonRef);
+    expect(daemon!.socketPath).toBe(daemonRef.socketPath);
+    c.close();
+  }, 20_000);
+
+  test("a real daemon whose settings.json sets NO effort reports \"\" — unset, not \"none\"", async () => {
+    // `reasoningEffort` is optional in settings, and the difference is not cosmetic: unset makes
+    // every request omit the `reasoning` block entirely, while "none" is an explicit level the
+    // backend honours. A phone told "none" for an unset Mac would start sending a level the Mac
+    // never sends.
+    const home = mkdtempSync(join(tmpdir(), "norma-sync-config-real-unset-"));
+    writeProviderSettings(home, "gpt-5.6-sol"); // no reasoningEffort key at all
+
+    daemon = await bootReal(home);
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(daemon.tokens.harness, "phone");
+
+    const res = await c.request(METHODS.syncConfig, {});
+    expect(res.error).toBeUndefined();
+    expect(res.result.defaultEffort).toBe("");
+    expect(res.result.defaultModel).toBe("gpt-5.6-sol");
+    expect(res.result.models.length).toBe(CODEX_MODELS.length); // the catalogue is unaffected
+    c.close();
+  }, 20_000);
 });
 
 describe("sync.memory (Chat Slice D task 3)", () => {

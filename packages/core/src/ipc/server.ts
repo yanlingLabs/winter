@@ -1199,9 +1199,18 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           liveEffort: opts.liveEffort,
           // provider-correctness T3: the EXACT catalogue session.setModel validates against, a few
           // hundred lines above (`opts.engine?.knownModels() ?? []`), and the one sync.push consults
-          // for `knownModelIds`. Read here at call time, so a provider swap or a family bump reaches
-          // a paired phone on its next connect with no daemon restart and — the point of serving it
-          // rather than letting the phone derive it — no phone app update either.
+          // for `knownModelIds`.
+          //
+          // Read at CALL TIME, and T3 review m2 is precise about what that does and does not buy.
+          // It buys: a phone always sees whatever the running engine's provider currently
+          // enumerates, with no phone app update — which is the whole reason the catalogue is
+          // served rather than derived. It does NOT buy a hot provider SWAP: `knownModels()` goes
+          // to `this.cfg.provider.provider`, the instance bound at boot, and providers/manager.ts
+          // states outright that changing `provider.type` in settings.json still needs a daemon
+          // restart. Only the model/effort SELECTION is hot (that resolver re-reads settings.json);
+          // the catalogue moves when the provider instance does. Do not describe this line as
+          // "a provider swap needs no restart" — it isn't, and the phone would be told the old
+          // provider's lineup until the daemon comes back.
           knownModels: () => opts.engine?.knownModels() ?? [],
         });
       }

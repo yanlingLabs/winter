@@ -71,10 +71,39 @@ struct SyncPushResult: Decodable { let applied: Bool; let lastSeq: Int; let buff
 /// The backend validates effort in two layers that disagree — `ultra` is refused globally,
 /// `minimal` is refused per model — so a future divergence is real, and carrying it per model makes
 /// that divergence a Mac-side data change instead of a phone app release.
+///
+/// **This type REFUSES WHAT THE WIRE REFUSES, and the decode is hand-written to make that true.**
+/// The zod schema is `{id: z.string().min(1), efforts: z.array(z.string().min(1))}` — both minimums
+/// are load-bearing, and Swift's synthesized `Decodable` enforces neither. A row like
+/// `{"id":"","efforts":[""]}` would decode cleanly into a picker whose selection is an empty slug,
+/// and an empty slug reaches a `/responses` request body verbatim and comes back an opaque HTTP 400
+/// — the same class of failure the never-synced rule exists to prevent, arriving by a different
+/// door. No shipped daemon can produce such a row today; a proxy, a future producer, or a lenient
+/// test double can, and "the current server never does that" is not a decode contract.
 public struct SyncConfigModel: Codable, Equatable, Sendable {
     public let id: String
     public let efforts: [String]
+
     public init(id: String, efforts: [String]) {
+        self.id = id
+        self.efforts = efforts
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try c.decode(String.self, forKey: .id)
+        let efforts = try c.decode([String].self, forKey: .efforts)
+        // Mirrors `z.string().min(1)` on both fields. A hard throw, never a filter: silently
+        // dropping a bad row would hand Task 6 a catalogue that is short by one model with nothing
+        // anywhere saying so, which is the lenient-double failure this whole seam is guarded against.
+        guard !id.isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .id, in: c,
+                                                  debugDescription: "model id must not be empty (wire: z.string().min(1))")
+        }
+        guard !efforts.contains(where: \.isEmpty) else {
+            throw DecodingError.dataCorruptedError(forKey: .efforts, in: c,
+                                                  debugDescription: "effort levels must not be empty (wire: z.array(z.string().min(1)))")
+        }
         self.id = id
         self.efforts = efforts
     }
@@ -503,8 +532,10 @@ public actor SyncClient {
 
     // MARK: - config / memory bootstrap (session-less)
 
-    /// `sync.config` — the Exa key, the user's added dangerous domains, and the daemon's live default
-    /// model, for a phone bootstrapping its OWN standalone chat.
+    /// `sync.config` — the Exa key, the user's added dangerous domains, the daemon's live default
+    /// model AND effort, and its whole model catalogue, for a phone bootstrapping its OWN standalone
+    /// chat. See `SyncConfig` for what an empty catalogue or an empty effort means (both are honest
+    /// "not told" answers, never a licence to derive one).
     public func fetchConfig() async throws -> SyncConfig {
         let raw = try await conn.call(method: METHODS.syncConfig, paramsJSON: encode(ConfigParams()))
         return try JSONDecoder().decode(SyncConfig.self, from: raw)
