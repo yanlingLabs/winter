@@ -1368,15 +1368,13 @@ export class AgentEngine {
    *  turn still runs on the boot-time model (Compactor is constructed once in daemon.ts and isn't
    *  live-wired); only the trigger threshold computed here uses the per-turn resolution.
    *
-   *  TWO corrections landed here on 2026-07-31; the numbers were wrong in OPPOSITE directions, so
-   *  each is pinned by its own test (test/agent/engine-compaction.test.ts):
+   *  Corrections landed here on 2026-07-31. Every input to the comparison was wrong, in DIFFERENT
+   *  DIRECTIONS, so each is pinned by its own test (test/agent/engine-compaction.test.ts):
    *
    *  1. THE FIGURE. `contextTokens` — the largest single round's input — not `inputTokens`, which
    *     is the SUM over the turn's tool rounds (see TurnCompletedEvent's doc comment). A turn with
    *     N rounds re-sends the growing context N times, so the sum ran far ahead of the real
-   *     context and compacted sessions that were nowhere near full. `?? inputTokens` keeps the old
-   *     reading for events persisted before the field existed — deliberately the PREMATURE
-   *     direction for legacy data, which costs a summarization rather than risking an overflow.
+   *     context and compacted sessions that were nowhere near full.
    *
    *  2. THE THREAD. MAIN-thread turns only. The last `turn_completed` in a session is not
    *     necessarily the main thread's: a DETACHED background subagent finishes after the main turn
@@ -1385,16 +1383,42 @@ export class AgentEngine {
    *     main-thread history (`historyInput` filters other threads out), so a child's figure is
    *     never the right input.
    *
-   *  The third half of the same bug lived in the model's `contextWindow` itself (codex-config.ts:
-   *  372_000 hand-transcribed for a 272,000 window, which put this threshold ABOVE the provider's
-   *  hard ceiling and made the compactor unreachable). Fixed there, guarded by
+   *  3. NO FIGURE ≠ A FIGURE OF ZERO, AND AN UNTRUSTWORTHY FIGURE IS WORSE THAN NONE (review I2).
+   *     This walks BACK to the most recent main-thread completion that carries a real measurement
+   *     (`contextTokens > 0`) instead of trusting whatever landed last. Two live producers of
+   *     unusable events, neither of them legacy data:
+   *       (a) an ABORTED turn. ESC mid-stream aborts before the provider's `response.completed`,
+   *           so no `usage` event ever arrives and all three figures are 0. Taking that at face
+   *           value silently cancels the compaction the PREVIOUS turn had earned — the same
+   *           "never degrade to zero" defense `Math.max` applies WITHIN a turn, applied ACROSS
+   *           turns.
+   *       (b) the PHONE. `apple/NormaChatKit/.../ChatEngine.swift` is a second, live engine: it
+   *           sums `inputTokens` across its own rounds exactly as the TS side used to, emits NO
+   *           `contextTokens`, and its lines reach this log BYTE-VERBATIM via `sync.push`'s raw
+   *           JSONL replication. This method has no mode gate, so a Mac turn following a
+   *           phone-authored turn in a synced chat session would read a round SUM as a context
+   *           size. There is deliberately NO `?? inputTokens` fallback any more: that expression
+   *           cannot tell a one-round turn's honest total from a twenty-round turn's sum.
+   *     The cost of skipping instead of trusting: the measurement can be one or more turns STALE
+   *     (an older, smaller context), so compaction fires later rather than earlier — absorbed by
+   *     the 68,000 tokens of headroom under the ceiling, and it is a lower bound, since context
+   *     only grows until a checkpoint. Sessions with NO usable event at all (pre-2026-07-31
+   *     history, or a chat driven entirely from the phone) simply don't auto-compact until this
+   *     daemon completes one turn for them — bounded, and self-healing on that turn.
+   *     FOLLOW-UP (cross-repo, NOT closable here): NormaChatKit should emit `contextTokens` too,
+   *     at which point phone-authored turns become usable rather than skipped.
+   *
+   *  The remaining half of the same bug lived in the model's `contextWindow` itself
+   *  (codex-config.ts: 372_000 hand-transcribed for a 272,000 window, which put this threshold
+   *  ABOVE the provider's hard ceiling and made the compactor unreachable). Fixed there, guarded by
    *  test/providers/codex-models-drift.test.ts. */
   private async maybeAutoCompact(sessionId: string, model: string): Promise<void> {
     const events = this.cfg.store.read(sessionId);
-    const lastCompleted = [...events].reverse().find((e) => isTurnCompleted(e) && e.threadId === MAIN_THREAD) as
-      TurnCompleted | undefined;
+    const lastCompleted = [...events].reverse().find(
+      (e): e is TurnCompleted => isTurnCompleted(e) && e.threadId === MAIN_THREAD && (e.contextTokens ?? 0) > 0,
+    );
     if (!lastCompleted) return;
-    const used = lastCompleted.contextTokens ?? lastCompleted.inputTokens;
+    const used = lastCompleted.contextTokens!;
     const frac = Number(process.env.NORMA_COMPACT_THRESHOLD_FRAC ?? DEFAULT_COMPACT_THRESHOLD_FRAC);
     const absMax = process.env.NORMA_COMPACT_MAX_TOKENS ? Number(process.env.NORMA_COMPACT_MAX_TOKENS) : Infinity;
     const limit = Math.min(this.contextWindow(model) * frac, absMax);

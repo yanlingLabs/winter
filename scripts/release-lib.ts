@@ -222,3 +222,42 @@ export function publishGuard(i: PublishGuardInputs): PublishGuardResult {
   if (aborts.length > 0) return { action: "abort", lines: aborts };
   return { action: "publish", lines: [] };
 }
+
+/**
+ * Provider-catalogue staleness nudge (T2 review M2). `CODEX_MODELS`'s context windows are
+ * hand-held constants re-derived from a live `/models` call; the date of that derivation lives in
+ * `CODEX_MODELS_VERIFIED` (packages/core/src/providers/codex-config.ts).
+ *
+ * WARN-ONLY, and deliberately so. A date-triggered FAILURE would redden a green pipeline on a day
+ * nobody touched code, and the reflexive repair for that is to bump the date without checking
+ * anything — which destroys the guard's meaning. It lives in the RELEASE pipeline rather than in
+ * the test suite because that is the moment the number actually ships and a human is watching the
+ * output; a `console.warn` inside a 229-file test run is invisible.
+ *
+ * Pure and injectable (`now`) so it is unit-testable without waiting 120 days.
+ */
+export function catalogueStaleness(i: { verified: string; now: Date; staleAfterDays?: number }): {
+  stale: boolean;
+  ageDays: number;
+  line: string | null;
+} {
+  const budget = i.staleAfterDays ?? 120;
+  const parsed = Date.parse(i.verified);
+  if (Number.isNaN(parsed)) {
+    return {
+      stale: true,
+      ageDays: NaN,
+      line: `WARNING: CODEX_MODELS_VERIFIED is not a parseable date ("${i.verified}") — the catalogue staleness nudge cannot run.`,
+    };
+  }
+  const ageDays = Math.floor((i.now.getTime() - parsed) / 86_400_000);
+  if (ageDays <= budget) return { stale: false, ageDays, line: null };
+  return {
+    stale: true,
+    ageDays,
+    line:
+      `WARNING: Codex model catalogue last verified ${i.verified} (${ageDays} days ago, budget ${budget}). ` +
+      `This release ships CODEX_MODELS' context windows as constants; a stale window silently breaks ` +
+      `auto-compaction. Re-derive: NORMA_CODEX_LIVE_DRIFT=1 bun test codex-models-drift`,
+  };
+}

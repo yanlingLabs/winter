@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { CODEX, CODEX_MODELS } from "../../src/providers/codex-config";
+import { CODEX, CODEX_MODELS, CODEX_MODELS_VERIFIED } from "../../src/providers/codex-config";
 import { DEFAULT_COMPACT_THRESHOLD_FRAC } from "../../src/agent/engine";
 import { KeychainSecretStore } from "../../src/auth/secret-store";
+import { keychainService } from "../../src/profile";
 import { CodexAuthStore } from "../../src/providers/codex-oauth";
 
 /**
@@ -20,29 +21,44 @@ import { CodexAuthStore } from "../../src/providers/codex-oauth";
  * TWO layers, because neither alone is trustworthy:
  *
  *   1. PINNED + DATED (always runs, everywhere, including CI with no credentials).
- *      The expected catalogue values are duplicated here as literals next to the date they were
- *      last verified against the live backend. Any hand-edit of `CODEX_MODELS` — the exact act
- *      that produced this bug — now fails a test whose message names the live endpoint and
- *      demands the editor re-derive the number and re-stamp `LAST_VERIFIED`. It cannot detect
- *      drift on the PROVIDER's side (nobody edits our file when OpenAI changes a window), which
- *      is why layer 2 exists.
+ *      The expected catalogue values are pinned here next to `CODEX_MODELS_VERIFIED`, the date
+ *      they were last checked against the live backend. Any hand-edit of `CODEX_MODELS` — the
+ *      exact act that produced this bug — fails with `RE_DERIVE` attached to the assertion, which
+ *      names the live endpoint and demands the editor re-derive the number and re-stamp the date.
+ *      Review I1: that message MUST hang off the assertions in THIS half. A bare numeric diff
+ *      ("Expected 272000, Received 300000") invites the editor to update the pin to match their
+ *      edit — which is the `codex-oauth.test.ts` failure mode this whole task exists to condemn,
+ *      reproduced inside the guard built to prevent it. This layer cannot detect drift on the
+ *      PROVIDER's side (nobody edits our file when OpenAI changes a window) — that is layer 2.
  *
  *   2. LIVE, CREDENTIAL-GATED, OPT-IN (`NORMA_CODEX_LIVE_DRIFT=1` + a Codex OAuth token present).
- *      The real guard: fetches the catalogue and fails on ANY disagreement. It is skipped — never
- *      failed — when either gate is absent, so CI (no creds) and a plain `bun test` stay green
- *      and offline.
+ *      The real guard: fetches the catalogue and fails on ANY disagreement. Absent the env flag it
+ *      is SKIPPED (`test.skipIf`), so CI and a plain `bun test` stay green and offline.
+ *
+ *      Opting in with NO credentials FAILS — it does not pass and it does not silently return
+ *      (review M1). A guard that reports success when it made no call is worse than one that
+ *      reports a skip: "pass" reads as "checked, no drift". This bites in a specific, already-seen
+ *      way — `SERVICE` resolves at module load to the DIST keychain (`com.norma.core`), so a
+ *      developer working the dev profile would otherwise see a green pass for a check that never
+ *      ran. Run it for the dev profile with:
+ *
+ *          NORMA_CODEX_LIVE_DRIFT=1 bun test codex-models-drift                      # dist login
+ *          NORMA_PROFILE=dev NORMA_CODEX_LIVE_DRIFT=1 bun test codex-models-drift    # dev login
  *
  *      Why gated on an ENV FLAG and not on credential presence alone: on a developer Mac the
  *      credentials ARE present, so a creds-only gate would make the ordinary `bun test` reach the
  *      network and read the LIVE DAEMON's Keychain item on every run — flaky, invasive, and
  *      exactly the kind of ambient side effect a unit suite must not have. Running the live guard
- *      is therefore a deliberate act:
+ *      is therefore a deliberate act.
  *
- *          NORMA_CODEX_LIVE_DRIFT=1 bun test codex-models-drift
- *
- *      A staleness nudge (a `console.warn`, never a failure) prints when `LAST_VERIFIED` is more
- *      than STALE_AFTER_DAYS old. Deliberately not an assertion: a date-triggered failure is a
- *      time bomb that breaks a green suite on a day nobody changed any code.
+ * STALENESS lives in the RELEASE PIPELINE, not here (review M2). `scripts/release.ts` §11c warns
+ * — never fails — when `CODEX_MODELS_VERIFIED` is older than the staleness budget
+ * (`catalogueStaleness` in scripts/release-lib.ts). Two deliberate choices: a `console.warn` inside
+ * a 229-file test run is invisible, and nobody runs this file in isolation on a schedule, so the
+ * nudge belongs where a human is watching output at the moment the number actually SHIPS; and it
+ * warns rather than fails because a date-triggered test failure reddens a green suite on a day
+ * nobody touched code, and the reflexive repair for that is to bump the date without checking
+ * anything — which destroys the guard's meaning.
  *
  * The live half NEVER prints, logs or persists the token, and NEVER refreshes it — a refresh
  * rotates the running daemon's stored credential, so a test that refreshed could log the user's
@@ -68,30 +84,41 @@ import { CodexAuthStore } from "../../src/providers/codex-oauth";
  * gap, stated here so the next reader does not "helpfully" add the wrong check.
  */
 
-/** Date the pinned values below were last verified against the live `/models` catalogue. */
-const LAST_VERIFIED = "2026-07-31";
-const STALE_AFTER_DAYS = 120;
-
-/** The live `/models?client_version=1.0.0` payload for the three user-selectable models, as read
- *  on LAST_VERIFIED. `context_window` and `max_context_window` were BOTH 272000 for all three. */
-const PINNED = [
-  { id: "gpt-5.6-sol", contextWindow: 272_000, supportsVision: true },
-  { id: "gpt-5.6-terra", contextWindow: 272_000, supportsVision: true },
-  { id: "gpt-5.6-luna", contextWindow: 272_000, supportsVision: true },
-] as const;
-
-/** The provider's hard ceiling. A request whose context exceeds this is rejected outright — so any
- *  compaction threshold at or above it is unreachable by construction. */
+/** The provider's hard ceiling, as read from the live catalogue on `CODEX_MODELS_VERIFIED`:
+ *  `context_window` AND `max_context_window` were both 272000 for all three models (and for every
+ *  deprecated slug — the catalogue has no larger model at all). A request whose context exceeds
+ *  this is rejected outright, so any compaction threshold at or above it is unreachable by
+ *  construction.
+ *
+ *  Review M3: this is the file's SINGLE hand-held number, and the live half checks it against the
+ *  wire. Everything else here derives from it — a guard whose thesis is "a pin copied from the same
+ *  hand proves nothing" must not itself carry four copies of the same literal. */
 const LIVE_CONTEXT_WINDOW = 272_000;
 
-const RE_DERIVE = `re-derive it from the live catalogue (GET ${CODEX.backendUrl}/models?client_version=1.0.0) and re-stamp LAST_VERIFIED`;
+/** The live `/models?client_version=1.0.0` payload for the three user-selectable models, as read on
+ *  `CODEX_MODELS_VERIFIED`. Vision = `input_modalities` contains "image". */
+const PINNED = [
+  { id: "gpt-5.6-sol", contextWindow: LIVE_CONTEXT_WINDOW, supportsVision: true },
+  { id: "gpt-5.6-terra", contextWindow: LIVE_CONTEXT_WINDOW, supportsVision: true },
+  { id: "gpt-5.6-luna", contextWindow: LIVE_CONTEXT_WINDOW, supportsVision: true },
+] as const;
+
+const RE_DERIVE =
+  `DO NOT edit the pin to match the code. Re-derive the value from the live catalogue ` +
+  `(GET ${CODEX.backendUrl}/models?client_version=1.0.0 — run ` +
+  `\`NORMA_CODEX_LIVE_DRIFT=1 bun test codex-models-drift\`, or ` +
+  `\`NORMA_PROFILE=dev …\` on the dev profile) and re-stamp CODEX_MODELS_VERIFIED in ` +
+  `src/providers/codex-config.ts. A 100,000-token transcription error survived three weeks of ` +
+  `green suites exactly because a pin was edited to agree with the constant.`;
 
 describe("CODEX_MODELS drift guard (pinned + dated)", () => {
   test("every entry matches the pinned live-catalogue values", () => {
-    expect(CODEX_MODELS.map((m) => ({ id: m.id, contextWindow: m.contextWindow, supportsVision: m.supportsVision })))
-      .toEqual(PINNED.map((p) => ({ ...p })));
-    // If this failed and the code is right, the PIN is stale: ${RE_DERIVE}
-    expect(RE_DERIVE).toContain("/models");
+    // The message rides the assertion that ACTUALLY RUNS (review I1) — a bare numeric diff invites
+    // the one repair this guard exists to prevent.
+    expect(
+      CODEX_MODELS.map((m) => ({ id: m.id, contextWindow: m.contextWindow, supportsVision: m.supportsVision })),
+      `CODEX_MODELS disagrees with the pin (last verified ${CODEX_MODELS_VERIFIED}). ${RE_DERIVE}`,
+    ).toEqual(PINNED.map((p) => ({ ...p })));
   });
 
   test("the compaction threshold each entry produces is REACHABLE — the bug that made auto-compaction dead", () => {
@@ -106,39 +133,40 @@ describe("CODEX_MODELS drift guard (pinned + dated)", () => {
     //
     //   AFTER  (fix):  272_000 (live) × 0.75 = 204_000  →  68,000 tokens of headroom below the
     //                  ceiling, so the trigger is reached with room to run the summarization turn.
+    //
+    // Asserted as PROPERTIES of the live ceiling, not as a re-typed 204_000 (review M3): the
+    // literal would be `LIVE_CONTEXT_WINDOW × DEFAULT_COMPACT_THRESHOLD_FRAC` copied by hand, which
+    // is the move this whole file exists to punish.
     for (const m of CODEX_MODELS) {
       const trigger = m.contextWindow * DEFAULT_COMPACT_THRESHOLD_FRAC;
-      expect(trigger).toBe(204_000);
-      expect(trigger).toBeLessThan(LIVE_CONTEXT_WINDOW);
-    }
-  });
-
-  test("LAST_VERIFIED is a real date, and nudges (never fails) when stale", () => {
-    expect(LAST_VERIFIED).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    const ageDays = (Date.now() - Date.parse(LAST_VERIFIED)) / 86_400_000;
-    expect(Number.isFinite(ageDays)).toBe(true);
-    if (ageDays > STALE_AFTER_DAYS) {
-      console.warn(
-        `[codex drift guard] CODEX_MODELS last verified ${LAST_VERIFIED} (${Math.round(ageDays)}d ago). ` +
-        `Run: NORMA_CODEX_LIVE_DRIFT=1 bun test codex-models-drift`,
-      );
+      expect(trigger, `the trigger is unreachable — ${RE_DERIVE}`).toBeLessThan(LIVE_CONTEXT_WINDOW);
+      // Headroom must also be enough to RUN the summarization turn, whose own input is roughly the
+      // context being summarized; a threshold one token under the ceiling is reachable but useless.
+      expect(
+        LIVE_CONTEXT_WINDOW - trigger,
+        `too little headroom between the trigger and the ${LIVE_CONTEXT_WINDOW} ceiling to run a compaction`,
+      ).toBeGreaterThanOrEqual(50_000);
     }
   });
 });
 
 // ── Live half ────────────────────────────────────────────────────────────────────────────────
-// Opt-in AND credential-gated (see the mechanism note at the top of this file). `test.skipIf`
-// keeps the skip visible in the runner's output rather than silently omitting the case.
+// Opt-in (see the mechanism note at the top of this file). `test.skipIf` keeps the skip VISIBLE in
+// the runner's output rather than silently omitting the case — and, per review M1, missing
+// credentials once opted in is a FAILURE, never a pass: a guard that reports success for a check it
+// never performed is worse than one that reports a skip.
 const liveRequested = process.env.NORMA_CODEX_LIVE_DRIFT === "1";
 
 describe("CODEX_MODELS drift guard (live catalogue)", () => {
   test.skipIf(!liveRequested)("every CODEX_MODELS entry agrees with the live /models payload", async () => {
     const tokens = await new CodexAuthStore(new KeychainSecretStore()).load();
-    if (!tokens) {
-      // No credentials → not a failure. This is the "skipped without creds" half of the contract.
-      console.warn("[codex drift guard] no Codex OAuth token in the Keychain — live check skipped. Run: norma login");
-      return;
-    }
+    expect(
+      tokens,
+      `NORMA_CODEX_LIVE_DRIFT=1 was set but no Codex OAuth token is in the "${keychainService()}" keychain, ` +
+      `so NOTHING was checked. Run \`norma login\` — or, if you work the dev profile, re-run with ` +
+      `NORMA_PROFILE=dev (this reads the dist keychain by default).`,
+    ).not.toBeNull();
+    if (!tokens) return; // unreachable past the assertion; narrows the type
     const res = await fetch(`${CODEX.backendUrl}/models?client_version=1.0.0`, {
       headers: {
         authorization: `Bearer ${tokens.accessToken}`,

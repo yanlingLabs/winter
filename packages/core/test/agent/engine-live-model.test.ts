@@ -69,7 +69,7 @@ describe("engine live model resolution (no daemon restart)", () => {
       store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: `u${i}`, clientName: "test" });
       store.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: `a${i}` });
     }
-    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 900, outputTokens: 10 }); // 900 > 750
+    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 900, outputTokens: 10, contextTokens: 900 }); // 900 > 750
 
     await engine.runTurn(sessionId);
 
@@ -187,7 +187,7 @@ describe("per-session model override (Chat Slice D task 1: meta.model wins over 
       store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: `u${i}`, clientName: "test" });
       store.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: `a${i}` });
     }
-    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 900, outputTokens: 10 }); // 900 > 750
+    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 900, outputTokens: 10, contextTokens: 900 }); // 900 > 750
 
     await engine.runTurn(sessionId);
 
@@ -215,7 +215,7 @@ describe("per-session model override (Chat Slice D task 1: meta.model wins over 
       store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: `u${i}`, clientName: "test" });
       store.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: `a${i}` });
     }
-    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 900, outputTokens: 10 });
+    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 900, outputTokens: 10, contextTokens: 900 });
 
     await engine.runTurn(sessionId);
 

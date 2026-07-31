@@ -92,7 +92,7 @@ describe("engine historyInput is checkpoint-aware", () => {
   });
 });
 
-describe("engine auto-compact trigger (at turn start, off real provider-reported inputTokens)", () => {
+describe("engine auto-compact trigger (at turn start, off the real provider-reported context size)", () => {
   // FakeProvider's models() must report a ModelInfo whose id matches the model setupEngine's
   // harness hardcodes onto EngineConfig.provider ("gated-1") — otherwise contextWindow() can't
   // resolve a contextWindow for it and the threshold is effectively Infinity.
@@ -106,7 +106,7 @@ describe("engine auto-compact trigger (at turn start, off real provider-reported
     }
   }
 
-  test("inputTokens over the threshold triggers a compaction before the turn's own streamTurn call", async () => {
+  test("a context over the threshold triggers a compaction before the turn's own streamTurn call", async () => {
     const provider = new FakeProvider(
       [
         [{ type: "text_delta", delta: "SUMMARY_TOKEN" }, { type: "done", stopReason: "end_turn" }], // the compaction's own streamTurn
@@ -116,7 +116,9 @@ describe("engine auto-compact trigger (at turn start, off real provider-reported
     );
     const { engine, store, sessionId } = setupEngine(provider);
     seedMessages(store, sessionId, 5); // 10 messages, > Compactor's default keepTail(6) → compactable
-    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 900, outputTokens: 10 }); // 900 > 750
+    // contextTokens is the figure the trigger reads (review I2: a turn carrying no context
+    // measurement is SKIPPED, never read off inputTokens — see maybeAutoCompact's doc comment).
+    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 900, outputTokens: 10, contextTokens: 900 }); // 900 > 750
 
     await engine.runTurn(sessionId);
 
@@ -138,11 +140,11 @@ describe("engine auto-compact trigger (at turn start, off real provider-reported
     expect(turnInput.some((it) => "content" in it && it.content === "u0")).toBe(false);
   });
 
-  test("inputTokens under the threshold does not trigger compaction", async () => {
+  test("a context under the threshold does not trigger compaction", async () => {
     const provider = new FakeProvider([[{ type: "text_delta", delta: "ok" }, { type: "done", stopReason: "end_turn" }]], [SMALL_MODEL]);
     const { engine, store, sessionId } = setupEngine(provider);
     seedMessages(store, sessionId, 5);
-    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 100, outputTokens: 10 }); // 100 < 750
+    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 100, outputTokens: 10, contextTokens: 100 }); // 100 < 750
 
     await engine.runTurn(sessionId);
 
@@ -258,6 +260,64 @@ describe("engine auto-compact trigger (at turn start, off real provider-reported
    *  main thread's — under-reporting it, and suppressing a compaction the main thread needed.
    *  Compaction only ever folds MAIN-thread history (`historyInput` filters other threads out), so
    *  reading a child's figure is never right. */
+  /** DIRECTION 4 (T2 review I2a) — AN ABORTED TURN ZEROES THE MEASUREMENT.
+   *
+   *  ESC mid-stream aborts before the provider's `response.completed`, so no `usage` event ever
+   *  arrives and the abort path emits `turn_completed{aborted, 0, 0, contextTokens: 0}`. That
+   *  becomes the last main-thread completion, and the trigger then measures 0 — silently
+   *  suppressing the compaction the PREVIOUS turn had already earned. `Math.max`'s "never degrade
+   *  to zero" defense was applied WITHIN a turn; this is the same defense ACROSS turns. */
+  test("an aborted turn (0 tokens, no usage ever reported) does not suppress the compaction the previous turn earned", async () => {
+    const provider = new FakeProvider(
+      [
+        [{ type: "text_delta", delta: "SUMMARY_TOKEN" }, { type: "done", stopReason: "end_turn" }],
+        [{ type: "text_delta", delta: "ok" }, { type: "done", stopReason: "end_turn" }],
+      ],
+      [SMALL_MODEL],
+    );
+    const { engine, store, sessionId } = setupEngine(provider);
+    seedMessages(store, sessionId, 5);
+    store.append(sessionId, {
+      type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn",
+      inputTokens: 900, outputTokens: 10, contextTokens: 900, // 900 > 750 → this turn earned a compaction
+    });
+    store.append(sessionId, {
+      type: "turn_completed", sessionId, threadId: "main", stopReason: "aborted",
+      inputTokens: 0, outputTokens: 0, contextTokens: 0, // ESC before any usage arrived
+    });
+
+    await engine.runTurn(sessionId);
+
+    expect(store.read(sessionId).some((e) => e.type === "checkpoint")).toBe(true);
+  });
+
+  /** DIRECTION 5 (T2 review I2b) — A SECOND, LIVE PRODUCER EMITS NO `contextTokens`.
+   *
+   *  `apple/NormaChatKit/.../ChatEngine.swift` is the phone's standalone chat engine. It sums
+   *  `inputTokens` across its own tool rounds — the identical round-summing fixed here on the TS
+   *  side — and emits `turn_completed` with NO `contextTokens`. Those lines reach this daemon's log
+   *  BYTE-VERBATIM via `sync.push` (raw-JSONL replication), and `maybeAutoCompact` has no mode
+   *  gate, so a Mac turn following a phone-authored turn in a synced chat session would measure the
+   *  phone's ROUND SUM. This is a CURRENT producer, not legacy data.
+   *
+   *  A figure that cannot be trusted is worse than no figure: the trigger skips such an event and
+   *  keeps walking back to the most recent completion that carries a real context measurement. */
+  test("a turn_completed with NO contextTokens (the phone's ChatEngine shape) is never read as a context size", async () => {
+    const provider = new FakeProvider([[{ type: "text_delta", delta: "ok" }, { type: "done", stopReason: "end_turn" }]], [SMALL_MODEL]);
+    const { engine, store, sessionId } = setupEngine(provider);
+    seedMessages(store, sessionId, 5);
+    // exactly the phone's shape: a round SUM in inputTokens, contextTokens absent
+    store.append(sessionId, {
+      type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn",
+      inputTokens: 900, outputTokens: 20, // 900 > 750 — but it is a SUM, not a context size
+    });
+
+    await engine.runTurn(sessionId);
+
+    expect(store.read(sessionId).some((e) => e.type === "checkpoint")).toBe(false);
+    expect(provider.requests).toHaveLength(1); // no compaction streamTurn
+  });
+
   test("a background CHILD's later turn_completed does not mask the main thread's context", async () => {
     const provider = new FakeProvider(
       [

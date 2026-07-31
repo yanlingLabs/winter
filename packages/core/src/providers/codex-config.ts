@@ -90,6 +90,12 @@ export const CODEX = {
  * codex-rs fetches models dynamically; this list is the best available static set.
  * TODO-verify: add a live /models fetch path to keep this current.
  */
+/** Date `CODEX_MODELS` was last checked against the live `/models` catalogue. Lives HERE, next to
+ *  the data it dates, and is read by BOTH the drift guard (test/providers/codex-models-drift.test.ts)
+ *  and the release pipeline's staleness nudge (scripts/release.ts §11c) — so the date can never
+ *  drift from the numbers it certifies. Re-stamp it only after the guard's LIVE half agrees. */
+export const CODEX_MODELS_VERIFIED = "2026-07-31";
+
 export const CODEX_MODELS: ModelInfo[] = [
   { id: "gpt-5.6-sol", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
   { id: "gpt-5.6-terra", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
