@@ -79,6 +79,58 @@ struct RealDaemon {
     process.on("SIGTERM", () => { d.stop(); process.exit(0); });
     """
 
+    /// iOS remote-path T2: the same daemon, booted with an INJECTED streaming `Provider` instead of
+    /// `agentProvider: null`, so a `session.send` runs a REAL turn through the REAL `AgentEngine`
+    /// and produces the events the phone path actually depends on — `assistant_delta` transients via
+    /// `hub.broadcastTransient` (borrowed seq and all), a persisted `reasoning_item` carrying opaque
+    /// provider state, and an oversized final message. Nothing here is faked below the provider
+    /// boundary: the engine, the hub, the store, the IPC server and the gateway are all production
+    /// code. (`agentProvider: {provider, model}` is the same injection seam packages/core's own
+    /// tests use — daemon.ts's `startDaemon` option, "object: use this provider directly".)
+    ///
+    /// The stream is: six small text chunks (six `assistant_delta`s at ONE borrowed seq), one opaque
+    /// `reasoning_item`, then a >1 MiB chunk. That last chunk is deliberate — uncapped it produces
+    /// both an `assistant_delta` and a final `assistant_message` past the phone transport's hard
+    /// 1 MiB de-framing limit, whose overflow silently ends the phone's inbound stream.
+    static let streamingProviderFixture = """
+    import { startDaemon, FileSecretStore } from "@norma/core";
+    const home = process.env.NORMA_HOME;
+    const CHUNKS = \(streamedChunksJSLiteral);
+    const provider = {
+      id: "conformance-fake",
+      models: () => [{ id: "conformance-model", family: "conformance", contextWindow: 128000, supportsVision: false }],
+      async *streamTurn() {
+        for (const c of CHUNKS) yield { type: "text_delta", delta: c };
+        yield { type: "reasoning_item", itemJson: "\(streamedReasoningSecret)" };
+        yield { type: "text_delta", delta: "Z".repeat(\(oversizedChunkBytes)) };
+        yield { type: "done", stopReason: "end_turn" };
+      },
+    };
+    const d = await startDaemon({
+      home, secrets: new FileSecretStore(home + "/secrets"),
+      agentProvider: { provider, model: "conformance-model" },
+    });
+    process.stdout.write(JSON.stringify({ socketPath: d.socketPath, harness: d.tokens.harness, remote: d.tokens.remote }) + "\\n");
+    process.on("SIGTERM", () => { d.stop(); process.exit(0); });
+    """
+
+    /// The six small chunks `streamingProviderFixture` streams, in order — and the expected
+    /// `assistant_delta` sequence on the phone. The fixture's JS array is INTERPOLATED from this
+    /// (`streamedChunksJSLiteral`), not hand-copied — writing the same list twice is the exact
+    /// failure mode this whole task exists to remove.
+    static let streamedChunks = ["Hel", "lo ", "from ", "the ", "real ", "engine"]
+    /// `streamedChunks` as a JS array literal, for the fixture above. The chunks are plain ASCII
+    /// with no quotes or backslashes, so a bare quote-and-join is sufficient and honest here.
+    private static var streamedChunksJSLiteral: String {
+        "[" + streamedChunks.map { "\"\($0)\"" }.joined(separator: ", ") + "]"
+    }
+    /// The opaque `reasoning_item.itemJson` that fixture persists. Stands in for the provider's
+    /// `encrypted_content`: it must appear in the daemon's session log and NOWHERE on the wire to a
+    /// phone.
+    static let streamedReasoningSecret = "conformance-encrypted-content-must-not-cross-the-wire"
+    /// Size of the fixture's final text chunk — past the phone's 1 MiB frame limit on purpose.
+    static let oversizedChunkBytes = 1_500_000
+
     private struct FixtureOutput: Decodable {
         let socketPath: String
         let harness: String
@@ -199,14 +251,39 @@ struct RealDaemon {
     /// release (mirroring the TS `daemon-sigterm` precedent's shutdown path) — then removes the
     /// temp `NORMA_HOME` and the redirected stdout/stderr scratch files. Idempotent: safe to call
     /// more than once (e.g. an explicit call plus a `defer` safety net).
+    ///
+    /// **The wait is BOUNDED, deliberately — do not restore `process.waitUntilExit()`.** That call
+    /// has been observed to block FOREVER here even though the child had genuinely exited: no
+    /// `bun -e` process left on the machine, and a `sample` of the stuck runner parked in
+    /// `-[NSConcreteTask waitUntilExit]` under this very `defer`. It is a Foundation reaping race,
+    /// nondeterministic (a different test hit it on each run of this suite, and an orphaned
+    /// `xctest` process from a prior session's run was still resident on the machine when this was
+    /// found — same signature). Unbounded, one occurrence wedges the ENTIRE suite: no summary line,
+    /// no failure, no output at all, and an orphaned test runner left behind. Bounded, it costs at
+    /// most a few seconds and escalates to SIGKILL. This changes no daemon behavior — only how long
+    /// a test is willing to wait for a process that has already been told to die.
     func stop() {
         if process.isRunning {
-            process.terminate() // SIGTERM
-            process.waitUntilExit()
+            process.terminate() // SIGTERM — the fixture's handler runs d.stop() then exit(0)
+            if !waitForExit(within: 5) {
+                kill(process.processIdentifier, SIGKILL)
+                _ = waitForExit(within: 2)
+            }
         }
         try? FileManager.default.removeItem(atPath: home)
         try? FileManager.default.removeItem(atPath: stdoutPath)
         try? FileManager.default.removeItem(atPath: stderrPath)
+    }
+
+    /// Polls `isRunning` to a deadline instead of blocking in `waitUntilExit()` — see `stop()`.
+    /// Returns whether the process was observed to have exited.
+    private func waitForExit(within seconds: Double) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if !process.isRunning { return true }
+            usleep(20_000)
+        }
+        return !process.isRunning
     }
 }
 

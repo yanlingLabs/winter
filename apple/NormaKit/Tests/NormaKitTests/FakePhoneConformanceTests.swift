@@ -362,6 +362,126 @@ final class FakePhoneConformanceTests: XCTestCase {
         await approvalVerifier.close()
     }
 
+    // MARK: - iOS remote-path T1+T2: streaming, opaque state, and the frame cliff — on the wire
+
+    /// **The end-to-end proof for the whole iOS remote path, and the tripwire for both of its
+    /// tasks.** Everything below runs through production code: a REAL daemon with a REAL
+    /// `AgentEngine` (only the `Provider` is injected — `RealDaemon.streamingProviderFixture`), a
+    /// REAL pairing ceremony, the REAL `Gateway` over a REAL iroh QUIC link, into the shipped
+    /// `NormaSessionClient`. Nothing between the provider and the phone is faked.
+    ///
+    /// It exists because NOTHING in either suite covered a transient event traversing the gateway,
+    /// and that hole hid two bugs at once:
+    ///
+    ///  * **T1 (client).** `hub.broadcastTransient` stamps an `assistant_delta` with the store's
+    ///    CURRENT `lastSeq` — the seq of the last event actually APPENDED, never one of its own — so
+    ///    a burst of deltas all share ONE seq. The phone client deduped on `seq <= cursor`, so the
+    ///    first delta advanced the cursor onto that shared seq and every delta after it was dropped
+    ///    at `seq == cursor`. Pre-T1 this test sees 1 of 7 chunks; post-T1, all 7.
+    ///  * **T2 (daemon).** The obvious way to write T2's live-stream allowlist — reuse
+    ///    `HISTORY_EVENT_TYPES` — drops `assistant_delta` entirely, because history governs
+    ///    PERSISTED replay and transients are never persisted. That would have re-broken streaming
+    ///    one hop UPSTREAM of the client just fixed, with a fully green suite. Here it is 0 of 7.
+    ///
+    /// It also pins T2's two guarantees on the real wire: the opaque `reasoning_item` the engine
+    /// persists mid-turn never reaches the phone, and a >1 MiB event does not silently kill the
+    /// connection (`LengthPrefix.unwrap` throws `.oversize` → `IrohConn.readLoop` `cont.finish()`es
+    /// the phone's inbound stream → reconnect, with nothing logged anywhere — the reported "it
+    /// reconnects every time I open a chat"). Uncapped, the oversized chunk ends this connection and
+    /// the assertions after it never see their events.
+    ///
+    /// Honest note on the reasoning half: the Swift stack was ALREADY accidentally safe there —
+    /// `apple/NormaProtocol` has no `reasoningItem` variant, so `NormaClient` yields `.unknownEvent`
+    /// and the gateway's `guard case .session` drops it. That accident evaporates the moment someone
+    /// mirrors the variant into Swift, which is exactly what CLAUDE.md's protocol checklist tells
+    /// them to do. The RED evidence for that hole is `remote-live-stream.test.ts` at the daemon
+    /// seam, where the leak is real for every remote client; this assertion pins the end-to-end
+    /// guarantee so the Swift-side accident can never become the only thing holding it up.
+    func testStreamingDeltasReachThePhone_OpaqueStateDoesNot_AndAnOversizedEventDoesNotKillTheLink() async throws {
+        let daemon = try await RealDaemon.start(fixtureOverride: RealDaemon.streamingProviderFixture)
+        defer { daemon.stop() }
+        let setup = try await makeHost(daemon: daemon)
+
+        let secret = SecretKey.generate().toBytes()
+        let accepted = try await pairPhone(setup: setup, secret: secret)
+        let phoneEndpointID = try SecretKey.fromBytes(bytes: secret).public().description
+        let conn = try await IrohDialer.dialInternal(
+            secret: secret, macEndpointID: setup.macEndpointID, alpn: IrohListener.defaultALPN,
+            relayURLs: [], addrOverride: setup.irohListener.endpointAddr
+        )
+        let client = NormaSessionClient(
+            conn: conn, hostID: phoneEndpointID, epoch: accepted.epoch, cursors: InMemoryCursorStore(),
+            clientInstanceID: "norma-fake-phone", clock: { Int(Date().timeIntervalSince1970 * 1000) },
+            idgen: { UUID().uuidString }
+        )
+        let (eventSink, eventTask) = drain(client.events)
+        defer { eventTask.cancel() }
+        let (gapSink, gapTask) = drain(client.gaps)
+        defer { gapTask.cancel() }
+
+        _ = try await client.handshake(resumes: [])
+        let dispatchResult = try await client.send(method: "session.dispatch", params: .object([:]))
+        guard let sid = dispatchResult["sessionId"]?.stringValue else {
+            return XCTFail("session.dispatch must return a sessionId")
+        }
+        _ = try await client.send(method: "session.attach", params: .object([
+            "sessionId": .string(sid), "fromSeq": .number(0),
+        ]))
+        _ = try await client.send(method: "session.send", params: .object([
+            "sessionId": .string(sid), "text": .string("stream me something"),
+        ]))
+
+        func received(_ type: String) -> [SessionEnvelope] {
+            eventSink.items.filter { $0.sessionID == sid && $0.json["type"]?.stringValue == type }
+        }
+
+        // `turn_completed` is the turn's terminal PERSISTED event — waiting on it (not on the
+        // deltas) means a missing delta fails as a mismatch, never as a timeout, AND it is what
+        // proves the link survived the oversized chunk that preceded it.
+        try await waitUntil(timeout: 30, "the turn to complete on the phone's own event stream") {
+            !received("turn_completed").isEmpty
+        }
+
+        // ---- T1: every streamed chunk crossed the wire ----
+        let deltas = received("assistant_delta")
+        XCTAssertEqual(deltas.count, RealDaemon.streamedChunks.count + 1,
+                       "every assistant_delta must reach the phone (the six small chunks + the big one). Pre-T1 only the FIRST survived the client's seq dedupe; a history-allowlist live filter would have delivered NONE.")
+        XCTAssertEqual(deltas.prefix(RealDaemon.streamedChunks.count).map { $0.json["delta"]?.stringValue ?? "" },
+                       RealDaemon.streamedChunks, "deltas arrive in provider order, unmodified")
+
+        // The shape that makes the above a genuine regression test rather than a happy path: a
+        // delta's seq is BORROWED from the store's head, never its own, so a run of deltas repeats
+        // one seq. Whatever the first of them does to a client's cursor, every one after it arrives
+        // at `seq == cursor` — the case a naive `seq <= cursor` dedupe drops 100% of the time.
+        // (The 7th delta's seq differs from the first six precisely because the `reasoning_item`
+        // the engine persisted between them moved the store's head — a borrowed seq tracks the LOG,
+        // not the stream.)
+        let smallDeltaSeqs = Set(deltas.prefix(RealDaemon.streamedChunks.count).compactMap { $0.seq })
+        XCTAssertEqual(smallDeltaSeqs.count, 1,
+                       "the six chunks streamed before the mid-turn reasoning_item all share the store's head seq — that is what makes `seq == cursor` the norm, not an edge case")
+        XCTAssertGreaterThanOrEqual(deltas.count - Set(deltas.compactMap { $0.seq }).count, 5,
+                                    "at least five deltas repeated a seq an earlier delta already delivered — i.e. arrived at `seq == cursor`")
+
+        // ---- T2a: the opaque provider state stayed on the Mac ----
+        XCTAssertTrue(received("reasoning_item").isEmpty,
+                      "reasoning_item wraps the provider's opaque encrypted_content — the session JSONL is its only sink (CLAUDE.md)")
+        let everySessionEnvelope = eventSink.items.map { String(describing: $0.json) }.joined()
+        XCTAssertFalse(everySessionEnvelope.contains(RealDaemon.streamedReasoningSecret),
+                       "the opaque payload must not appear on the phone's wire under ANY event type")
+
+        // ---- T2b: the >1 MiB event was capped, and the link survived it ----
+        // Reaching this line at all is most of the proof: `turn_completed` is emitted AFTER the
+        // oversized assistant_message, so an uncapped frame would have ended the phone's inbound
+        // stream before it ever arrived.
+        let messages = received("assistant_message")
+        XCTAssertEqual(messages.count, 1, "the canonical assistant_message must still arrive after the oversized chunk")
+        for env in eventSink.items {
+            let size = (try? JSONEncoder().encode(env.json).count) ?? 0
+            XCTAssertLessThan(size, 1 << 20, "no event may reach the phone at or past the transport's hard 1 MiB frame limit — oversize is a SILENT connection kill, not an error")
+        }
+        XCTAssertTrue(gapSink.items.isEmpty, "no GapSignal across a full streamed turn")
+    }
+
     /// SP3.1 T1 (the whole point): a REAL revoke, reached through the REAL router/gateway stack, must
     /// surface on the shipped `NormaSessionClient` as a TYPED `.handshakeRejected` with a re-pair code
     /// — the signal the iOS app maps to its honest `.revoked` state — NOT a bare `connectionClosed`/

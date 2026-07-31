@@ -960,3 +960,53 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         }
     }
 }
+
+// ================================================================================================
+// TRANSIENT event types — the Swift half of ONE cross-language definition.
+// ================================================================================================
+
+extension SessionEvent {
+    /// The seven BROADCAST-ONLY TRANSIENT event types, as wire discriminators. Mirrors
+    /// `TRANSIENT_EVENT_TYPES` in `packages/protocol/src/events.ts` — read that constant's doc
+    /// comment for the full contract; the short version:
+    ///
+    /// A transient is fanned out to attached clients but NEVER appended to the session log (absent
+    /// from the JSONL, from attach replay, and from `session.history`). It carries
+    /// `seq = the store's lastSeq at broadcast time` — the seq of the last event actually APPENDED,
+    /// not one of its own — so on a caught-up client it routinely arrives at `seq == cursor`, and
+    /// can even sit BELOW it. Every client MUST therefore exempt these from BOTH seq dedupe AND
+    /// cursor/lastSeq advancement. Skipping the dedupe is what gets the event to the UI; skipping
+    /// the ADVANCE is what keeps the real, persisted event at that borrowed seq alive.
+    ///
+    /// **Why it lives here.** `Discriminator` above is `private`, so every consumer that needed
+    /// this list hand-copied the strings — and the phone client's copy was simply missing, which
+    /// dropped 100% of `assistant_delta` and left iOS with no streaming at all while the suite
+    /// stayed green. Exposing one public constant is the fix: `NormaClient` (Mac),
+    /// `NormaSessionClient` (phone) and the daemon's remote live-stream filter all derive from a
+    /// single definition, and parity tests pin this literal against the TypeScript one.
+    public static let transientTypes: Set<String> = [
+        "assistant_delta",
+        "lease_granted",
+        "lease_lost",
+        "peripheral_call_requested",
+        "plugin_tool_invoke",
+        "hardware_requested",
+        "plugin_tile_updated",
+    ]
+
+    /// Case-level mirror of `transientTypes`, for callers holding a DECODED event (`NormaClient`)
+    /// rather than a raw wire discriminator (`NormaSessionClient`, which handles payloads
+    /// opaquely). The two halves are proven equivalent by `SessionEventTransientTests`, which
+    /// round-trips every variant through the encoder and asserts
+    /// `transientTypes.contains(type) == isTransient` — so this switch cannot drift from the set
+    /// above, in either direction.
+    public var isTransient: Bool {
+        switch self {
+        case .assistantDelta, .leaseGranted, .leaseLost, .peripheralCallRequested,
+             .pluginToolInvoke, .hardwareRequested, .pluginTileUpdated:
+            return true
+        default:
+            return false
+        }
+    }
+}

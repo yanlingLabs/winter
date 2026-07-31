@@ -33,6 +33,13 @@ import { TokenAuthority } from "../../src/auth/tokens";
 //
 // If a future change makes `sync.pull` filter, or makes `session.history` pass `reasoning_item`,
 // exactly one of the two halves below fails and the decision gets re-made deliberately.
+//
+// THIRD SURFACE (iOS remote-path T2): the LIVE/REPLAY event stream of a remote connection is now
+// governed by the same read-for-display posture as `session.history` —
+// `sessions/remote-stream.ts`'s allowlist, applied in `session.attach`'s HubClient. Its own suite
+// is `test/ipc/remote-live-stream.test.ts`, which also re-asserts the `sync.pull` half of this
+// decision over a REMOTE-role connection specifically (both cases below run as `harness`, so
+// neither would have caught that filter leaking onto the replication path).
 // ==============================================================================================
 
 class TestClient {

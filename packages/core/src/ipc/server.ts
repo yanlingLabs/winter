@@ -39,6 +39,7 @@ import type { MemoryStore, MemoryErrorKind } from "../agent/memory";
 import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTailMemDir } from "../agent/memory-file-ops";
 import type { SessionStore } from "../sessions/store";
 import { readHistoryPage } from "../sessions/history";
+import { filterRemoteStreamEvent } from "../sessions/remote-stream";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { AgentEngine } from "../agent/engine";
@@ -836,9 +837,26 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.sessionAttach: {
         const p = parseParams(SessionAttachParams, params);
         assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        // This `deliver` is the ONE event path to a remote-role connection: `harnessConns` (the
+        // session_created / session_titled / plugin_tile_updated broadcast set) admits role
+        // "harness" only, and plugin pushes need a plugin-role hello. So the remote policy below
+        // has exactly one seam to cover — both REPLAY (hub.attach's read loop calls deliver) and
+        // LIVE (hub.fanOut calls the same deliver).
+        const isRemote = socket.data.authedRole === "remote";
         const hubClient: HubClient = {
           clientName: socket.data.clientName,
           deliver(event: SessionEvent): boolean {
+            // The remote live/replay policy (sessions/remote-stream.ts): allowlist the type,
+            // then bound the serialized size. Harness/admin connections are untouched — they
+            // still receive every event byte-identically.
+            if (isRemote) {
+              const allowed = filterRemoteStreamEvent(event);
+              // Filtered, not failed: return `true` so hub.attach's replay loop keeps going and
+              // still advances its lastSeq past this event. `false` means "this client is dead"
+              // and would abort the replay mid-way.
+              if (!allowed) return true;
+              event = allowed;
+            }
             return socket.data.writer.enqueue(encodeLine({ jsonrpc: "2.0", method: METHODS.event, params: event }));
           },
         };

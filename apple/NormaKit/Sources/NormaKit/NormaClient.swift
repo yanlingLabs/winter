@@ -158,8 +158,13 @@ public actor NormaClient {
             // routed app-side by Phase 4d-ii Task 3) plugin_tile_updated, all runtime-only and
             // must never be resurrected by replay — plugin_tile_updated also carries the
             // `sessionId:"$system"` sentinel, never a real attached session).
-            switch e {
-            case .assistantDelta, .leaseGranted, .leaseLost, .peripheralCallRequested, .pluginToolInvoke, .hardwareRequested, .pluginTileUpdated:
+            //
+            // The membership test is `SessionEvent.isTransient` (NormaProtocol) — the ONE
+            // cross-language definition of the seven, mirroring the daemon's own
+            // `TRANSIENT_EVENT_TYPES`. It used to be a literal case list here, hand-copied into
+            // the phone client and the daemon's live filter; the phone's copy was simply missing,
+            // which killed 100% of iOS streaming with a green suite. Derive, never re-list.
+            if e.isTransient {
                 // Update the tiles store BEFORE yielding, so a consumer that reads `tiles`
                 // immediately after observing this event via `events` sees the mutation already
                 // applied (no race between the two).
@@ -172,8 +177,6 @@ public actor NormaClient {
                 }
                 eventsCont.yield(.session(e))
                 return
-            default:
-                break
             }
             // The seq dedupe/lastSeq bookkeeping is scoped to the currently attached session
             // ONLY. `lastSeq` is a per-session cursor; applying it globally would drop a

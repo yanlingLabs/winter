@@ -656,7 +656,8 @@ public actor NormaSessionClient {
 
     /// The dedup/advance core. `seq <= cursor` → duplicate/already-applied, dropped. `seq > cursor`
     /// → yield THEN advance the cursor to `seq` (durable-apply-then-advance), TOLERATING forward
-    /// jumps past `cursor + 1`.
+    /// jumps past `cursor + 1`. TRANSIENT events (`transientEventTypes`) skip the whole core —
+    /// always yielded, never deduped, never cursor-advancing.
     ///
     /// **Why forward jumps are never gaps (T5 conformance fix — aligns with the gateway's
     /// documented contract).** The gateway filters `harness_attached`/`harness_detached`
@@ -673,6 +674,11 @@ public actor NormaSessionClient {
     /// fresh `harness_attached` → new hole → repeat). The `gaps` stream therefore now fires only
     /// on `liveBuffer` overflow (a genuine "too far behind, snapshot" signal).
     private func applyEvent(session: String, stream: String, seq: Int, decoded: SessionEnvelope) {
+        // TRANSIENT events bypass the dedupe/advance core entirely — see `transientEventTypes`.
+        if isTransient(decoded) {
+            eventsCont.yield(decoded)
+            return
+        }
         let cursor = currentCursor(session, stream)
         if seq <= cursor { return }
         eventsCont.yield(decoded)
@@ -693,6 +699,44 @@ public actor NormaSessionClient {
 
     private func currentCursor(_ session: String, _ stream: String) -> Int {
         cursors.cursor(host: hostID, session: session, stream: stream) ?? 0
+    }
+
+    /// The seven broadcast-only TRANSIENT event types, mirroring the Mac client's exemption list
+    /// (`NormaKit.NormaClient.route`) exactly — assistant_delta streaming, the peripheral-lease v1
+    /// events, plugin_tool_invoke, hardware_requested and plugin_tile_updated. All are runtime-only:
+    /// the daemon fans them out WITHOUT appending them to the session log, so they are absent from
+    /// replay and must never be resurrected by it.
+    ///
+    /// **Why they must bypass the dedupe/advance core.** A transient carries `seq = the store's
+    /// lastSeq at broadcast time` — the seq of the last event the daemon actually APPENDED, not one
+    /// of its own (`packages/core/src/sessions/hub.ts` `broadcastTransient`). The contract is stated
+    /// in `packages/protocol/src/events.ts`: clients "MUST exempt assistant_delta from seq-based
+    /// dedupe and lastSeq updates". On a caught-up client that seq is by construction `<= cursor`,
+    /// so the plain `seq <= cursor` drop killed EVERY one — no streaming at all on a remote session,
+    /// the whole reply landing at once when the turn ended.
+    ///
+    /// Both halves of the exemption are load-bearing:
+    ///  - skipping the dedupe check is what lets the event reach the UI at all;
+    ///  - skipping the cursor advance is what keeps the REAL event at that borrowed seq alive. A
+    ///    transient can legitimately outrun the cursor (its seq belongs to a persisted event still
+    ///    in flight — mid-replay, or behind a gateway-filtered hole); advancing to it would swallow
+    ///    that genuine event as a duplicate the moment it arrived. Exempting only the dedupe trades
+    ///    dropped streaming for a silently truncated transcript.
+    ///
+    /// Matched on the wire discriminator rather than a typed decode: this client handles event
+    /// payloads OPAQUELY (`SessionEnvelope.json`) so an unknown/future type never throws.
+    ///
+    /// The list itself is `SessionEvent.transientTypes` (NormaProtocol) — the ONE cross-language
+    /// definition, mirroring the daemon's `TRANSIENT_EVENT_TYPES`. It was a private literal here,
+    /// hand-copied from `NormaClient`'s case list; the daemon's new remote live-stream filter would
+    /// have made that hand-mirrored copy #4 on the same axis, and a filter missing a type it should
+    /// carry drops that event silently, forever, one hop upstream of this client. Derive, never
+    /// re-list.
+    private static let transientEventTypes: Set<String> = SessionEvent.transientTypes
+
+    private func isTransient(_ decoded: SessionEnvelope) -> Bool {
+        guard let type = decoded.json["type"]?.stringValue else { return false }
+        return Self.transientEventTypes.contains(type)
     }
 
     private func decode(_ env: WireEnvelope, session: String) -> SessionEnvelope {
