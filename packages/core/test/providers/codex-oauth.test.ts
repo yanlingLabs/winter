@@ -102,14 +102,22 @@ describe("CodexOAuthProvider", () => {
 
 describe("CODEX_MODELS", () => {
   // 2026-07-10 user decision (4e-fix Task 2): gpt-5.5 and gpt-5.4/gpt-5.4-mini are FULLY
-  // DEPRECATED — CODEX_MODELS is now EXACTLY the gpt-5.6 family (sol/terra/luna, 372K ctx).
+  // DEPRECATED — CODEX_MODELS is now EXACTLY the gpt-5.6 family (sol/terra/luna).
   // A configured settings.json model outside this list falls back at runtime to
   // DEFAULT_CODEX_MODEL (providers/manager.ts's live model resolver), not rejected here.
-  test("is EXACTLY the gpt-5.6 family — sol/terra/luna, 372K context, nothing else", () => {
+  //
+  // 2026-07-31: this test asserted `372_000` — it PINNED the transcription error it was meant to
+  // guard, which is why a 100,000-token mistake survived three weeks of green suites and killed
+  // auto-compaction on every Codex model (see codex-config.ts's CODEX_MODELS doc comment). The
+  // real window is 272,000, verified live. A pin copied from the same hand as the constant proves
+  // nothing; the ONLY guard that can catch this class of drift is a comparison against the live
+  // catalogue — test/providers/codex-models-drift.test.ts. Change this number only after that
+  // guard's live half agrees.
+  test("is EXACTLY the gpt-5.6 family — sol/terra/luna, 272K context, nothing else", () => {
     expect(CODEX_MODELS.map((m) => m.id)).toEqual(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
     for (const m of CODEX_MODELS) {
       expect(m.family).toBe("gpt-5");
-      expect(m.contextWindow).toBe(372_000);
+      expect(m.contextWindow).toBe(272_000);
       expect(m.supportsVision).toBe(true);
     }
   });

@@ -59,28 +59,41 @@ export const CODEX = {
 } as const;
 
 /**
- * Static Codex model list — verified live 2026-07-10 from /models?client_version=1.0.0.
+ * Static Codex model list — re-verified live 2026-07-31 from /models?client_version=1.0.0
+ * (first transcribed 2026-07-10).
  *
  * The backend returns only these slugs for ChatGPT-account auth (OAuth).
  * The v1 static list (gpt-5.2-codex, gpt-5.1-codex, etc.) was stale; those models
  * return HTTP 400 "not supported when using Codex with a ChatGPT account."
  *
- * gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna (372K ctx) are the ONLY user-selectable models —
- * per an explicit 2026-07-10 user decision, gpt-5.5 and gpt-5.4/gpt-5.4-mini (272K ctx) are
- * FULLY DEPRECATED and deliberately dropped from this list, even though the live /models
- * payload may still list them. codex-auto-review is hidden — excluded from this list, not
+ * gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna are the ONLY user-selectable models — per an
+ * explicit 2026-07-10 user decision, gpt-5.5 and gpt-5.4/gpt-5.4-mini are FULLY DEPRECATED and
+ * deliberately dropped from this list, even though the live /models payload may still list them.
+ * codex-auto-review is hidden — excluded from this list, not
  * offered as a user-selectable model. A settings.json that still names a deprecated slug is
  * NOT rejected outright: providers/manager.ts's live model resolver auto-falls-back any
  * configured model not in this list to DEFAULT_CODEX_MODEL (warning once per distinct slug),
  * so an old settings file degrades gracefully rather than erroring every turn.
- * Context windows and vision flags from /models payload field values.
+ * Context windows and vision flags from /models payload field values (`context_window`,
+ * `input_modalities` containing "image").
+ *
+ * contextWindow 272_000: EVERY model the catalogue offers reports `context_window: 272000` —
+ * including the three below and every deprecated slug. This entry read `372_000` from
+ * 2026-07-10 (a hand-transcription that was never re-derived) until 2026-07-31. It was not a
+ * cosmetic error: the auto-compaction trigger is 0.75 × this number, so the wrong value put the
+ * threshold at 279,000 — ABOVE the provider's own 272,000 hard ceiling, i.e. unreachable. A long
+ * session hit the backend's hard limit and failed instead of ever compacting; auto-compaction was
+ * dead on every Codex model. Do not edit this number by hand: re-derive it from the live
+ * catalogue. test/providers/codex-models-drift.test.ts is the guard (offline pin + dated,
+ * opt-in live comparison) — see its header for how to run the live half.
+ *
  * codex-rs fetches models dynamically; this list is the best available static set.
  * TODO-verify: add a live /models fetch path to keep this current.
  */
 export const CODEX_MODELS: ModelInfo[] = [
-  { id: "gpt-5.6-sol", family: "gpt-5", contextWindow: 372_000, supportsVision: true },
-  { id: "gpt-5.6-terra", family: "gpt-5", contextWindow: 372_000, supportsVision: true },
-  { id: "gpt-5.6-luna", family: "gpt-5", contextWindow: 372_000, supportsVision: true },
+  { id: "gpt-5.6-sol", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
+  { id: "gpt-5.6-terra", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
+  { id: "gpt-5.6-luna", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
 ];
 
 /** Default/fallback codex-oauth model — used both as the fresh-install default (settings.ts's

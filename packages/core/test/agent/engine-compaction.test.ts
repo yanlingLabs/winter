@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import type { ProviderEvent } from "../../src/providers/types";
 import { FakeProvider } from "../../src/agent/fake-provider";
+import { CODEX_MODELS } from "../../src/providers/codex-config";
+import { DEFAULT_COMPACT_THRESHOLD_FRAC } from "../../src/agent/engine";
 import { setupEngine } from "./engine-steer.test";
 
 describe("engine historyInput is checkpoint-aware", () => {
@@ -156,5 +159,126 @@ describe("engine auto-compact trigger (at turn start, off real provider-reported
 
     expect(store.read(sessionId).some((e) => e.type === "checkpoint")).toBe(false);
     expect(provider.requests).toHaveLength(1);
+  });
+
+  // ── The trigger was wrong in BOTH directions. Each direction is pinned independently below, so
+  //    a single test can never pass because two errors cancelled. ─────────────────────────────
+
+  /** DIRECTION 1 — TOO HIGH TO EVER REACH (the dead-compactor bug).
+   *
+   *  `CODEX_MODELS` hardcoded `contextWindow: 372_000`; the real window is 272,000. The threshold
+   *  is a fraction OF that number, so the bug moved it ABOVE the provider's own hard ceiling:
+   *
+   *      372_000 × 0.75 = 279_000   vs a ceiling of 272_000
+   *
+   *  A request whose context exceeds 272,000 is rejected by the backend, so `inputTokens` can
+   *  never be reported above it — the trigger was mathematically unreachable and auto-compaction
+   *  was dead on every Codex model. The session did not get compacted; it hit the provider's hard
+   *  limit and failed.
+   *
+   *  This test drives the engine with a ModelInfo carrying the REAL `CODEX_MODELS` window (not a
+   *  copy of the number) and a previous turn at 271,000 tokens — the largest context the provider
+   *  can ever report. Pre-fix: 271,000 < 279,000 → no compaction. Post-fix: 271,000 > 204,000 →
+   *  compaction. */
+  test("a context just under the provider's real 272,000 ceiling DOES trigger compaction (the trigger is reachable)", async () => {
+    const CODEX_SHAPED = { id: "gated-1", family: "gpt-5", contextWindow: CODEX_MODELS[0]!.contextWindow, supportsVision: true };
+    // the arithmetic under test, visible: window × frac must land BELOW 272,000 to be reachable
+    expect(CODEX_SHAPED.contextWindow * DEFAULT_COMPACT_THRESHOLD_FRAC).toBeLessThan(272_000);
+
+    const provider = new FakeProvider(
+      [
+        [{ type: "text_delta", delta: "SUMMARY_TOKEN" }, { type: "done", stopReason: "end_turn" }], // the compaction's own streamTurn
+        [{ type: "text_delta", delta: "ok" }, { type: "done", stopReason: "end_turn" }],
+      ],
+      [CODEX_SHAPED],
+    );
+    const { engine, store, sessionId } = setupEngine(provider);
+    seedMessages(store, sessionId, 5);
+    store.append(sessionId, {
+      type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn",
+      inputTokens: 271_000, outputTokens: 10, contextTokens: 271_000,
+    });
+
+    await engine.runTurn(sessionId);
+
+    expect(store.read(sessionId).some((e) => e.type === "checkpoint")).toBe(true);
+    expect(provider.requests[0]!.instructions).toContain("compacting");
+  });
+
+  /** DIRECTION 2 — TOO LOW ON TOOL-HEAVY TURNS (the premature-compaction bug).
+   *
+   *  `turn_completed.inputTokens` is the SUM of every tool ROUND's input tokens (correct for a
+   *  "tokens billed this turn" readout, which is what the CLI/TUI render it as) — but the trigger
+   *  needs the size of the CONTEXT, i.e. ONE request, not the sum of N of them. A turn with three
+   *  300-token rounds sums to 900 while the context never exceeded 300; against a 750 threshold
+   *  the pre-fix trigger compacted a session whose context was 40% full.
+   *
+   *  Pinned separately from Direction 1 on purpose: the two errors push opposite ways, and a
+   *  single end-to-end test could have passed with both still present. */
+  test("a tool-heavy turn does NOT trigger compaction on the SUM of its rounds", async () => {
+    const toolRound = (callId: string): ProviderEvent[] => [
+      { type: "tool_call", callId, name: "glob", argsJson: '{"pattern":"*"}' },
+      { type: "usage", inputTokens: 300, outputTokens: 5 },
+      { type: "done", stopReason: "tool_calls" },
+    ];
+    const provider = new FakeProvider(
+      [
+        toolRound("c1"),
+        toolRound("c2"),
+        [{ type: "text_delta", delta: "done" }, { type: "usage", inputTokens: 300, outputTokens: 5 }, { type: "done", stopReason: "end_turn" }],
+        [{ type: "text_delta", delta: "second turn" }, { type: "usage", inputTokens: 10, outputTokens: 1 }, { type: "done", stopReason: "end_turn" }],
+      ],
+      [SMALL_MODEL],
+    );
+    const { engine, store, sessionId } = setupEngine(provider);
+    seedMessages(store, sessionId, 5); // compactable, so a spurious trigger is visible
+
+    await engine.runTurn(sessionId); // 3 rounds × 300 = 900 summed; the context itself peaked at 300
+
+    const completed = store.read(sessionId).find((e) => e.type === "turn_completed") as
+      { inputTokens: number; outputTokens: number; contextTokens?: number };
+    // the BILLING figure is unchanged — the sum is what the CLI/TUI turn summary means:
+    expect(completed.inputTokens).toBe(900);
+    // the CONTEXT figure is the largest single request, NOT the sum:
+    expect(completed.contextTokens).toBe(300);
+
+    await engine.runTurn(sessionId); // the trigger reads the turn above
+
+    // 300 < 750 → nothing to compact. Pre-fix the trigger saw 900 and compacted a 40%-full context.
+    expect(store.read(sessionId).some((e) => e.type === "checkpoint")).toBe(false);
+    expect(provider.requests.some((r) => (r.instructions ?? "").includes("compacting"))).toBe(false);
+  });
+
+  /** DIRECTION 3 (found while fixing the other two, pinned independently) — A BACKGROUND CHILD'S
+   *  turn_completed MASKING THE MAIN THREAD'S.
+   *
+   *  The trigger takes the LAST `turn_completed` in the session, of ANY thread. A detached
+   *  (background) subagent finishes AFTER the main turn it was spawned from, so its own tiny
+   *  `turn_completed` lands last and the trigger then measures the CHILD's context instead of the
+   *  main thread's — under-reporting it, and suppressing a compaction the main thread needed.
+   *  Compaction only ever folds MAIN-thread history (`historyInput` filters other threads out), so
+   *  reading a child's figure is never right. */
+  test("a background CHILD's later turn_completed does not mask the main thread's context", async () => {
+    const provider = new FakeProvider(
+      [
+        [{ type: "text_delta", delta: "SUMMARY_TOKEN" }, { type: "done", stopReason: "end_turn" }],
+        [{ type: "text_delta", delta: "ok" }, { type: "done", stopReason: "end_turn" }],
+      ],
+      [SMALL_MODEL],
+    );
+    const { engine, store, sessionId } = setupEngine(provider);
+    seedMessages(store, sessionId, 5);
+    store.append(sessionId, {
+      type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn",
+      inputTokens: 900, outputTokens: 10, contextTokens: 900, // 900 > 750 → the main thread needs a compaction
+    });
+    store.append(sessionId, {
+      type: "turn_completed", sessionId, threadId: "th_bg_child", stopReason: "end_turn",
+      inputTokens: 10, outputTokens: 2, contextTokens: 10, // a bg subagent landing after the main turn
+    });
+
+    await engine.runTurn(sessionId);
+
+    expect(store.read(sessionId).some((e) => e.type === "checkpoint")).toBe(true);
   });
 });

@@ -122,9 +122,26 @@ export const ApprovalResolvedEvent = ThreadBase.extend({
   // Dispatch relay (Phase 7): see approval_requested.
   childSessionId: z.string().optional(),
 });
+/** `inputTokens`/`outputTokens` are the turn's TOTALS — summed across every tool round — which is
+ *  what a "tokens billed this turn" readout means (the CLI/TUI turn-summary line renders exactly
+ *  this). They are NOT the size of the context, and must never be used as such: a turn with N tool
+ *  rounds re-sends the (growing) context N times, so the sum can be several times the largest
+ *  single request.
+ *
+ *  `contextTokens` (additive optional, like `agent_error.code` — an extra field on an EXISTING
+ *  variant, so no new Swift case and no NormaKit exhaustive-switch trap) is the OTHER figure: the
+ *  provider-reported input size of the turn's LARGEST single request, i.e. how full the context
+ *  actually got. That is the only correct input to the auto-compaction trigger
+ *  (`engine.ts`'s `maybeAutoCompact`), which previously read `inputTokens` and therefore compacted
+ *  prematurely on tool-heavy turns — a session whose context was 40% full got summarized because
+ *  three rounds of it summed past the threshold. Absent on events written before 2026-07-31 and on
+ *  the pre-stream error path (no round ever reported usage); consumers must fall back to
+ *  `inputTokens` for those, which is the pre-existing behavior. TS-only for now: no Swift mirror
+ *  and no fixture, because no client renders it — it is a daemon-internal trigger input. */
 export const TurnCompletedEvent = ThreadBase.extend({
   type: z.literal("turn_completed"), stopReason: z.enum(["end_turn", "aborted", "error"]),
   inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(),
+  contextTokens: z.number().int().nonnegative().optional(),
 });
 /** `code` (phase 5 routines T3, blocking concern carried from T2's runner.ts report): additive
  *  optional field on this EXISTING variant (not a new SessionEvent variant — no NormaKit

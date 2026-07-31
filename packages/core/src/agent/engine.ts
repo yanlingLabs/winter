@@ -48,6 +48,12 @@ export interface BgTaskLister {
 
 const MAIN_THREAD = "main";
 const MAX_TOOL_ITERATIONS = 24; // runaway guard until 1b-ii budgets land
+/** Fraction of the model's context window at which auto-compaction fires (overridable per process
+ *  with NORMA_COMPACT_THRESHOLD_FRAC — see `maybeAutoCompact`). EXPORTED so the Codex drift guard
+ *  (test/providers/codex-models-drift.test.ts) can compute the REAL trigger from the REAL
+ *  contextWindow rather than re-typing 0.75 — the whole class of bug that guard exists for is a
+ *  number copied by hand and never re-derived. */
+export const DEFAULT_COMPACT_THRESHOLD_FRAC = 0.75;
 // Dispatch (Phase 7) Task 4: session_spawn is registered on the SAME shared registry every
 // session's specs() reads from (daemon.ts registers it once, globally, like spawn_agent) — so
 // without an explicit exclusion it would be visible to every non-dispatch session too (a code
@@ -1354,20 +1360,42 @@ export class AgentEngine {
     return Infinity;
   }
 
-  /** Auto-compact off the REAL provider-reported size of the previous turn (its `turn_completed`
-   *  `inputTokens`) — not an estimate. Runs at the start of every turn, before `historyInput` is
-   *  built, so a triggered compaction's checkpoint is what `historyInput` sees for this turn. No
-   *  prior completed turn (first turn of a session) means the context is necessarily small, so
-   *  there's nothing to check. `model` is this turn's resolved model (see `contextWindow`'s doc
-   *  comment) — the Compactor's OWN summarization turn still runs on the boot-time model
-   *  (Compactor is constructed once in daemon.ts and isn't live-wired); only the trigger
-   *  threshold computed here uses the per-turn resolution. */
+  /** Auto-compact off the REAL provider-reported size of the previous turn — not an estimate. Runs
+   *  at the start of every turn, before `historyInput` is built, so a triggered compaction's
+   *  checkpoint is what `historyInput` sees for this turn. No prior completed turn (first turn of a
+   *  session) means the context is necessarily small, so there's nothing to check. `model` is this
+   *  turn's resolved model (see `contextWindow`'s doc comment) — the Compactor's OWN summarization
+   *  turn still runs on the boot-time model (Compactor is constructed once in daemon.ts and isn't
+   *  live-wired); only the trigger threshold computed here uses the per-turn resolution.
+   *
+   *  TWO corrections landed here on 2026-07-31; the numbers were wrong in OPPOSITE directions, so
+   *  each is pinned by its own test (test/agent/engine-compaction.test.ts):
+   *
+   *  1. THE FIGURE. `contextTokens` — the largest single round's input — not `inputTokens`, which
+   *     is the SUM over the turn's tool rounds (see TurnCompletedEvent's doc comment). A turn with
+   *     N rounds re-sends the growing context N times, so the sum ran far ahead of the real
+   *     context and compacted sessions that were nowhere near full. `?? inputTokens` keeps the old
+   *     reading for events persisted before the field existed — deliberately the PREMATURE
+   *     direction for legacy data, which costs a summarization rather than risking an overflow.
+   *
+   *  2. THE THREAD. MAIN-thread turns only. The last `turn_completed` in a session is not
+   *     necessarily the main thread's: a DETACHED background subagent finishes after the main turn
+   *     that spawned it, and its own (tiny) completion would otherwise become the measurement —
+   *     silently suppressing a compaction the main thread needed. Compaction only ever folds
+   *     main-thread history (`historyInput` filters other threads out), so a child's figure is
+   *     never the right input.
+   *
+   *  The third half of the same bug lived in the model's `contextWindow` itself (codex-config.ts:
+   *  372_000 hand-transcribed for a 272,000 window, which put this threshold ABOVE the provider's
+   *  hard ceiling and made the compactor unreachable). Fixed there, guarded by
+   *  test/providers/codex-models-drift.test.ts. */
   private async maybeAutoCompact(sessionId: string, model: string): Promise<void> {
     const events = this.cfg.store.read(sessionId);
-    const lastCompleted = [...events].reverse().find(isTurnCompleted);
+    const lastCompleted = [...events].reverse().find((e) => isTurnCompleted(e) && e.threadId === MAIN_THREAD) as
+      TurnCompleted | undefined;
     if (!lastCompleted) return;
-    const used = lastCompleted.inputTokens;
-    const frac = Number(process.env.NORMA_COMPACT_THRESHOLD_FRAC ?? 0.75);
+    const used = lastCompleted.contextTokens ?? lastCompleted.inputTokens;
+    const frac = Number(process.env.NORMA_COMPACT_THRESHOLD_FRAC ?? DEFAULT_COMPACT_THRESHOLD_FRAC);
     const absMax = process.env.NORMA_COMPACT_MAX_TOKENS ? Number(process.env.NORMA_COMPACT_MAX_TOKENS) : Infinity;
     const limit = Math.min(this.contextWindow(model) * frac, absMax);
     if (used > limit) await this.cfg.compactor.compact(sessionId, this.aborters.get(sessionId)?.signal);
@@ -2246,7 +2274,11 @@ export class AgentEngine {
     const visionCapable = this.cfg.provider.provider.models().find((m) => m.id === opts.model)?.supportsVision;
     const tsEnabled = this.toolSearchEnabled(cwd);
     const deferThreshold = this.toolSearchThreshold(cwd);
-    const usage = { inputTokens: 0, outputTokens: 0 };
+    // `inputTokens`/`outputTokens` accumulate across this thread's tool ROUNDS — the turn's billed
+    // totals (see TurnCompletedEvent's doc comment). `contextTokens` is deliberately NOT a sum: it
+    // is the largest single round's input, i.e. how full the context actually got. Every
+    // `turn_completed` emit below spreads this object, so all terminal paths carry both figures.
+    const usage = { inputTokens: 0, outputTokens: 0, contextTokens: 0 };
     let lastText = "";
     // The effective iteration bound for THIS thread — opts.maxTurns (spawn bridge only) or the
     // shared default. Computed once so the loop condition and the cap message below always agree
@@ -2436,7 +2468,14 @@ export class AgentEngine {
           // spec §B4/§B6). itemJson is sensitive-opaque: this append is its only sink — never log it.
           this.emit(sessionId, { type: "reasoning_item", sessionId, threadId, itemJson: ev.itemJson });
         }
-        else if (ev.type === "usage") { usage.inputTokens += ev.inputTokens; usage.outputTokens += ev.outputTokens; }
+        else if (ev.type === "usage") {
+          usage.inputTokens += ev.inputTokens; usage.outputTokens += ev.outputTokens;
+          // MAX, not sum: within a turn the context only grows, so the largest round's input IS
+          // the turn's final context size. Taking the max rather than "the last round that
+          // reported usage" is defensive — a provider that omits usage on its final round (or
+          // reports 0) then degrades to the biggest figure it DID report, never to zero.
+          usage.contextTokens = Math.max(usage.contextTokens, ev.inputTokens);
+        }
         else if (ev.type === "done") stop = ev.stopReason;
         else if (ev.type === "error") {
           // Phase 5 routines T3: forward the provider's structured error code (ProviderEvent's
