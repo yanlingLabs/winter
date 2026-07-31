@@ -155,6 +155,15 @@ export interface IpcServerOptions {
   // one (most existing tests, or a no-agentProvider daemon) reports `""` — `defaultModel` is a
   // plain string, never nullable.
   liveModel?: () => string;
+  // provider-correctness T3 (`sync.config`): the provider's LIVE reasoning effort, off the SAME
+  // `live()` resolver `liveModel` reads (`LiveModelSelection` carries both). Optional on exactly
+  // the same terms: absent, or an unset `settings.provider.reasoningEffort`, reports `""` — which
+  // means UNSET, never `"none"` (see SyncConfigContext.liveEffort for why those differ on the wire).
+  //
+  // The model CATALOGUE that ships beside it has deliberately NO option here: it is read straight
+  // off `opts.engine.knownModels()`, the same accessor session.setModel/sync.push already validate
+  // against, so the phone can never be served a lineup this daemon would itself reject.
+  liveEffort?: () => string;
   // Phase 4b Task 4 (spec §3): the plugin tool bridge. `registry` is the SAME ToolRegistry the
   // AgentEngine executes tool calls against (daemon.ts shares the one instance) — tool.register
   // registers `plugin__<pluginId>__<tool>` into it; the socket close() handler and the
@@ -1187,6 +1196,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           secret: opts.secrets ? (name) => opts.secrets!.get(name) : undefined,
           dangerousDomainsAdded: opts.dangerousDomainsAdded ? () => opts.dangerousDomainsAdded!() : undefined,
           liveModel: opts.liveModel,
+          liveEffort: opts.liveEffort,
+          // provider-correctness T3: the EXACT catalogue session.setModel validates against, a few
+          // hundred lines above (`opts.engine?.knownModels() ?? []`), and the one sync.push consults
+          // for `knownModelIds`. Read here at call time, so a provider swap or a family bump reaches
+          // a paired phone on its next connect with no daemon restart and — the point of serving it
+          // rather than letting the phone derive it — no phone app update either.
+          knownModels: () => opts.engine?.knownModels() ?? [],
         });
       }
       case METHODS.syncMemory: {

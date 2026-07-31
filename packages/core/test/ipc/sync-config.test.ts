@@ -2,19 +2,25 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ERR, LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
+import { ERR, LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, SyncConfigResult, type WritableSocket } from "@norma/protocol";
 import { startIpcServer } from "../../src/ipc/server";
-import { syncConfig, syncMemory, SYNC_PAGE_BYTES, SYNC_MEMORY_TRUNCATION_MARKER } from "../../src/ipc/sync";
+import { syncConfig, syncMemory, effortsForModel, SYNC_PAGE_BYTES, SYNC_MEMORY_TRUNCATION_MARKER } from "../../src/ipc/sync";
 import { EXA_API_KEY_SECRET } from "../../src/agent/tools/search";
+import { REASONING_EFFORTS } from "../../src/settings";
+import { CODEX_MODELS, DEFAULT_CODEX_MODEL } from "../../src/providers/codex-config";
+import type { ModelInfo } from "../../src/providers/types";
 import type { SecretStore } from "../../src/auth/secret-store";
 import { SessionStore } from "../../src/sessions/store";
+import { SessionHub } from "../../src/sessions/hub";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 
 // Chat Slice D task 3 — the two remaining sync surfaces, for the phone's OWN standalone chat
 // rather than log replication:
 //
-//  - sync.config {}          → { exaKey, dangerousDomains, defaultModel }  (all read HOT, at call time)
+//  - sync.config {}          → { exaKey, dangerousDomains, defaultModel, models, defaultEffort }
+//                              (all read HOT, at call time; the last two added by
+//                               provider-correctness T3 — see that describe block below)
 //  - sync.memory { cursor? } → { files: [{name, content}], nextCursor?, complete }
 //
 // Neither carries a `sessionId` — both stay REMOTE_ALLOWED_METHODS-listed anyway (the phone is the
@@ -33,6 +39,14 @@ class FakeSecretStore implements SecretStore {
   }
   async get(name: string): Promise<string | null> { return this.values.get(name) ?? null; }
   async set(name: string, value: string): Promise<void> { this.values.set(name, value); }
+}
+
+/** A stub engine exposing only what `sync.config`'s catalogue (and `session.setModel`/`sync.push`'s
+ *  validation) consult — the SAME shape sync-bounds.test.ts's own `fakeEngine` uses. The catalogue
+ *  is deliberately read off `opts.engine`, never a parallel `IpcServerOptions` getter: a second
+ *  source could serve the phone a lineup the daemon's own `session.setModel` would then reject. */
+function fakeEngine(models: () => ModelInfo[]): any {
+  return { knownModels: () => models(), isRunning: () => false };
 }
 
 class TestClient {
@@ -84,6 +98,8 @@ describe("sync.config (Chat Slice D task 3)", () => {
     secrets?: SecretStore;
     dangerousDomainsAdded?: (cwd?: string) => string[] | undefined;
     liveModel?: () => string;
+    liveEffort?: () => string;
+    models?: () => ModelInfo[];
   } = {}): Promise<{ home: string; socketPath: string; harnessToken: string; remoteToken: string }> {
     const home = mkdtempSync(join(tmpdir(), "norma-sync-config-"));
     const store = new SessionStore(home);
@@ -93,7 +109,9 @@ describe("sync.config (Chat Slice D task 3)", () => {
     const server = startIpcServer({
       socketPath, serverVersion: "test", tokens: authority, store,
       secrets: over.secrets, dangerousDomainsAdded: over.dangerousDomainsAdded, liveModel: over.liveModel,
-    });
+      liveEffort: over.liveEffort,
+      ...(over.models ? { engine: fakeEngine(over.models), hub: new SessionHub(store) } : {}),
+    } as any);
     stop = () => { server.stop(); store.close(); };
     return { home, socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote };
   }
@@ -114,6 +132,10 @@ describe("sync.config (Chat Slice D task 3)", () => {
       exaKey: "exa_live_key",
       dangerousDomains: ["evil.example.com", "totally-fine.example"],
       defaultModel: "claude-opus-5",
+      // No knownModels/liveEffort wired on this server -> the honest empties (see the catalogue
+      // describe-block below for what a real provider serves).
+      models: [],
+      defaultEffort: "",
     });
     c.close();
   });
@@ -136,7 +158,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
 
     const res = await c.request(METHODS.syncConfig, {});
     expect(res.error).toBeUndefined();
-    expect(res.result).toEqual({ exaKey: null, dangerousDomains: [], defaultModel: "" });
+    expect(res.result).toEqual({ exaKey: null, dangerousDomains: [], defaultModel: "", models: [], defaultEffort: "" });
     c.close();
   });
 
@@ -144,26 +166,49 @@ describe("sync.config (Chat Slice D task 3)", () => {
     let key: string | null = "first-key";
     let domains: string[] = ["first.example"];
     let model = "gpt-5-first";
+    let effort = "low";
+    let catalogue: ModelInfo[] = [
+      { id: "gpt-5-first", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
+    ];
     const secrets: SecretStore = {
       get: async (name) => (name === EXA_API_KEY_SECRET ? key : null),
       set: async () => {},
     };
     const { socketPath, harnessToken } = await boot({
       secrets, dangerousDomainsAdded: () => domains, liveModel: () => model,
+      liveEffort: () => effort, models: () => catalogue,
     });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "phone");
 
     const before = await c.request(METHODS.syncConfig, {});
-    expect(before.result).toEqual({ exaKey: "first-key", dangerousDomains: ["first.example"], defaultModel: "gpt-5-first" });
+    expect(before.result).toEqual({
+      exaKey: "first-key", dangerousDomains: ["first.example"], defaultModel: "gpt-5-first",
+      models: [{ id: "gpt-5-first", efforts: [...REASONING_EFFORTS] }], defaultEffort: "low",
+    });
 
-    // Simulate a live settings/keychain change WITHOUT restarting anything — same closures, new values.
+    // Simulate a live settings/keychain change WITHOUT restarting anything — same closures, new
+    // values. The MODEL CATALOGUE moves too (a provider swap / a family bump on the Mac): the phone
+    // must see the new lineup on its very next connect, with no daemon restart AND no app update —
+    // that "no app update" half is the whole reason the catalogue is served rather than derived.
     key = "second-key";
     domains = ["first.example", "second.example"];
     model = "gpt-5-second";
+    effort = "xhigh";
+    catalogue = [
+      { id: "gpt-5-second", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
+      { id: "gpt-5-second-mini", family: "gpt-5", contextWindow: 272_000, supportsVision: false },
+    ];
 
     const after = await c.request(METHODS.syncConfig, {});
-    expect(after.result).toEqual({ exaKey: "second-key", dangerousDomains: ["first.example", "second.example"], defaultModel: "gpt-5-second" });
+    expect(after.result).toEqual({
+      exaKey: "second-key", dangerousDomains: ["first.example", "second.example"], defaultModel: "gpt-5-second",
+      models: [
+        { id: "gpt-5-second", efforts: [...REASONING_EFFORTS] },
+        { id: "gpt-5-second-mini", efforts: [...REASONING_EFFORTS] },
+      ],
+      defaultEffort: "xhigh",
+    });
     c.close();
   });
 
@@ -189,7 +234,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
 
   test("syncConfig() drops undefined dangerousDomainsAdded()/absent secret to the safe defaults", async () => {
     const result = await syncConfig({});
-    expect(result).toEqual({ exaKey: null, dangerousDomains: [], defaultModel: "" });
+    expect(result).toEqual({ exaKey: null, dangerousDomains: [], defaultModel: "", models: [], defaultEffort: "" });
   });
 
   test("syncConfig() reads the secret through EXA_API_KEY_SECRET, the SAME name Search uses", async () => {
@@ -202,6 +247,183 @@ describe("sync.config (Chat Slice D task 3)", () => {
     expect(seen).toEqual([EXA_API_KEY_SECRET]);
     expect(result.exaKey).toBe("abc");
     expect(result.dangerousDomains).toEqual([]); // undefined from the getter -> []
+  });
+});
+
+// ================================================================================================
+// The MODEL CATALOGUE on sync.config (provider-correctness T3).
+//
+// Before this, the wire carried ONE model string and the phone GUESSED the rest: it split
+// `gpt-5.6-terra` into ("gpt-5.6", terra) and synthesized the other two tiers by string
+// concatenation (norma-ios `ModelLineup.options`), and its effort control was a pure UI mock whose
+// list still carried `ultra` — a slug the backend's GLOBAL enum layer rejects outright, and which
+// this daemon deleted from REASONING_EFFORTS on 2026-07-31. A derived lineup cannot be wrong-proof:
+// the phone can never prove the tiers it invented exist. The daemon can, because it is the side
+// that already validates them (`AgentEngine.knownModels()`, `session.setModel`).
+//
+// So the catalogue is SERVED, not derived — and per-model, even though all three gpt-5.6 slugs
+// accept the identical six efforts today (see `effortsForModel`'s own doc comment).
+// ================================================================================================
+
+describe("sync.config model catalogue (provider-correctness T3)", () => {
+  let stop: (() => void) | undefined;
+  afterEach(() => { stop?.(); stop = undefined; });
+
+  async function boot(over: {
+    liveModel?: () => string;
+    liveEffort?: () => string;
+    models?: () => ModelInfo[];
+  } = {}): Promise<{ socketPath: string; harnessToken: string; remoteToken: string }> {
+    const home = mkdtempSync(join(tmpdir(), "norma-sync-catalogue-"));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets")));
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({
+      socketPath, serverVersion: "test", tokens: authority, store,
+      liveModel: over.liveModel, liveEffort: over.liveEffort,
+      ...(over.models ? { engine: fakeEngine(over.models), hub: new SessionHub(store) } : {}),
+    } as any);
+    stop = () => { server.stop(); store.close(); };
+    return { socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote };
+  }
+
+  test("serves the ACTIVE provider's real catalogue — the daemon's own knownModels(), not a mirror", async () => {
+    const { socketPath, harnessToken } = await boot({
+      models: () => CODEX_MODELS,
+      liveModel: () => DEFAULT_CODEX_MODEL,
+      liveEffort: () => "high",
+    });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "phone");
+
+    const res = await c.request(METHODS.syncConfig, {});
+    expect(res.error).toBeUndefined();
+    // Exactly the daemon's own catalogue, in its own order — never a hand-kept second list.
+    expect(res.result.models.map((m: { id: string }) => m.id)).toEqual(CODEX_MODELS.map((m) => m.id));
+    expect(res.result.defaultModel).toBe(DEFAULT_CODEX_MODEL);
+    expect(res.result.defaultEffort).toBe("high");
+    c.close();
+  });
+
+  test("efforts ride PER MODEL — uniform today, but a divergence must never need an app update", async () => {
+    const { socketPath, harnessToken } = await boot({ models: () => CODEX_MODELS });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "phone");
+
+    const res = await c.request(METHODS.syncConfig, {});
+    for (const row of res.result.models as Array<{ id: string; efforts: string[] }>) {
+      // Every row carries its OWN list — a client reading `models[i].efforts` never has to know
+      // that they happen to be identical today.
+      expect(row.efforts).toEqual([...REASONING_EFFORTS]);
+    }
+    // The exact universe the wire accepts: `none` IS honoured, `ultra` is refused by a global enum,
+    // `minimal` is refused PER MODEL. The phone's old mock had the first two exactly backwards.
+    const flat = new Set((res.result.models as Array<{ efforts: string[] }>).flatMap((m) => m.efforts));
+    expect(flat.has("none")).toBe(true);
+    expect(flat.has("ultra")).toBe(false);
+    expect(flat.has("minimal")).toBe(false);
+    c.close();
+  });
+
+  test("a provider that cannot enumerate its models serves [] — it never invents a catalogue", async () => {
+    // An arbitrary openai-compatible endpoint: `knownModels()` is empty, exactly the case
+    // `session.setModel`'s `known.length > 0` guard already skips membership-checking. `[]` is the
+    // honest answer, and the never-synced discipline (a phone must WAIT, never guess) is what makes
+    // it safe — an invented lineup is what produced the 400-on-first-turn bug once already.
+    const { socketPath, harnessToken } = await boot({
+      models: () => [],
+      liveModel: () => "my-local-llm",
+    });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "phone");
+
+    const res = await c.request(METHODS.syncConfig, {});
+    expect(res.result.models).toEqual([]);
+    expect(res.result.defaultModel).toBe("my-local-llm"); // still served — the phone can run on it
+    c.close();
+  });
+
+  test("a daemon with NO agent provider serves an empty catalogue AND an empty effort", async () => {
+    // The never-synced shape from the daemon's side: nothing is configured, so nothing is claimed.
+    // `defaultModel: ""` already meant this for the model (norma-ios `ChatConfigStore.apply` ignores
+    // an empty one rather than storing it); `models: []` / `defaultEffort: ""` are the same
+    // statement for the two new fields.
+    const { socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "phone");
+
+    const res = await c.request(METHODS.syncConfig, {});
+    expect(res.result).toEqual({ exaKey: null, dangerousDomains: [], defaultModel: "", models: [], defaultEffort: "" });
+    c.close();
+  });
+
+  test("an UNSET reasoning effort is \"\", never \"none\" — they are different states on the wire", async () => {
+    // `settings.provider.reasoningEffort` is optional. Unset makes openai-compatible.ts omit the
+    // `reasoning` block from the request body ENTIRELY; `"none"` sends `reasoning: {effort:"none"}`
+    // and the server echoes it back. Collapsing the two here would make the phone start sending an
+    // explicit level to a Mac that deliberately sends none.
+    const { socketPath, harnessToken } = await boot({ liveEffort: () => "", models: () => CODEX_MODELS });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "phone");
+
+    const res = await c.request(METHODS.syncConfig, {});
+    expect(res.result.defaultEffort).toBe("");
+    expect(res.result.models.length).toBeGreaterThan(0); // the catalogue is unaffected by an unset effort
+    c.close();
+  });
+
+  test("a REMOTE (phone) caller gets the catalogue too — sync.config's allowlisting is unchanged", async () => {
+    // Widening a result does NOT touch the four-list remote allowlist: `sync.config` has been
+    // REMOTE_ALLOWED_METHODS-listed since Chat Slice D task 3. Only a NEW METHOD would.
+    const { socketPath, remoteToken } = await boot({ models: () => CODEX_MODELS, liveEffort: () => "medium" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(remoteToken, "iphone-gateway", "remote");
+
+    const res = await c.request(METHODS.syncConfig, {});
+    expect(res.error).toBeUndefined();
+    expect(res.result.models.map((m: { id: string }) => m.id)).toEqual(CODEX_MODELS.map((m) => m.id));
+    expect(res.result.defaultEffort).toBe("medium");
+    c.close();
+  });
+
+  test("the served result validates against SyncConfigResult — the schema is the contract, not prose", async () => {
+    const { socketPath, harnessToken } = await boot({
+      models: () => CODEX_MODELS, liveModel: () => DEFAULT_CODEX_MODEL, liveEffort: () => "max",
+    });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "phone");
+
+    const res = await c.request(METHODS.syncConfig, {});
+    expect(() => SyncConfigResult.parse(res.result)).not.toThrow();
+    // Strict: no extra keys beyond the five the schema declares.
+    expect(Object.keys(res.result).sort()).toEqual(["dangerousDomains", "defaultEffort", "defaultModel", "exaKey", "models"]);
+    c.close();
+  });
+
+  // ----------------------------------------------------------------------------------------------
+  // Direct unit tests — no server/socket.
+  // ----------------------------------------------------------------------------------------------
+
+  test("effortsForModel() returns REASONING_EFFORTS for every model, as a fresh array each call", () => {
+    const a = effortsForModel("gpt-5.6-sol");
+    const b = effortsForModel("anything-at-all");
+    expect(a).toEqual([...REASONING_EFFORTS]);
+    expect(b).toEqual([...REASONING_EFFORTS]);
+    // A copy, never the shared constant: a caller that mutates its row must not corrupt the source.
+    expect(a).not.toBe(b);
+    a.push("bogus");
+    expect(effortsForModel("gpt-5.6-sol")).toEqual([...REASONING_EFFORTS]);
+  });
+
+  test("syncConfig() maps knownModels() to {id, efforts} and drops everything else about a model", async () => {
+    // `ModelInfo` also carries `family`/`contextWindow`/`supportsVision`. None of it is the phone's
+    // business (it does not size its own context window off the Mac's catalogue), and every field on
+    // this wire is one more thing to keep true — so the projection is deliberate and pinned here.
+    const result = await syncConfig({
+      knownModels: () => [{ id: "gpt-5.6-sol", family: "gpt-5", contextWindow: 272_000, supportsVision: true }],
+    });
+    expect(result.models).toEqual([{ id: "gpt-5.6-sol", efforts: [...REASONING_EFFORTS] }]);
   });
 });
 

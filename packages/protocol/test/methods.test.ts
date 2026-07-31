@@ -134,6 +134,9 @@ import {
   WorkflowGetResult,
   SessionHistoryParams,
   SessionHistoryResult,
+  SyncConfigParams,
+  SyncConfigModel,
+  SyncConfigResult,
   METHODS,
 } from "../src/methods";
 
@@ -1070,5 +1073,76 @@ describe("workflow RPCs (CC-parity phase 3, Track C Task C2)", () => {
     expect(WorkflowGetParams.parse({ runId: "wf_1" })).toEqual({ runId: "wf_1" });
     expect(() => WorkflowGetParams.parse({})).toThrow();
     expect(WorkflowGetResult.parse({ run: runView })).toEqual({ run: runView });
+  });
+});
+
+// ------------------------------------------------------------------------------------------------
+// sync.config — the phone's bootstrap bundle, widened by provider-correctness T3 with the daemon's
+// model catalogue and its live reasoning effort.
+//
+// Before T3 the wire carried ONE model string and the phone DERIVED a lineup from it (split on the
+// last `-`, read the tail as a tier, synthesize the siblings by concatenation) while its effort
+// control was a UI mock that had drifted to offering `ultra` — a level the backend rejects
+// outright. Neither could be proved right by the side doing the guessing. Both are now served by
+// the side that already validates them.
+// ------------------------------------------------------------------------------------------------
+describe("sync.config schema (provider-correctness T3)", () => {
+  const full = {
+    exaKey: null,
+    dangerousDomains: [],
+    defaultModel: "gpt-5.6-sol",
+    models: [{ id: "gpt-5.6-sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"] }],
+    defaultEffort: "high",
+  };
+
+  test("sync.config params are empty; the result carries the catalogue and the effort", () => {
+    expect(SyncConfigParams.parse({})).toEqual({});
+    expect(SyncConfigResult.parse(full)).toEqual(full);
+    expect(METHODS.syncConfig).toBe("sync.config");
+  });
+
+  test("models/defaultEffort are REQUIRED on the wire — the daemon always states them", () => {
+    // The daemon is never allowed to stay silent about the catalogue: `[]` and `""` are how it says
+    // "there is none", and that is a statement a client can act on. An OMITTED field would be
+    // indistinguishable from a serialization bug, so the schema refuses it.
+    const { models, ...noModels } = full;
+    const { defaultEffort, ...noEffort } = full;
+    expect(() => SyncConfigResult.parse(noModels)).toThrow();
+    expect(() => SyncConfigResult.parse(noEffort)).toThrow();
+  });
+
+  test("an empty catalogue and an unset effort are VALID — that is the never-synced answer", () => {
+    // A provider that cannot enumerate its models (an arbitrary openai-compatible endpoint), or no
+    // provider at all. The client waits; it does not derive a lineup from `defaultModel`. A guessed
+    // fallback is what produced a 400-on-first-turn on a freshly-paired phone once already.
+    expect(SyncConfigResult.parse({ ...full, models: [], defaultEffort: "" })).toEqual({
+      ...full, models: [], defaultEffort: "",
+    });
+  });
+
+  test("a catalogue row needs a non-empty id AND an efforts array — no half rows", () => {
+    expect(SyncConfigModel.parse({ id: "m", efforts: ["low"] })).toEqual({ id: "m", efforts: ["low"] });
+    expect(SyncConfigModel.parse({ id: "m", efforts: [] })).toEqual({ id: "m", efforts: [] });
+    expect(() => SyncConfigModel.parse({ id: "", efforts: ["low"] })).toThrow();
+    expect(() => SyncConfigModel.parse({ id: "m" })).toThrow();
+    expect(() => SyncConfigModel.parse({ efforts: ["low"] })).toThrow();
+    // An empty-string effort would reach a request body verbatim and 400 the turn.
+    expect(() => SyncConfigModel.parse({ id: "m", efforts: [""] })).toThrow();
+    // One bad row poisons the whole result rather than being silently dropped.
+    expect(() => SyncConfigResult.parse({ ...full, models: [{ id: "", efforts: [] }] })).toThrow();
+  });
+
+  test("efforts ride per model, and rows may legitimately disagree", () => {
+    // Uniform today; the schema must not be the thing that stops a divergence from being expressed,
+    // because the API demonstrably validates effort per model (`minimal` -> `unsupported_value`
+    // naming the slug, a different layer from the global enum that rejects `ultra`).
+    const divergent = {
+      ...full,
+      models: [
+        { id: "gpt-5.6-sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"] },
+        { id: "gpt-5.7-nano", efforts: ["low", "medium"] },
+      ],
+    };
+    expect(SyncConfigResult.parse(divergent)).toEqual(divergent);
   });
 });

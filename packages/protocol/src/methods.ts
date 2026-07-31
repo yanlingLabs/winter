@@ -1074,6 +1074,25 @@ export type SessionForkRef = z.infer<typeof SessionForkRef>;
  *  per-session. Every field is read AT CALL TIME (hot, no daemon restart), same discipline as
  *  every other settings-backed getter in this codebase. */
 export const SyncConfigParams = z.object({});
+
+/** One row of the daemon's model catalogue: the slug, plus the reasoning-effort levels that slug
+ *  accepts.
+ *
+ *  **Why `efforts` rides PER MODEL when all three gpt-5.6 slugs accept the identical six today.**
+ *  The backend validates effort in TWO different layers, and they do not agree with each other:
+ *  `ultra` is refused by a GLOBAL, model-agnostic enum (`invalid_value`), while `minimal` is refused
+ *  PER MODEL (`unsupported_value`, the error naming the slug). So per-model divergence is not
+ *  hypothetical — it is the observed behaviour of the layer that already exists. Carrying one flat
+ *  list would mean a future divergence could only be expressed by shipping a new PHONE APP; carrying
+ *  it per model makes that same divergence a daemon-side data edit that reaches every paired device
+ *  on its next connect. (See `REASONING_EFFORTS` in packages/core/src/settings.ts for the full
+ *  two-layer story and why "ultra" must never come back.) */
+export const SyncConfigModel = z.object({
+  id: z.string().min(1),
+  efforts: z.array(z.string().min(1)),
+});
+export type SyncConfigModel = z.infer<typeof SyncConfigModel>;
+
 export const SyncConfigResult = z.object({
   /** `null` when no key is stored — never an empty string (indistinguishable from "stored but
    *  blank"). Sourced from `Bun.secrets` (`EXA_API_KEY_SECRET`), the SAME keychain item Search's
@@ -1088,6 +1107,31 @@ export const SyncConfigResult = z.object({
    *  `provider.live?.() ?? {model: provider.model}` idiom) — the phone's starting point for a brand
    *  new local chat session, not a value it re-validates against anything. */
   defaultModel: z.string(),
+  /** The ACTIVE provider's whole model catalogue — `AgentEngine.knownModels()`, the SAME list
+   *  `session.setModel` and `sync.push` validate a slug against, re-read every call.
+   *
+   *  Before this field the phone DERIVED its lineup: it split `defaultModel` on its last `-`, read
+   *  the tail as a tier, and synthesized the sibling slugs by string concatenation. A derivation
+   *  cannot be proved — the phone could never know the tiers it invented exist, and its parallel
+   *  effort control (a pure UI mock) had drifted to offering `ultra`, which the backend rejects
+   *  outright. The daemon is the side that already holds and validates this list, so it serves it.
+   *
+   *  **EMPTY IS A REAL ANSWER, and it is never a licence to guess.** `[]` means the active provider
+   *  cannot enumerate its models (an arbitrary openai-compatible endpoint — the same case
+   *  `session.setModel` handles by skipping its membership check), or that no provider is configured
+   *  at all. A client that receives `[]` has NOT been told a catalogue and must wait for one, exactly
+   *  as it already waits on an empty `defaultModel` rather than substituting a guess: a guessed
+   *  fallback model is what produced a 400-on-first-turn on a freshly-paired phone once already. */
+  models: z.array(SyncConfigModel),
+  /** The LIVE reasoning effort (`settings.provider.reasoningEffort`), re-resolved every call
+   *  alongside `defaultModel` and off the same resolver.
+   *
+   *  `""` means UNSET, and unset is NOT `"none"`. An unset effort makes the daemon omit the
+   *  `reasoning` block from the request body entirely (providers/openai-compatible.ts); `"none"` is
+   *  an explicit level the backend honours and echoes back. A client must treat `""` as "the Mac has
+   *  configured no effort" and send none itself — never as a level to put on the wire, and never as
+   *  a reason to pick one. */
+  defaultEffort: z.string(),
 });
 export type SyncConfigParams = z.infer<typeof SyncConfigParams>;
 export type SyncConfigResult = z.infer<typeof SyncConfigResult>;

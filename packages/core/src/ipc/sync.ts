@@ -5,6 +5,8 @@ import { ERR, SessionEvent, SESSION_TITLE_MAX_CHARS, type SyncConfigResult, type
 import { resolveModelAlias } from "../agent/model-aliases";
 import { assistantMemoryDirFor } from "../agent/memory-dir";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
+import { REASONING_EFFORTS } from "../settings";
+import type { ModelInfo } from "../providers/types";
 import type { SessionForkRef, SessionStore, SyncedEntry } from "../sessions/store";
 
 // ================================================================================================
@@ -519,19 +521,62 @@ export interface SyncConfigContext {
    *  degrades to `""` — there is no sensible model to report, and `defaultModel` is a plain
    *  string, never nullable (see `SyncConfigResult`'s own doc comment). */
   liveModel?(): string;
+  /** The provider's live reasoning effort, off the SAME `live()` resolver `liveModel` reads (a
+   *  `LiveModelSelection` carries both) — so a `norma model --effort` edit is visible on the very
+   *  next `sync.config` with no daemon restart, exactly like the model beside it.
+   *
+   *  Absent, or a resolved `undefined`, degrades to `""` — which is the honest report of an UNSET
+   *  effort, not a substitute for one. `settings.provider.reasoningEffort` is genuinely optional and
+   *  unset makes every request omit the `reasoning` block entirely; collapsing that to `"none"` here
+   *  would have the phone start sending an explicit level the Mac never sends. */
+  liveEffort?(): string;
+  /** The ACTIVE provider's model catalogue — wired (ipc/server.ts) from `opts.engine.knownModels()`,
+   *  the SAME accessor `session.setModel` validates against and `sync.push` consults for
+   *  `knownModelIds`. Deliberately NOT a parallel `IpcServerOptions` getter: a second source could
+   *  serve a phone a lineup this daemon's own `session.setModel` would then reject.
+   *
+   *  Absent, or an empty array, both mean "no catalogue to report" (no engine wired, or a provider
+   *  that cannot enumerate) — see `SyncConfigResult.models` for why the client must WAIT on that
+   *  rather than derive one. */
+  knownModels?(): ModelInfo[];
+}
+
+/** The reasoning-effort levels one model accepts.
+ *
+ *  Uniform today — every model gets `REASONING_EFFORTS`, the wire-valid universe measured against
+ *  the endpoint (settings.ts) — but this is THE SEAM where a per-model divergence lands, and it is a
+ *  function rather than a constant for exactly that reason. It deliberately does NOT live as an
+ *  `efforts` field on `ModelInfo`/`CODEX_MODELS`: the models catalogue's own drift guard
+ *  (test/providers/codex-models-drift.test.ts) documents at length that the provider's
+ *  `supported_reasoning_levels` is the source that CAUSED the `ultra` bug rather than one that would
+ *  have caught it, and a per-model effort array sitting inside `CODEX_MODELS` would read as a claim
+ *  sourced from that catalogue. Effort validity is a property of the REQUEST VALIDATOR; it belongs
+ *  here, next to the thing that serves it, not next to the context windows.
+ *
+ *  Returns a fresh array every call — the caller owns its row and must not be able to mutate the
+ *  shared constant through it. */
+export function effortsForModel(_modelId: string): string[] {
+  return [...REASONING_EFFORTS];
 }
 
 /** Everything a freshly-paired phone needs to run its OWN standalone chat (the `phone-always-local`
- *  design decision): the Exa key, the user's additions to the dangerous-domains list, and the
- *  daemon's current default model. Every field is read HERE, at call time — nothing is cached
- *  across calls, so a Keychain rotation or a settings edit is visible on the very next
- *  `sync.config`, no daemon restart (the same "hot" contract every other settings-backed getter in
- *  this codebase already keeps). */
+ *  design decision): the Exa key, the user's additions to the dangerous-domains list, the daemon's
+ *  current default model and effort, and the provider's whole model catalogue. Every field is read
+ *  HERE, at call time — nothing is cached across calls, so a Keychain rotation, a `norma model`
+ *  edit, or a provider swap is visible on the very next `sync.config`, no daemon restart (the same
+ *  "hot" contract every other settings-backed getter in this codebase already keeps).
+ *
+ *  The catalogue half (provider-correctness T3) is projected down to `{id, efforts}`: `ModelInfo`
+ *  also carries `family`/`contextWindow`/`supportsVision`, none of which is the phone's business
+ *  (it does not size its own context window off the Mac's catalogue), and every field on this wire
+ *  is one more thing that has to stay true. */
 export async function syncConfig(ctx: SyncConfigContext): Promise<SyncConfigResult> {
   const exaKey = (await ctx.secret?.(EXA_API_KEY_SECRET)) ?? null;
   const dangerousDomains = ctx.dangerousDomainsAdded?.() ?? [];
   const defaultModel = ctx.liveModel?.() ?? "";
-  return { exaKey, dangerousDomains, defaultModel };
+  const defaultEffort = ctx.liveEffort?.() ?? "";
+  const models = (ctx.knownModels?.() ?? []).map((m) => ({ id: m.id, efforts: effortsForModel(m.id) }));
+  return { exaKey, dangerousDomains, defaultModel, models, defaultEffort };
 }
 
 // ------------------------------------------------------------------------------------------------

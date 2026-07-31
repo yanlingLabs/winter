@@ -64,15 +64,83 @@ struct SyncHeadsResult: Decodable { let sessions: [SyncHead] }
 struct SyncPullResult: Decodable { let data: String; let nextCursor: Int?; let complete: Bool }
 struct SyncPushResult: Decodable { let applied: Bool; let lastSeq: Int; let buffered: Int }
 
+/// One row of the Mac's model catalogue — the mirror of `SyncConfigModel`
+/// (packages/protocol/src/methods.ts).
+///
+/// `efforts` is per model even though every slug the Mac offers today accepts the identical six.
+/// The backend validates effort in two layers that disagree — `ultra` is refused globally,
+/// `minimal` is refused per model — so a future divergence is real, and carrying it per model makes
+/// that divergence a Mac-side data change instead of a phone app release.
+public struct SyncConfigModel: Codable, Equatable, Sendable {
+    public let id: String
+    public let efforts: [String]
+    public init(id: String, efforts: [String]) {
+        self.id = id
+        self.efforts = efforts
+    }
+}
+
 /// `sync.config` — a freshly-paired phone's bootstrap for its OWN local chat.
+///
+/// **Decoding strictness is load-bearing and is deliberately NOT uniform across these five fields.**
+///
+/// The three ORIGINAL fields stay REQUIRED. Swift's synthesized `Decodable` cannot tell "field
+/// absent" from "field present but null", so an `exaKey`-less body would decode as `nil` and
+/// `ChatConfigStore.apply` would CLEAR the user's stored Exa key. What prevents that today is
+/// exactly that `dangerousDomains` and `defaultModel` are non-optional: a partial body fails the
+/// decode outright and `apply` is never reached. Making either optional would silently convert a
+/// partial response into a credential deletion.
+///
+/// The two fields added by provider-correctness T3 are decoded with `decodeIfPresent`, and that is
+/// a different judgement for a different reason, not a relaxation of the one above. This kit ships
+/// inside the iOS app, which updates on its own schedule (App Store) while the Mac updates on
+/// Sparkle's — so a phone WILL, at some point, call a daemon built before these fields existed.
+/// Requiring them would make that pairing fail the whole bundle: no Exa key, no dangerous domains,
+/// no model, chat unusable. Defaulting them to `[]` / `""` degrades it instead to the state a
+/// never-synced phone is already designed to handle — "I have not been told a catalogue" — and the
+/// never-synced rule (WAIT, never guess) is what makes that safe. `[]` and `""` are the ABSENCE of
+/// a catalogue, never a fallback one; nothing here may invent slugs or levels from them.
 public struct SyncConfig: Codable, Equatable, Sendable {
     public let exaKey: String?
     public let dangerousDomains: [String]
     public let defaultModel: String
-    public init(exaKey: String?, dangerousDomains: [String], defaultModel: String) {
+    /// The Mac's whole model catalogue. EMPTY means the Mac reported no catalogue — its provider
+    /// cannot enumerate its models, none is configured, or (see above) it predates this field.
+    /// A consumer must wait for a real one rather than deriving a lineup from `defaultModel`, which
+    /// is precisely what this field exists to stop.
+    public let models: [SyncConfigModel]
+    /// The Mac's live reasoning effort. `""` means UNSET, which is NOT `"none"`: unset makes a turn
+    /// omit the `reasoning` block entirely, while `"none"` is an explicit level the backend honours.
+    public let defaultEffort: String
+
+    public init(exaKey: String?, dangerousDomains: [String], defaultModel: String,
+                models: [SyncConfigModel], defaultEffort: String) {
         self.exaKey = exaKey
         self.dangerousDomains = dangerousDomains
         self.defaultModel = defaultModel
+        self.models = models
+        self.defaultEffort = defaultEffort
+    }
+
+    // No default arguments on the init above, deliberately: every construction site — including both
+    // test doubles — must be UPDATED rather than silently keep building the old three-field shape
+    // and serving an empty catalogue nobody notices. The compile error IS the sweep.
+
+    /// Hand-written ONLY to make the two new fields absence-tolerant. The three original fields are
+    /// decoded byte-for-byte as the synthesized initializer already did — `decodeIfPresent` for the
+    /// optional `exaKey` (which is also what the synthesized ENCODER's `encodeIfPresent` requires,
+    /// since a nil key is omitted rather than written as `null`), plain `decode` for the two
+    /// non-optionals. Reproducing the old behaviour exactly is the point: those two hard decodes are
+    /// what make a partial body fail outright instead of reaching `ChatConfigStore.apply` and
+    /// clearing a credential, and this change must not quietly move that line.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        exaKey = try c.decodeIfPresent(String.self, forKey: .exaKey)
+        dangerousDomains = try c.decode([String].self, forKey: .dangerousDomains)
+        defaultModel = try c.decode(String.self, forKey: .defaultModel)
+        // Tolerated-absent — an older daemon, not a malformed body.
+        models = try c.decodeIfPresent([SyncConfigModel].self, forKey: .models) ?? []
+        defaultEffort = try c.decodeIfPresent(String.self, forKey: .defaultEffort) ?? ""
     }
 }
 

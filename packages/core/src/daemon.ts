@@ -1207,7 +1207,18 @@ export async function startDaemon(opts: {
   // (`this.cfg.provider.live?.() ?? {model: this.cfg.provider.model}`) rather than reusing
   // `providerInfo` above, which is a boot-time snapshot. `undefined` on a no-agentProvider daemon —
   // `ipc/server.ts` degrades that to `""`.
-  const liveModel = agentProvider ? () => (agentProvider!.live?.() ?? { model: agentProvider!.model }).model : undefined;
+  //
+  // provider-correctness T3 adds the EFFORT beside it. Both read the ONE `live()` selection — a
+  // `LiveModelSelection` carries `{model, reasoningEffort?}` together — so the pair a phone is told
+  // is the pair a turn on this Mac would actually run, never a model from one settings read paired
+  // with an effort from another. `reasoningEffort` is genuinely optional in settings, and an unset
+  // one reports `""`: unset is NOT `"none"` (unset omits the `reasoning` block entirely), and
+  // `SyncConfigResult.defaultEffort` documents why the phone must not collapse the two.
+  const liveSelection = agentProvider
+    ? () => agentProvider!.live?.() ?? { model: agentProvider!.model }
+    : undefined;
+  const liveModel = liveSelection ? () => liveSelection().model : undefined;
+  const liveEffort = liveSelection ? () => liveSelection().reasoningEffort ?? "" : undefined;
 
   const server: IpcServer = startIpcServer({
     socketPath: dirs.socketPath,
@@ -1243,7 +1254,10 @@ export async function startDaemon(opts: {
     // runner already consult (constructed above, before the `if (agentProvider)` gate).
     dangerousDomainsAdded,
     // Chat Slice D task 3 (`sync.config`): the hot live-model closure built just above.
+    // provider-correctness T3: its effort half. The model CATALOGUE needs no wiring here — the
+    // server reads it off the `engine` it is already handed, so there is exactly one catalogue.
     liveModel,
+    liveEffort,
     mcp: mcp ?? undefined,
     // Phase 4b Task 4: the plugin tool bridge. `registry` is undefined whenever agentProvider is
     // null (see `sharedRegistry`'s doc comment above). `supervisor`, unlike `registry`, is now

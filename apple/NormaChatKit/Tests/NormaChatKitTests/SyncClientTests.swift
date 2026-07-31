@@ -812,15 +812,96 @@ final class SyncClientTests: XCTestCase {
 
     func testFetchConfigAndMemory() async throws {
         let daemon = FakeDaemon()
-        daemon.config = SyncConfig(exaKey: "exa-123", dangerousDomains: ["evil.test"], defaultModel: "gpt-5.4")
+        let served = SyncConfig(exaKey: "exa-123", dangerousDomains: ["evil.test"], defaultModel: "gpt-5.6-terra",
+                                models: [SyncConfigModel(id: "gpt-5.6-terra", efforts: FakeDaemon.wireEfforts)],
+                                defaultEffort: "high")
+        daemon.config = served
         daemon.memory = [SyncMemoryFile(name: "MEMORY.md", content: "# facts"), SyncMemoryFile(name: "prefs.md", content: "likes tea")]
         let store = try LocalEventStore(directory: dir)
         let client = SyncClient(store: store, conn: daemon)
 
         let config = try await client.fetchConfig()
-        XCTAssertEqual(config, SyncConfig(exaKey: "exa-123", dangerousDomains: ["evil.test"], defaultModel: "gpt-5.4"))
+        XCTAssertEqual(config, served)
         let memory = try await client.fetchMemory()
         XCTAssertEqual(memory.map { $0.name }, ["MEMORY.md", "prefs.md"])
+    }
+
+    // MARK: - provider-correctness T3: the model catalogue on sync.config
+
+    /// The catalogue survives the wire verbatim — per-model efforts included.
+    ///
+    /// This is the whole point of the field: before it, the phone SPLIT `defaultModel` on its last
+    /// `-` and synthesized sibling slugs by string concatenation, which cannot be proved correct.
+    /// Now the Mac says what exists, and the phone repeats it.
+    func testTheModelCatalogueRoundTripsWithPerModelEfforts() async throws {
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        let config = try await client.fetchConfig()
+        XCTAssertEqual(config.models.map(\.id), ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
+        for model in config.models {
+            XCTAssertEqual(model.efforts, FakeDaemon.wireEfforts,
+                           "every row carries its OWN effort list — a client must never have to know they match today")
+            XCTAssertFalse(model.efforts.contains("ultra"), "a global enum rejects ultra — it must never reach a picker")
+            XCTAssertFalse(model.efforts.contains("minimal"), "minimal is rejected PER MODEL — the reason efforts ride per model")
+            XCTAssertTrue(model.efforts.contains("none"), "none IS honoured, measured live — the old mock omitted it")
+        }
+        XCTAssertEqual(config.defaultEffort, "medium")
+    }
+
+    /// A Mac that reports NO catalogue decodes as an empty one — and empty must stay empty.
+    ///
+    /// The never-synced rule: a phone that has not been told a lineup WAITS. It does not derive one
+    /// from `defaultModel`, which is exactly the guess that shipped a 400-on-first-turn once already.
+    /// This pins that the kit hands its caller a truthful `[]` rather than helping.
+    func testAnUnenumerableProviderYieldsAnEmptyCatalogueNeverAGuessedOne() async throws {
+        let daemon = FakeDaemon()
+        daemon.config = SyncConfig(exaKey: nil, dangerousDomains: [], defaultModel: "my-local-llm",
+                                   models: [], defaultEffort: "")
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        let config = try await client.fetchConfig()
+        XCTAssertEqual(config.models, [], "no catalogue was served — none may be invented from the model slug")
+        XCTAssertEqual(config.defaultEffort, "", "unset is not \"none\": an unset effort omits the reasoning block entirely")
+        XCTAssertEqual(config.defaultModel, "my-local-llm", "the model is still served — the phone can run on it")
+    }
+
+    /// An OLDER Mac (built before these fields existed) degrades to "no catalogue", not to a failed
+    /// bootstrap. This kit ships in an app that updates on its own schedule, so a phone WILL meet a
+    /// daemon that predates the field; requiring it would fail the whole bundle and take the Exa key
+    /// and dangerous-domain list down with it.
+    func testAPreCatalogueDaemonBodyStillDecodesAsTheNeverSyncedState() throws {
+        let body = Data(#"{"exaKey":"k","dangerousDomains":["evil.test"],"defaultModel":"gpt-5.6-sol"}"#.utf8)
+        let config = try JSONDecoder().decode(SyncConfig.self, from: body)
+        XCTAssertEqual(config.models, [])
+        XCTAssertEqual(config.defaultEffort, "")
+        XCTAssertEqual(config.exaKey, "k", "the fields that DO exist still land — this is a degrade, not a drop")
+        XCTAssertEqual(config.dangerousDomains, ["evil.test"])
+    }
+
+    /// …and the leniency above is scoped to the two NEW fields ONLY. A body missing
+    /// `dangerousDomains` or `defaultModel` must still fail the decode outright: that hard failure is
+    /// the only thing standing between a partial response and `ChatConfigStore.apply` clearing the
+    /// user's stored Exa key.
+    func testAPartialBodyMissingAnOriginalFieldStillRefusesToDecode() {
+        for body in [#"{"exaKey":"k","defaultModel":"gpt-5.6-sol","models":[],"defaultEffort":""}"#,
+                     #"{"exaKey":"k","dangerousDomains":[],"models":[],"defaultEffort":""}"#] {
+            XCTAssertThrowsError(try JSONDecoder().decode(SyncConfig.self, from: Data(body.utf8)),
+                                 "a partial body must fail the decode, never half-apply: \(body)")
+        }
+    }
+
+    /// A malformed catalogue ROW is refused, not silently dropped — the double and the wire agree
+    /// that `id` is a non-empty string and `efforts` an array of them (`SyncConfigModel`, zod).
+    /// Accepting a half-row here would put a `""` slug in a picker and a 400 on the next turn.
+    func testAMalformedCatalogueRowRefusesTheWholeBody() {
+        for models in [#"[{"efforts":["low"]}]"#, #"[{"id":"gpt-5.6-sol"}]"#, #"[{"id":"gpt-5.6-sol","efforts":"low"}]"#] {
+            let body = #"{"exaKey":null,"dangerousDomains":[],"defaultModel":"m","defaultEffort":"","models":\#(models)}"#
+            XCTAssertThrowsError(try JSONDecoder().decode(SyncConfig.self, from: Data(body.utf8)),
+                                 "a malformed catalogue row must refuse the body: \(models)")
+        }
     }
 
     // MARK: - T11-review F-8: the per-session leg
@@ -913,7 +994,25 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
     var memoryPageSize: Int? = nil
     /// Runs before a pull is served, once, keyed by session — the racing-daemon-append hook.
     var beforePull: [String: () -> Void] = [:]
-    var config = SyncConfig(exaKey: nil, dangerousDomains: [], defaultModel: "gpt-5.4")
+    /// G9 (provider-correctness T3): the default carries the WIDENED `sync.config` shape — the model
+    /// catalogue and the live effort, not just a model string. A double that kept serving the old
+    /// three-field body would have every catalogue consumer testing against an empty lineup while the
+    /// real wire always sends one; that is the precise class of gap that let two real bugs through a
+    /// green suite in an earlier slice. `SyncConfig`'s memberwise init takes no default arguments, so
+    /// this line could not have been left behind silently.
+    var config = SyncConfig(exaKey: nil, dangerousDomains: [], defaultModel: "gpt-5.6-sol",
+                            models: [
+                                SyncConfigModel(id: "gpt-5.6-sol", efforts: FakeDaemon.wireEfforts),
+                                SyncConfigModel(id: "gpt-5.6-terra", efforts: FakeDaemon.wireEfforts),
+                                SyncConfigModel(id: "gpt-5.6-luna", efforts: FakeDaemon.wireEfforts),
+                            ],
+                            defaultEffort: "medium")
+    /// The EXACT effort universe the wire serves, mirrored from `REASONING_EFFORTS`
+    /// (packages/core/src/settings.ts). `none` is in it (genuinely honoured, measured live); `ultra`
+    /// is NOT (a global enum rejects it) and neither is `minimal` (rejected per model). The phone's
+    /// pre-T3 mock effort list had the first two exactly backwards — a double that invented its own
+    /// list would let that recur.
+    static let wireEfforts = ["none", "low", "medium", "high", "xhigh", "max"]
     var memory: [SyncMemoryFile] = []
 
     // MARK: seeding helpers
