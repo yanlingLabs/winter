@@ -562,9 +562,9 @@ export function effortsForModel(_modelId: string): string[] {
 /** Everything a freshly-paired phone needs to run its OWN standalone chat (the `phone-always-local`
  *  design decision): the Exa key, the user's additions to the dangerous-domains list, the daemon's
  *  current default model and effort, and the provider's whole model catalogue. Every field is read
- *  HERE, at call time — nothing is cached across calls, so a Keychain rotation, a `norma model`
- *  edit, or a provider swap is visible on the very next `sync.config`, no daemon restart (the same
- *  "hot" contract every other settings-backed getter in this codebase already keeps).
+ *  HERE, at call time — nothing is cached across calls, so a Keychain rotation or a `norma model`
+ *  edit is visible on the very next `sync.config`, no daemon restart (the same "hot" contract every
+ *  other settings-backed getter in this codebase already keeps).
  *
  *  "Hot" is exact about its scope (T3 review m2): the model/effort SELECTION re-reads settings.json
  *  every call, so `norma model … --effort …` lands with no restart. The CATALOGUE tracks the engine's

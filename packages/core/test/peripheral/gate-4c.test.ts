@@ -160,7 +160,12 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
 
         inst = await createSupervisedInstance({ home, socketPath, hardware: true });
         inst.supervisor.startAll(spawnable);
-        await waitFor(() => inst!.supervisor.status(pluginId) === "running", 10_000, `supervisor status "running" for ${pluginId}`);
+        // 30s, not 10s: this waits on a real plugin subprocess reaching "running", and under
+        // full-suite load the wall-clock lands within 0.4% of a 10s budget (measured twice,
+        // independently: 10019.92ms and 10037.62ms) while passing 8/8 in isolation. That is a
+        // budget too tight for the machine, not a defect — and a flake here costs every future
+        // baseline check a paragraph of explanation about which failures are "expected".
+        await waitFor(() => inst!.supervisor.status(pluginId) === "running", 30_000, `supervisor status "running" for ${pluginId}`);
         await waitFor(() => inst!.registry.has(`plugin__${pluginId}__set_charge_limit`), 5_000, `plugin__${pluginId}__set_charge_limit registered`);
 
         const tokens = await inst.authority.ensureTokens();
