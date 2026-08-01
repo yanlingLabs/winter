@@ -37,6 +37,10 @@ import { DISPATCH_SYSTEM_PROMPT } from "./dispatch-prompt";
 import { CHAT_SYSTEM_PROMPT } from "./chat-prompt";
 import type { DispatchChildren } from "./dispatch-children";
 import type { WorkflowRuntime } from "../workflows/runtime";
+// provider-correctness T5: the Norma-level effort tier vocabulary. `wireEffort` is what makes
+// `resolveSel` a total function into the wire-valid set; the other two decide whether the tier's
+// PROMPT half applies. See settings.ts for why the two vocabularies are deliberately disjoint.
+import { clientEffortEligible, isClientEffort, wireEffort } from "../settings";
 
 /** Structural narrowing of BackgroundTaskRegistry (bg-registry.ts) to just what pinnedTools
  *  (below) needs — lets the engine (and tests) work with anything shaped like a per-session task
@@ -1979,14 +1983,34 @@ export class AgentEngine {
    *  alone still changes only WHICH model answers, not how hard it reasons. Set-time validation is
    *  again the handler's job, and for effort it is model-AWARE (the API validates effort per-model),
    *  so an override that reaches here has already been checked against the session's own model's
-   *  list. */
-  private resolveSel(meta: { model?: string; effort?: string }): { model: string; reasoningEffort?: string } {
+   *  list.
+   *
+   *  provider-correctness T5 makes this the TRANSLATION point too. `meta.effort` may hold a
+   *  NORMA-LEVEL tier (`CLIENT_EFFORTS`, settings.ts — `ultra` today), which the endpoint refuses
+   *  outright: `wireEffort` is applied to WHATEVER this resolves, so `reasoningEffort` coming out of
+   *  here is always absent or wire-valid, on every one of the three call sites, with no per-site
+   *  discipline required. It is applied to the global default as well as the override — the global
+   *  is zod-enum'd and so already wire-valid, and running it through anyway makes the guarantee a
+   *  property of this function rather than of a claim about its inputs.
+   *
+   *  ONE RESOLUTION, TWO FIELDS. `ultra` also changes the system prompt, and the prompt half keys
+   *  off the TIER, not off the wire value it maps to — `max` and `ultra` are indistinguishable once
+   *  translated, and a session that explicitly chose `max` must NOT get the tier's behaviour. So
+   *  `ultra` is reported alongside the translated effort instead of leaving callers to re-read
+   *  `meta.effort` and re-derive it (three call sites, three chances to disagree). It is gated here,
+   *  once, on `clientEffortEligible(meta.mode)`: `session.setEffort` refuses a tier for chat/dispatch
+   *  at the door, and this is the second enforcement for a stored tier that got in some other way (a
+   *  fork, a hand-edited index) — such a session still sends `max` and still gets no injection. */
+  private resolveSel(meta: { model?: string; effort?: string; mode?: string }): { model: string; reasoningEffort?: string; ultra: boolean } {
     const base = this.cfg.provider.live?.() ?? { model: this.cfg.provider.model };
-    if (!meta.model && !meta.effort) return base;
+    // `||`, not `??` — byte-for-byte the truthiness the pre-T5 spread used, so an empty-string
+    // effort keeps falling back to the global default exactly as it did.
+    const selected = meta.effort || base.reasoningEffort;
+    const ultra = isClientEffort(meta.effort) && clientEffortEligible(meta.mode);
     return {
-      ...base,
-      ...(meta.model ? { model: meta.model } : {}),
-      ...(meta.effort ? { reasoningEffort: meta.effort } : {}),
+      model: meta.model || base.model,
+      ...(selected !== undefined ? { reasoningEffort: wireEffort(selected) } : {}),
+      ultra,
     };
   }
 
@@ -2072,6 +2096,10 @@ export class AgentEngine {
       // the normal base and no override, so it would otherwise inherit the user's active style — e.g.
       // "learning" would leave TODO(human) gaps in autonomous work no human reviews. Exclude it here.
       skipOutputStyle: meta.origin === "dispatch-child",
+      // provider-correctness T5: the `ultra` tier's prompt half. Already mode-gated inside
+      // `resolveSel` (code sessions only), so there is no second predicate here — one resolution,
+      // two fields, and the wire half of the SAME resolution is the `max` this turn will send.
+      ultraDelegation: sel.ultra,
       skillToolOffered,
     });
     // NOTE (correctness-critical): `loaded` MUST be THE ONE LIVE SET for this session — never a
