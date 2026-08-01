@@ -595,26 +595,74 @@ final class FieldStateAdapter: ObservableObject {
     /// cannot recur here.
     @Published var selectionProbation: SelectionProbation?
 
-    /// Called by `applyModelSelection`/`applyEffortSelection`'s wirer when the RPC SUCCEEDS —
-    /// arms the probation on what was just accepted. A `nil` value (the user picked "Default")
-    /// arms nothing for that axis: clearing an override cannot be the thing that breaks a turn.
-    func armProbation(model: String? = nil, effort: String? = nil) {
-        guard model != nil || effort != nil else { selectionProbation = nil; return }
-        selectionProbation = SelectionProbation(model: model ?? selectionProbation?.model,
-                                                effort: effort ?? selectionProbation?.effort)
+    /// The session this adapter is currently bound to. Wired by whichever surface owns it
+    /// (`DetachedWindowController` → its own `sessionId`; the orb → `AppModel.focusedSessionId`).
+    ///
+    /// I1 (review): this exists because a probation must be able to say WHICH session it belongs to.
+    /// The revert goes out through `AppModel.setSessionModel`/`setSessionEffort`, which resolve
+    /// `focusedSessionId` AT REVERT TIME — so an unstamped probation armed on session A and resolved
+    /// while B is focused clears B's override and leaves A's in place.
+    var boundSessionId: () -> String? = { nil }
+
+    /// Called by the pickers' wirer when the RPC SUCCEEDS — arms the probation on what was just
+    /// accepted, stamped with the session it was accepted FOR.
+    ///
+    /// Both parameters are DOUBLY optional, and the middle case is the point (M2, review):
+    ///   * `.none`        → this axis is not part of this call. Leave whatever it holds.
+    ///   * `.some(nil)`   → the user picked "Default" on this axis. Disarm THAT AXIS ONLY — clearing
+    ///                      an override can never be the thing that breaks a turn. The old flat
+    ///                      `String?` signature made this indistinguishable from "not arming", so
+    ///                      `armProbation(model: nil)` wiped a live EFFORT probation as a side
+    ///                      effect of the user touching the model menu.
+    ///   * `.some(value)` → arm this axis.
+    func armProbation(model: String?? = nil, effort: String?? = nil) {
+        guard let sid = boundSessionId(), !sid.isEmpty else { selectionProbation = nil; return }
+        // A probation stamped for a DIFFERENT session is stale — never merge a new axis onto it.
+        let existing = selectionProbation?.sessionId == sid ? selectionProbation : nil
+        let nextModel = model ?? existing?.model
+        let nextEffort = effort ?? existing?.effort
+        guard nextModel != nil || nextEffort != nil else { selectionProbation = nil; return }
+        selectionProbation = SelectionProbation(
+            sessionId: sid, model: nextModel, effort: nextEffort,
+            // M1 (review): a selection applied MID-TURN cannot have affected the turn already
+            // running — the daemon resolves model/effort at turn start — so that turn's outcome
+            // says nothing about it. Consume the in-flight turn's boundary without a verdict and
+            // judge the NEXT one. Chosen over the doc-line option because the passive-failure
+            // argument cuts both ways: the wrong verdict here CLEARS a deliberate user choice.
+            skipsInFlightTurn: existing?.skipsInFlightTurn ?? session.state.turnRunning)
     }
 
-    /// Resolves the probation against the turn that just ran, and ALWAYS ends it — one turn, one
-    /// verdict, whatever the verdict is. Returns what the caller must clear.
+    /// Resolves the probation against the turn that just ran. Returns what the caller must clear.
     ///
     /// The revert a caller performs is `onSetModel(nil)` / `onSetEffort(nil)` — a CLEAR, never a
     /// write of the previous value. Writing the fallback would sever the precedence chain (session
     /// override → daemon default) and silently pin the session past every future change; clearing
     /// restores it.
+    ///
+    /// Three refusals, in order:
+    ///   1. SESSION MISMATCH (I1) — the probation belongs to a session this adapter is no longer
+    ///      bound to. Its verdict could only ever be applied to the WRONG session, since the revert
+    ///      resolves the focused session at revert time. Dropped, never acted on. The per-surface
+    ///      clear in `DetachedWindowController.selectSession` stays as belt-and-braces; this is the
+    ///      guard that also covers the orb, whose only session-switch hook
+    ///      (`OrbWindowController.updateIsChatSession`) touches nothing else.
+    ///   2. IN-FLIGHT TURN (M1) — armed while a turn was already running. Consume this boundary
+    ///      without a verdict; the probation survives for the next turn, which is the first one that
+    ///      actually ran on the new selection.
+    ///   3. Otherwise: one turn, one verdict, and the probation ends either way.
     @discardableResult
     func resolveProbation(turnError: String?) -> SelectionRevert {
+        guard let probation = selectionProbation else { return .none }
+        guard probation.sessionId == boundSessionId() else {
+            selectionProbation = nil
+            return .none
+        }
+        if probation.skipsInFlightTurn {
+            selectionProbation?.skipsInFlightTurn = false
+            return .none
+        }
         defer { selectionProbation = nil }
-        return selectionRevert(selectionProbation, turnErrorMessage: turnError)
+        return selectionRevert(probation, turnErrorMessage: turnError)
     }
 }
 
@@ -646,8 +694,15 @@ func effectiveSelection(row: String?, optimistic: OptimisticSelection) -> String
 
 /// A just-applied selection awaiting the verdict of exactly ONE turn.
 struct SelectionProbation: Equatable {
+    /// I1 (review): WHICH session this probation belongs to. Load-bearing, not bookkeeping — the
+    /// revert resolves its target session at revert time, so an unstamped probation armed on session
+    /// A and resolved while B is focused clears B's override and leaves A's untouched.
+    var sessionId: String
     var model: String?
     var effort: String?
+    /// M1 (review): armed while a turn was ALREADY running, so the first boundary that follows
+    /// belongs to a turn that ran on the OLD selection and must be consumed without a verdict.
+    var skipsInFlightTurn: Bool = false
 }
 
 enum SelectionRevert: Equatable {
@@ -665,26 +720,44 @@ enum SelectionRevert: Equatable {
 /// transcript, which made a model choice unholdable forever after one bad turn — and, because the
 /// transcript is durable, that survived relaunch. Neither is expressible here.
 ///
-/// **Conservative on purpose.** A revert throws away a choice the user deliberately made, so the
-/// message must name BOTH the value and the axis before this fires. The residual case it exists for
-/// is narrow: set-time validation (`session.setEffort`/`session.setModel`, T1/T4/T5) already refuses
-/// anything the daemon's own catalogue rejects, so what reaches here is a selection the catalogue
-/// accepted and the ENDPOINT did not — a BYOK provider, or a per-model divergence the daemon has not
-/// learned yet. An unrelated tool failure that happens to contain the word "high" must not cost the
-/// user their effort setting.
+/// **Conservative on purpose, and I4 (review) made it more so.** A revert throws away a choice the
+/// user deliberately made, so the message must name BOTH the value and the axis before this fires.
+/// The residual case it exists for is narrow: set-time validation (`session.setEffort`/
+/// `session.setModel`, T1/T4/T5) already refuses anything the daemon's own catalogue rejects, so
+/// what reaches here is a selection the catalogue accepted and the ENDPOINT did not — a BYOK
+/// provider, or a per-model divergence the daemon has not learned yet.
+///
+/// The value must appear QUOTED (see `mentionsQuoted`). Plain `contains` clears a deliberate choice
+/// on an incidental substring: `"low"` sits inside "allowed", `"high"` inside "xhigh", `"max"`
+/// inside "maximum". The review offered quoting OR a word-boundary regex; quoting is the stricter of
+/// the two and is the only one that survives `"none"`, which is an ordinary English word with
+/// perfectly good boundaries around it ("…; none of the retries succeeded"). The bias is deliberate:
+/// a false NEGATIVE just means no auto-revert (the user still sees a failing turn and can act), while
+/// a false POSITIVE silently destroys a setting they chose on purpose.
 func selectionRevert(_ probation: SelectionProbation?, turnErrorMessage: String?) -> SelectionRevert {
     guard let probation, let raw = turnErrorMessage else { return .none }
     let message = raw.lowercased()
     // Effort first: an effort rejection names the model too (`unsupported_value` errors quote the
     // slug), so checking the model first would misattribute it and clear the wrong axis.
-    if let effort = probation.effort, !effort.isEmpty,
-       message.contains(effort.lowercased()),
+    if let effort = probation.effort, mentionsQuoted(effort, in: message),
        message.contains("effort") || message.contains("reasoning") {
         return .effort
     }
-    if let model = probation.model, !model.isEmpty,
-       message.contains(model.lowercased()), message.contains("model") {
+    if let model = probation.model, mentionsQuoted(model, in: message), message.contains("model") {
         return .model
     }
     return .none
+}
+
+/// Does `message` name `value` as a QUOTED token — `'value'`, `"value"` or `` `value` ``?
+///
+/// Every provider rejection this function exists to recognise quotes the offending value
+/// (`unsupported_value: 'reasoning.effort' does not support 'minimal'`, `The model 'x' does not
+/// exist`), and requiring the quotes is what makes "xhigh" fail to match "high": the character
+/// before `high` inside `'xhigh'` is `x`, not a quote. `message` is expected pre-lowercased;
+/// `value` is lowercased here so callers cannot get that wrong.
+func mentionsQuoted(_ value: String, in message: String) -> Bool {
+    guard !value.isEmpty else { return false }
+    let needle = value.lowercased()
+    return ["'", "\"", "`"].contains { message.contains("\($0)\(needle)\($0)") }
 }

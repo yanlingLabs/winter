@@ -242,7 +242,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
                 // to `.none`, which re-renders whatever the daemon still holds. A revert is never a
                 // write of the previous value — see `OptimisticSelection.none`.
                 adapter?.pendingModel = .none
-                if ok { adapter?.armProbation(model: model) }
+                if ok { adapter?.armProbation(model: .some(model)) }
                 adapter?.modelChangeInFlight = false
             }
         }
@@ -257,7 +257,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
                 let ok = (try? await client.setEffort(sessionId: self.sessionId, effort: effort)) != nil
                 if ok { await self.directory.refresh() }
                 adapter?.pendingEffort = .none
-                if ok { adapter?.armProbation(effort: effort) }
+                if ok { adapter?.armProbation(effort: .some(effort)) }
                 adapter?.effortChangeInFlight = false
             }
         }
@@ -269,6 +269,10 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // "no rows offered" rather than as a guessed lineup.
         refreshModelCatalogue()
         adapter.onRefreshModelCatalogue = { [weak self] in self?.refreshModelCatalogue() }
+        // I1 (review): stamps every probation with the session it was armed for, so a verdict can
+        // never be applied to a different one. This window repins in place (`selectSession`), so it
+        // is read FRESH rather than captured.
+        adapter.boundSessionId = { [weak self] in self?.sessionId }
 
         // Task 6 (2e-iii): this window's own sidebar wiring — its own `directory`, `selectSession`
         // (switch in place), `newSession` (create+repin), and the AppDelegate-wired
