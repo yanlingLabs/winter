@@ -508,7 +508,9 @@ export class SessionStore {
    *  provider-correctness T4 review (I2) — `effort` is DELIBERATELY absent from this shape: a
    *  phone-set per-session effort does not replicate to this index today. That is Task 6's surface
    *  (phone-owned chat sessions) and its own model-aware ingress validation to add, mirroring the
-   *  `model` field's drop-and-log precedent just below — not a gap to silently close here. */
+   *  `model` field's drop-and-log precedent — which lives at the CALLER (`ipc/sync.ts:414`), not
+   *  here: validation happens before the write, and this method writes what it is given
+   *  unconditionally. Not a gap to silently close here. */
   applySyncMeta(sessionId: string, meta: { title?: string; model?: string; forkedFrom?: SessionForkRef }): void {
     if (meta.title !== undefined) this.db.run("UPDATE sessions SET title = ? WHERE session_id = ?", [capTitle(meta.title), sessionId]);
     if (meta.model !== undefined) this.db.run("UPDATE sessions SET model = ? WHERE session_id = ?", [meta.model, sessionId]);
