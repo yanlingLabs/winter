@@ -264,14 +264,18 @@ export class SessionStore {
 
   createSession(
     scope: string,
-    opts: { cwd?: string; approvalPolicy?: SessionApprovalPolicy; origin?: string; mode?: "code" | "dispatch" | "chat"; parentSessionId?: string; model?: string } = {},
+    // provider-correctness T6: `effort` joins `model` here — index-only metadata on identical
+    // terms (same additive column, same reset-to-undefined on a full index rebuild). Validating it
+    // is the CALLER's job, exactly as it is for `model`: which levels a model accepts is provider
+    // knowledge, and only `session.create`'s handler knows the session's mode (the tier gate).
+    opts: { cwd?: string; approvalPolicy?: SessionApprovalPolicy; origin?: string; mode?: "code" | "dispatch" | "chat"; parentSessionId?: string; model?: string; effort?: string } = {},
   ): string {
     if (!SCOPE_RE.test(scope)) throw new Error(`invalid scope: ${scope}`);
     const sessionId = `s_${randomBytes(6).toString("hex")}`;
     mkdirSync(join(this.homeDir, "sessions", scope), { recursive: true });
     this.db.run(
-      "INSERT INTO sessions (session_id, scope, created_at, last_seq, cwd, approval_policy, origin, mode, parent_session_id, model) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
-      [sessionId, scope, Date.now(), opts.cwd ?? null, opts.approvalPolicy ?? "ask", opts.origin ?? null, opts.mode ?? null, opts.parentSessionId ?? null, opts.model ?? null],
+      "INSERT INTO sessions (session_id, scope, created_at, last_seq, cwd, approval_policy, origin, mode, parent_session_id, model, effort) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
+      [sessionId, scope, Date.now(), opts.cwd ?? null, opts.approvalPolicy ?? "ask", opts.origin ?? null, opts.mode ?? null, opts.parentSessionId ?? null, opts.model ?? null, opts.effort ?? null],
     );
     this.append(sessionId, { type: "session_created", sessionId, scope, ...(opts.mode ? { mode: opts.mode } : {}) });
     return sessionId;

@@ -390,6 +390,41 @@ function assertRemoteMayUseSession(store: SessionStore, role: string | undefined
   }
 }
 
+/** provider-correctness T6: the ONE effort-selection rule, shared verbatim by `session.setEffort`
+ *  and `session.create`. Throws `RpcFailure(INVALID_PARAMS)` on refusal; returns silently otherwise.
+ *
+ *  It is a FUNCTION rather than two copies of the same `if` because the two handlers must never
+ *  drift: `session.create` exists so a client can set an effort without a second round trip, and a
+ *  create that accepted what `setEffort` refuses would be a hole around the gate rather than a
+ *  shortcut through it. Both callers resolve `model` by the SAME precedence
+ *  `AgentEngine.resolveSel` applies (the session's own override first, the daemon's live default
+ *  second) — for `create` the "session's own" is the model that very call is stamping, which is why
+ *  the resolution is the caller's job and not this function's.
+ *
+ *  The two branches are ALTERNATIVES, not layers (T5's ruling, restated here because it is the
+ *  non-obvious half): a tier is deliberately NOT run through `effortsForModel`, which describes what
+ *  the ENDPOINT accepts — a tier never reaches the endpoint, so every model would refuse it and the
+ *  feature could not exist. The only question for a tier is whether THIS session may select one.
+ *
+ *  `allowed.length > 0` mirrors `session.setModel`'s own `known.length > 0` idiom: a provider that
+ *  cannot enumerate is not bricked. It means the daemon can accept what `sync.config` does not
+ *  advertise, never the reverse. */
+function assertEffortSelectable(effort: string, model: string, mode: string | undefined): void {
+  if (isClientEffort(effort)) {
+    // `clientEffortEligible` is a fail-closed allowlist (settings.ts) — a mode nobody has written
+    // yet is refused, deliberately unlike `engine.ts`'s `resolveMode`, which defaults to "code".
+    if (!clientEffortEligible(mode)) {
+      throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${effort}' is a Norma-level tier offered on code sessions only — this is a '${mode ?? "unknown"}' session (wire efforts: ${effortsForModel(model).join(", ")})`);
+    }
+    return;
+  }
+  const allowed = effortsForModel(model);
+  if (allowed.length > 0 && !allowed.includes(effort)) {
+    const forModel = model ? `by model '${model}'` : "by the configured provider";
+    throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${effort}' is not accepted ${forModel} — supported: ${allowed.join(", ")}`);
+  }
+}
+
 /** Maps a failed `PluginSupervisor.invoke()` result to the message a `throw new Error(...)` in
  *  `tool.register`'s bridged `run()` turns into an isError tool_result (ToolRegistry.execute's
  *  catch path) — see that handler below. */
@@ -813,7 +848,15 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // SessionApprovalPolicy doc comment), so this coercion is the ONLY way a session's stored
         // policy ever becomes "chat".
         const approvalPolicy = p.mode === "chat" ? "chat" : p.approvalPolicy;
-        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy, origin: p.origin, mode: p.mode, model: p.model });
+        // provider-correctness T6: the effort half of `model`, validated by the SAME rule
+        // `session.setEffort` applies (`assertEffortSelectable`) so a create can never accept what a
+        // set would refuse. Both inputs are the ones THIS CALL is about to stamp — `p.model` (before
+        // the daemon's live default: checking against a model this session will not use would
+        // validate the wrong thing) and `p.mode` (absent = code, which `clientEffortEligible` reads
+        // as tier-eligible). Refused OUTRIGHT rather than dropped, unlike `sync.push`'s ingress:
+        // there is no irreplaceable log riding along here, so the caller can simply be told.
+        if (p.effort !== undefined) assertEffortSelectable(p.effort, p.model ?? opts.liveModel?.() ?? "", p.mode);
+        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy, origin: p.origin, mode: p.mode, model: p.model, effort: p.effort });
         const trusted = cwd ? (opts.trust?.isTrusted(cwd) ?? false) : false;
         // Broadcast the session_created event to every authed harness (not just attachments —
         // a brand-new session has none) so other harnesses can offer to follow (spec §4.4).
@@ -1172,39 +1215,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // admitted HERE as a client-side selector translated before the request (at
         // `AgentEngine.resolveSel`), never by adding it to `effortsForModel`.
         if (p.effort !== null) {
-          // Read ONCE, for both branches below. An unknown sessionId leaves this undefined and is
-          // left to `store.setEffort` to report — that keeps NOT_FOUND coming from one place
-          // regardless of which branch ran (and is why neither branch may refuse on an absent meta).
+          // Read ONCE. An unknown sessionId leaves this undefined and is left to `store.setEffort`
+          // to report — that keeps NOT_FOUND coming from one place regardless of which branch of
+          // `assertEffortSelectable` ran (and is why neither branch may refuse on an absent meta).
           let sessionMeta: { model?: string; mode?: string } | undefined;
           try { sessionMeta = opts.store.meta(p.sessionId); } catch { /* unknown id → the store call below owns the error */ }
-          if (isClientEffort(p.effort)) {
-            // ALTERNATIVES, not layers: a tier is deliberately NOT run through `effortsForModel`,
-            // which describes what the ENDPOINT accepts — the tier never reaches the endpoint, so
-            // every model would refuse it and the feature could not exist. The only question for a
-            // tier is whether THIS session may select it, and the answer is code sessions only:
-            // chat and dispatch have their own base prompts and their own narrow toolsets (chat has
-            // no `spawn_agent` at all), so the tier's delegation posture is meaningless-to-harmful
-            // there. `clientEffortEligible` is a fail-closed allowlist — see settings.ts.
-            if (!clientEffortEligible(sessionMeta?.mode)) {
-              throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${p.effort}' is a Norma-level tier offered on code sessions only — this is a '${sessionMeta?.mode ?? "unknown"}' session (wire efforts: ${effortsForModel(sessionMeta?.model ?? opts.liveModel?.() ?? "").join(", ")})`);
-            }
-          } else {
-            // The session's EFFECTIVE model, by the same precedence AgentEngine.resolveSel applies:
-            // its own override first, the daemon's live default second.
-            const model = sessionMeta?.model ?? opts.liveModel?.() ?? "";
-            const allowed = effortsForModel(model);
-            // m2 review — the carve-out the "never refuse what it advertises, nor advertise what it
-            // refuses" claim doesn't state: if `effortsForModel` ever returns `[]` for a model (an
-            // unknown/BYO slug it can't enumerate), this guard never fires and ANY effort is accepted
-            // for it, even though `sync.config` would advertise none. That is the permissive
-            // direction, and it is deliberate — the same `known.length > 0` idiom session.setModel
-            // uses just above, so a provider that can't enumerate isn't bricked. Left unchanged; it
-            // means the daemon can accept what it does not advertise, never the reverse.
-            if (allowed.length > 0 && !allowed.includes(p.effort)) {
-              const forModel = model ? `by model '${model}'` : "by the configured provider";
-              throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${p.effort}' is not accepted ${forModel} — supported: ${allowed.join(", ")}`);
-            }
-          }
+          // The session's EFFECTIVE model, by the same precedence AgentEngine.resolveSel applies:
+          // its own override first, the daemon's live default second. Both rules — the tier's
+          // code-only gate and the model-aware wire check, with the m2-review permissive carve-out
+          // for a provider that cannot enumerate — live in `assertEffortSelectable`, which
+          // `session.create` calls too so the two surfaces cannot drift.
+          assertEffortSelectable(p.effort, sessionMeta?.model ?? opts.liveModel?.() ?? "", sessionMeta?.mode);
         }
         try {
           opts.store.setEffort(p.sessionId, p.effort);

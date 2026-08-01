@@ -486,3 +486,132 @@ describe("session.setEffort admits the ultra tier for CODE sessions only (provid
     c.close();
   });
 });
+
+// ================================================================================================
+// provider-correctness T6: `session.create` takes an `effort`.
+//
+// T4 review m3 left this open as "decide, don't inherit". DECIDED: added. A client that wants a
+// per-session effort from turn one otherwise has to create-then-`setEffort` — two round-trips with
+// a real window in which a turn fired immediately after create resolves at the GLOBAL effort,
+// silently. The phone's New Chat flow sets model AND effort at create time on a latency-critical
+// path, so that window is not hypothetical.
+//
+// It is a PARAM FIELD on an existing method, so it touches none of the four remote-allowlist lists
+// (`session.create` has been remote-reachable since Chat Slice C; only a new METHOD moves those).
+// The validation is `session.setEffort`'s, applied to the same two axes:
+//   * model-aware membership against `effortsForModel`, resolved against the model this very call
+//     stamps (`p.model`) before the daemon's live default — checking against the live default while
+//     stamping a different model would validate the wrong thing;
+//   * the code-sessions-only tier gate (`clientEffortEligible`), on the mode this very call stamps.
+// ================================================================================================
+describe("session.create carries an effort, validated exactly as session.setEffort is (T6)", () => {
+  let stop3: (() => void) | undefined;
+  afterEach(() => { stop3?.(); stop3 = undefined; });
+
+  async function boot3(opts: { liveModel?: () => string } = {}) {
+    const home = mkdtempSync(join(tmpdir(), "norma-create-effort-"));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, liveModel: opts.liveModel });
+    stop3 = () => { server.stop(); store.close(); };
+    return { store, socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote };
+  }
+
+  test("a created session carries the effort from its very first turn — no second round trip", async () => {
+    const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "gpt-5.6-sol" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "creator");
+
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "gpt-5.6-luna", effort: "xhigh" });
+    expect(res.error).toBeUndefined();
+    expect(store.meta(res.result.sessionId).effort).toBe("xhigh");
+    expect(store.meta(res.result.sessionId).model).toBe("gpt-5.6-luna");
+
+    const listed = await c.request(METHODS.sessionList, {});
+    expect(listed.result.sessions.find((s: any) => s.sessionId === res.result.sessionId).effort).toBe("xhigh");
+    c.close();
+  });
+
+  test("omitting effort leaves the session on the global default (control)", async () => {
+    const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "gpt-5.6-sol" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "creator");
+    const res = await c.request(METHODS.sessionCreate, { scope: "global" });
+    expect(res.error).toBeUndefined();
+    expect(store.meta(res.result.sessionId).effort).toBeUndefined();
+    c.close();
+  });
+
+  test("a wire-invalid effort is REFUSED at create — and no session is minted", async () => {
+    const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "gpt-5.6-sol" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "creator");
+
+    expect(REASONING_EFFORTS).not.toContain("minimal");
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", effort: "minimal" });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error.message).toContain("minimal");
+    // Refused BEFORE the row exists — unlike sync.push's drop-and-log, there is no irreplaceable
+    // log riding along here, so refusing outright is the honest answer (and matches setEffort).
+    expect(store.list().length).toBe(0);
+    c.close();
+  });
+
+  test("the tier IS accepted on a code session created here", async () => {
+    const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "gpt-5.6-sol" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "creator");
+
+    for (const effort of [...effortsForModel("gpt-5.6-sol"), ...clientEfforts()]) {
+      const res = await c.request(METHODS.sessionCreate, { scope: "global", effort });
+      expect(res.error).toBeUndefined();
+      expect(store.meta(res.result.sessionId).effort).toBe(effort);
+    }
+    c.close();
+  });
+
+  test("the tier is REFUSED on a chat session created here — the same code-only gate", async () => {
+    const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "gpt-5.6-sol" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "creator");
+
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", mode: "chat", effort: "ultra" });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error.message).toContain("code sessions only");
+    expect(store.list().length).toBe(0);
+    c.close();
+  });
+
+  test("the effort is checked against the model THIS CALL stamps, not the daemon's live default", async () => {
+    // `effortsForModel` is uniform today, so this pins the SEAM rather than a divergence: the
+    // handler must read `p.model` first. A future per-model divergence makes this test the one that
+    // catches a handler validating against the wrong model.
+    const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "some-other-default" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "creator");
+    for (const effort of effortsForModel("gpt-5.6-luna")) {
+      const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "gpt-5.6-luna", effort });
+      expect(res.error).toBeUndefined();
+      expect(store.meta(res.result.sessionId).effort).toBe(effort);
+    }
+    c.close();
+  });
+
+  test("a REMOTE caller may set an effort at create (it is not cwd/approvalPolicy)", async () => {
+    // The remote guard refuses exactly `cwd`/`approvalPolicy` (the phone does not browse this Mac's
+    // filesystem, and a chat policy is fixed). `model` was never in that set and `effort` is not
+    // either — a phone picking its own reasoning level is the whole point of the field.
+    const { store, socketPath, remoteToken } = await boot3({ liveModel: () => "gpt-5.6-sol" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(remoteToken, "phone", "remote");
+
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", mode: "chat", effort: "high" });
+    expect(res.error).toBeUndefined();
+    expect(store.meta(res.result.sessionId).effort).toBe("high");
+    c.close();
+  });
+});
