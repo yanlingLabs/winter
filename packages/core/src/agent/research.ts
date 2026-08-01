@@ -35,9 +35,13 @@ import { READPAGE_PER_PAGE_CHAR_CAP, READPAGE_TOTAL_OUTPUT_CHAR_CAP } from "./to
  * one, not merely the shorter one.
  */
 
-export const RESEARCH_MODEL = "gpt-5.4-mini";
-export const RESEARCH_FALLBACK_MODEL = "gpt-5.6-luna";
-export const RESEARCH_EFFORT = "low";
+// 2026-08-02 user decision, backed by the 40-run blind eval (readpage-model-benchmark): luna beat
+// gpt-5.4-mini on BOTH quality and cost, and 5.4-mini is a deprecated slug the daemon no longer
+// advertises. Effort "none" is a real, measured wire level (server echoes it and reports 0
+// reasoning tokens — provider-correctness T1); summarization needs recall, not reasoning.
+export const RESEARCH_MODEL = "gpt-5.6-luna";
+export const RESEARCH_FALLBACK_MODEL = "gpt-5.6-terra";
+export const RESEARCH_EFFORT = "none";
 export const RESEARCH_MAX_PAGES_DEFAULT = 5;
 export const RESEARCH_MAX_PAGES_CEILING = 15;
 export const RESEARCH_WALL_CLOCK_MS = 180_000;
