@@ -28,6 +28,68 @@ import { ensureGlobalGitignore, NORMA_PERSONAL_IGNORES } from "./global-gitignor
  *  first, the same way "none" and "ultra" were verified for this list. */
 export const REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
 
+/** NORMA-LEVEL effort tiers (provider-correctness T5) — selectable in Norma, **never on the wire**.
+ *
+ *  This is a STRICTLY DISJOINT vocabulary from `REASONING_EFFORTS` above, and the two live next to
+ *  each other so nobody reads one without the other. `REASONING_EFFORTS` is what the endpoint's
+ *  request validator accepts. A value here is a Norma product decision that is TRANSLATED to a wire
+ *  effort (`wireEffort` below) before any request body exists, plus whatever local behaviour the
+ *  tier names.
+ *
+ *  `ultra` belongs here precisely BECAUSE the wire refuses it — the same global `invalid_value`
+ *  enum documented above. It was never a real API level; it was a catalogue misreading. What the
+ *  user actually wanted from it (the thing that made it look real) is now what it means in Norma:
+ *  `max` on the wire, plus a proactive-delegation posture in the system prompt
+ *  (`ULTRA_DELEGATION_INSTRUCTION`, agent/context.ts). Code sessions only — see
+ *  `clientEffortEligible`.
+ *
+ *  **Never merge these into `REASONING_EFFORTS`, and never let them into `effortsForModel`**
+ *  (ipc/sync.ts): that function is the single source for BOTH what `sync.config` advertises as a
+ *  model's levels AND what `session.setEffort` accepts as a wire effort, so a tier inside it would
+ *  make the daemon advertise a value its own turn would be 400'd on — the original bug, arriving
+ *  through the fix. Tiers ride `sync.config`'s own `clientEfforts` field instead. */
+export const CLIENT_EFFORTS = ["ultra"] as const;
+export type ClientEffort = (typeof CLIENT_EFFORTS)[number];
+
+/** The WIRE effort each tier is translated to. A `Record<ClientEffort, …>` on purpose: adding a
+ *  tier to `CLIENT_EFFORTS` without deciding what it sends is a TYPE ERROR here, not a runtime
+ *  surprise at the request layer. The value type is pinned to `REASONING_EFFORTS` for the same
+ *  reason — a mapping to something the wire refuses cannot be written. */
+const CLIENT_EFFORT_WIRE: Record<ClientEffort, (typeof REASONING_EFFORTS)[number]> = {
+  // "reason as hard as the endpoint allows" — the honest wire meaning of the tier.
+  ultra: "max",
+};
+
+/** Whether `effort` is a Norma-level tier rather than a wire effort. Undefined (no selection) is
+ *  not a tier. */
+export function isClientEffort(effort: string | undefined): effort is ClientEffort {
+  return effort !== undefined && (CLIENT_EFFORTS as readonly string[]).includes(effort);
+}
+
+/** Translate a SELECTED effort (a wire effort, a Norma tier, or nothing) into what may go on the
+ *  wire. TOTAL by construction: every result is either `undefined` or a member of
+ *  `REASONING_EFFORTS`, so no caller downstream of this can hand a tier to a provider. Applied at
+ *  `AgentEngine.resolveSel` — the one place a session's stored effort becomes a request field. */
+export function wireEffort(effort: string | undefined): string | undefined {
+  if (effort === undefined) return undefined;
+  return isClientEffort(effort) ? CLIENT_EFFORT_WIRE[effort] : effort;
+}
+
+/** Which session modes may SELECT a client tier: CODE ONLY.
+ *
+ *  A tier changes the system prompt, and chat/dispatch have their own base prompts and their own
+ *  narrow toolsets (a chat session has no `spawn_agent` at all, so a delegation posture there would
+ *  be an instruction to use a tool it does not have — the exact machine-touching-capability leak
+ *  `skillToolOffered` exists to prevent, in a different slot).
+ *
+ *  An ALLOWLIST, deliberately fail-CLOSED, and deliberately NOT `engine.ts`'s `resolveMode` (which
+ *  defaults an unrecognised mode to "code"). They agree on every mode that exists today; on a mode
+ *  nobody has written yet they disagree, and "not this one" is the safe default for something that
+ *  rewrites the prompt. `undefined` is code by the store-wide `mode ?? "code"` convention. */
+export function clientEffortEligible(mode: string | undefined): boolean {
+  return mode === undefined || mode === "code";
+}
+
 export const ProviderSettings = z.discriminatedUnion("type", [
   z.object({ type: z.literal("codex-oauth"), model: z.string().min(1), reasoningEffort: z.enum(REASONING_EFFORTS).optional() }),
   z.object({ type: z.literal("openai-compatible"), model: z.string().min(1), baseUrl: z.string().url(), reasoningEffort: z.enum(REASONING_EFFORTS).optional() }),

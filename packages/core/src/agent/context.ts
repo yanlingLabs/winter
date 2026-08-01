@@ -12,6 +12,35 @@ export const BASE_PROMPT = [
   "When you need the user to choose between options or clarify something you cannot resolve from the request, the code, or sensible defaults, ALWAYS ask via the ask_user tool with structured options — never pose the question as prose and stop. (This is about HOW to ask, not WHETHER: if you can proceed on a sensible default, just proceed.)",
 ].join(" ");
 
+/** The prompt half of the `ultra` tier (provider-correctness T5) — injected into the base region by
+ *  `assemble({ultraDelegation:true})`, for CODE sessions whose stored effort is `ultra` and nothing
+ *  else. The wire half is `max` (`wireEffort`, settings.ts); this is the rest of what the user is
+ *  actually asking for when they pick the top tier.
+ *
+ *  POSTURE ONLY. The mechanics of spawning — parallel calls in one message, background defaults,
+ *  worktree isolation, naming, resume — already live in `spawn_agent`'s own description
+ *  (tools/spawn.ts), which is the right place for them because it tracks the tool's real signature
+ *  and is only present when the tool is. Repeating any of it here would be a second copy to keep
+ *  true, and would tell a model about a capability the session may not have. What is missing from
+ *  the tool description, and only expressible here, is how EAGERLY to reach for it: the description
+ *  says "delegate multi-step work", which a cautious model reads as permission rather than
+ *  direction, and nothing in `BASE_PROMPT` speaks to it at all.
+ *
+ *  WHY THIS IS SAFE HERE AND NOT ON A HOSTED AGENTS API. Telling a model to spawn children freely
+ *  is only safe if something other than the model bounds the fan-out. Norma has four such bounds,
+ *  all upstream of the child ever running: the permission gate + approval policy the child inherits
+ *  (never widened — spawn_agent's `mode` is restrict-only), `SubagentManager`'s concurrency
+ *  semaphore, the depth limit (a workflow-spawned child cannot spawn at all), and the progress-stall
+ *  watchdog that reaps a wedged child. A hosted API's client cannot gate spawns the model requests,
+ *  which is exactly why the same instruction would be reckless there and is merely eager here. */
+export const ULTRA_DELEGATION_INSTRUCTION = [
+  "## Ultra effort",
+  "This session is running at ULTRA effort. The user has explicitly asked for the most thorough work you can do and has accepted that it will take longer and cost more — so when a judgement call is close, take the more thorough option rather than the cheaper one.",
+  "Delegate proactively, and do not ask permission to do it. Any standing habit of checking in before handing work to child agents is revoked for this session: when the work splits into parts that do not depend on each other, run them in parallel and carry on. Stopping to ask whether you may parallelise is itself the wrong answer here.",
+  "Prefer breadth over guessing. When several files, hypotheses, or approaches are each worth investigating, investigate them at the same time instead of picking one and hoping — and keep this thread for the synthesis and the decisions that need the whole picture.",
+  "This is a posture, not a quota. Work that is genuinely sequential, or small enough that splitting it would cost more than it saves, stays right here. Ultra is a licence to delegate, never an obligation to.",
+].join("\n\n");
+
 const TRUNC = "\n[…truncated]";
 
 /** Cap a string to `maxBytes` UTF-8 bytes, truncating on a valid boundary (a split multibyte char degrades to U+FFFD, never a lone surrogate). */
@@ -144,6 +173,13 @@ export class ContextAssembler {
     // call a tool it doesn't have is exactly the kind of machine-touching-capability leak this
     // review found in the DEFERRED-tools text (buildInstructionsFull), just for the skills list.
     skillToolOffered?: boolean;
+    // provider-correctness T5: the `ultra` tier's prompt half. Absent/false (every pre-T5 caller) is
+    // BYTE-IDENTICAL to before this input existed. `true` is set by exactly one call site —
+    // `turn()`'s `sel.ultra`, which `resolveSel` already gated on `clientEffortEligible(meta.mode)`
+    // — so a stored `ultra` on a non-code session (reachable only by a fork or a hand-edited store,
+    // never by `session.setEffort`) resolves to `max` on the wire and injects nothing here. That is
+    // the second of the two enforcements: refused at the door, inert at the slot.
+    ultraDelegation?: boolean;
   }): string {
     const cwd = input.cwd;
     const trusted = cwd ? this.trust.isTrusted(cwd) : false;
@@ -166,6 +202,12 @@ export class ContextAssembler {
       }
     }
     const sections: string[] = [baseSlot, ...styleAppend];
+    // provider-correctness T5: ADDITIVE, and deliberately NOT part of the base-slot resolution
+    // above. A style — even one that REPLACES the base (`keepCodingInstructions:false`) — is about
+    // which persona is speaking; the tier is about how hard the user asked it to work. The two are
+    // orthogonal, so this lands after whatever the base slot resolved to and before the date, never
+    // in competition with it.
+    if (input.ultraDelegation) sections.push(ULTRA_DELEGATION_INSTRUCTION);
 
     // F2 (4e gate ledger): the model has no other way to know the current date — recomputed each
     // assemble() call (once per turn) so it stays current across long sessions. LOCAL time, not
