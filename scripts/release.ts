@@ -150,6 +150,13 @@ const pre = preflight({
       return out === "" ? null : `working tree not clean — commit or stash changes before releasing`;
     },
     tag: () => {
+      // Under --resume-publish an existing tag is the EXPECTED state, not a failure: the
+      // publish tail tags+pushes BEFORE `gh release create` (the 0.2.002 fix), so every
+      // partially-completed publish a resume exists to finish has already pushed its tag —
+      // this check unconditionally aborting made the resume path unreachable by construction
+      // (observed live on 0.2.009: upload EOF after the tag push). publishGuard downstream
+      // still owns resume semantics, including aborting when the RELEASE is missing.
+      if (RESUME_PUBLISH) return null;
       // Check the tag for the version this run will actually RELEASE: preVersion under
       // --no-bump, else the post-bump next patch. Checking v<preVersion> unconditionally made
       // every second bumping release fail — after a successful release the tree legitimately
