@@ -86,3 +86,31 @@ test("runWorkflowAgent falls back to the live/boot default when there is no per-
   await engine.runWorkflowAgent(sessionId, "do a thing", undefined, new AbortController().signal);
   expect(provider.requests[0]!.model).toBe("fake-1"); // this harness's boot model (workflow-agent.testkit.ts)
 });
+
+// provider-correctness T4 review, I3: this call site did `model: opts?.model ?? this.resolveSel(meta).model`
+// — took `.model` off `resolveSel`'s result and discarded the rest — so a workflow-spawned child ran
+// with NO reasoning block at all, even when the daemon had a session or global effort set. That is
+// the SAME shape of bug the I3 fix just above (Chat Slice D task 1) already repaired once for the
+// model half of this exact call site; it had silently regressed to dropping the OTHER half. Per the
+// review: "It has now dropped a half of the selection twice. A third time is a refactor away, and the
+// symptom — a workflow child reasoning at no effort — is invisible in every existing assertion." This
+// is that assertion.
+test("runWorkflowAgent routes effort resolution through resolveSel — honors a per-session override (I3 review fix, provider-correctness T4)", async () => {
+  const { engine, sessionId, store, provider } = await makeWorkflowAgentHarness({ childReply: "ok" });
+  store.setEffort(sessionId, "xhigh");
+  await engine.runWorkflowAgent(sessionId, "do a thing", undefined, new AbortController().signal);
+  expect(provider.requests[0]!.reasoningEffort).toBe("xhigh");
+});
+
+// The two halves are independent, exactly as resolveSel documents: an explicit opts.model (the
+// workflow script's own arg) still wins for the MODEL, but there is no opts.effort counterpart — the
+// effort always comes from `sel` (the session-resolved value), regardless of which model answers.
+// Both halves matter here because this call site has dropped one or the other twice already.
+test("runWorkflowAgent's explicit opts.model still wins for the model, while the effort still comes from sel (both halves of the selection, independently)", async () => {
+  const { engine, sessionId, store, provider } = await makeWorkflowAgentHarness({ childReply: "ok" });
+  store.setModel(sessionId, "session-override-model");
+  store.setEffort(sessionId, "max");
+  await engine.runWorkflowAgent(sessionId, "do a thing", { model: "explicit-workflow-model" }, new AbortController().signal);
+  expect(provider.requests[0]!.model).toBe("explicit-workflow-model"); // opts.model wins for the model
+  expect(provider.requests[0]!.reasoningEffort).toBe("max"); // there is no opts.effort — always from sel
+});

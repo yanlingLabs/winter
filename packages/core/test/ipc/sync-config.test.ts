@@ -418,6 +418,35 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
     expect(effortsForModel("gpt-5.6-sol")).toEqual([...REASONING_EFFORTS]);
   });
 
+  // I1 review fix (task-4-review.md lines 394-416): `effortsForModel` is a FUNCTION, not a constant,
+  // precisely because a per-model divergence is expected to land one day — and nothing today
+  // detects the day it does. `session.setModel` (ipc/server.ts) validates only the NEW model id; it
+  // never re-checks a session's already-stored effort against that model's list. That is silently
+  // fine while every model's list is identical, and silently WRONG the day it isn't: a session could
+  // carry an effort its (new) model no longer accepts, and every subsequent turn would be 400'd by
+  // the provider with nothing pointing back at the setting that caused it — the exact silent-brick
+  // failure mode this task's OWN set-time validation exists to prevent, reintroduced through the
+  // other door.
+  //
+  // This is the tripwire: it pins uniformity across a representative spread of model ids — real
+  // ones this daemon knows about, an arbitrary/BYO one, an empty string, and one that looks
+  // plausible but isn't — so that a genuine per-model divergence turns this test red the moment it
+  // lands, rather than staying invisible until a user hits it in production.
+  //
+  // WHEN THIS FAILS: `session.setModel` must re-check-or-clear a stored effort before this
+  // divergence can ship. Do not "fix" this test by special-casing the diverging id — that defeats
+  // its purpose.
+  test("uniformity tripwire — effortsForModel returns the IDENTICAL set for every id, known or not", () => {
+    const ids = ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5-first", "anything-at-all", "", "unknown-vendor/byo-model-x"];
+    const rows = ids.map((id) => effortsForModel(id));
+    for (const row of rows) expect(row).toEqual([...REASONING_EFFORTS]);
+    // Cross-compare pairwise too, not merely each-against-the-constant — the failure this guards
+    // against is divergence BETWEEN models, which "equals REASONING_EFFORTS" alone still catches,
+    // but stating the cross-comparison explicitly is what makes this test self-documenting as a
+    // UNIFORMITY check rather than a per-id snapshot.
+    for (let i = 1; i < rows.length; i++) expect(rows[i]).toEqual(rows[0]);
+  });
+
   test("syncConfig() maps knownModels() to {id, efforts} and drops everything else about a model", async () => {
     // `ModelInfo` also carries `family`/`contextWindow`/`supportsVision`. None of it is the phone's
     // business (it does not size its own context window off the Mac's catalogue), and every field on

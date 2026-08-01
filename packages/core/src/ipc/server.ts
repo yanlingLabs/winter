@@ -1180,6 +1180,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           try { sessionModel = opts.store.meta(p.sessionId).model; } catch { /* unknown id → the store call below owns the error */ }
           const model = sessionModel ?? opts.liveModel?.() ?? "";
           const allowed = effortsForModel(model);
+          // m2 review — the carve-out the "never refuse what it advertises, nor advertise what it
+          // refuses" claim doesn't state: if `effortsForModel` ever returns `[]` for a model (an
+          // unknown/BYO slug it can't enumerate), this guard never fires and ANY effort is accepted
+          // for it, even though `sync.config` would advertise none. That is the permissive
+          // direction, and it is deliberate — the same `known.length > 0` idiom session.setModel
+          // uses just above, so a provider that can't enumerate isn't bricked. Left unchanged; it
+          // means the daemon can accept what it does not advertise, never the reverse.
           if (allowed.length > 0 && !allowed.includes(p.effort)) {
             const forModel = model ? `by model '${model}'` : "by the configured provider";
             throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${p.effort}' is not accepted ${forModel} — supported: ${allowed.join(", ")}`);
