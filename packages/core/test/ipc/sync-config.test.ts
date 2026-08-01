@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ERR, LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, SyncConfigResult, type WritableSocket } from "@norma/protocol";
 import { startIpcServer } from "../../src/ipc/server";
-import { syncConfig, syncMemory, effortsForModel, SYNC_PAGE_BYTES, SYNC_MEMORY_TRUNCATION_MARKER } from "../../src/ipc/sync";
+import { syncConfig, syncMemory, effortsForModel, clientEfforts, SYNC_PAGE_BYTES, SYNC_MEMORY_TRUNCATION_MARKER } from "../../src/ipc/sync";
 import { EXA_API_KEY_SECRET } from "../../src/agent/tools/search";
-import { REASONING_EFFORTS, loadSettings } from "../../src/settings";
+import { CLIENT_EFFORTS, REASONING_EFFORTS, loadSettings } from "../../src/settings";
 import { CODEX_MODELS, DEFAULT_CODEX_MODEL } from "../../src/providers/codex-config";
 import { createProvider } from "../../src/providers/manager";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
@@ -138,6 +138,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
       // describe-block below for what a real provider serves).
       models: [],
       defaultEffort: "",
+      clientEfforts: ["ultra"],
     });
     c.close();
   });
@@ -160,7 +161,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
 
     const res = await c.request(METHODS.syncConfig, {});
     expect(res.error).toBeUndefined();
-    expect(res.result).toEqual({ exaKey: null, dangerousDomains: [], defaultModel: "", models: [], defaultEffort: "" });
+    expect(res.result).toEqual({ exaKey: null, dangerousDomains: [], defaultModel: "", models: [], defaultEffort: "", clientEfforts: ["ultra"] });
     c.close();
   });
 
@@ -187,6 +188,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
     expect(before.result).toEqual({
       exaKey: "first-key", dangerousDomains: ["first.example"], defaultModel: "gpt-5-first",
       models: [{ id: "gpt-5-first", efforts: [...REASONING_EFFORTS] }], defaultEffort: "low",
+      clientEfforts: ["ultra"],
     });
 
     // Simulate a live settings/keychain change WITHOUT restarting anything — same closures, new
@@ -210,6 +212,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
         { id: "gpt-5-second-mini", efforts: [...REASONING_EFFORTS] },
       ],
       defaultEffort: "xhigh",
+      clientEfforts: ["ultra"],
     });
     c.close();
   });
@@ -236,7 +239,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
 
   test("syncConfig() drops undefined dangerousDomainsAdded()/absent secret to the safe defaults", async () => {
     const result = await syncConfig({});
-    expect(result).toEqual({ exaKey: null, dangerousDomains: [], defaultModel: "", models: [], defaultEffort: "" });
+    expect(result).toEqual({ exaKey: null, dangerousDomains: [], defaultModel: "", models: [], defaultEffort: "", clientEfforts: ["ultra"] });
   });
 
   test("syncConfig() reads the secret through EXA_API_KEY_SECRET, the SAME name Search uses", async () => {
@@ -356,7 +359,7 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
     await c.hello(harnessToken, "phone");
 
     const res = await c.request(METHODS.syncConfig, {});
-    expect(res.result).toEqual({ exaKey: null, dangerousDomains: [], defaultModel: "", models: [], defaultEffort: "" });
+    expect(res.result).toEqual({ exaKey: null, dangerousDomains: [], defaultModel: "", models: [], defaultEffort: "", clientEfforts: ["ultra"] });
     c.close();
   });
 
@@ -398,8 +401,8 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
 
     const res = await c.request(METHODS.syncConfig, {});
     expect(() => SyncConfigResult.parse(res.result)).not.toThrow();
-    // Strict: no extra keys beyond the five the schema declares.
-    expect(Object.keys(res.result).sort()).toEqual(["dangerousDomains", "defaultEffort", "defaultModel", "exaKey", "models"]);
+    // Strict: no extra keys beyond the six the schema declares.
+    expect(Object.keys(res.result).sort()).toEqual(["clientEfforts", "dangerousDomains", "defaultEffort", "defaultModel", "exaKey", "models"]);
     c.close();
   });
 
@@ -445,6 +448,33 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
     // but stating the cross-comparison explicitly is what makes this test self-documenting as a
     // UNIFORMITY check rather than a per-id snapshot.
     for (let i = 1; i < rows.length; i++) expect(rows[i]).toEqual(rows[0]);
+  });
+
+  // provider-correctness T5 — the OTHER tripwire on this seam, and the one that guards the identity
+  // Task 4 hardened. `effortsForModel` is what `session.setEffort` validates a WIRE effort against
+  // AND what `sync.config` advertises per model; a Norma-level tier is accepted by the same handler
+  // but must never appear in that list, because the daemon would then be advertising a level its own
+  // request would be 400'd on — the exact bug (`ultra` offered by a phone-side mock) that the
+  // catalogue field was added to fix, arriving through the fix.
+  //
+  // WHEN THIS FAILS: someone has merged the tier list into the wire list. The fix is never to widen
+  // `effortsForModel`; it is to put the tier back in `clientEfforts`, where a client renders it as a
+  // separate control.
+  test("disjointness tripwire — no client tier ever appears in ANY model's advertised wire efforts", () => {
+    const tiers = clientEfforts();
+    expect(tiers).toEqual([...CLIENT_EFFORTS]);
+    expect(tiers).toContain("ultra");
+    const ids = ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "anything-at-all", "", "unknown-vendor/byo-model-x"];
+    for (const id of ids) {
+      for (const tier of tiers) expect(effortsForModel(id)).not.toContain(tier);
+    }
+    // ...and the converse: a wire effort is never smuggled in as a "tier", which would give the same
+    // level two different controls in a picker.
+    for (const wire of REASONING_EFFORTS) expect(tiers).not.toContain(wire);
+    // A copy, never the shared constant — same discipline as effortsForModel's row.
+    expect(clientEfforts()).not.toBe(tiers);
+    tiers.push("bogus");
+    expect(clientEfforts()).toEqual([...CLIENT_EFFORTS]);
   });
 
   test("syncConfig() maps knownModels() to {id, efforts} and drops everything else about a model", async () => {

@@ -1174,6 +1174,24 @@ export const SyncConfigResult = z.object({
    *  configured no effort" and send none itself — never as a level to put on the wire, and never as
    *  a reason to pick one. */
   defaultEffort: z.string(),
+  /** NORMA-LEVEL effort tiers this daemon offers — selectable in Norma, **never sent upstream**,
+   *  and offered on CODE sessions only (`session.setEffort` refuses them for chat/dispatch).
+   *  `["ultra"]` on a current daemon (`CLIENT_EFFORTS`, packages/core/src/settings.ts).
+   *
+   *  **A SEPARATE FIELD, deliberately never merged into `models[].efforts`.** That array is exactly
+   *  what the endpoint's request validator accepts and exactly what `session.setEffort` accepts as
+   *  a wire effort — one list, one meaning. A tier here is the opposite kind of value: the daemon
+   *  TRANSLATES it to a wire effort (today `ultra` → `max`) plus some local behaviour before any
+   *  request is built, so putting it in `models[].efforts` would make the daemon advertise a level
+   *  its own turn would be 400'd on. That is precisely the bug the catalogue field was added to fix
+   *  — `ultra` was offered by a phone-side mock while a global enum on the backend rejected it — so
+   *  re-merging the two lists would reintroduce it through the fix.
+   *
+   *  `[]` is a real answer and the only correct degrade: "this daemon offers no Norma-level tiers".
+   *  A client renders exactly what it is told (wire levels from `models[].efforts`, tiers from
+   *  here) and invents neither, so an older daemon meeting a newer client simply shows no tiers
+   *  rather than offering one the daemon would refuse. */
+  clientEfforts: z.array(z.string().min(1)),
 });
 export type SyncConfigParams = z.infer<typeof SyncConfigParams>;
 export type SyncConfigResult = z.infer<typeof SyncConfigResult>;

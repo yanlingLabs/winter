@@ -5,7 +5,7 @@ import { ERR, SessionEvent, SESSION_TITLE_MAX_CHARS, type SyncConfigResult, type
 import { resolveModelAlias } from "../agent/model-aliases";
 import { assistantMemoryDirFor } from "../agent/memory-dir";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
-import { REASONING_EFFORTS } from "../settings";
+import { CLIENT_EFFORTS, REASONING_EFFORTS } from "../settings";
 import type { ModelInfo } from "../providers/types";
 import type { SessionForkRef, SessionStore, SyncedEntry } from "../sessions/store";
 
@@ -559,6 +559,24 @@ export function effortsForModel(_modelId: string): string[] {
   return [...REASONING_EFFORTS];
 }
 
+/** The NORMA-LEVEL effort tiers this daemon offers (provider-correctness T5) — `sync.config`'s
+ *  `clientEfforts`, and the deliberate counterpart to `effortsForModel` above.
+ *
+ *  TWO FUNCTIONS, NEVER ONE. `effortsForModel` answers "what will the endpoint accept for this
+ *  model" and is the SAME source `session.setEffort` validates a wire effort against — the identity
+ *  that keeps the daemon from ever advertising something it refuses, or refusing something it
+ *  advertises. This answers a different question: "what extra levels does NORMA offer, that it
+ *  translates away before a request exists". Folding a tier into the first list would break that
+ *  identity in the worst direction — the daemon would advertise `ultra` and then 400 on it, which
+ *  is exactly the bug (a phone-side mock offering `ultra`) that the catalogue field was added to fix.
+ *
+ *  NOT per-model, unlike `effortsForModel`. A tier has no API meaning at all, so it cannot vary by
+ *  what the API accepts; scoping it to a subset of slugs would re-import the catalogue claim that
+ *  caused the original bug. Returns a fresh array every call, same reason as its neighbour. */
+export function clientEfforts(): string[] {
+  return [...CLIENT_EFFORTS];
+}
+
 /** Everything a freshly-paired phone needs to run its OWN standalone chat (the `phone-always-local`
  *  design decision): the Exa key, the user's additions to the dangerous-domains list, the daemon's
  *  current default model and effort, and the provider's whole model catalogue. Every field is read
@@ -591,7 +609,12 @@ export async function syncConfig(ctx: SyncConfigContext): Promise<SyncConfigResu
   const defaultModel = ctx.liveModel?.() ?? "";
   const defaultEffort = ctx.liveEffort?.() ?? "";
   const models = (ctx.knownModels?.() ?? []).map((m) => ({ id: m.id, efforts: effortsForModel(m.id) }));
-  return { exaKey, dangerousDomains, defaultModel, models, defaultEffort };
+  // provider-correctness T5 — a SEPARATE field, never merged into `models[].efforts`. Not a
+  // per-model projection either: a tier is a Norma product decision with no API meaning, so it
+  // rides once for the whole daemon. Constant today; served rather than baked into the client for
+  // the same reason the catalogue is — a tier the Mac stops offering must disappear from every
+  // paired device on its next connect, with no app release.
+  return { exaKey, dangerousDomains, defaultModel, models, defaultEffort, clientEfforts: clientEfforts() };
 }
 
 // ------------------------------------------------------------------------------------------------

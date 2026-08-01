@@ -1136,6 +1136,7 @@ describe("sync.config schema (provider-correctness T3)", () => {
     defaultModel: "gpt-5.6-sol",
     models: [{ id: "gpt-5.6-sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"] }],
     defaultEffort: "high",
+    clientEfforts: ["ultra"],
   };
 
   test("sync.config params are empty; the result carries the catalogue and the effort", () => {
@@ -1173,6 +1174,28 @@ describe("sync.config schema (provider-correctness T3)", () => {
     expect(() => SyncConfigModel.parse({ id: "m", efforts: [""] })).toThrow();
     // One bad row poisons the whole result rather than being silently dropped.
     expect(() => SyncConfigResult.parse({ ...full, models: [{ id: "", efforts: [] }] })).toThrow();
+  });
+
+  // provider-correctness T5 — `clientEfforts`: NORMA-LEVEL tiers, a SEPARATE field from
+  // `models[].efforts` and never merged into it. `models[].efforts` is exactly what the endpoint's
+  // request validator accepts; a client tier is exactly what it does NOT (the daemon translates it
+  // before building a request). Merging them would make the daemon advertise a value its own turn
+  // would 400 on — the original bug, reintroduced through the field that was added to fix it.
+  test("clientEfforts is REQUIRED — a daemon that offers no tiers says `[]`, it never stays silent", () => {
+    const { clientEfforts, ...noClientEfforts } = full;
+    expect(() => SyncConfigResult.parse(noClientEfforts)).toThrow();
+    // The same sentinel discipline as `models: []` / `defaultEffort: ""`: an explicit empty is a
+    // statement ("this daemon offers no Norma-level tiers"), which is what lets an older/newer
+    // pairing degrade to daemon-driven pickers instead of a client-side guess.
+    expect(SyncConfigResult.parse({ ...full, clientEfforts: [] }).clientEfforts).toEqual([]);
+  });
+
+  test("a client tier must be a non-empty string, like every other level on this wire", () => {
+    // Same reason as inside a catalogue row: an empty string would reach a picker as a selectable
+    // level and, if anything ever put it on the wire, come back an opaque 400.
+    expect(() => SyncConfigResult.parse({ ...full, clientEfforts: [""] })).toThrow();
+    expect(() => SyncConfigResult.parse({ ...full, clientEfforts: ["ultra", ""] })).toThrow();
+    expect(() => SyncConfigResult.parse({ ...full, clientEfforts: "ultra" })).toThrow();
   });
 
   test("efforts ride per model, and rows may legitimately disagree", () => {
