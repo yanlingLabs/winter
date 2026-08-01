@@ -116,6 +116,15 @@ export const SessionCreateParams = z.object({
   // `SessionRow.model`'s own doc comment in store.ts), so it does NOT ride the `session_created`
   // event and resets to absent on a full index rebuild. Bounded — see SESSION_MODEL_MAX_CHARS.
   model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).optional(),
+  // provider-correctness T6: the effort half of `model` just above, stamped at creation time and
+  // validated by the SAME rules `session.setEffort` applies (model-aware membership against
+  // `effortsForModel`, plus the code-sessions-only gate for a Norma-level tier). Added rather than
+  // left to a create-then-setEffort pair because the phone's New Chat flow sets model AND effort at
+  // create time on a latency-critical path: two round-trips leave a window in which a turn fired
+  // immediately after create resolves at the GLOBAL effort, silently. Index-only metadata like
+  // `model` — it does not ride `session_created` and resets to absent on a full index rebuild.
+  // Bounded — see SESSION_EFFORT_MAX_CHARS.
+  effort: z.string().min(1).max(SESSION_EFFORT_MAX_CHARS).optional(),
 });
 export const SessionCreateResult = z.object({ sessionId: z.string(), trusted: z.boolean() });
 
@@ -1077,7 +1086,17 @@ export const SYNC_MAX_CHUNK_B64 = 384 * 1024;
  *  `meta.model` is validated against the daemon's own model catalogue exactly as `session.setModel`
  *  is (alias-resolved, membership-checked when the provider can enumerate, stored freely when it
  *  can't) — but an UNKNOWN slug is DROPPED rather than failing the call: a model mismatch between a
- *  phone and a Mac must never block log replication, which is the irreplaceable half. */
+ *  phone and a Mac must never block log replication, which is the irreplaceable half.
+ *
+ *  `meta.effort` (provider-correctness T6) carries the same rule and the same reason. It exists
+ *  because a phone-set per-session effort that does NOT replicate is invisible: the Mac keeps
+ *  resolving that session at the global default while the phone's UI shows the override, and the
+ *  only symptom is "the answers are different on the Mac". Its ingress validation is model-aware
+ *  (`effortsForModel`, packages/core/src/ipc/sync.ts) exactly as `session.setEffort`'s is, and it
+ *  drops-and-logs rather than failing the push, exactly as `model` does. One rule is stricter here
+ *  than at `session.setEffort`: a Norma-level TIER (`sync.config.clientEfforts`, e.g. `"ultra"`) is
+ *  ALWAYS dropped on this ingress, because a tier is code-sessions-only and this surface is
+ *  chat-only fail-closed — no session reachable through it may ever hold one. */
 export const SyncPushParams = z.object({
   sessionId: z.string().min(1),
   baseSeq: z.number().int().nonnegative(),
@@ -1088,6 +1107,12 @@ export const SyncPushParams = z.object({
     // unbounded title on an UNPAGED heads/list response is a persistent connection killer.
     title: z.string().max(SESSION_TITLE_MAX_CHARS).optional(),
     model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).optional(),
+    // provider-correctness T6. Bounded by the SAME constant `session.setEffort`'s param uses, and
+    // NOT enumerated here for the same reason that one isn't: which levels a model accepts is
+    // provider knowledge the protocol package cannot see change, so a zod enum here would be a
+    // second, drift-prone copy. Membership is checked at the handler, against the session's own
+    // model's list.
+    effort: z.string().min(1).max(SESSION_EFFORT_MAX_CHARS).optional(),
     forkedFrom: SessionForkRef.optional(),
   }).optional(),
 });

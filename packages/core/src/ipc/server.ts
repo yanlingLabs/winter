@@ -1248,6 +1248,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // that skips Task 1's validation. An unknown slug is dropped rather than fatal (a model
           // mismatch must never block log replication); see validateSyncMeta.
           knownModelIds: () => (opts.engine?.knownModels() ?? []).map((m) => m.id),
+          // provider-correctness T6: the SAME live-model getter `session.setEffort` resolves against
+          // (just above), so a pushed `meta.effort` on a session with no model override of its own
+          // is checked against the model the next turn would actually use — not against `""`.
+          liveModel: opts.liveModel,
           // The SAME broadcast session.create performs (see its handler above): a brand-new session
           // has no attachments, so its session_created can't reach anyone through the hub's
           // per-session fan-out — it goes to every authed harness so a sidebar can pick it up.

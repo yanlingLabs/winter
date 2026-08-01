@@ -505,15 +505,17 @@ export class SessionStore {
    *  Each field is optional and only the PRESENT ones are written (an omitted field is "unchanged",
    *  never "clear"), so an incremental push that carries only a new title can't wipe the model.
    *
-   *  provider-correctness T4 review (I2) — `effort` is DELIBERATELY absent from this shape: a
-   *  phone-set per-session effort does not replicate to this index today. That is Task 6's surface
-   *  (phone-owned chat sessions) and its own model-aware ingress validation to add, mirroring the
-   *  `model` field's drop-and-log precedent — which lives at the CALLER (`ipc/sync.ts:414`), not
-   *  here: validation happens before the write, and this method writes what it is given
-   *  unconditionally. Not a gap to silently close here. */
-  applySyncMeta(sessionId: string, meta: { title?: string; model?: string; forkedFrom?: SessionForkRef }): void {
+   *  provider-correctness T6 added `effort` (the T4-review I2 gap: a phone-set per-session effort
+   *  reached this index for `model` and was silently dropped for `effort`, so the Mac kept resolving
+   *  that session at the global default while the phone's UI showed the override). It is written
+   *  here UNCONDITIONALLY, exactly like `model` beside it — the validation that decides whether a
+   *  pushed effort deserves to be written lives at the CALLER (`validateSyncMeta`, ipc/sync.ts),
+   *  which is where the session's model and the tier rule are both in scope. A refused effort never
+   *  reaches this method at all, so there is nothing here to "also check". */
+  applySyncMeta(sessionId: string, meta: { title?: string; model?: string; effort?: string; forkedFrom?: SessionForkRef }): void {
     if (meta.title !== undefined) this.db.run("UPDATE sessions SET title = ? WHERE session_id = ?", [capTitle(meta.title), sessionId]);
     if (meta.model !== undefined) this.db.run("UPDATE sessions SET model = ? WHERE session_id = ?", [meta.model, sessionId]);
+    if (meta.effort !== undefined) this.db.run("UPDATE sessions SET effort = ? WHERE session_id = ?", [meta.effort, sessionId]);
     if (meta.forkedFrom !== undefined) {
       this.db.run(
         "UPDATE sessions SET forked_from_session_id = ?, forked_from_at_seq = ? WHERE session_id = ?",

@@ -140,6 +140,7 @@ import {
   SyncConfigParams,
   SyncConfigModel,
   SyncConfigResult,
+  SyncPushParams,
   METHODS,
 } from "../src/methods";
 
@@ -554,6 +555,37 @@ describe("session.setEffort schema (provider-correctness T4)", () => {
     });
     expect(listed.sessions[0]!.effort).toBe("xhigh");
     expect(listed.sessions[1]!.effort).toBeUndefined();
+  });
+});
+
+// provider-correctness T6: the two remaining places a per-session effort can enter the daemon —
+// `sync.push`'s index-only `meta` (the phone's replication path) and `session.create` (so a client
+// that wants an effort from turn one doesn't need a second round trip). Both are SHAPE-only here;
+// the model-aware membership check and the tier gate live in core, at each handler.
+describe("per-session effort ingress shapes (provider-correctness T6)", () => {
+  test("SyncPushParams.meta carries an optional effort, bounded by SESSION_EFFORT_MAX_CHARS", () => {
+    const base = { sessionId: "s1", baseSeq: 0, data: "", complete: true };
+    expect(SyncPushParams.parse({ ...base, meta: { effort: "xhigh" } }).meta!.effort).toBe("xhigh");
+    // Absent stays absent — an omitted field is "unchanged", never "clear" (applySyncMeta's rule).
+    expect(SyncPushParams.parse({ ...base, meta: { title: "t" } }).meta!.effort).toBeUndefined();
+    expect(SyncPushParams.parse({ ...base }).meta).toBeUndefined();
+    expect(() => SyncPushParams.parse({ ...base, meta: { effort: "" } })).toThrow();
+    expect(() => SyncPushParams.parse({ ...base, meta: { effort: "e".repeat(SESSION_EFFORT_MAX_CHARS + 1) } })).toThrow();
+  });
+
+  test("SyncPushParams.meta.effort is bounded but NOT enumerated — the tier drop is a handler rule", () => {
+    // `ultra` is a Norma-level tier this ingress always DROPS (sync.push is chat-only fail-closed,
+    // and tiers are code-sessions-only). It parses here on purpose: the schema is a shape contract,
+    // and enumerating levels in this package would be a second copy of a set it cannot see change.
+    const base = { sessionId: "s1", baseSeq: 0, data: "", complete: true };
+    expect(SyncPushParams.parse({ ...base, meta: { effort: "ultra" } }).meta!.effort).toBe("ultra");
+  });
+
+  test("SessionCreateParams accepts an optional effort, absent by default", () => {
+    expect(SessionCreateParams.parse({ scope: "global", effort: "high" }).effort).toBe("high");
+    expect(SessionCreateParams.parse({ scope: "global" }).effort).toBeUndefined();
+    expect(() => SessionCreateParams.parse({ scope: "global", effort: "" })).toThrow();
+    expect(() => SessionCreateParams.parse({ scope: "global", effort: "e".repeat(SESSION_EFFORT_MAX_CHARS + 1) })).toThrow();
   });
 });
 

@@ -5,7 +5,7 @@ import { ERR, SessionEvent, SESSION_TITLE_MAX_CHARS, type SyncConfigResult, type
 import { resolveModelAlias } from "../agent/model-aliases";
 import { assistantMemoryDirFor } from "../agent/memory-dir";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
-import { CLIENT_EFFORTS, REASONING_EFFORTS } from "../settings";
+import { CLIENT_EFFORTS, REASONING_EFFORTS, isClientEffort } from "../settings";
 import type { ModelInfo } from "../providers/types";
 import type { SessionForkRef, SessionStore, SyncedEntry } from "../sessions/store";
 
@@ -185,7 +185,30 @@ function resolveChatSession(
 }
 
 /** The index-only metadata a push may carry, after validation. */
-export interface SyncMeta { title?: string; model?: string; forkedFrom?: SessionForkRef }
+export interface SyncMeta { title?: string; model?: string; effort?: string; forkedFrom?: SessionForkRef }
+
+/** The effort half of `validateSyncMeta`'s inputs (provider-correctness T6) — kept as its own
+ *  options bag rather than three more positional parameters, so a caller that only cares about the
+ *  model half (there are none in production, but every existing test is one) is untouched.
+ *
+ *  Every field is optional and degrades to its safest value, the same "typed no-op" discipline as
+ *  `SyncPushContext`/`SyncConfigContext` above. */
+export interface SyncMetaEffortContext {
+  /** The session's model as it stands BEFORE this push — its stored override, else the daemon's
+   *  live default. A model arriving in this SAME `meta` (already validated by the model half) wins
+   *  over it: the two travel together, and checking a new effort against the OLD model would refuse
+   *  a legitimate model+effort pair pushed atomically. */
+  model?: string;
+  /** Which wire levels a model accepts. Injected rather than called directly so the "provider
+   *  cannot enumerate" branch is reachable in a test — `effortsForModel` is uniform and non-empty
+   *  today, so the permissive carve-out below has no other way to be exercised. Production leaves
+   *  it absent and gets `effortsForModel`, the SAME source `session.setEffort` checks and
+   *  `sync.config` advertises. */
+  efforts?(modelId: string): string[];
+  /** Called with the REFUSED value and a short reason, once per drop. The caller logs; this
+   *  function never does its own I/O (`validateSyncMeta` is pure), same split as `onDroppedModel`. */
+  onDroppedEffort?(effort: string, reason: string): void;
+}
 
 /** Validates `sync.push`'s `meta` before ANY of it reaches the index.
  *
@@ -204,11 +227,38 @@ export interface SyncMeta { title?: string; model?: string; forkedFrom?: Session
  *  already had (in particular, a bad push can never overwrite a good model with a broken one).
  *
  *  `title` is clamped as defence in depth — `SyncPushParams` already rejects an over-long one at
- *  the wire, and `SessionStore` clamps on both write and read; this covers any non-RPC caller. */
+ *  the wire, and `SessionStore` clamps on both write and read; this covers any non-RPC caller.
+ *
+ *  `effort` (provider-correctness T6, closing the T4-review I2 gap) is the model's rule applied to
+ *  the other axis, plus one refusal the model half has no analogue for.
+ *
+ *    * MODEL-AWARE MEMBERSHIP against `effortsForModel` — the SAME list `session.setEffort` checks
+ *      and `sync.config` advertises. `sync.push` is a SECOND INGRESS into the same column, so it
+ *      needs its own check rather than a shared assumption: `AgentEngine.resolveSel` hands the
+ *      stored effort straight to the provider, so one unaccepted level bricks every subsequent turn
+ *      on that session with no UI signal — precisely what the model half already guards against.
+ *      Checked against the effective model (a pushed one wins over the stored/live one, see
+ *      `SyncMetaEffortContext.model`), because the endpoint validates effort PER MODEL.
+ *    * DROPPED, NOT FATAL, for exactly the model half's reason, and with the same non-destructive
+ *      consequence: the batch lands in full and the column keeps whatever it had, so a bad push can
+ *      never overwrite a good effort with a broken one.
+ *    * A NORMA-LEVEL TIER IS ALWAYS DROPPED HERE, and this is the one rule stricter than
+ *      `session.setEffort`'s. It is DERIVED, not invented: `sync.push` is chat-only fail-closed
+ *      (this file's invariant 1 — every verb resolves the target's mode and refuses anything that
+ *      isn't exactly "chat"), and a tier is code-sessions-only (`clientEffortEligible`,
+ *      settings.ts). The two gates compose to "no session reachable through this surface may hold a
+ *      tier", so admitting one could only ever produce an unreachable, un-resolvable row. It is
+ *      NOT routed through the wire list — a tier never reaches the endpoint, so every model would
+ *      refuse it and the reason logged would be wrong.
+ *
+ *  Note the ORDER of the two effort branches: the tier check runs FIRST, so `ultra` is reported as a
+ *  tier rather than as "not accepted by model X". Same alternatives-not-layers structure as
+ *  `session.setEffort`'s handler. */
 export function validateSyncMeta(
-  meta: { title?: string; model?: string; forkedFrom?: SessionForkRef },
+  meta: { title?: string; model?: string; effort?: string; forkedFrom?: SessionForkRef },
   knownModelIds: string[],
   onDroppedModel?: (slug: string) => void,
+  effortCtx: SyncMetaEffortContext = {},
 ): SyncMeta {
   const out: SyncMeta = {};
   if (meta.title !== undefined) {
@@ -224,6 +274,21 @@ export function validateSyncMeta(
       const resolved = resolveModelAlias(meta.model, knownModelIds);
       if (knownModelIds.includes(resolved)) out.model = resolved;
       else onDroppedModel?.(meta.model);
+    }
+  }
+  if (meta.effort !== undefined) {
+    if (isClientEffort(meta.effort)) {
+      effortCtx.onDroppedEffort?.(meta.effort, "a Norma-level tier, offered on code sessions only — sync.push is chat-only");
+    } else {
+      // The pushed model wins; it landed in the same atomic `meta` and is already validated.
+      const model = out.model ?? effortCtx.model ?? "";
+      const allowed = (effortCtx.efforts ?? effortsForModel)(model);
+      // `allowed.length > 0` mirrors `session.setModel`/`session.setEffort`'s own `known.length > 0`
+      // idiom verbatim: a provider that cannot enumerate is not bricked. It means this ingress can
+      // accept what `sync.config` does not advertise, never the reverse — the permissive direction,
+      // deliberately.
+      if (allowed.length === 0 || allowed.includes(meta.effort)) out.effort = meta.effort;
+      else effortCtx.onDroppedEffort?.(meta.effort, `not accepted by model '${model}' — supported: ${allowed.join(", ")}`);
     }
   }
   return out;
@@ -303,6 +368,12 @@ export interface SyncPushContext {
    *  provider can't enumerate its models, in which case a pushed value is stored freely; see
    *  `validateSyncMeta`. */
   knownModelIds?(): string[];
+  /** provider-correctness T6: the daemon's live default model — the LAST rung of the effective-model
+   *  precedence a pushed `meta.effort` is validated against (pushed model → the row's stored model →
+   *  this → `""`), identical to what `session.setEffort` resolves (`sessionMeta?.model ??
+   *  opts.liveModel?.() ?? ""`, ipc/server.ts). Absent degrades to `""`, which `effortsForModel`
+   *  answers for as it does for any slug. */
+  liveModel?(): string;
 }
 
 /** Parses a reassembled JSONL batch into raw-line/event pairs. Every line must be JSON AND a valid
@@ -411,7 +482,15 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
   const first = entries[0]!.event;
   const meta = p.meta
     ? validateSyncMeta(p.meta, ctx.knownModelIds?.() ?? [], (slug) =>
-        console.warn(`[sync] dropped unknown model ${JSON.stringify(slug)} pushed for session ${p.sessionId} — the log was replicated, the model override was not`))
+        console.warn(`[sync] dropped unknown model ${JSON.stringify(slug)} pushed for session ${p.sessionId} — the log was replicated, the model override was not`), {
+        // provider-correctness T6. The row may not exist yet (a creating push), so the lookup is
+        // defensive — an unknown id simply contributes nothing and the live default takes over.
+        model: (() => {
+          try { return store.meta(p.sessionId).model; } catch { return undefined; }
+        })() ?? ctx.liveModel?.(),
+        onDroppedEffort: (effort, reason) =>
+          console.warn(`[sync] dropped effort ${JSON.stringify(effort)} pushed for session ${p.sessionId} (${reason}) — the log was replicated, the effort override was not`),
+      })
     : undefined;
   let lastSeq: number;
   let createdEvent: SessionEvent | undefined;
