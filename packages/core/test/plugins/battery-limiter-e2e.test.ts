@@ -133,16 +133,16 @@ describe("battery-limiter ctx.hardware round-trip (real Bun child process, scrip
       inst = await createSupervisedInstance({ home, socketPath, hardware: true });
       inst.supervisor.startAll(spawnable);
 
-      await waitFor(() => inst!.supervisor.status(pluginId) === "running", 10_000, `supervisor status "running" for ${pluginId}`);
+      await waitFor(() => inst?.supervisor.status(pluginId) === "running", 30_000, `supervisor status "running" for ${pluginId}`);
       await waitFor(
-        () => inst!.registry.has(`plugin__${pluginId}__set_charge_limit`) && inst!.registry.has(`plugin__${pluginId}__get_charge_limit`),
+        () => !!(inst?.registry.has(`plugin__${pluginId}__set_charge_limit`) && inst?.registry.has(`plugin__${pluginId}__get_charge_limit`)),
         5_000,
         `plugin__${pluginId}__{set_charge_limit,get_charge_limit} registered`,
       );
 
       // Tile pushed once at registration, before any hardware call has ever resolved — the
       // example's own `lastKnownLimit` module state starts undefined.
-      await waitFor(() => inst!.contrib.get(pluginId)?.tile !== undefined, 2_000, `tile.update landed for ${pluginId}`);
+      await waitFor(() => inst?.contrib.get(pluginId)?.tile !== undefined, 2_000, `tile.update landed for ${pluginId}`);
       expect(inst.contrib.get(pluginId)?.tile).toEqual({ title: "Battery Limiter", value: "unknown" });
 
       const tokens = await inst.authority.ensureTokens();
@@ -197,6 +197,6 @@ describe("battery-limiter ctx.hardware round-trip (real Bun child process, scrip
       // one-off tied to set_charge_limit specifically.
       expect(inst.contrib.get(pluginId)?.tile).toEqual({ title: "Battery Limiter", value: "65%" });
     },
-    20_000,
+    90_000, // 60s registration budget + margin (real child spawn under load)
   );
 });

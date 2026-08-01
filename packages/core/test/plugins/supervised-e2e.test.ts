@@ -33,8 +33,8 @@ describe("supervised e2e: sample-echo (real Bun child process)", () => {
       // 1. Registration: the real `bun index.ts` child connects, hellos as role "plugin", and
       // calls plugin.register — the supervisor status flips out of "starting" into "running".
       await waitFor(
-        () => srv!.supervisor.status(pluginId) === "running",
-        10_000,
+        () => srv?.supervisor.status(pluginId) === "running",
+        30_000,
         `supervisor status "running" for ${pluginId}`,
       );
 
@@ -43,7 +43,7 @@ describe("supervised e2e: sample-echo (real Bun child process)", () => {
       // examples/sample-echo/index.ts) land — wait for both explicitly rather than assuming they
       // raced ahead of the status flip above.
       await waitFor(
-        () => srv!.registry.has(`plugin__${pluginId}__echo`) && srv!.registry.has(`plugin__${pluginId}__sleep`),
+        () => !!(srv?.registry.has(`plugin__${pluginId}__echo`) && srv?.registry.has(`plugin__${pluginId}__sleep`)),
         5_000,
         `plugin__${pluginId}__{echo,sleep} registered`,
       );
@@ -57,7 +57,7 @@ describe("supervised e2e: sample-echo (real Bun child process)", () => {
       // pins down the one-time INITIAL paint deterministically, before that later push could win
       // a wire race against it and flip the value out from under this assertion.
       await waitFor(
-        () => srv!.contrib.get(pluginId)?.tile !== undefined,
+        () => srv?.contrib.get(pluginId)?.tile !== undefined,
         2_000,
         `tile.update landed in the contrib registry for ${pluginId}`,
       );

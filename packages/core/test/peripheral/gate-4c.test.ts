@@ -165,8 +165,8 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
         // independently: 10019.92ms and 10037.62ms) while passing 8/8 in isolation. That is a
         // budget too tight for the machine, not a defect — and a flake here costs every future
         // baseline check a paragraph of explanation about which failures are "expected".
-        await waitFor(() => inst!.supervisor.status(pluginId) === "running", 30_000, `supervisor status "running" for ${pluginId}`);
-        await waitFor(() => inst!.registry.has(`plugin__${pluginId}__set_charge_limit`), 5_000, `plugin__${pluginId}__set_charge_limit registered`);
+        await waitFor(() => inst?.supervisor.status(pluginId) === "running", 30_000, `supervisor status "running" for ${pluginId}`);
+        await waitFor(() => !!inst?.registry.has(`plugin__${pluginId}__set_charge_limit`), 5_000, `plugin__${pluginId}__set_charge_limit registered`);
 
         const tokens = await inst.authority.ensureTokens();
         const provider = await connectProvider(socketPath, tokens.harness);
@@ -198,7 +198,7 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
 
         provider.close();
       },
-      20_000,
+      90_000, // 60s registration budget + margin; see the note on the waitFor above
     );
   });
 
