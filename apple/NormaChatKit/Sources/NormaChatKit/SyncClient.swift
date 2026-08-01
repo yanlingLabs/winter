@@ -111,7 +111,7 @@ public struct SyncConfigModel: Codable, Equatable, Sendable {
 
 /// `sync.config` — a freshly-paired phone's bootstrap for its OWN local chat.
 ///
-/// **Decoding strictness is load-bearing and is deliberately NOT uniform across these five fields.**
+/// **Decoding strictness is load-bearing and is deliberately NOT uniform across these six fields.**
 ///
 /// The three ORIGINAL fields stay REQUIRED. Swift's synthesized `Decodable` cannot tell "field
 /// absent" from "field present but null", so an `exaKey`-less body would decode as `nil` and
@@ -120,7 +120,7 @@ public struct SyncConfigModel: Codable, Equatable, Sendable {
 /// decode outright and `apply` is never reached. Making either optional would silently convert a
 /// partial response into a credential deletion.
 ///
-/// The two fields added by provider-correctness T3 are decoded with `decodeIfPresent`, and that is
+/// The three fields added by provider-correctness T3 and T5 are decoded with `decodeIfPresent`, and that is
 /// a different judgement for a different reason, not a relaxation of the one above. This kit ships
 /// inside the iOS app, which updates on its own schedule (App Store) while the Mac updates on
 /// Sparkle's — so a phone WILL, at some point, call a daemon built before these fields existed.
@@ -141,14 +141,27 @@ public struct SyncConfig: Codable, Equatable, Sendable {
     /// The Mac's live reasoning effort. `""` means UNSET, which is NOT `"none"`: unset makes a turn
     /// omit the `reasoning` block entirely, while `"none"` is an explicit level the backend honours.
     public let defaultEffort: String
+    /// NORMA-LEVEL effort tiers the Mac offers (`["ultra"]` on a current daemon) — selectable in
+    /// Norma, **never sent upstream**, and offered on CODE sessions only.
+    ///
+    /// A SEPARATE list from `models[].efforts`, and the two must never be concatenated into one
+    /// picker section. `models[].efforts` is exactly what the endpoint accepts; a tier is exactly
+    /// what it does not — the Mac translates it (today `ultra` → `max`) before building a request,
+    /// and applies extra local behaviour of its own. Offering a tier on a chat session, or putting
+    /// one on a request this device builds itself, is a 400 from a global enum on the backend.
+    ///
+    /// EMPTY means the Mac offers no tiers — including because it predates this field. Render
+    /// exactly what you are told and invent nothing, the same never-synced rule the catalogue keeps.
+    public let clientEfforts: [String]
 
     public init(exaKey: String?, dangerousDomains: [String], defaultModel: String,
-                models: [SyncConfigModel], defaultEffort: String) {
+                models: [SyncConfigModel], defaultEffort: String, clientEfforts: [String]) {
         self.exaKey = exaKey
         self.dangerousDomains = dangerousDomains
         self.defaultModel = defaultModel
         self.models = models
         self.defaultEffort = defaultEffort
+        self.clientEfforts = clientEfforts
     }
 
     // No default arguments on the init above, deliberately: every construction site — including both
@@ -170,6 +183,12 @@ public struct SyncConfig: Codable, Equatable, Sendable {
         // Tolerated-absent — an older daemon, not a malformed body.
         models = try c.decodeIfPresent([SyncConfigModel].self, forKey: .models) ?? []
         defaultEffort = try c.decodeIfPresent(String.self, forKey: .defaultEffort) ?? ""
+        // provider-correctness T5, tolerated-absent for the SAME reason as the two above (this kit
+        // ships in an App Store app that will meet a Sparkle-updated Mac of any vintage), and safe
+        // for a stronger reason than they are: absent → no tiers offered → the phone renders only
+        // the wire levels, which is precisely the pre-T5 behaviour. The failure mode leniency
+        // usually risks — inventing a level — cannot occur, because `[]` is not a fallback list.
+        clientEfforts = try c.decodeIfPresent([String].self, forKey: .clientEfforts) ?? []
     }
 }
 

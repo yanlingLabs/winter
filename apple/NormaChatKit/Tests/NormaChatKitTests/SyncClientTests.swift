@@ -814,7 +814,7 @@ final class SyncClientTests: XCTestCase {
         let daemon = FakeDaemon()
         let served = SyncConfig(exaKey: "exa-123", dangerousDomains: ["evil.test"], defaultModel: "gpt-5.6-terra",
                                 models: [SyncConfigModel(id: "gpt-5.6-terra", efforts: FakeDaemon.wireEfforts)],
-                                defaultEffort: "high")
+                                defaultEffort: "high", clientEfforts: FakeDaemon.clientTiers)
         daemon.config = served
         daemon.memory = [SyncMemoryFile(name: "MEMORY.md", content: "# facts"), SyncMemoryFile(name: "prefs.md", content: "likes tea")]
         let store = try LocalEventStore(directory: dir)
@@ -858,7 +858,7 @@ final class SyncClientTests: XCTestCase {
     func testAnUnenumerableProviderYieldsAnEmptyCatalogueNeverAGuessedOne() async throws {
         let daemon = FakeDaemon()
         daemon.config = SyncConfig(exaKey: nil, dangerousDomains: [], defaultModel: "my-local-llm",
-                                   models: [], defaultEffort: "")
+                                   models: [], defaultEffort: "", clientEfforts: [])
         let store = try LocalEventStore(directory: dir)
         let client = SyncClient(store: store, conn: daemon)
 
@@ -917,6 +917,60 @@ final class SyncClientTests: XCTestCase {
             XCTAssertThrowsError(try JSONDecoder().decode(SyncConfig.self, from: Data(body.utf8)),
                                  "a malformed catalogue row must refuse the body: \(models)")
         }
+    }
+
+    // MARK: - provider-correctness T5: Norma-level client tiers on sync.config
+
+    /// The tiers arrive as their OWN list and are never folded into a model's wire efforts.
+    ///
+    /// This is the property that keeps `ultra` off the wire on THIS device: the phone builds its own
+    /// chat requests, so a tier that leaked into `models[].efforts` would be selected and sent, and a
+    /// global enum on the backend would 400 it. Separate lists, separate meanings, asserted together.
+    func testClientTiersRideTheirOwnListAndNeverAModelsWireEfforts() async throws {
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        let config = try await client.fetchConfig()
+        XCTAssertEqual(config.clientEfforts, ["ultra"])
+        for model in config.models {
+            XCTAssertFalse(model.efforts.contains("ultra"),
+                           "a Norma-level tier must never appear as a wire level for any model")
+            XCTAssertTrue(Set(model.efforts).isDisjoint(with: Set(config.clientEfforts)),
+                          "the two lists are disjoint by construction — never concatenate them")
+        }
+    }
+
+    /// A Mac that offers NO tiers says so, and `[]` is never a licence to substitute one.
+    func testADaemonOfferingNoTiersDecodesAsEmptyNeverAsAGuess() async throws {
+        let daemon = FakeDaemon()
+        daemon.config = SyncConfig(exaKey: nil, dangerousDomains: [], defaultModel: "my-local-llm",
+                                   models: [], defaultEffort: "", clientEfforts: [])
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        let config = try await client.fetchConfig()
+        XCTAssertEqual(config.clientEfforts, [])
+    }
+
+    /// A PRE-T5 Mac degrades to "no tiers", not to a failed bootstrap — and the degrade is exactly
+    /// the pre-T5 behaviour (wire levels only), which is why this leniency cannot invent anything.
+    func testAPreTierDaemonBodyDecodesAsNoTiersRatherThanFailing() throws {
+        let body = Data(#"{"exaKey":"k","dangerousDomains":[],"defaultModel":"m","models":[],"defaultEffort":"high"}"#.utf8)
+        let config = try JSONDecoder().decode(SyncConfig.self, from: body)
+        XCTAssertEqual(config.clientEfforts, [])
+        XCTAssertEqual(config.defaultEffort, "high", "the fields that DO exist still land")
+    }
+
+    /// The tiers survive the wire verbatim through a real encode/decode round trip, including the
+    /// case that matters most: a tier list that is NOT what this build happens to hard-code.
+    func testClientTiersRoundTripVerbatimIncludingAnUnfamiliarOne() throws {
+        let body = #"{"exaKey":null,"dangerousDomains":[],"defaultModel":"m","defaultEffort":"","models":[],"clientEfforts":["ultra","hypermax"]}"#
+        let config = try JSONDecoder().decode(SyncConfig.self, from: Data(body.utf8))
+        XCTAssertEqual(config.clientEfforts, ["ultra", "hypermax"],
+                       "the Mac is the authority on its own tiers — the phone repeats them, it does not filter to a list it knows")
+        let reencoded = try JSONDecoder().decode(SyncConfig.self, from: try JSONEncoder().encode(config))
+        XCTAssertEqual(reencoded, config)
     }
 
     /// The boundary the rule above must NOT overshoot: an empty `efforts` ARRAY is legal
@@ -1018,8 +1072,9 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
     var memoryPageSize: Int? = nil
     /// Runs before a pull is served, once, keyed by session — the racing-daemon-append hook.
     var beforePull: [String: () -> Void] = [:]
-    /// G9 (provider-correctness T3): the default carries the WIDENED `sync.config` shape — the model
-    /// catalogue and the live effort, not just a model string. A double that kept serving the old
+    /// G9 (provider-correctness T3, widened again by T5): the default carries the FULL `sync.config`
+    /// shape — the model catalogue, the live effort, and the Norma-level client tiers, not just a
+    /// model string. A double that kept serving the old
     /// three-field body would have every catalogue consumer testing against an empty lineup while the
     /// real wire always sends one; that is the precise class of gap that let two real bugs through a
     /// green suite in an earlier slice. `SyncConfig`'s memberwise init takes no default arguments, so
@@ -1030,13 +1085,18 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
                                 SyncConfigModel(id: "gpt-5.6-terra", efforts: FakeDaemon.wireEfforts),
                                 SyncConfigModel(id: "gpt-5.6-luna", efforts: FakeDaemon.wireEfforts),
                             ],
-                            defaultEffort: "medium")
+                            defaultEffort: "medium", clientEfforts: FakeDaemon.clientTiers)
     /// The EXACT effort universe the wire serves, mirrored from `REASONING_EFFORTS`
     /// (packages/core/src/settings.ts). `none` is in it (genuinely honoured, measured live); `ultra`
     /// is NOT (a global enum rejects it) and neither is `minimal` (rejected per model). The phone's
     /// pre-T3 mock effort list had the first two exactly backwards — a double that invented its own
     /// list would let that recur.
     static let wireEfforts = ["none", "low", "medium", "high", "xhigh", "max"]
+    /// The NORMA-LEVEL tiers a current Mac offers (`CLIENT_EFFORTS`, packages/core/src/settings.ts).
+    /// A SEPARATE constant from `wireEfforts` because they are separate lists on the wire and must
+    /// stay separate here: a double that merged them would let a picker offer `ultra` as if the
+    /// endpoint accepted it — the exact drift T3/T5 exist to make impossible.
+    static let clientTiers = ["ultra"]
     var memory: [SyncMemoryFile] = []
 
     // MARK: seeding helpers
