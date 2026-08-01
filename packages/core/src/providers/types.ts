@@ -11,6 +11,15 @@ export const ProviderEvent = z.discriminatedUnion("type", [
     code: z.enum(["auth", "rate_limit", "server", "network", "bad_request"]),
     message: z.string(),
     retryAfterMs: z.number().int().positive().optional(),
+    /** The PROVIDER's own structured error code, verbatim (OpenAI's `{"error":{…,"code":…}}`),
+     *  when the body carried one — e.g. `context_length_exceeded`. The `code` field above is a
+     *  coarse five-way classification the whole daemon shares; this is the un-flattened original,
+     *  and it is the ONLY reliable carrier of it: `mapHttpError` caps the body text it embeds in
+     *  `message` at 200 chars, and the envelope puts `code` AFTER the unbounded human message, so
+     *  on real context-overflow bodies the code is truncated out of the prose. Parsed off the full
+     *  body before that cap (providers/errors.ts). Core-internal — deliberately NOT mirrored onto
+     *  the `agent_error` SessionEvent, so no protocol/Swift surface is engaged. */
+    providerCode: z.string().optional(),
   }),
 ]);
 export type ProviderEvent = z.infer<typeof ProviderEvent>;

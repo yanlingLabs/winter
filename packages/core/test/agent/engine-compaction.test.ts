@@ -343,3 +343,121 @@ describe("engine auto-compact trigger (at turn start, off the real provider-repo
   });
 
 });
+
+/** THE SECOND TRIGGER — the provider's own context-length error (followups T1).
+ *
+ *  The `contextTokens` trigger above is primary, and it self-heals every case where the daemon has
+ *  completed at least one measured turn. ONE case never self-heals, and it is the worst one: a
+ *  session that is ALREADY past the provider's hard ceiling. Its request 400s in ~400ms, before any
+ *  `usage` event exists, so the turn emits `turn_completed{error, contextTokens: 0}` — which
+ *  `maybeAutoCompact` correctly refuses to read as a context size (DIRECTION 4/5 above). The
+ *  measurement it needs can therefore NEVER arrive: every subsequent turn rebuilds the same
+ *  oversized input, 400s identically, and the session is bricked forever with no path back. The
+ *  old (pre-2026-07-31) code was equally stuck — it read `inputTokens`, also 0 here.
+ *
+ *  So the error itself becomes the trigger: a main-thread turn that dies on a recognized
+ *  context-length complaint runs the SAME compaction path (summarize → checkpoint), and the NEXT
+ *  turn proceeds on the compacted context. The failed turn is NOT retried automatically — the user
+ *  still sees the error, and re-sending is their call.
+ *
+ *  The real error shape is recorded in test/providers/errors.test.ts; the short version is that the
+ *  structured `context_length_exceeded` code is TRUNCATED OUT of `message` by mapHttpError's
+ *  200-char body cap in the longer of the two live body forms, which is why it rides as its own
+ *  `providerCode` field rather than being substring-matched out of prose. */
+describe("engine compaction recovery from a provider context-length error", () => {
+  const SMALL_MODEL = { id: "gated-1", family: "fake", contextWindow: 1000, supportsVision: false };
+
+  /** Exactly what `mapHttpError` produces for the chat-lineage 400 body: `code` flattened to the
+   *  coarse `bad_request`, `message` = "HTTP 400 — " + the body sliced at 200 chars (note the
+   *  slice lands mid-`"type"`, so the structured code is GONE from the prose), and the structured
+   *  code lifted off the FULL body into `providerCode`. */
+  const CONTEXT_LENGTH_ERROR: ProviderEvent = {
+    type: "error",
+    code: "bad_request",
+    message: 'HTTP 400 — {"error":{"message":"This model\'s maximum context length is 272000 tokens. However, your messages resulted in 289431 tokens. Please reduce the length of the messages.","type":"invalid_request_error","',
+    providerCode: "context_length_exceeded",
+  };
+
+  function seedMessages(store: ReturnType<typeof setupEngine>["store"], sessionId: string, n: number) {
+    for (let i = 0; i < n; i++) {
+      store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: `u${i}`, clientName: "test" });
+      store.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: `a${i}` });
+    }
+  }
+
+  test("a session already past the ceiling recovers: the error compacts, and the NEXT turn runs on the compacted context", async () => {
+    const provider = new FakeProvider(
+      [
+        [CONTEXT_LENGTH_ERROR],                                                                     // turn 1: 400s before any usage
+        [{ type: "text_delta", delta: "SUMMARY_TOKEN" }, { type: "done", stopReason: "end_turn" }],  // the recovery compaction
+        [{ type: "text_delta", delta: "ok" }, { type: "done", stopReason: "end_turn" }],             // turn 2, on the compacted context
+      ],
+      [SMALL_MODEL],
+    );
+    const { engine, store, sessionId, events } = setupEngine(provider);
+    seedMessages(store, sessionId, 5); // 10 messages > Compactor's keepTail(6) → compactable
+
+    await engine.runTurn(sessionId);
+
+    // ── THE NEGATIVE PROPERTY: the token-driven trigger CANNOT be what fired here. ────────────
+    // Not one main-thread turn_completed in this session carries a usable `contextTokens`, which
+    // is precisely the stuck-forever state — `maybeAutoCompact` walks back, finds nothing, and
+    // returns before ever looking at a threshold. Anything that compacted did so via the error.
+    const completions = store.read(sessionId).filter((e) => e.type === "turn_completed") as
+      Array<{ threadId: string; contextTokens?: number; stopReason: string }>;
+    expect(completions.length).toBeGreaterThan(0);
+    expect(completions.every((c) => !((c.contextTokens ?? 0) > 0))).toBe(true);
+
+    // the failure is still surfaced to the user, unchanged — recovery is not concealment:
+    expect(events.find((e) => e.type === "agent_error")).toMatchObject({ code: "bad_request", message: CONTEXT_LENGTH_ERROR.message });
+    expect(completions[0]).toMatchObject({ threadId: "main", stopReason: "error" });
+
+    // the recovery compaction ran, and produced a real checkpoint:
+    const checkpoint = store.read(sessionId).find((e) => e.type === "checkpoint");
+    expect(checkpoint).toBeDefined();
+    expect(checkpoint && "summary" in checkpoint && checkpoint.summary).toBe("SUMMARY_TOKEN");
+
+    // …and the failed turn was NOT retried: exactly two provider calls happened in that runTurn —
+    // the turn that 400'd, then the compaction. A third would mean an automatic re-send.
+    expect(provider.requests).toHaveLength(2);
+    expect(provider.requests[1]!.instructions).toContain("compacting");
+
+    await engine.runTurn(sessionId); // the user re-sends
+
+    const nextInput = provider.requests[2]!.input;
+    const serialized = JSON.stringify(nextInput);
+    expect(serialized).toContain("[Summary of earlier conversation]");
+    expect(serialized).toContain("SUMMARY_TOKEN");
+    // the oversized head is gone — this is the difference between "recovered" and "400s forever":
+    expect(nextInput.some((it) => "content" in it && it.content === "u0")).toBe(false);
+    // and it is strictly SMALLER than the input that 400'd, not merely different:
+    expect(nextInput.length).toBeLessThan(provider.requests[0]!.input.length);
+  });
+
+  test("an unrelated bad_request does not compact (recognition is conservative, not code-shaped)", async () => {
+    const provider = new FakeProvider(
+      [[{ type: "error", code: "bad_request", message: 'HTTP 400 — {"error":{"message":"Unsupported value: \'reasoning.effort\' does not support \'ultra\'","code":"unsupported_value"}}' }]],
+      [SMALL_MODEL],
+    );
+    const { engine, store, sessionId } = setupEngine(provider);
+    seedMessages(store, sessionId, 5); // compactable, so a spurious compaction would be visible
+
+    await engine.runTurn(sessionId);
+
+    expect(store.read(sessionId).some((e) => e.type === "checkpoint")).toBe(false);
+    expect(provider.requests).toHaveLength(1); // no compaction streamTurn
+  });
+
+  test("nothing safely compactable → the turn still ends cleanly in error, with no extra provider call", async () => {
+    const provider = new FakeProvider([[CONTEXT_LENGTH_ERROR]], [SMALL_MODEL]);
+    const { engine, store, sessionId } = setupEngine(provider);
+    seedMessages(store, sessionId, 2); // 4 messages ≤ keepTail(6) → Compactor returns NOT_COMPACTED
+
+    await engine.runTurn(sessionId);
+
+    expect(store.read(sessionId).some((e) => e.type === "checkpoint")).toBe(false);
+    expect(provider.requests).toHaveLength(1);
+    const completed = store.read(sessionId).find((e) => e.type === "turn_completed");
+    expect(completed).toMatchObject({ stopReason: "error" });
+  });
+});
