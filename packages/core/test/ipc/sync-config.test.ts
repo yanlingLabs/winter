@@ -101,6 +101,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
     dangerousDomainsAdded?: (cwd?: string) => string[] | undefined;
     liveModel?: () => string;
     liveEffort?: () => string;
+    liveProvider?: () => string;
     models?: () => ModelInfo[];
   } = {}): Promise<{ home: string; socketPath: string; harnessToken: string; remoteToken: string }> {
     const home = mkdtempSync(join(tmpdir(), "norma-sync-config-"));
@@ -111,7 +112,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
     const server = startIpcServer({
       socketPath, serverVersion: "test", tokens: authority, store,
       secrets: over.secrets, dangerousDomainsAdded: over.dangerousDomainsAdded, liveModel: over.liveModel,
-      liveEffort: over.liveEffort,
+      liveEffort: over.liveEffort, liveProvider: over.liveProvider,
       ...(over.models ? { engine: fakeEngine(over.models), hub: new SessionHub(store) } : {}),
     });
     stop = () => { server.stop(); store.close(); };
@@ -131,6 +132,9 @@ describe("sync.config (Chat Slice D task 3)", () => {
     const res = await c.request(METHODS.syncConfig, {});
     expect(res.error).toBeUndefined();
     expect(res.result).toEqual({
+      // No liveProvider wired on this server -> "none", the honest "this daemon runs no provider"
+      // (whole-branch review C1). It is never "" — that field has no empty sentinel.
+      provider: "none",
       exaKey: "exa_live_key",
       dangerousDomains: ["evil.example.com", "totally-fine.example"],
       defaultModel: "claude-opus-5",
@@ -161,7 +165,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
 
     const res = await c.request(METHODS.syncConfig, {});
     expect(res.error).toBeUndefined();
-    expect(res.result).toEqual({ exaKey: null, dangerousDomains: [], defaultModel: "", models: [], defaultEffort: "", clientEfforts: ["ultra"] });
+    expect(res.result).toEqual({ provider: "none", exaKey: null, dangerousDomains: [], defaultModel: "", models: [], defaultEffort: "", clientEfforts: ["ultra"] });
     c.close();
   });
 
@@ -179,13 +183,14 @@ describe("sync.config (Chat Slice D task 3)", () => {
     };
     const { socketPath, harnessToken } = await boot({
       secrets, dangerousDomainsAdded: () => domains, liveModel: () => model,
-      liveEffort: () => effort, models: () => catalogue,
+      liveEffort: () => effort, models: () => catalogue, liveProvider: () => "codex-oauth",
     });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "phone");
 
     const before = await c.request(METHODS.syncConfig, {});
     expect(before.result).toEqual({
+      provider: "codex-oauth",
       exaKey: "first-key", dangerousDomains: ["first.example"], defaultModel: "gpt-5-first",
       models: [{ id: "gpt-5-first", efforts: [...REASONING_EFFORTS] }], defaultEffort: "low",
       clientEfforts: ["ultra"],
@@ -206,6 +211,9 @@ describe("sync.config (Chat Slice D task 3)", () => {
 
     const after = await c.request(METHODS.syncConfig, {});
     expect(after.result).toEqual({
+      // NOT hot, unlike everything beside it: the provider TYPE is boot-bound (changing it needs a
+      // daemon restart), so this closure keeps answering the running instance's id.
+      provider: "codex-oauth",
       exaKey: "second-key", dangerousDomains: ["first.example", "second.example"], defaultModel: "gpt-5-second",
       models: [
         { id: "gpt-5-second", efforts: [...REASONING_EFFORTS] },
@@ -239,7 +247,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
 
   test("syncConfig() drops undefined dangerousDomainsAdded()/absent secret to the safe defaults", async () => {
     const result = await syncConfig({});
-    expect(result).toEqual({ exaKey: null, dangerousDomains: [], defaultModel: "", models: [], defaultEffort: "", clientEfforts: ["ultra"] });
+    expect(result).toEqual({ provider: "none", exaKey: null, dangerousDomains: [], defaultModel: "", models: [], defaultEffort: "", clientEfforts: ["ultra"] });
   });
 
   test("syncConfig() reads the secret through EXA_API_KEY_SECRET, the SAME name Search uses", async () => {
@@ -277,6 +285,7 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
   async function boot(over: {
     liveModel?: () => string;
     liveEffort?: () => string;
+    liveProvider?: () => string;
     models?: () => ModelInfo[];
   } = {}): Promise<{ socketPath: string; harnessToken: string; remoteToken: string }> {
     const home = mkdtempSync(join(tmpdir(), "norma-sync-catalogue-"));
@@ -286,7 +295,7 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
     const tokens = await authority.ensureTokens();
     const server = startIpcServer({
       socketPath, serverVersion: "test", tokens: authority, store,
-      liveModel: over.liveModel, liveEffort: over.liveEffort,
+      liveModel: over.liveModel, liveEffort: over.liveEffort, liveProvider: over.liveProvider,
       ...(over.models ? { engine: fakeEngine(over.models), hub: new SessionHub(store) } : {}),
     });
     stop = () => { server.stop(); store.close(); };
@@ -359,7 +368,9 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
     await c.hello(harnessToken, "phone");
 
     const res = await c.request(METHODS.syncConfig, {});
-    expect(res.result).toEqual({ exaKey: null, dangerousDomains: [], defaultModel: "", models: [], defaultEffort: "", clientEfforts: ["ultra"] });
+    // ...and `provider: "none"` is that same statement for the identity (whole-branch review C1) —
+    // a stated answer, not a silence, because this is the one field with no empty sentinel.
+    expect(res.result).toEqual({ provider: "none", exaKey: null, dangerousDomains: [], defaultModel: "", models: [], defaultEffort: "", clientEfforts: ["ultra"] });
     c.close();
   });
 
@@ -426,8 +437,11 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
 
     const res = await c.request(METHODS.syncConfig, {});
     expect(() => SyncConfigResult.parse(res.result)).not.toThrow();
-    // Strict: no extra keys beyond the six the schema declares.
-    expect(Object.keys(res.result).sort()).toEqual(["clientEfforts", "dangerousDomains", "defaultEffort", "defaultModel", "exaKey", "models"]);
+    // Strict: no extra keys beyond the seven the schema declares. Its cross-language twin is the
+    // MIRROR TRIPWIRE in packages/protocol/test/methods.test.ts, which pins the same set on the
+    // schema itself and names the two hand-written Swift mirrors; this half pins what the DAEMON
+    // actually puts on the wire, so a field declared and never populated still fails here.
+    expect(Object.keys(res.result).sort()).toEqual(["clientEfforts", "dangerousDomains", "defaultEffort", "defaultModel", "exaKey", "models", "provider"]);
     c.close();
   });
 
@@ -621,6 +635,105 @@ describe("sync.config through a real startDaemon (T3 review I1)", () => {
     expect(res.result.models.length).toBe(CODEX_MODELS.length); // the catalogue is unaffected
     c.close();
   }, 20_000);
+});
+
+// ================================================================================================
+// `provider` — whole-branch review C1: the field that makes this bundle SELF-DESCRIBING.
+//
+// Every other field says WHAT the Mac runs. Nothing said WHOSE, and that gap has one concrete live
+// failure behind it. The phone runs its OWN chat engine on its OWN codex-oauth credentials
+// (`phone-always-local`). On an `openai-compatible` Mac the provider is constructed with no
+// enumerable catalogue (`ProviderSettings` has no `models` field, settings.ts), so `sync.config`
+// honestly serves `models: []` — but `defaultModel` is still a NON-EMPTY foreign slug, and a phone
+// that stores any non-empty `defaultModel` then puts a llama/BYOK name on Codex `/responses` and is
+// 400'd on its first turn. The "empty catalogue is ignored on apply" rule governs `models` only;
+// only the provider identity closes this.
+//
+// These run against a REAL `startDaemon` over a real settings.json for the same reason the T3
+// review's I1 block above does: the wiring (daemon.ts's `liveProvider`, and the one line that
+// passes it into the options object) is the part that silently degrades. Dropping it does not throw
+// and does not fail a type-check — `SyncConfigContext.liveProvider` is optional — it just makes
+// every daemon report `"none"`, which reads as "no provider configured" and would have every phone
+// discard a perfectly good codex bundle. Both provider types are booted, because the whole point of
+// the field is telling them apart.
+// ================================================================================================
+
+describe("sync.config `provider` through a real startDaemon (whole-branch review C1)", () => {
+  let daemon: RunningDaemon | undefined;
+  afterEach(async () => { await daemon?.stop(); daemon = undefined; });
+
+  async function bootWithSettings(home: string, provider: Record<string, unknown>): Promise<{ daemon: RunningDaemon; secrets: FileSecretStore }> {
+    const settingsPath = join(home, "settings.json");
+    writeFileSync(settingsPath, JSON.stringify({
+      schemaVersion: 2, provider, titles: { enabled: false }, toolSearch: { enabled: false },
+    }, null, 2) + "\n");
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    // openai-compatible refuses to construct without a stored key; codex-oauth ignores it (its
+    // token is only read at stream time, and no turn is ever driven here).
+    await secrets.set("openai-api-key", "sk-test-not-a-real-key");
+    const active = await createProvider(loadSettings(settingsPath), secrets, settingsPath);
+    const d = await startDaemon({
+      home, secrets,
+      agentProvider: { provider: active.provider, model: active.liveModel().model, live: active.liveModel },
+    });
+    return { daemon: d, secrets };
+  }
+
+  test("a codex-oauth Mac states `codex-oauth` beside its real catalogue", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-sync-provider-codex-"));
+    ({ daemon } = await bootWithSettings(home, { type: "codex-oauth", model: "gpt-5.6-terra", reasoningEffort: "high" }));
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(daemon.tokens.harness, "phone");
+
+    const res = await c.request(METHODS.syncConfig, {});
+    expect(res.error).toBeUndefined();
+    // THE ASSERTION C1 IS ABOUT: without `liveProvider` wired in daemon.ts this is "none", a value
+    // that is legal, meaningful, and wrong — exactly the shape of the `liveEffort` gap above.
+    expect(res.result.provider).toBe("codex-oauth");
+    // It agrees with the catalogue beside it, which is the property that makes it usable: the
+    // identity and the lineup come off the SAME provider instance.
+    expect(res.result.models.map((m: any) => m.id)).toEqual(CODEX_MODELS.map((m) => m.id));
+    expect(res.result.defaultModel).toBe("gpt-5.6-terra");
+    c.close();
+  }, 20_000);
+
+  test("a BYOK (openai-compatible) Mac states `openai-compatible` — the empty catalogue alone never could", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-sync-provider-byok-"));
+    ({ daemon } = await bootWithSettings(home, {
+      type: "openai-compatible", model: "llama-3.3-70b-local", baseUrl: "http://127.0.0.1:11434/v1",
+    }));
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(daemon.tokens.harness, "phone");
+
+    const res = await c.request(METHODS.syncConfig, {});
+    expect(res.error).toBeUndefined();
+    expect(res.result.provider).toBe("openai-compatible");
+    // The exact live shape C1 exists for, asserted TOGETHER so the danger is visible in one place:
+    // an empty catalogue AND a non-empty foreign slug. A phone reading only these two would store
+    // "llama-3.3-70b-local" and send it to Codex.
+    expect(res.result.models).toEqual([]);
+    expect(res.result.defaultModel).toBe("llama-3.3-70b-local");
+    expect(res.result.provider).not.toBe("codex-oauth"); // …and this is what saves it
+    // Not a wire-format accident: the served value is a member of `ProviderSettings.type`'s own
+    // vocabulary, which is what lets a client compare it against its own provider at all.
+    expect(["codex-oauth", "openai-compatible"]).toContain(res.result.provider);
+    c.close();
+  }, 20_000);
+
+  test("`Provider.id` IS the `ProviderSettings.type` literal — the identity this field reports", async () => {
+    // The one coupling `liveProvider` depends on, pinned so a new provider whose `id` drifts from
+    // its settings literal fails here rather than by serving a phone a token it cannot compare.
+    const home = mkdtempSync(join(tmpdir(), "norma-sync-provider-ids-"));
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    await secrets.set("openai-api-key", "sk-test-not-a-real-key");
+    for (const provider of [
+      { type: "codex-oauth" as const, model: "gpt-5.6-sol" },
+      { type: "openai-compatible" as const, model: "m", baseUrl: "http://127.0.0.1:11434/v1" },
+    ]) {
+      const active = await createProvider({ schemaVersion: 2, provider } as any, secrets);
+      expect(active.provider.id).toBe(provider.type);
+    }
+  });
 });
 
 describe("sync.memory (Chat Slice D task 3)", () => {

@@ -27,6 +27,7 @@ final class ModelPickerTests: XCTestCase {
     /// class of bug where a picker offers a slug it cannot prove exists.
     func testModelPickerOptionsComeFromTheCatalogue() {
         let catalogue = SyncConfigSnapshot(
+            provider: "codex-oauth",
             defaultModel: "srv-a",
             models: [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"]),
                      SyncConfigModelInfo(id: "srv-b", efforts: ["high"])],
@@ -40,7 +41,7 @@ final class ModelPickerTests: XCTestCase {
     /// one is precisely the bug `sync.config.models` was added to kill.
     func testAnEmptyCatalogueOffersNothingRatherThanGuessing() {
         XCTAssertEqual(modelPickerOptions(.empty), [])
-        XCTAssertEqual(modelPickerOptions(SyncConfigSnapshot(defaultModel: "gpt-5.6-sol", models: [],
+        XCTAssertEqual(modelPickerOptions(SyncConfigSnapshot(provider: "codex-oauth", defaultModel: "gpt-5.6-sol", models: [],
                                                             defaultEffort: "high", clientEfforts: ["ultra"])), [],
                        "a defaultModel is NOT a catalogue — synthesizing siblings from it is the original bug")
     }
@@ -211,6 +212,7 @@ final class ModelPickerTests: XCTestCase {
     /// The two sections stay two sections, and the tier section is scoped by mode.
     func testEffortPickerOffersWireLevelsPlusTiersOnlyForCode() {
         let catalogue = SyncConfigSnapshot(
+            provider: "codex-oauth",
             defaultModel: "srv-a",
             models: [SyncConfigModelInfo(id: "srv-a", efforts: ["none", "low", "high"]),
                      SyncConfigModelInfo(id: "srv-b", efforts: ["high", "max"])],
@@ -624,10 +626,12 @@ final class ModelPickerTests: XCTestCase {
         await waitUntilSent(t, 3)
         let req = lineJSON(t.sent[2])
         XCTAssertEqual(req["method"] as? String, "sync.config")
-        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"exaKey":null,"dangerousDomains":[],"defaultModel":"srv-a","models":[{"id":"srv-a","efforts":["low","high"]}],"defaultEffort":"high","clientEfforts":["ultra"]}}"#)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"provider":"codex-oauth","exaKey":null,"dangerousDomains":[],"defaultModel":"srv-a","models":[{"id":"srv-a","efforts":["low","high"]}],"defaultEffort":"high","clientEfforts":["ultra"]}}"#)
         let snapshot = await fetched
         XCTAssertEqual(snapshot?.models, [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"])])
         XCTAssertEqual(snapshot?.clientEfforts, ["ultra"])
+        XCTAssertEqual(snapshot?.provider, "codex-oauth",
+                       "whole-branch review C1: the identity threads through the wrapper like every other field")
     }
 
     /// `session.list` → `SessionSummary.effort`, end to end — the effort picker's only source for

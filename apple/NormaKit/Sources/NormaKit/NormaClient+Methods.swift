@@ -937,8 +937,10 @@ public struct SyncConfigModelInfo: Equatable, Sendable {
 /// `exaKey` (a Keychain secret) and `dangerousDomains`. Both exist for the PHONE, which runs its own
 /// chat engine and needs them to make its own network calls; the Mac app runs no engine of its own
 /// and has no use for either. Surfacing a Keychain secret through a kit accessor no caller needs is
-/// a new exposure with no counterweight, so this type stops at the four fields the pickers consume.
-/// Widen it the day a Mac-side caller genuinely needs more — never pre-emptively.
+/// a new exposure with no counterweight, so this type stops at the model/effort fields — the ones a
+/// picker reads (`defaultModel`, `models`, `clientEfforts`) plus the two that say what they mean
+/// (`provider`, `defaultEffort`). Widen it the day a Mac-side caller genuinely needs more — never
+/// pre-emptively.
 ///
 /// **Absence is a REAL ANSWER and never a licence to guess.** `models: []` means the active provider
 /// cannot enumerate its models (an arbitrary openai-compatible endpoint), or none is configured. A
@@ -947,6 +949,20 @@ public struct SyncConfigModelInfo: Equatable, Sendable {
 /// UNSET, which is NOT `"none"`: unset makes a turn omit the `reasoning` block entirely, while
 /// `"none"` is an explicit level the backend honours.
 public struct SyncConfigSnapshot: Equatable, Sendable {
+    /// WHICH PROVIDER everything below describes — `"codex-oauth"` / `"openai-compatible"` (the
+    /// daemon's `ProviderSettings.type` vocabulary), `"none"` when it runs none, `""` only when the
+    /// daemon predates the field.
+    ///
+    /// **On the wire this is the one field with NO empty sentinel** (`z.string().min(1)`) — a daemon
+    /// always knows which provider it is running. Its purpose is a rule THIS client does not need
+    /// and the phone does: a consumer running its own engine on its own credentials must treat a
+    /// non-empty foreign `provider` as never-synced and discard `defaultModel` (see
+    /// `SyncConfigResult.provider`, packages/protocol/src/methods.ts, for the live 400 that closes).
+    /// It is mirrored here anyway because this projection is one of the two hand-written mirrors of
+    /// that result, and a mirror that silently omits a field is how the field went missing for a
+    /// whole task in the first place — a Mac-side caller that ever needs to say "this catalogue is
+    /// not yours" has it, rather than having to widen the type under pressure.
+    public let provider: String
     /// The daemon's live default model — re-resolved by the daemon on every call, so a
     /// `norma model` edit lands with no restart. `""` when no provider is configured.
     public let defaultModel: String
@@ -965,7 +981,11 @@ public struct SyncConfigSnapshot: Equatable, Sendable {
     /// cannot know which session a picker is for.
     public let clientEfforts: [String]
 
-    public init(defaultModel: String, models: [SyncConfigModelInfo], defaultEffort: String, clientEfforts: [String]) {
+    // No default arguments, same reason `NormaChatKit.SyncConfig`'s init has none: this type is a
+    // HAND-written mirror of a schema no compiler connects it to, so the memberwise widening is the
+    // only sweep pressure that exists.
+    public init(provider: String, defaultModel: String, models: [SyncConfigModelInfo], defaultEffort: String, clientEfforts: [String]) {
+        self.provider = provider
         self.defaultModel = defaultModel
         self.models = models
         self.defaultEffort = defaultEffort
@@ -974,8 +994,10 @@ public struct SyncConfigSnapshot: Equatable, Sendable {
 
     /// What a client holds before it has ever been told a catalogue — every field at its ABSENT
     /// value, none of them a fallback. A picker built on this offers no model rows and no effort
-    /// rows, which is the honest rendering of "I have not been told".
-    public static let empty = SyncConfigSnapshot(defaultModel: "", models: [], defaultEffort: "", clientEfforts: [])
+    /// rows, which is the honest rendering of "I have not been told". `provider` is `""` here for
+    /// the same reason and NOT `"none"`: `"none"` is a daemon SAYING it runs no provider, while this
+    /// value is nobody having said anything yet.
+    public static let empty = SyncConfigSnapshot(provider: "", defaultModel: "", models: [], defaultEffort: "", clientEfforts: [])
 }
 
 extension NormaClient {
@@ -1009,6 +1031,10 @@ extension NormaClient {
             return SyncConfigModelInfo(id: id, efforts: efforts)
         }
         return SyncConfigSnapshot(
+            // Absent → `""`: an older daemon, decoded as "nobody has said" rather than as a claim.
+            // Never defaulted to a provider name — a guessed identity is worse than none, because
+            // the whole point of the field is being able to tell a foreign catalogue from your own.
+            provider: r["provider"]?.stringValue ?? "",
             defaultModel: r["defaultModel"]?.stringValue ?? "",
             models: models,
             defaultEffort: r["defaultEffort"]?.stringValue ?? "",

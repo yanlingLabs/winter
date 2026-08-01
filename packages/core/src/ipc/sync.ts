@@ -634,7 +634,29 @@ export interface SyncConfigContext {
    *  that cannot enumerate) — see `SyncConfigResult.models` for why the client must WAIT on that
    *  rather than derive one. */
   knownModels?(): ModelInfo[];
+  /** WHICH PROVIDER this whole bundle describes (whole-branch review C1) — wired (ipc/server.ts →
+   *  daemon.ts) from the id of the very `Provider` instance whose `models()` becomes `knownModels`
+   *  above, so the identity and the catalogue can never disagree. `Provider.id` is the same
+   *  vocabulary as `ProviderSettings.type` (`"codex-oauth"` / `"openai-compatible"`, settings.ts)
+   *  by construction: `createProvider` branches on that literal and each provider's `id` is it.
+   *
+   *  Deliberately NOT a fresh `settings.provider.type` read, and deliberately NOT off `liveModel`'s
+   *  resolver: the provider TYPE is boot-bound (a settings.json edit that changes it needs a daemon
+   *  restart — providers/manager.ts), so a live read would report a provider whose catalogue this
+   *  bundle is not serving. Reporting the running instance is the only answer that agrees with
+   *  `models`/`defaultModel` beside it.
+   *
+   *  Absent (a daemon with no agent provider at all) degrades to `"none"`, not to `""`: this is the
+   *  one field on this wire with no empty sentinel — see `SyncConfigResult.provider`. */
+  liveProvider?(): string;
 }
+
+/** What `sync.config` reports when this daemon has no agent provider configured at all. A real
+ *  answer, not a sentinel: `defaultModel` is `""` and `models` is `[]` on such a daemon, so a client
+ *  applying the mismatch rule discards exactly nothing it could have used — and a client that
+ *  somehow shares this daemon's (nonexistent) provider is not a case that can arise. Kept a distinct
+ *  token from any `ProviderSettings.type` literal so it can never read as a real provider. */
+export const NO_PROVIDER = "none";
 
 /** The reasoning-effort levels one model accepts.
  *
@@ -699,6 +721,11 @@ export function clientEfforts(): string[] {
  *  provider ever enumerates hundreds of models, cap it HERE, at the projection, rather than trusting
  *  that observation to stay true. */
 export async function syncConfig(ctx: SyncConfigContext): Promise<SyncConfigResult> {
+  // Whole-branch review C1 — FIRST, because it is what makes everything after it interpretable: a
+  // catalogue and a default model mean nothing to a client that runs its own engine until it knows
+  // WHOSE they are. An empty/absent getter reports "none" rather than "", the one field here with
+  // no empty sentinel (see `SyncConfigResult.provider`).
+  const provider = ctx.liveProvider?.() || NO_PROVIDER;
   const exaKey = (await ctx.secret?.(EXA_API_KEY_SECRET)) ?? null;
   const dangerousDomains = ctx.dangerousDomainsAdded?.() ?? [];
   const defaultModel = ctx.liveModel?.() ?? "";
@@ -709,7 +736,7 @@ export async function syncConfig(ctx: SyncConfigContext): Promise<SyncConfigResu
   // rides once for the whole daemon. Constant today; served rather than baked into the client for
   // the same reason the catalogue is — a tier the Mac stops offering must disappear from every
   // paired device on its next connect, with no app release.
-  return { exaKey, dangerousDomains, defaultModel, models, defaultEffort, clientEfforts: clientEfforts() };
+  return { provider, exaKey, dangerousDomains, defaultModel, models, defaultEffort, clientEfforts: clientEfforts() };
 }
 
 // ------------------------------------------------------------------------------------------------

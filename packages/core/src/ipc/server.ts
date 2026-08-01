@@ -164,6 +164,15 @@ export interface IpcServerOptions {
   // off `opts.engine.knownModels()`, the same accessor session.setModel/sync.push already validate
   // against, so the phone can never be served a lineup this daemon would itself reject.
   liveEffort?: () => string;
+  // Whole-branch review C1 (`sync.config`): WHICH provider the two fields above describe — the id
+  // of the running `Provider` instance, which is `ProviderSettings.type`'s own vocabulary. Optional
+  // on the same terms as its neighbours, but its absent value is `"none"` rather than `""`: this is
+  // the one field on that wire with no empty sentinel (`SyncConfigResult.provider`).
+  //
+  // Boot-bound BY DESIGN, unlike `liveModel`/`liveEffort` beside it — it must agree with the
+  // CATALOGUE, which is bound to the same instance, not with a settings.json a restart has not
+  // picked up yet. See `SyncConfigContext.liveProvider`.
+  liveProvider?: () => string;
   // Phase 4b Task 4 (spec §3): the plugin tool bridge. `registry` is the SAME ToolRegistry the
   // AgentEngine executes tool calls against (daemon.ts shares the one instance) — tool.register
   // registers `plugin__<pluginId>__<tool>` into it; the socket close() handler and the
@@ -1298,6 +1307,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           dangerousDomainsAdded: opts.dangerousDomainsAdded ? () => opts.dangerousDomainsAdded!() : undefined,
           liveModel: opts.liveModel,
           liveEffort: opts.liveEffort,
+          // Whole-branch review C1: the identity of the provider the `knownModels` below belongs to
+          // — served together so a client can tell a foreign catalogue from its own.
+          liveProvider: opts.liveProvider,
           // provider-correctness T3: the EXACT catalogue session.setModel validates against, a few
           // hundred lines above (`opts.engine?.knownModels() ?? []`), and the one sync.push consults
           // for `knownModelIds`.

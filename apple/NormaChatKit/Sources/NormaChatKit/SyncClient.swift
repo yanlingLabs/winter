@@ -135,6 +135,29 @@ public struct SyncConfigModel: Codable, Equatable, Sendable {
 /// never-synced rule (WAIT, never guess) is what makes that safe. `[]` and `""` are the ABSENCE of
 /// a catalogue, never a fallback one; nothing here may invent slugs or levels from them.
 public struct SyncConfig: Codable, Equatable, Sendable {
+    /// WHICH PROVIDER this whole bundle describes — `"codex-oauth"` / `"openai-compatible"`, the
+    /// Mac's `ProviderSettings.type` vocabulary; `"none"` when that Mac has no provider configured
+    /// at all. On the wire it is `z.string().min(1)`: the one field here with NO empty sentinel,
+    /// because a daemon always knows which provider it is running (including "not one").
+    ///
+    /// **THE RULE (whole-branch review C1, and the one T6b must implement): a provider MISMATCH
+    /// means NEVER-SYNCED for the model half.** This device runs its OWN chat engine on its OWN
+    /// codex-oauth credentials, so a non-empty `provider` that is not ours means `defaultModel` (and
+    /// `models`, already `[]`) describe SOMEBODY ELSE'S endpoint and must be discarded, not applied.
+    ///
+    /// It closes a live 400. On an `openai-compatible` Mac the provider is built with no enumerable
+    /// catalogue, so `models` is honestly `[]` — but `defaultModel` is still a non-empty FOREIGN
+    /// slug (a llama/BYOK name). `ChatConfigStore.apply` stores any non-empty `defaultModel`, so
+    /// this device would then send that slug to Codex `/responses` and be 400'd on its first turn.
+    /// The "an empty catalogue is ignored on apply" rule governs `models` ONLY and does not reach
+    /// `defaultModel`; nothing but the provider identity can.
+    ///
+    /// **`""` (an older Mac, before the field existed) is NOT a mismatch.** It means "the Mac did
+    /// not say", which is the pre-field status quo and must keep behaving exactly like it. Treating
+    /// unknown as foreign would take local chat down on every Mac built before this field — the
+    /// same failure the leniency below exists to prevent, arriving through the guard. Only a
+    /// NON-EMPTY value that differs from ours is a mismatch.
+    public let provider: String
     public let exaKey: String?
     public let dangerousDomains: [String]
     public let defaultModel: String
@@ -159,8 +182,9 @@ public struct SyncConfig: Codable, Equatable, Sendable {
     /// exactly what you are told and invent nothing, the same never-synced rule the catalogue keeps.
     public let clientEfforts: [String]
 
-    public init(exaKey: String?, dangerousDomains: [String], defaultModel: String,
+    public init(provider: String, exaKey: String?, dangerousDomains: [String], defaultModel: String,
                 models: [SyncConfigModel], defaultEffort: String, clientEfforts: [String]) {
+        self.provider = provider
         self.exaKey = exaKey
         self.dangerousDomains = dangerousDomains
         self.defaultModel = defaultModel
@@ -171,7 +195,9 @@ public struct SyncConfig: Codable, Equatable, Sendable {
 
     // No default arguments on the init above, deliberately: every construction site — including both
     // test doubles — must be UPDATED rather than silently keep building the old three-field shape
-    // and serving an empty catalogue nobody notices. The compile error IS the sweep.
+    // and serving an empty catalogue nobody notices. The compile error IS the sweep. `provider`
+    // (whole-branch review C1) is first and defaultless for exactly that reason: it is a field no
+    // fixture and no generated artifact would ever have forced anyone to notice.
 
     /// Hand-written ONLY to make the two new fields absence-tolerant. The three original fields are
     /// decoded byte-for-byte as the synthesized initializer already did — `decodeIfPresent` for the
@@ -182,6 +208,11 @@ public struct SyncConfig: Codable, Equatable, Sendable {
     /// clearing a credential, and this change must not quietly move that line.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        // Tolerated-absent (whole-branch review C1), and `""` is a LOAD-BEARING degrade, not a
+        // shrug: it means "this Mac predates the field", which the mismatch rule must read as
+        // compatible. Requiring it would fail the whole bundle against every older daemon — Exa key
+        // and dangerous-domain list included — which is the same trap the two decodes below avoid.
+        provider = try c.decodeIfPresent(String.self, forKey: .provider) ?? ""
         exaKey = try c.decodeIfPresent(String.self, forKey: .exaKey)
         dangerousDomains = try c.decode([String].self, forKey: .dangerousDomains)
         defaultModel = try c.decode(String.self, forKey: .defaultModel)

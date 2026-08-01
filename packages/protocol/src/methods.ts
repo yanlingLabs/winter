@@ -1194,6 +1194,36 @@ export const SyncConfigModel = z.object({
 export type SyncConfigModel = z.infer<typeof SyncConfigModel>;
 
 export const SyncConfigResult = z.object({
+  /** WHICH PROVIDER this whole bundle describes — `"codex-oauth"` / `"openai-compatible"`, the
+   *  `ProviderSettings.type` vocabulary (packages/core/src/settings.ts), `"none"` on a daemon with
+   *  no provider configured at all.
+   *
+   *  **NOT sentinel-optional, unlike every other field here.** `models: []` and `defaultEffort: ""`
+   *  are real answers meaning "I have none"; there is no equivalent for this one, because the daemon
+   *  always knows which provider it is running (including "not one"). `min(1)`, always stated.
+   *
+   *  **THE RULE THIS FIELD EXISTS FOR: a provider MISMATCH means NEVER-SYNCED for the model half.**
+   *  A client that runs its OWN engine on its OWN credentials — the phone, which is always
+   *  codex-oauth (`phone-always-local`) — must, on a non-empty `provider` that is not its own,
+   *  discard `defaultModel` (and `models`, already `[]`) instead of adopting it. Without that rule
+   *  the bundle is not self-describing and one live 400 follows directly: on an `openai-compatible`
+   *  Mac the provider is constructed with no enumerable catalogue (`ProviderSettings` has no
+   *  `models` field), so `models` is `[]` — but `defaultModel` is still a non-empty FOREIGN slug (a
+   *  llama/BYOK name). A phone that stores any non-empty `defaultModel` then sends that slug to
+   *  Codex `/responses` and is 400'd on its first turn. The "an empty catalogue is ignored on apply"
+   *  rule governs `models` ONLY and does not close this; nothing but the provider identity can.
+   *
+   *  ABSENT (a daemon built before this field) is NOT a mismatch. A client mirror decodes absence as
+   *  `""` — "the Mac did not say" — which is the pre-field status quo and must keep behaving like
+   *  it; treating unknown as mismatched would take local chat down on every older Mac.
+   *
+   *  BOOT-BOUND, deliberately, and it agrees with `models` by construction: it is the identity of
+   *  the very provider instance whose `models()` feeds this bundle, NOT a fresh read of
+   *  `settings.provider.type`. A settings.json edited to a different `provider.type` needs a daemon
+   *  restart to take effect (providers/manager.ts says so), so a live-read type would claim a
+   *  provider whose catalogue this bundle is not reporting — the same mismatch, manufactured by the
+   *  field meant to detect it. */
+  provider: z.string().min(1),
   /** `null` when no key is stored — never an empty string (indistinguishable from "stored but
    *  blank"). Sourced from `Bun.secrets` (`EXA_API_KEY_SECRET`), the SAME keychain item Search's
    *  own accessor reads — never written to disk anywhere in this envelope. */

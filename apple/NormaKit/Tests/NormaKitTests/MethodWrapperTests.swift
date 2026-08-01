@@ -975,13 +975,15 @@ extension MethodWrapperTests {
     func testSyncConfigDecodesTheCatalogueAndBothEffortLists() async throws {
         let (client, t) = try await connected()
 
-        let catalogueBody = #"{"exaKey":"exa_secret","dangerousDomains":["evil.test"],"defaultModel":"gpt-5.6-sol","models":[{"id":"gpt-5.6-sol","efforts":["none","low","medium","high","xhigh","max"]},{"id":"gpt-5.6-luna","efforts":["low","high"]}],"defaultEffort":"medium","clientEfforts":["ultra"]}"#
+        let catalogueBody = #"{"provider":"codex-oauth","exaKey":"exa_secret","dangerousDomains":["evil.test"],"defaultModel":"gpt-5.6-sol","models":[{"id":"gpt-5.6-sol","efforts":["none","low","medium","high","xhigh","max"]},{"id":"gpt-5.6-luna","efforts":["low","high"]}],"defaultEffort":"medium","clientEfforts":["ultra"]}"#
         let (req, snapshot) = try await roundTrip(t, sentIndex: 1, result: catalogueBody) {
             try await client.syncConfig()
         }
         XCTAssertEqual(req["method"] as? String, "sync.config")
         XCTAssertEqual(req["params"] as? [String: Any] as NSDictionary?, [:] as NSDictionary,
                        "sync.config takes NO params — an empty object, matching SyncConfigParams")
+        XCTAssertEqual(snapshot.provider, "codex-oauth",
+                       "whole-branch review C1: the bundle says WHOSE catalogue this is, not only what it holds")
         XCTAssertEqual(snapshot.defaultModel, "gpt-5.6-sol")
         XCTAssertEqual(snapshot.defaultEffort, "medium")
         XCTAssertEqual(snapshot.models, [
@@ -1001,7 +1003,7 @@ extension MethodWrapperTests {
         // A compile-level fact, asserted through Mirror so it survives a refactor that adds the
         // field back without anyone noticing this file.
         let fields = Mirror(reflecting: snapshot).children.compactMap(\.label)
-        XCTAssertEqual(Set(fields), ["defaultModel", "models", "defaultEffort", "clientEfforts"])
+        XCTAssertEqual(Set(fields), ["provider", "defaultModel", "models", "defaultEffort", "clientEfforts"])
     }
 
     /// An OLDER daemon (pre-T3/T5) answers without the catalogue fields. That must degrade to the
@@ -1010,8 +1012,10 @@ extension MethodWrapperTests {
     func testSyncConfigDegradesToAbsentValuesOnAnOlderDaemon() async throws {
         let (_, snapshot) = try await roundTripSyncConfig(#"{"exaKey":null,"dangerousDomains":[],"defaultModel":"gpt-5.6-sol"}"#)
         XCTAssertEqual(snapshot.defaultModel, "gpt-5.6-sol")
-        XCTAssertEqual(snapshot, SyncConfigSnapshot(defaultModel: "gpt-5.6-sol", models: [],
+        XCTAssertEqual(snapshot, SyncConfigSnapshot(provider: "", defaultModel: "gpt-5.6-sol", models: [],
                                                     defaultEffort: "", clientEfforts: []))
+        XCTAssertEqual(snapshot.provider, "",
+                       #"an absent provider is "nobody said", never a guessed identity — the field exists to tell catalogues apart"#)
         XCTAssertEqual(SyncConfigSnapshot.empty.models, [], "the never-told state has no catalogue at all")
     }
 

@@ -961,7 +961,7 @@ final class SyncClientTests: XCTestCase {
 
     func testFetchConfigAndMemory() async throws {
         let daemon = FakeDaemon()
-        let served = SyncConfig(exaKey: "exa-123", dangerousDomains: ["evil.test"], defaultModel: "gpt-5.6-terra",
+        let served = SyncConfig(provider: "codex-oauth", exaKey: "exa-123", dangerousDomains: ["evil.test"], defaultModel: "gpt-5.6-terra",
                                 models: [SyncConfigModel(id: "gpt-5.6-terra", efforts: FakeDaemon.wireEfforts)],
                                 defaultEffort: "high", clientEfforts: FakeDaemon.clientTiers)
         daemon.config = served
@@ -1006,7 +1006,7 @@ final class SyncClientTests: XCTestCase {
     /// This pins that the kit hands its caller a truthful `[]` rather than helping.
     func testAnUnenumerableProviderYieldsAnEmptyCatalogueNeverAGuessedOne() async throws {
         let daemon = FakeDaemon()
-        daemon.config = SyncConfig(exaKey: nil, dangerousDomains: [], defaultModel: "my-local-llm",
+        daemon.config = SyncConfig(provider: "openai-compatible", exaKey: nil, dangerousDomains: [], defaultModel: "my-local-llm",
                                    models: [], defaultEffort: "", clientEfforts: [])
         let store = try LocalEventStore(directory: dir)
         let client = SyncClient(store: store, conn: daemon)
@@ -1093,7 +1093,7 @@ final class SyncClientTests: XCTestCase {
     /// A Mac that offers NO tiers says so, and `[]` is never a licence to substitute one.
     func testADaemonOfferingNoTiersDecodesAsEmptyNeverAsAGuess() async throws {
         let daemon = FakeDaemon()
-        daemon.config = SyncConfig(exaKey: nil, dangerousDomains: [], defaultModel: "my-local-llm",
+        daemon.config = SyncConfig(provider: "openai-compatible", exaKey: nil, dangerousDomains: [], defaultModel: "my-local-llm",
                                    models: [], defaultEffort: "", clientEfforts: [])
         let store = try LocalEventStore(directory: dir)
         let client = SyncClient(store: store, conn: daemon)
@@ -1129,6 +1129,68 @@ final class SyncClientTests: XCTestCase {
         let body = #"{"exaKey":null,"dangerousDomains":[],"defaultModel":"m","defaultEffort":"","models":[{"id":"m","efforts":[]}]}"#
         let config = try JSONDecoder().decode(SyncConfig.self, from: Data(body.utf8))
         XCTAssertEqual(config.models, [SyncConfigModel(id: "m", efforts: [])])
+    }
+
+    // MARK: - whole-branch review C1: `provider` — the field that makes the bundle self-describing
+
+    /// The identity rides the wire and reaches the caller. Every other field says WHAT the Mac runs;
+    /// this one says WHOSE, and without it a phone cannot tell a catalogue it may adopt from one it
+    /// must discard.
+    func testTheProviderIdentityRidesTheConfigBundle() async throws {
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        let config = try await client.fetchConfig()
+        XCTAssertEqual(config.provider, "codex-oauth",
+                       "the double models a codex Mac — the same provider this device runs")
+    }
+
+    /// THE LIVE 400 THIS FIELD CLOSES, as a shape assertion. A BYOK Mac honestly reports an EMPTY
+    /// catalogue — its provider cannot enumerate — while `defaultModel` stays a non-empty FOREIGN
+    /// slug. `ChatConfigStore.apply` stores any non-empty `defaultModel`, so a phone reading only
+    /// those two would send a llama slug to Codex `/responses` and be 400'd on its first turn.
+    /// `models: []` does not protect it (the empty-catalogue rule governs `models` only); the
+    /// provider identity is the only field that distinguishes this bundle from a codex Mac's.
+    func testABYOKMacsBundleIsDistinguishableEvenThoughItsCatalogueIsEmpty() async throws {
+        let daemon = FakeDaemon()
+        daemon.config = SyncConfig(provider: "openai-compatible", exaKey: nil, dangerousDomains: [],
+                                   defaultModel: "llama-3.3-70b-local", models: [], defaultEffort: "",
+                                   clientEfforts: [])
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        let config = try await client.fetchConfig()
+        XCTAssertEqual(config.models, [], "honest: that provider cannot enumerate")
+        XCTAssertFalse(config.defaultModel.isEmpty, "…yet the slug is NOT empty — this is the trap")
+        XCTAssertNotEqual(config.provider, "codex-oauth",
+                          "the mismatch is visible: this device must treat the model half as never-synced")
+    }
+
+    /// A PRE-C1 Mac degrades to `""`, and `""` must NOT read as a mismatch. This is the one place
+    /// the leniency direction matters: requiring the field would fail the whole bundle (Exa key and
+    /// dangerous-domain list included) against every older daemon, and treating absence as FOREIGN
+    /// would take local chat down on every one of them instead. Absent means "the Mac did not say",
+    /// which is the pre-field status quo.
+    func testAPreProviderDaemonBodyDecodesAsUnknownRatherThanForeign() throws {
+        let body = Data(#"{"exaKey":"k","dangerousDomains":[],"defaultModel":"gpt-5.6-sol","models":[],"defaultEffort":"high","clientEfforts":[]}"#.utf8)
+        let config = try JSONDecoder().decode(SyncConfig.self, from: body)
+        XCTAssertEqual(config.provider, "")
+        XCTAssertEqual(config.defaultModel, "gpt-5.6-sol", "the fields that DO exist still land — a degrade, not a drop")
+    }
+
+    /// The value survives a real encode/decode round trip verbatim, including a provider name this
+    /// build has never heard of. The Mac is the authority on what it runs; the phone compares that
+    /// string against its own and does not filter it to a vocabulary it knows — which is also why
+    /// the wire type is a plain string rather than an enum.
+    func testTheProviderRoundTripsVerbatimIncludingAnUnfamiliarOne() throws {
+        for name in ["codex-oauth", "openai-compatible", "none", "some-future-provider"] {
+            let body = #"{"provider":"\#(name)","exaKey":null,"dangerousDomains":[],"defaultModel":"m","defaultEffort":"","models":[],"clientEfforts":[]}"#
+            let config = try JSONDecoder().decode(SyncConfig.self, from: Data(body.utf8))
+            XCTAssertEqual(config.provider, name)
+            let reencoded = try JSONDecoder().decode(SyncConfig.self, from: try JSONEncoder().encode(config))
+            XCTAssertEqual(reencoded, config, "the identity must survive this kit's own re-encode: \(name)")
+        }
     }
 
     // MARK: - T11-review F-8: the per-session leg
@@ -1226,14 +1288,16 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
     var memoryPageSize: Int? = nil
     /// Runs before a pull is served, once, keyed by session — the racing-daemon-append hook.
     var beforePull: [String: () -> Void] = [:]
-    /// G9 (provider-correctness T3, widened again by T5): the default carries the FULL `sync.config`
-    /// shape — the model catalogue, the live effort, and the Norma-level client tiers, not just a
-    /// model string. A double that kept serving the old
+    /// G9 (provider-correctness T3, widened again by T5 and by the whole-branch review's C1): the
+    /// default carries the FULL `sync.config` shape — the PROVIDER IDENTITY, the model catalogue,
+    /// the live effort, and the Norma-level client tiers, not just a model string. `codex-oauth`
+    /// specifically, because that is what the phone itself runs: a double serving a foreign provider
+    /// by default would put every consumer on the never-synced path. A double that kept serving the old
     /// three-field body would have every catalogue consumer testing against an empty lineup while the
     /// real wire always sends one; that is the precise class of gap that let two real bugs through a
     /// green suite in an earlier slice. `SyncConfig`'s memberwise init takes no default arguments, so
     /// this line could not have been left behind silently.
-    var config = SyncConfig(exaKey: nil, dangerousDomains: [], defaultModel: "gpt-5.6-sol",
+    var config = SyncConfig(provider: "codex-oauth", exaKey: nil, dangerousDomains: [], defaultModel: "gpt-5.6-sol",
                             models: [
                                 SyncConfigModel(id: "gpt-5.6-sol", efforts: FakeDaemon.wireEfforts),
                                 SyncConfigModel(id: "gpt-5.6-terra", efforts: FakeDaemon.wireEfforts),

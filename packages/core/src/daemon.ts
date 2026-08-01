@@ -1227,6 +1227,16 @@ export async function startDaemon(opts: {
     : undefined;
   const liveModel = liveSelection ? () => liveSelection().model : undefined;
   const liveEffort = liveSelection ? () => liveSelection().reasoningEffort ?? "" : undefined;
+  // Whole-branch review C1 — WHICH provider the two lines above (and the catalogue the server reads
+  // off `engine`) belong to. Read off `agentProvider.provider` and NOT off `liveSelection`: the
+  // provider TYPE is boot-bound (`buildLiveModelResolver` closes over the boot `providerType` and
+  // deliberately ignores a live-read one, because changing `provider.type` needs a restart), so
+  // routing it through the hot resolver would advertise a hotness that does not exist. This is the
+  // SAME instance `providerInfo` above and `engine.knownModels()` (via `cfg.provider.provider`)
+  // read, so the identity and the catalogue cannot drift apart; `Provider.id` is `codex-oauth` /
+  // `openai-compatible`, `ProviderSettings.type`'s own vocabulary. `undefined` on a no-provider
+  // daemon — ipc/sync.ts degrades that to `"none"`, never to `""`.
+  const liveProvider = agentProvider ? () => agentProvider!.provider.id : undefined;
 
   const server: IpcServer = startIpcServer({
     socketPath: dirs.socketPath,
@@ -1266,6 +1276,8 @@ export async function startDaemon(opts: {
     // server reads it off the `engine` it is already handed, so there is exactly one catalogue.
     liveModel,
     liveEffort,
+    // Whole-branch review C1: the provider identity that makes the two above interpretable.
+    liveProvider,
     mcp: mcp ?? undefined,
     // Phase 4b Task 4: the plugin tool bridge. `registry` is undefined whenever agentProvider is
     // null (see `sharedRegistry`'s doc comment above). `supervisor`, unlike `registry`, is now

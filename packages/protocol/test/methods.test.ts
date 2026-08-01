@@ -1163,6 +1163,7 @@ describe("workflow RPCs (CC-parity phase 3, Track C Task C2)", () => {
 // ------------------------------------------------------------------------------------------------
 describe("sync.config schema (provider-correctness T3)", () => {
   const full = {
+    provider: "codex-oauth",
     exaKey: null,
     dangerousDomains: [],
     defaultModel: "gpt-5.6-sol",
@@ -1230,6 +1231,36 @@ describe("sync.config schema (provider-correctness T3)", () => {
     expect(() => SyncConfigResult.parse({ ...full, clientEfforts: "ultra" })).toThrow();
   });
 
+  // provider-correctness whole-branch review C1 — `provider`: what makes this bundle
+  // SELF-DESCRIBING. Every other field says WHAT the Mac runs; without this one nothing says WHOSE.
+  // A phone runs its own engine on codex-oauth credentials, so an `openai-compatible` Mac's
+  // non-empty foreign `defaultModel` (its `models` is `[]` — that provider cannot enumerate) is a
+  // 400 on the phone's first turn unless the phone can SEE that it came from another provider.
+  test("provider is REQUIRED and NON-EMPTY — the one field with no 'I have none' sentinel", () => {
+    const { provider, ...noProvider } = full;
+    expect(() => SyncConfigResult.parse(noProvider)).toThrow();
+    // `""` is how `defaultEffort` says "unset" and `[]` is how `models` says "none". There is no
+    // such state here: a daemon always knows which provider it is running, and "no provider
+    // configured" is itself a stateable answer (`"none"`), not a silence.
+    expect(() => SyncConfigResult.parse({ ...full, provider: "" })).toThrow();
+    expect(SyncConfigResult.parse({ ...full, provider: "none" }).provider).toBe("none");
+    expect(SyncConfigResult.parse({ ...full, provider: "openai-compatible" }).provider).toBe("openai-compatible");
+    // Not an enum on the wire, deliberately: the phone's rule is "not MINE ⇒ never-synced", which
+    // is decided by string inequality against its own provider and needs no shared vocabulary. A
+    // zod enum here would make a Mac that gains a third provider type fail its phone's whole
+    // bootstrap — the Exa key and dangerous-domain list included — instead of degrading it.
+    expect(SyncConfigResult.parse({ ...full, provider: "some-future-provider" }).provider).toBe("some-future-provider");
+  });
+
+  test("the shape C1 exists for: a BYOK Mac states its provider beside an empty catalogue and a foreign slug", () => {
+    // Exactly what an `openai-compatible` daemon serves. `models: []` alone does NOT protect a
+    // phone (T6b's "empty catalogue is ignored on apply" governs `models` only); `defaultModel` is
+    // still non-empty and still foreign, and only `provider` distinguishes it from a codex Mac's.
+    const byok = { ...full, provider: "openai-compatible", defaultModel: "llama-3.3-70b-local", models: [] };
+    expect(SyncConfigResult.parse(byok)).toEqual(byok);
+    expect(byok.provider).not.toBe("codex-oauth");
+  });
+
   test("efforts ride per model, and rows may legitimately disagree", () => {
     // Uniform today; the schema must not be the thing that stops a divergence from being expressed,
     // because the API demonstrably validates effort per model (`minimal` -> `unsupported_value`
@@ -1242,5 +1273,40 @@ describe("sync.config schema (provider-correctness T3)", () => {
       ],
     };
     expect(SyncConfigResult.parse(divergent)).toEqual(divergent);
+  });
+
+  // ----------------------------------------------------------------------------------------------
+  // Whole-branch review C3 — THE MIRROR TRIPWIRE.
+  //
+  // `sync.config` is mirrored BY HAND into two Swift types that no compiler and no fixture connects
+  // to this schema: NormaChatKit's `SyncConfig` (the phone's whole local-chat bootstrap) and
+  // NormaKit's `SyncConfigSnapshot` (the Mac pickers' projection). `packages/protocol`'s generated
+  // artifacts cover EVENTS only — a method result gets no fixture, so the round-trip test that
+  // normally forces a Swift sync never fires for this type. Adding a field here therefore breaks
+  // NOTHING anywhere, in either language, and the phone simply never learns about it.
+  //
+  // This is that missing break. It is a KEY-SET pin, not a behaviour test: the shape of every field
+  // is already covered above; what nobody else notices is a field ARRIVING or LEAVING.
+  // ----------------------------------------------------------------------------------------------
+  test("MIRROR TRIPWIRE — the field set is pinned; changing it means editing two Swift files by hand", () => {
+    expect(
+      Object.keys(SyncConfigResult.shape).sort(),
+      "sync.config's FIELD SET changed. Nothing else in either language will tell you, so update " +
+      "BOTH hand-written Swift mirrors in the same commit, then this pin:\n" +
+      "  • apple/NormaChatKit/Sources/NormaChatKit/SyncClient.swift  (struct SyncConfig — the phone's " +
+      "local-chat bootstrap; its memberwise init takes NO default arguments on purpose, so every " +
+      "construction site including both test doubles must be updated)\n" +
+      "  • apple/NormaKit/Sources/NormaKit/NormaClient+Methods.swift (struct SyncConfigSnapshot — the " +
+      "Mac pickers' projection; widen it only for a field a Mac caller genuinely needs)\n" +
+      "…and, at the next kit tag, ../norma-ios's ScriptedSyncDaemon double.",
+    ).toEqual([
+      "clientEfforts",
+      "dangerousDomains",
+      "defaultEffort",
+      "defaultModel",
+      "exaKey",
+      "models",
+      "provider",
+    ]);
   });
 });
