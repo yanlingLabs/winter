@@ -66,7 +66,7 @@ import type { ProviderLink } from "../peripheral/provider-link";
 import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
-import { addLocalDir, loadSettings, saveSettings, type Settings } from "../settings";
+import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, type Settings } from "../settings";
 import {
   deriveInstallName, installPluginFromDir, missingConsents, buildConsentBlock, applyFreshPluginConsent,
   setPluginEnabled, grantPluginConsents, removePluginFromSettings, removePluginDir, stripPluginConsents,
@@ -1166,30 +1166,44 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // values diverge yet.
         //
         // NOT a claim that any other string is "an invalid effort": it is a claim about what is
-        // valid ON THE WIRE. A Norma-level tier that never reaches the wire (the planned `ultra`,
-        // which sends `max` plus a delegation instruction, code sessions only) is a different kind
-        // of value, and when it lands it belongs HERE as an accepted client-side selector
-        // translated before the request — never inside `effortsForModel`, which describes what the
-        // endpoint accepts.
+        // valid ON THE WIRE. A Norma-level tier that never reaches the wire (`ultra`, which sends
+        // `max` plus a delegation instruction, code sessions only) is a different kind of value —
+        // provider-correctness T5 landed it, and, exactly as this comment anticipated, it is
+        // admitted HERE as a client-side selector translated before the request (at
+        // `AgentEngine.resolveSel`), never by adding it to `effortsForModel`.
         if (p.effort !== null) {
-          // The session's EFFECTIVE model, by the same precedence AgentEngine.resolveSel applies:
-          // its own override first, the daemon's live default second. An unknown sessionId is left
-          // to `store.setEffort` below to report — that keeps NOT_FOUND coming from one place
-          // regardless of whether this branch ran.
-          let sessionModel: string | undefined;
-          try { sessionModel = opts.store.meta(p.sessionId).model; } catch { /* unknown id → the store call below owns the error */ }
-          const model = sessionModel ?? opts.liveModel?.() ?? "";
-          const allowed = effortsForModel(model);
-          // m2 review — the carve-out the "never refuse what it advertises, nor advertise what it
-          // refuses" claim doesn't state: if `effortsForModel` ever returns `[]` for a model (an
-          // unknown/BYO slug it can't enumerate), this guard never fires and ANY effort is accepted
-          // for it, even though `sync.config` would advertise none. That is the permissive
-          // direction, and it is deliberate — the same `known.length > 0` idiom session.setModel
-          // uses just above, so a provider that can't enumerate isn't bricked. Left unchanged; it
-          // means the daemon can accept what it does not advertise, never the reverse.
-          if (allowed.length > 0 && !allowed.includes(p.effort)) {
-            const forModel = model ? `by model '${model}'` : "by the configured provider";
-            throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${p.effort}' is not accepted ${forModel} — supported: ${allowed.join(", ")}`);
+          // Read ONCE, for both branches below. An unknown sessionId leaves this undefined and is
+          // left to `store.setEffort` to report — that keeps NOT_FOUND coming from one place
+          // regardless of which branch ran (and is why neither branch may refuse on an absent meta).
+          let sessionMeta: { model?: string; mode?: string } | undefined;
+          try { sessionMeta = opts.store.meta(p.sessionId); } catch { /* unknown id → the store call below owns the error */ }
+          if (isClientEffort(p.effort)) {
+            // ALTERNATIVES, not layers: a tier is deliberately NOT run through `effortsForModel`,
+            // which describes what the ENDPOINT accepts — the tier never reaches the endpoint, so
+            // every model would refuse it and the feature could not exist. The only question for a
+            // tier is whether THIS session may select it, and the answer is code sessions only:
+            // chat and dispatch have their own base prompts and their own narrow toolsets (chat has
+            // no `spawn_agent` at all), so the tier's delegation posture is meaningless-to-harmful
+            // there. `clientEffortEligible` is a fail-closed allowlist — see settings.ts.
+            if (!clientEffortEligible(sessionMeta?.mode)) {
+              throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${p.effort}' is a Norma-level tier offered on code sessions only — this is a '${sessionMeta!.mode}' session (wire efforts: ${effortsForModel(sessionMeta?.model ?? opts.liveModel?.() ?? "").join(", ")})`);
+            }
+          } else {
+            // The session's EFFECTIVE model, by the same precedence AgentEngine.resolveSel applies:
+            // its own override first, the daemon's live default second.
+            const model = sessionMeta?.model ?? opts.liveModel?.() ?? "";
+            const allowed = effortsForModel(model);
+            // m2 review — the carve-out the "never refuse what it advertises, nor advertise what it
+            // refuses" claim doesn't state: if `effortsForModel` ever returns `[]` for a model (an
+            // unknown/BYO slug it can't enumerate), this guard never fires and ANY effort is accepted
+            // for it, even though `sync.config` would advertise none. That is the permissive
+            // direction, and it is deliberate — the same `known.length > 0` idiom session.setModel
+            // uses just above, so a provider that can't enumerate isn't bricked. Left unchanged; it
+            // means the daemon can accept what it does not advertise, never the reverse.
+            if (allowed.length > 0 && !allowed.includes(p.effort)) {
+              const forModel = model ? `by model '${model}'` : "by the configured provider";
+              throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${p.effort}' is not accepted ${forModel} — supported: ${allowed.join(", ")}`);
+            }
           }
         }
         try {

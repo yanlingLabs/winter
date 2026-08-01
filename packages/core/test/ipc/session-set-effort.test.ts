@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, SESSION_EFFORT_MAX_CHARS, type WritableSocket } from "@norma/protocol";
 import { startIpcServer } from "../../src/ipc/server";
-import { effortsForModel } from "../../src/ipc/sync";
+import { clientEfforts, effortsForModel } from "../../src/ipc/sync";
 import { REASONING_EFFORTS } from "../../src/settings";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -277,20 +277,21 @@ describe("session.setEffort round-trip RPC (provider-correctness T4)", () => {
     c.close();
   });
 
-  // SCOPE, stated precisely so a later task reads it correctly: this pins that none of these
-  // reaches the WIRE as an effort. `minimal` is a real level the endpoint refuses per-model;
-  // `ultra` is refused by the global enum layer; `HIGH`/`turbo` are simply not levels. It is NOT a
-  // claim that `ultra` can never be a Norma-level SELECTOR — the planned client-side tier sends
-  // `max` on the wire plus a delegation instruction, and when it lands it is admitted at the
-  // handler as a translated-before-the-request selector, never by adding it to `effortsForModel`.
-  // Whoever builds that will move `ultra` out of this list; the other three must stay.
+  // SCOPE, stated precisely: this pins that none of these reaches the WIRE as an effort. `minimal`
+  // is a real level the endpoint refuses per-model; `HIGH`/`turbo` are simply not levels.
+  //
+  // `ultra` USED TO BE IN THIS LIST and is deliberately no longer — provider-correctness T5 landed
+  // the Norma-level tier the earlier note anticipated, so `ultra` is now ADMITTED here (for code
+  // sessions) as a selector that is translated to `max` before any request is built, never by
+  // adding it to `effortsForModel`. Its new truth — accepted for code, refused for chat/dispatch —
+  // is pinned in its own describe block below; the other three must stay here.
   test("an effort OUTSIDE the model's list is refused with INVALID_PARAMS and never reaches the column", async () => {
     const { store, socketPath, harnessToken } = await boot({ liveModel: () => "gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "effort-setter");
     const sessionId = store.createSession("global");
 
-    for (const bogus of ["minimal", "ultra", "HIGH", "turbo"]) {
+    for (const bogus of ["minimal", "HIGH", "turbo"]) {
       const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort: bogus });
       expect(res.error).toBeTruthy();
       expect(res.error.code).toBe(ERR.INVALID_PARAMS);
@@ -324,6 +325,11 @@ describe("session.setEffort round-trip RPC (provider-correctness T4)", () => {
   // A daemon with no provider at all (no liveModel wired — most test harnesses, and a real daemon
   // started with agentProvider: null) still validates: there is no model to name, but the effort
   // set is not empty, so a bogus value is still refused rather than silently stored.
+  //
+  // T5 note: the bogus value here used to be `ultra`, which is now an ACCEPTED tier on a code
+  // session — so it stopped being a witness for this claim. `minimal` replaces it and is a strictly
+  // better one: it is a real level the endpoint refuses per-model, i.e. exactly the kind of value
+  // this "still validated with no provider" branch exists to catch.
   test("with NO provider configured the effort is still validated (a bogus value never reaches the column)", async () => {
     const { store, socketPath, harnessToken } = await boot(); // no liveModel
     const c = await TestClient.connect(socketPath);
@@ -331,7 +337,7 @@ describe("session.setEffort round-trip RPC (provider-correctness T4)", () => {
     const sessionId = store.createSession("global");
 
     expect((await c.request(METHODS.sessionSetEffort, { sessionId, effort: "high" })).error).toBeUndefined();
-    const refused = await c.request(METHODS.sessionSetEffort, { sessionId, effort: "ultra" });
+    const refused = await c.request(METHODS.sessionSetEffort, { sessionId, effort: "minimal" });
     expect(refused.error.code).toBe(ERR.INVALID_PARAMS);
     expect(store.meta(sessionId).effort).toBe("high"); // the refused call left the previous value alone
     c.close();
@@ -357,5 +363,126 @@ describe("store.setEffort: the effort column is durable and its migration is ide
     expect(second.meta(sessionId).effort).toBe("xhigh");
     expect(second.list().find((r) => r.sessionId === sessionId)?.effort).toBe("xhigh");
     second.close();
+  });
+});
+
+// ================================================================================================
+// provider-correctness T5 — `ultra`, a NORMA-LEVEL tier admitted at THIS handler.
+//
+// This is the door, and the FIRST of the tier's two enforcements (the second is `resolveSel`, which
+// keeps a tier that got in some other way — a fork, a hand-edited index — inert on a non-code
+// session; engine-live-model.test.ts pins that half at the request layer).
+//
+// The tier is admitted here rather than inside `effortsForModel` on purpose: that function is the
+// single source for BOTH what `sync.config` advertises per model AND what this handler accepts as a
+// WIRE effort, and a tier inside it would make the daemon advertise a level its own request would
+// be 400'd on. `ultra` is instead advertised through `sync.config`'s separate `clientEfforts`.
+// ================================================================================================
+describe("session.setEffort admits the ultra tier for CODE sessions only (provider-correctness T5)", () => {
+  let stop2: (() => void) | undefined;
+  afterEach(() => { stop2?.(); stop2 = undefined; });
+
+  async function boot2(opts: { liveModel?: () => string } = {}) {
+    const home = mkdtempSync(join(tmpdir(), "norma-set-effort-ultra-"));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, liveModel: opts.liveModel });
+    stop2 = () => { server.stop(); store.close(); };
+    return { store, socketPath, harnessToken: tokens.harness };
+  }
+
+  test("a CODE session accepts `ultra`, and the STORE keeps `ultra` — never silently rewritten to max", async () => {
+    // The stored value is the user's SELECTION, not a wire value. Rewriting it to `max` at set time
+    // would make every picker unable to show what they actually chose, and would erase the tier's
+    // prompt half on the very next turn (resolveSel keys the injection off the tier, not off max).
+    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "effort-setter");
+
+    for (const sessionId of [store.createSession("global"), store.createSession("global", { mode: "code" })]) {
+      const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort: "ultra" });
+      expect(res.error).toBeUndefined();
+      expect(store.meta(sessionId).effort).toBe("ultra");
+    }
+    c.close();
+  });
+
+  for (const mode of ["chat", "dispatch"] as const) {
+    test(`a ${mode.toUpperCase()} session REFUSES \`ultra\` with the same INVALID_PARAMS shape, and the column stays empty`, async () => {
+      const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
+      const c = await TestClient.connect(socketPath);
+      await c.hello(harnessToken, "effort-setter");
+      const sessionId = store.createSession("global", { mode });
+
+      const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort: "ultra" });
+      expect(res.error).toBeTruthy();
+      expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+      expect(res.error.message).toContain("ultra");
+      expect(store.meta(sessionId).effort).toBeUndefined();
+
+      // ...and the refusal is scoped to the TIER: the same session still takes every WIRE effort,
+      // so this is not "chat/dispatch cannot set an effort".
+      for (const effort of effortsForModel("gpt-5.6-sol")) {
+        expect((await c.request(METHODS.sessionSetEffort, { sessionId, effort })).error).toBeUndefined();
+        expect(store.meta(sessionId).effort).toBe(effort);
+      }
+      c.close();
+    });
+  }
+
+  test("the tier is NOT routed through effortsForModel — an unenumerable model still accepts it", async () => {
+    // `effortsForModel` describes what the ENDPOINT accepts; the tier never reaches the endpoint, so
+    // the model is irrelevant to it. This also pins that the two checks are alternatives, not layers:
+    // if the tier were run through the wire check it would be refused by every model.
+    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "effort-setter");
+    const sessionId = store.createSession("global");
+    store.setModel(sessionId, "unknown-vendor/byo-model-x");
+
+    expect((await c.request(METHODS.sessionSetEffort, { sessionId, effort: "ultra" })).error).toBeUndefined();
+    expect(store.meta(sessionId).effort).toBe("ultra");
+    c.close();
+  });
+
+  test("`ultra` on an UNKNOWN session is still NOT_FOUND — the store stays the single source of that error", async () => {
+    const { socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "effort-setter");
+
+    const res = await c.request(METHODS.sessionSetEffort, { sessionId: "s_nosuchsession", effort: "ultra" });
+    expect(res.error.code).toBe(ERR.NOT_FOUND);
+    c.close();
+  });
+
+  test("clearing works the same for a tier as for a wire effort", async () => {
+    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "effort-setter");
+    const sessionId = store.createSession("global");
+
+    expect((await c.request(METHODS.sessionSetEffort, { sessionId, effort: "ultra" })).error).toBeUndefined();
+    expect((await c.request(METHODS.sessionSetEffort, { sessionId, effort: null })).error).toBeUndefined();
+    expect(store.meta(sessionId).effort).toBeUndefined();
+    c.close();
+  });
+
+  // The advertise/accept identity, restated for the tier half. `sync.config` serves TWO lists and
+  // this handler must accept the union of them for a code session — a level a picker can show but
+  // the daemon refuses is the failure mode this whole plan exists to remove.
+  test("every level sync.config advertises — wire efforts AND client tiers — is accepted on a code session", async () => {
+    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "effort-setter");
+    const sessionId = store.createSession("global");
+
+    for (const effort of [...effortsForModel("gpt-5.6-sol"), ...clientEfforts()]) {
+      const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort });
+      expect(res.error).toBeUndefined();
+      expect(store.meta(sessionId).effort).toBe(effort);
+    }
+    c.close();
   });
 });
