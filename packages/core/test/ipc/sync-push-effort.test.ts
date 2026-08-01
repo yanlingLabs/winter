@@ -145,6 +145,30 @@ describe("sync.push meta.effort — the second ingress (provider-correctness T6)
     c.close();
   });
 
+  test("sync.heads reports the effort back — replication is bidirectional or it is a new divergence", async () => {
+    const { socketPath, harnessToken } = await boot({ models: CATALOGUE });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "phone");
+    const withEffort = uuid();
+    const without = uuid();
+
+    await c.request(METHODS.syncPush, {
+      sessionId: withEffort, baseSeq: 0, data: b64(jsonl([created(withEffort)])), complete: true,
+      meta: { effort: "low" },
+    });
+    await c.request(METHODS.syncPush, {
+      sessionId: without, baseSeq: 0, data: b64(jsonl([created(without)])), complete: true,
+    });
+
+    const heads = await c.request(METHODS.syncHeads, {});
+    const rows: any[] = heads.result.sessions;
+    expect(rows.find((s) => s.sessionId === withEffort).effort).toBe("low");
+    // OMITTED, not null — absent means "no override", which is a different fact from any level
+    // (only `title` is explicitly nullable on this row).
+    expect("effort" in rows.find((s) => s.sessionId === without)).toBe(false);
+    c.close();
+  });
+
   test("an omitted effort is UNCHANGED, never cleared — applySyncMeta's present-fields-only rule", async () => {
     const { store, socketPath, harnessToken } = await boot({ models: CATALOGUE });
     const c = await TestClient.connect(socketPath);

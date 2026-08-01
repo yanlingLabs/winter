@@ -57,6 +57,11 @@ public struct SyncHead: Decodable, Equatable, Sendable {
     public let lastSeq: Int
     public let title: String?          // `null` on the wire when the session has none
     public let model: String?
+    /// provider-correctness T6: the Mac's per-session reasoning effort. Absent (never `null`) when
+    /// the session has no override — the same omitted-means-unchanged shape `model` uses, and the
+    /// read half of `PushMetaParams.effort` below. Optional here means BOTH "no override" and "an
+    /// older daemon that predates the field"; neither is a licence to substitute a level.
+    public let effort: String?
     public let forkedFrom: SessionForkRef?
 }
 
@@ -213,6 +218,12 @@ private struct PullParams: Encodable { let sessionId: String; let fromSeq: Int; 
 private struct PushMetaParams: Encodable {
     let title: String?
     let model: String?
+    /// provider-correctness T6. Encoded with `encodeIfPresent` like every optional here, so `nil` is
+    /// ABSENT on the wire — which the daemon reads as "unchanged", never "clear". There is
+    /// deliberately no way to CLEAR an effort through `sync.push`: `applySyncMeta` writes only the
+    /// fields it is given, and a replication meta that could null a column would let a phone that
+    /// simply hasn't learned about an override yet wipe one the Mac just set.
+    let effort: String?
     let forkedFrom: SessionForkRef?
 
     /// The ONE construction point, so the wire's title ceiling is enforced structurally rather than
@@ -222,9 +233,10 @@ private struct PushMetaParams: Encodable {
     /// re-fires on every pass until the title happens to change. Today's titles all come from the
     /// daemon (already bounded) or from `planFork` (bounded there too); this guard is what keeps a
     /// FUTURE local title source — T11's phone-side titler — from silently wedging a session.
-    init(title: String?, model: String?, forkedFrom: SessionForkRef?) {
+    init(title: String?, model: String?, effort: String?, forkedFrom: SessionForkRef?) {
         self.title = title.map(LocalEventStore.capTitle)
         self.model = model
+        self.effort = effort
         self.forkedFrom = forkedFrom
     }
 }
@@ -363,7 +375,7 @@ public actor SyncClient {
         let bytes = try await pullBytes(sessionId: head.sessionId, fromSeq: fromSeq)
         try await store.applyPull(sessionId: head.sessionId, data: bytes,
                                   title: .some(head.title), model: .some(head.model),
-                                  forkedFrom: .some(head.forkedFrom))
+                                  effort: .some(head.effort), forkedFrom: .some(head.forkedFrom))
     }
 
     /// Drains `sync.pull` page by page (cursor-resumed) and returns the concatenated raw JSONL bytes.
@@ -395,7 +407,8 @@ public actor SyncClient {
         let baseSeq = meta.lastSyncedSeq
         let tail = await store.rawTail(sessionId: sessionId, fromSeq: baseSeq)
         if tail.isEmpty { return }
-        let pushMeta = PushMetaParams(title: meta.title, model: meta.model, forkedFrom: meta.forkedFrom)
+        let pushMeta = PushMetaParams(title: meta.title, model: meta.model, effort: meta.effort,
+                                      forkedFrom: meta.forkedFrom)
         do {
             let result = try await pushChunked(sessionId: sessionId, baseSeq: baseSeq, data: tail, meta: pushMeta)
             await store.setLastSyncedSeq(sessionId: sessionId, result.lastSeq)
@@ -450,6 +463,7 @@ public actor SyncClient {
             } else {
                 try await store.applyPull(sessionId: sessionId, data: remainder,
                                           title: .some(daemonHead?.title ?? nil), model: .some(daemonHead?.model ?? nil),
+                                          effort: .some(daemonHead?.effort ?? nil),
                                           forkedFrom: .some(daemonHead?.forkedFrom ?? nil))
             }
             return
@@ -491,7 +505,8 @@ public actor SyncClient {
         // The id is derived by `planFork` from the branch point AND the branch content, so a retry of
         // THIS branch recomputes this id while a different branch gets its own (review round 2).
         let plan = try await store.planFork(originalId: originalId, atSeq: atSeq)
-        let forkPushMeta = PushMetaParams(title: plan.title, model: plan.model, forkedFrom: plan.forkedFrom)
+        let forkPushMeta = PushMetaParams(title: plan.title, model: plan.model, effort: plan.effort,
+                                          forkedFrom: plan.forkedFrom)
         do {
             let result = try await pushChunked(sessionId: plan.newId, baseSeq: 0, data: plan.bytes, meta: forkPushMeta)
             try await store.commitFork(plan, syncedSeq: result.lastSeq)
@@ -527,6 +542,7 @@ public actor SyncClient {
         let branch = try await pullBytes(sessionId: originalId, fromSeq: atSeq)
         try await store.applyPull(sessionId: originalId, data: branch,
                                   title: .some(daemonHead?.title ?? nil), model: .some(daemonHead?.model ?? nil),
+                                  effort: .some(daemonHead?.effort ?? nil),
                                   forkedFrom: .some(daemonHead?.forkedFrom ?? nil))
     }
 

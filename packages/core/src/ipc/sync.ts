@@ -311,6 +311,10 @@ export function syncHeads(store: SessionStore): SyncHeadsResult {
       // fold than a missing key (which is indistinguishable from an older daemon).
       title: row.title ?? null,
       ...(row.model !== undefined ? { model: row.model } : {}),
+      // provider-correctness T6 — the read half of `meta.effort`. Omitted rather than `null` when
+      // absent, matching `model` beside it (only `title` is explicitly nullable here, and its own
+      // doc comment says why): absent means "no override", which is a different fact from any level.
+      ...(row.effort !== undefined ? { effort: row.effort } : {}),
       ...(row.forkedFrom !== undefined ? { forkedFrom: row.forkedFrom } : {}),
     }));
   return { sessions };

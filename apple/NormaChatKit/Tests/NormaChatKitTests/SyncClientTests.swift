@@ -808,6 +808,82 @@ final class SyncClientTests: XCTestCase {
         XCTAssertFalse(daemon.has(id), "every attempt above was refused — nothing was ever created")
     }
 
+    // MARK: - provider-correctness T6: per-session effort replicates BOTH ways
+
+    /// PUSH. The T4-review I2 gap in the direction it was named: a phone-set effort must reach the
+    /// Mac's index. Would fail before T6 — `PushMetaParams` had no `effort` field, so the value
+    /// stayed on the phone and the Mac kept resolving that session at its global default while the
+    /// phone's UI showed the override.
+    func testPushCarriesThePerSessionEffort() async throws {
+        let id = "60000000-0000-4000-8000-000000000001"
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        try await store.createSession(sessionId: id, model: "gpt-5.6-luna", effort: "xhigh")
+        let client = SyncClient(store: store, conn: daemon)
+
+        try await client.syncAll()
+
+        XCTAssertEqual(daemon.meta(id)?.effort, "xhigh", "the phone's effort must ride sync.push's meta")
+        XCTAssertEqual(daemon.meta(id)?.model, "gpt-5.6-luna")
+    }
+
+    /// PULL. The same field in the other direction — the Mac's own picker can set an effort on a
+    /// chat session, and a one-way field would reproduce the identical divergence mirrored.
+    func testPullAdoptsTheDaemonsEffort() async throws {
+        let id = "60000000-0000-4000-8000-000000000002"
+        let daemon = FakeDaemon()
+        daemon.seed(id, [created(id), user(id, 2, "from mac")], title: "Mac chat", model: "gpt-5.6-sol", effort: "low")
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        try await client.syncAll()
+
+        let metas = await store.sessions()
+        XCTAssertEqual(metas.first?.effort, "low")
+    }
+
+    /// ABSENT means "no override", and it must survive as absent rather than being invented into a
+    /// level — the never-synced rule applied to this field. `effort: nil` is the deliberate opt-out
+    /// of `FakeDaemon.seededEffort`.
+    func testAnAbsentEffortStaysAbsentThroughAPull() async throws {
+        let id = "60000000-0000-4000-8000-000000000003"
+        let daemon = FakeDaemon()
+        daemon.seed(id, [created(id), user(id, 2, "from mac")], title: "Mac chat", effort: nil)
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        try await client.syncAll()
+
+        let metas = await store.sessions()
+        XCTAssertNil(metas.first?.effort)
+    }
+
+    /// The effort is SIDECAR-DURABLE — it survives the process, like title/model. A store rebuilt
+    /// over the same directory must recover it, or every relaunch would re-push a nil and the Mac
+    /// would… keep its value (absent = unchanged), leaving the two silently disagreeing forever.
+    func testEffortSurvivesAStoreReopen() async throws {
+        let id = "60000000-0000-4000-8000-000000000004"
+        let store = try LocalEventStore(directory: dir)
+        try await store.createSession(sessionId: id, effort: "high")
+        let before = await store.sessions()
+        XCTAssertEqual(before.first?.effort, "high")
+
+        let reopened = try LocalEventStore(directory: dir)
+        let after = await reopened.sessions()
+        XCTAssertEqual(after.first?.effort, "high", "the meta sidecar must carry effort across a relaunch")
+    }
+
+    /// A FORK inherits the original's effort, exactly as it inherits its model — a fork is the same
+    /// conversation branched, so it must resolve at the same reasoning level.
+    func testAForkInheritsTheEffort() async throws {
+        let id = "60000000-0000-4000-8000-000000000005"
+        let store = try LocalEventStore(directory: dir)
+        try await store.createSession(sessionId: id, model: "gpt-5.6-sol", effort: "xhigh")
+        let plan = try await store.planFork(originalId: id, atSeq: 1)
+        XCTAssertEqual(plan.effort, "xhigh")
+        XCTAssertEqual(plan.model, "gpt-5.6-sol")
+    }
+
     // MARK: - config / memory bootstrap
 
     func testFetchConfigAndMemory() async throws {
@@ -1062,7 +1138,7 @@ final class SyncClientTests: XCTestCase {
 class FakeDaemon: RpcConn, @unchecked Sendable {
     private let lock = NSLock()
     private var logs: [String: [Data]] = [:]                                  // sessionId → lines (seq order)
-    private var metas: [String: (title: String?, model: String?, forkedFrom: SessionForkRef?)] = [:]
+    private var metas: [String: (title: String?, model: String?, effort: String?, forkedFrom: SessionForkRef?)] = [:]
     private var buffer: [String: Data] = [:]                                  // reassembly (single conn)
     private(set) var pushFrames = 0
     private(set) var pullPages = 0
@@ -1101,9 +1177,18 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
 
     // MARK: seeding helpers
 
-    func seed(_ id: String, _ lines: [Data], title: String? = nil, model: String? = nil, forkedFrom: SessionForkRef? = nil) {
-        lock.withLock { logs[id] = lines; metas[id] = (title, model, forkedFrom) }
+    func seed(_ id: String, _ lines: [Data], title: String? = nil, model: String? = nil,
+              effort: String? = FakeDaemon.seededEffort, forkedFrom: SessionForkRef? = nil) {
+        lock.withLock { logs[id] = lines; metas[id] = (title, model, effort, forkedFrom) }
     }
+    /// G10 (provider-correctness T6): every seeded session carries an effort BY DEFAULT, for the same
+    /// reason `config` above carries a full catalogue rather than an empty one. A double whose
+    /// sessions never have an effort would test every consumer against the never-synced path — the
+    /// exact gap shape that let two real bugs through a green suite in an earlier slice — while the
+    /// real wire, once a picker exists, sends one on most sessions. A test that specifically wants
+    /// the no-override case passes `effort: nil` explicitly, which now READS as the deliberate choice
+    /// it is.
+    static let seededEffort: String? = "medium"
     /// Rebuilds a session as the phone's EXACT bytes plus extra lines, so an append lines up seq-wise.
     func replace(_ id: String, phoneBytes: Data, plus extra: [Data]) {
         lock.withLock { logs[id] = LocalChatSession.split(phoneBytes) + extra }
@@ -1113,7 +1198,7 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
     func has(_ id: String) -> Bool { lock.withLock { logs[id] != nil } }
     func sessionIds() -> [String] { lock.withLock { Array(logs.keys) } }
     func rawLog(_ id: String) -> Data { lock.withLock { LocalChatSession.join(logs[id] ?? []) } }
-    func meta(_ id: String) -> (title: String?, model: String?, forkedFrom: SessionForkRef?)? { lock.withLock { metas[id] } }
+    func meta(_ id: String) -> (title: String?, model: String?, effort: String?, forkedFrom: SessionForkRef?)? { lock.withLock { metas[id] } }
     /// The head as the daemon computes it: the LAST EVENT'S SEQ (M5 — not the line count).
     func head(_ id: String) -> Int {
         lock.withLock { (logs[id]?.last.flatMap { LineEnvelope($0)?.seq }) ?? 0 }
@@ -1139,6 +1224,9 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
             var row: [String: Any] = ["sessionId": id, "lastSeq": head(id),
                                       "title": (lock.withLock { metas[id]?.title } as String?) ?? NSNull()]
             if let m = lock.withLock({ metas[id]?.model }) { row["model"] = m }
+            // T6: OMITTED when absent, exactly as the daemon serves it (`syncHeads`, ipc/sync.ts) —
+            // absent means "no override", which is a different fact from any level.
+            if let e = lock.withLock({ metas[id]?.effort }) { row["effort"] = e }
             if let f = lock.withLock({ metas[id]?.forkedFrom }) { row["forkedFrom"] = ["sessionId": f.sessionId, "atSeq": f.atSeq] }
             return row
         }
@@ -1192,6 +1280,15 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
         // check. Only the hard length bound — where the double used to accept "" and any length — is.
         if let model = metaObj?["model"] as? String, model.isEmpty || model.utf16.count > 200 {
             throw RpcError(code: -32602, message: "expected string to have >=1 and <=200 characters (meta.model was \(model.utf16.count))")
+        }
+        // G10 — WIRE RULE mirrored from `SyncPushParams.meta.effort` = `z.string().min(1).max(
+        // SESSION_EFFORT_MAX_CHARS)` (methods.ts, 32 chars), a schema-level bound refused before any
+        // handler logic runs. Distinct from (and NOT modeled here, exactly as for `model`) the
+        // handler-level DROP of a wire-invalid or tier value in `validateSyncMeta`: that needs a
+        // model catalogue and a mode concept this double has neither of, so it is out of scope for a
+        // wire-SHAPE check.
+        if let effort = metaObj?["effort"] as? String, effort.isEmpty || effort.utf16.count > 32 {
+            throw RpcError(code: -32602, message: "expected string to have >=1 and <=32 characters (meta.effort was \(effort.utf16.count))")
         }
         // G6 — WIRE RULE mirrored from `SessionForkRef` (methods.ts:75-78): `{sessionId: min(1) string,
         // atSeq: nonnegative int}`. A malformed shape fails zod's parse BEFORE any handler runs, so the
@@ -1299,7 +1396,9 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
                     fork = SessionForkRef(sessionId: sid, atSeq: at)
                 }
                 metas[id] = (metaObj["title"] as? String ?? metas[id]?.title,
-                             metaObj["model"] as? String ?? metas[id]?.model, fork)
+                             metaObj["model"] as? String ?? metas[id]?.model,
+                             // T6: absent = UNCHANGED, never cleared — `applySyncMeta`'s rule.
+                             metaObj["effort"] as? String ?? metas[id]?.effort, fork)
             }
         }
         return try JSONSerialization.data(withJSONObject: ["applied": true, "lastSeq": head(id), "buffered": 0])

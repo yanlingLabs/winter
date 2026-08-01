@@ -1029,6 +1029,20 @@ export const SyncHeadsResult = z.object({
     /** `null`, never absent, when the session has neither a generated title nor a first message. */
     title: z.string().nullable(),
     model: z.string().optional(),
+    /** provider-correctness T6: the READ half of `sync.push`'s `meta.effort`, and the reason it is
+     *  here rather than left for later — replication through this pair is bidirectional by design,
+     *  so a field that only travels one way produces exactly the divergence the field was added to
+     *  fix, mirrored. The Mac's own picker can set an effort on a chat session; without this the
+     *  phone would keep running that session at its own effort forever, and the only symptom would
+     *  again be "the answers are different".
+     *
+     *  Unvalidated on the way OUT, deliberately: this reports the daemon's own column, which every
+     *  ingress into it (`session.setEffort`, `session.create`, `sync.push`) has already checked.
+     *  Absent means "no override" — the session resolves at the global default. It may be a
+     *  Norma-level TIER only in theory: `sync.heads` lists CHAT sessions exclusively and every
+     *  ingress refuses a tier for chat, so a reader that treats it as a wire effort is safe today —
+     *  but `SessionSummary.effort`'s rule (match against BOTH lists) is the one to follow. */
+    effort: z.string().optional(),
     forkedFrom: SessionForkRef.optional(),
   })),
 });
