@@ -409,9 +409,14 @@ struct WindowContentView<Accessory: View>: View {
     }
 
     /// The effort menu: "Default", then the WIRE levels the session's model accepts, then — only for
-    /// a CODE session — the Norma-level tiers, under their own heading. The two sections are never
-    /// merged (see `effortPickerOptions`), and the tier section is simply absent for chat/dispatch
-    /// rather than shown-and-refused.
+    /// a CODE session whose model the catalogue actually lists — the Norma-level tiers, under their
+    /// own heading. The two sections are never merged (see `effortPickerOptions`), and the tier
+    /// section is simply ABSENT rather than shown-and-refused in both cases it does not apply:
+    /// chat/dispatch, and a catalogue that reported no wire levels at all (a BYOK Mac, or nothing
+    /// fetched yet — whole-branch review I1). In that second case the menu is "Default" alone, which
+    /// is the honest rendering of "this daemon has told me nothing about efforts for this model".
+    /// A tier the user ALREADY pinned still gets its row via the `.unknown` branch below, so a
+    /// selection made before the catalogue emptied out stays visible and clearable.
     @ViewBuilder
     private var effortMenuContent: some View {
         let row = currentSidebarSessionSummary
@@ -660,13 +665,30 @@ func modelPickerOptions(_ catalogue: SyncConfigSnapshot) -> [String] {
 /// session row's own (`SessionSummary.mode`); ABSENT means code, the store-wide convention that
 /// `clientEffortEligible` (packages/core/src/settings.ts) also applies — and this must stay an
 /// allowlist, so a future mode nobody has written yet gets no tiers for free.
+///
+/// **AND SO IS THE NO-WIRE-LEVELS SCOPING** (whole-branch review I1). Unconditional advertisement
+/// has a second consequence the mode gate does not cover: with an EMPTY `wire` list the menu
+/// rendered "Default" and `ultra` and nothing else. That happens on any BYOK Mac — an arbitrary
+/// openai-compatible endpoint cannot enumerate its models, so `models` is `[]` — and on any client
+/// that has not fetched yet. `ultra` is the one value the daemon rewrites to `max`, the least
+/// portable effort against an arbitrary endpoint, so the only real choice on offer was the worst
+/// one, while the daemon itself would have accepted all six (`effortsForModel` is
+/// provider-independent; the client was the only thing hiding them).
+///
+/// So: a daemon that has told us no wire levels has told us NOTHING about this model's efforts, and
+/// a tier is not a substitute for the list we were not given. The same "empty is a real answer and
+/// never a licence to guess" rule `modelPickerOptions` already keeps — the tier section was simply
+/// exempt from it. Deliberately client-side and deliberately narrow: the honest fix is a
+/// provider-independent effort list on `sync.config`, and this is not it.
 func effortPickerOptions(catalogue: SyncConfigSnapshot, model: String?, mode: String?) -> (wire: [String], tiers: [String]) {
     // The session's EFFECTIVE model, by AgentEngine.resolveSel's own precedence: its override first,
     // the daemon's live default second. A model the catalogue doesn't list contributes no levels —
     // "I have not been told", not "none exist".
     let effective = model ?? catalogue.defaultModel
     let wire = catalogue.models.first { $0.id == effective }?.efforts ?? []
-    return (wire, effortTiersAreOffered(mode: mode) ? catalogue.clientEfforts : [])
+    // Both gates, and the sections stand or fall together: no wire list ⇒ no tier section either.
+    let tiers = (!wire.isEmpty && effortTiersAreOffered(mode: mode)) ? catalogue.clientEfforts : []
+    return (wire, tiers)
 }
 
 /// The mode gate above, as its own named symbol so `ModelPickerTests` can drive the rule directly

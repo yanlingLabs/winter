@@ -233,6 +233,51 @@ final class ModelPickerTests: XCTestCase {
         XCTAssertEqual(effortPickerOptions(catalogue: catalogue, model: "unheard-of", mode: "code").wire, [])
     }
 
+    /// Whole-branch review I1 — NO WIRE LEVELS MEANS NO MENU, TIERS INCLUDED.
+    ///
+    /// `clientEfforts` is advertised UNCONDITIONALLY (the daemon cannot know which session a picker
+    /// is for), so before this rule a BYOK Mac — `models: []`, because an arbitrary
+    /// openai-compatible endpoint cannot enumerate — rendered an effort menu offering "Default" and
+    /// `ultra` and NOTHING else. `ultra` is the one value the daemon translates to `max`, the least
+    /// portable effort against an arbitrary endpoint, so the menu's sole real choice was its worst
+    /// one. Meanwhile the daemon ACCEPTS all six (`effortsForModel` is provider-independent) — the
+    /// client was the only thing hiding them.
+    ///
+    /// The rule: a daemon that has told us no wire levels has told us nothing about this model's
+    /// efforts, and a tier is not a substitute for the list we were not given. Same
+    /// "empty is a real answer, never a licence to guess" discipline `modelPickerOptions` keeps —
+    /// applied to the section that was quietly exempt from it.
+    ///
+    /// This also closes deferred M5's not-loaded case for free: an unfetched catalogue and an
+    /// unloaded row produce the identical `wire == []`.
+    func testATierIsNeverOfferedAloneWhenTheCatalogueReportsNoWireLevels() {
+        // 1. The BYOK / never-fetched catalogue: `models: []` with tiers advertised anyway.
+        let byok = SyncConfigSnapshot(provider: "openai-compatible", defaultModel: "llama-3.3-70b-local",
+                                      models: [], defaultEffort: "", clientEfforts: ["ultra"])
+        let byokCode = effortPickerOptions(catalogue: byok, model: nil, mode: "code")
+        XCTAssertEqual(byokCode.wire, [], "the daemon reported no catalogue")
+        XCTAssertEqual(byokCode.tiers, [],
+                       "…so the menu must not degrade to `ultra` alone — the one value the daemon rewrites to `max`")
+
+        // …and `.empty` (nothing fetched yet) is the same state, reached a different way.
+        XCTAssertEqual(effortPickerOptions(catalogue: .empty, model: nil, mode: "code").tiers, [])
+
+        // 2. An UNLISTED model against a real catalogue — a stale pin, or a provider that moved on.
+        //    Same reasoning: we were not told this model's levels, so we know nothing to offer.
+        let real = SyncConfigSnapshot(provider: "codex-oauth", defaultModel: "srv-a",
+                                      models: [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"])],
+                                      defaultEffort: "high", clientEfforts: ["ultra"])
+        let unlisted = effortPickerOptions(catalogue: real, model: "unheard-of", mode: "code")
+        XCTAssertEqual(unlisted.wire, [])
+        XCTAssertEqual(unlisted.tiers, [], "an unlisted model gets no tier either — the sections stand or fall together")
+
+        // 3. THE BOUNDARY: a model that IS listed still offers its tier. This rule suppresses the
+        //    tier only where there is no wire list beside it; it must never become "no tiers".
+        XCTAssertEqual(effortPickerOptions(catalogue: real, model: "srv-a", mode: "code").tiers, ["ultra"])
+        XCTAssertEqual(effortPickerOptions(catalogue: real, model: nil, mode: "code").tiers, ["ultra"],
+                       "the daemon's live default is a listed model — the ordinary case must be untouched")
+    }
+
     /// A CURRENT selection may be a TIER reported verbatim (`SessionListResult.effort`'s own rule),
     /// so a picker matching only against the model's `efforts` array shows no checkmark at all.
     func testCurrentSelectionIsMatchedAgainstBOTHLists() {
