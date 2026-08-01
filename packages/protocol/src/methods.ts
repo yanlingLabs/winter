@@ -143,6 +143,10 @@ export const SessionListResult = z.object({
     // client must be able to read it. Absent means "this session uses the global default", never
     // "no effort" (an unset effort omits the provider's `reasoning` block entirely; `"none"` is a
     // distinct, real, measured level — see REASONING_EFFORTS in core's settings.ts).
+    // provider-correctness T5: the value may ALSO be a Norma-level tier from
+    // `sync.config.clientEfforts` (e.g. "ultra") — the user's SELECTION is stored and reported
+    // verbatim, never rewritten to its wire translation. A picker matching this against the
+    // chosen model's `efforts` array alone will miss; match against BOTH lists.
     effort: z.string().optional(),
     // Chat Slice D Task 2: round-trips SessionRow.forkedFrom (store.ts). Declared here — rather
     // than left to smuggle through undeclared — for the same reason `title` above is: the value

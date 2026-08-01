@@ -1186,7 +1186,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             // no `spawn_agent` at all), so the tier's delegation posture is meaningless-to-harmful
             // there. `clientEffortEligible` is a fail-closed allowlist — see settings.ts.
             if (!clientEffortEligible(sessionMeta?.mode)) {
-              throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${p.effort}' is a Norma-level tier offered on code sessions only — this is a '${sessionMeta!.mode}' session (wire efforts: ${effortsForModel(sessionMeta?.model ?? opts.liveModel?.() ?? "").join(", ")})`);
+              throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${p.effort}' is a Norma-level tier offered on code sessions only — this is a '${sessionMeta?.mode ?? "unknown"}' session (wire efforts: ${effortsForModel(sessionMeta?.model ?? opts.liveModel?.() ?? "").join(", ")})`);
             }
           } else {
             // The session's EFFECTIVE model, by the same precedence AgentEngine.resolveSel applies:

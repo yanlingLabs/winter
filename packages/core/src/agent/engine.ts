@@ -2003,6 +2003,9 @@ export class AgentEngine {
    *  fork, a hand-edited index) — such a session still sends `max` and still gets no injection. */
   private resolveSel(meta: { model?: string; effort?: string; mode?: string }): { model: string; reasoningEffort?: string; ultra: boolean } {
     const base = this.cfg.provider.live?.() ?? { model: this.cfg.provider.model };
+    // NOTE: `base`'s shape is exhaustive by construction here — `live()` is typed
+    // `() => { model; reasoningEffort? }` and both fields are handled explicitly below. The pre-T5
+    // `...base` spread is gone; a future field added to that closure must be threaded by hand.
     // `||`, not `??` — byte-for-byte the truthiness the pre-T5 spread used, so an empty-string
     // effort keeps falling back to the global default exactly as it did.
     const selected = meta.effort || base.reasoningEffort;

@@ -422,9 +422,11 @@ describe("ultra is translated before the wire (provider-correctness T5)", () => 
   });
 
   test("NO request the provider ever sees carries a Norma-level tier — swept across every recorded hop", async () => {
-    // The catch-all. The tests above name the hops that exist today; this one asserts the invariant
-    // over whatever hops the engine happens to make, so a NEW call site that forgets to translate
-    // fails here even if nobody thought to name it.
+    // The catch-all — scoped honestly (T5 review, Minor): it sweeps every request RECORDED BY THE
+    // FLOWS THIS TEST DRIVES (one turn + one synchronous spawn child). A call path it never drives
+    // (e.g. runWorkflowAgent) contributes no request here and is NOT covered by this sweep. The
+    // real guarantee that no path can leak a tier is structural, pinned elsewhere: wireEffort's
+    // totality (settings.test.ts) + resolveSel being the sole meta.effort -> reasoningEffort path.
     const spawnCall: ProviderEvent = { type: "tool_call", callId: "s1", name: "spawn_agent", argsJson: JSON.stringify({ prompt: "do X", description: "test task", run_in_background: false }) };
     const provider = new FakeProvider([[spawnCall, done("tool_calls")], text("child report")]);
     const { engine, store, sessionId } = setupSpawn([], { provider, live: () => ({ model: "live-model" }) });
