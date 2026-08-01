@@ -964,3 +964,86 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertEqual(dirs, ["/tmp"])
     }
 }
+
+// MARK: - provider-correctness T6: the `sync.config` wrapper the Mac's pickers consume
+
+extension MethodWrapperTests {
+    /// The wrapper exists at all. T3's review recorded its ABSENCE as a known gap: `sync.config`
+    /// carries the model catalogue and the effort lists, and NormaKit — the Mac app's only daemon
+    /// client — had no way to ask for them, which is why the Mac's picker was still a hardcoded
+    /// three-slug mirror.
+    func testSyncConfigDecodesTheCatalogueAndBothEffortLists() async throws {
+        let (client, t) = try await connected()
+
+        let catalogueBody = #"{"exaKey":"exa_secret","dangerousDomains":["evil.test"],"defaultModel":"gpt-5.6-sol","models":[{"id":"gpt-5.6-sol","efforts":["none","low","medium","high","xhigh","max"]},{"id":"gpt-5.6-luna","efforts":["low","high"]}],"defaultEffort":"medium","clientEfforts":["ultra"]}"#
+        let (req, snapshot) = try await roundTrip(t, sentIndex: 1, result: catalogueBody) {
+            try await client.syncConfig()
+        }
+        XCTAssertEqual(req["method"] as? String, "sync.config")
+        XCTAssertEqual(req["params"] as? [String: Any] as NSDictionary?, [:] as NSDictionary,
+                       "sync.config takes NO params — an empty object, matching SyncConfigParams")
+        XCTAssertEqual(snapshot.defaultModel, "gpt-5.6-sol")
+        XCTAssertEqual(snapshot.defaultEffort, "medium")
+        XCTAssertEqual(snapshot.models, [
+            SyncConfigModelInfo(id: "gpt-5.6-sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"]),
+            SyncConfigModelInfo(id: "gpt-5.6-luna", efforts: ["low", "high"]),
+        ], "per-model efforts survive verbatim — the whole point of the field")
+        XCTAssertEqual(snapshot.clientEfforts, ["ultra"],
+                       "tiers arrive on their OWN list, never merged into models[].efforts")
+    }
+
+    /// The projection is deliberate, not an oversight: `exaKey` is a Keychain secret the Mac app has
+    /// no use for (it runs no engine of its own), so the kit does not hand it out. A test rather
+    /// than a comment, because "we chose not to surface a secret" is exactly the decision a future
+    /// widening should have to argue with.
+    func testSyncConfigDoesNotSurfaceTheExaKey() async throws {
+        let (_, snapshot) = try await roundTripSyncConfig(#"{"exaKey":"exa_secret","dangerousDomains":[],"defaultModel":"m","models":[],"defaultEffort":"","clientEfforts":[]}"#)
+        // A compile-level fact, asserted through Mirror so it survives a refactor that adds the
+        // field back without anyone noticing this file.
+        let fields = Mirror(reflecting: snapshot).children.compactMap(\.label)
+        XCTAssertEqual(Set(fields), ["defaultModel", "models", "defaultEffort", "clientEfforts"])
+    }
+
+    /// An OLDER daemon (pre-T3/T5) answers without the catalogue fields. That must degrade to the
+    /// ABSENT values — never throw, and never a fallback lineup. `[]`/`""` are the absence of an
+    /// answer, and a picker built on them offers nothing rather than guessing.
+    func testSyncConfigDegradesToAbsentValuesOnAnOlderDaemon() async throws {
+        let (_, snapshot) = try await roundTripSyncConfig(#"{"exaKey":null,"dangerousDomains":[],"defaultModel":"gpt-5.6-sol"}"#)
+        XCTAssertEqual(snapshot.defaultModel, "gpt-5.6-sol")
+        XCTAssertEqual(snapshot, SyncConfigSnapshot(defaultModel: "gpt-5.6-sol", models: [],
+                                                    defaultEffort: "", clientEfforts: []))
+        XCTAssertEqual(SyncConfigSnapshot.empty.models, [], "the never-told state has no catalogue at all")
+    }
+
+    /// A malformed row is DROPPED, not admitted. The wire is `z.string().min(1)` on both fields;
+    /// Swift enforces neither for free, and an empty slug reaches a `/responses` body verbatim and
+    /// comes back an opaque 400 — the same failure class the never-synced rule exists to prevent,
+    /// arriving by a different door.
+    func testSyncConfigRefusesEmptySlugsAndEmptyLevels() async throws {
+        let (_, snapshot) = try await roundTripSyncConfig(#"{"exaKey":null,"dangerousDomains":[],"defaultModel":"m","models":[{"id":"","efforts":["high"]},{"id":"ok","efforts":["high",""]}],"defaultEffort":"","clientEfforts":["ultra",""]}"#)
+        XCTAssertEqual(snapshot.models, [SyncConfigModelInfo(id: "ok", efforts: ["high"])])
+        XCTAssertEqual(snapshot.clientEfforts, ["ultra"])
+    }
+
+    private func roundTripSyncConfig(_ result: String) async throws -> (NormaClient, SyncConfigSnapshot) {
+        let (client, t) = try await connected()
+        let (_, snapshot) = try await roundTrip(t, sentIndex: 1, result: result) { try await client.syncConfig() }
+        return (client, snapshot)
+    }
+
+    /// `session.list` threads `effort` into the tuple beside `model` — the Mac effort picker's only
+    /// source for "what is currently pinned". Absent on the wire threads through as nil (= "uses the
+    /// global default"), and a TIER threads through VERBATIM rather than as its wire translation,
+    /// which is why a picker must match against both lists.
+    func testListSessionsThreadsEffortIncludingATier() async throws {
+        let (client, t) = try await connected()
+        let listBody = #"{"sessions":[{"sessionId":"s_1","scope":"global","createdAt":1,"lastSeq":0,"model":"gpt-5.6-sol","effort":"xhigh"},{"sessionId":"s_2","scope":"global","createdAt":2,"lastSeq":0,"effort":"ultra"},{"sessionId":"s_3","scope":"global","createdAt":3,"lastSeq":0}]}"#
+        let (_, rows) = try await roundTrip(t, sentIndex: 1, result: listBody) {
+            try await client.listSessions()
+        }
+        XCTAssertEqual(rows.first { $0.sessionId == "s_1" }?.effort, "xhigh")
+        XCTAssertEqual(rows.first { $0.sessionId == "s_2" }?.effort, "ultra",
+                       "a Norma tier is reported verbatim, never rewritten to its wire translation")
+        XCTAssertNil(rows.first { $0.sessionId == "s_3" }?.effort, "absent = no override")
+    }
+}

@@ -392,6 +392,31 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
     c.close();
   });
 
+  // provider-correctness T6: the Mac app's pickers now depend on this method, over a HARNESS
+  // connection. `sync.config` is on REMOTE_ALLOWED_METHODS because the phone was the only client
+  // that had ever needed it, and that list is easy to misread as "remote ONLY" — it is a permission
+  // for the remote role, not a restriction to it. Named explicitly here so a future tightening
+  // (adding a role check to this handler, say) breaks with a test that says why it may not.
+  test("a HARNESS (Mac app) caller gets the identical catalogue — the method is role-AGNOSTIC", async () => {
+    const { socketPath, harnessToken, remoteToken } = await boot({ models: () => CODEX_MODELS, liveEffort: () => "medium", liveModel: () => DEFAULT_CODEX_MODEL });
+
+    const harness = await TestClient.connect(socketPath);
+    await harness.hello(harnessToken, "norma-app");
+    const asHarness = await harness.request(METHODS.syncConfig, {});
+    expect(asHarness.error).toBeUndefined();
+
+    const remote = await TestClient.connect(socketPath);
+    await remote.hello(remoteToken, "iphone-gateway", "remote");
+    const asRemote = await remote.request(METHODS.syncConfig, {});
+
+    // IDENTICAL, not merely both-successful: the Mac's picker and the phone's must be offered the
+    // same lineup, or "the daemon never advertises what it refuses" holds for only one of them.
+    expect(asHarness.result).toEqual(asRemote.result);
+    expect(asHarness.result.clientEfforts).toEqual([...CLIENT_EFFORTS]);
+    harness.close();
+    remote.close();
+  });
+
   test("the served result validates against SyncConfigResult — the schema is the contract, not prose", async () => {
     const { socketPath, harnessToken } = await boot({
       models: () => CODEX_MODELS, liveModel: () => DEFAULT_CODEX_MODEL, liveEffort: () => "max",
