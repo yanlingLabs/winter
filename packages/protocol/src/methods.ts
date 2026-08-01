@@ -67,6 +67,22 @@ export const SESSION_TITLE_MAX_CHARS = 200;
  *  40 characters), far below anything that could bloat a row. */
 export const SESSION_MODEL_MAX_CHARS = 200;
 
+/** provider-correctness T4: the same unbounded-field hazard `SESSION_MODEL_MAX_CHARS` documents,
+ *  one column over — a per-session `effort` rides every `session.list` row, unpaged and
+ *  remote-reachable, exactly like `model`.
+ *
+ *  Belt-and-braces rather than the primary guard, and the difference from `model` is worth stating:
+ *  a provider that cannot enumerate its catalogue makes `session.setModel` store an unrecognized
+ *  slug VERBATIM (correct for a BYO endpoint), so for `model` the schema cap really is the only
+ *  bound. Effort has no such escape hatch — `session.setEffort`'s handler refuses anything outside
+ *  the effort list of the session's own model, a closed set of short slugs. The cap lives here
+ *  anyway so the bound is structural at the SCHEMA and survives any future relaxation of that
+ *  membership check, for exactly the reason the model cap does.
+ *
+ *  32 for the same reason 200 is: far above every real slug (the longest today is "medium", six
+ *  characters), far below anything that could bloat a row. */
+export const SESSION_EFFORT_MAX_CHARS = 32;
+
 /** Chat Slice D task 2 (session sync): where a session was branched from — the parent session's id
  *  plus the seq it was forked AT (every parent event with `seq <= atSeq` is shared history). Index-
  *  only metadata carried by `sync.push`'s `meta` and reported by `sync.heads`/`session.list`; it
@@ -121,6 +137,13 @@ export const SessionListResult = z.object({
     // Chat Slice D Task 1: round-trips SessionRow.model (store.ts) — absent for every session
     // created before this field existed, or created/left without an explicit override.
     model: z.string().optional(),
+    // provider-correctness T4: round-trips SessionRow.effort (store.ts), the per-session reasoning
+    // effort `session.setEffort` writes. Declared alongside `model` for the same reason `title` and
+    // `forkedFrom` are — the value really does flow out of `store.list()`, so a schema-validating
+    // client must be able to read it. Absent means "this session uses the global default", never
+    // "no effort" (an unset effort omits the provider's `reasoning` block entirely; `"none"` is a
+    // distinct, real, measured level — see REASONING_EFFORTS in core's settings.ts).
+    effort: z.string().optional(),
     // Chat Slice D Task 2: round-trips SessionRow.forkedFrom (store.ts). Declared here — rather
     // than left to smuggle through undeclared — for the same reason `title` above is: the value
     // really does flow out of `store.list()`, so a schema-validating client must be able to read
@@ -365,6 +388,25 @@ export const SessionSetPolicyResult = z.object({ ok: z.literal(true) });
 // precedent as session.setPolicy).
 export const SessionSetModelParams = z.object({ sessionId: z.string().min(1), model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).nullable() });
 export const SessionSetModelResult = z.object({});
+
+// provider-correctness T4 (spec Component 4): per-session reasoning effort. Its OWN method rather
+// than a second argument on `session.setModel` — the user's call, verbatim: "effort and model are
+// two different things, just like the CLI", where `norma model <slug>` and `norma model --effort
+// <level>` are separate controls over separate axes. Everything else mirrors `session.setModel`
+// above: mode-agnostic (there is no "fixed effort" concept for any mode, unlike session.setPolicy's
+// chat rule), `effort: null` CLEARS the override so the next resolution falls back to the global
+// default (`settings.provider.reasoningEffort` — AgentEngine.resolveSel), required-but-nullable
+// rather than optional so a caller can't confuse "didn't send it" with "explicitly clearing it",
+// and a bare-`{}` result with an unknown sessionId reported as a thrown NOT_FOUND.
+//
+// The VALUE is deliberately NOT enumerated here. Which efforts a model accepts is provider
+// knowledge — the API validates effort PER-MODEL (`minimal` is refused with an `unsupported_value`
+// naming the slug, by a different layer than the global enum that refuses `ultra`) — so the daemon
+// checks membership at set time against the session's own model's list (ipc/server.ts, reading
+// core's `effortsForModel`, the SAME list `sync.config` advertises to the phone). A zod enum here
+// would be a second, drift-prone copy of a set the protocol package cannot see change.
+export const SessionSetEffortParams = z.object({ sessionId: z.string().min(1), effort: z.string().min(1).max(SESSION_EFFORT_MAX_CHARS).nullable() });
+export const SessionSetEffortResult = z.object({});
 
 export const ThreadInfoSchema = z.object({
   threadId: z.string(), parentThreadId: z.string().optional(), agentType: z.string().optional(),
@@ -1191,6 +1233,7 @@ export const METHODS = {
   planRespond: "plan.respond",
   sessionSetPolicy: "session.setPolicy",
   sessionSetModel: "session.setModel",
+  sessionSetEffort: "session.setEffort",
   threadList: "thread.list",
   threadSend: "thread.send",
   agentStop: "agent.stop",

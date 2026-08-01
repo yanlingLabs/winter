@@ -575,22 +575,24 @@ final class GatewayGateTests: XCTestCase {
         XCTAssertEqual(resp.kind, .rpcResponse, "the connection must still serve a normal rpc after an ignored pong")
     }
 
-    // MARK: - G7: the Swift remote allowlist is EXACTLY the eighteen names (cross-language tripwire)
+    // MARK: - G7: the Swift remote allowlist is EXACTLY the nineteen names (cross-language tripwire)
 
-    func testG7_RemoteAllowlistIsExactlyTheEighteenNames() {
+    func testG7_RemoteAllowlistIsExactlyTheNineteenNames() {
         let expected: Set<String> = [
             "protocol.hello", "session.list", "session.attach", "session.send",
             "session.dispatch", "approval.respond", "ask_user.respond",
             "session.interrupt", "engine.activity", "approval.list",
             "session.create", "session.history", "session.setModel",
+            // provider-correctness T4: per-session reasoning effort, its own method beside setModel.
+            "session.setEffort",
             // Chat Slice D task 2: chat-session log replication.
             "sync.heads", "sync.pull", "sync.push",
             // Chat Slice D task 3: standalone-chat config bundle + memory-bucket replica.
             "sync.config", "sync.memory",
         ]
-        XCTAssertEqual(Gateway.remoteAllowedMethods.count, 18)
+        XCTAssertEqual(Gateway.remoteAllowedMethods.count, 19)
         XCTAssertEqual(Gateway.remoteAllowedMethods, expected,
-                       "Swift remote allowlist drifted from the eighteen — mirror packages/core/src/ipc/server.ts's REMOTE_ALLOWED_METHODS")
+                       "Swift remote allowlist drifted from the nineteen — mirror packages/core/src/ipc/server.ts's REMOTE_ALLOWED_METHODS")
     }
 
     // MARK: - WB-C1: a JSON-RPC error's `data` survives the relay (DIVERGED{lastSeq} → the phone)

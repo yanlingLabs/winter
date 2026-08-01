@@ -54,6 +54,13 @@ export interface SessionRow {
    *  `cwd`/`origin`/`approvalPolicy`'s own reset-to-default behavior in recoverAll's pass-2
    *  INSERT below. Absent means "use the live/boot default" — AgentEngine.resolveSel's own rule. */
   model?: string;
+  /** provider-correctness T4: a per-session reasoning-effort override (`session.setEffort`/
+   *  `store.setEffort`). Index-only metadata on exactly the same terms as `model` above — same
+   *  additive column, same reset-to-undefined on a full index rebuild. Absent means "use the global
+   *  default" (`settings.provider.reasoningEffort`, AgentEngine.resolveSel's own rule); it does NOT
+   *  mean "no reasoning" — an unset effort omits the provider's `reasoning` block entirely, while
+   *  `"none"` is a distinct level the endpoint honours (settings.ts's REASONING_EFFORTS). */
+  effort?: string;
   /** Chat Slice D task 2 (session sync): where this session was branched from, when a syncing
    *  client says so (`sync.push`'s `meta.forkedFrom`). Index-only metadata with the same
    *  reset-on-rebuild caveat as `model` above — the phone re-sends it on its next push, which is
@@ -111,6 +118,7 @@ export class SessionStore {
       mode TEXT,
       parent_session_id TEXT,
       model TEXT,
+      effort TEXT,
       forked_from_session_id TEXT,
       forked_from_at_seq INTEGER
     )`);
@@ -125,6 +133,9 @@ export class SessionStore {
       "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
       // Chat Slice D task 1: additive migration, same pattern as approval_policy/cwd above.
       "ALTER TABLE sessions ADD COLUMN model TEXT",
+      // provider-correctness T4: per-session reasoning effort — the SAME additive index-only
+      // pattern as `model` one line up, deliberately not a second shape.
+      "ALTER TABLE sessions ADD COLUMN effort TEXT",
       // Chat Slice D task 2 (session sync): fork provenance, two plain columns rather than a JSON
       // blob so the pair is queryable and can never be half-parseable.
       "ALTER TABLE sessions ADD COLUMN forked_from_session_id TEXT",
@@ -303,8 +314,8 @@ export class SessionStore {
   }
 
   list(): SessionRow[] {
-    return (this.db.query("SELECT session_id, scope, created_at, last_seq, title, first_message, cwd, origin, mode, parent_session_id, model, forked_from_session_id, forked_from_at_seq FROM sessions ORDER BY created_at").all() as
-      { session_id: string; scope: string; created_at: number; last_seq: number; title: string | null; first_message: string | null; cwd: string | null; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null; forked_from_session_id: string | null; forked_from_at_seq: number | null }[])
+    return (this.db.query("SELECT session_id, scope, created_at, last_seq, title, first_message, cwd, origin, mode, parent_session_id, model, effort, forked_from_session_id, forked_from_at_seq FROM sessions ORDER BY created_at").all() as
+      { session_id: string; scope: string; created_at: number; last_seq: number; title: string | null; first_message: string | null; cwd: string | null; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null; effort: string | null; forked_from_session_id: string | null; forked_from_at_seq: number | null }[])
       .map((r) => ({
         sessionId: r.session_id,
         scope: r.scope,
@@ -318,6 +329,7 @@ export class SessionStore {
         mode: r.mode ?? undefined,
         parentSessionId: r.parent_session_id ?? undefined,
         model: r.model ?? undefined,
+        effort: r.effort ?? undefined,
         // Both columns are written together (applySyncMeta) — but read defensively as a PAIR so a
         // half-written row (hand-edited db, an interrupted future migration) reports "not a fork"
         // rather than a `{sessionId: null}` shaped object that would fail the wire schema.
@@ -359,12 +371,26 @@ export class SessionStore {
     if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
   }
 
+  /** provider-correctness T4: per-session reasoning-effort override — `effort: null` CLEARS it
+   *  (the next resolution falls back to the global default, AgentEngine.resolveSel). Identical
+   *  contract to `setModel` directly above, deliberately: throws on an unknown session so the IPC
+   *  layer maps it to NOT_FOUND, and setting the same value twice (or re-clearing an already-clear
+   *  one) is a successful no-op UPDATE.
+   *
+   *  Stores whatever it is handed — the VALUE check lives at the RPC boundary
+   *  (`session.setEffort`, ipc/server.ts), which is where the session's own model is known and so
+   *  where the model's effort list can be consulted. Same split as `setModel`/`session.setModel`. */
+  setEffort(sessionId: string, effort: string | null): void {
+    const res = this.db.run("UPDATE sessions SET effort = ? WHERE session_id = ?", [effort, sessionId]);
+    if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
+  }
+
   meta(sessionId: string): {
     sessionId: string; scope: string; cwd: string | null; approvalPolicy: SessionApprovalPolicy;
-    origin?: string; mode?: string; parentSessionId?: string; model?: string;
+    origin?: string; mode?: string; parentSessionId?: string; model?: string; effort?: string;
   } {
-    const row = this.db.query("SELECT scope, cwd, approval_policy, origin, mode, parent_session_id, model FROM sessions WHERE session_id = ?").get(sessionId) as
-      | { scope: string; cwd: string | null; approval_policy: string; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null } | null;
+    const row = this.db.query("SELECT scope, cwd, approval_policy, origin, mode, parent_session_id, model, effort FROM sessions WHERE session_id = ?").get(sessionId) as
+      | { scope: string; cwd: string | null; approval_policy: string; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null; effort: string | null } | null;
     if (!row) throw new Error(`unknown session: ${sessionId}`);
     const p = row.approval_policy;
     // Plan-immunity (2026-07-28, USER-REVISED design): "chat" (gate.ts's SessionApprovalPolicy)
@@ -380,6 +406,7 @@ export class SessionStore {
       sessionId, scope: row.scope, cwd: row.cwd, approvalPolicy,
       origin: row.origin ?? undefined, mode: row.mode ?? undefined, parentSessionId: row.parent_session_id ?? undefined,
       model: row.model ?? undefined,
+      effort: row.effort ?? undefined,
     };
   }
 

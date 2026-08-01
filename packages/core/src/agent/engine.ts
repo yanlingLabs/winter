@@ -1964,10 +1964,30 @@ export class AgentEngine {
    *  provider's `models()` — `session.setModel`'s handler (ipc/server.ts) is where that happens,
    *  at set time (I1 review fix); this method's only defense-in-depth for a since-drifted override
    *  lives in `contextWindow`'s own fallback (see its doc comment), not here, so this stays exactly
-   *  as cheap and side-effect-free as the expression it replaces. */
-  private resolveSel(meta: { model?: string }): { model: string; reasoningEffort?: string } {
+   *  as cheap and side-effect-free as the expression it replaces.
+   *
+   *  provider-correctness T4 makes EFFORT per-session on the same terms (`meta.effort`, set via
+   *  `store.setEffort`/`session.setEffort`), resolved at this one point for the same reason the
+   *  model is: precedence `session value → global default`, where the global is `live()`'s
+   *  `reasoningEffort` (or nothing at all when no `live` is wired, or when
+   *  `settings.provider.reasoningEffort` is unset — an absent effort omits the provider's
+   *  `reasoning` block entirely, which is NOT the same as sending `"none"`).
+   *
+   *  The two axes are INDEPENDENT — the whole reason `session.setEffort` is its own method rather
+   *  than a second argument on `session.setModel` ("effort and model are two different things, just
+   *  like the CLI"). Overriding one leaves the other resolving exactly as it did: `meta.model`
+   *  alone still changes only WHICH model answers, not how hard it reasons. Set-time validation is
+   *  again the handler's job, and for effort it is model-AWARE (the API validates effort per-model),
+   *  so an override that reaches here has already been checked against the session's own model's
+   *  list. */
+  private resolveSel(meta: { model?: string; effort?: string }): { model: string; reasoningEffort?: string } {
     const base = this.cfg.provider.live?.() ?? { model: this.cfg.provider.model };
-    return meta.model ? { ...base, model: meta.model } : base;
+    if (!meta.model && !meta.effort) return base;
+    return {
+      ...base,
+      ...(meta.model ? { model: meta.model } : {}),
+      ...(meta.effort ? { reasoningEffort: meta.effort } : {}),
+    };
   }
 
   private async turn(sessionId: string, signal: AbortSignal): Promise<void> {
@@ -2015,7 +2035,8 @@ export class AgentEngine {
     // per turn and not re-read mid-turn. Falls back to the boot-time `provider.model` when `live`
     // isn't wired (most test harnesses) — unchanged behavior for them. Chat Slice D task 1:
     // `meta.model` (a per-SESSION override, `store.setModel`/`session.setModel`) wins over
-    // whichever of those two this picks — see resolveSel's own doc comment.
+    // whichever of those two this picks; provider-correctness T4 adds `meta.effort` on the same
+    // terms for the effort half — see resolveSel's own doc comment.
     const sel = this.resolveSel(meta);
     if (!meta.cwd) {
       this.emit(sessionId, { type: "turn_started", sessionId, threadId });
@@ -4522,6 +4543,9 @@ export class AgentEngine {
     const cwd = meta.cwd;
     if (!cwd) return { ok: false, result: "session has no working directory" };
     const agentType = opts?.label ?? "general-purpose";
+    // Resolved ONCE per workflow-spawned child (this method's own cadence — see resolveSel's doc
+    // comment): both halves of the selection, model AND effort, come from the same call.
+    const sel = this.resolveSel(meta);
     const def = this.cfg.agents.resolve(agentType, cwd);
     const childCwd = cwd;
     const childPolicy: SessionApprovalPolicy = "accept-edits";
@@ -4549,7 +4573,16 @@ export class AgentEngine {
       // (`meta` is already in scope a few lines up). Now the SAME single resolution point: an
       // explicit `opts.model` (the workflow script's own arg) still wins when present, otherwise
       // this session's live/override-aware default, never the bare boot snapshot.
-      cwd: childCwd, model: opts?.model ?? this.resolveSel(meta).model, meta: childMeta, depth: 1,
+      //
+      // provider-correctness T4: the EFFORT half of that same resolution, which this call site was
+      // dropping on the floor — it took `.model` and discarded the rest, so a workflow-spawned
+      // child ran with NO reasoning block at all even when the daemon's global effort was set (a
+      // pre-existing gap, invisible while effort was global-only and strictly worse once a user can
+      // set it per session). Every other runThread call site already threads
+      // `sel.reasoningEffort`/`opts.reasoningEffort`; this one now does too. There is no
+      // `opts.effort` counterpart to `opts.model` — a workflow script picks the child's MODEL, not
+      // how hard it reasons, matching agent defs (spec: "do NOT add per-agent effort").
+      cwd: childCwd, model: opts?.model ?? sel.model, reasoningEffort: sel.reasoningEffort, meta: childMeta, depth: 1,
       signal: AbortSignal.any([childSignal, signal]),
       loaded: childLoaded, excludeTools: childExcludeTools, allowTools: def.allowTools, onProgress: progress,
     }));

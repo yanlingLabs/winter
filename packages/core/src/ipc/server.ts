@@ -12,7 +12,7 @@ import {
   SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams,
   SkillsReadParams, SkillsWriteParams, SkillsDeleteParams,
   PluginsListParams, AskUserRespondParams, TaskListParams, PlanRespondParams, SessionSetPolicyParams,
-  SessionSetModelParams,
+  SessionSetModelParams, SessionSetEffortParams,
   ThreadListParams, ThreadSendParams, AgentStopParams,
   PeripheralLeaseParams, PeripheralRenewParams, PeripheralReleaseParams, PeripheralAdvertiseParams,
   PeripheralRevokeParams, PeripheralRespondParams, DaemonStatusParams, EngineActivityParams, QuotaStateParams,
@@ -40,7 +40,7 @@ import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTai
 import type { SessionStore } from "../sessions/store";
 import { readHistoryPage } from "../sessions/history";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
-import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory } from "./sync";
+import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { AgentEngine } from "../agent/engine";
 import { resolveModelAlias } from "../agent/model-aliases";
@@ -332,6 +332,10 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   // fixed policy has no remote-meaningful "set" at all). Guarded by assertRemoteMayUseSession below,
   // same as every other bare-sessionId entry on this list.
   METHODS.sessionSetModel,
+  // provider-correctness T4: the phone sets the reasoning EFFORT on a remote-driven session — the
+  // other half of its model picker, and a separate method for the same reason it is separate on the
+  // CLI. Same bare-sessionId shape, so the same assertRemoteMayUseSession guard applies below.
+  METHODS.sessionSetEffort,
   // Chat Slice D task 2 (session sync): the phone replicates its own chat-session logs both ways.
   // The phone is the ONLY client that has ever needed these three — they exist for exactly this
   // role. All three are additionally CHAT-ONLY and fail closed on an absent/unknown session mode
@@ -374,7 +378,8 @@ const REMOTE_ELIGIBLE_SESSION_MODES = new Set(["code", "dispatch", "chat"]);
  *  phone, including one that never does. Used by session.attach/send/history/interrupt plus
  *  approval.respond, approval.list, and ask_user.respond — all three also carry a caller-supplied
  *  `sessionId` with no other mode check, and ask_user.respond in particular is exactly the RPC the
- *  AskQuestion tool resolves through. Chat Slice D task 1 added session.setModel to this set too. */
+ *  AskQuestion tool resolves through. Chat Slice D task 1 added session.setModel to this set too;
+ *  provider-correctness T4 added session.setEffort beside it. */
 function assertRemoteMayUseSession(store: SessionStore, role: string | undefined | null, sessionId: string): void {
   if (role !== "remote") return;
   let mode: string | undefined;
@@ -1132,6 +1137,56 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         }
         try {
           opts.store.setModel(p.sessionId, model);
+        } catch (e) {
+          throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
+        }
+        return {};
+      }
+      // provider-correctness T4: per-session reasoning effort — its OWN method rather than a second
+      // argument on session.setModel just above ("effort and model are two different things, just
+      // like the CLI"). Everything structural is that method's, deliberately: the same
+      // `assertRemoteMayUseSession` guard (it is REMOTE_ALLOWED_METHODS-listed and takes a bare
+      // caller-supplied sessionId), the same mode-agnosticism, the same `null` = clear, the same
+      // NOT_FOUND mapping, and the same "the next turn resolves it, never the running one".
+      case METHODS.sessionSetEffort: {
+        const p = parseParams(SessionSetEffortParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        // SET-TIME validation, for the reason session.setModel's exists (I1 review fix: an
+        // unvalidated selection bricks every future turn SILENTLY — the provider 400s on each one
+        // with nothing pointing back at the setting that caused it). The effort half needs it MORE,
+        // not less: the endpoint validates effort PER-MODEL, and the two rejections come from
+        // different layers — `minimal` is refused with an `unsupported_value` naming the model,
+        // while a value outside the global enum is refused model-agnostically — so the only honest
+        // check is against THIS session's model's own list, at set time.
+        //
+        // `effortsForModel` (ipc/sync.ts) is that list, and it is the SAME one `sync.config`
+        // advertises to the phone. That shared source is the point: the daemon must never refuse an
+        // effort it advertises, nor advertise one it refuses. It is uniform across models today —
+        // the per-model seam exists because the API's behaviour is per-model, not because the
+        // values diverge yet.
+        //
+        // NOT a claim that any other string is "an invalid effort": it is a claim about what is
+        // valid ON THE WIRE. A Norma-level tier that never reaches the wire (the planned `ultra`,
+        // which sends `max` plus a delegation instruction, code sessions only) is a different kind
+        // of value, and when it lands it belongs HERE as an accepted client-side selector
+        // translated before the request — never inside `effortsForModel`, which describes what the
+        // endpoint accepts.
+        if (p.effort !== null) {
+          // The session's EFFECTIVE model, by the same precedence AgentEngine.resolveSel applies:
+          // its own override first, the daemon's live default second. An unknown sessionId is left
+          // to `store.setEffort` below to report — that keeps NOT_FOUND coming from one place
+          // regardless of whether this branch ran.
+          let sessionModel: string | undefined;
+          try { sessionModel = opts.store.meta(p.sessionId).model; } catch { /* unknown id → the store call below owns the error */ }
+          const model = sessionModel ?? opts.liveModel?.() ?? "";
+          const allowed = effortsForModel(model);
+          if (allowed.length > 0 && !allowed.includes(p.effort)) {
+            const forModel = model ? `by model '${model}'` : "by the configured provider";
+            throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${p.effort}' is not accepted ${forModel} — supported: ${allowed.join(", ")}`);
+          }
+        }
+        try {
+          opts.store.setEffort(p.sessionId, p.effort);
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }

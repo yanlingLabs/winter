@@ -18,6 +18,9 @@ import {
   SessionSetPolicyResult,
   SessionSetModelParams,
   SessionSetModelResult,
+  SessionSetEffortParams,
+  SessionSetEffortResult,
+  SESSION_EFFORT_MAX_CHARS,
   SessionAddDirParams,
   SessionSetCwdParams,
   TrustDirParams,
@@ -511,6 +514,46 @@ describe("session.create / session.list carry an optional per-session model (Cha
     });
     expect(listed.sessions[0]!.model).toBe("claude-opus-5");
     expect(listed.sessions[1]!.model).toBeUndefined();
+  });
+});
+
+// provider-correctness T4: per-session reasoning effort — session.setEffort {sessionId, effort:
+// string|null} → {} (null clears). Its OWN method, not a second argument on session.setModel
+// ("effort and model are two different things, just like the CLI"), and mode-agnostic on the same
+// terms. The VALUE is not enumerated here on purpose: which efforts a model accepts is provider
+// knowledge the daemon checks at set time (a zod enum here would be a second, drift-prone copy of
+// a set this package cannot see change).
+describe("session.setEffort schema (provider-correctness T4)", () => {
+  test("params: sessionId required non-empty, effort is a nullable string (both string and null accepted)", () => {
+    expect(SessionSetEffortParams.parse({ sessionId: "s1", effort: "xhigh" }).effort).toBe("xhigh");
+    expect(SessionSetEffortParams.parse({ sessionId: "s1", effort: null }).effort).toBeNull();
+    expect(() => SessionSetEffortParams.parse({ sessionId: "s1", effort: "" })).toThrow(); // empty string is not a level
+    expect(() => SessionSetEffortParams.parse({ sessionId: "", effort: "high" })).toThrow();
+    expect(() => SessionSetEffortParams.parse({ sessionId: "s1" })).toThrow(); // effort is required (nullable, not optional)
+  });
+
+  test("the value is bounded but NOT enumerated — an unknown slug parses here and is refused by the daemon", () => {
+    // "minimal" is a real level the API rejects PER-MODEL; the wire schema deliberately lets it
+    // through so the daemon's model-aware check (ipc/server.ts) is the one place that decides.
+    expect(SessionSetEffortParams.parse({ sessionId: "s1", effort: "minimal" }).effort).toBe("minimal");
+    expect(SessionSetEffortParams.parse({ sessionId: "s1", effort: "e".repeat(SESSION_EFFORT_MAX_CHARS) }).effort!.length).toBe(SESSION_EFFORT_MAX_CHARS);
+    expect(() => SessionSetEffortParams.parse({ sessionId: "s1", effort: "e".repeat(SESSION_EFFORT_MAX_CHARS + 1) })).toThrow();
+  });
+
+  test("result is empty; METHODS carries the verb", () => {
+    expect(SessionSetEffortResult.parse({})).toEqual({});
+    expect(METHODS.sessionSetEffort).toBe("session.setEffort");
+  });
+
+  test("SessionListResult rows carry an optional effort; older shapes without it still parse", () => {
+    const listed = SessionListResult.parse({
+      sessions: [
+        { sessionId: "s_1", scope: "global", createdAt: 1, lastSeq: 0, effort: "xhigh" },
+        { sessionId: "s_2", scope: "global", createdAt: 1, lastSeq: 0 }, // no effort — uses the global default
+      ],
+    });
+    expect(listed.sessions[0]!.effort).toBe("xhigh");
+    expect(listed.sessions[1]!.effort).toBeUndefined();
   });
 });
 

@@ -352,6 +352,25 @@ extension NormaClient {
         ]))
     }
 
+    /// `session.setEffort {sessionId, effort}` (provider-correctness T4) — the per-session
+    /// reasoning-effort override, the other half of `setModel` above and a SEPARATE method by
+    /// design ("effort and model are two different things, just like the CLI"). Identical wire
+    /// contract: `effort: nil` CLEARS the override and is sent as a LITERAL JSON null, never an
+    /// omitted key (`SessionSetEffortParams.effort` is `.min(1).nullable()` — required-but-nullable,
+    /// NOT optional), the result is a bare `{}`, and an unresolvable sessionId throws `RpcError` via
+    /// the daemon's NOT_FOUND.
+    ///
+    /// The VALUE is not validated here, and deliberately so: the endpoint validates effort
+    /// per-model, so only the daemon — which knows the session's own model — can decide. An effort
+    /// the session's model does not accept comes back as an `RpcError` (INVALID_PARAMS) naming the
+    /// supported set, which a picker should surface rather than swallow.
+    public func setEffort(sessionId: String, effort: String?) async throws {
+        _ = try await request("session.setEffort", params: obj([
+            "sessionId": .string(sessionId),
+            "effort": effort.map { JSONValue.string($0) } ?? JSONValue.null,
+        ]))
+    }
+
     public func taskList(sessionId: String) async throws -> [(id: String, subject: String, status: String, activeForm: String?)] {
         let r = try await request("task.list", params: obj(["sessionId": .string(sessionId)]))
         return (r["tasks"]?.arrayValue ?? []).compactMap { t in

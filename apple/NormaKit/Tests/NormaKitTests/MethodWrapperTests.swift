@@ -74,6 +74,7 @@ final class MethodWrapperTests: XCTestCase {
             ("plan.respond", #"{"ok":true,"alreadyResolved":false}"#, { _ = try await client.planRespond(sessionId: "s", callId: "c1", approved: true, autoAccept: true) }),
             ("session.setPolicy", #"{"ok":true}"#, { try await client.setPolicy(sessionId: "s", policy: "auto") }),
             ("session.setModel", #"{}"#, { try await client.setModel(sessionId: "s", model: "claude-opus-5") }),
+            ("session.setEffort", #"{}"#, { try await client.setEffort(sessionId: "s", effort: "xhigh") }),
             ("session.steer", #"{"ok":true,"injected":true}"#, { _ = try await client.steer(sessionId: "s", text: "also do X") }),
             ("session.interrupt", #"{"ok":true,"wasRunning":true}"#, { _ = try await client.interrupt(sessionId: "s") }),
             ("daemon.trustDir", #"{"ok":true,"trusted":true}"#, { _ = try await client.trustDir(path: "/tmp/p") }),
@@ -107,6 +108,30 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertTrue(
             (clearReq["params"] as? [String: Any])?["model"] is NSNull,
             "model:nil must send a literal JSON null, not an omitted key"
+        )
+    }
+
+    /// provider-correctness T4: `session.setEffort`'s wire shape — same required-but-nullable rule
+    /// as `session.setModel` above (`SessionSetEffortParams.effort: z.string().min(1).nullable()`),
+    /// so a clear must carry a LITERAL JSON `null` rather than omitting the key, which would fail
+    /// the daemon's own schema validation.
+    func testSetEffortEncodesStringOrLiteralNull() async throws {
+        let (client, t) = try await connected()
+
+        let (setReq, _) = try await roundTrip(t, sentIndex: 1, result: #"{}"#) {
+            try await client.setEffort(sessionId: "s_1", effort: "xhigh")
+        }
+        XCTAssertEqual(setReq["method"] as? String, "session.setEffort")
+        XCTAssertEqual((setReq["params"] as? [String: Any])?["sessionId"] as? String, "s_1")
+        XCTAssertEqual((setReq["params"] as? [String: Any])?["effort"] as? String, "xhigh")
+
+        let (clearReq, _) = try await roundTrip(t, sentIndex: 2, result: #"{}"#) {
+            try await client.setEffort(sessionId: "s_1", effort: nil)
+        }
+        XCTAssertEqual(clearReq["method"] as? String, "session.setEffort")
+        XCTAssertTrue(
+            (clearReq["params"] as? [String: Any])?["effort"] is NSNull,
+            "effort:nil must send a literal JSON null, not an omitted key"
         )
     }
 
