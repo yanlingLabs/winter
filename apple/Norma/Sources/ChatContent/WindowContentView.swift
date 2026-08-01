@@ -1,4 +1,5 @@
 import SwiftUI
+import NormaKit
 
 /// The chat window's content column — header (optional leading accessory + status), transcript,
 /// pinned tasks, queued line, composer. Shared by the MORPH window (which injects its self-drawn
@@ -27,6 +28,11 @@ struct WindowContentView<Accessory: View>: View {
     /// presentational-only convention as `showingPolicyMenu` above (a separate flag: the two menus
     /// are independent popovers, never shown together off one boolean).
     @State private var showingModelMenu = false
+
+    /// provider-correctness T6: the effort menu's own popover state — a THIRD independent flag, same
+    /// reasoning as `showingModelMenu` being separate from `showingPolicyMenu`: model and effort are
+    /// independent affordances and must never open off one boolean.
+    @State private var showingEffortMenu = false
 
     /// Task 3 (2e-i): whether the "… +N completed" tail is expanded to the full completed list.
     /// Local presentational state, same convention as `showingPolicyMenu` above — resets whenever
@@ -79,6 +85,12 @@ struct WindowContentView<Accessory: View>: View {
                 // same header slot, same plain-icon-button idiom.
                 if modelMenuIsVisible(isChatSession: adapter.isChatSession) {
                     modelMenuButton
+                }
+                // provider-correctness T6: the effort menu, beside the model menu — the OTHER axis
+                // ("effort and model are two different things, just like the CLI"), and the only
+                // surface on the Mac through which a Norma-level tier is reachable at all.
+                if effortMenuIsVisible(isChatSession: adapter.isChatSession) {
+                    effortMenuButton
                 }
                 // Plan-immunity (2026-07-28 design): chat's approval policy is fixed and can never
                 // be changed — the picker behind this button is meaningless (and every row's
@@ -306,6 +318,8 @@ struct WindowContentView<Accessory: View>: View {
     @ViewBuilder
     private var modelMenuButton: some View {
         Button {
+            // T6: a snapshot, refreshed exactly when it is about to be read.
+            adapter.onRefreshModelCatalogue()
             showingModelMenu = true
         } label: {
             Image(systemName: "cpu")
@@ -318,41 +332,51 @@ struct WindowContentView<Accessory: View>: View {
         }
     }
 
-    /// The model menu's rows: "Default" (clears the override, `nil`) first, then every
-    /// `sessionModelOptions` slug (WorkSidebar.swift's own MARK-section precedent for
-    /// `sessionPolicyModes`) — a checkmark on whichever matches the CURRENT session's row
-    /// (`currentSidebarSessionSummary.model`, WorkSidebar.swift). Read once per popover render
-    /// (`current`), same "read fresh at render" convention `sidebarSessionInfo` already uses for
-    /// title/scope/cwd.
+    /// The model menu's rows: "Default" (clears the override, `nil`) first, then every slug the
+    /// SYNCED CATALOGUE reports (`modelPickerOptions`) — a checkmark on whichever matches the
+    /// session's CURRENT selection, which is the optimistic overlay when one is pending and the
+    /// daemon's own row otherwise (`effectiveSelection`). Read once per popover render, same "read
+    /// fresh at render" convention `sidebarSessionInfo` uses for title/scope/cwd.
+    ///
+    /// An UNLISTED current model still gets a row of its own — a stale slug from a provider change
+    /// is still the thing this session is pinned to, and a selection the user cannot see is a
+    /// selection they cannot clear.
     @ViewBuilder
     private var modelMenuContent: some View {
-        let current = currentSidebarSessionSummary?.model
+        let current = effectiveSelection(row: currentSidebarSessionSummary?.model, optimistic: adapter.pendingModel)
+        let options = modelPickerOptions(adapter.modelCatalogue)
         VStack(alignment: .leading, spacing: 2) {
             Text("Model")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 4)
             modelPickerRow(nil, current: current)
-            ForEach(sessionModelOptions, id: \.self) { model in
+            ForEach(options, id: \.self) { model in
                 modelPickerRow(model, current: current)
+            }
+            if let current, !options.contains(current) {
+                modelPickerRow(current, current: current)
             }
         }
         .padding(12)
         .frame(minWidth: 160)
     }
 
-    /// One model-menu row — `model: nil` is the "Default" row (clears the override). Selecting a
-    /// row fires `adapter.onSetModel` directly, same "the wirer owns in-flight/success bookkeeping"
-    /// convention as `policyPickerRow`'s own doc comment.
+    /// One model-menu row — `model: nil` is the "Default" row (clears the override). Selecting a row
+    /// applies OPTIMISTICALLY (the overlay flips before the RPC) and fires `adapter.onSetModel`;
+    /// the wirer owns the in-flight flag, the revert, and the probation, same "the wirer owns the
+    /// bookkeeping" convention as `policyPickerRow`.
     @ViewBuilder
     private func modelPickerRow(_ model: String?, current: String?) -> some View {
         Button {
+            adapter.pendingModel = model.map { OptimisticSelection.value($0) } ?? .clear
             adapter.onSetModel(model)
+            showingModelMenu = false
         } label: {
             HStack {
                 Text(modelDisplayLabel(model))
                 Spacer()
-                if current == model {
+                if selectionIsCurrent(model, current: current) {
                     Image(systemName: "checkmark")
                 }
             }
@@ -360,6 +384,87 @@ struct WindowContentView<Accessory: View>: View {
         }
         .buttonStyle(.plain)
         .disabled(adapter.modelChangeInFlight)
+        .padding(.vertical, 4)
+    }
+
+    // MARK: - provider-correctness T6: the header's effort menu — `session.setEffort`
+
+    /// Same plain-icon-button idiom as the model/policy buttons, a different glyph ("gauge") so the
+    /// three affordances stay visually distinct.
+    @ViewBuilder
+    private var effortMenuButton: some View {
+        Button {
+            // T6: a snapshot, refreshed exactly when it is about to be read.
+            adapter.onRefreshModelCatalogue()
+            showingEffortMenu = true
+        } label: {
+            Image(systemName: "gauge.with.dots.needle.33percent")
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showingEffortMenu, arrowEdge: .bottom) {
+            effortMenuContent
+        }
+    }
+
+    /// The effort menu: "Default", then the WIRE levels the session's model accepts, then — only for
+    /// a CODE session — the Norma-level tiers, under their own heading. The two sections are never
+    /// merged (see `effortPickerOptions`), and the tier section is simply absent for chat/dispatch
+    /// rather than shown-and-refused.
+    @ViewBuilder
+    private var effortMenuContent: some View {
+        let row = currentSidebarSessionSummary
+        let current = effectiveSelection(row: row?.effort, optimistic: adapter.pendingEffort)
+        let opts = effortPickerOptions(catalogue: adapter.modelCatalogue,
+                                       model: effectiveSelection(row: row?.model, optimistic: adapter.pendingModel),
+                                       mode: row?.mode)
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Reasoning effort")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 4)
+            effortPickerRow(nil, current: current)
+            ForEach(opts.wire, id: \.self) { level in
+                effortPickerRow(level, current: current)
+            }
+            if !opts.tiers.isEmpty {
+                Text("Norma")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 6)
+                    .padding(.bottom, 4)
+                ForEach(opts.tiers, id: \.self) { tier in
+                    effortPickerRow(tier, current: current)
+                }
+            }
+            // A current selection in NEITHER list still needs a row — see `selectionOrigin`.
+            if selectionOrigin(current, wire: opts.wire, tiers: opts.tiers) == .unknown, let current {
+                effortPickerRow(current, current: current)
+            }
+        }
+        .padding(12)
+        .frame(minWidth: 180)
+    }
+
+    @ViewBuilder
+    private func effortPickerRow(_ effort: String?, current: String?) -> some View {
+        Button {
+            adapter.pendingEffort = effort.map { OptimisticSelection.value($0) } ?? .clear
+            adapter.onSetEffort(effort)
+            showingEffortMenu = false
+        } label: {
+            HStack {
+                Text(effortDisplayLabel(effort))
+                Spacer()
+                if selectionIsCurrent(effort, current: current) {
+                    Image(systemName: "checkmark")
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(adapter.effortChangeInFlight)
         .padding(.vertical, 4)
     }
 
@@ -521,22 +626,101 @@ func buildSubagentSection(_ items: [SubagentItem]) -> (rows: [SubagentItem], any
 // these directly, same "SwiftUI body isn't unit-testable, the decision behind it is" posture as
 // `buildTaskSection`/`buildSubagentSection` above.
 
-/// The model menu's offered slugs — a hardcoded Swift mirror of `CODEX_MODELS`
-/// (`packages/core/src/providers/codex-config.ts`), same "Swift constant mirrors a TS one, no
-/// generated binding" precedent as `sessionPolicyModes` (WorkSidebar.swift) mirrors the protocol's
-/// `ApprovalPolicy` enum. These three slugs are the FULL catalogue `session.setModel`'s server-side
-/// validation (`AgentEngine.knownModels()`, ipc/server.ts) currently accepts for the shipped
-/// codex-oauth provider; an openai-compatible BYOK provider is non-enumerable server-side (any
-/// non-empty slug passes there), so this list is deliberately not exhaustive for every provider —
-/// only the sanctioned default's. A drift here (a future model added/removed server-side) fails
-/// OPEN, not closed: the picker simply doesn't offer a slug that would still be settable by hand
-/// (`norma-probe`, the CLI's `/model`), never the reverse.
-let sessionModelOptions: [String] = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+/// provider-correctness T6: the model menu's offered slugs, read from the SYNCED CATALOGUE
+/// (`sync.config`'s `models`, reached through `NormaClient.syncConfig()` and held on
+/// `FieldStateAdapter.modelCatalogue`).
+///
+/// This replaced a hardcoded three-slug Swift mirror of `CODEX_MODELS`. That mirror was wrong in a
+/// way no test could catch: a picker cannot prove a slug it invented exists, and the daemon is the
+/// side that already holds AND validates the list, so the daemon serves it. The identical mistake on
+/// the phone — a derived lineup plus a mock effort list offering `ultra` — is what this whole plan
+/// exists to remove.
+///
+/// **EMPTY IS A REAL ANSWER AND NEVER A LICENCE TO GUESS.** `[]` means the daemon reported no
+/// catalogue: its provider cannot enumerate (an arbitrary openai-compatible endpoint — the same case
+/// `session.setModel` handles by skipping its membership check), none is configured, or this client
+/// has not fetched yet. The menu then offers the "Default" row alone. Substituting a remembered or
+/// derived lineup is exactly the failure this field replaced.
+func modelPickerOptions(_ catalogue: SyncConfigSnapshot) -> [String] {
+    catalogue.models.map(\.id)
+}
+
+/// provider-correctness T6: the effort menu's two sections — WIRE levels for the session's model,
+/// and NORMA-LEVEL tiers.
+///
+/// **TWO LISTS, NEVER ONE.** `models[].efforts` is exactly what the endpoint's request validator
+/// accepts; a tier is exactly what it does not (the daemon translates `ultra` → `max` plus a
+/// delegation posture before a request body exists). Concatenating them would make a picker offer a
+/// level the turn would be 400'd on — the original bug, arriving through its own fix.
+///
+/// **THE MODE SCOPING IS THIS CLIENT'S OBLIGATION.** `sync.config` advertises `clientEfforts`
+/// UNCONDITIONALLY, because a daemon serving a whole-device bootstrap cannot know which session a
+/// picker is for. `session.setEffort` refuses a tier for anything but a code session, so offering
+/// one on chat/dispatch would render rows whose every tap comes back an RPC error. `mode` is the
+/// session row's own (`SessionSummary.mode`); ABSENT means code, the store-wide convention that
+/// `clientEffortEligible` (packages/core/src/settings.ts) also applies — and this must stay an
+/// allowlist, so a future mode nobody has written yet gets no tiers for free.
+func effortPickerOptions(catalogue: SyncConfigSnapshot, model: String?, mode: String?) -> (wire: [String], tiers: [String]) {
+    // The session's EFFECTIVE model, by AgentEngine.resolveSel's own precedence: its override first,
+    // the daemon's live default second. A model the catalogue doesn't list contributes no levels —
+    // "I have not been told", not "none exist".
+    let effective = model ?? catalogue.defaultModel
+    let wire = catalogue.models.first { $0.id == effective }?.efforts ?? []
+    return (wire, effortTiersAreOffered(mode: mode) ? catalogue.clientEfforts : [])
+}
+
+/// The mode gate above, as its own named symbol so `ModelPickerTests` can drive the rule directly
+/// rather than only through a catalogue. CODE ONLY, absent == code, everything else refused — the
+/// Swift mirror of `clientEffortEligible`.
+func effortTiersAreOffered(mode: String?) -> Bool {
+    mode == nil || mode == "code"
+}
+
+/// Whether a picker row is the CURRENT selection.
+///
+/// `SessionSummary.effort` may report a Norma-level TIER verbatim (`"ultra"`) rather than its wire
+/// translation (`"max"`) — `SessionListResult`'s own doc comment says so explicitly — so matching
+/// against the model's `efforts` array alone silently shows NO checkmark on a session whose effort
+/// is a tier. Both lists, always.
+func selectionIsCurrent(_ option: String?, current: String?) -> Bool {
+    option == current
+}
+
+/// Where a current selection lives, for a picker that renders two sections. `nil` for "no override",
+/// and `.unknown` for a value in NEITHER list — a stale slug from a provider change, or a tier a
+/// daemon has stopped offering. Rendered as its own row rather than dropped: a selection the user
+/// cannot see is a selection they cannot clear.
+enum SelectionOrigin: Equatable { case none, wire, tier, unknown }
+
+func selectionOrigin(_ current: String?, wire: [String], tiers: [String]) -> SelectionOrigin {
+    guard let current else { return .none }
+    if wire.contains(current) { return .wire }
+    if tiers.contains(current) { return .tier }
+    return .unknown
+}
 
 /// The model menu's current-selection LABEL — the row's `model` if set, else "Default" (brief's
 /// own wording: labeled so the user can tell inherited-from-default apart from explicitly-pinned).
 func modelDisplayLabel(_ model: String?) -> String {
     model ?? "Default"
+}
+
+/// The effort menu's current-selection LABEL — same "Default" wording and same reason as
+/// `modelDisplayLabel` above: no override must READ as inherited-from-default, never as blank.
+/// "Default" is deliberately NOT "none": an unset effort omits the request's `reasoning` block
+/// entirely, while `"none"` is a real, distinct level the endpoint honours, and it appears in the
+/// wire list as its own row.
+func effortDisplayLabel(_ effort: String?) -> String {
+    effort ?? "Default"
+}
+
+/// Visibility rule behind the effort-menu button — the same always-true asymmetry vs the policy
+/// picker that `modelMenuIsVisible` documents, kept as its own symbol for the same reason: a
+/// regression that copies `!isChatSession` here is then a one-line, obviously-wrong diff. Chat
+/// sessions DO choose their effort (`session.setEffort` is mode-agnostic); what they may not choose
+/// is a TIER, and that is `effortTiersAreOffered`'s job, not this one's.
+func effortMenuIsVisible(isChatSession _: Bool) -> Bool {
+    true
 }
 
 /// Visibility rule behind the model-menu button (`modelMenuButton`'s own `if` in `body` above) —

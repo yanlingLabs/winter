@@ -88,5 +88,13 @@ struct SessionSummary: Equatable, Identifiable {
     // to know what's currently pinned, same "read fresh from the directory" convention as
     // `sidebarSessionInfo`'s title/scope/cwd rows. Defaulted, same reasoning as `mode` above.
     var model: String? = nil
+    /// provider-correctness T6: threaded through from `listSessions()` (T4's per-session effort
+    /// override) — `WindowContentView`'s effort menu reads this to know what is currently pinned,
+    /// same convention as `model` above.
+    ///
+    /// The value may be a Norma-level TIER (`"ultra"`) reported VERBATIM rather than its wire
+    /// translation (`SessionListResult.effort`'s own doc comment) — so a picker matching it against
+    /// the chosen model's `efforts` array alone will show no checkmark. Match against BOTH lists.
+    var effort: String? = nil
     var id: String { sessionId }
 }

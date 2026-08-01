@@ -351,7 +351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { [weak self] in
             guard let self else { return }
             let rows = (try? await model.client.listSessions())?.map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model)
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort)
             } ?? []
             if let sid = Self.chatSessionToOpen(in: rows) {
                 let title = rows.first { $0.sessionId == sid }?.title
@@ -793,6 +793,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Task 10 (Chat Slice D): the model menu — same seam as the policy picker just above.
         orb.onSetModel = { [weak self] model in
             await self?.appModel?.setSessionModel(model) ?? false
+        }
+
+        // provider-correctness T6: the effort menu and the catalogue behind both pickers — same
+        // seam as the model menu just above.
+        orb.onSetEffort = { [weak self] effort in
+            await self?.appModel?.setSessionEffort(effort) ?? false
+        }
+        orb.onFetchModelCatalogue = { [weak self] in
+            await self?.appModel?.fetchModelCatalogue()
         }
 
         // Dispatch (Phase 7), Task 8: the field's child-status circles — tapping one opens that

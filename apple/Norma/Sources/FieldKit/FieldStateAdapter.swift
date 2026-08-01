@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import SwiftUI
+import NormaKit
 
 /// Task 2 (fluid orb): the three states the fluid-orb bubble can render — derived purely from
 /// `SessionModel`'s turn/task/unread state by `FieldStateAdapter.fluidState` below. `.idle` means
@@ -76,9 +77,29 @@ final class FieldStateAdapter: ObservableObject {
                     self.triggerStoppedFlash()
                 }
                 self.previousLastTurnAborted = newState.lastTurnAborted
+
+                // provider-correctness T6: THE TURN BOUNDARY, and the only place the picker
+                // probation is ever resolved. Edge-detected on `turnRunning` true→false — the same
+                // edge-detector idiom as `lastTurnAborted` just above — so exactly ONE turn's
+                // outcome is ever consulted, and the probation ends either way. A revert CLEARS the
+                // override (`onSetModel(nil)`/`onSetEffort(nil)`); it never writes the fallback,
+                // which would sever the precedence chain and pin the session past future changes.
+                if self.previousTurnRunning && !newState.turnRunning {
+                    switch self.resolveProbation(turnError: newState.lastTurnError) {
+                    case .model: self.onSetModel(nil)
+                    case .effort: self.onSetEffort(nil)
+                    case .none: break
+                    }
+                }
+                self.previousTurnRunning = newState.turnRunning
             }
             .store(in: &cancellables)
     }
+
+    /// provider-correctness T6: the second edge-detection memory for the sink above —
+    /// `OrbSessionState.turnRunning`'s last observed value. View-layer bookkeeping, same as
+    /// `previousLastTurnAborted` below and for the same reason (an edge is not reducer state).
+    private var previousTurnRunning: Bool = false
 
     /// Edge-detection memory for the sink above — `OrbSessionState.lastTurnAborted`'s own last
     /// observed value, NOT itself part of the pure reducer state (view-layer bookkeeping only).
@@ -532,4 +553,138 @@ final class FieldStateAdapter: ObservableObject {
     /// session directory's own `mode` field for the newly-pinned session — the left sidebar lists
     /// every session, chat included, with no mode filter of its own).
     @Published var isChatSession: Bool = false
+
+    // MARK: - provider-correctness T6: the catalogue-driven model/effort pickers
+
+    /// The daemon's synced model catalogue (`sync.config`) — the pickers' ONLY source of slugs and
+    /// effort levels, replacing the hardcoded three-slug mirror that used to live in
+    /// `WindowContentView`. Populated by whichever surface owns this adapter (its own `NormaClient`
+    /// calls `NormaClient.syncConfig()`); `.empty` until then, which the pickers render as "no rows
+    /// offered" rather than as a fallback lineup — a derived catalogue is precisely the bug the
+    /// field exists to kill.
+    @Published var modelCatalogue: SyncConfigSnapshot = .empty
+
+    /// Re-reads the catalogue into `modelCatalogue`. Wired by whichever surface owns this adapter;
+    /// called when a picker MENU OPENS, which is the honest refresh point for a value that is a
+    /// SNAPSHOT rather than a subscription — `sync.config` re-resolves the model and effort on every
+    /// call, so a `norma model --effort` edit made while a window sat open lands the next time the
+    /// user actually looks. Deliberately NOT on a session switch: the catalogue is daemon-wide, so a
+    /// switch cannot change it, and firing an RPC there perturbs the create/attach sequence every
+    /// switch test asserts on for no benefit.
+    var onRefreshModelCatalogue: () -> Void = {}
+
+    /// True while a `session.setEffort` RPC is in flight. A SEPARATE flag from `modelChangeInFlight`
+    /// for the same reason that one is separate from `policyChangeInFlight`: model and effort are
+    /// independent axes and independent affordances ("two different things, just like the CLI").
+    @Published var effortChangeInFlight: Bool = false
+
+    /// Wired to `session.setEffort` — `nil` CLEARS the override (the wire sends a literal null).
+    /// Same wirer-owns-the-bookkeeping convention as `onSetModel`.
+    var onSetEffort: (String?) -> Void = { _ in }
+
+    /// The model selection applied OPTIMISTICALLY — rendered ahead of the RPC's answer, and reverted
+    /// to `.none` if the daemon refuses. See `OptimisticSelection` for why the revert is a revert of
+    /// the OVERLAY and never a write of the fallback.
+    @Published var pendingModel: OptimisticSelection = .none
+    /// The effort half of `pendingModel`.
+    @Published var pendingEffort: OptimisticSelection = .none
+
+    /// The selection currently ON PROBATION — applied, accepted by the daemon, and awaiting the
+    /// verdict of the ONE turn that runs next. Nil the rest of the time. In memory only: a probation
+    /// cannot survive a relaunch, which is half of why the transcript-wide-scan bug it replaces
+    /// cannot recur here.
+    @Published var selectionProbation: SelectionProbation?
+
+    /// Called by `applyModelSelection`/`applyEffortSelection`'s wirer when the RPC SUCCEEDS —
+    /// arms the probation on what was just accepted. A `nil` value (the user picked "Default")
+    /// arms nothing for that axis: clearing an override cannot be the thing that breaks a turn.
+    func armProbation(model: String? = nil, effort: String? = nil) {
+        guard model != nil || effort != nil else { selectionProbation = nil; return }
+        selectionProbation = SelectionProbation(model: model ?? selectionProbation?.model,
+                                                effort: effort ?? selectionProbation?.effort)
+    }
+
+    /// Resolves the probation against the turn that just ran, and ALWAYS ends it — one turn, one
+    /// verdict, whatever the verdict is. Returns what the caller must clear.
+    ///
+    /// The revert a caller performs is `onSetModel(nil)` / `onSetEffort(nil)` — a CLEAR, never a
+    /// write of the previous value. Writing the fallback would sever the precedence chain (session
+    /// override → daemon default) and silently pin the session past every future change; clearing
+    /// restores it.
+    @discardableResult
+    func resolveProbation(turnError: String?) -> SelectionRevert {
+        defer { selectionProbation = nil }
+        return selectionRevert(selectionProbation, turnErrorMessage: turnError)
+    }
+}
+
+/// provider-correctness T6: a picker selection applied ahead of its RPC's answer.
+///
+/// Three cases, not `String?`, because "no optimistic value" and "optimistically cleared" are
+/// different states that `nil` cannot tell apart — and conflating them is how an optimistic UI ends
+/// up showing a cleared override that the daemon actually refused to clear.
+enum OptimisticSelection: Equatable {
+    /// No optimistic value — render the daemon's own row. This is also the REVERT state: an RPC
+    /// refusal returns here, which shows the user exactly what the daemon still holds. It is
+    /// deliberately NOT "write the previous value back": the daemon never changed anything, so there
+    /// is nothing to write, and writing would be the fallback-severs-precedence bug in miniature.
+    case none
+    /// The user picked "Default" — render as no override.
+    case clear
+    case value(String)
+}
+
+/// provider-correctness T6: what a picker is rendering right now — the optimistic overlay when there
+/// is one, the daemon's row otherwise.
+func effectiveSelection(row: String?, optimistic: OptimisticSelection) -> String? {
+    switch optimistic {
+    case .none: return row
+    case .clear: return nil
+    case .value(let v): return v
+    }
+}
+
+/// A just-applied selection awaiting the verdict of exactly ONE turn.
+struct SelectionProbation: Equatable {
+    var model: String?
+    var effort: String?
+}
+
+enum SelectionRevert: Equatable {
+    case none
+    case model
+    case effort
+}
+
+/// Does the turn that just ran implicate the selection on probation?
+///
+/// **Scoped to ONE turn by construction, and that is the load-bearing property.** `turnErrorMessage`
+/// is `OrbSessionState.lastTurnError`, which the reducer sets on a main-thread `agent_error` and
+/// clears on the next `turn_started` and on any clean `turn_completed`. There is no transcript to
+/// scan and no history to accumulate: an earlier implementation of this idea scanned the whole
+/// transcript, which made a model choice unholdable forever after one bad turn — and, because the
+/// transcript is durable, that survived relaunch. Neither is expressible here.
+///
+/// **Conservative on purpose.** A revert throws away a choice the user deliberately made, so the
+/// message must name BOTH the value and the axis before this fires. The residual case it exists for
+/// is narrow: set-time validation (`session.setEffort`/`session.setModel`, T1/T4/T5) already refuses
+/// anything the daemon's own catalogue rejects, so what reaches here is a selection the catalogue
+/// accepted and the ENDPOINT did not — a BYOK provider, or a per-model divergence the daemon has not
+/// learned yet. An unrelated tool failure that happens to contain the word "high" must not cost the
+/// user their effort setting.
+func selectionRevert(_ probation: SelectionProbation?, turnErrorMessage: String?) -> SelectionRevert {
+    guard let probation, let raw = turnErrorMessage else { return .none }
+    let message = raw.lowercased()
+    // Effort first: an effort rejection names the model too (`unsupported_value` errors quote the
+    // slug), so checking the model first would misattribute it and clear the wrong axis.
+    if let effort = probation.effort, !effort.isEmpty,
+       message.contains(effort.lowercased()),
+       message.contains("effort") || message.contains("reasoning") {
+        return .effort
+    }
+    if let model = probation.model, !model.isEmpty,
+       message.contains(model.lowercased()), message.contains("model") {
+        return .model
+    }
+    return .none
 }

@@ -111,9 +111,37 @@ struct GlassRootView: View {
             Task { @MainActor in
                 let ok = await controller.onSetModel?(model) ?? false
                 if ok { await controller.sidebars?.directory.refresh() }
+                // provider-correctness T6: the RPC's answer is no longer swallowed — see the twin
+                // wiring in `DetachedWindowController.init` for the full rationale (success retires
+                // the overlay and arms a one-turn probation; refusal reverts the overlay to `.none`,
+                // which is a revert of the OVERLAY, never a write of the fallback).
+                adapter.pendingModel = .none
+                if ok { adapter.armProbation(model: model) }
                 adapter.modelChangeInFlight = false
             }
         }
+
+        // provider-correctness T6: the effort menu — the model wiring's twin on the other axis.
+        adapter.onSetEffort = { [adapter, controller] effort in
+            adapter.effortChangeInFlight = true
+            Task { @MainActor in
+                let ok = await controller.onSetEffort?(effort) ?? false
+                if ok { await controller.sidebars?.directory.refresh() }
+                adapter.pendingEffort = .none
+                if ok { adapter.armProbation(effort: effort) }
+                adapter.effortChangeInFlight = false
+            }
+        }
+
+        // provider-correctness T6: seed the pickers' catalogue. `sync.config` is a snapshot, so this
+        // is a fetch, not a subscription; a failure leaves `.empty` and the pickers offer no rows
+        // rather than a guessed lineup.
+        adapter.onRefreshModelCatalogue = { [adapter, controller] in
+            Task { @MainActor in
+                if let snapshot = await controller.onFetchModelCatalogue?() { adapter.modelCatalogue = snapshot }
+            }
+        }
+        if adapter.modelCatalogue == .empty { adapter.onRefreshModelCatalogue() }
     }
 
     var body: some View {
