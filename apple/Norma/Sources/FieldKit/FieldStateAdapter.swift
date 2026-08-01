@@ -734,6 +734,23 @@ enum SelectionRevert: Equatable {
 /// perfectly good boundaries around it ("…; none of the retries succeeded"). The bias is deliberate:
 /// a false NEGATIVE just means no auto-revert (the user still sees a failing turn and can act), while
 /// a false POSITIVE silently destroys a setting they chose on purpose.
+///
+/// **A NORMA-LEVEL TIER NEVER REVERTS HERE, AND THAT IS A PERMANENT FALSE NEGATIVE, NOT A BUG TO
+/// PATCH LOCALLY** (whole-branch review M1). `probation.effort` holds what the user SELECTED —
+/// `SessionListResult.effort` reports a tier verbatim, so `"ultra"` — while the endpoint's rejection
+/// quotes what was actually SENT, the wire translation (`"max"`). The two never match, so the
+/// `.effort` branch below is structurally dead for a tier.
+///
+/// It is left that way on purpose. Closing it needs the tier→wire table (`CLIENT_EFFORT_WIRE`,
+/// packages/core/src/settings.ts) on this side, and `sync.config` deliberately does not serve it —
+/// `clientEfforts` is a list of tiers, not a mapping. Hand-copying the table here would recreate
+/// precisely the client-side mirror of a daemon constant that this whole branch exists to delete,
+/// and it would drift the first time a tier's translation changes, silently, in the direction that
+/// destroys a user's setting. The honest fix is daemon-side (serve the translation, or have the
+/// error name the tier it came from); until then this is exactly the false negative the bias above
+/// already declares acceptable — the user sees the failing turn and clears the effort themselves.
+/// The residual is narrow twice over: a tier is code-sessions-only, and since the whole-branch I1
+/// fix the picker offers no tier at all unless the daemon reported real wire levels beside it.
 func selectionRevert(_ probation: SelectionProbation?, turnErrorMessage: String?) -> SelectionRevert {
     guard let probation, let raw = turnErrorMessage else { return .none }
     let message = raw.lowercased()

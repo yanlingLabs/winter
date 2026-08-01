@@ -153,7 +153,12 @@ describe("use_responses_lite — never-send pin", () => {
       // rewritten, per the investigation's account of build_responses_request:
       expect(body.tools.length).toBeGreaterThan(0); // tools NOT relocated off the top level…
       expect(body.input.some((i: any) => i.type === "additional_tools")).toBe(false); // …into input
-      expect(body.instructions).not.toBe(""); // instructions NOT emptied
+      // M5 (whole-branch review): `not.toBe("")` PASSES on `undefined`, so an `instructions` that
+      // stopped being built at all — a rename, a dropped field — would have read as "not emptied".
+      // Assert the type, which is the only form that distinguishes "present and non-empty" from
+      // "absent". `.length` is the other half: a string is present AND says something.
+      expect(typeof body.instructions).toBe("string"); // instructions NOT emptied
+      expect(body.instructions.length).toBeGreaterThan(0);
       expect(body.parallel_tool_calls).toBe(true); // NOT forced false
     },
   );

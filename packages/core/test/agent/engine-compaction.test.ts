@@ -250,7 +250,6 @@ describe("engine auto-compact trigger (at turn start, off the real provider-repo
     expect(store.read(sessionId).some((e) => e.type === "checkpoint")).toBe(false);
     expect(provider.requests.some((r) => (r.instructions ?? "").includes("compacting"))).toBe(false);
   });
-
   /** DIRECTION 3 (found while fixing the other two, pinned independently) — A BACKGROUND CHILD'S
    *  turn_completed MASKING THE MAIN THREAD'S.
    *
@@ -260,6 +259,31 @@ describe("engine auto-compact trigger (at turn start, off the real provider-repo
    *  main thread's — under-reporting it, and suppressing a compaction the main thread needed.
    *  Compaction only ever folds MAIN-thread history (`historyInput` filters other threads out), so
    *  reading a child's figure is never right. */
+  test("a background CHILD's later turn_completed does not mask the main thread's context", async () => {
+    const provider = new FakeProvider(
+      [
+        [{ type: "text_delta", delta: "SUMMARY_TOKEN" }, { type: "done", stopReason: "end_turn" }],
+        [{ type: "text_delta", delta: "ok" }, { type: "done", stopReason: "end_turn" }],
+      ],
+      [SMALL_MODEL],
+    );
+    const { engine, store, sessionId } = setupEngine(provider);
+    seedMessages(store, sessionId, 5);
+    store.append(sessionId, {
+      type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn",
+      inputTokens: 900, outputTokens: 10, contextTokens: 900, // 900 > 750 → the main thread needs a compaction
+    });
+    store.append(sessionId, {
+      type: "turn_completed", sessionId, threadId: "th_bg_child", stopReason: "end_turn",
+      inputTokens: 10, outputTokens: 2, contextTokens: 10, // a bg subagent landing after the main turn
+    });
+
+    await engine.runTurn(sessionId);
+
+    expect(store.read(sessionId).some((e) => e.type === "checkpoint")).toBe(true);
+  });
+
+
   /** DIRECTION 4 (T2 review I2a) — AN ABORTED TURN ZEROES THE MEASUREMENT.
    *
    *  ESC mid-stream aborts before the provider's `response.completed`, so no `usage` event ever
@@ -318,27 +342,4 @@ describe("engine auto-compact trigger (at turn start, off the real provider-repo
     expect(provider.requests).toHaveLength(1); // no compaction streamTurn
   });
 
-  test("a background CHILD's later turn_completed does not mask the main thread's context", async () => {
-    const provider = new FakeProvider(
-      [
-        [{ type: "text_delta", delta: "SUMMARY_TOKEN" }, { type: "done", stopReason: "end_turn" }],
-        [{ type: "text_delta", delta: "ok" }, { type: "done", stopReason: "end_turn" }],
-      ],
-      [SMALL_MODEL],
-    );
-    const { engine, store, sessionId } = setupEngine(provider);
-    seedMessages(store, sessionId, 5);
-    store.append(sessionId, {
-      type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn",
-      inputTokens: 900, outputTokens: 10, contextTokens: 900, // 900 > 750 → the main thread needs a compaction
-    });
-    store.append(sessionId, {
-      type: "turn_completed", sessionId, threadId: "th_bg_child", stopReason: "end_turn",
-      inputTokens: 10, outputTokens: 2, contextTokens: 10, // a bg subagent landing after the main turn
-    });
-
-    await engine.runTurn(sessionId);
-
-    expect(store.read(sessionId).some((e) => e.type === "checkpoint")).toBe(true);
-  });
 });

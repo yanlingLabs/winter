@@ -82,6 +82,24 @@ import { CodexAuthStore } from "../../src/providers/codex-oauth";
  * Effort validity lives in the REQUEST VALIDATOR, not the catalogue: the only honest guard for it
  * is a live probe request per effort, which is a different (and much more expensive) test. Known
  * gap, stated here so the next reader does not "helpfully" add the wrong check.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ *
+ * THE TWO NON-DERIVED ANCHORS ELSEWHERE IN THE SUITE (review M2, named here because a tripwire
+ * nobody can see is not one). `LIVE_CONTEXT_WINDOW` below is this file's single hand-held number
+ * and everything here derives from it — but two OTHER files carry 272,000 independently:
+ *
+ *   • test/providers/codex-oauth.test.ts  — `expect(m.contextWindow).toBe(272_000)` over
+ *     CODEX_MODELS. The literal that PINNED the original 372,000 transcription error for three
+ *     weeks; it is kept literal on purpose, since deriving it from the constant it guards would
+ *     make it prove nothing.
+ *   • test/agent/engine-compaction.test.ts — `expect(CODEX_SHAPED.contextWindow * FRAC)
+ *     .toBeLessThan(272_000)`, the arithmetic proof that the compaction trigger is REACHABLE at
+ *     the provider's real ceiling. It reads the window off `CODEX_MODELS[0]` but compares against
+ *     a literal, which is what makes it a check rather than a tautology.
+ *
+ * That independence is the real guard against a coordinated edit: someone "fixing" a failure by
+ * bumping `CODEX_MODELS` and this file together still reddens both of those. Do NOT derive either
+ * from `LIVE_CONTEXT_WINDOW` — the duplication is the mechanism.
  */
 
 /** The provider's hard ceiling, as read from the live catalogue on `CODEX_MODELS_VERIFIED`:
@@ -165,7 +183,11 @@ describe("CODEX_MODELS drift guard (live catalogue)", () => {
       `NORMA_CODEX_LIVE_DRIFT=1 was set but no Codex OAuth token is in the "${keychainService()}" keychain, ` +
       `so NOTHING was checked. Run \`norma login\` — or, if you work the dev profile, re-run with ` +
       `NORMA_PROFILE=dev (this reads the dist keychain by default).`,
-    ).not.toBeNull();
+    ).toBeTruthy();
+    // M7 (whole-branch review): `toBeTruthy`, not `.not.toBeNull()` — the latter PASSES on
+    // `undefined`, and the `if (!tokens) return` below would then return CLEANLY out of a green
+    // test that made no call. That is the "skipped but actually passed" shape this whole file's
+    // review-M1 note condemns, reproduced inside the guard built to prevent it.
     if (!tokens) return; // unreachable past the assertion; narrows the type
     const res = await fetch(`${CODEX.backendUrl}/models?client_version=1.0.0`, {
       headers: {

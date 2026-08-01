@@ -134,10 +134,22 @@ export const ApprovalResolvedEvent = ThreadBase.extend({
  *  actually got. That is the only correct input to the auto-compaction trigger
  *  (`engine.ts`'s `maybeAutoCompact`), which previously read `inputTokens` and therefore compacted
  *  prematurely on tool-heavy turns — a session whose context was 40% full got summarized because
- *  three rounds of it summed past the threshold. Absent on events written before 2026-07-31 and on
- *  the pre-stream error path (no round ever reported usage); consumers must fall back to
- *  `inputTokens` for those, which is the pre-existing behavior. TS-only for now: no Swift mirror
- *  and no fixture, because no client renders it — it is a daemon-internal trigger input. */
+ *  three rounds of it summed past the threshold.
+ *
+ *  ABSENT (events written before 2026-07-31, the pre-stream error path where no round ever reported
+ *  usage, and any producer that does not emit it) means **SKIP THE EVENT** — never fall back to
+ *  `inputTokens`. That fallback IS the bug above: `inputTokens` sums across tool rounds, so
+ *  substituting it re-introduces exactly the premature compaction this field was added to remove,
+ *  on precisely the events that carry the least information. `engine.ts`'s `maybeAutoCompact`
+ *  deliberately carries NO `?? inputTokens` for this reason; a consumer with nothing to read should
+ *  keep looking back rather than trust a figure that means something else. If you EMIT this field,
+ *  it is the per-round MAXIMUM (`Math.max` across the turn's requests), never a sum and never the
+ *  last round's value.
+ *
+ *  TS-only for now: no Swift mirror and no fixture, because no client renders it — it is a
+ *  daemon-internal trigger input. But `NormaChatKit`'s `ChatEngine` is a live SECOND producer of
+ *  `turn_completed` whose events reach this daemon's log verbatim via `sync.push`, so "TS-only"
+ *  describes the READERS, not the writers. */
 export const TurnCompletedEvent = ThreadBase.extend({
   type: z.literal("turn_completed"), stopReason: z.enum(["end_turn", "aborted", "error"]),
   inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(),

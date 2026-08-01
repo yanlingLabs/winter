@@ -17,7 +17,8 @@ import NormaSessionKit
 ///   G4b inner-payload JSON depth ceiling (≤32), enforced before forwarding
 ///   G5  `revoke(_:)` — pump cancelled, daemon client closed, future frames + reconnect refused
 ///   G6  `ScriptedRemoteConn` on `OSAllocatedUnfairLock` + `RemoteConn.peerID`
-///   G7  the remote allowlist is EXACTLY the ten names (Swift half of the cross-language tripwire)
+///   G7  the remote allowlist is EXACTLY the nineteen names (Swift half of the cross-language
+///       tripwire — the count is asserted, so this header must be re-stamped when it moves)
 final class GatewayGateTests: XCTestCase {
 
     // MARK: - Shared helpers (per-file copies, matching this codebase's test-double convention)

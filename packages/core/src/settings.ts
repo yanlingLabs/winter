@@ -6,7 +6,7 @@ import { DEFAULT_CODEX_MODEL } from "./providers/codex-config";
 import { ensureGlobalGitignore, NORMA_PERSONAL_IGNORES } from "./global-gitignore";
 
 /** Reasoning-effort slugs valid on the wire — measured LIVE against the Codex OAuth endpoint
- *  (2026-07-31), one model at a time, NOT read off the /models catalogue text. That distinction
+ *  (2026-07-30), one model at a time, NOT read off the /models catalogue text. That distinction
  *  matters: "ultra" was added here on 2026-07-10 from exactly that catalogue reading and was
  *  never checked against the request validator. Effort is global and hot-reloaded (every session
  *  re-resolves it every turn), so a persisted invalid slug doesn't fail at set-time — it breaks
