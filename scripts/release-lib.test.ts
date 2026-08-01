@@ -3,6 +3,7 @@ import {
   appcastInsertPlan,
   appcastItem,
   caskFrom,
+  catalogueStaleness,
   dmgStagePlan,
   preflight,
   publishGuard,
@@ -295,5 +296,35 @@ describe("publishGuard", () => {
     const g = publishGuard({ dryRun: false, resumePublish: false, tagExists: false, releaseExists: false, ...base });
     expect(g.action).toBe("publish");
     expect(g.lines).toEqual([]);
+  });
+});
+
+describe("catalogueStaleness (T2 review M2 — warn-only nudge in the release pipeline)", () => {
+  const verified = "2026-07-31";
+
+  test("inside the budget -> not stale, no line", () => {
+    const r = catalogueStaleness({ verified, now: new Date("2026-09-01T00:00:00Z") });
+    expect(r.stale).toBe(false);
+    expect(r.line).toBeNull();
+  });
+
+  test("past the budget -> stale, with a line naming the date, the age and the re-derive command", () => {
+    const r = catalogueStaleness({ verified, now: new Date("2027-01-31T00:00:00Z") });
+    expect(r.stale).toBe(true);
+    expect(r.ageDays).toBeGreaterThan(120);
+    expect(r.line).toContain(verified);
+    expect(r.line).toContain("NORMA_CODEX_LIVE_DRIFT=1");
+  });
+
+  test("exactly at the budget is NOT stale (warn only once genuinely past it)", () => {
+    const r = catalogueStaleness({ verified, now: new Date("2026-11-28T00:00:00Z") });
+    expect(r.ageDays).toBe(120);
+    expect(r.stale).toBe(false);
+  });
+
+  test("an unparseable date warns rather than silently passing", () => {
+    const r = catalogueStaleness({ verified: "soon", now: new Date("2026-09-01T00:00:00Z") });
+    expect(r.stale).toBe(true);
+    expect(r.line).toContain("not a parseable date");
   });
 });

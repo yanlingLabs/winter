@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom } from "../src/settings";
 import { DEFAULT_CODEX_MODEL } from "../src/providers/codex-config";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 
@@ -295,12 +295,94 @@ describe("loadSettings", () => {
   });
 
   test("every documented reasoning-effort slug parses; an invalid slug is rejected", () => {
-    expect(REASONING_EFFORTS).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
+    expect(REASONING_EFFORTS).toEqual(["none", "low", "medium", "high", "xhigh", "max"]);
     for (const effort of REASONING_EFFORTS) {
       const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: effort } });
       expect(s.provider.reasoningEffort).toBe(effort);
     }
     expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: "bogus" } })).toThrow();
+  });
+
+  // Task 1 (provider-correctness, 2026-07-31): pins the live bug this task exists to fix.
+  // "ultra" was added to REASONING_EFFORTS on 2026-07-10 from a reading of the live /models
+  // catalogue that was never checked against the request validator. Effort is GLOBAL and
+  // HOT-RELOADED (providers/manager.ts's live resolver re-reads settings.json every turn), so
+  // `norma model --effort ultra` doesn't fail at set-time — it silently PERSISTS, and then breaks
+  // EVERY session with an opaque HTTP 400 one turn later. Measured live against the Codex OAuth
+  // endpoint this session (do not re-derive, do not weaken): "ultra" is rejected by a DIFFERENT,
+  // GLOBAL enum layer (`invalid_value`, model-agnostic) than per-model rejections; "none" is
+  // genuinely honoured on all three gpt-5.6 models — the server echoes `effort: "none"` in both
+  // response.created and response.completed, emits no reasoning item, and reports 0 reasoning
+  // tokens (the same model at `max` reports 42, proving the counter is live, not always zero).
+  test("ultra must never be wire-valid again; none must always be (the live 400 this task fixes)", () => {
+    expect(REASONING_EFFORTS as readonly string[]).not.toContain("ultra");
+    expect(REASONING_EFFORTS as readonly string[]).toContain("none");
+    expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: "ultra" } })).toThrow();
+    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: "none" } });
+    expect(s.provider.reasoningEffort).toBe("none");
+
+    // The actual `norma model --effort ultra` path: setReasoningEffort + saveSettings (which
+    // validates before writing). Before this task's fix, this round-trip SUCCEEDED and wrote
+    // "ultra" to settings.json on disk — exactly the write that then 400s every session's next
+    // turn against the live endpoint.
+    const p = tmpSettings({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } });
+    expect(() => saveSettings(p, setReasoningEffort(loadSettings(p), "ultra" as any))).toThrow();
+  });
+
+  // ----------------------------------------------------------------------------------------------
+  // provider-correctness T5 — the NORMA-LEVEL tier vocabulary (`CLIENT_EFFORTS`), which lives beside
+  // `REASONING_EFFORTS` precisely so the two are read together and never conflated. `REASONING_EFFORTS`
+  // is what the endpoint's request validator accepts; `CLIENT_EFFORTS` is what Norma offers on top and
+  // TRANSLATES away before a request exists. The two must stay disjoint, and `wireEffort` must be a
+  // TOTAL function into the first set — those are the only two properties that keep `ultra` off the wire.
+  // ----------------------------------------------------------------------------------------------
+  test("CLIENT_EFFORTS is the tier set, and it is DISJOINT from the wire set", () => {
+    expect(CLIENT_EFFORTS).toEqual(["ultra"]);
+    for (const tier of CLIENT_EFFORTS) {
+      expect(REASONING_EFFORTS as readonly string[]).not.toContain(tier);
+    }
+    for (const wire of REASONING_EFFORTS) {
+      expect(CLIENT_EFFORTS as readonly string[]).not.toContain(wire);
+    }
+  });
+
+  test("a client tier is a per-SESSION selector — it is still refused as a GLOBAL settings value", () => {
+    // `settings.provider.reasoningEffort` is the daemon-wide default and goes on the wire verbatim
+    // for every session with no override. A tier has no meaning there (nothing would translate it
+    // for the sessions that inherit it), so the settings schema keeps refusing it — the Task 1 fix
+    // is untouched by this task.
+    for (const tier of CLIENT_EFFORTS) {
+      expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: tier } })).toThrow();
+    }
+  });
+
+  test("wireEffort is TOTAL into the wire set: a tier maps to max, a wire effort is identity, unset stays unset", () => {
+    expect(wireEffort("ultra")).toBe("max");
+    for (const wire of REASONING_EFFORTS) expect(wireEffort(wire)).toBe(wire);
+    expect(wireEffort(undefined)).toBeUndefined();
+    // The property that actually matters — anything this returns is either absent or wire-valid.
+    // A second tier added to CLIENT_EFFORTS without a mapping row would fail HERE rather than
+    // silently reaching a request body.
+    for (const effort of [...CLIENT_EFFORTS, ...REASONING_EFFORTS]) {
+      expect(REASONING_EFFORTS as readonly string[]).toContain(wireEffort(effort)!);
+    }
+  });
+
+  test("isClientEffort recognises exactly the tiers — never a wire effort, never junk", () => {
+    for (const tier of CLIENT_EFFORTS) expect(isClientEffort(tier)).toBe(true);
+    for (const wire of REASONING_EFFORTS) expect(isClientEffort(wire)).toBe(false);
+    for (const junk of ["", "ULTRA", "ultra ", "minimal", undefined]) expect(isClientEffort(junk)).toBe(false);
+  });
+
+  // FAIL-CLOSED, unlike engine.ts's `resolveMode` (which defaults an unrecognised mode to "code").
+  // They agree on every mode that exists today; they disagree on a mode nobody has written yet, and
+  // for a tier that changes the system prompt the safe default is "not this one".
+  test("clientEffortEligible is a fail-closed code-only allowlist", () => {
+    expect(clientEffortEligible(undefined)).toBe(true);  // the store-wide `mode ?? "code"` convention
+    expect(clientEffortEligible("code")).toBe(true);
+    for (const mode of ["chat", "dispatch", "cowork", "", "CODE", "something-new"]) {
+      expect(clientEffortEligible(mode)).toBe(false);
+    }
   });
 
   test("hooks config parses; absent → undefined", () => {

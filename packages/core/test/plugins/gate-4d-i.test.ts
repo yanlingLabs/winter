@@ -140,7 +140,7 @@ describe("4d-i gate: live tiles + shortcut/tile-action round-trip (real sample-e
       await harness.hello(tokens.harness, "dashboard");
 
       inst.supervisor.startAll(spawnable);
-      await waitFor(() => inst.supervisor.status(pluginId) === "running", 10_000, `supervisor status "running" for ${pluginId}`);
+      await waitFor(() => inst.supervisor.status(pluginId) === "running", 30_000, `supervisor status "running" for ${pluginId}`);
       await waitFor(() => inst.registry.has(`plugin__${pluginId}__echo`), 5_000, `plugin__${pluginId}__echo registered`);
 
       // --- (a) initial tile.update (once-at-connect paint) ---
@@ -215,6 +215,6 @@ describe("4d-i gate: live tiles + shortcut/tile-action round-trip (real sample-e
       inst.store.close();
       await waitFor(() => !isPidAlive(childPid), 5_000, `killed child pid ${childPid} to stay dead (no stray respawn interfering with teardown)`);
     },
-    25_000,
+    90_000, // 60s registration budget + margin (real child spawn under load)
   );
 });

@@ -247,12 +247,19 @@ extension NormaClient {
     /// explicit override, or created before this field existed. T1 itself deferred this threading
     /// ("no consumer yet") — the Mac model picker (`WindowContentView`'s model menu) is that
     /// consumer: it reads a session row's current override straight off this tuple.
-    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?)] {
+    ///
+    /// provider-correctness T6: `effort` appended after `model`, same purely-additive precedent
+    /// (`SessionListResult`'s own row carries it since T4). The Mac's effort picker is its consumer,
+    /// and it must be read with `SessionSummary.effort`'s rule in mind: the value may be a
+    /// Norma-level TIER (`sync.config.clientEfforts`, e.g. `"ultra"`) reported verbatim rather than
+    /// rewritten to its wire translation, so a picker matching it against the model's `efforts`
+    /// array alone will miss. Match against BOTH lists.
+    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?)] {
         let r = try await request("session.list", params: nil)
         return (r["sessions"]?.arrayValue ?? []).compactMap { s in
             guard let id = s["sessionId"]?.stringValue, let scope = s["scope"]?.stringValue,
                   let created = s["createdAt"]?.intValue, let last = s["lastSeq"]?.intValue else { return nil }
-            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue)
+            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue)
         }
     }
 
@@ -349,6 +356,25 @@ extension NormaClient {
         _ = try await request("session.setModel", params: obj([
             "sessionId": .string(sessionId),
             "model": model.map { JSONValue.string($0) } ?? JSONValue.null,
+        ]))
+    }
+
+    /// `session.setEffort {sessionId, effort}` (provider-correctness T4) — the per-session
+    /// reasoning-effort override, the other half of `setModel` above and a SEPARATE method by
+    /// design ("effort and model are two different things, just like the CLI"). Identical wire
+    /// contract: `effort: nil` CLEARS the override and is sent as a LITERAL JSON null, never an
+    /// omitted key (`SessionSetEffortParams.effort` is `.min(1).nullable()` — required-but-nullable,
+    /// NOT optional), the result is a bare `{}`, and an unresolvable sessionId throws `RpcError` via
+    /// the daemon's NOT_FOUND.
+    ///
+    /// The VALUE is not validated here, and deliberately so: the endpoint validates effort
+    /// per-model, so only the daemon — which knows the session's own model — can decide. An effort
+    /// the session's model does not accept comes back as an `RpcError` (INVALID_PARAMS) naming the
+    /// supported set, which a picker should surface rather than swallow.
+    public func setEffort(sessionId: String, effort: String?) async throws {
+        _ = try await request("session.setEffort", params: obj([
+            "sessionId": .string(sessionId),
+            "effort": effort.map { JSONValue.string($0) } ?? JSONValue.null,
         ]))
     }
 
@@ -881,5 +907,138 @@ extension NormaClient {
             throw RpcError(code: -3, message: "invalid result from server for workflow.get")
         }
         return view
+    }
+}
+
+// MARK: - provider-correctness T6: the model/effort catalogue (`sync.config`)
+
+/// One row of the daemon's model catalogue — the Swift mirror of `SyncConfigModel`
+/// (packages/protocol/src/methods.ts).
+///
+/// `efforts` rides PER MODEL even though every slug the daemon offers today accepts the identical
+/// six. The backend validates effort in two layers that disagree with each other — `ultra` is
+/// refused by a global enum, `minimal` is refused per model, naming the slug — so a future
+/// divergence is the observed behaviour of a layer that already exists, not a hypothetical. Carried
+/// per model, that divergence becomes a daemon-side data change instead of a new app release.
+public struct SyncConfigModelInfo: Equatable, Sendable {
+    public let id: String
+    public let efforts: [String]
+
+    public init(id: String, efforts: [String]) {
+        self.id = id
+        self.efforts = efforts
+    }
+}
+
+/// What `sync.config` tells a client about models and effort — the catalogue, the daemon's live
+/// defaults, and the Norma-level tiers.
+///
+/// **A PROJECTION, not the whole result, and deliberately so.** `SyncConfigResult` also carries
+/// `exaKey` (a Keychain secret) and `dangerousDomains`. Both exist for the PHONE, which runs its own
+/// chat engine and needs them to make its own network calls; the Mac app runs no engine of its own
+/// and has no use for either. Surfacing a Keychain secret through a kit accessor no caller needs is
+/// a new exposure with no counterweight, so this type stops at the model/effort fields — the ones a
+/// picker reads (`defaultModel`, `models`, `clientEfforts`) plus the two that say what they mean
+/// (`provider`, `defaultEffort`). Widen it the day a Mac-side caller genuinely needs more — never
+/// pre-emptively.
+///
+/// **Absence is a REAL ANSWER and never a licence to guess.** `models: []` means the active provider
+/// cannot enumerate its models (an arbitrary openai-compatible endpoint), or none is configured. A
+/// caller that receives `[]` has NOT been told a catalogue and must show none — deriving a lineup
+/// from `defaultModel` is exactly the bug this field was added to kill. `defaultEffort: ""` means
+/// UNSET, which is NOT `"none"`: unset makes a turn omit the `reasoning` block entirely, while
+/// `"none"` is an explicit level the backend honours.
+public struct SyncConfigSnapshot: Equatable, Sendable {
+    /// WHICH PROVIDER everything below describes — `"codex-oauth"` / `"openai-compatible"` (the
+    /// daemon's `ProviderSettings.type` vocabulary), `"none"` when it runs none, `""` only when the
+    /// daemon predates the field.
+    ///
+    /// **On the wire this is the one field with NO empty sentinel** (`z.string().min(1)`) — a daemon
+    /// always knows which provider it is running. Its purpose is a rule THIS client does not need
+    /// and the phone does: a consumer running its own engine on its own credentials must treat a
+    /// non-empty foreign `provider` as never-synced and discard `defaultModel` (see
+    /// `SyncConfigResult.provider`, packages/protocol/src/methods.ts, for the live 400 that closes).
+    /// It is mirrored here anyway because this projection is one of the two hand-written mirrors of
+    /// that result, and a mirror that silently omits a field is how the field went missing for a
+    /// whole task in the first place — a Mac-side caller that ever needs to say "this catalogue is
+    /// not yours" has it, rather than having to widen the type under pressure.
+    public let provider: String
+    /// The daemon's live default model — re-resolved by the daemon on every call, so a
+    /// `norma model` edit lands with no restart. `""` when no provider is configured.
+    public let defaultModel: String
+    /// The active provider's whole catalogue. EMPTY means "no catalogue was reported" — wait, never
+    /// derive one.
+    public let models: [SyncConfigModelInfo]
+    /// The daemon's live reasoning effort. `""` means UNSET (see the type's own note).
+    public let defaultEffort: String
+    /// NORMA-LEVEL effort tiers — selectable in Norma, **never sent upstream**, and offered on CODE
+    /// sessions only. `["ultra"]` on a current daemon.
+    ///
+    /// A SEPARATE list from `models[].efforts`, and the two must never be concatenated into one
+    /// picker section: `models[].efforts` is exactly what the endpoint accepts, a tier is exactly
+    /// what it does not (the daemon translates it before a request exists). Scoping a tier to code
+    /// sessions is the CLIENT's obligation — the daemon advertises this unconditionally because it
+    /// cannot know which session a picker is for.
+    public let clientEfforts: [String]
+
+    // No default arguments, same reason `NormaChatKit.SyncConfig`'s init has none: this type is a
+    // HAND-written mirror of a schema no compiler connects it to, so the memberwise widening is the
+    // only sweep pressure that exists.
+    public init(provider: String, defaultModel: String, models: [SyncConfigModelInfo], defaultEffort: String, clientEfforts: [String]) {
+        self.provider = provider
+        self.defaultModel = defaultModel
+        self.models = models
+        self.defaultEffort = defaultEffort
+        self.clientEfforts = clientEfforts
+    }
+
+    /// What a client holds before it has ever been told a catalogue — every field at its ABSENT
+    /// value, none of them a fallback. A picker built on this offers no model rows and no effort
+    /// rows, which is the honest rendering of "I have not been told". `provider` is `""` here for
+    /// the same reason and NOT `"none"`: `"none"` is a daemon SAYING it runs no provider, while this
+    /// value is nobody having said anything yet.
+    public static let empty = SyncConfigSnapshot(provider: "", defaultModel: "", models: [], defaultEffort: "", clientEfforts: [])
+}
+
+extension NormaClient {
+    /// `sync.config {}` (Chat Slice D task 3; the catalogue fields are provider-correctness T3/T5).
+    ///
+    /// **ROLE-AGNOSTIC, which is why a Mac harness client may call it at all.** The method is on
+    /// `REMOTE_ALLOWED_METHODS` because the phone is the only client that had ever needed it, but
+    /// that list is a permission for the REMOTE role, not a restriction to it: the handler
+    /// (`ipc/server.ts`) applies no role check and takes no `sessionId`, so a harness connection
+    /// gets the identical result. T3's review recorded the absence of this wrapper as a known gap;
+    /// the Mac's model/effort pickers are the caller that closes it.
+    ///
+    /// Every field is read by the daemon AT CALL TIME, so this is a snapshot and never a
+    /// subscription — a caller that wants to track a `norma model --effort` edit re-calls it.
+    ///
+    /// Decodes LENIENTLY on absence and STRICTLY on shape, the same split `NormaChatKit.SyncConfig`
+    /// makes for the same reason: a missing field means an older daemon (degrade to the absent
+    /// value), while a present-but-malformed row would put an empty slug into a picker, and an empty
+    /// slug reaches a request body verbatim and comes back an opaque 400. A malformed row is
+    /// therefore DROPPED from the catalogue rather than admitted — this kit ships in the same
+    /// bundle as the daemon it talks to, so a bad row here is a bug on this machine, not a version
+    /// skew to tolerate.
+    public func syncConfig() async throws -> SyncConfigSnapshot {
+        let r = try await request("sync.config", params: .object([:]))
+        let models: [SyncConfigModelInfo] = (r["models"]?.arrayValue ?? []).compactMap { m in
+            // Mirrors `z.string().min(1)` on BOTH fields — Swift's synthesized decoding enforces
+            // neither, and an empty slug or an empty level is exactly the value that survives all
+            // the way to a request body.
+            guard let id = m["id"]?.stringValue, !id.isEmpty else { return nil }
+            let efforts = (m["efforts"]?.arrayValue ?? []).compactMap { $0.stringValue }.filter { !$0.isEmpty }
+            return SyncConfigModelInfo(id: id, efforts: efforts)
+        }
+        return SyncConfigSnapshot(
+            // Absent → `""`: an older daemon, decoded as "nobody has said" rather than as a claim.
+            // Never defaulted to a provider name — a guessed identity is worse than none, because
+            // the whole point of the field is being able to tell a foreign catalogue from your own.
+            provider: r["provider"]?.stringValue ?? "",
+            defaultModel: r["defaultModel"]?.stringValue ?? "",
+            models: models,
+            defaultEffort: r["defaultEffort"]?.stringValue ?? "",
+            clientEfforts: (r["clientEfforts"]?.arrayValue ?? []).compactMap { $0.stringValue }.filter { !$0.isEmpty }
+        )
     }
 }

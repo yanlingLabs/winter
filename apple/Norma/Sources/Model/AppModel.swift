@@ -77,7 +77,7 @@ final class AppModel: ObservableObject {
         let feedClient = feed.client
         directory = SessionDirectory(lister: {
             try await feedClient.listSessions().map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model)
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort)
             }
         })
         // FINAL-REVIEW FIX (M1): cold-window bootstrap — session.list on construction, not only on
@@ -256,6 +256,25 @@ final class AppModel: ObservableObject {
     func setSessionModel(_ model: String?) async -> Bool {
         guard let sid = focusedSessionId else { return false }
         return (try? await client.setModel(sessionId: sid, model: model)) != nil
+    }
+
+    /// provider-correctness T6: the effort menu's focused-session surface — `setSessionModel`'s
+    /// exact twin on the other axis ("effort and model are two different things, just like the
+    /// CLI"). `effort: nil` clears the override (a literal wire null). Like `setSessionModel`, there
+    /// is no mode special case to guard here: `session.setEffort` is mode-agnostic — what IS
+    /// mode-scoped is which levels a picker may OFFER (a Norma tier is code-sessions-only), and that
+    /// is the picker's obligation, enforced daemon-side, not this method's.
+    func setSessionEffort(_ effort: String?) async -> Bool {
+        guard let sid = focusedSessionId else { return false }
+        return (try? await client.setEffort(sessionId: sid, effort: effort)) != nil
+    }
+
+    /// provider-correctness T6: the daemon's synced model catalogue (`sync.config`) — the pickers'
+    /// only source of slugs and effort levels. `nil` on any failure, which leaves the caller's
+    /// existing catalogue untouched: a daemon hiccup must never blank a picker out from under the
+    /// user, the same posture `SessionDirectory.refresh` takes for the same reason.
+    func fetchModelCatalogue() async -> SyncConfigSnapshot? {
+        try? await client.syncConfig()
     }
 
     func interruptTurn() async {

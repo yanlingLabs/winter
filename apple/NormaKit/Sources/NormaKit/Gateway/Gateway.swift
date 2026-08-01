@@ -53,6 +53,10 @@ public actor Gateway {
     /// standalone-chat bootstrap config (Exa key + user dangerous domains + default model) and its
     /// read-only `_assistant` memory-bucket replica. Neither carries a sessionId; both are pure
     /// passthroughs, same as every other sync verb.
+    /// provider-correctness T4 added `session.setEffort` (19th) — the phone sets the reasoning
+    /// effort on a remote-driven session. A separate method from `session.setModel` on purpose
+    /// ("effort and model are two different things, just like the CLI"); also a pure passthrough —
+    /// the daemon owns the per-model validity check, since only it knows the session's model.
     static let remoteAllowedMethods: Set<String> = [
         "protocol.hello", "session.list", "session.attach", "session.send",
         "session.dispatch", "approval.respond", "ask_user.respond",
@@ -63,6 +67,8 @@ public actor Gateway {
         "session.history",
         // Chat Slice D task 1: the phone sets the model on a remote-driven session.
         "session.setModel",
+        // provider-correctness T4: and its reasoning effort, a separate axis with its own method.
+        "session.setEffort",
         // Chat Slice D task 2: the phone replicates its own chat-session logs both ways.
         "sync.heads", "sync.pull", "sync.push",
         // Chat Slice D task 3: the phone's standalone-chat config bundle + memory-bucket replica.

@@ -55,6 +55,12 @@ public struct LocalSessionMeta: Equatable, Sendable {
     public let scope: String
     public let title: String?
     public let model: String?
+    /// provider-correctness T6: the per-session reasoning effort, carried on exactly `model`'s
+    /// terms — index-only, sidecar-persisted, pushed in `sync.push`'s `meta`, and reported back by
+    /// `sync.heads`. `nil` means "no override" (the session resolves at whatever default the engine
+    /// applies), never "no reasoning": an unset effort omits the request's `reasoning` block, while
+    /// `"none"` is a distinct level the endpoint honours.
+    public let effort: String?
     public let lastSeq: Int
     public let lastSyncedSeq: Int
     public let forkedFrom: SessionForkRef?
@@ -133,6 +139,7 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
     private var syncedSeq: Int       // lastSyncedSeq; guarded by `lock`
     private var title: String?       // guarded by `lock`
     private var model: String?       // guarded by `lock`
+    private var effort: String?      // guarded by `lock` (provider-correctness T6)
     private var forkedFrom: SessionForkRef?  // guarded by `lock`
 
     /// A sidecar JSON of the index-only facts that have no event of their own — mirrors the columns
@@ -141,6 +148,10 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
         var scope: String
         var title: String?
         var model: String?
+        /// T6, and DECODE-OPTIONAL by construction (Swift synthesizes `decodeIfPresent` for an
+        /// Optional): a sidecar written before this field existed still loads, which is the whole
+        /// installed base on the first launch after this ships.
+        var effort: String?
         var lastSyncedSeq: Int
         var forkedFrom: SessionForkRef?
     }
@@ -153,6 +164,7 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
         self.syncedSeq = 0
         self.title = nil
         self.model = nil
+        self.effort = nil
         self.forkedFrom = nil
     }
 
@@ -175,6 +187,7 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
                 syncedSeq = min(s.lastSyncedSeq, lastSeq) // never claim to have synced past what we hold
                 title = s.title
                 model = s.model
+                effort = s.effort
                 forkedFrom = s.forkedFrom
             }
         }
@@ -340,7 +353,7 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
     func metaSnapshot() -> LocalSessionMeta {
         lock.withLock {
             LocalSessionMeta(sessionId: sessionId, scope: scopeValue, title: title, model: model,
-                             lastSeq: head, lastSyncedSeq: syncedSeq, forkedFrom: forkedFrom)
+                             effort: effort, lastSeq: head, lastSyncedSeq: syncedSeq, forkedFrom: forkedFrom)
         }
     }
 
@@ -358,17 +371,19 @@ public final class LocalChatSession: LocalSession, @unchecked Sendable {
 
     /// Applies the index-only facts a `sync.heads`/`sync.pull` reported (or a local set): each is
     /// "unchanged" when nil, mirroring `SessionStore.applySyncMeta`'s "omitted → keep" semantics.
-    func setSyncedMeta(title: String?? = nil, model: String?? = nil, forkedFrom: SessionForkRef?? = nil) {
+    func setSyncedMeta(title: String?? = nil, model: String?? = nil, effort: String?? = nil,
+                       forkedFrom: SessionForkRef?? = nil) {
         lock.withLock {
             if let title { self.title = title }
             if let model { self.model = model }
+            if let effort { self.effort = effort }
             if let forkedFrom { self.forkedFrom = forkedFrom }
             persistSidecarLocked()
         }
     }
 
     private func persistSidecarLocked() {
-        let sidecar = MetaSidecar(scope: scopeValue, title: title, model: model,
+        let sidecar = MetaSidecar(scope: scopeValue, title: title, model: model, effort: effort,
                                   lastSyncedSeq: syncedSeq, forkedFrom: forkedFrom)
         if let data = try? JSONEncoder().encode(sidecar) { Self.atomicWrite(data, to: metaURL) }
     }
@@ -552,6 +567,7 @@ public actor LocalEventStore {
     /// caller then drives turns through it and the engine appends from seq 2 upward.
     @discardableResult
     public func createSession(sessionId: String, scope: String = "global", model: String? = nil,
+                              effort: String? = nil,
                               ts: Int = Int(Date().timeIntervalSince1970 * 1000)) throws -> LocalChatSession {
         if handles[sessionId] != nil { throw LocalStoreError.sessionExists(sessionId) }
         let handle = LocalChatSession(sessionId: sessionId, directory: directory)
@@ -561,6 +577,7 @@ public actor LocalEventStore {
         }
         handle.recover()
         if let model { handle.setSyncedMeta(model: .some(model)) }
+        if let effort { handle.setSyncedMeta(effort: .some(effort)) }
         handles[sessionId] = handle
         return handle
     }
@@ -609,7 +626,7 @@ public actor LocalEventStore {
     /// the post-apply head is exactly the right watermark. Returns it.
     @discardableResult
     func applyPull(sessionId: String, data: Data, title: String??, model: String??,
-                   forkedFrom: SessionForkRef??) throws -> Int {
+                   effort: String?? = nil, forkedFrom: SessionForkRef??) throws -> Int {
         let handle: LocalChatSession
         if let existing = handles[sessionId] {
             handle = existing
@@ -620,7 +637,7 @@ public actor LocalEventStore {
             handle.recover()
             handles[sessionId] = handle
         }
-        handle.setSyncedMeta(title: title, model: model, forkedFrom: forkedFrom)
+        handle.setSyncedMeta(title: title, model: model, effort: effort, forkedFrom: forkedFrom)
         let applied = handle.lastSeq
         handle.setLastSyncedSeq(applied)
         return applied
@@ -628,8 +645,9 @@ public actor LocalEventStore {
 
     func setLastSyncedSeq(sessionId: String, _ seq: Int) { handles[sessionId]?.setLastSyncedSeq(seq) }
 
-    func setSyncedMeta(sessionId: String, title: String?? = nil, model: String?? = nil, forkedFrom: SessionForkRef?? = nil) {
-        handles[sessionId]?.setSyncedMeta(title: title, model: model, forkedFrom: forkedFrom)
+    func setSyncedMeta(sessionId: String, title: String?? = nil, model: String?? = nil,
+                       effort: String?? = nil, forkedFrom: SessionForkRef?? = nil) {
+        handles[sessionId]?.setSyncedMeta(title: title, model: model, effort: effort, forkedFrom: forkedFrom)
     }
 
     func truncate(sessionId: String, toSeq: Int) { handles[sessionId]?.truncate(toSeq: toSeq) }
@@ -642,6 +660,9 @@ public actor LocalEventStore {
         let bytes: Data
         let title: String
         let model: String?
+        /// T6: the fork inherits the original's effort exactly as it inherits its model — a fork is
+        /// the same conversation branched, so it must resolve at the same reasoning level.
+        let effort: String?
         let forkedFrom: SessionForkRef
         let lastSeq: Int
     }
@@ -684,6 +705,7 @@ public actor LocalEventStore {
                         // fork's own creating push fail with INVALID_PARAMS, stranding the branch.
                         title: LocalEventStore.capTitle((originalMeta.title ?? "Chat") + titleMarker),
                         model: originalMeta.model,
+                        effort: originalMeta.effort,
                         forkedFrom: SessionForkRef(sessionId: originalId, atSeq: atSeq),
                         lastSeq: originalMeta.lastSeq)
     }
@@ -720,7 +742,8 @@ public actor LocalEventStore {
             handle.recover()
             handles[plan.newId] = handle
         }
-        handle.setSyncedMeta(title: .some(plan.title), model: .some(plan.model), forkedFrom: .some(plan.forkedFrom))
+        handle.setSyncedMeta(title: .some(plan.title), model: .some(plan.model), effort: .some(plan.effort),
+                             forkedFrom: .some(plan.forkedFrom))
         handle.setLastSyncedSeq(max(syncedSeq, handle.metaSnapshot().lastSyncedSeq))
         return handle.metaSnapshot()
     }

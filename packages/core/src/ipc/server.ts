@@ -12,7 +12,7 @@ import {
   SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams,
   SkillsReadParams, SkillsWriteParams, SkillsDeleteParams,
   PluginsListParams, AskUserRespondParams, TaskListParams, PlanRespondParams, SessionSetPolicyParams,
-  SessionSetModelParams,
+  SessionSetModelParams, SessionSetEffortParams,
   ThreadListParams, ThreadSendParams, AgentStopParams,
   PeripheralLeaseParams, PeripheralRenewParams, PeripheralReleaseParams, PeripheralAdvertiseParams,
   PeripheralRevokeParams, PeripheralRespondParams, DaemonStatusParams, EngineActivityParams, QuotaStateParams,
@@ -40,7 +40,7 @@ import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTai
 import type { SessionStore } from "../sessions/store";
 import { readHistoryPage } from "../sessions/history";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
-import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory } from "./sync";
+import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { AgentEngine } from "../agent/engine";
 import { resolveModelAlias } from "../agent/model-aliases";
@@ -66,7 +66,7 @@ import type { ProviderLink } from "../peripheral/provider-link";
 import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
-import { addLocalDir, loadSettings, saveSettings, type Settings } from "../settings";
+import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, type Settings } from "../settings";
 import {
   deriveInstallName, installPluginFromDir, missingConsents, buildConsentBlock, applyFreshPluginConsent,
   setPluginEnabled, grantPluginConsents, removePluginFromSettings, removePluginDir, stripPluginConsents,
@@ -155,6 +155,24 @@ export interface IpcServerOptions {
   // one (most existing tests, or a no-agentProvider daemon) reports `""` — `defaultModel` is a
   // plain string, never nullable.
   liveModel?: () => string;
+  // provider-correctness T3 (`sync.config`): the provider's LIVE reasoning effort, off the SAME
+  // `live()` resolver `liveModel` reads (`LiveModelSelection` carries both). Optional on exactly
+  // the same terms: absent, or an unset `settings.provider.reasoningEffort`, reports `""` — which
+  // means UNSET, never `"none"` (see SyncConfigContext.liveEffort for why those differ on the wire).
+  //
+  // The model CATALOGUE that ships beside it has deliberately NO option here: it is read straight
+  // off `opts.engine.knownModels()`, the same accessor session.setModel/sync.push already validate
+  // against, so the phone can never be served a lineup this daemon would itself reject.
+  liveEffort?: () => string;
+  // Whole-branch review C1 (`sync.config`): WHICH provider the two fields above describe — the id
+  // of the running `Provider` instance, which is `ProviderSettings.type`'s own vocabulary. Optional
+  // on the same terms as its neighbours, but its absent value is `"none"` rather than `""`: this is
+  // the one field on that wire with no empty sentinel (`SyncConfigResult.provider`).
+  //
+  // Boot-bound BY DESIGN, unlike `liveModel`/`liveEffort` beside it — it must agree with the
+  // CATALOGUE, which is bound to the same instance, not with a settings.json a restart has not
+  // picked up yet. See `SyncConfigContext.liveProvider`.
+  liveProvider?: () => string;
   // Phase 4b Task 4 (spec §3): the plugin tool bridge. `registry` is the SAME ToolRegistry the
   // AgentEngine executes tool calls against (daemon.ts shares the one instance) — tool.register
   // registers `plugin__<pluginId>__<tool>` into it; the socket close() handler and the
@@ -323,6 +341,10 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   // fixed policy has no remote-meaningful "set" at all). Guarded by assertRemoteMayUseSession below,
   // same as every other bare-sessionId entry on this list.
   METHODS.sessionSetModel,
+  // provider-correctness T4: the phone sets the reasoning EFFORT on a remote-driven session — the
+  // other half of its model picker, and a separate method for the same reason it is separate on the
+  // CLI. Same bare-sessionId shape, so the same assertRemoteMayUseSession guard applies below.
+  METHODS.sessionSetEffort,
   // Chat Slice D task 2 (session sync): the phone replicates its own chat-session logs both ways.
   // The phone is the ONLY client that has ever needed these three — they exist for exactly this
   // role. All three are additionally CHAT-ONLY and fail closed on an absent/unknown session mode
@@ -365,7 +387,8 @@ const REMOTE_ELIGIBLE_SESSION_MODES = new Set(["code", "dispatch", "chat"]);
  *  phone, including one that never does. Used by session.attach/send/history/interrupt plus
  *  approval.respond, approval.list, and ask_user.respond — all three also carry a caller-supplied
  *  `sessionId` with no other mode check, and ask_user.respond in particular is exactly the RPC the
- *  AskQuestion tool resolves through. Chat Slice D task 1 added session.setModel to this set too. */
+ *  AskQuestion tool resolves through. Chat Slice D task 1 added session.setModel to this set too;
+ *  provider-correctness T4 added session.setEffort beside it. */
 function assertRemoteMayUseSession(store: SessionStore, role: string | undefined | null, sessionId: string): void {
   if (role !== "remote") return;
   let mode: string | undefined;
@@ -373,6 +396,41 @@ function assertRemoteMayUseSession(store: SessionStore, role: string | undefined
   const effectiveMode = mode ?? "code";
   if (!REMOTE_ELIGIBLE_SESSION_MODES.has(effectiveMode)) {
     throw new RpcFailure(ERR.INVALID_PARAMS, `${effectiveMode} sessions are not available to remote clients`);
+  }
+}
+
+/** provider-correctness T6: the ONE effort-selection rule, shared verbatim by `session.setEffort`
+ *  and `session.create`. Throws `RpcFailure(INVALID_PARAMS)` on refusal; returns silently otherwise.
+ *
+ *  It is a FUNCTION rather than two copies of the same `if` because the two handlers must never
+ *  drift: `session.create` exists so a client can set an effort without a second round trip, and a
+ *  create that accepted what `setEffort` refuses would be a hole around the gate rather than a
+ *  shortcut through it. Both callers resolve `model` by the SAME precedence
+ *  `AgentEngine.resolveSel` applies (the session's own override first, the daemon's live default
+ *  second) — for `create` the "session's own" is the model that very call is stamping, which is why
+ *  the resolution is the caller's job and not this function's.
+ *
+ *  The two branches are ALTERNATIVES, not layers (T5's ruling, restated here because it is the
+ *  non-obvious half): a tier is deliberately NOT run through `effortsForModel`, which describes what
+ *  the ENDPOINT accepts — a tier never reaches the endpoint, so every model would refuse it and the
+ *  feature could not exist. The only question for a tier is whether THIS session may select one.
+ *
+ *  `allowed.length > 0` mirrors `session.setModel`'s own `known.length > 0` idiom: a provider that
+ *  cannot enumerate is not bricked. It means the daemon can accept what `sync.config` does not
+ *  advertise, never the reverse. */
+function assertEffortSelectable(effort: string, model: string, mode: string | undefined): void {
+  if (isClientEffort(effort)) {
+    // `clientEffortEligible` is a fail-closed allowlist (settings.ts) — a mode nobody has written
+    // yet is refused, deliberately unlike `engine.ts`'s `resolveMode`, which defaults to "code".
+    if (!clientEffortEligible(mode)) {
+      throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${effort}' is a Norma-level tier offered on code sessions only — this is a '${mode ?? "unknown"}' session (wire efforts: ${effortsForModel(model).join(", ")})`);
+    }
+    return;
+  }
+  const allowed = effortsForModel(model);
+  if (allowed.length > 0 && !allowed.includes(effort)) {
+    const forModel = model ? `by model '${model}'` : "by the configured provider";
+    throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${effort}' is not accepted ${forModel} — supported: ${allowed.join(", ")}`);
   }
 }
 
@@ -799,7 +857,15 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // SessionApprovalPolicy doc comment), so this coercion is the ONLY way a session's stored
         // policy ever becomes "chat".
         const approvalPolicy = p.mode === "chat" ? "chat" : p.approvalPolicy;
-        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy, origin: p.origin, mode: p.mode, model: p.model });
+        // provider-correctness T6: the effort half of `model`, validated by the SAME rule
+        // `session.setEffort` applies (`assertEffortSelectable`) so a create can never accept what a
+        // set would refuse. Both inputs are the ones THIS CALL is about to stamp — `p.model` (before
+        // the daemon's live default: checking against a model this session will not use would
+        // validate the wrong thing) and `p.mode` (absent = code, which `clientEffortEligible` reads
+        // as tier-eligible). Refused OUTRIGHT rather than dropped, unlike `sync.push`'s ingress:
+        // there is no irreplaceable log riding along here, so the caller can simply be told.
+        if (p.effort !== undefined) assertEffortSelectable(p.effort, p.model ?? opts.liveModel?.() ?? "", p.mode);
+        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy, origin: p.origin, mode: p.mode, model: p.model, effort: p.effort });
         const trusted = cwd ? (opts.trust?.isTrusted(cwd) ?? false) : false;
         // Broadcast the session_created event to every authed harness (not just attachments —
         // a brand-new session has none) so other harnesses can offer to follow (spec §4.4).
@@ -1128,6 +1194,55 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         }
         return {};
       }
+      // provider-correctness T4: per-session reasoning effort — its OWN method rather than a second
+      // argument on session.setModel just above ("effort and model are two different things, just
+      // like the CLI"). Everything structural is that method's, deliberately: the same
+      // `assertRemoteMayUseSession` guard (it is REMOTE_ALLOWED_METHODS-listed and takes a bare
+      // caller-supplied sessionId), the same mode-agnosticism, the same `null` = clear, the same
+      // NOT_FOUND mapping, and the same "the next turn resolves it, never the running one".
+      case METHODS.sessionSetEffort: {
+        const p = parseParams(SessionSetEffortParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        // SET-TIME validation, for the reason session.setModel's exists (I1 review fix: an
+        // unvalidated selection bricks every future turn SILENTLY — the provider 400s on each one
+        // with nothing pointing back at the setting that caused it). The effort half needs it MORE,
+        // not less: the endpoint validates effort PER-MODEL, and the two rejections come from
+        // different layers — `minimal` is refused with an `unsupported_value` naming the model,
+        // while a value outside the global enum is refused model-agnostically — so the only honest
+        // check is against THIS session's model's own list, at set time.
+        //
+        // `effortsForModel` (ipc/sync.ts) is that list, and it is the SAME one `sync.config`
+        // advertises to the phone. That shared source is the point: the daemon must never refuse an
+        // effort it advertises, nor advertise one it refuses. It is uniform across models today —
+        // the per-model seam exists because the API's behaviour is per-model, not because the
+        // values diverge yet.
+        //
+        // NOT a claim that any other string is "an invalid effort": it is a claim about what is
+        // valid ON THE WIRE. A Norma-level tier that never reaches the wire (`ultra`, which sends
+        // `max` plus a delegation instruction, code sessions only) is a different kind of value —
+        // provider-correctness T5 landed it, and, exactly as this comment anticipated, it is
+        // admitted HERE as a client-side selector translated before the request (at
+        // `AgentEngine.resolveSel`), never by adding it to `effortsForModel`.
+        if (p.effort !== null) {
+          // Read ONCE. An unknown sessionId leaves this undefined and is left to `store.setEffort`
+          // to report — that keeps NOT_FOUND coming from one place regardless of which branch of
+          // `assertEffortSelectable` ran (and is why neither branch may refuse on an absent meta).
+          let sessionMeta: { model?: string; mode?: string } | undefined;
+          try { sessionMeta = opts.store.meta(p.sessionId); } catch { /* unknown id → the store call below owns the error */ }
+          // The session's EFFECTIVE model, by the same precedence AgentEngine.resolveSel applies:
+          // its own override first, the daemon's live default second. Both rules — the tier's
+          // code-only gate and the model-aware wire check, with the m2-review permissive carve-out
+          // for a provider that cannot enumerate — live in `assertEffortSelectable`, which
+          // `session.create` calls too so the two surfaces cannot drift.
+          assertEffortSelectable(p.effort, sessionMeta?.model ?? opts.liveModel?.() ?? "", sessionMeta?.mode);
+        }
+        try {
+          opts.store.setEffort(p.sessionId, p.effort);
+        } catch (e) {
+          throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
+        }
+        return {};
+      }
 
       // -----------------------------------------------------------------------------------------
       // Session sync (Chat Slice D task 2): `sync.heads`/`sync.pull`/`sync.push` — the replication
@@ -1163,6 +1278,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // that skips Task 1's validation. An unknown slug is dropped rather than fatal (a model
           // mismatch must never block log replication); see validateSyncMeta.
           knownModelIds: () => (opts.engine?.knownModels() ?? []).map((m) => m.id),
+          // provider-correctness T6: the SAME live-model getter `session.setEffort` resolves against
+          // (just above), so a pushed `meta.effort` on a session with no model override of its own
+          // is checked against the model the next turn would actually use — not against `""`.
+          liveModel: opts.liveModel,
           // The SAME broadcast session.create performs (see its handler above): a brand-new session
           // has no attachments, so its session_created can't reach anyone through the hub's
           // per-session fan-out — it goes to every authed harness so a sidebar can pick it up.
@@ -1187,6 +1306,25 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           secret: opts.secrets ? (name) => opts.secrets!.get(name) : undefined,
           dangerousDomainsAdded: opts.dangerousDomainsAdded ? () => opts.dangerousDomainsAdded!() : undefined,
           liveModel: opts.liveModel,
+          liveEffort: opts.liveEffort,
+          // Whole-branch review C1: the identity of the provider the `knownModels` below belongs to
+          // — served together so a client can tell a foreign catalogue from its own.
+          liveProvider: opts.liveProvider,
+          // provider-correctness T3: the EXACT catalogue session.setModel validates against, a few
+          // hundred lines above (`opts.engine?.knownModels() ?? []`), and the one sync.push consults
+          // for `knownModelIds`.
+          //
+          // Read at CALL TIME, and T3 review m2 is precise about what that does and does not buy.
+          // It buys: a phone always sees whatever the running engine's provider currently
+          // enumerates, with no phone app update — which is the whole reason the catalogue is
+          // served rather than derived. It does NOT buy a hot provider SWAP: `knownModels()` goes
+          // to `this.cfg.provider.provider`, the instance bound at boot, and providers/manager.ts
+          // states outright that changing `provider.type` in settings.json still needs a daemon
+          // restart. Only the model/effort SELECTION is hot (that resolver re-reads settings.json);
+          // the catalogue moves when the provider instance does. Do not describe this line as
+          // "a provider swap needs no restart" — it isn't, and the phone would be told the old
+          // provider's lineup until the daemon comes back.
+          knownModels: () => opts.engine?.knownModels() ?? [],
         });
       }
       case METHODS.syncMemory: {

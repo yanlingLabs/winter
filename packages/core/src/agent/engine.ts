@@ -37,6 +37,10 @@ import { DISPATCH_SYSTEM_PROMPT } from "./dispatch-prompt";
 import { CHAT_SYSTEM_PROMPT } from "./chat-prompt";
 import type { DispatchChildren } from "./dispatch-children";
 import type { WorkflowRuntime } from "../workflows/runtime";
+// provider-correctness T5: the Norma-level effort tier vocabulary. `wireEffort` is what makes
+// `resolveSel` a total function into the wire-valid set; the other two decide whether the tier's
+// PROMPT half applies. See settings.ts for why the two vocabularies are deliberately disjoint.
+import { clientEffortEligible, isClientEffort, wireEffort } from "../settings";
 
 /** Structural narrowing of BackgroundTaskRegistry (bg-registry.ts) to just what pinnedTools
  *  (below) needs — lets the engine (and tests) work with anything shaped like a per-session task
@@ -48,6 +52,12 @@ export interface BgTaskLister {
 
 const MAIN_THREAD = "main";
 const MAX_TOOL_ITERATIONS = 24; // runaway guard until 1b-ii budgets land
+/** Fraction of the model's context window at which auto-compaction fires (overridable per process
+ *  with NORMA_COMPACT_THRESHOLD_FRAC — see `maybeAutoCompact`). EXPORTED so the Codex drift guard
+ *  (test/providers/codex-models-drift.test.ts) can compute the REAL trigger from the REAL
+ *  contextWindow rather than re-typing 0.75 — the whole class of bug that guard exists for is a
+ *  number copied by hand and never re-derived. */
+export const DEFAULT_COMPACT_THRESHOLD_FRAC = 0.75;
 // Dispatch (Phase 7) Task 4: session_spawn is registered on the SAME shared registry every
 // session's specs() reads from (daemon.ts registers it once, globally, like spawn_agent) — so
 // without an explicit exclusion it would be visible to every non-dispatch session too (a code
@@ -1354,20 +1364,66 @@ export class AgentEngine {
     return Infinity;
   }
 
-  /** Auto-compact off the REAL provider-reported size of the previous turn (its `turn_completed`
-   *  `inputTokens`) — not an estimate. Runs at the start of every turn, before `historyInput` is
-   *  built, so a triggered compaction's checkpoint is what `historyInput` sees for this turn. No
-   *  prior completed turn (first turn of a session) means the context is necessarily small, so
-   *  there's nothing to check. `model` is this turn's resolved model (see `contextWindow`'s doc
-   *  comment) — the Compactor's OWN summarization turn still runs on the boot-time model
-   *  (Compactor is constructed once in daemon.ts and isn't live-wired); only the trigger
-   *  threshold computed here uses the per-turn resolution. */
+  /** Auto-compact off the REAL provider-reported size of the previous turn — not an estimate. Runs
+   *  at the start of every turn, before `historyInput` is built, so a triggered compaction's
+   *  checkpoint is what `historyInput` sees for this turn. No prior completed turn (first turn of a
+   *  session) means the context is necessarily small, so there's nothing to check. `model` is this
+   *  turn's resolved model (see `contextWindow`'s doc comment) — the Compactor's OWN summarization
+   *  turn still runs on the boot-time model (Compactor is constructed once in daemon.ts and isn't
+   *  live-wired); only the trigger threshold computed here uses the per-turn resolution.
+   *
+   *  Corrections landed here on 2026-07-31. Every input to the comparison was wrong, in DIFFERENT
+   *  DIRECTIONS, so each is pinned by its own test (test/agent/engine-compaction.test.ts):
+   *
+   *  1. THE FIGURE. `contextTokens` — the largest single round's input — not `inputTokens`, which
+   *     is the SUM over the turn's tool rounds (see TurnCompletedEvent's doc comment). A turn with
+   *     N rounds re-sends the growing context N times, so the sum ran far ahead of the real
+   *     context and compacted sessions that were nowhere near full.
+   *
+   *  2. THE THREAD. MAIN-thread turns only. The last `turn_completed` in a session is not
+   *     necessarily the main thread's: a DETACHED background subagent finishes after the main turn
+   *     that spawned it, and its own (tiny) completion would otherwise become the measurement —
+   *     silently suppressing a compaction the main thread needed. Compaction only ever folds
+   *     main-thread history (`historyInput` filters other threads out), so a child's figure is
+   *     never the right input.
+   *
+   *  3. NO FIGURE ≠ A FIGURE OF ZERO, AND AN UNTRUSTWORTHY FIGURE IS WORSE THAN NONE (review I2).
+   *     This walks BACK to the most recent main-thread completion that carries a real measurement
+   *     (`contextTokens > 0`) instead of trusting whatever landed last. Two live producers of
+   *     unusable events, neither of them legacy data:
+   *       (a) an ABORTED turn. ESC mid-stream aborts before the provider's `response.completed`,
+   *           so no `usage` event ever arrives and all three figures are 0. Taking that at face
+   *           value silently cancels the compaction the PREVIOUS turn had earned — the same
+   *           "never degrade to zero" defense `Math.max` applies WITHIN a turn, applied ACROSS
+   *           turns.
+   *       (b) the PHONE. `apple/NormaChatKit/.../ChatEngine.swift` is a second, live engine: it
+   *           sums `inputTokens` across its own rounds exactly as the TS side used to, emits NO
+   *           `contextTokens`, and its lines reach this log BYTE-VERBATIM via `sync.push`'s raw
+   *           JSONL replication. This method has no mode gate, so a Mac turn following a
+   *           phone-authored turn in a synced chat session would read a round SUM as a context
+   *           size. There is deliberately NO `?? inputTokens` fallback any more: that expression
+   *           cannot tell a one-round turn's honest total from a twenty-round turn's sum.
+   *     The cost of skipping instead of trusting: the measurement can be one or more turns STALE
+   *     (an older, smaller context), so compaction fires later rather than earlier — absorbed by
+   *     the 68,000 tokens of headroom under the ceiling, and it is a lower bound, since context
+   *     only grows until a checkpoint. Sessions with NO usable event at all (pre-2026-07-31
+   *     history, or a chat driven entirely from the phone) simply don't auto-compact until this
+   *     daemon completes one turn for them — bounded, and self-healing on that turn.
+   *     FOLLOW-UP (cross-repo, NOT closable here): NormaChatKit should emit `contextTokens` too,
+   *     at which point phone-authored turns become usable rather than skipped.
+   *
+   *  The remaining half of the same bug lived in the model's `contextWindow` itself
+   *  (codex-config.ts: 372_000 hand-transcribed for a 272,000 window, which put this threshold
+   *  ABOVE the provider's hard ceiling and made the compactor unreachable). Fixed there, guarded by
+   *  test/providers/codex-models-drift.test.ts. */
   private async maybeAutoCompact(sessionId: string, model: string): Promise<void> {
     const events = this.cfg.store.read(sessionId);
-    const lastCompleted = [...events].reverse().find(isTurnCompleted);
+    const lastCompleted = [...events].reverse().find(
+      (e): e is TurnCompleted => isTurnCompleted(e) && e.threadId === MAIN_THREAD && (e.contextTokens ?? 0) > 0,
+    );
     if (!lastCompleted) return;
-    const used = lastCompleted.inputTokens;
-    const frac = Number(process.env.NORMA_COMPACT_THRESHOLD_FRAC ?? 0.75);
+    const used = lastCompleted.contextTokens!;
+    const frac = Number(process.env.NORMA_COMPACT_THRESHOLD_FRAC ?? DEFAULT_COMPACT_THRESHOLD_FRAC);
     const absMax = process.env.NORMA_COMPACT_MAX_TOKENS ? Number(process.env.NORMA_COMPACT_MAX_TOKENS) : Infinity;
     const limit = Math.min(this.contextWindow(model) * frac, absMax);
     if (used > limit) await this.cfg.compactor.compact(sessionId, this.aborters.get(sessionId)?.signal);
@@ -1912,10 +1968,53 @@ export class AgentEngine {
    *  provider's `models()` — `session.setModel`'s handler (ipc/server.ts) is where that happens,
    *  at set time (I1 review fix); this method's only defense-in-depth for a since-drifted override
    *  lives in `contextWindow`'s own fallback (see its doc comment), not here, so this stays exactly
-   *  as cheap and side-effect-free as the expression it replaces. */
-  private resolveSel(meta: { model?: string }): { model: string; reasoningEffort?: string } {
+   *  as cheap and side-effect-free as the expression it replaces.
+   *
+   *  provider-correctness T4 makes EFFORT per-session on the same terms (`meta.effort`, set via
+   *  `store.setEffort`/`session.setEffort`), resolved at this one point for the same reason the
+   *  model is: precedence `session value → global default`, where the global is `live()`'s
+   *  `reasoningEffort` (or nothing at all when no `live` is wired, or when
+   *  `settings.provider.reasoningEffort` is unset — an absent effort omits the provider's
+   *  `reasoning` block entirely, which is NOT the same as sending `"none"`).
+   *
+   *  The two axes are INDEPENDENT — the whole reason `session.setEffort` is its own method rather
+   *  than a second argument on `session.setModel` ("effort and model are two different things, just
+   *  like the CLI"). Overriding one leaves the other resolving exactly as it did: `meta.model`
+   *  alone still changes only WHICH model answers, not how hard it reasons. Set-time validation is
+   *  again the handler's job, and for effort it is model-AWARE (the API validates effort per-model),
+   *  so an override that reaches here has already been checked against the session's own model's
+   *  list.
+   *
+   *  provider-correctness T5 makes this the TRANSLATION point too. `meta.effort` may hold a
+   *  NORMA-LEVEL tier (`CLIENT_EFFORTS`, settings.ts — `ultra` today), which the endpoint refuses
+   *  outright: `wireEffort` is applied to WHATEVER this resolves, so `reasoningEffort` coming out of
+   *  here is always absent or wire-valid, on every one of the three call sites, with no per-site
+   *  discipline required. It is applied to the global default as well as the override — the global
+   *  is zod-enum'd and so already wire-valid, and running it through anyway makes the guarantee a
+   *  property of this function rather than of a claim about its inputs.
+   *
+   *  ONE RESOLUTION, TWO FIELDS. `ultra` also changes the system prompt, and the prompt half keys
+   *  off the TIER, not off the wire value it maps to — `max` and `ultra` are indistinguishable once
+   *  translated, and a session that explicitly chose `max` must NOT get the tier's behaviour. So
+   *  `ultra` is reported alongside the translated effort instead of leaving callers to re-read
+   *  `meta.effort` and re-derive it (three call sites, three chances to disagree). It is gated here,
+   *  once, on `clientEffortEligible(meta.mode)`: `session.setEffort` refuses a tier for chat/dispatch
+   *  at the door, and this is the second enforcement for a stored tier that got in some other way (a
+   *  fork, a hand-edited index) — such a session still sends `max` and still gets no injection. */
+  private resolveSel(meta: { model?: string; effort?: string; mode?: string }): { model: string; reasoningEffort?: string; ultra: boolean } {
     const base = this.cfg.provider.live?.() ?? { model: this.cfg.provider.model };
-    return meta.model ? { ...base, model: meta.model } : base;
+    // NOTE: `base`'s shape is exhaustive by construction here — `live()` is typed
+    // `() => { model; reasoningEffort? }` and both fields are handled explicitly below. The pre-T5
+    // `...base` spread is gone; a future field added to that closure must be threaded by hand.
+    // `||`, not `??` — byte-for-byte the truthiness the pre-T5 spread used, so an empty-string
+    // effort keeps falling back to the global default exactly as it did.
+    const selected = meta.effort || base.reasoningEffort;
+    const ultra = isClientEffort(meta.effort) && clientEffortEligible(meta.mode);
+    return {
+      model: meta.model || base.model,
+      ...(selected !== undefined ? { reasoningEffort: wireEffort(selected) } : {}),
+      ultra,
+    };
   }
 
   private async turn(sessionId: string, signal: AbortSignal): Promise<void> {
@@ -1963,7 +2062,8 @@ export class AgentEngine {
     // per turn and not re-read mid-turn. Falls back to the boot-time `provider.model` when `live`
     // isn't wired (most test harnesses) — unchanged behavior for them. Chat Slice D task 1:
     // `meta.model` (a per-SESSION override, `store.setModel`/`session.setModel`) wins over
-    // whichever of those two this picks — see resolveSel's own doc comment.
+    // whichever of those two this picks; provider-correctness T4 adds `meta.effort` on the same
+    // terms for the effort half — see resolveSel's own doc comment.
     const sel = this.resolveSel(meta);
     if (!meta.cwd) {
       this.emit(sessionId, { type: "turn_started", sessionId, threadId });
@@ -1999,6 +2099,10 @@ export class AgentEngine {
       // the normal base and no override, so it would otherwise inherit the user's active style — e.g.
       // "learning" would leave TODO(human) gaps in autonomous work no human reviews. Exclude it here.
       skipOutputStyle: meta.origin === "dispatch-child",
+      // provider-correctness T5: the `ultra` tier's prompt half. Already mode-gated inside
+      // `resolveSel` (code sessions only), so there is no second predicate here — one resolution,
+      // two fields, and the wire half of the SAME resolution is the `max` this turn will send.
+      ultraDelegation: sel.ultra,
       skillToolOffered,
     });
     // NOTE (correctness-critical): `loaded` MUST be THE ONE LIVE SET for this session — never a
@@ -2246,7 +2350,11 @@ export class AgentEngine {
     const visionCapable = this.cfg.provider.provider.models().find((m) => m.id === opts.model)?.supportsVision;
     const tsEnabled = this.toolSearchEnabled(cwd);
     const deferThreshold = this.toolSearchThreshold(cwd);
-    const usage = { inputTokens: 0, outputTokens: 0 };
+    // `inputTokens`/`outputTokens` accumulate across this thread's tool ROUNDS — the turn's billed
+    // totals (see TurnCompletedEvent's doc comment). `contextTokens` is deliberately NOT a sum: it
+    // is the largest single round's input, i.e. how full the context actually got. Every
+    // `turn_completed` emit below spreads this object, so all terminal paths carry both figures.
+    const usage = { inputTokens: 0, outputTokens: 0, contextTokens: 0 };
     let lastText = "";
     // The effective iteration bound for THIS thread — opts.maxTurns (spawn bridge only) or the
     // shared default. Computed once so the loop condition and the cap message below always agree
@@ -2436,7 +2544,14 @@ export class AgentEngine {
           // spec §B4/§B6). itemJson is sensitive-opaque: this append is its only sink — never log it.
           this.emit(sessionId, { type: "reasoning_item", sessionId, threadId, itemJson: ev.itemJson });
         }
-        else if (ev.type === "usage") { usage.inputTokens += ev.inputTokens; usage.outputTokens += ev.outputTokens; }
+        else if (ev.type === "usage") {
+          usage.inputTokens += ev.inputTokens; usage.outputTokens += ev.outputTokens;
+          // MAX, not sum: within a turn the context only grows, so the largest round's input IS
+          // the turn's final context size. Taking the max rather than "the last round that
+          // reported usage" is defensive — a provider that omits usage on its final round (or
+          // reports 0) then degrades to the biggest figure it DID report, never to zero.
+          usage.contextTokens = Math.max(usage.contextTokens, ev.inputTokens);
+        }
         else if (ev.type === "done") stop = ev.stopReason;
         else if (ev.type === "error") {
           // Phase 5 routines T3: forward the provider's structured error code (ProviderEvent's
@@ -4459,6 +4574,9 @@ export class AgentEngine {
     const cwd = meta.cwd;
     if (!cwd) return { ok: false, result: "session has no working directory" };
     const agentType = opts?.label ?? "general-purpose";
+    // Resolved ONCE per workflow-spawned child (this method's own cadence — see resolveSel's doc
+    // comment): both halves of the selection, model AND effort, come from the same call.
+    const sel = this.resolveSel(meta);
     const def = this.cfg.agents.resolve(agentType, cwd);
     const childCwd = cwd;
     const childPolicy: SessionApprovalPolicy = "accept-edits";
@@ -4486,7 +4604,16 @@ export class AgentEngine {
       // (`meta` is already in scope a few lines up). Now the SAME single resolution point: an
       // explicit `opts.model` (the workflow script's own arg) still wins when present, otherwise
       // this session's live/override-aware default, never the bare boot snapshot.
-      cwd: childCwd, model: opts?.model ?? this.resolveSel(meta).model, meta: childMeta, depth: 1,
+      //
+      // provider-correctness T4: the EFFORT half of that same resolution, which this call site was
+      // dropping on the floor — it took `.model` and discarded the rest, so a workflow-spawned
+      // child ran with NO reasoning block at all even when the daemon's global effort was set (a
+      // pre-existing gap, invisible while effort was global-only and strictly worse once a user can
+      // set it per session). Every other runThread call site already threads
+      // `sel.reasoningEffort`/`opts.reasoningEffort`; this one now does too. There is no
+      // `opts.effort` counterpart to `opts.model` — a workflow script picks the child's MODEL, not
+      // how hard it reasons, matching agent defs (spec: "do NOT add per-agent effort").
+      cwd: childCwd, model: opts?.model ?? sel.model, reasoningEffort: sel.reasoningEffort, meta: childMeta, depth: 1,
       signal: AbortSignal.any([childSignal, signal]),
       loaded: childLoaded, excludeTools: childExcludeTools, allowTools: def.allowTools, onProgress: progress,
     }));

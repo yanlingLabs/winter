@@ -95,7 +95,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         let feedClient = feed.client
         let sessionDirectory = SessionDirectory(lister: {
             try await feedClient.listSessions().map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model)
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort)
             }
         })
         directory = sessionDirectory
@@ -236,9 +236,43 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
                 guard let self else { return }
                 let ok = (try? await client.setModel(sessionId: self.sessionId, model: model)) != nil
                 if ok { await self.directory.refresh() }
+                // provider-correctness T6: the RPC's answer is no longer swallowed. On SUCCESS the
+                // optimistic overlay retires (the refreshed row now carries the truth) and the
+                // selection goes on probation for exactly one turn; on REFUSAL the overlay reverts
+                // to `.none`, which re-renders whatever the daemon still holds. A revert is never a
+                // write of the previous value — see `OptimisticSelection.none`.
+                adapter?.pendingModel = .none
+                if ok { adapter?.armProbation(model: .some(model)) }
                 adapter?.modelChangeInFlight = false
             }
         }
+
+        // provider-correctness T6: the effort menu — the model wiring's exact twin on the other
+        // axis, down to the refresh-before-clearing-in-flight ordering.
+        adapter.onSetEffort = { [weak self, weak adapter] effort in
+            guard let adapter else { return }
+            adapter.effortChangeInFlight = true
+            Task { @MainActor [weak self, weak adapter] in
+                guard let self else { return }
+                let ok = (try? await client.setEffort(sessionId: self.sessionId, effort: effort)) != nil
+                if ok { await self.directory.refresh() }
+                adapter?.pendingEffort = .none
+                if ok { adapter?.armProbation(effort: .some(effort)) }
+                adapter?.effortChangeInFlight = false
+            }
+        }
+
+        // provider-correctness T6: the synced catalogue this window's pickers read. Fetched once at
+        // construction — `sync.config` is a snapshot, never a subscription — and re-fetched on a
+        // session switch (`selectSession`), which is also when a `norma model --effort` edit made
+        // meanwhile becomes worth re-reading. A failure leaves `.empty`, which the pickers render as
+        // "no rows offered" rather than as a guessed lineup.
+        refreshModelCatalogue()
+        adapter.onRefreshModelCatalogue = { [weak self] in self?.refreshModelCatalogue() }
+        // I1 (review): stamps every probation with the session it was armed for, so a verdict can
+        // never be applied to a different one. This window repins in place (`selectSession`), so it
+        // is read FRESH rather than captured.
+        adapter.boundSessionId = { [weak self] in self?.sessionId }
 
         // Task 6 (2e-iii): this window's own sidebar wiring — its own `directory`, `selectSession`
         // (switch in place), `newSession` (create+repin), and the AppDelegate-wired
@@ -253,6 +287,17 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         )
         window.contentView = NSHostingView(rootView: DetachedWindowRootView(adapter: adapter, sidebars: sidebars))
         window.setFrame(frame, display: true)
+    }
+
+    /// provider-correctness T6: re-reads `sync.config` into the adapter. Fire-and-forget with a
+    /// `try?`, same posture as `SessionDirectory.refresh` — a daemon hiccup must leave the previous
+    /// catalogue in place, never blank the picker out from under the user.
+    func refreshModelCatalogue() {
+        let client = feed.client
+        Task { @MainActor [weak self] in
+            guard let snapshot = try? await client.syncConfig() else { return }
+            self?.adapter.modelCatalogue = snapshot
+        }
     }
 
     /// Orders the window front and starts its feed (connect/attach/pump — the same `SessionFeed`
@@ -288,6 +333,14 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         guard sessionId != self.sessionId else { return }
         self.sessionId = sessionId
         adapter.isChatSession = Self.isChatSession(sessionId, in: directory.rows)
+        // provider-correctness T6: a different session means a different pinned model/effort and a
+        // possibly-different mode, so every picker overlay from the OLD session must go — leaving
+        // one would render the previous session's optimistic choice as this session's selection.
+        // The probation goes too: it is scoped to the turn that follows the apply, and that turn
+        // will now never run here.
+        adapter.pendingModel = .none
+        adapter.pendingEffort = .none
+        adapter.selectionProbation = nil
         Task { @MainActor [weak self] in
             await self?.feed.repin(to: sessionId)
         }

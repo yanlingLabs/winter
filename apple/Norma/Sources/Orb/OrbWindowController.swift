@@ -1,4 +1,5 @@
 import AppKit
+import NormaKit
 import SwiftUI
 
 /// v1 PointerOverlayWindow's key/main refusal pattern (GlassFieldWindow.swift GlassFieldPanel,
@@ -148,6 +149,17 @@ final class OrbWindowController: ObservableObject {
     /// (`AppDelegate.boot()` wires this to `AppModel.setSessionModel`), widened to the nilable wire
     /// shape `session.setModel` itself takes (`nil` clears the override).
     var onSetModel: ((String?) async -> Bool)?
+
+    /// provider-correctness T6: the effort menu — the exact twin of `onSetModel` above
+    /// (`AppDelegate.boot()` wires it to `AppModel.setSessionEffort`). `nil` clears the override.
+    var onSetEffort: ((String?) async -> Bool)?
+
+    /// provider-correctness T6: reads the daemon's synced model catalogue (`sync.config`) — the
+    /// pickers' only source of slugs and effort levels. Same "controller exposes a hook,
+    /// AppDelegate wires the real side effect" seam as the callbacks above; `nil` (unwired, or a
+    /// failed fetch) leaves the adapter at `.empty`, which the pickers render as "no rows offered"
+    /// rather than as a guessed lineup.
+    var onFetchModelCatalogue: (() async -> SyncConfigSnapshot?)?
 
     /// Task 6 (2e-iii): the morph window's width-responsive sidebar wiring — this controller exposes
     /// it (it does NOT import `AppModel`), `AppDelegate.boot()` wires it to the app model's

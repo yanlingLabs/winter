@@ -60,11 +60,13 @@ import {
   appcastInsertPlan,
   appcastItem,
   caskFrom,
+  catalogueStaleness,
   dmgStagePlan,
   preflight,
   publishGuard,
   resolveSigningIdentity,
 } from "./release-lib";
+import { CODEX_MODELS_VERIFIED } from "../packages/core/src/providers/codex-config";
 
 const TEAM_ID = "37N77U9RSZ";
 const NOTARY_PROFILE = "norma-notary";
@@ -584,6 +586,22 @@ if (!existsSync(nameGuard)) {
 }
 console.log("Gate: identity scan of built artifacts...");
 sh(`"${nameGuard}" artifacts "${app}" "${caskOutPath}"`);
+
+// ---------------------------------------------------------------------------
+// 11c. Provider-catalogue staleness nudge — WARN ONLY, never a gate (T2 review M2).
+//      CODEX_MODELS' context windows are hand-held constants re-derived from a live
+//      /models call; a stale window does not throw, it silently moves the
+//      auto-compaction threshold (a 372_000 transcription for a 272,000 window once
+//      put it ABOVE the provider's hard ceiling and killed auto-compaction outright).
+//      This is the moment that number SHIPS and a human is watching output, which is
+//      why the nudge lives here rather than as a console.warn inside a 3,000-test run.
+//      Deliberately not fail-closed like 11b: a date-triggered failure would redden a
+//      green pipeline on a day nobody touched code, and the reflexive repair is to bump
+//      the date without checking anything.
+// ---------------------------------------------------------------------------
+const catalogue = catalogueStaleness({ verified: CODEX_MODELS_VERIFIED, now: new Date() });
+if (catalogue.line) console.warn(`\n${catalogue.line}\n`);
+else console.log(`Catalogue: CODEX_MODELS verified ${CODEX_MODELS_VERIFIED} (${catalogue.ageDays}d ago) — within budget`);
 
 // ---------------------------------------------------------------------------
 // 12. Publish tail. Guards run FIRST (tag + gh release existence, re-checked HERE against the

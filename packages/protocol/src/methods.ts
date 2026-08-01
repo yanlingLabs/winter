@@ -67,6 +67,22 @@ export const SESSION_TITLE_MAX_CHARS = 200;
  *  40 characters), far below anything that could bloat a row. */
 export const SESSION_MODEL_MAX_CHARS = 200;
 
+/** provider-correctness T4: the same unbounded-field hazard `SESSION_MODEL_MAX_CHARS` documents,
+ *  one column over — a per-session `effort` rides every `session.list` row, unpaged and
+ *  remote-reachable, exactly like `model`.
+ *
+ *  Belt-and-braces rather than the primary guard, and the difference from `model` is worth stating:
+ *  a provider that cannot enumerate its catalogue makes `session.setModel` store an unrecognized
+ *  slug VERBATIM (correct for a BYO endpoint), so for `model` the schema cap really is the only
+ *  bound. Effort has no such escape hatch — `session.setEffort`'s handler refuses anything outside
+ *  the effort list of the session's own model, a closed set of short slugs. The cap lives here
+ *  anyway so the bound is structural at the SCHEMA and survives any future relaxation of that
+ *  membership check, for exactly the reason the model cap does.
+ *
+ *  32 for the same reason 200 is: far above every real slug (the longest today is "medium", six
+ *  characters), far below anything that could bloat a row. */
+export const SESSION_EFFORT_MAX_CHARS = 32;
+
 /** Chat Slice D task 2 (session sync): where a session was branched from — the parent session's id
  *  plus the seq it was forked AT (every parent event with `seq <= atSeq` is shared history). Index-
  *  only metadata carried by `sync.push`'s `meta` and reported by `sync.heads`/`session.list`; it
@@ -100,6 +116,15 @@ export const SessionCreateParams = z.object({
   // `SessionRow.model`'s own doc comment in store.ts), so it does NOT ride the `session_created`
   // event and resets to absent on a full index rebuild. Bounded — see SESSION_MODEL_MAX_CHARS.
   model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).optional(),
+  // provider-correctness T6: the effort half of `model` just above, stamped at creation time and
+  // validated by the SAME rules `session.setEffort` applies (model-aware membership against
+  // `effortsForModel`, plus the code-sessions-only gate for a Norma-level tier). Added rather than
+  // left to a create-then-setEffort pair because the phone's New Chat flow sets model AND effort at
+  // create time on a latency-critical path: two round-trips leave a window in which a turn fired
+  // immediately after create resolves at the GLOBAL effort, silently. Index-only metadata like
+  // `model` — it does not ride `session_created` and resets to absent on a full index rebuild.
+  // Bounded — see SESSION_EFFORT_MAX_CHARS.
+  effort: z.string().min(1).max(SESSION_EFFORT_MAX_CHARS).optional(),
 });
 export const SessionCreateResult = z.object({ sessionId: z.string(), trusted: z.boolean() });
 
@@ -121,6 +146,17 @@ export const SessionListResult = z.object({
     // Chat Slice D Task 1: round-trips SessionRow.model (store.ts) — absent for every session
     // created before this field existed, or created/left without an explicit override.
     model: z.string().optional(),
+    // provider-correctness T4: round-trips SessionRow.effort (store.ts), the per-session reasoning
+    // effort `session.setEffort` writes. Declared alongside `model` for the same reason `title` and
+    // `forkedFrom` are — the value really does flow out of `store.list()`, so a schema-validating
+    // client must be able to read it. Absent means "this session uses the global default", never
+    // "no effort" (an unset effort omits the provider's `reasoning` block entirely; `"none"` is a
+    // distinct, real, measured level — see REASONING_EFFORTS in core's settings.ts).
+    // provider-correctness T5: the value may ALSO be a Norma-level tier from
+    // `sync.config.clientEfforts` (e.g. "ultra") — the user's SELECTION is stored and reported
+    // verbatim, never rewritten to its wire translation. A picker matching this against the
+    // chosen model's `efforts` array alone will miss; match against BOTH lists.
+    effort: z.string().optional(),
     // Chat Slice D Task 2: round-trips SessionRow.forkedFrom (store.ts). Declared here — rather
     // than left to smuggle through undeclared — for the same reason `title` above is: the value
     // really does flow out of `store.list()`, so a schema-validating client must be able to read
@@ -365,6 +401,25 @@ export const SessionSetPolicyResult = z.object({ ok: z.literal(true) });
 // precedent as session.setPolicy).
 export const SessionSetModelParams = z.object({ sessionId: z.string().min(1), model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).nullable() });
 export const SessionSetModelResult = z.object({});
+
+// provider-correctness T4 (spec Component 4): per-session reasoning effort. Its OWN method rather
+// than a second argument on `session.setModel` — the user's call, verbatim: "effort and model are
+// two different things, just like the CLI", where `norma model <slug>` and `norma model --effort
+// <level>` are separate controls over separate axes. Everything else mirrors `session.setModel`
+// above: mode-agnostic (there is no "fixed effort" concept for any mode, unlike session.setPolicy's
+// chat rule), `effort: null` CLEARS the override so the next resolution falls back to the global
+// default (`settings.provider.reasoningEffort` — AgentEngine.resolveSel), required-but-nullable
+// rather than optional so a caller can't confuse "didn't send it" with "explicitly clearing it",
+// and a bare-`{}` result with an unknown sessionId reported as a thrown NOT_FOUND.
+//
+// The VALUE is deliberately NOT enumerated here. Which efforts a model accepts is provider
+// knowledge — the API validates effort PER-MODEL (`minimal` is refused with an `unsupported_value`
+// naming the slug, by a different layer than the global enum that refuses `ultra`) — so the daemon
+// checks membership at set time against the session's own model's list (ipc/server.ts, reading
+// core's `effortsForModel`, the SAME list `sync.config` advertises to the phone). A zod enum here
+// would be a second, drift-prone copy of a set the protocol package cannot see change.
+export const SessionSetEffortParams = z.object({ sessionId: z.string().min(1), effort: z.string().min(1).max(SESSION_EFFORT_MAX_CHARS).nullable() });
+export const SessionSetEffortResult = z.object({});
 
 export const ThreadInfoSchema = z.object({
   threadId: z.string(), parentThreadId: z.string().optional(), agentType: z.string().optional(),
@@ -974,6 +1029,20 @@ export const SyncHeadsResult = z.object({
     /** `null`, never absent, when the session has neither a generated title nor a first message. */
     title: z.string().nullable(),
     model: z.string().optional(),
+    /** provider-correctness T6: the READ half of `sync.push`'s `meta.effort`, and the reason it is
+     *  here rather than left for later — replication through this pair is bidirectional by design,
+     *  so a field that only travels one way produces exactly the divergence the field was added to
+     *  fix, mirrored. The Mac's own picker can set an effort on a chat session; without this the
+     *  phone would keep running that session at its own effort forever, and the only symptom would
+     *  again be "the answers are different".
+     *
+     *  Unvalidated on the way OUT, deliberately: this reports the daemon's own column, which every
+     *  ingress into it (`session.setEffort`, `session.create`, `sync.push`) has already checked.
+     *  Absent means "no override" — the session resolves at the global default. It may be a
+     *  Norma-level TIER only in theory: `sync.heads` lists CHAT sessions exclusively and every
+     *  ingress refuses a tier for chat, so a reader that treats it as a wire effort is safe today —
+     *  but `SessionSummary.effort`'s rule (match against BOTH lists) is the one to follow. */
+    effort: z.string().optional(),
     forkedFrom: SessionForkRef.optional(),
   })),
 });
@@ -1031,7 +1100,17 @@ export const SYNC_MAX_CHUNK_B64 = 384 * 1024;
  *  `meta.model` is validated against the daemon's own model catalogue exactly as `session.setModel`
  *  is (alias-resolved, membership-checked when the provider can enumerate, stored freely when it
  *  can't) — but an UNKNOWN slug is DROPPED rather than failing the call: a model mismatch between a
- *  phone and a Mac must never block log replication, which is the irreplaceable half. */
+ *  phone and a Mac must never block log replication, which is the irreplaceable half.
+ *
+ *  `meta.effort` (provider-correctness T6) carries the same rule and the same reason. It exists
+ *  because a phone-set per-session effort that does NOT replicate is invisible: the Mac keeps
+ *  resolving that session at the global default while the phone's UI shows the override, and the
+ *  only symptom is "the answers are different on the Mac". Its ingress validation is model-aware
+ *  (`effortsForModel`, packages/core/src/ipc/sync.ts) exactly as `session.setEffort`'s is, and it
+ *  drops-and-logs rather than failing the push, exactly as `model` does. One rule is stricter here
+ *  than at `session.setEffort`: a Norma-level TIER (`sync.config.clientEfforts`, e.g. `"ultra"`) is
+ *  ALWAYS dropped on this ingress, because a tier is code-sessions-only and this surface is
+ *  chat-only fail-closed — no session reachable through it may ever hold one. */
 export const SyncPushParams = z.object({
   sessionId: z.string().min(1),
   baseSeq: z.number().int().nonnegative(),
@@ -1042,6 +1121,27 @@ export const SyncPushParams = z.object({
     // unbounded title on an UNPAGED heads/list response is a persistent connection killer.
     title: z.string().max(SESSION_TITLE_MAX_CHARS).optional(),
     model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).optional(),
+    // provider-correctness T6. Bounded by the SAME constant `session.setEffort`'s param uses, and
+    // NOT enumerated here for the same reason that one isn't: which levels a model accepts is
+    // provider knowledge the protocol package cannot see change, so a zod enum here would be a
+    // second, drift-prone copy. Membership is checked at the handler, against the session's own
+    // model's list.
+    //
+    // THREE STATES, and the distinction between the last two is the whole point (T6 review, C6):
+    //   * ABSENT      → unchanged. This is what a STALE client sends — one that simply has not
+    //                   learned about an override the other side set. It must never be able to wipe
+    //                   one, which is why "I have no effort" is spelled by omitting the key.
+    //   * `null`      → CLEAR the override, restoring the precedence chain (session → global).
+    //   * a string    → set it, subject to the handler's model-aware + tier checks.
+    // `null` rather than `""` deliberately: it is the SAME clear vocabulary `session.setEffort`
+    // already uses for this exact column (`SessionSetEffortParams.effort` is `.nullable()`), so
+    // there is no second magic value to remember, no `.min(1)` to relax, and no ""→NULL mapping a
+    // future writer can miss and thereby store a truthy-but-meaningless effort that then flows out
+    // through `sync.heads` and `session.list`.
+    //
+    // Deliberately NOT extended to `title`/`model` beside it: neither has a clear affordance in any
+    // UI, so giving them a null state would be inventing a capability nothing asks for.
+    effort: z.string().min(1).max(SESSION_EFFORT_MAX_CHARS).nullable().optional(),
     forkedFrom: SessionForkRef.optional(),
   }).optional(),
 });
@@ -1074,7 +1174,56 @@ export type SessionForkRef = z.infer<typeof SessionForkRef>;
  *  per-session. Every field is read AT CALL TIME (hot, no daemon restart), same discipline as
  *  every other settings-backed getter in this codebase. */
 export const SyncConfigParams = z.object({});
+
+/** One row of the daemon's model catalogue: the slug, plus the reasoning-effort levels that slug
+ *  accepts.
+ *
+ *  **Why `efforts` rides PER MODEL when all three gpt-5.6 slugs accept the identical six today.**
+ *  The backend validates effort in TWO different layers, and they do not agree with each other:
+ *  `ultra` is refused by a GLOBAL, model-agnostic enum (`invalid_value`), while `minimal` is refused
+ *  PER MODEL (`unsupported_value`, the error naming the slug). So per-model divergence is not
+ *  hypothetical — it is the observed behaviour of the layer that already exists. Carrying one flat
+ *  list would mean a future divergence could only be expressed by shipping a new PHONE APP; carrying
+ *  it per model makes that same divergence a daemon-side data edit that reaches every paired device
+ *  on its next connect. (See `REASONING_EFFORTS` in packages/core/src/settings.ts for the full
+ *  two-layer story and why "ultra" must never come back.) */
+export const SyncConfigModel = z.object({
+  id: z.string().min(1),
+  efforts: z.array(z.string().min(1)),
+});
+export type SyncConfigModel = z.infer<typeof SyncConfigModel>;
+
 export const SyncConfigResult = z.object({
+  /** WHICH PROVIDER this whole bundle describes — `"codex-oauth"` / `"openai-compatible"`, the
+   *  `ProviderSettings.type` vocabulary (packages/core/src/settings.ts), `"none"` on a daemon with
+   *  no provider configured at all.
+   *
+   *  **NOT sentinel-optional, unlike every other field here.** `models: []` and `defaultEffort: ""`
+   *  are real answers meaning "I have none"; there is no equivalent for this one, because the daemon
+   *  always knows which provider it is running (including "not one"). `min(1)`, always stated.
+   *
+   *  **THE RULE THIS FIELD EXISTS FOR: a provider MISMATCH means NEVER-SYNCED for the model half.**
+   *  A client that runs its OWN engine on its OWN credentials — the phone, which is always
+   *  codex-oauth (`phone-always-local`) — must, on a non-empty `provider` that is not its own,
+   *  discard `defaultModel` (and `models`, already `[]`) instead of adopting it. Without that rule
+   *  the bundle is not self-describing and one live 400 follows directly: on an `openai-compatible`
+   *  Mac the provider is constructed with no enumerable catalogue (`ProviderSettings` has no
+   *  `models` field), so `models` is `[]` — but `defaultModel` is still a non-empty FOREIGN slug (a
+   *  llama/BYOK name). A phone that stores any non-empty `defaultModel` then sends that slug to
+   *  Codex `/responses` and is 400'd on its first turn. The "an empty catalogue is ignored on apply"
+   *  rule governs `models` ONLY and does not close this; nothing but the provider identity can.
+   *
+   *  ABSENT (a daemon built before this field) is NOT a mismatch. A client mirror decodes absence as
+   *  `""` — "the Mac did not say" — which is the pre-field status quo and must keep behaving like
+   *  it; treating unknown as mismatched would take local chat down on every older Mac.
+   *
+   *  BOOT-BOUND, deliberately, and it agrees with `models` by construction: it is the identity of
+   *  the very provider instance whose `models()` feeds this bundle, NOT a fresh read of
+   *  `settings.provider.type`. A settings.json edited to a different `provider.type` needs a daemon
+   *  restart to take effect (providers/manager.ts says so), so a live-read type would claim a
+   *  provider whose catalogue this bundle is not reporting — the same mismatch, manufactured by the
+   *  field meant to detect it. */
+  provider: z.string().min(1),
   /** `null` when no key is stored — never an empty string (indistinguishable from "stored but
    *  blank"). Sourced from `Bun.secrets` (`EXA_API_KEY_SECRET`), the SAME keychain item Search's
    *  own accessor reads — never written to disk anywhere in this envelope. */
@@ -1088,6 +1237,49 @@ export const SyncConfigResult = z.object({
    *  `provider.live?.() ?? {model: provider.model}` idiom) — the phone's starting point for a brand
    *  new local chat session, not a value it re-validates against anything. */
   defaultModel: z.string(),
+  /** The ACTIVE provider's whole model catalogue — `AgentEngine.knownModels()`, the SAME list
+   *  `session.setModel` and `sync.push` validate a slug against, re-read every call.
+   *
+   *  Before this field the phone DERIVED its lineup: it split `defaultModel` on its last `-`, read
+   *  the tail as a tier, and synthesized the sibling slugs by string concatenation. A derivation
+   *  cannot be proved — the phone could never know the tiers it invented exist, and its parallel
+   *  effort control (a pure UI mock) had drifted to offering `ultra`, which the backend rejects
+   *  outright. The daemon is the side that already holds and validates this list, so it serves it.
+   *
+   *  **EMPTY IS A REAL ANSWER, and it is never a licence to guess.** `[]` means the active provider
+   *  cannot enumerate its models (an arbitrary openai-compatible endpoint — the same case
+   *  `session.setModel` handles by skipping its membership check), or that no provider is configured
+   *  at all. A client that receives `[]` has NOT been told a catalogue and must wait for one, exactly
+   *  as it already waits on an empty `defaultModel` rather than substituting a guess: a guessed
+   *  fallback model is what produced a 400-on-first-turn on a freshly-paired phone once already. */
+  models: z.array(SyncConfigModel),
+  /** The LIVE reasoning effort (`settings.provider.reasoningEffort`), re-resolved every call
+   *  alongside `defaultModel` and off the same resolver.
+   *
+   *  `""` means UNSET, and unset is NOT `"none"`. An unset effort makes the daemon omit the
+   *  `reasoning` block from the request body entirely (providers/openai-compatible.ts); `"none"` is
+   *  an explicit level the backend honours and echoes back. A client must treat `""` as "the Mac has
+   *  configured no effort" and send none itself — never as a level to put on the wire, and never as
+   *  a reason to pick one. */
+  defaultEffort: z.string(),
+  /** NORMA-LEVEL effort tiers this daemon offers — selectable in Norma, **never sent upstream**,
+   *  and offered on CODE sessions only (`session.setEffort` refuses them for chat/dispatch).
+   *  `["ultra"]` on a current daemon (`CLIENT_EFFORTS`, packages/core/src/settings.ts).
+   *
+   *  **A SEPARATE FIELD, deliberately never merged into `models[].efforts`.** That array is exactly
+   *  what the endpoint's request validator accepts and exactly what `session.setEffort` accepts as
+   *  a wire effort — one list, one meaning. A tier here is the opposite kind of value: the daemon
+   *  TRANSLATES it to a wire effort (today `ultra` → `max`) plus some local behaviour before any
+   *  request is built, so putting it in `models[].efforts` would make the daemon advertise a level
+   *  its own turn would be 400'd on. That is precisely the bug the catalogue field was added to fix
+   *  — `ultra` was offered by a phone-side mock while a global enum on the backend rejected it — so
+   *  re-merging the two lists would reintroduce it through the fix.
+   *
+   *  `[]` is a real answer and the only correct degrade: "this daemon offers no Norma-level tiers".
+   *  A client renders exactly what it is told (wire levels from `models[].efforts`, tiers from
+   *  here) and invents neither, so an older daemon meeting a newer client simply shows no tiers
+   *  rather than offering one the daemon would refuse. */
+  clientEfforts: z.array(z.string().min(1)),
 });
 export type SyncConfigParams = z.infer<typeof SyncConfigParams>;
 export type SyncConfigResult = z.infer<typeof SyncConfigResult>;
@@ -1147,6 +1339,7 @@ export const METHODS = {
   planRespond: "plan.respond",
   sessionSetPolicy: "session.setPolicy",
   sessionSetModel: "session.setModel",
+  sessionSetEffort: "session.setEffort",
   threadList: "thread.list",
   threadSend: "thread.send",
   agentStop: "agent.stop",

@@ -5,6 +5,8 @@ import { ERR, SessionEvent, SESSION_TITLE_MAX_CHARS, type SyncConfigResult, type
 import { resolveModelAlias } from "../agent/model-aliases";
 import { assistantMemoryDirFor } from "../agent/memory-dir";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
+import { CLIENT_EFFORTS, REASONING_EFFORTS, isClientEffort } from "../settings";
+import type { ModelInfo } from "../providers/types";
 import type { SessionForkRef, SessionStore, SyncedEntry } from "../sessions/store";
 
 // ================================================================================================
@@ -183,7 +185,30 @@ function resolveChatSession(
 }
 
 /** The index-only metadata a push may carry, after validation. */
-export interface SyncMeta { title?: string; model?: string; forkedFrom?: SessionForkRef }
+export interface SyncMeta { title?: string; model?: string; effort?: string | null; forkedFrom?: SessionForkRef }
+
+/** The effort half of `validateSyncMeta`'s inputs (provider-correctness T6) — kept as its own
+ *  options bag rather than three more positional parameters, so a caller that only cares about the
+ *  model half (there are none in production, but every existing test is one) is untouched.
+ *
+ *  Every field is optional and degrades to its safest value, the same "typed no-op" discipline as
+ *  `SyncPushContext`/`SyncConfigContext` above. */
+export interface SyncMetaEffortContext {
+  /** The session's model as it stands BEFORE this push — its stored override, else the daemon's
+   *  live default. A model arriving in this SAME `meta` (already validated by the model half) wins
+   *  over it: the two travel together, and checking a new effort against the OLD model would refuse
+   *  a legitimate model+effort pair pushed atomically. */
+  model?: string;
+  /** Which wire levels a model accepts. Injected rather than called directly so the "provider
+   *  cannot enumerate" branch is reachable in a test — `effortsForModel` is uniform and non-empty
+   *  today, so the permissive carve-out below has no other way to be exercised. Production leaves
+   *  it absent and gets `effortsForModel`, the SAME source `session.setEffort` checks and
+   *  `sync.config` advertises. */
+  efforts?(modelId: string): string[];
+  /** Called with the REFUSED value and a short reason, once per drop. The caller logs; this
+   *  function never does its own I/O (`validateSyncMeta` is pure), same split as `onDroppedModel`. */
+  onDroppedEffort?(effort: string, reason: string): void;
+}
 
 /** Validates `sync.push`'s `meta` before ANY of it reaches the index.
  *
@@ -202,11 +227,38 @@ export interface SyncMeta { title?: string; model?: string; forkedFrom?: Session
  *  already had (in particular, a bad push can never overwrite a good model with a broken one).
  *
  *  `title` is clamped as defence in depth — `SyncPushParams` already rejects an over-long one at
- *  the wire, and `SessionStore` clamps on both write and read; this covers any non-RPC caller. */
+ *  the wire, and `SessionStore` clamps on both write and read; this covers any non-RPC caller.
+ *
+ *  `effort` (provider-correctness T6, closing the T4-review I2 gap) is the model's rule applied to
+ *  the other axis, plus one refusal the model half has no analogue for.
+ *
+ *    * MODEL-AWARE MEMBERSHIP against `effortsForModel` — the SAME list `session.setEffort` checks
+ *      and `sync.config` advertises. `sync.push` is a SECOND INGRESS into the same column, so it
+ *      needs its own check rather than a shared assumption: `AgentEngine.resolveSel` hands the
+ *      stored effort straight to the provider, so one unaccepted level bricks every subsequent turn
+ *      on that session with no UI signal — precisely what the model half already guards against.
+ *      Checked against the effective model (a pushed one wins over the stored/live one, see
+ *      `SyncMetaEffortContext.model`), because the endpoint validates effort PER MODEL.
+ *    * DROPPED, NOT FATAL, for exactly the model half's reason, and with the same non-destructive
+ *      consequence: the batch lands in full and the column keeps whatever it had, so a bad push can
+ *      never overwrite a good effort with a broken one.
+ *    * A NORMA-LEVEL TIER IS ALWAYS DROPPED HERE, and this is the one rule stricter than
+ *      `session.setEffort`'s. It is DERIVED, not invented: `sync.push` is chat-only fail-closed
+ *      (this file's invariant 1 — every verb resolves the target's mode and refuses anything that
+ *      isn't exactly "chat"), and a tier is code-sessions-only (`clientEffortEligible`,
+ *      settings.ts). The two gates compose to "no session reachable through this surface may hold a
+ *      tier", so admitting one could only ever produce an unreachable, un-resolvable row. It is
+ *      NOT routed through the wire list — a tier never reaches the endpoint, so every model would
+ *      refuse it and the reason logged would be wrong.
+ *
+ *  Note the ORDER of the two effort branches: the tier check runs FIRST, so `ultra` is reported as a
+ *  tier rather than as "not accepted by model X". Same alternatives-not-layers structure as
+ *  `session.setEffort`'s handler. */
 export function validateSyncMeta(
-  meta: { title?: string; model?: string; forkedFrom?: SessionForkRef },
+  meta: { title?: string; model?: string; effort?: string | null; forkedFrom?: SessionForkRef },
   knownModelIds: string[],
   onDroppedModel?: (slug: string) => void,
+  effortCtx: SyncMetaEffortContext = {},
 ): SyncMeta {
   const out: SyncMeta = {};
   if (meta.title !== undefined) {
@@ -222,6 +274,33 @@ export function validateSyncMeta(
       const resolved = resolveModelAlias(meta.model, knownModelIds);
       if (knownModelIds.includes(resolved)) out.model = resolved;
       else onDroppedModel?.(meta.model);
+    }
+  }
+  if (meta.effort !== undefined) {
+    if (meta.effort === null) {
+      // An explicit CLEAR (T6 review, C6). Never validated, and deliberately ahead of both branches
+      // below: clearing restores the precedence chain, so there is no model whose list it could
+      // fail and no mode it could be ineligible for. A null that fell into either branch would be
+      // dropped, and the override would be un-clearable through this surface.
+      out.effort = null;
+    } else if (isClientEffort(meta.effort)) {
+      effortCtx.onDroppedEffort?.(meta.effort, "a Norma-level tier, offered on code sessions only — sync.push is chat-only");
+    } else {
+      // The pushed model wins; it landed in the same atomic `meta` and is already validated.
+      const model = out.model ?? effortCtx.model ?? "";
+      const allowed = (effortCtx.efforts ?? effortsForModel)(model);
+      // `allowed.length > 0` mirrors `session.setModel`/`session.setEffort`'s own `known.length > 0`
+      // idiom verbatim: a provider that cannot enumerate is not bricked. It means this ingress can
+      // accept what `sync.config` does not advertise, never the reverse — the permissive direction,
+      // deliberately.
+      if (allowed.length === 0 || allowed.includes(meta.effort)) out.effort = meta.effort;
+      else {
+        // M3 (review): mirror-EXACT with `assertEffortSelectable` (ipc/server.ts), no-model
+        // fallback included — `by model ''` is not a sentence, and two surfaces explaining the same
+        // refusal differently is precisely the drift this plan exists to remove.
+        const forModel = model ? `by model '${model}'` : "by the configured provider";
+        effortCtx.onDroppedEffort?.(meta.effort, `not accepted ${forModel} — supported: ${allowed.join(", ")}`);
+      }
     }
   }
   return out;
@@ -244,6 +323,10 @@ export function syncHeads(store: SessionStore): SyncHeadsResult {
       // fold than a missing key (which is indistinguishable from an older daemon).
       title: row.title ?? null,
       ...(row.model !== undefined ? { model: row.model } : {}),
+      // provider-correctness T6 — the read half of `meta.effort`. Omitted rather than `null` when
+      // absent, matching `model` beside it (only `title` is explicitly nullable here, and its own
+      // doc comment says why): absent means "no override", which is a different fact from any level.
+      ...(row.effort !== undefined ? { effort: row.effort } : {}),
       ...(row.forkedFrom !== undefined ? { forkedFrom: row.forkedFrom } : {}),
     }));
   return { sessions };
@@ -301,6 +384,12 @@ export interface SyncPushContext {
    *  provider can't enumerate its models, in which case a pushed value is stored freely; see
    *  `validateSyncMeta`. */
   knownModelIds?(): string[];
+  /** provider-correctness T6: the daemon's live default model — the LAST rung of the effective-model
+   *  precedence a pushed `meta.effort` is validated against (pushed model → the row's stored model →
+   *  this → `""`), identical to what `session.setEffort` resolves (`sessionMeta?.model ??
+   *  opts.liveModel?.() ?? ""`, ipc/server.ts). Absent degrades to `""`, which `effortsForModel`
+   *  answers for as it does for any slug. */
+  liveModel?(): string;
 }
 
 /** Parses a reassembled JSONL batch into raw-line/event pairs. Every line must be JSON AND a valid
@@ -409,7 +498,15 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
   const first = entries[0]!.event;
   const meta = p.meta
     ? validateSyncMeta(p.meta, ctx.knownModelIds?.() ?? [], (slug) =>
-        console.warn(`[sync] dropped unknown model ${JSON.stringify(slug)} pushed for session ${p.sessionId} — the log was replicated, the model override was not`))
+        console.warn(`[sync] dropped unknown model ${JSON.stringify(slug)} pushed for session ${p.sessionId} — the log was replicated, the model override was not`), {
+        // provider-correctness T6. The row may not exist yet (a creating push), so the lookup is
+        // defensive — an unknown id simply contributes nothing and the live default takes over.
+        model: (() => {
+          try { return store.meta(p.sessionId).model; } catch { return undefined; }
+        })() ?? ctx.liveModel?.(),
+        onDroppedEffort: (effort, reason) =>
+          console.warn(`[sync] dropped effort ${JSON.stringify(effort)} pushed for session ${p.sessionId} (${reason}) — the log was replicated, the effort override was not`),
+      })
     : undefined;
   let lastSeq: number;
   let createdEvent: SessionEvent | undefined;
@@ -519,19 +616,127 @@ export interface SyncConfigContext {
    *  degrades to `""` — there is no sensible model to report, and `defaultModel` is a plain
    *  string, never nullable (see `SyncConfigResult`'s own doc comment). */
   liveModel?(): string;
+  /** The provider's live reasoning effort, off the SAME `live()` resolver `liveModel` reads (a
+   *  `LiveModelSelection` carries both) — so a `norma model --effort` edit is visible on the very
+   *  next `sync.config` with no daemon restart, exactly like the model beside it.
+   *
+   *  Absent, or a resolved `undefined`, degrades to `""` — which is the honest report of an UNSET
+   *  effort, not a substitute for one. `settings.provider.reasoningEffort` is genuinely optional and
+   *  unset makes every request omit the `reasoning` block entirely; collapsing that to `"none"` here
+   *  would have the phone start sending an explicit level the Mac never sends. */
+  liveEffort?(): string;
+  /** The ACTIVE provider's model catalogue — wired (ipc/server.ts) from `opts.engine.knownModels()`,
+   *  the SAME accessor `session.setModel` validates against and `sync.push` consults for
+   *  `knownModelIds`. Deliberately NOT a parallel `IpcServerOptions` getter: a second source could
+   *  serve a phone a lineup this daemon's own `session.setModel` would then reject.
+   *
+   *  Absent, or an empty array, both mean "no catalogue to report" (no engine wired, or a provider
+   *  that cannot enumerate) — see `SyncConfigResult.models` for why the client must WAIT on that
+   *  rather than derive one. */
+  knownModels?(): ModelInfo[];
+  /** WHICH PROVIDER this whole bundle describes (whole-branch review C1) — wired (ipc/server.ts →
+   *  daemon.ts) from the id of the very `Provider` instance whose `models()` becomes `knownModels`
+   *  above, so the identity and the catalogue can never disagree. `Provider.id` is the same
+   *  vocabulary as `ProviderSettings.type` (`"codex-oauth"` / `"openai-compatible"`, settings.ts)
+   *  by construction: `createProvider` branches on that literal and each provider's `id` is it.
+   *
+   *  Deliberately NOT a fresh `settings.provider.type` read, and deliberately NOT off `liveModel`'s
+   *  resolver: the provider TYPE is boot-bound (a settings.json edit that changes it needs a daemon
+   *  restart — providers/manager.ts), so a live read would report a provider whose catalogue this
+   *  bundle is not serving. Reporting the running instance is the only answer that agrees with
+   *  `models`/`defaultModel` beside it.
+   *
+   *  Absent (a daemon with no agent provider at all) degrades to `"none"`, not to `""`: this is the
+   *  one field on this wire with no empty sentinel — see `SyncConfigResult.provider`. */
+  liveProvider?(): string;
+}
+
+/** What `sync.config` reports when this daemon has no agent provider configured at all. A real
+ *  answer, not a sentinel: `defaultModel` is `""` and `models` is `[]` on such a daemon, so a client
+ *  applying the mismatch rule discards exactly nothing it could have used — and a client that
+ *  somehow shares this daemon's (nonexistent) provider is not a case that can arise. Kept a distinct
+ *  token from any `ProviderSettings.type` literal so it can never read as a real provider. */
+export const NO_PROVIDER = "none";
+
+/** The reasoning-effort levels one model accepts.
+ *
+ *  Uniform today — every model gets `REASONING_EFFORTS`, the wire-valid universe measured against
+ *  the endpoint (settings.ts) — but this is THE SEAM where a per-model divergence lands, and it is a
+ *  function rather than a constant for exactly that reason. It deliberately does NOT live as an
+ *  `efforts` field on `ModelInfo`/`CODEX_MODELS`: the models catalogue's own drift guard
+ *  (test/providers/codex-models-drift.test.ts) documents at length that the provider's
+ *  `supported_reasoning_levels` is the source that CAUSED the `ultra` bug rather than one that would
+ *  have caught it, and a per-model effort array sitting inside `CODEX_MODELS` would read as a claim
+ *  sourced from that catalogue. Effort validity is a property of the REQUEST VALIDATOR; it belongs
+ *  here, next to the thing that serves it, not next to the context windows.
+ *
+ *  Returns a fresh array every call — the caller owns its row and must not be able to mutate the
+ *  shared constant through it. */
+export function effortsForModel(_modelId: string): string[] {
+  return [...REASONING_EFFORTS];
+}
+
+/** The NORMA-LEVEL effort tiers this daemon offers (provider-correctness T5) — `sync.config`'s
+ *  `clientEfforts`, and the deliberate counterpart to `effortsForModel` above.
+ *
+ *  TWO FUNCTIONS, NEVER ONE. `effortsForModel` answers "what will the endpoint accept for this
+ *  model" and is the SAME source `session.setEffort` validates a wire effort against — the identity
+ *  that keeps the daemon from ever advertising something it refuses, or refusing something it
+ *  advertises. This answers a different question: "what extra levels does NORMA offer, that it
+ *  translates away before a request exists". Folding a tier into the first list would break that
+ *  identity in the worst direction — the daemon would advertise `ultra` and then 400 on it, which
+ *  is exactly the bug (a phone-side mock offering `ultra`) that the catalogue field was added to fix.
+ *
+ *  NOT per-model, unlike `effortsForModel`. A tier has no API meaning at all, so it cannot vary by
+ *  what the API accepts; scoping it to a subset of slugs would re-import the catalogue claim that
+ *  caused the original bug. Returns a fresh array every call, same reason as its neighbour. */
+export function clientEfforts(): string[] {
+  return [...CLIENT_EFFORTS];
 }
 
 /** Everything a freshly-paired phone needs to run its OWN standalone chat (the `phone-always-local`
- *  design decision): the Exa key, the user's additions to the dangerous-domains list, and the
- *  daemon's current default model. Every field is read HERE, at call time — nothing is cached
- *  across calls, so a Keychain rotation or a settings edit is visible on the very next
- *  `sync.config`, no daemon restart (the same "hot" contract every other settings-backed getter in
- *  this codebase already keeps). */
+ *  design decision): the Exa key, the user's additions to the dangerous-domains list, the daemon's
+ *  current default model and effort, and the provider's whole model catalogue. Every field is read
+ *  HERE, at call time — nothing is cached across calls, so a Keychain rotation or a `norma model`
+ *  edit is visible on the very next `sync.config`, no daemon restart (the same "hot" contract every
+ *  other settings-backed getter in this codebase already keeps).
+ *
+ *  "Hot" is exact about its scope (T3 review m2): the model/effort SELECTION re-reads settings.json
+ *  every call, so `norma model … --effort …` lands with no restart. The CATALOGUE tracks the engine's
+ *  boot-bound provider instance — a settings.json edit that changes `provider.type` still needs a
+ *  restart (providers/manager.ts says so), and until then this reports the old provider's lineup.
+ *
+ *  The catalogue half (provider-correctness T3) is projected down to `{id, efforts}`: `ModelInfo`
+ *  also carries `family`/`contextWindow`/`supportsVision`, none of which is the phone's business
+ *  (it does not size its own context window off the Mac's catalogue), and every field on this wire
+ *  is one more thing that has to stay true.
+ *
+ *  T3 review m4 — the array is UNCAPPED, and that is a considered choice on a phone-facing wire
+ *  where oversized frames hard-fail the transport (see `SESSION_TITLE_MAX_CHARS` for the class of
+ *  bug that motivates caps here). Both dimensions are bounded by construction rather than by a
+ *  literal: the rows are whatever the active provider enumerates (three today, single digits for
+ *  any plausible catalogue) and each row is a slug plus six short words. The realistic worst case is
+ *  a few hundred bytes — orders of magnitude under any frame limit — and unlike a session title,
+ *  none of this is user-authored, so there is no input an attacker or a careless user can grow. If a
+ *  provider ever enumerates hundreds of models, cap it HERE, at the projection, rather than trusting
+ *  that observation to stay true. */
 export async function syncConfig(ctx: SyncConfigContext): Promise<SyncConfigResult> {
+  // Whole-branch review C1 — FIRST, because it is what makes everything after it interpretable: a
+  // catalogue and a default model mean nothing to a client that runs its own engine until it knows
+  // WHOSE they are. An empty/absent getter reports "none" rather than "", the one field here with
+  // no empty sentinel (see `SyncConfigResult.provider`).
+  const provider = ctx.liveProvider?.() || NO_PROVIDER;
   const exaKey = (await ctx.secret?.(EXA_API_KEY_SECRET)) ?? null;
   const dangerousDomains = ctx.dangerousDomainsAdded?.() ?? [];
   const defaultModel = ctx.liveModel?.() ?? "";
-  return { exaKey, dangerousDomains, defaultModel };
+  const defaultEffort = ctx.liveEffort?.() ?? "";
+  const models = (ctx.knownModels?.() ?? []).map((m) => ({ id: m.id, efforts: effortsForModel(m.id) }));
+  // provider-correctness T5 — a SEPARATE field, never merged into `models[].efforts`. Not a
+  // per-model projection either: a tier is a Norma product decision with no API meaning, so it
+  // rides once for the whole daemon. Constant today; served rather than baked into the client for
+  // the same reason the catalogue is — a tier the Mac stops offering must disappear from every
+  // paired device on its next connect, with no app release.
+  return { provider, exaKey, dangerousDomains, defaultModel, models, defaultEffort, clientEfforts: clientEfforts() };
 }
 
 // ------------------------------------------------------------------------------------------------

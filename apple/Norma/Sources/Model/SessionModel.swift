@@ -189,6 +189,16 @@ struct OrbSessionState: Equatable {
     /// turn the queued text was riding on ends — absorbed (`turnCompleted`) or died
     /// (`agentError`) — since a queued steer never survives past the turn it was queued for.
     var queuedSteers: [String] = []
+    /// provider-correctness T6: the message of the `agent_error` that ENDED THE TURN THAT JUST RAN
+    /// — set on a main-thread `agent_error`, cleared by the next `turn_started` and by any clean
+    /// `turn_completed`. Nil at every other moment.
+    ///
+    /// Deliberately a "last turn" fact rather than a growing list, and that scoping is the whole
+    /// point: the model/effort pickers use it to decide whether the selection the user just applied
+    /// is what broke the turn, and a prior implementation of that idea SCANNED THE WHOLE TRANSCRIPT
+    /// — which made a model unholdable forever after a single bad turn, surviving relaunch. One
+    /// turn's message, overwritten by the next turn, cannot express that bug.
+    var lastTurnError: String? = nil
 
     /// gate-feedback-1 FIX A: client names currently attached to this session, via
     /// `harness_attached`/`harness_detached` (previously ignored by the `default:` branch below).
@@ -311,6 +321,7 @@ enum SessionReducer {
             s.status = .thinking
             s.streamingText = ""
             s.lastTurnAborted = false // a fresh turn clears any prior interrupt flag
+            s.lastTurnError = nil     // T6: and any prior turn's error — this one hasn't failed yet
             // Dispatch (Phase 7): prune finished children on the NEXT main turn — same cadence as
             // the CLI TUI's `state.agents` prune on `turn_started` (subagent-roster precedent).
             s.children.removeAll { $0.status == "completed" || $0.status == "error" }
@@ -396,6 +407,7 @@ enum SessionReducer {
             s.pendingInteractions = []
             s.streamingText = ""
             s.status = .idle
+            s.lastTurnError = nil // T6: this turn ended without an agent_error
             s.queuedSteers = [] // the turn absorbed whatever was queued for it
             s.lastTurnAborted = (v.stopReason == "aborted") // Esc-interrupt feedback (gate polish)
             if v.stopReason == "aborted", !s.exchanges.isEmpty {
@@ -418,6 +430,7 @@ enum SessionReducer {
             s.pendingInteractions = []
             s.streamingText = ""
             s.status = .idle
+            s.lastTurnError = v.message // T6: the one signal the pickers' probation reads
             s.queuedSteers = [] // the turn died with whatever was queued for it
             if let last = s.exchanges.indices.last, s.exchanges[last].reply.isEmpty {
                 s.exchanges[last].reply = "⚠︎ \(v.message)"

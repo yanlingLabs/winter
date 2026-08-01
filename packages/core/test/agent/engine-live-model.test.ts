@@ -3,6 +3,7 @@ import { FakeProvider } from "../../src/agent/fake-provider";
 import { setupEngine } from "./engine-steer.test";
 import { setup as setupSpawn } from "./engine-spawn.test";
 import type { ProviderEvent } from "../../src/providers/types";
+import { CLIENT_EFFORTS, REASONING_EFFORTS } from "../../src/settings";
 
 const done = (reason: "end_turn" | "tool_calls"): ProviderEvent => ({ type: "done", stopReason: reason });
 const text = (t: string): ProviderEvent[] => [{ type: "text_delta", delta: t }, done("end_turn")];
@@ -69,7 +70,7 @@ describe("engine live model resolution (no daemon restart)", () => {
       store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: `u${i}`, clientName: "test" });
       store.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: `a${i}` });
     }
-    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 900, outputTokens: 10 }); // 900 > 750
+    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 900, outputTokens: 10, contextTokens: 900 }); // 900 > 750
 
     await engine.runTurn(sessionId);
 
@@ -187,7 +188,7 @@ describe("per-session model override (Chat Slice D task 1: meta.model wins over 
       store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: `u${i}`, clientName: "test" });
       store.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: `a${i}` });
     }
-    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 900, outputTokens: 10 }); // 900 > 750
+    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 900, outputTokens: 10, contextTokens: 900 }); // 900 > 750
 
     await engine.runTurn(sessionId);
 
@@ -215,12 +216,228 @@ describe("per-session model override (Chat Slice D task 1: meta.model wins over 
       store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: `u${i}`, clientName: "test" });
       store.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: `a${i}` });
     }
-    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 900, outputTokens: 10 });
+    store.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 900, outputTokens: 10, contextTokens: 900 });
 
     await engine.runTurn(sessionId);
 
     const checkpoint = store.read(sessionId).find((e) => e.type === "checkpoint");
     expect(checkpoint).toBeUndefined(); // Infinity threshold — never compacts, same as before this fix
     expect(provider.requests[0]!.model).toBe("some-override"); // the turn itself still ran with the raw override
+  });
+});
+
+// provider-correctness T4: session.setEffort/store.setEffort's per-SESSION reasoning-effort
+// override, resolved at the SAME single `resolveSel` point as the model above — precedence
+// `meta.effort` → the global default (live()'s reasoningEffort, or nothing when no live() is
+// wired). The two axes are INDEPENDENT: overriding one never disturbs the other, which is exactly
+// why this is its own RPC rather than a second argument on session.setModel.
+describe("per-session effort override (provider-correctness T4: meta.effort wins over live()/global)", () => {
+  test("a session WITHOUT an effort uses the global default (control) — same engine, same live()", async () => {
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, sessionId } = setupEngine(provider, { live: () => ({ model: "live-model", reasoningEffort: "medium" }) });
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.reasoningEffort).toBe("medium");
+  });
+
+  test("store.setEffort overrides live()'s reasoningEffort for THIS session, but leaves the model untouched", async () => {
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, store, sessionId } = setupEngine(provider, { live: () => ({ model: "live-model", reasoningEffort: "medium" }) });
+    store.setEffort(sessionId, "xhigh");
+
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.reasoningEffort).toBe("xhigh");
+    expect(provider.requests[0]!.model).toBe("live-model"); // untouched — only `reasoningEffort` is overridden
+  });
+
+  test("store.setEffort supplies an effort even when the GLOBAL has none (no live() wired at all)", async () => {
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, store, sessionId } = setupEngine(provider); // no `live` opt — boot snapshot carries model only
+    store.setEffort(sessionId, "high");
+
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.reasoningEffort).toBe("high");
+    expect(provider.requests[0]!.model).toBe("gated-1"); // the boot-snapshot model, unchanged
+  });
+
+  test("store.setEffort(sessionId, null) clears the override — the NEXT turn falls back to the global again", async () => {
+    const provider = new FakeProvider([text("first"), text("second")]);
+    const { engine, store, sessionId } = setupEngine(provider, { live: () => ({ model: "m", reasoningEffort: "low" }) });
+    store.setEffort(sessionId, "max");
+
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.reasoningEffort).toBe("max");
+
+    store.setEffort(sessionId, null);
+    await engine.runTurn(sessionId);
+    expect(provider.requests[1]!.reasoningEffort).toBe("low");
+  });
+
+  test("clearing an effort when the global has NONE leaves the field absent (never an empty string)", async () => {
+    const provider = new FakeProvider([text("first"), text("second")]);
+    const { engine, store, sessionId } = setupEngine(provider, { live: () => ({ model: "m" }) }); // global effort unset
+    store.setEffort(sessionId, "max");
+
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.reasoningEffort).toBe("max");
+
+    store.setEffort(sessionId, null);
+    await engine.runTurn(sessionId);
+    expect(provider.requests[1]!.reasoningEffort).toBeUndefined();
+  });
+
+  test("an override is scoped to its own sessionId — a second session on the same engine is unaffected", async () => {
+    const provider = new FakeProvider([text("a"), text("b")]);
+    const { engine, store, sessionId: sessionA, cwd } = setupEngine(provider, { live: () => ({ model: "m", reasoningEffort: "low" }) });
+    const sessionB = store.createSession("global", { cwd });
+    store.setEffort(sessionA, "max");
+
+    await engine.runTurn(sessionA);
+    await engine.runTurn(sessionB);
+    expect(provider.requests[0]!.reasoningEffort).toBe("max");
+    expect(provider.requests[1]!.reasoningEffort).toBe("low"); // session B never had an override
+  });
+
+  // The two axes are orthogonal: a session can override BOTH, and each keeps its own precedence.
+  test("model and effort override INDEPENDENTLY on the same session", async () => {
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, store, sessionId } = setupEngine(provider, { live: () => ({ model: "live-model", reasoningEffort: "low" }) });
+    store.setModel(sessionId, "session-model");
+    store.setEffort(sessionId, "max");
+
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.model).toBe("session-model");
+    expect(provider.requests[0]!.reasoningEffort).toBe("max");
+  });
+
+  test("subagents inherit the SESSION-resolved effort, not the global one", async () => {
+    // Same shape as the live()-effort inheritance test above (run_in_background:false so
+    // requests[1] is the CHILD's own synchronous round) — but the effort under test is the
+    // per-session override, proving resolveSel's result is what the spawn bridge inherits.
+    const spawnCall: ProviderEvent = { type: "tool_call", callId: "s1", name: "spawn_agent", argsJson: JSON.stringify({ prompt: "do X", description: "test task", run_in_background: false }) };
+    const provider = new FakeProvider([
+      [spawnCall, done("tool_calls")],
+      text("child report"),
+    ]);
+    const { engine, store, sessionId } = setupSpawn(
+      [],
+      { provider, live: () => ({ model: "live-model", reasoningEffort: "low" }) },
+    );
+    store.setEffort(sessionId, "xhigh");
+    await engine.runTurn(sessionId);
+    const fp = provider as FakeProvider;
+    expect(fp.requests[0]!.reasoningEffort).toBe("xhigh"); // parent round
+    expect(fp.requests[1]!.reasoningEffort).toBe("xhigh"); // the child inherits the same resolved effort
+  });
+});
+
+// ================================================================================================
+// provider-correctness T5 — `ultra`, a NORMA-LEVEL tier that must never reach the wire.
+//
+// Every assertion here is made at the REQUEST LAYER (`FakeProvider.requests[n]`), never at the
+// mapping function. That is the point: the claim is not "resolveSel translates correctly", it is
+// "no hop between a stored selection and the HTTP body can reintroduce the tier" — and only the
+// request the provider actually receives can prove that. `ultra` is refused by a GLOBAL enum on the
+// backend, so a single leaking hop is an opaque 400 on every turn of that session.
+//
+// The store is written DIRECTLY here (`store.setEffort`), deliberately bypassing `session.setEffort`
+// and its mode gate: the non-code cases below are reachable in production only by a fork or a
+// hand-edited index, and this layer must hold for them anyway (defense in depth #2 — refused at the
+// door, inert at the slot).
+// ================================================================================================
+describe("ultra is translated before the wire (provider-correctness T5)", () => {
+  const POSTURE = "## Ultra effort";
+
+  test("a CODE session at `ultra` puts `max` on the wire — the tier itself never leaves the daemon", async () => {
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, store, sessionId } = setupEngine(provider, { live: () => ({ model: "live-model", reasoningEffort: "low" }) });
+    store.setEffort(sessionId, "ultra");
+
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.reasoningEffort).toBe("max");
+    expect(provider.requests[0]!.reasoningEffort).not.toBe("ultra");
+    // The STORED value is untouched: a tier is the user's selection, not a wire value, and silently
+    // rewriting it to `max` would make the picker unable to show what they actually chose.
+    expect(store.meta(sessionId).effort).toBe("ultra");
+  });
+
+  test("...and the delegation posture rides in THIS turn's instructions", async () => {
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, store, sessionId } = setupEngine(provider, { live: () => ({ model: "live-model" }) });
+    store.setEffort(sessionId, "ultra");
+
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.instructions).toContain(POSTURE);
+  });
+
+  test("plain `max` gets NO posture — the injection keys off the TIER, not the wire value it maps to", async () => {
+    // The distinction the whole design rests on. Both selections put `max` on the wire; only one of
+    // them is a request for the tier's behaviour. If this ever went green for `max`, `resolveSel`
+    // would be reading the translated value back instead of remembering what was chosen.
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, store, sessionId } = setupEngine(provider, { live: () => ({ model: "live-model" }) });
+    store.setEffort(sessionId, "max");
+
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.reasoningEffort).toBe("max");
+    expect(provider.requests[0]!.instructions).not.toContain(POSTURE);
+  });
+
+  test("a session with NO effort gets no posture (control)", async () => {
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, sessionId } = setupEngine(provider, { live: () => ({ model: "live-model", reasoningEffort: "high" }) });
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.instructions).not.toContain(POSTURE);
+  });
+
+  for (const mode of ["chat", "dispatch"] as const) {
+    test(`a ${mode.toUpperCase()} session carrying ultra still sends max and injects NOTHING`, async () => {
+      // Unreachable through `session.setEffort` (it refuses the tier for these modes) — reachable by
+      // a fork or a hand-edited store, which is exactly why the engine cannot rely on the door.
+      const provider = new FakeProvider([text("ok")]);
+      const { engine, store, cwd } = setupEngine(provider, { live: () => ({ model: "live-model", reasoningEffort: "low" }) });
+      const sessionId = store.createSession("global", { cwd, approvalPolicy: "auto", mode });
+      store.setEffort(sessionId, "ultra");
+
+      await engine.runTurn(sessionId);
+      expect(provider.requests[0]!.reasoningEffort).toBe("max");   // still translated — never on the wire
+      expect(provider.requests[0]!.instructions).not.toContain(POSTURE); // but inert
+    });
+  }
+
+  test("a subagent inherits the TRANSLATED effort — the child's own request never carries the tier either", async () => {
+    // Same shape as the T4 inheritance test above (run_in_background:false so requests[1] is the
+    // CHILD's own synchronous round). The child is a second, independent hop to the provider.
+    const spawnCall: ProviderEvent = { type: "tool_call", callId: "s1", name: "spawn_agent", argsJson: JSON.stringify({ prompt: "do X", description: "test task", run_in_background: false }) };
+    const provider = new FakeProvider([
+      [spawnCall, done("tool_calls")],
+      text("child report"),
+    ]);
+    const { engine, store, sessionId } = setupSpawn([], { provider, live: () => ({ model: "live-model", reasoningEffort: "low" }) });
+    store.setEffort(sessionId, "ultra");
+
+    await engine.runTurn(sessionId);
+    const fp = provider as FakeProvider;
+    expect(fp.requests[0]!.reasoningEffort).toBe("max"); // parent round
+    expect(fp.requests[1]!.reasoningEffort).toBe("max"); // the child, one more hop away
+  });
+
+  test("NO request the provider ever sees carries a Norma-level tier — swept across every recorded hop", async () => {
+    // The catch-all — scoped honestly (T5 review, Minor): it sweeps every request RECORDED BY THE
+    // FLOWS THIS TEST DRIVES (one turn + one synchronous spawn child). A call path it never drives
+    // (e.g. runWorkflowAgent) contributes no request here and is NOT covered by this sweep. The
+    // real guarantee that no path can leak a tier is structural, pinned elsewhere: wireEffort's
+    // totality (settings.test.ts) + resolveSel being the sole meta.effort -> reasoningEffort path.
+    const spawnCall: ProviderEvent = { type: "tool_call", callId: "s1", name: "spawn_agent", argsJson: JSON.stringify({ prompt: "do X", description: "test task", run_in_background: false }) };
+    const provider = new FakeProvider([[spawnCall, done("tool_calls")], text("child report")]);
+    const { engine, store, sessionId } = setupSpawn([], { provider, live: () => ({ model: "live-model" }) });
+    store.setEffort(sessionId, "ultra");
+
+    await engine.runTurn(sessionId);
+    const fp = provider as FakeProvider;
+    expect(fp.requests.length).toBeGreaterThan(1);
+    for (const req of fp.requests) {
+      expect(CLIENT_EFFORTS as readonly string[]).not.toContain(req.reasoningEffort ?? "");
+      expect(REASONING_EFFORTS as readonly string[]).toContain(req.reasoningEffort!);
+    }
   });
 });

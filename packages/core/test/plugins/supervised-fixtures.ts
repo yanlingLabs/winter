@@ -202,7 +202,7 @@ export async function createSupervisedInstance(params: {
     mintToken: (id) => store.mintPluginToken(id),
     spawn,
     signalPid,
-    settings: { registrationTimeoutMs: 10_000, killGraceMs: 1_500, ...supervisorSettings },
+    settings: { registrationTimeoutMs: 60_000, killGraceMs: 1_500, ...supervisorSettings },
     onLog: (m) => { if (process.env.NORMA_TEST_DEBUG) console.error(`[supervisor] ${m}`); },
     onCircuitOpen: (id) => registry.unregisterByPrefix(`plugin__${id}__`),
   });

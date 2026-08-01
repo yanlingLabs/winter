@@ -75,6 +75,8 @@ Adding/changing a `SessionEvent` variant or RPC method touches, in order:
 2. `packages/protocol/scripts/generate.ts` — add a canonical fixture for the new variant
 3. `pnpm protocol:generate`
 4. `packages/core/src/agent/subagent-transcript.ts` — its `satisfies Record<SessionEvent["type"], boolean>` exhaustiveness map fails core's `tsc` on a new variant until updated
+
+   **Adding a FIELD (not a variant) engages none of the compile-time traps above — so sweep the field's PRODUCERS BY MEANING, not by build breakage.** Every step in this checklist is keyed to something failing to compile, and nothing fails to compile when a producer simply doesn't set a new optional field. `turn_completed.contextTokens` shipped correct on the daemon while `NormaChatKit`'s `ChatEngine` remained a **live second producer** emitting the old shape — reaching the daemon's log verbatim via `sync.push`, past a consumer with no mode gate. Ask: who else *writes* this event, in either language, and does the consumer's fallback silently accept their shape? (Corollary that saved that change from being a Critical: replication is byte-verbatim, so the phone does not decode and re-encode — had it done so, the new field would have been stripped in transit and the fix would have looked like it worked.)
 5. `apple/NormaProtocol` — mirror the Swift type; round-trip test asserts the fixture count, so it fails until synced
 6. `apple/NormaKit` — it has exhaustive `switch`es over event variants (e.g. the `seq`/`sessionId` accessors); a new variant breaks compilation there, **not** in NormaProtocol
 7. Build NormaKit **and** the app, not just `swift test` in NormaProtocol — that's the only way to catch step 6

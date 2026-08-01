@@ -18,6 +18,9 @@ import {
   SessionSetPolicyResult,
   SessionSetModelParams,
   SessionSetModelResult,
+  SessionSetEffortParams,
+  SessionSetEffortResult,
+  SESSION_EFFORT_MAX_CHARS,
   SessionAddDirParams,
   SessionSetCwdParams,
   TrustDirParams,
@@ -134,6 +137,10 @@ import {
   WorkflowGetResult,
   SessionHistoryParams,
   SessionHistoryResult,
+  SyncConfigParams,
+  SyncConfigModel,
+  SyncConfigResult,
+  SyncPushParams,
   METHODS,
 } from "../src/methods";
 
@@ -508,6 +515,77 @@ describe("session.create / session.list carry an optional per-session model (Cha
     });
     expect(listed.sessions[0]!.model).toBe("claude-opus-5");
     expect(listed.sessions[1]!.model).toBeUndefined();
+  });
+});
+
+// provider-correctness T4: per-session reasoning effort — session.setEffort {sessionId, effort:
+// string|null} → {} (null clears). Its OWN method, not a second argument on session.setModel
+// ("effort and model are two different things, just like the CLI"), and mode-agnostic on the same
+// terms. The VALUE is not enumerated here on purpose: which efforts a model accepts is provider
+// knowledge the daemon checks at set time (a zod enum here would be a second, drift-prone copy of
+// a set this package cannot see change).
+describe("session.setEffort schema (provider-correctness T4)", () => {
+  test("params: sessionId required non-empty, effort is a nullable string (both string and null accepted)", () => {
+    expect(SessionSetEffortParams.parse({ sessionId: "s1", effort: "xhigh" }).effort).toBe("xhigh");
+    expect(SessionSetEffortParams.parse({ sessionId: "s1", effort: null }).effort).toBeNull();
+    expect(() => SessionSetEffortParams.parse({ sessionId: "s1", effort: "" })).toThrow(); // empty string is not a level
+    expect(() => SessionSetEffortParams.parse({ sessionId: "", effort: "high" })).toThrow();
+    expect(() => SessionSetEffortParams.parse({ sessionId: "s1" })).toThrow(); // effort is required (nullable, not optional)
+  });
+
+  test("the value is bounded but NOT enumerated — an unknown slug parses here and is refused by the daemon", () => {
+    // "minimal" is a real level the API rejects PER-MODEL; the wire schema deliberately lets it
+    // through so the daemon's model-aware check (ipc/server.ts) is the one place that decides.
+    expect(SessionSetEffortParams.parse({ sessionId: "s1", effort: "minimal" }).effort).toBe("minimal");
+    expect(SessionSetEffortParams.parse({ sessionId: "s1", effort: "e".repeat(SESSION_EFFORT_MAX_CHARS) }).effort!.length).toBe(SESSION_EFFORT_MAX_CHARS);
+    expect(() => SessionSetEffortParams.parse({ sessionId: "s1", effort: "e".repeat(SESSION_EFFORT_MAX_CHARS + 1) })).toThrow();
+  });
+
+  test("result is empty; METHODS carries the verb", () => {
+    expect(SessionSetEffortResult.parse({})).toEqual({});
+    expect(METHODS.sessionSetEffort).toBe("session.setEffort");
+  });
+
+  test("SessionListResult rows carry an optional effort; older shapes without it still parse", () => {
+    const listed = SessionListResult.parse({
+      sessions: [
+        { sessionId: "s_1", scope: "global", createdAt: 1, lastSeq: 0, effort: "xhigh" },
+        { sessionId: "s_2", scope: "global", createdAt: 1, lastSeq: 0 }, // no effort — uses the global default
+      ],
+    });
+    expect(listed.sessions[0]!.effort).toBe("xhigh");
+    expect(listed.sessions[1]!.effort).toBeUndefined();
+  });
+});
+
+// provider-correctness T6: the two remaining places a per-session effort can enter the daemon —
+// `sync.push`'s index-only `meta` (the phone's replication path) and `session.create` (so a client
+// that wants an effort from turn one doesn't need a second round trip). Both are SHAPE-only here;
+// the model-aware membership check and the tier gate live in core, at each handler.
+describe("per-session effort ingress shapes (provider-correctness T6)", () => {
+  test("SyncPushParams.meta carries an optional effort, bounded by SESSION_EFFORT_MAX_CHARS", () => {
+    const base = { sessionId: "s1", baseSeq: 0, data: "", complete: true };
+    expect(SyncPushParams.parse({ ...base, meta: { effort: "xhigh" } }).meta!.effort).toBe("xhigh");
+    // Absent stays absent — an omitted field is "unchanged", never "clear" (applySyncMeta's rule).
+    expect(SyncPushParams.parse({ ...base, meta: { title: "t" } }).meta!.effort).toBeUndefined();
+    expect(SyncPushParams.parse({ ...base }).meta).toBeUndefined();
+    expect(() => SyncPushParams.parse({ ...base, meta: { effort: "" } })).toThrow();
+    expect(() => SyncPushParams.parse({ ...base, meta: { effort: "e".repeat(SESSION_EFFORT_MAX_CHARS + 1) } })).toThrow();
+  });
+
+  test("SyncPushParams.meta.effort is bounded but NOT enumerated — the tier drop is a handler rule", () => {
+    // `ultra` is a Norma-level tier this ingress always DROPS (sync.push is chat-only fail-closed,
+    // and tiers are code-sessions-only). It parses here on purpose: the schema is a shape contract,
+    // and enumerating levels in this package would be a second copy of a set it cannot see change.
+    const base = { sessionId: "s1", baseSeq: 0, data: "", complete: true };
+    expect(SyncPushParams.parse({ ...base, meta: { effort: "ultra" } }).meta!.effort).toBe("ultra");
+  });
+
+  test("SessionCreateParams accepts an optional effort, absent by default", () => {
+    expect(SessionCreateParams.parse({ scope: "global", effort: "high" }).effort).toBe("high");
+    expect(SessionCreateParams.parse({ scope: "global" }).effort).toBeUndefined();
+    expect(() => SessionCreateParams.parse({ scope: "global", effort: "" })).toThrow();
+    expect(() => SessionCreateParams.parse({ scope: "global", effort: "e".repeat(SESSION_EFFORT_MAX_CHARS + 1) })).toThrow();
   });
 });
 
@@ -1070,5 +1148,165 @@ describe("workflow RPCs (CC-parity phase 3, Track C Task C2)", () => {
     expect(WorkflowGetParams.parse({ runId: "wf_1" })).toEqual({ runId: "wf_1" });
     expect(() => WorkflowGetParams.parse({})).toThrow();
     expect(WorkflowGetResult.parse({ run: runView })).toEqual({ run: runView });
+  });
+});
+
+// ------------------------------------------------------------------------------------------------
+// sync.config — the phone's bootstrap bundle, widened by provider-correctness T3 with the daemon's
+// model catalogue and its live reasoning effort.
+//
+// Before T3 the wire carried ONE model string and the phone DERIVED a lineup from it (split on the
+// last `-`, read the tail as a tier, synthesize the siblings by concatenation) while its effort
+// control was a UI mock that had drifted to offering `ultra` — a level the backend rejects
+// outright. Neither could be proved right by the side doing the guessing. Both are now served by
+// the side that already validates them.
+// ------------------------------------------------------------------------------------------------
+describe("sync.config schema (provider-correctness T3)", () => {
+  const full = {
+    provider: "codex-oauth",
+    exaKey: null,
+    dangerousDomains: [],
+    defaultModel: "gpt-5.6-sol",
+    models: [{ id: "gpt-5.6-sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"] }],
+    defaultEffort: "high",
+    clientEfforts: ["ultra"],
+  };
+
+  test("sync.config params are empty; the result carries the catalogue and the effort", () => {
+    expect(SyncConfigParams.parse({})).toEqual({});
+    expect(SyncConfigResult.parse(full)).toEqual(full);
+    expect(METHODS.syncConfig).toBe("sync.config");
+  });
+
+  test("models/defaultEffort are REQUIRED on the wire — the daemon always states them", () => {
+    // The daemon is never allowed to stay silent about the catalogue: `[]` and `""` are how it says
+    // "there is none", and that is a statement a client can act on. An OMITTED field would be
+    // indistinguishable from a serialization bug, so the schema refuses it.
+    const { models, ...noModels } = full;
+    const { defaultEffort, ...noEffort } = full;
+    expect(() => SyncConfigResult.parse(noModels)).toThrow();
+    expect(() => SyncConfigResult.parse(noEffort)).toThrow();
+  });
+
+  test("an empty catalogue and an unset effort are VALID — that is the never-synced answer", () => {
+    // A provider that cannot enumerate its models (an arbitrary openai-compatible endpoint), or no
+    // provider at all. The client waits; it does not derive a lineup from `defaultModel`. A guessed
+    // fallback is what produced a 400-on-first-turn on a freshly-paired phone once already.
+    expect(SyncConfigResult.parse({ ...full, models: [], defaultEffort: "" })).toEqual({
+      ...full, models: [], defaultEffort: "",
+    });
+  });
+
+  test("a catalogue row needs a non-empty id AND an efforts array — no half rows", () => {
+    expect(SyncConfigModel.parse({ id: "m", efforts: ["low"] })).toEqual({ id: "m", efforts: ["low"] });
+    expect(SyncConfigModel.parse({ id: "m", efforts: [] })).toEqual({ id: "m", efforts: [] });
+    expect(() => SyncConfigModel.parse({ id: "", efforts: ["low"] })).toThrow();
+    expect(() => SyncConfigModel.parse({ id: "m" })).toThrow();
+    expect(() => SyncConfigModel.parse({ efforts: ["low"] })).toThrow();
+    // An empty-string effort would reach a request body verbatim and 400 the turn.
+    expect(() => SyncConfigModel.parse({ id: "m", efforts: [""] })).toThrow();
+    // One bad row poisons the whole result rather than being silently dropped.
+    expect(() => SyncConfigResult.parse({ ...full, models: [{ id: "", efforts: [] }] })).toThrow();
+  });
+
+  // provider-correctness T5 — `clientEfforts`: NORMA-LEVEL tiers, a SEPARATE field from
+  // `models[].efforts` and never merged into it. `models[].efforts` is exactly what the endpoint's
+  // request validator accepts; a client tier is exactly what it does NOT (the daemon translates it
+  // before building a request). Merging them would make the daemon advertise a value its own turn
+  // would 400 on — the original bug, reintroduced through the field that was added to fix it.
+  test("clientEfforts is REQUIRED — a daemon that offers no tiers says `[]`, it never stays silent", () => {
+    const { clientEfforts, ...noClientEfforts } = full;
+    expect(() => SyncConfigResult.parse(noClientEfforts)).toThrow();
+    // The same sentinel discipline as `models: []` / `defaultEffort: ""`: an explicit empty is a
+    // statement ("this daemon offers no Norma-level tiers"), which is what lets an older/newer
+    // pairing degrade to daemon-driven pickers instead of a client-side guess.
+    expect(SyncConfigResult.parse({ ...full, clientEfforts: [] }).clientEfforts).toEqual([]);
+  });
+
+  test("a client tier must be a non-empty string, like every other level on this wire", () => {
+    // Same reason as inside a catalogue row: an empty string would reach a picker as a selectable
+    // level and, if anything ever put it on the wire, come back an opaque 400.
+    expect(() => SyncConfigResult.parse({ ...full, clientEfforts: [""] })).toThrow();
+    expect(() => SyncConfigResult.parse({ ...full, clientEfforts: ["ultra", ""] })).toThrow();
+    expect(() => SyncConfigResult.parse({ ...full, clientEfforts: "ultra" })).toThrow();
+  });
+
+  // provider-correctness whole-branch review C1 — `provider`: what makes this bundle
+  // SELF-DESCRIBING. Every other field says WHAT the Mac runs; without this one nothing says WHOSE.
+  // A phone runs its own engine on codex-oauth credentials, so an `openai-compatible` Mac's
+  // non-empty foreign `defaultModel` (its `models` is `[]` — that provider cannot enumerate) is a
+  // 400 on the phone's first turn unless the phone can SEE that it came from another provider.
+  test("provider is REQUIRED and NON-EMPTY — the one field with no 'I have none' sentinel", () => {
+    const { provider, ...noProvider } = full;
+    expect(() => SyncConfigResult.parse(noProvider)).toThrow();
+    // `""` is how `defaultEffort` says "unset" and `[]` is how `models` says "none". There is no
+    // such state here: a daemon always knows which provider it is running, and "no provider
+    // configured" is itself a stateable answer (`"none"`), not a silence.
+    expect(() => SyncConfigResult.parse({ ...full, provider: "" })).toThrow();
+    expect(SyncConfigResult.parse({ ...full, provider: "none" }).provider).toBe("none");
+    expect(SyncConfigResult.parse({ ...full, provider: "openai-compatible" }).provider).toBe("openai-compatible");
+    // Not an enum on the wire, deliberately: the phone's rule is "not MINE ⇒ never-synced", which
+    // is decided by string inequality against its own provider and needs no shared vocabulary. A
+    // zod enum here would make a Mac that gains a third provider type fail its phone's whole
+    // bootstrap — the Exa key and dangerous-domain list included — instead of degrading it.
+    expect(SyncConfigResult.parse({ ...full, provider: "some-future-provider" }).provider).toBe("some-future-provider");
+  });
+
+  test("the shape C1 exists for: a BYOK Mac states its provider beside an empty catalogue and a foreign slug", () => {
+    // Exactly what an `openai-compatible` daemon serves. `models: []` alone does NOT protect a
+    // phone (T6b's "empty catalogue is ignored on apply" governs `models` only); `defaultModel` is
+    // still non-empty and still foreign, and only `provider` distinguishes it from a codex Mac's.
+    const byok = { ...full, provider: "openai-compatible", defaultModel: "llama-3.3-70b-local", models: [] };
+    expect(SyncConfigResult.parse(byok)).toEqual(byok);
+    expect(byok.provider).not.toBe("codex-oauth");
+  });
+
+  test("efforts ride per model, and rows may legitimately disagree", () => {
+    // Uniform today; the schema must not be the thing that stops a divergence from being expressed,
+    // because the API demonstrably validates effort per model (`minimal` -> `unsupported_value`
+    // naming the slug, a different layer from the global enum that rejects `ultra`).
+    const divergent = {
+      ...full,
+      models: [
+        { id: "gpt-5.6-sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"] },
+        { id: "gpt-5.7-nano", efforts: ["low", "medium"] },
+      ],
+    };
+    expect(SyncConfigResult.parse(divergent)).toEqual(divergent);
+  });
+
+  // ----------------------------------------------------------------------------------------------
+  // Whole-branch review C3 — THE MIRROR TRIPWIRE.
+  //
+  // `sync.config` is mirrored BY HAND into two Swift types that no compiler and no fixture connects
+  // to this schema: NormaChatKit's `SyncConfig` (the phone's whole local-chat bootstrap) and
+  // NormaKit's `SyncConfigSnapshot` (the Mac pickers' projection). `packages/protocol`'s generated
+  // artifacts cover EVENTS only — a method result gets no fixture, so the round-trip test that
+  // normally forces a Swift sync never fires for this type. Adding a field here therefore breaks
+  // NOTHING anywhere, in either language, and the phone simply never learns about it.
+  //
+  // This is that missing break. It is a KEY-SET pin, not a behaviour test: the shape of every field
+  // is already covered above; what nobody else notices is a field ARRIVING or LEAVING.
+  // ----------------------------------------------------------------------------------------------
+  test("MIRROR TRIPWIRE — the field set is pinned; changing it means editing two Swift files by hand", () => {
+    expect(
+      Object.keys(SyncConfigResult.shape).sort(),
+      "sync.config's FIELD SET changed. Nothing else in either language will tell you, so update " +
+      "BOTH hand-written Swift mirrors in the same commit, then this pin:\n" +
+      "  • apple/NormaChatKit/Sources/NormaChatKit/SyncClient.swift  (struct SyncConfig — the phone's " +
+      "local-chat bootstrap; its memberwise init takes NO default arguments on purpose, so every " +
+      "construction site including both test doubles must be updated)\n" +
+      "  • apple/NormaKit/Sources/NormaKit/NormaClient+Methods.swift (struct SyncConfigSnapshot — the " +
+      "Mac pickers' projection; widen it only for a field a Mac caller genuinely needs)\n" +
+      "…and, at the next kit tag, ../norma-ios's ScriptedSyncDaemon double.",
+    ).toEqual([
+      "clientEfforts",
+      "dangerousDomains",
+      "defaultEffort",
+      "defaultModel",
+      "exaKey",
+      "models",
+      "provider",
+    ]);
   });
 });

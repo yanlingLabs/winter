@@ -111,14 +111,59 @@ struct GlassRootView: View {
             Task { @MainActor in
                 let ok = await controller.onSetModel?(model) ?? false
                 if ok { await controller.sidebars?.directory.refresh() }
+                // provider-correctness T6: the RPC's answer is no longer swallowed — see the twin
+                // wiring in `DetachedWindowController.init` for the full rationale (success retires
+                // the overlay and arms a one-turn probation; refusal reverts the overlay to `.none`,
+                // which is a revert of the OVERLAY, never a write of the fallback).
+                adapter.pendingModel = .none
+                if ok { adapter.armProbation(model: .some(model)) }
                 adapter.modelChangeInFlight = false
             }
         }
+
+        // provider-correctness T6: the effort menu — the model wiring's twin on the other axis.
+        adapter.onSetEffort = { [adapter, controller] effort in
+            adapter.effortChangeInFlight = true
+            Task { @MainActor in
+                let ok = await controller.onSetEffort?(effort) ?? false
+                if ok { await controller.sidebars?.directory.refresh() }
+                adapter.pendingEffort = .none
+                if ok { adapter.armProbation(effort: .some(effort)) }
+                adapter.effortChangeInFlight = false
+            }
+        }
+
+        // provider-correctness T6: seed the pickers' catalogue. `sync.config` is a snapshot, so this
+        // is a fetch, not a subscription; a failure leaves `.empty` and the pickers offer no rows
+        // rather than a guessed lineup.
+        adapter.onRefreshModelCatalogue = { [adapter, controller] in
+            Task { @MainActor in
+                if let snapshot = await controller.onFetchModelCatalogue?() { adapter.modelCatalogue = snapshot }
+            }
+        }
+        // I1 (review): the orb has its OWN adapter and its only session-switch hook
+        // (`OrbWindowController.updateIsChatSession`) touches nothing else — so the probation's own
+        // session stamp, not a per-site clear, is what keeps a verdict off the wrong session. Read
+        // fresh through the sidebar wiring, which AppDelegate points at `AppModel.focusedSessionId`.
+        adapter.boundSessionId = { [controller] in controller.sidebars?.currentSessionId() }
+        // I2 (review): NO NETWORK I/O HERE. This function is called unconditionally from `body`, and
+        // every other line in it is an idempotent closure assignment. A fetch here fanned out into a
+        // burst of concurrent `sync.config` calls on the first render, and — because a failed fetch
+        // leaves the snapshot `.empty` — became an unbounded RPC storm against a daemon that was
+        // down. The seed now rides `.task {}` in `body`, which runs once per appearance.
     }
 
     var body: some View {
         wireCallbacks()
         return NormaFieldView(adapter: adapter, morph: morphModel, fluid: fluidModel, sidebars: controller.sidebars)
+            // I2 (review): the catalogue seed — a LIFECYCLE hook, not a `body` side effect. Runs
+            // once per appearance regardless of how many times `body` re-evaluates, so a daemon
+            // that is down costs one failed fetch rather than one per render. The pickers refresh
+            // again on menu-open (`adapter.onRefreshModelCatalogue`), which is what recovers a
+            // catalogue this seed failed to fetch.
+            .task {
+                if adapter.modelCatalogue == .empty { adapter.onRefreshModelCatalogue() }
+            }
             .onChange(of: controller.surface) { _, newSurface in
                 switch newSurface {
                 case .orb:

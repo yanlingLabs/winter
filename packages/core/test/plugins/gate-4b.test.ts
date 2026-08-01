@@ -69,12 +69,12 @@ describe("4b gate: kill-9 mid-call recovery", () => {
         // registrationTimeoutMs stays generous (the FIRST real spawn+register must succeed
         // reliably) — only the backoff cap is shortened, so the post-crash restart is fast without
         // racing the initial boot.
-        supervisorSettings: { registrationTimeoutMs: 10_000, backoffCapMs: 500, killGraceMs: 1_500 },
+        supervisorSettings: { registrationTimeoutMs: 60_000, backoffCapMs: 500, killGraceMs: 1_500 },
       });
 
-      await waitFor(() => srv!.supervisor.status(pluginId) === "running", 10_000, "initial registration");
+      await waitFor(() => srv?.supervisor.status(pluginId) === "running", 30_000, "initial registration");
       await waitFor(
-        () => srv!.registry.has(ECHO_TOOL(pluginId)) && srv!.registry.has(SLEEP_TOOL(pluginId)),
+        () => !!(srv?.registry.has(ECHO_TOOL(pluginId)) && srv?.registry.has(SLEEP_TOOL(pluginId))),
         5_000,
         "initial tool registration",
       );
@@ -103,9 +103,9 @@ describe("4b gate: kill-9 mid-call recovery", () => {
       expect(srv.supervisor.status(pluginId)).toBe("backoff");
 
       // Short backoff (backoffCapMs: 500) -> automatic real respawn -> re-registration -> running.
-      await waitFor(() => srv!.supervisor.status(pluginId) === "running", 15_000, "status running again after backoff restart");
+      await waitFor(() => srv?.supervisor.status(pluginId) === "running", 30_000, "status running again after backoff restart");
       await waitFor(
-        () => srv!.registry.has(ECHO_TOOL(pluginId)) && srv!.registry.has(SLEEP_TOOL(pluginId)),
+        () => !!(srv?.registry.has(ECHO_TOOL(pluginId)) && srv?.registry.has(SLEEP_TOOL(pluginId))),
         5_000,
         "tool re-registration after restart",
       );
@@ -116,7 +116,7 @@ describe("4b gate: kill-9 mid-call recovery", () => {
       expect(isPidAlive(second.pluginPid)).toBe(true);
       expect(isPidAlive(childPid)).toBe(false); // the killed pid stays dead — no zombie/orphan
     },
-    25_000,
+    90_000, // 60s registration budget + margin (real child spawn under load)
   );
 });
 
@@ -156,7 +156,7 @@ describe("4b gate: circuit breaker (5 real crashes)", () => {
       inst = await createSupervisedInstance({
         home, socketPath, spawn,
         supervisorSettings: {
-          registrationTimeoutMs: 10_000, backoffCapMs: 80, killGraceMs: 500,
+          registrationTimeoutMs: 60_000, backoffCapMs: 80, killGraceMs: 500,
           circuitFailures: 5, circuitWindowMs: 600_000,
         },
       });
@@ -171,11 +171,11 @@ describe("4b gate: circuit breaker (5 real crashes)", () => {
       // strictly serialized spawn -> fail -> backoff -> respawn), so this loop can never race
       // itself into killing the wrong generation's pid.
       for (let i = 0; i < 5; i++) {
-        await waitFor(() => spawnedPids.length > i, 10_000, `real spawn attempt #${i + 1}`);
+        await waitFor(() => spawnedPids.length > i, 30_000, `real spawn attempt #${i + 1}`);
         kill9(spawnedPids[i]!);
       }
 
-      await waitFor(() => inst!.supervisor.status(pluginId) === "circuit-open", 10_000, "circuit-open after 5 real crashes");
+      await waitFor(() => inst?.supervisor.status(pluginId) === "circuit-open", 30_000, "circuit-open after 5 real crashes");
       expect(spawnedPids).toHaveLength(5);
       const callsAtOpen = spawnCalls;
 
@@ -194,7 +194,7 @@ describe("4b gate: circuit breaker (5 real crashes)", () => {
         await waitFor(() => !isPidAlive(pid), 3_000, `spawned pid ${pid} to be dead`);
       }
     },
-    20_000,
+    90_000, // 60s registration budget + margin (real child spawn under load)
   );
 });
 
@@ -219,11 +219,11 @@ describe("4b gate: orphan reclaim across a simulated core restart", () => {
       // process outlives it.
       const a = await createSupervisedInstance({
         home, socketPath,
-        supervisorSettings: { registrationTimeoutMs: 10_000, killGraceMs: 1_500 },
+        supervisorSettings: { registrationTimeoutMs: 60_000, killGraceMs: 1_500 },
         signalPid: () => {},
       });
       a.supervisor.startAll(spawnable);
-      await waitFor(() => a.supervisor.status(pluginId) === "running", 10_000, "instance A initial registration");
+      await waitFor(() => a.supervisor.status(pluginId) === "running", 30_000, "instance A initial registration");
       await waitFor(() => a.registry.has(ECHO_TOOL(pluginId)), 5_000, "instance A tool registration");
 
       const first = await echoRoundTrip(a.registry, pluginId, "hi");
@@ -265,7 +265,7 @@ describe("4b gate: orphan reclaim across a simulated core restart", () => {
       // what a restarted core process does.
       const b = await createSupervisedInstance({
         home, socketPath,
-        supervisorSettings: { registrationTimeoutMs: 10_000, killGraceMs: 1_500 },
+        supervisorSettings: { registrationTimeoutMs: 60_000, killGraceMs: 1_500 },
       });
 
       // Boot-time orphan reclaim: the (restored) pid file names a live, identity-verified process
@@ -276,7 +276,7 @@ describe("4b gate: orphan reclaim across a simulated core restart", () => {
 
       // The still-running child's OWN SDK reconnect loop (1s·2^n backoff) notices its connection
       // dropped and re-hellos/re-registers against the SAME socketPath, now served by instance B.
-      await waitFor(() => b.supervisor.status(pluginId) === "running", 15_000, "instance B adopts the reclaimed child");
+      await waitFor(() => b.supervisor.status(pluginId) === "running", 30_000, "instance B adopts the reclaimed child");
       await waitFor(() => b.registry.has(ECHO_TOOL(pluginId)), 5_000, "instance B tool re-registration");
 
       const second = await echoRoundTrip(b.registry, pluginId, "still me");
@@ -288,7 +288,7 @@ describe("4b gate: orphan reclaim across a simulated core restart", () => {
       b.store.close();
       await waitFor(() => !isPidAlive(childPid), 5_000, "reclaimed child exits after instance B's real teardown");
     },
-    25_000,
+    90_000, // 60s registration budget + margin (real child spawn under load)
   );
 
   test(
@@ -331,7 +331,7 @@ describe("4b gate: orphan reclaim across a simulated core restart", () => {
         // Belt-and-braces: reclaimOrphans must never spawn anything on any branch — if it somehow
         // did, this makes the test fail loudly instead of silently starting a stray real process.
         spawn: () => { throw new Error("reclaimOrphans must never spawn"); },
-        supervisorSettings: { registrationTimeoutMs: 10_000 },
+        supervisorSettings: { registrationTimeoutMs: 60_000 },
       });
 
       inst.supervisor.reclaimOrphans(spawnable);

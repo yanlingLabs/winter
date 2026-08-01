@@ -808,19 +808,389 @@ final class SyncClientTests: XCTestCase {
         XCTAssertFalse(daemon.has(id), "every attempt above was refused — nothing was ever created")
     }
 
+    // MARK: - provider-correctness T6: per-session effort replicates BOTH ways
+
+    /// PUSH. The T4-review I2 gap in the direction it was named: a phone-set effort must reach the
+    /// Mac's index. Would fail before T6 — `PushMetaParams` had no `effort` field, so the value
+    /// stayed on the phone and the Mac kept resolving that session at its global default while the
+    /// phone's UI showed the override.
+    func testPushCarriesThePerSessionEffort() async throws {
+        let id = "60000000-0000-4000-8000-000000000001"
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        try await store.createSession(sessionId: id, model: "gpt-5.6-luna", effort: "xhigh")
+        let client = SyncClient(store: store, conn: daemon)
+
+        try await client.syncAll()
+
+        XCTAssertEqual(daemon.meta(id)?.effort, "xhigh", "the phone's effort must ride sync.push's meta")
+        XCTAssertEqual(daemon.meta(id)?.model, "gpt-5.6-luna")
+    }
+
+    /// PULL. The same field in the other direction — the Mac's own picker can set an effort on a
+    /// chat session, and a one-way field would reproduce the identical divergence mirrored.
+    func testPullAdoptsTheDaemonsEffort() async throws {
+        let id = "60000000-0000-4000-8000-000000000002"
+        let daemon = FakeDaemon()
+        daemon.seed(id, [created(id), user(id, 2, "from mac")], title: "Mac chat", model: "gpt-5.6-sol", effort: "low")
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        try await client.syncAll()
+
+        let metas = await store.sessions()
+        XCTAssertEqual(metas.first?.effort, "low")
+    }
+
+    /// ABSENT means "no override", and it must survive as absent rather than being invented into a
+    /// level — the never-synced rule applied to this field. `effort: nil` is the deliberate opt-out
+    /// of `FakeDaemon.seededEffort`.
+    func testAnAbsentEffortStaysAbsentThroughAPull() async throws {
+        let id = "60000000-0000-4000-8000-000000000003"
+        let daemon = FakeDaemon()
+        daemon.seed(id, [created(id), user(id, 2, "from mac")], title: "Mac chat", effort: nil)
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        try await client.syncAll()
+
+        let metas = await store.sessions()
+        XCTAssertNil(metas.first?.effort)
+    }
+
+    /// The effort is SIDECAR-DURABLE — it survives the process, like title/model. A store rebuilt
+    /// over the same directory must recover it, or every relaunch would re-push a nil and the Mac
+    /// would… keep its value (absent = unchanged), leaving the two silently disagreeing forever.
+    func testEffortSurvivesAStoreReopen() async throws {
+        let id = "60000000-0000-4000-8000-000000000004"
+        let store = try LocalEventStore(directory: dir)
+        try await store.createSession(sessionId: id, effort: "high")
+        let before = await store.sessions()
+        XCTAssertEqual(before.first?.effort, "high")
+
+        let reopened = try LocalEventStore(directory: dir)
+        let after = await reopened.sessions()
+        XCTAssertEqual(after.first?.effort, "high", "the meta sidecar must carry effort across a relaunch")
+    }
+
+    /// A FORK inherits the original's effort, exactly as it inherits its model — a fork is the same
+    /// conversation branched, so it must resolve at the same reasoning level.
+    func testAForkInheritsTheEffort() async throws {
+        let id = "60000000-0000-4000-8000-000000000005"
+        let store = try LocalEventStore(directory: dir)
+        try await store.createSession(sessionId: id, model: "gpt-5.6-sol", effort: "xhigh")
+        let plan = try await store.planFork(originalId: id, atSeq: 1)
+        XCTAssertEqual(plan.effort, "xhigh")
+        XCTAssertEqual(plan.model, "gpt-5.6-sol")
+    }
+
+    // MARK: - provider-correctness T6 review (C6): ABSENT vs. a wire null
+
+    /// **THE PROTECTION.** A STALE phone — one holding a session it has no effort for, while the Mac
+    /// has an override it has not learned about yet — must push the `effort` key ABSENT, never
+    /// `null`. Absent reads as UNCHANGED on the daemon; `null` reads as CLEAR. Mapping a nil local
+    /// effort to null would turn every routine push from a not-yet-caught-up phone into a silent
+    /// wipe of the Mac's setting.
+    ///
+    /// Would fail against any "simplification" that made `PushMetaParams.effort` a plain `String?`
+    /// again and let nil encode as null.
+    func testAStalePhonePushesAbsentEffortNotNull() async throws {
+        let id = "70000000-0000-4000-8000-000000000001"
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        // No effort locally — the stale case, exactly.
+        try await store.createSession(sessionId: id, model: "gpt-5.6-sol")
+        let client = SyncClient(store: store, conn: daemon)
+
+        try await client.syncAll()
+
+        let meta = try XCTUnwrap(daemon.lastPushMeta)
+        XCTAssertNil(meta["effort"],
+                     "a nil local effort must OMIT the key — present-and-null would clear the Mac's override")
+        XCTAssertFalse(meta["effort"] is NSNull)
+        XCTAssertEqual(meta["model"] as? String, "gpt-5.6-sol", "…while the fields it DOES hold still ride")
+    }
+
+    /// The other side of the same encoder: an effort the phone actually holds rides as a plain
+    /// string, so "absent" really is reserved for "I have nothing to say".
+    func testAPhoneWithAnEffortPushesItAsAString() async throws {
+        let id = "70000000-0000-4000-8000-000000000002"
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        try await store.createSession(sessionId: id, effort: "xhigh")
+        let client = SyncClient(store: store, conn: daemon)
+
+        try await client.syncAll()
+
+        let meta = try XCTUnwrap(daemon.lastPushMeta)
+        XCTAssertEqual(meta["effort"] as? String, "xhigh")
+        XCTAssertFalse(meta["effort"] is NSNull)
+    }
+
+    /// The DOUBLE's own three-state fold, driven directly — `SyncClient` cannot produce a wire null
+    /// today (by design, see the test above), so the only way to prove `FakeDaemon` mirrors
+    /// `applySyncMeta` rather than quietly treating a clear as a no-op is to hand it one.
+    func testFakeDaemonMirrorsTheThreeStateEffortSemantics() async throws {
+        let id = "70000000-0000-4000-8000-000000000003"
+        let daemon = FakeDaemon()
+        let line = created(id)
+
+        func push(_ meta: [String: Any], baseSeq: Int, lines: [Data]) async throws {
+            let params: [String: Any] = [
+                "sessionId": id, "baseSeq": baseSeq,
+                "data": LocalChatSession.join(lines).base64EncodedString(),
+                "complete": true, "meta": meta,
+            ]
+            _ = try await daemon.call(method: METHODS.syncPush,
+                                      paramsJSON: try JSONSerialization.data(withJSONObject: params))
+        }
+
+        try await push(["effort": "high"], baseSeq: 0, lines: [line])
+        XCTAssertEqual(daemon.meta(id)?.effort, "high")
+
+        // ABSENT → unchanged.
+        try await push(["title": "t"], baseSeq: 1, lines: [user(id, 2, "a")])
+        XCTAssertEqual(daemon.meta(id)?.effort, "high")
+
+        // NULL → cleared.
+        try await push(["effort": NSNull()], baseSeq: 2, lines: [user(id, 3, "b")])
+        XCTAssertNil(daemon.meta(id)?.effort, "a wire null must CLEAR, exactly as applySyncMeta does")
+    }
+
     // MARK: - config / memory bootstrap
 
     func testFetchConfigAndMemory() async throws {
         let daemon = FakeDaemon()
-        daemon.config = SyncConfig(exaKey: "exa-123", dangerousDomains: ["evil.test"], defaultModel: "gpt-5.4")
+        let served = SyncConfig(provider: "codex-oauth", exaKey: "exa-123", dangerousDomains: ["evil.test"], defaultModel: "gpt-5.6-terra",
+                                models: [SyncConfigModel(id: "gpt-5.6-terra", efforts: FakeDaemon.wireEfforts)],
+                                defaultEffort: "high", clientEfforts: FakeDaemon.clientTiers)
+        daemon.config = served
         daemon.memory = [SyncMemoryFile(name: "MEMORY.md", content: "# facts"), SyncMemoryFile(name: "prefs.md", content: "likes tea")]
         let store = try LocalEventStore(directory: dir)
         let client = SyncClient(store: store, conn: daemon)
 
         let config = try await client.fetchConfig()
-        XCTAssertEqual(config, SyncConfig(exaKey: "exa-123", dangerousDomains: ["evil.test"], defaultModel: "gpt-5.4"))
+        XCTAssertEqual(config, served)
         let memory = try await client.fetchMemory()
         XCTAssertEqual(memory.map { $0.name }, ["MEMORY.md", "prefs.md"])
+    }
+
+    // MARK: - provider-correctness T3: the model catalogue on sync.config
+
+    /// The catalogue survives the wire verbatim — per-model efforts included.
+    ///
+    /// This is the whole point of the field: before it, the phone SPLIT `defaultModel` on its last
+    /// `-` and synthesized sibling slugs by string concatenation, which cannot be proved correct.
+    /// Now the Mac says what exists, and the phone repeats it.
+    func testTheModelCatalogueRoundTripsWithPerModelEfforts() async throws {
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        let config = try await client.fetchConfig()
+        XCTAssertEqual(config.models.map(\.id), ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
+        for model in config.models {
+            XCTAssertEqual(model.efforts, FakeDaemon.wireEfforts,
+                           "every row carries its OWN effort list — a client must never have to know they match today")
+            XCTAssertFalse(model.efforts.contains("ultra"), "a global enum rejects ultra — it must never reach a picker")
+            XCTAssertFalse(model.efforts.contains("minimal"), "minimal is rejected PER MODEL — the reason efforts ride per model")
+            XCTAssertTrue(model.efforts.contains("none"), "none IS honoured, measured live — the old mock omitted it")
+        }
+        XCTAssertEqual(config.defaultEffort, "medium")
+    }
+
+    /// A Mac that reports NO catalogue decodes as an empty one — and empty must stay empty.
+    ///
+    /// The never-synced rule: a phone that has not been told a lineup WAITS. It does not derive one
+    /// from `defaultModel`, which is exactly the guess that shipped a 400-on-first-turn once already.
+    /// This pins that the kit hands its caller a truthful `[]` rather than helping.
+    func testAnUnenumerableProviderYieldsAnEmptyCatalogueNeverAGuessedOne() async throws {
+        let daemon = FakeDaemon()
+        daemon.config = SyncConfig(provider: "openai-compatible", exaKey: nil, dangerousDomains: [], defaultModel: "my-local-llm",
+                                   models: [], defaultEffort: "", clientEfforts: [])
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        let config = try await client.fetchConfig()
+        XCTAssertEqual(config.models, [], "no catalogue was served — none may be invented from the model slug")
+        XCTAssertEqual(config.defaultEffort, "", "unset is not \"none\": an unset effort omits the reasoning block entirely")
+        XCTAssertEqual(config.defaultModel, "my-local-llm", "the model is still served — the phone can run on it")
+    }
+
+    /// An OLDER Mac (built before these fields existed) degrades to "no catalogue", not to a failed
+    /// bootstrap. This kit ships in an app that updates on its own schedule, so a phone WILL meet a
+    /// daemon that predates the field; requiring it would fail the whole bundle and take the Exa key
+    /// and dangerous-domain list down with it.
+    func testAPreCatalogueDaemonBodyStillDecodesAsTheNeverSyncedState() throws {
+        let body = Data(#"{"exaKey":"k","dangerousDomains":["evil.test"],"defaultModel":"gpt-5.6-sol"}"#.utf8)
+        let config = try JSONDecoder().decode(SyncConfig.self, from: body)
+        XCTAssertEqual(config.models, [])
+        XCTAssertEqual(config.defaultEffort, "")
+        XCTAssertEqual(config.exaKey, "k", "the fields that DO exist still land — this is a degrade, not a drop")
+        XCTAssertEqual(config.dangerousDomains, ["evil.test"])
+    }
+
+    /// …and the leniency above is scoped to the two NEW fields ONLY. A body missing
+    /// `dangerousDomains` or `defaultModel` must still fail the decode outright: that hard failure is
+    /// the only thing standing between a partial response and `ChatConfigStore.apply` clearing the
+    /// user's stored Exa key.
+    func testAPartialBodyMissingAnOriginalFieldStillRefusesToDecode() {
+        for body in [#"{"exaKey":"k","defaultModel":"gpt-5.6-sol","models":[],"defaultEffort":""}"#,
+                     #"{"exaKey":"k","dangerousDomains":[],"models":[],"defaultEffort":""}"#] {
+            XCTAssertThrowsError(try JSONDecoder().decode(SyncConfig.self, from: Data(body.utf8)),
+                                 "a partial body must fail the decode, never half-apply: \(body)")
+        }
+    }
+
+    /// A malformed catalogue ROW is refused, not silently dropped.
+    ///
+    /// T3 review I2: this used to assert only the cases Swift's SYNTHESIZED `Decodable` already
+    /// rejected (missing key, wrong type) and claimed the min-length rules in prose. It did not
+    /// hold — `{"id":"","efforts":[""]}` decoded cleanly while zod refuses both. The empty-string
+    /// cases below are the ones that matter: an empty slug reaches a request body verbatim and
+    /// returns an opaque 400, so the decoder now enforces `z.string().min(1)` on both fields and
+    /// this test is what keeps that true.
+    func testAMalformedCatalogueRowRefusesTheWholeBody() {
+        for models in [
+            #"[{"efforts":["low"]}]"#,                          // id missing
+            #"[{"id":"gpt-5.6-sol"}]"#,                         // efforts missing
+            #"[{"id":"gpt-5.6-sol","efforts":"low"}]"#,         // efforts not an array
+            #"[{"id":"","efforts":["low"]}]"#,                  // z.string().min(1) on id
+            #"[{"id":"gpt-5.6-sol","efforts":[""]}]"#,          // z.string().min(1) inside efforts
+            #"[{"id":"gpt-5.6-sol","efforts":["low",""]}]"#,    // ...including a LATER element
+            // One bad row poisons the whole body rather than being dropped: a catalogue silently
+            // short by one model is indistinguishable from a Mac that genuinely stopped offering it.
+            #"[{"id":"gpt-5.6-sol","efforts":["low"]},{"id":"","efforts":["low"]}]"#,
+        ] {
+            let body = #"{"exaKey":null,"dangerousDomains":[],"defaultModel":"m","defaultEffort":"","models":\#(models)}"#
+            XCTAssertThrowsError(try JSONDecoder().decode(SyncConfig.self, from: Data(body.utf8)),
+                                 "a malformed catalogue row must refuse the body: \(models)")
+        }
+    }
+
+    // MARK: - provider-correctness T5: Norma-level client tiers on sync.config
+
+    /// The tiers arrive as their OWN list and are never folded into a model's wire efforts.
+    ///
+    /// This is the property that keeps `ultra` off the wire on THIS device: the phone builds its own
+    /// chat requests, so a tier that leaked into `models[].efforts` would be selected and sent, and a
+    /// global enum on the backend would 400 it. Separate lists, separate meanings, asserted together.
+    func testClientTiersRideTheirOwnListAndNeverAModelsWireEfforts() async throws {
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        let config = try await client.fetchConfig()
+        XCTAssertEqual(config.clientEfforts, ["ultra"])
+        for model in config.models {
+            XCTAssertFalse(model.efforts.contains("ultra"),
+                           "a Norma-level tier must never appear as a wire level for any model")
+            XCTAssertTrue(Set(model.efforts).isDisjoint(with: Set(config.clientEfforts)),
+                          "the two lists are disjoint by construction — never concatenate them")
+        }
+    }
+
+    /// A Mac that offers NO tiers says so, and `[]` is never a licence to substitute one.
+    func testADaemonOfferingNoTiersDecodesAsEmptyNeverAsAGuess() async throws {
+        let daemon = FakeDaemon()
+        daemon.config = SyncConfig(provider: "openai-compatible", exaKey: nil, dangerousDomains: [], defaultModel: "my-local-llm",
+                                   models: [], defaultEffort: "", clientEfforts: [])
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        let config = try await client.fetchConfig()
+        XCTAssertEqual(config.clientEfforts, [])
+    }
+
+    /// A PRE-T5 Mac degrades to "no tiers", not to a failed bootstrap — and the degrade is exactly
+    /// the pre-T5 behaviour (wire levels only), which is why this leniency cannot invent anything.
+    func testAPreTierDaemonBodyDecodesAsNoTiersRatherThanFailing() throws {
+        let body = Data(#"{"exaKey":"k","dangerousDomains":[],"defaultModel":"m","models":[],"defaultEffort":"high"}"#.utf8)
+        let config = try JSONDecoder().decode(SyncConfig.self, from: body)
+        XCTAssertEqual(config.clientEfforts, [])
+        XCTAssertEqual(config.defaultEffort, "high", "the fields that DO exist still land")
+    }
+
+    /// The tiers survive the wire verbatim through a real encode/decode round trip, including the
+    /// case that matters most: a tier list that is NOT what this build happens to hard-code.
+    func testClientTiersRoundTripVerbatimIncludingAnUnfamiliarOne() throws {
+        let body = #"{"exaKey":null,"dangerousDomains":[],"defaultModel":"m","defaultEffort":"","models":[],"clientEfforts":["ultra","hypermax"]}"#
+        let config = try JSONDecoder().decode(SyncConfig.self, from: Data(body.utf8))
+        XCTAssertEqual(config.clientEfforts, ["ultra", "hypermax"],
+                       "the Mac is the authority on its own tiers — the phone repeats them, it does not filter to a list it knows")
+        let reencoded = try JSONDecoder().decode(SyncConfig.self, from: try JSONEncoder().encode(config))
+        XCTAssertEqual(reencoded, config)
+    }
+
+    /// The boundary the rule above must NOT overshoot: an empty `efforts` ARRAY is legal
+    /// (`z.array(...)` with no `.min()`), and so is an empty `models` array. "This model accepts no
+    /// effort levels" is a statement the wire can make; "" as a level is not.
+    func testAnEmptyEffortsArrayIsLegalUnlikeAnEmptyEffortString() throws {
+        let body = #"{"exaKey":null,"dangerousDomains":[],"defaultModel":"m","defaultEffort":"","models":[{"id":"m","efforts":[]}]}"#
+        let config = try JSONDecoder().decode(SyncConfig.self, from: Data(body.utf8))
+        XCTAssertEqual(config.models, [SyncConfigModel(id: "m", efforts: [])])
+    }
+
+    // MARK: - whole-branch review C1: `provider` — the field that makes the bundle self-describing
+
+    /// The identity rides the wire and reaches the caller. Every other field says WHAT the Mac runs;
+    /// this one says WHOSE, and without it a phone cannot tell a catalogue it may adopt from one it
+    /// must discard.
+    func testTheProviderIdentityRidesTheConfigBundle() async throws {
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        let config = try await client.fetchConfig()
+        XCTAssertEqual(config.provider, "codex-oauth",
+                       "the double models a codex Mac — the same provider this device runs")
+    }
+
+    /// THE LIVE 400 THIS FIELD CLOSES, as a shape assertion. A BYOK Mac honestly reports an EMPTY
+    /// catalogue — its provider cannot enumerate — while `defaultModel` stays a non-empty FOREIGN
+    /// slug. `ChatConfigStore.apply` stores any non-empty `defaultModel`, so a phone reading only
+    /// those two would send a llama slug to Codex `/responses` and be 400'd on its first turn.
+    /// `models: []` does not protect it (the empty-catalogue rule governs `models` only); the
+    /// provider identity is the only field that distinguishes this bundle from a codex Mac's.
+    func testABYOKMacsBundleIsDistinguishableEvenThoughItsCatalogueIsEmpty() async throws {
+        let daemon = FakeDaemon()
+        daemon.config = SyncConfig(provider: "openai-compatible", exaKey: nil, dangerousDomains: [],
+                                   defaultModel: "llama-3.3-70b-local", models: [], defaultEffort: "",
+                                   clientEfforts: [])
+        let store = try LocalEventStore(directory: dir)
+        let client = SyncClient(store: store, conn: daemon)
+
+        let config = try await client.fetchConfig()
+        XCTAssertEqual(config.models, [], "honest: that provider cannot enumerate")
+        XCTAssertFalse(config.defaultModel.isEmpty, "…yet the slug is NOT empty — this is the trap")
+        XCTAssertNotEqual(config.provider, "codex-oauth",
+                          "the mismatch is visible: this device must treat the model half as never-synced")
+    }
+
+    /// A PRE-C1 Mac degrades to `""`, and `""` must NOT read as a mismatch. This is the one place
+    /// the leniency direction matters: requiring the field would fail the whole bundle (Exa key and
+    /// dangerous-domain list included) against every older daemon, and treating absence as FOREIGN
+    /// would take local chat down on every one of them instead. Absent means "the Mac did not say",
+    /// which is the pre-field status quo.
+    func testAPreProviderDaemonBodyDecodesAsUnknownRatherThanForeign() throws {
+        let body = Data(#"{"exaKey":"k","dangerousDomains":[],"defaultModel":"gpt-5.6-sol","models":[],"defaultEffort":"high","clientEfforts":[]}"#.utf8)
+        let config = try JSONDecoder().decode(SyncConfig.self, from: body)
+        XCTAssertEqual(config.provider, "")
+        XCTAssertEqual(config.defaultModel, "gpt-5.6-sol", "the fields that DO exist still land — a degrade, not a drop")
+    }
+
+    /// The value survives a real encode/decode round trip verbatim, including a provider name this
+    /// build has never heard of. The Mac is the authority on what it runs; the phone compares that
+    /// string against its own and does not filter it to a vocabulary it knows — which is also why
+    /// the wire type is a plain string rather than an enum.
+    func testTheProviderRoundTripsVerbatimIncludingAnUnfamiliarOne() throws {
+        for name in ["codex-oauth", "openai-compatible", "none", "some-future-provider"] {
+            let body = #"{"provider":"\#(name)","exaKey":null,"dangerousDomains":[],"defaultModel":"m","defaultEffort":"","models":[],"clientEfforts":[]}"#
+            let config = try JSONDecoder().decode(SyncConfig.self, from: Data(body.utf8))
+            XCTAssertEqual(config.provider, name)
+            let reencoded = try JSONDecoder().decode(SyncConfig.self, from: try JSONEncoder().encode(config))
+            XCTAssertEqual(reencoded, config, "the identity must survive this kit's own re-encode: \(name)")
+        }
     }
 
     // MARK: - T11-review F-8: the per-session leg
@@ -903,9 +1273,14 @@ final class SyncClientTests: XCTestCase {
 class FakeDaemon: RpcConn, @unchecked Sendable {
     private let lock = NSLock()
     private var logs: [String: [Data]] = [:]                                  // sessionId → lines (seq order)
-    private var metas: [String: (title: String?, model: String?, forkedFrom: SessionForkRef?)] = [:]
+    private var metas: [String: (title: String?, model: String?, effort: String?, forkedFrom: SessionForkRef?)] = [:]
     private var buffer: [String: Data] = [:]                                  // reassembly (single conn)
     private(set) var pushFrames = 0
+    /// The RAW `meta` object of the last COMPLETE push, exactly as it arrived. Recorded because the
+    /// T6 review's C6 protection is about a key being ABSENT vs. present-and-null — a distinction
+    /// that is invisible once the double has folded it into `metas`. `nil` when the push carried no
+    /// meta at all. (`NSNull` shows up for a wire null, as `JSONSerialization` produces it.)
+    private(set) var lastPushMeta: [String: Any]?
     private(set) var pullPages = 0
     private(set) var memoryPages = 0
     /// Max raw bytes per pull page / files per memory page — `nil` means "one complete page".
@@ -913,14 +1288,49 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
     var memoryPageSize: Int? = nil
     /// Runs before a pull is served, once, keyed by session — the racing-daemon-append hook.
     var beforePull: [String: () -> Void] = [:]
-    var config = SyncConfig(exaKey: nil, dangerousDomains: [], defaultModel: "gpt-5.4")
+    /// G9 (provider-correctness T3, widened again by T5 and by the whole-branch review's C1): the
+    /// default carries the FULL `sync.config` shape — the PROVIDER IDENTITY, the model catalogue,
+    /// the live effort, and the Norma-level client tiers, not just a model string. `codex-oauth`
+    /// specifically, because that is what the phone itself runs: a double serving a foreign provider
+    /// by default would put every consumer on the never-synced path. A double that kept serving the old
+    /// three-field body would have every catalogue consumer testing against an empty lineup while the
+    /// real wire always sends one; that is the precise class of gap that let two real bugs through a
+    /// green suite in an earlier slice. `SyncConfig`'s memberwise init takes no default arguments, so
+    /// this line could not have been left behind silently.
+    var config = SyncConfig(provider: "codex-oauth", exaKey: nil, dangerousDomains: [], defaultModel: "gpt-5.6-sol",
+                            models: [
+                                SyncConfigModel(id: "gpt-5.6-sol", efforts: FakeDaemon.wireEfforts),
+                                SyncConfigModel(id: "gpt-5.6-terra", efforts: FakeDaemon.wireEfforts),
+                                SyncConfigModel(id: "gpt-5.6-luna", efforts: FakeDaemon.wireEfforts),
+                            ],
+                            defaultEffort: "medium", clientEfforts: FakeDaemon.clientTiers)
+    /// The EXACT effort universe the wire serves, mirrored from `REASONING_EFFORTS`
+    /// (packages/core/src/settings.ts). `none` is in it (genuinely honoured, measured live); `ultra`
+    /// is NOT (a global enum rejects it) and neither is `minimal` (rejected per model). The phone's
+    /// pre-T3 mock effort list had the first two exactly backwards — a double that invented its own
+    /// list would let that recur.
+    static let wireEfforts = ["none", "low", "medium", "high", "xhigh", "max"]
+    /// The NORMA-LEVEL tiers a current Mac offers (`CLIENT_EFFORTS`, packages/core/src/settings.ts).
+    /// A SEPARATE constant from `wireEfforts` because they are separate lists on the wire and must
+    /// stay separate here: a double that merged them would let a picker offer `ultra` as if the
+    /// endpoint accepted it — the exact drift T3/T5 exist to make impossible.
+    static let clientTiers = ["ultra"]
     var memory: [SyncMemoryFile] = []
 
     // MARK: seeding helpers
 
-    func seed(_ id: String, _ lines: [Data], title: String? = nil, model: String? = nil, forkedFrom: SessionForkRef? = nil) {
-        lock.withLock { logs[id] = lines; metas[id] = (title, model, forkedFrom) }
+    func seed(_ id: String, _ lines: [Data], title: String? = nil, model: String? = nil,
+              effort: String? = FakeDaemon.seededEffort, forkedFrom: SessionForkRef? = nil) {
+        lock.withLock { logs[id] = lines; metas[id] = (title, model, effort, forkedFrom) }
     }
+    /// G10 (provider-correctness T6): every seeded session carries an effort BY DEFAULT, for the same
+    /// reason `config` above carries a full catalogue rather than an empty one. A double whose
+    /// sessions never have an effort would test every consumer against the never-synced path — the
+    /// exact gap shape that let two real bugs through a green suite in an earlier slice — while the
+    /// real wire, once a picker exists, sends one on most sessions. A test that specifically wants
+    /// the no-override case passes `effort: nil` explicitly, which now READS as the deliberate choice
+    /// it is.
+    static let seededEffort: String? = "medium"
     /// Rebuilds a session as the phone's EXACT bytes plus extra lines, so an append lines up seq-wise.
     func replace(_ id: String, phoneBytes: Data, plus extra: [Data]) {
         lock.withLock { logs[id] = LocalChatSession.split(phoneBytes) + extra }
@@ -930,7 +1340,7 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
     func has(_ id: String) -> Bool { lock.withLock { logs[id] != nil } }
     func sessionIds() -> [String] { lock.withLock { Array(logs.keys) } }
     func rawLog(_ id: String) -> Data { lock.withLock { LocalChatSession.join(logs[id] ?? []) } }
-    func meta(_ id: String) -> (title: String?, model: String?, forkedFrom: SessionForkRef?)? { lock.withLock { metas[id] } }
+    func meta(_ id: String) -> (title: String?, model: String?, effort: String?, forkedFrom: SessionForkRef?)? { lock.withLock { metas[id] } }
     /// The head as the daemon computes it: the LAST EVENT'S SEQ (M5 — not the line count).
     func head(_ id: String) -> Int {
         lock.withLock { (logs[id]?.last.flatMap { LineEnvelope($0)?.seq }) ?? 0 }
@@ -956,6 +1366,9 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
             var row: [String: Any] = ["sessionId": id, "lastSeq": head(id),
                                       "title": (lock.withLock { metas[id]?.title } as String?) ?? NSNull()]
             if let m = lock.withLock({ metas[id]?.model }) { row["model"] = m }
+            // T6: OMITTED when absent, exactly as the daemon serves it (`syncHeads`, ipc/sync.ts) —
+            // absent means "no override", which is a different fact from any level.
+            if let e = lock.withLock({ metas[id]?.effort }) { row["effort"] = e }
             if let f = lock.withLock({ metas[id]?.forkedFrom }) { row["forkedFrom"] = ["sessionId": f.sessionId, "atSeq": f.atSeq] }
             return row
         }
@@ -1009,6 +1422,15 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
         // check. Only the hard length bound — where the double used to accept "" and any length — is.
         if let model = metaObj?["model"] as? String, model.isEmpty || model.utf16.count > 200 {
             throw RpcError(code: -32602, message: "expected string to have >=1 and <=200 characters (meta.model was \(model.utf16.count))")
+        }
+        // G10 — WIRE RULE mirrored from `SyncPushParams.meta.effort` = `z.string().min(1).max(
+        // SESSION_EFFORT_MAX_CHARS)` (methods.ts, 32 chars), a schema-level bound refused before any
+        // handler logic runs. Distinct from (and NOT modeled here, exactly as for `model`) the
+        // handler-level DROP of a wire-invalid or tier value in `validateSyncMeta`: that needs a
+        // model catalogue and a mode concept this double has neither of, so it is out of scope for a
+        // wire-SHAPE check.
+        if let effort = metaObj?["effort"] as? String, effort.isEmpty || effort.utf16.count > 32 {
+            throw RpcError(code: -32602, message: "expected string to have >=1 and <=32 characters (meta.effort was \(effort.utf16.count))")
         }
         // G6 — WIRE RULE mirrored from `SessionForkRef` (methods.ts:75-78): `{sessionId: min(1) string,
         // atSeq: nonnegative int}`. A malformed shape fails zod's parse BEFORE any handler runs, so the
@@ -1109,14 +1531,28 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
 
         lock.withLock {
             logs[id, default: []].append(contentsOf: lines)
+            lastPushMeta = metaObj
             if let metaObj = metaObj {
                 // (title length + model bound + forkedFrom shape already refused above)
                 var fork: SessionForkRef? = metas[id]?.forkedFrom
                 if let f = metaObj["forkedFrom"] as? [String: Any], let sid = f["sessionId"] as? String, let at = (f["atSeq"] as? NSNumber)?.intValue {
                     fork = SessionForkRef(sessionId: sid, atSeq: at)
                 }
+                // T6, widened by the review's C6 ruling — THREE states for `effort`, mirroring
+                // `applySyncMeta` (packages/core/src/sessions/store.ts) exactly:
+                //   key absent → UNCHANGED,  NSNull → CLEAR,  String → set.
+                // The double used to fold `NSNull` into "unchanged" via `as? String ?? existing`,
+                // which would have made a clear look like a no-op here while the real daemon nulled
+                // the column — a lenient double hiding the very state the ruling added.
+                let effort: String?
+                if let raw = metaObj["effort"] {
+                    effort = raw is NSNull ? nil : (raw as? String)
+                } else {
+                    effort = metas[id]?.effort
+                }
                 metas[id] = (metaObj["title"] as? String ?? metas[id]?.title,
-                             metaObj["model"] as? String ?? metas[id]?.model, fork)
+                             metaObj["model"] as? String ?? metas[id]?.model,
+                             effort, fork)
             }
         }
         return try JSONSerialization.data(withJSONObject: ["applied": true, "lastSeq": head(id), "buffered": 0])

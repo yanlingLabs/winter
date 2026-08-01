@@ -57,6 +57,11 @@ public struct SyncHead: Decodable, Equatable, Sendable {
     public let lastSeq: Int
     public let title: String?          // `null` on the wire when the session has none
     public let model: String?
+    /// provider-correctness T6: the Mac's per-session reasoning effort. Absent (never `null`) when
+    /// the session has no override — the same omitted-means-unchanged shape `model` uses, and the
+    /// read half of `PushMetaParams.effort` below. Optional here means BOTH "no override" and "an
+    /// older daemon that predates the field"; neither is a licence to substitute a level.
+    public let effort: String?
     public let forkedFrom: SessionForkRef?
 }
 
@@ -64,15 +69,162 @@ struct SyncHeadsResult: Decodable { let sessions: [SyncHead] }
 struct SyncPullResult: Decodable { let data: String; let nextCursor: Int?; let complete: Bool }
 struct SyncPushResult: Decodable { let applied: Bool; let lastSeq: Int; let buffered: Int }
 
+/// One row of the Mac's model catalogue — the mirror of `SyncConfigModel`
+/// (packages/protocol/src/methods.ts).
+///
+/// `efforts` is per model even though every slug the Mac offers today accepts the identical six.
+/// The backend validates effort in two layers that disagree — `ultra` is refused globally,
+/// `minimal` is refused per model — so a future divergence is real, and carrying it per model makes
+/// that divergence a Mac-side data change instead of a phone app release.
+///
+/// **This type REFUSES WHAT THE WIRE REFUSES, and the decode is hand-written to make that true.**
+/// The zod schema is `{id: z.string().min(1), efforts: z.array(z.string().min(1))}` — both minimums
+/// are load-bearing, and Swift's synthesized `Decodable` enforces neither. A row like
+/// `{"id":"","efforts":[""]}` would decode cleanly into a picker whose selection is an empty slug,
+/// and an empty slug reaches a `/responses` request body verbatim and comes back an opaque HTTP 400
+/// — the same class of failure the never-synced rule exists to prevent, arriving by a different
+/// door. No shipped daemon can produce such a row today; a proxy, a future producer, or a lenient
+/// test double can, and "the current server never does that" is not a decode contract.
+public struct SyncConfigModel: Codable, Equatable, Sendable {
+    public let id: String
+    public let efforts: [String]
+
+    public init(id: String, efforts: [String]) {
+        self.id = id
+        self.efforts = efforts
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try c.decode(String.self, forKey: .id)
+        let efforts = try c.decode([String].self, forKey: .efforts)
+        // Mirrors `z.string().min(1)` on both fields. A hard throw, never a filter: silently
+        // dropping a bad row would hand Task 6 a catalogue that is short by one model with nothing
+        // anywhere saying so, which is the lenient-double failure this whole seam is guarded against.
+        guard !id.isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .id, in: c,
+                                                  debugDescription: "model id must not be empty (wire: z.string().min(1))")
+        }
+        guard !efforts.contains(where: \.isEmpty) else {
+            throw DecodingError.dataCorruptedError(forKey: .efforts, in: c,
+                                                  debugDescription: "effort levels must not be empty (wire: z.array(z.string().min(1)))")
+        }
+        self.id = id
+        self.efforts = efforts
+    }
+}
+
 /// `sync.config` — a freshly-paired phone's bootstrap for its OWN local chat.
+///
+/// **Decoding strictness is load-bearing and is deliberately NOT uniform across these six fields.**
+///
+/// The three ORIGINAL fields stay REQUIRED. Swift's synthesized `Decodable` cannot tell "field
+/// absent" from "field present but null", so an `exaKey`-less body would decode as `nil` and
+/// `ChatConfigStore.apply` would CLEAR the user's stored Exa key. What prevents that today is
+/// exactly that `dangerousDomains` and `defaultModel` are non-optional: a partial body fails the
+/// decode outright and `apply` is never reached. Making either optional would silently convert a
+/// partial response into a credential deletion.
+///
+/// The three fields added by provider-correctness T3 and T5 are decoded with `decodeIfPresent`, and that is
+/// a different judgement for a different reason, not a relaxation of the one above. This kit ships
+/// inside the iOS app, which updates on its own schedule (App Store) while the Mac updates on
+/// Sparkle's — so a phone WILL, at some point, call a daemon built before these fields existed.
+/// Requiring them would make that pairing fail the whole bundle: no Exa key, no dangerous domains,
+/// no model, chat unusable. Defaulting them to `[]` / `""` degrades it instead to the state a
+/// never-synced phone is already designed to handle — "I have not been told a catalogue" — and the
+/// never-synced rule (WAIT, never guess) is what makes that safe. `[]` and `""` are the ABSENCE of
+/// a catalogue, never a fallback one; nothing here may invent slugs or levels from them.
 public struct SyncConfig: Codable, Equatable, Sendable {
+    /// WHICH PROVIDER this whole bundle describes — `"codex-oauth"` / `"openai-compatible"`, the
+    /// Mac's `ProviderSettings.type` vocabulary; `"none"` when that Mac has no provider configured
+    /// at all. On the wire it is `z.string().min(1)`: the one field here with NO empty sentinel,
+    /// because a daemon always knows which provider it is running (including "not one").
+    ///
+    /// **THE RULE (whole-branch review C1, and the one T6b must implement): a provider MISMATCH
+    /// means NEVER-SYNCED for the model half.** This device runs its OWN chat engine on its OWN
+    /// codex-oauth credentials, so a non-empty `provider` that is not ours means `defaultModel` (and
+    /// `models`, already `[]`) describe SOMEBODY ELSE'S endpoint and must be discarded, not applied.
+    ///
+    /// It closes a live 400. On an `openai-compatible` Mac the provider is built with no enumerable
+    /// catalogue, so `models` is honestly `[]` — but `defaultModel` is still a non-empty FOREIGN
+    /// slug (a llama/BYOK name). `ChatConfigStore.apply` stores any non-empty `defaultModel`, so
+    /// this device would then send that slug to Codex `/responses` and be 400'd on its first turn.
+    /// The "an empty catalogue is ignored on apply" rule governs `models` ONLY and does not reach
+    /// `defaultModel`; nothing but the provider identity can.
+    ///
+    /// **`""` (an older Mac, before the field existed) is NOT a mismatch.** It means "the Mac did
+    /// not say", which is the pre-field status quo and must keep behaving exactly like it. Treating
+    /// unknown as foreign would take local chat down on every Mac built before this field — the
+    /// same failure the leniency below exists to prevent, arriving through the guard. Only a
+    /// NON-EMPTY value that differs from ours is a mismatch.
+    public let provider: String
     public let exaKey: String?
     public let dangerousDomains: [String]
     public let defaultModel: String
-    public init(exaKey: String?, dangerousDomains: [String], defaultModel: String) {
+    /// The Mac's whole model catalogue. EMPTY means the Mac reported no catalogue — its provider
+    /// cannot enumerate its models, none is configured, or (see above) it predates this field.
+    /// A consumer must wait for a real one rather than deriving a lineup from `defaultModel`, which
+    /// is precisely what this field exists to stop.
+    public let models: [SyncConfigModel]
+    /// The Mac's live reasoning effort. `""` means UNSET, which is NOT `"none"`: unset makes a turn
+    /// omit the `reasoning` block entirely, while `"none"` is an explicit level the backend honours.
+    public let defaultEffort: String
+    /// NORMA-LEVEL effort tiers the Mac offers (`["ultra"]` on a current daemon) — selectable in
+    /// Norma, **never sent upstream**, and offered on CODE sessions only.
+    ///
+    /// A SEPARATE list from `models[].efforts`, and the two must never be concatenated into one
+    /// picker section. `models[].efforts` is exactly what the endpoint accepts; a tier is exactly
+    /// what it does not — the Mac translates it (today `ultra` → `max`) before building a request,
+    /// and applies extra local behaviour of its own. Offering a tier on a chat session, or putting
+    /// one on a request this device builds itself, is a 400 from a global enum on the backend.
+    ///
+    /// EMPTY means the Mac offers no tiers — including because it predates this field. Render
+    /// exactly what you are told and invent nothing, the same never-synced rule the catalogue keeps.
+    public let clientEfforts: [String]
+
+    public init(provider: String, exaKey: String?, dangerousDomains: [String], defaultModel: String,
+                models: [SyncConfigModel], defaultEffort: String, clientEfforts: [String]) {
+        self.provider = provider
         self.exaKey = exaKey
         self.dangerousDomains = dangerousDomains
         self.defaultModel = defaultModel
+        self.models = models
+        self.defaultEffort = defaultEffort
+        self.clientEfforts = clientEfforts
+    }
+
+    // No default arguments on the init above, deliberately: every construction site — including both
+    // test doubles — must be UPDATED rather than silently keep building the old three-field shape
+    // and serving an empty catalogue nobody notices. The compile error IS the sweep. `provider`
+    // (whole-branch review C1) is first and defaultless for exactly that reason: it is a field no
+    // fixture and no generated artifact would ever have forced anyone to notice.
+
+    /// Hand-written ONLY to make the two new fields absence-tolerant. The three original fields are
+    /// decoded byte-for-byte as the synthesized initializer already did — `decodeIfPresent` for the
+    /// optional `exaKey` (which is also what the synthesized ENCODER's `encodeIfPresent` requires,
+    /// since a nil key is omitted rather than written as `null`), plain `decode` for the two
+    /// non-optionals. Reproducing the old behaviour exactly is the point: those two hard decodes are
+    /// what make a partial body fail outright instead of reaching `ChatConfigStore.apply` and
+    /// clearing a credential, and this change must not quietly move that line.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // Tolerated-absent (whole-branch review C1), and `""` is a LOAD-BEARING degrade, not a
+        // shrug: it means "this Mac predates the field", which the mismatch rule must read as
+        // compatible. Requiring it would fail the whole bundle against every older daemon — Exa key
+        // and dangerous-domain list included — which is the same trap the two decodes below avoid.
+        provider = try c.decodeIfPresent(String.self, forKey: .provider) ?? ""
+        exaKey = try c.decodeIfPresent(String.self, forKey: .exaKey)
+        dangerousDomains = try c.decode([String].self, forKey: .dangerousDomains)
+        defaultModel = try c.decode(String.self, forKey: .defaultModel)
+        // Tolerated-absent — an older daemon, not a malformed body.
+        models = try c.decodeIfPresent([SyncConfigModel].self, forKey: .models) ?? []
+        defaultEffort = try c.decodeIfPresent(String.self, forKey: .defaultEffort) ?? ""
+        // provider-correctness T5, tolerated-absent for the SAME reason as the two above (this kit
+        // ships in an App Store app that will meet a Sparkle-updated Mac of any vintage), and safe
+        // for a stronger reason than they are: absent → no tiers offered → the phone renders only
+        // the wire levels, which is precisely the pre-T5 behaviour. The failure mode leniency
+        // usually risks — inventing a level — cannot occur, because `[]` is not a fallback list.
+        clientEfforts = try c.decodeIfPresent([String].self, forKey: .clientEfforts) ?? []
     }
 }
 
@@ -97,6 +249,23 @@ private struct PullParams: Encodable { let sessionId: String; let fromSeq: Int; 
 private struct PushMetaParams: Encodable {
     let title: String?
     let model: String?
+    /// provider-correctness T6, widened by the T6 review's C6 ruling. THREE states, and the middle
+    /// one is the whole protection:
+    ///   * `.none`        → the key is ABSENT. "I have no effort to report", which the daemon reads
+    ///                      as UNCHANGED. This is what a STALE client sends — one that has simply
+    ///                      not learned about an override the Mac set — and it is why nil-means-
+    ///                      absent rather than nil-means-clear.
+    ///   * `.some(nil)`   → a literal wire `null`: CLEAR the override. Only ever a deliberate,
+    ///                      user-expressed clear.
+    ///   * `.some(value)` → set it.
+    ///
+    /// `SyncClient` NEVER produces the middle case today, deliberately: `LocalSessionMeta.effort` is
+    /// a plain `String?` with no way to record "the user cleared this" as distinct from "I never had
+    /// one", so mapping a nil local effort to `null` would turn every stale push into a wipe. A
+    /// client that wants to express a real clear must first record the clear as an INTENT in its own
+    /// store; until it does, absent is the only honest answer. `testAStalePhonePushesAbsentEffortNotNull`
+    /// pins that, so a future "helpful" nil→null simplification fails loudly.
+    let effort: String??
     let forkedFrom: SessionForkRef?
 
     /// The ONE construction point, so the wire's title ceiling is enforced structurally rather than
@@ -106,10 +275,30 @@ private struct PushMetaParams: Encodable {
     /// re-fires on every pass until the title happens to change. Today's titles all come from the
     /// daemon (already bounded) or from `planFork` (bounded there too); this guard is what keeps a
     /// FUTURE local title source — T11's phone-side titler — from silently wedging a session.
-    init(title: String?, model: String?, forkedFrom: SessionForkRef?) {
+    init(title: String?, model: String?, effort: String??, forkedFrom: SessionForkRef?) {
         self.title = title.map(LocalEventStore.capTitle)
         self.model = model
+        self.effort = effort
         self.forkedFrom = forkedFrom
+    }
+
+    private enum CodingKeys: String, CodingKey { case title, model, effort, forkedFrom }
+
+    /// Hand-written ONLY because `effort` is doubly optional and the two inner cases must encode
+    /// differently — absent vs. a literal `null`. Synthesized `encodeIfPresent` collapses at one
+    /// level and the distinction is exactly what the wire contract turns on, so this is spelled out
+    /// rather than trusted. Every other field keeps `encodeIfPresent`'s nil-is-absent behaviour
+    /// verbatim: the daemon's optional schema fields expect an omitted key, never `null`.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(title, forKey: .title)
+        try c.encodeIfPresent(model, forKey: .model)
+        switch effort {
+        case .none: break                                   // absent → unchanged
+        case .some(.none): try c.encodeNil(forKey: .effort) // null → clear
+        case .some(.some(let v)): try c.encode(v, forKey: .effort)
+        }
+        try c.encodeIfPresent(forkedFrom, forKey: .forkedFrom)
     }
 }
 private struct PushParams: Encodable { let sessionId: String; let baseSeq: Int; let data: String; let complete: Bool; let meta: PushMetaParams? }
@@ -247,7 +436,7 @@ public actor SyncClient {
         let bytes = try await pullBytes(sessionId: head.sessionId, fromSeq: fromSeq)
         try await store.applyPull(sessionId: head.sessionId, data: bytes,
                                   title: .some(head.title), model: .some(head.model),
-                                  forkedFrom: .some(head.forkedFrom))
+                                  effort: .some(head.effort), forkedFrom: .some(head.forkedFrom))
     }
 
     /// Drains `sync.pull` page by page (cursor-resumed) and returns the concatenated raw JSONL bytes.
@@ -279,7 +468,11 @@ public actor SyncClient {
         let baseSeq = meta.lastSyncedSeq
         let tail = await store.rawTail(sessionId: sessionId, fromSeq: baseSeq)
         if tail.isEmpty { return }
-        let pushMeta = PushMetaParams(title: meta.title, model: meta.model, forkedFrom: meta.forkedFrom)
+        // `meta.effort` is a plain `String?`, and it maps to ABSENT when nil — never to a wire null.
+        // See `PushMetaParams.effort` for why that direction is the stale-client protection.
+        let pushMeta = PushMetaParams(title: meta.title, model: meta.model,
+                                      effort: meta.effort.map { Optional($0) },
+                                      forkedFrom: meta.forkedFrom)
         do {
             let result = try await pushChunked(sessionId: sessionId, baseSeq: baseSeq, data: tail, meta: pushMeta)
             await store.setLastSyncedSeq(sessionId: sessionId, result.lastSeq)
@@ -334,6 +527,7 @@ public actor SyncClient {
             } else {
                 try await store.applyPull(sessionId: sessionId, data: remainder,
                                           title: .some(daemonHead?.title ?? nil), model: .some(daemonHead?.model ?? nil),
+                                          effort: .some(daemonHead?.effort ?? nil),
                                           forkedFrom: .some(daemonHead?.forkedFrom ?? nil))
             }
             return
@@ -375,7 +569,9 @@ public actor SyncClient {
         // The id is derived by `planFork` from the branch point AND the branch content, so a retry of
         // THIS branch recomputes this id while a different branch gets its own (review round 2).
         let plan = try await store.planFork(originalId: originalId, atSeq: atSeq)
-        let forkPushMeta = PushMetaParams(title: plan.title, model: plan.model, forkedFrom: plan.forkedFrom)
+        let forkPushMeta = PushMetaParams(title: plan.title, model: plan.model,
+                                          effort: plan.effort.map { Optional($0) },
+                                          forkedFrom: plan.forkedFrom)
         do {
             let result = try await pushChunked(sessionId: plan.newId, baseSeq: 0, data: plan.bytes, meta: forkPushMeta)
             try await store.commitFork(plan, syncedSeq: result.lastSeq)
@@ -411,6 +607,7 @@ public actor SyncClient {
         let branch = try await pullBytes(sessionId: originalId, fromSeq: atSeq)
         try await store.applyPull(sessionId: originalId, data: branch,
                                   title: .some(daemonHead?.title ?? nil), model: .some(daemonHead?.model ?? nil),
+                                  effort: .some(daemonHead?.effort ?? nil),
                                   forkedFrom: .some(daemonHead?.forkedFrom ?? nil))
     }
 
@@ -435,8 +632,10 @@ public actor SyncClient {
 
     // MARK: - config / memory bootstrap (session-less)
 
-    /// `sync.config` — the Exa key, the user's added dangerous domains, and the daemon's live default
-    /// model, for a phone bootstrapping its OWN standalone chat.
+    /// `sync.config` — the Exa key, the user's added dangerous domains, the daemon's live default
+    /// model AND effort, and its whole model catalogue, for a phone bootstrapping its OWN standalone
+    /// chat. See `SyncConfig` for what an empty catalogue or an empty effort means (both are honest
+    /// "not told" answers, never a licence to derive one).
     public func fetchConfig() async throws -> SyncConfig {
         let raw = try await conn.call(method: METHODS.syncConfig, paramsJSON: encode(ConfigParams()))
         return try JSONDecoder().decode(SyncConfig.self, from: raw)

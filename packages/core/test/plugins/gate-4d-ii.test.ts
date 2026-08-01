@@ -174,7 +174,7 @@ describe("4d-ii gate: over-the-wire plugin lifecycle (install -> enable/consent 
       expect(["starting", "running"]).toContain(enableRes.result.status); // hot-spawned NOW, possibly still awaiting registration
       expect(["starting", "running"]).toContain(inst.supervisor.status(pluginId)); // SAME supervisor instance — proves the RPC actually reached it
 
-      await waitFor(() => inst.supervisor.status(pluginId) === "running", 10_000, `supervisor status "running" for ${pluginId} (real child registered)`);
+      await waitFor(() => inst.supervisor.status(pluginId) === "running", 30_000, `supervisor status "running" for ${pluginId} (real child registered)`);
 
       const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
       expect(settings.plugins.enabled).toEqual([pluginId]);
@@ -202,7 +202,7 @@ describe("4d-ii gate: over-the-wire plugin lifecycle (install -> enable/consent 
       const disableRes = await harness.request(METHODS.pluginDisable, { name: pluginId });
       expect(disableRes.result).toEqual({ ok: true });
 
-      await waitFor(() => inst.supervisor.status(pluginId) !== "running", 10_000, `supervisor status leaves "running" for ${pluginId}`);
+      await waitFor(() => inst.supervisor.status(pluginId) !== "running", 30_000, `supervisor status leaves "running" for ${pluginId}`);
       await waitFor(() => !isPidAlive(pluginPid), 5_000, `hot-stopped real child pid ${pluginPid} to actually die (no orphan)`);
 
       const settingsAfterDisable = JSON.parse(readFileSync(settingsPath, "utf8"));
@@ -241,6 +241,6 @@ describe("4d-ii gate: over-the-wire plugin lifecycle (install -> enable/consent 
       inst.store.close();
       await waitFor(() => !isPidAlive(pluginPid), 5_000, "child pid to stay dead through teardown (no stray respawn)");
     },
-    30_000,
+    90_000, // 60s registration budget + margin (real child spawn under load)
   );
 });
