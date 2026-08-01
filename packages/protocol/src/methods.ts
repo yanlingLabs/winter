@@ -1126,7 +1126,22 @@ export const SyncPushParams = z.object({
     // provider knowledge the protocol package cannot see change, so a zod enum here would be a
     // second, drift-prone copy. Membership is checked at the handler, against the session's own
     // model's list.
-    effort: z.string().min(1).max(SESSION_EFFORT_MAX_CHARS).optional(),
+    //
+    // THREE STATES, and the distinction between the last two is the whole point (T6 review, C6):
+    //   * ABSENT      → unchanged. This is what a STALE client sends — one that simply has not
+    //                   learned about an override the other side set. It must never be able to wipe
+    //                   one, which is why "I have no effort" is spelled by omitting the key.
+    //   * `null`      → CLEAR the override, restoring the precedence chain (session → global).
+    //   * a string    → set it, subject to the handler's model-aware + tier checks.
+    // `null` rather than `""` deliberately: it is the SAME clear vocabulary `session.setEffort`
+    // already uses for this exact column (`SessionSetEffortParams.effort` is `.nullable()`), so
+    // there is no second magic value to remember, no `.min(1)` to relax, and no ""→NULL mapping a
+    // future writer can miss and thereby store a truthy-but-meaningless effort that then flows out
+    // through `sync.heads` and `session.list`.
+    //
+    // Deliberately NOT extended to `title`/`model` beside it: neither has a clear affordance in any
+    // UI, so giving them a null state would be inventing a capability nothing asks for.
+    effort: z.string().min(1).max(SESSION_EFFORT_MAX_CHARS).nullable().optional(),
     forkedFrom: SessionForkRef.optional(),
   }).optional(),
 });

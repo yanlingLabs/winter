@@ -185,7 +185,7 @@ function resolveChatSession(
 }
 
 /** The index-only metadata a push may carry, after validation. */
-export interface SyncMeta { title?: string; model?: string; effort?: string; forkedFrom?: SessionForkRef }
+export interface SyncMeta { title?: string; model?: string; effort?: string | null; forkedFrom?: SessionForkRef }
 
 /** The effort half of `validateSyncMeta`'s inputs (provider-correctness T6) — kept as its own
  *  options bag rather than three more positional parameters, so a caller that only cares about the
@@ -255,7 +255,7 @@ export interface SyncMetaEffortContext {
  *  tier rather than as "not accepted by model X". Same alternatives-not-layers structure as
  *  `session.setEffort`'s handler. */
 export function validateSyncMeta(
-  meta: { title?: string; model?: string; effort?: string; forkedFrom?: SessionForkRef },
+  meta: { title?: string; model?: string; effort?: string | null; forkedFrom?: SessionForkRef },
   knownModelIds: string[],
   onDroppedModel?: (slug: string) => void,
   effortCtx: SyncMetaEffortContext = {},
@@ -277,7 +277,13 @@ export function validateSyncMeta(
     }
   }
   if (meta.effort !== undefined) {
-    if (isClientEffort(meta.effort)) {
+    if (meta.effort === null) {
+      // An explicit CLEAR (T6 review, C6). Never validated, and deliberately ahead of both branches
+      // below: clearing restores the precedence chain, so there is no model whose list it could
+      // fail and no mode it could be ineligible for. A null that fell into either branch would be
+      // dropped, and the override would be un-clearable through this surface.
+      out.effort = null;
+    } else if (isClientEffort(meta.effort)) {
       effortCtx.onDroppedEffort?.(meta.effort, "a Norma-level tier, offered on code sessions only — sync.push is chat-only");
     } else {
       // The pushed model wins; it landed in the same atomic `meta` and is already validated.
@@ -288,7 +294,13 @@ export function validateSyncMeta(
       // accept what `sync.config` does not advertise, never the reverse — the permissive direction,
       // deliberately.
       if (allowed.length === 0 || allowed.includes(meta.effort)) out.effort = meta.effort;
-      else effortCtx.onDroppedEffort?.(meta.effort, `not accepted by model '${model}' — supported: ${allowed.join(", ")}`);
+      else {
+        // M3 (review): mirror-EXACT with `assertEffortSelectable` (ipc/server.ts), no-model
+        // fallback included — `by model ''` is not a sentence, and two surfaces explaining the same
+        // refusal differently is precisely the drift this plan exists to remove.
+        const forModel = model ? `by model '${model}'` : "by the configured provider";
+        effortCtx.onDroppedEffort?.(meta.effort, `not accepted ${forModel} — supported: ${allowed.join(", ")}`);
+      }
     }
   }
   return out;

@@ -516,9 +516,12 @@ export class SessionStore {
    *  pushed effort deserves to be written lives at the CALLER (`validateSyncMeta`, ipc/sync.ts),
    *  which is where the session's model and the tier rule are both in scope. A refused effort never
    *  reaches this method at all, so there is nothing here to "also check". */
-  applySyncMeta(sessionId: string, meta: { title?: string; model?: string; effort?: string; forkedFrom?: SessionForkRef }): void {
+  applySyncMeta(sessionId: string, meta: { title?: string; model?: string; effort?: string | null; forkedFrom?: SessionForkRef }): void {
     if (meta.title !== undefined) this.db.run("UPDATE sessions SET title = ? WHERE session_id = ?", [capTitle(meta.title), sessionId]);
     if (meta.model !== undefined) this.db.run("UPDATE sessions SET model = ? WHERE session_id = ?", [meta.model, sessionId]);
+    // T6 review (C6): `effort` is the ONE field here with three states — absent (unchanged), `null`
+    // (CLEAR), a string (set). `null` binds straight through to SQL NULL, so there is no sentinel to
+    // map and nothing a future writer can forget. `title`/`model` above stay two-state on purpose.
     if (meta.effort !== undefined) this.db.run("UPDATE sessions SET effort = ? WHERE session_id = ?", [meta.effort, sessionId]);
     if (meta.forkedFrom !== undefined) {
       this.db.run(

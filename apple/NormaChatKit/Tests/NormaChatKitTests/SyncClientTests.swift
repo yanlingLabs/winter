@@ -884,6 +884,79 @@ final class SyncClientTests: XCTestCase {
         XCTAssertEqual(plan.model, "gpt-5.6-sol")
     }
 
+    // MARK: - provider-correctness T6 review (C6): ABSENT vs. a wire null
+
+    /// **THE PROTECTION.** A STALE phone — one holding a session it has no effort for, while the Mac
+    /// has an override it has not learned about yet — must push the `effort` key ABSENT, never
+    /// `null`. Absent reads as UNCHANGED on the daemon; `null` reads as CLEAR. Mapping a nil local
+    /// effort to null would turn every routine push from a not-yet-caught-up phone into a silent
+    /// wipe of the Mac's setting.
+    ///
+    /// Would fail against any "simplification" that made `PushMetaParams.effort` a plain `String?`
+    /// again and let nil encode as null.
+    func testAStalePhonePushesAbsentEffortNotNull() async throws {
+        let id = "70000000-0000-4000-8000-000000000001"
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        // No effort locally — the stale case, exactly.
+        try await store.createSession(sessionId: id, model: "gpt-5.6-sol")
+        let client = SyncClient(store: store, conn: daemon)
+
+        try await client.syncAll()
+
+        let meta = try XCTUnwrap(daemon.lastPushMeta)
+        XCTAssertNil(meta["effort"],
+                     "a nil local effort must OMIT the key — present-and-null would clear the Mac's override")
+        XCTAssertFalse(meta["effort"] is NSNull)
+        XCTAssertEqual(meta["model"] as? String, "gpt-5.6-sol", "…while the fields it DOES hold still ride")
+    }
+
+    /// The other side of the same encoder: an effort the phone actually holds rides as a plain
+    /// string, so "absent" really is reserved for "I have nothing to say".
+    func testAPhoneWithAnEffortPushesItAsAString() async throws {
+        let id = "70000000-0000-4000-8000-000000000002"
+        let daemon = FakeDaemon()
+        let store = try LocalEventStore(directory: dir)
+        try await store.createSession(sessionId: id, effort: "xhigh")
+        let client = SyncClient(store: store, conn: daemon)
+
+        try await client.syncAll()
+
+        let meta = try XCTUnwrap(daemon.lastPushMeta)
+        XCTAssertEqual(meta["effort"] as? String, "xhigh")
+        XCTAssertFalse(meta["effort"] is NSNull)
+    }
+
+    /// The DOUBLE's own three-state fold, driven directly — `SyncClient` cannot produce a wire null
+    /// today (by design, see the test above), so the only way to prove `FakeDaemon` mirrors
+    /// `applySyncMeta` rather than quietly treating a clear as a no-op is to hand it one.
+    func testFakeDaemonMirrorsTheThreeStateEffortSemantics() async throws {
+        let id = "70000000-0000-4000-8000-000000000003"
+        let daemon = FakeDaemon()
+        let line = created(id)
+
+        func push(_ meta: [String: Any], baseSeq: Int, lines: [Data]) async throws {
+            let params: [String: Any] = [
+                "sessionId": id, "baseSeq": baseSeq,
+                "data": LocalChatSession.join(lines).base64EncodedString(),
+                "complete": true, "meta": meta,
+            ]
+            _ = try await daemon.call(method: METHODS.syncPush,
+                                      paramsJSON: try JSONSerialization.data(withJSONObject: params))
+        }
+
+        try await push(["effort": "high"], baseSeq: 0, lines: [line])
+        XCTAssertEqual(daemon.meta(id)?.effort, "high")
+
+        // ABSENT → unchanged.
+        try await push(["title": "t"], baseSeq: 1, lines: [user(id, 2, "a")])
+        XCTAssertEqual(daemon.meta(id)?.effort, "high")
+
+        // NULL → cleared.
+        try await push(["effort": NSNull()], baseSeq: 2, lines: [user(id, 3, "b")])
+        XCTAssertNil(daemon.meta(id)?.effort, "a wire null must CLEAR, exactly as applySyncMeta does")
+    }
+
     // MARK: - config / memory bootstrap
 
     func testFetchConfigAndMemory() async throws {
@@ -1141,6 +1214,11 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
     private var metas: [String: (title: String?, model: String?, effort: String?, forkedFrom: SessionForkRef?)] = [:]
     private var buffer: [String: Data] = [:]                                  // reassembly (single conn)
     private(set) var pushFrames = 0
+    /// The RAW `meta` object of the last COMPLETE push, exactly as it arrived. Recorded because the
+    /// T6 review's C6 protection is about a key being ABSENT vs. present-and-null — a distinction
+    /// that is invisible once the double has folded it into `metas`. `nil` when the push carried no
+    /// meta at all. (`NSNull` shows up for a wire null, as `JSONSerialization` produces it.)
+    private(set) var lastPushMeta: [String: Any]?
     private(set) var pullPages = 0
     private(set) var memoryPages = 0
     /// Max raw bytes per pull page / files per memory page — `nil` means "one complete page".
@@ -1389,16 +1467,28 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
 
         lock.withLock {
             logs[id, default: []].append(contentsOf: lines)
+            lastPushMeta = metaObj
             if let metaObj = metaObj {
                 // (title length + model bound + forkedFrom shape already refused above)
                 var fork: SessionForkRef? = metas[id]?.forkedFrom
                 if let f = metaObj["forkedFrom"] as? [String: Any], let sid = f["sessionId"] as? String, let at = (f["atSeq"] as? NSNumber)?.intValue {
                     fork = SessionForkRef(sessionId: sid, atSeq: at)
                 }
+                // T6, widened by the review's C6 ruling — THREE states for `effort`, mirroring
+                // `applySyncMeta` (packages/core/src/sessions/store.ts) exactly:
+                //   key absent → UNCHANGED,  NSNull → CLEAR,  String → set.
+                // The double used to fold `NSNull` into "unchanged" via `as? String ?? existing`,
+                // which would have made a clear look like a no-op here while the real daemon nulled
+                // the column — a lenient double hiding the very state the ruling added.
+                let effort: String?
+                if let raw = metaObj["effort"] {
+                    effort = raw is NSNull ? nil : (raw as? String)
+                } else {
+                    effort = metas[id]?.effort
+                }
                 metas[id] = (metaObj["title"] as? String ?? metas[id]?.title,
                              metaObj["model"] as? String ?? metas[id]?.model,
-                             // T6: absent = UNCHANGED, never cleared — `applySyncMeta`'s rule.
-                             metaObj["effort"] as? String ?? metas[id]?.effort, fork)
+                             effort, fork)
             }
         }
         return try JSONSerialization.data(withJSONObject: ["applied": true, "lastSeq": head(id), "buffered": 0])

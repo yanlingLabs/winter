@@ -259,6 +259,76 @@ describe("sync.push meta.effort — the second ingress (provider-correctness T6)
   });
 
   // ------------------------------------------------------------------------------------------
+  // The CLEAR — a wire null (C6 ruling, fix round 1)
+  // ------------------------------------------------------------------------------------------
+
+  test("meta.effort: null CLEARS the override; absent leaves it alone", async () => {
+    const { store, socketPath, harnessToken } = await boot({ models: CATALOGUE });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "phone");
+    const id = uuid();
+
+    await c.request(METHODS.syncPush, {
+      sessionId: id, baseSeq: 0, data: b64(jsonl([created(id), userMsg(id, 2, "one")])), complete: true,
+      meta: { effort: "high" },
+    });
+    expect(store.meta(id).effort).toBe("high");
+
+    // ABSENT — unchanged. The stale-client protection: a client that never learned about the
+    // override must not be able to wipe it just by pushing events.
+    await c.request(METHODS.syncPush, {
+      sessionId: id, baseSeq: 2, data: b64(jsonl([userMsg(id, 3, "two")])), complete: true,
+      meta: { title: "a title" },
+    });
+    expect(store.meta(id).effort).toBe("high");
+
+    // NULL — an explicit clear. The SAME vocabulary `session.setEffort` already uses for this exact
+    // field (`SessionSetEffortParams.effort` is `.nullable()`), so there is no second magic value to
+    // remember and no ""→NULL mapping anyone can miss.
+    const res = await c.request(METHODS.syncPush, {
+      sessionId: id, baseSeq: 3, data: b64(jsonl([userMsg(id, 4, "three")])), complete: true,
+      meta: { effort: null },
+    });
+    expect(res.error).toBeUndefined();
+    expect(store.meta(id).effort).toBeUndefined();
+    expect(store.lastSeq(id)).toBe(4);
+    c.close();
+  });
+
+  test("a clear is never validated — it cannot be dropped, and it does not reach the tier gate", async () => {
+    // Clearing restores the precedence chain, so there is no model whose list it could fail and no
+    // mode it could be ineligible for. A `null` that fell into either branch would be un-clearable.
+    const known = CATALOGUE.map((m) => m.id);
+    const dropped: string[] = [];
+    // A NON-EMPTY wire list on purpose: with an empty one the permissive carve-out would admit the
+    // null by accident and this test would prove nothing.
+    const out = validateSyncMeta({ effort: null }, known, undefined, {
+      model: "gpt-5.6-sol", efforts: () => ["low", "high"], onDroppedEffort: (e) => dropped.push(e),
+    });
+    expect(out.effort).toBeNull();
+    expect(dropped).toEqual([]);
+  });
+
+  test("session.list and sync.heads both stop reporting a cleared effort", async () => {
+    const { socketPath, harnessToken } = await boot({ models: CATALOGUE });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "phone");
+    const id = uuid();
+    await c.request(METHODS.syncPush, {
+      sessionId: id, baseSeq: 0, data: b64(jsonl([created(id)])), complete: true, meta: { effort: "low" },
+    });
+    await c.request(METHODS.syncPush, {
+      sessionId: id, baseSeq: 1, data: b64(jsonl([userMsg(id, 2, "x")])), complete: true, meta: { effort: null },
+    });
+
+    const heads = await c.request(METHODS.syncHeads, {});
+    expect("effort" in heads.result.sessions.find((s: any) => s.sessionId === id)).toBe(false);
+    const listed = await c.request(METHODS.sessionList, {});
+    expect(listed.result.sessions.find((s: any) => s.sessionId === id).effort).toBeUndefined();
+    c.close();
+  });
+
+  // ------------------------------------------------------------------------------------------
   // validateSyncMeta directly — the unit the handler delegates to
   // ------------------------------------------------------------------------------------------
 
@@ -292,6 +362,60 @@ describe("sync.push meta.effort — the second ingress (provider-correctness T6)
     for (const level of effortsForModel("gpt-5.6-luna")) {
       expect(validateSyncMeta({ effort: level }, known, undefined, { model: "gpt-5.6-luna" }).effort).toBe(level);
     }
+  });
+
+  // M4 (review): the THIRD precedence rung — `ctx.liveModel`. Nothing exercised it, so deleting the
+  // `liveModel: opts.liveModel` wiring in ipc/server.ts left the suite green while every pushed
+  // effort silently degraded to being validated against `""`.
+  test("a pushed effort on a session with NO model override is validated against the daemon's LIVE model", async () => {
+    const { store, socketPath, harnessToken } = await boot({
+      models: CATALOGUE,
+      // A model the catalogue knows, deliberately NOT the one any push names.
+      liveModel: () => "gpt-5.6-luna",
+    });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "phone");
+    const id = uuid();
+
+    await c.request(METHODS.syncPush, {
+      sessionId: id, baseSeq: 0, data: b64(jsonl([created(id)])), complete: true, meta: { effort: "high" },
+    });
+    expect(store.meta(id).effort).toBe("high");
+    expect(store.meta(id).model).toBeUndefined(); // no override — the live model is what decided
+
+    // `effortsForModel` is uniform today, so the ONE externally-visible proof that the rung was
+    // consulted (rather than silently defaulting to `""`) is the drop reason the handler logs. Spy
+    // on it: without the `liveModel: opts.liveModel` wiring in ipc/server.ts this reads
+    // `by the configured provider` instead of naming the live model, and the test fails.
+    const warnings: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+    try {
+      const res = await c.request(METHODS.syncPush, {
+        sessionId: id, baseSeq: 1, data: b64(jsonl([userMsg(id, 2, "x")])), complete: true,
+        meta: { effort: "minimal" },
+      });
+      expect(res.error).toBeUndefined();
+    } finally {
+      console.warn = realWarn;
+    }
+    expect(store.meta(id).effort).toBe("high"); // the bad push never overwrote the good value
+    expect(warnings.join("\n")).toContain("by model 'gpt-5.6-luna'");
+    c.close();
+  });
+
+  // M3 (review): the drop reason must MIRROR `assertEffortSelectable`'s wording, including its
+  // no-model fallback — `by model ''` is not a sentence, and the two surfaces explaining the same
+  // refusal differently is the drift this whole plan is about.
+  test("the drop reason mirrors assertEffortSelectable's wording, including the no-model case", () => {
+    const known = CATALOGUE.map((m) => m.id);
+    let reason = "";
+    validateSyncMeta({ effort: "minimal" }, known, undefined, { model: "gpt-5.6-sol", onDroppedEffort: (_e, r) => { reason = r; } });
+    expect(reason).toContain("by model 'gpt-5.6-sol'");
+
+    validateSyncMeta({ effort: "minimal" }, known, undefined, { model: "", onDroppedEffort: (_e, r) => { reason = r; } });
+    expect(reason).toContain("by the configured provider");
+    expect(reason).not.toContain("by model ''");
   });
 
   test("validateSyncMeta: a provider that cannot enumerate efforts accepts freely (the permissive direction)", () => {

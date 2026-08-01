@@ -218,12 +218,23 @@ private struct PullParams: Encodable { let sessionId: String; let fromSeq: Int; 
 private struct PushMetaParams: Encodable {
     let title: String?
     let model: String?
-    /// provider-correctness T6. Encoded with `encodeIfPresent` like every optional here, so `nil` is
-    /// ABSENT on the wire — which the daemon reads as "unchanged", never "clear". There is
-    /// deliberately no way to CLEAR an effort through `sync.push`: `applySyncMeta` writes only the
-    /// fields it is given, and a replication meta that could null a column would let a phone that
-    /// simply hasn't learned about an override yet wipe one the Mac just set.
-    let effort: String?
+    /// provider-correctness T6, widened by the T6 review's C6 ruling. THREE states, and the middle
+    /// one is the whole protection:
+    ///   * `.none`        → the key is ABSENT. "I have no effort to report", which the daemon reads
+    ///                      as UNCHANGED. This is what a STALE client sends — one that has simply
+    ///                      not learned about an override the Mac set — and it is why nil-means-
+    ///                      absent rather than nil-means-clear.
+    ///   * `.some(nil)`   → a literal wire `null`: CLEAR the override. Only ever a deliberate,
+    ///                      user-expressed clear.
+    ///   * `.some(value)` → set it.
+    ///
+    /// `SyncClient` NEVER produces the middle case today, deliberately: `LocalSessionMeta.effort` is
+    /// a plain `String?` with no way to record "the user cleared this" as distinct from "I never had
+    /// one", so mapping a nil local effort to `null` would turn every stale push into a wipe. A
+    /// client that wants to express a real clear must first record the clear as an INTENT in its own
+    /// store; until it does, absent is the only honest answer. `testAStalePhonePushesAbsentEffortNotNull`
+    /// pins that, so a future "helpful" nil→null simplification fails loudly.
+    let effort: String??
     let forkedFrom: SessionForkRef?
 
     /// The ONE construction point, so the wire's title ceiling is enforced structurally rather than
@@ -233,11 +244,30 @@ private struct PushMetaParams: Encodable {
     /// re-fires on every pass until the title happens to change. Today's titles all come from the
     /// daemon (already bounded) or from `planFork` (bounded there too); this guard is what keeps a
     /// FUTURE local title source — T11's phone-side titler — from silently wedging a session.
-    init(title: String?, model: String?, effort: String?, forkedFrom: SessionForkRef?) {
+    init(title: String?, model: String?, effort: String??, forkedFrom: SessionForkRef?) {
         self.title = title.map(LocalEventStore.capTitle)
         self.model = model
         self.effort = effort
         self.forkedFrom = forkedFrom
+    }
+
+    private enum CodingKeys: String, CodingKey { case title, model, effort, forkedFrom }
+
+    /// Hand-written ONLY because `effort` is doubly optional and the two inner cases must encode
+    /// differently — absent vs. a literal `null`. Synthesized `encodeIfPresent` collapses at one
+    /// level and the distinction is exactly what the wire contract turns on, so this is spelled out
+    /// rather than trusted. Every other field keeps `encodeIfPresent`'s nil-is-absent behaviour
+    /// verbatim: the daemon's optional schema fields expect an omitted key, never `null`.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(title, forKey: .title)
+        try c.encodeIfPresent(model, forKey: .model)
+        switch effort {
+        case .none: break                                   // absent → unchanged
+        case .some(.none): try c.encodeNil(forKey: .effort) // null → clear
+        case .some(.some(let v)): try c.encode(v, forKey: .effort)
+        }
+        try c.encodeIfPresent(forkedFrom, forKey: .forkedFrom)
     }
 }
 private struct PushParams: Encodable { let sessionId: String; let baseSeq: Int; let data: String; let complete: Bool; let meta: PushMetaParams? }
@@ -407,7 +437,10 @@ public actor SyncClient {
         let baseSeq = meta.lastSyncedSeq
         let tail = await store.rawTail(sessionId: sessionId, fromSeq: baseSeq)
         if tail.isEmpty { return }
-        let pushMeta = PushMetaParams(title: meta.title, model: meta.model, effort: meta.effort,
+        // `meta.effort` is a plain `String?`, and it maps to ABSENT when nil — never to a wire null.
+        // See `PushMetaParams.effort` for why that direction is the stale-client protection.
+        let pushMeta = PushMetaParams(title: meta.title, model: meta.model,
+                                      effort: meta.effort.map { Optional($0) },
                                       forkedFrom: meta.forkedFrom)
         do {
             let result = try await pushChunked(sessionId: sessionId, baseSeq: baseSeq, data: tail, meta: pushMeta)
@@ -505,7 +538,8 @@ public actor SyncClient {
         // The id is derived by `planFork` from the branch point AND the branch content, so a retry of
         // THIS branch recomputes this id while a different branch gets its own (review round 2).
         let plan = try await store.planFork(originalId: originalId, atSeq: atSeq)
-        let forkPushMeta = PushMetaParams(title: plan.title, model: plan.model, effort: plan.effort,
+        let forkPushMeta = PushMetaParams(title: plan.title, model: plan.model,
+                                          effort: plan.effort.map { Optional($0) },
                                           forkedFrom: plan.forkedFrom)
         do {
             let result = try await pushChunked(sessionId: plan.newId, baseSeq: 0, data: plan.bytes, meta: forkPushMeta)
