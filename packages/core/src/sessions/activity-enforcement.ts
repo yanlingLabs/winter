@@ -137,8 +137,9 @@ export interface ActivityEnforcement {
  * once already.
  *
  * All state here is in memory and provisional. The two STORED flags stay user-explicit: nothing in
- * this file ever writes `backgrounded`/`archived` (the `session.setActivity` RPC is their only
- * writer). A daemon restart therefore forgets every auto-background and every active span, which is
+ * this file ever writes `backgrounded`/`archived` (`session.setActivity` and `dispatch-children.ts`'s
+ * spawn path — which stamps a dispatch child backgrounded at birth — are their only two writers).
+ * A daemon restart therefore forgets every auto-background and every active span, which is
  * correct — after a restart nothing is attached and no turn is running, so the derivation answers
  * from scratch.
  */

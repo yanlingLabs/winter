@@ -42,7 +42,7 @@ final class NormaSessionClientTests: XCTestCase {
     }
 
     /// `type` is the event's wire discriminator and it is NOT decoration: the client exempts the
-    /// seven TRANSIENT types from seq dedupe/cursor advance, so a frame's type decides which half of
+    /// eight TRANSIENT types from seq dedupe/cursor advance, so a frame's type decides which half of
     /// `applyEvent` it exercises. Anything testing dedupe/gap/replay must therefore use a PERSISTED
     /// type (the `assistant_message` default); the transient tests pass their own.
     private func eventFrame(
@@ -498,7 +498,7 @@ final class NormaSessionClientTests: XCTestCase {
                        "only the two PERSISTED events moved the cursor")
     }
 
-    /// The same drop killed all SEVEN transient types, not just streaming: the peripheral-lease v1
+    /// The same drop killed all EIGHT transient types, not just streaming: the peripheral-lease v1
     /// events, `plugin_tool_invoke`, `hardware_requested` and `plugin_tile_updated` are broadcast
     /// with the same borrowed seq. Pins the phone's exemption list against the Mac client's
     /// (`NormaClient.swift`) — membership drift in either direction fails here.

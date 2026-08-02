@@ -542,10 +542,12 @@ export class SessionStore {
    *  every future caller gets the same protection independent of this exclusion).
    *
    *  `first_message IS NULL` (set by `append`/`appendSynced`'s `user_message` derivation) is the
-   *  cheap indexed pre-filter, narrowing to a small candidate set in the common case — most sessions
-   *  get a first message within seconds of creation. It is NOT trusted alone: it only ever tracks
-   *  main-thread USER messages, so it says nothing about assistant output, and `recoverAll`'s
-   *  skip-bad-lines repair (a corrupt line is dropped, not stopped at — see `readGoodLines`) can
+   *  cheap SQL pre-filter — a full table scan (the `sessions` table carries no index beyond its
+   *  primary key), same as `cleanerCandidateIds` below — narrowing to a small candidate set in the
+   *  common case — most sessions get a first message within seconds of creation. It is NOT trusted
+   *  alone: it only ever tracks main-thread USER messages, so it says nothing about assistant
+   *  output, and `recoverAll`'s skip-bad-lines repair (a corrupt line is dropped, not stopped at —
+   *  see `readGoodLines`) can
    *  leave a log whose `user_message` line was corrupted-and-dropped while a LATER `assistant_message`
    *  line survived — `first_message` would then read NULL on a session that plainly produced real
    *  output (reaper.test.ts's "recovered log" case reproduces exactly this). So every
