@@ -1,5 +1,13 @@
-import { SessionEvent } from "@norma/protocol";
+import { SessionEvent, type SessionActivity } from "@norma/protocol";
 import type { SessionStore, EventInput } from "./store";
+
+/** Default bound on `SessionHub`'s last-emitted-activity memo (see `emitActivity`). Sessions are
+ *  unbounded over a daemon's lifetime, so a plain Map keyed by session id is a slow leak; this caps
+ *  it. Safe to bound at ALL because the memo is a de-dupe cache, never state: evicting an entry can
+ *  only cause one redundant re-statement of a state the client already holds — it can never cause a
+ *  MISSED change (that would need a stale entry, and eviction removes entries). 512 is far above
+ *  any plausible count of sessions changing state within one daemon run. */
+export const ACTIVITY_MEMO_CAP = 512;
 
 export interface HubClient {
   clientName: string;
@@ -23,7 +31,11 @@ export class SessionHub {
   // observer are swallowed (an observer must never break the append path).
   private observers = new Set<(event: SessionEvent) => void>();
 
-  constructor(private readonly store: SessionStore) {}
+  /** session-activity-hygiene T4: the last `session_activity` value BROADCAST per session — the
+   *  change filter behind `emitActivity`. Insertion-ordered, used as an LRU (see the cap). */
+  private lastActivity = new Map<string, SessionActivity>();
+
+  constructor(private readonly store: SessionStore, private readonly activityMemoCap = ACTIVITY_MEMO_CAP) {}
 
   addObserver(fn: (event: SessionEvent) => void): () => void {
     this.observers.add(fn);
@@ -110,6 +122,48 @@ export class SessionHub {
     const event = SessionEvent.parse({ ...input, seq: this.store.lastSeq(sessionId), ts: Date.now() });
     this.fanOut(sessionId, event);
     return event;
+  }
+
+  /** session-activity-hygiene T4: broadcast the session's DERIVED lifecycle state — but only when
+   *  it is actually a change. This is the live signal that lets an open UI flip without re-polling
+   *  `session.list`; every producer of a lifecycle transition calls it (`session.setActivity` after
+   *  its flag write, `session.attach`'s archived-clear, and T5's enforcement transitions).
+   *
+   *  Takes the state rather than deriving one: the derivation needs signals the hub does not own
+   *  (`AgentEngine.isRunning`/`hasBackgroundWork`) and there is exactly ONE place that wires them
+   *  (`deriveActivity` in ipc/server.ts). A hub that re-derived would be a second wiring — the
+   *  precise divergence T3 already had to fix once, when a private hub made `session.list` report
+   *  "idle" for a session with a live harness on it.
+   *
+   *  `undefined` — what the derivation returns for a chat/dispatch session — emits NOTHING. Absence
+   *  means "this session has no lifecycle", and that is not a state to announce; it also lets a
+   *  caller pipe a derivation result straight through without re-testing participation.
+   *
+   *  ONLY ON CHANGE, against `lastActivity`: an idempotent `session.setActivity` (background on an
+   *  already-backgrounded session) and any future per-tick sweep must not put a frame on every
+   *  attached socket for a state nobody moved. The FIRST publish for a session always fires — the
+   *  hub cannot know what a process that never ran published, and a re-statement is idempotent for
+   *  every client, whereas a suppressed first change would be invisible forever.
+   *
+   *  Deliberately NOT conditioned on `attachedCount > 0`, even though `fanOut` to an empty set is a
+   *  no-op today: that would bake "nobody is listening" into the memo, and the next global fan-out
+   *  path (T9's `norma agents` roster is the plan's own candidate, on the `session_titled`
+   *  `onGlobalEvent` precedent) would then silently miss every change made while a session sat
+   *  unattached. The contract here is about the STATE changing, not about who hears it.
+   *
+   *  Returns the broadcast event, or `null` when nothing was emitted. */
+  emitActivity(sessionId: string, activity: SessionActivity | undefined): SessionEvent | null {
+    if (activity === undefined) return null;
+    if (this.lastActivity.get(sessionId) === activity) return null;
+    // Re-insert to move this session to the young end (Map iterates in insertion order), so the
+    // eviction below drops the least-recently-CHANGED session rather than the oldest-known one.
+    this.lastActivity.delete(sessionId);
+    this.lastActivity.set(sessionId, activity);
+    if (this.lastActivity.size > this.activityMemoCap) {
+      const oldest = this.lastActivity.keys().next().value;
+      if (oldest !== undefined) this.lastActivity.delete(oldest);
+    }
+    return this.broadcastTransient(sessionId, { type: "session_activity", sessionId, activity });
   }
 
   private fanOut(sessionId: string, event: SessionEvent): void {

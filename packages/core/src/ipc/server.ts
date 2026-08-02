@@ -1032,7 +1032,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // independent (store.setArchived's own doc), which is what returns a resumed session to
           // background rather than to idle.
           try {
-            if (opts.store.meta(p.sessionId).archived) opts.store.setArchived(p.sessionId, false);
+            if (opts.store.meta(p.sessionId).archived) {
+              opts.store.setArchived(p.sessionId, false);
+              // T4: this un-archive is a real, observable state change — the second `emitActivity`
+              // call site, and the one that is easy to miss because it lives in a different handler
+              // from the RPC that owns the lifecycle. Derived AFTER the clear and after `hub.attach`
+              // (this connection is already counted), so the value announced is what `session.list`
+              // would now answer: "active", or "background" if the background flag survived the
+              // resume. Inside the same try as the read above — a row that vanished mid-attach has
+              // nothing to announce either.
+              hub.emitActivity(p.sessionId, deriveActivity(opts.store.meta(p.sessionId), p.sessionId, Date.now()));
+            }
           } catch { /* the row vanished between attach and here — nothing left to clear */ }
           return { ok: true, lastSeq };
         } catch (e) {
@@ -1429,7 +1439,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // Re-read rather than assuming what was just written: the derivation's inputs are the STORED
         // flags, and re-reading them is what keeps this echo an observation instead of a restatement.
         const after = opts.store.meta(p.sessionId);
-        return { ok: true, activity: deriveActivity(after, p.sessionId, Date.now()) };
+        const activity = deriveActivity(after, p.sessionId, Date.now());
+        // T4: the LIVE half. The RPC's own answer reaches only the caller; every OTHER harness with
+        // this session open would otherwise learn of the flag write on its next `session.list`.
+        // The SAME derived value the caller is handed, so the two can never describe different
+        // states, and the hub suppresses a re-statement (an idempotent set emits nothing).
+        hub.emitActivity(p.sessionId, activity);
+        return { ok: true, activity };
       }
 
       // -----------------------------------------------------------------------------------------

@@ -211,6 +211,94 @@ describe("SessionHub", () => {
     expect(hub.attachedCount(id)).toBe(0);
   });
 
+  // -----------------------------------------------------------------------------------------
+  // session-activity-hygiene T4: emitActivity — the lifecycle's LIVE signal.
+  // -----------------------------------------------------------------------------------------
+
+  test("emitActivity broadcasts a session_activity transient — borrowed seq, never persisted, never replayed", () => {
+    const { store, hub } = setup();
+    const id = store.createSession("global");
+    const a = fakeClient("a");
+    hub.attach(a, id, 0);
+    const before = store.lastSeq(id);
+
+    const e = hub.emitActivity(id, "background");
+    expect(e).toMatchObject({ type: "session_activity", activity: "background", sessionId: id, seq: before });
+    expect(store.lastSeq(id)).toBe(before);   // borrowed, not consumed
+    expect(a.received.at(-1)).toMatchObject({ type: "session_activity", activity: "background" });
+
+    // ...and it is absent from a fresh client's replay, like every transient.
+    const b = fakeClient("b");
+    hub.attach(b, id, 0);
+    expect(b.received.some((ev) => ev.type === "session_activity")).toBe(false);
+  });
+
+  test("emitActivity emits ONLY on change — a repeat of the same state is suppressed", () => {
+    const { store, hub } = setup();
+    const id = store.createSession("global");
+    const a = fakeClient("a");
+    hub.attach(a, id, 0);
+    const count = () => a.received.filter((e) => e.type === "session_activity").length;
+
+    expect(hub.emitActivity(id, "background")).not.toBeNull();
+    expect(count()).toBe(1);
+    // The idempotent-set case: `session.setActivity background` twice must not put a second frame
+    // on every attached socket.
+    expect(hub.emitActivity(id, "background")).toBeNull();
+    expect(hub.emitActivity(id, "background")).toBeNull();
+    expect(count()).toBe(1);
+
+    // A genuine change fires; returning to the previous value is a change too (the memo holds only
+    // the LAST emitted value, not a history).
+    expect(hub.emitActivity(id, "idle")).not.toBeNull();
+    expect(hub.emitActivity(id, "background")).not.toBeNull();
+    expect(a.received.filter((e) => e.type === "session_activity").map((e: any) => e.activity))
+      .toEqual(["background", "idle", "background"]);
+  });
+
+  test("emitActivity tracks change PER SESSION — one session's state never suppresses another's", () => {
+    const { store, hub } = setup();
+    const one = store.createSession("global");
+    const two = store.createSession("global");
+    expect(hub.emitActivity(one, "background")).not.toBeNull();
+    expect(hub.emitActivity(two, "background")).not.toBeNull(); // different session: not a repeat
+    expect(hub.emitActivity(one, "background")).toBeNull();
+  });
+
+  test("emitActivity(undefined) emits nothing — absence is 'no lifecycle', not a state", () => {
+    const { store, hub } = setup();
+    const id = store.createSession("global", { mode: "chat" });
+    const a = fakeClient("a");
+    hub.attach(a, id, 0);
+    // What `activityFor` returns for a chat/dispatch session. A caller must be able to pipe the
+    // derivation straight through without re-testing participation.
+    expect(hub.emitActivity(id, undefined)).toBeNull();
+    expect(a.received.some((e) => e.type === "session_activity")).toBe(false);
+  });
+
+  test("emitActivity fires with NOTHING attached — the contract is 'the state changed', not 'someone heard it'", () => {
+    const { store, hub } = setup();
+    const id = store.createSession("global");
+    // Deliberate: conditioning the memo on attachedCount would bake "nobody is listening" into it,
+    // and the next global fan-out path (T9's roster) would silently miss every change made while a
+    // session sat unattached.
+    expect(hub.emitActivity(id, "background")).not.toBeNull();
+    expect(hub.emitActivity(id, "background")).toBeNull();
+  });
+
+  test("the change memo is BOUNDED — eviction costs one redundant re-statement, never a missed change", () => {
+    const store = new SessionStore(mkdtempSync(join(tmpdir(), "norma-hub-")));
+    const hub = new SessionHub(store, 2); // cap injected so the eviction path is testable in 3 sessions
+    const ids = [store.createSession("global"), store.createSession("global"), store.createSession("global")];
+    for (const id of ids) expect(hub.emitActivity(id, "background")).not.toBeNull();
+    // ids[0] is now the least-recently-changed and has been evicted: re-emitting its CURRENT state
+    // fires again (a harmless re-statement of what its clients already hold)...
+    expect(hub.emitActivity(ids[0]!, "background")).not.toBeNull();
+    // ...while the two still memoized stay suppressed. Eviction can never do the opposite — hide a
+    // real change — because that would need a STALE entry, and eviction only removes entries.
+    expect(hub.emitActivity(ids[2]!, "background")).toBeNull();
+  });
+
   test("broadcastTransient evicts a dead client like a normal broadcast", () => {
     const { store, hub } = setup();
     const id = store.createSession("global");
