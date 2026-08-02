@@ -9,6 +9,21 @@ import type { SessionStore, EventInput } from "./store";
  *  any plausible count of sessions changing state within one daemon run. */
 export const ACTIVITY_MEMO_CAP = 512;
 
+/** session-activity-hygiene T9: how the global sink should treat connections the PER-SESSION
+ *  fan-out already reached. Only producers that fan out BOTH ways ever pass it. */
+export interface GlobalDeliveryOptions {
+  /** Skip any connection currently attached to `event.sessionId` — it already received this exact
+   *  event through `fanOut`, so delivering the global copy too would be a duplicate.
+   *
+   *  Absent (the `session_titled` path, unchanged) means "deliver to every harness": that event is
+   *  PERSISTED and carries its own seq, so the attached-harness double is absorbed by seq dedupe
+   *  (NormaKit dedupes on seq; the CLI ignores repeats). A TRANSIENT has no such absorber — clients
+   *  are required to exempt transients from seq dedupe (they borrow the store's head), so a
+   *  duplicate `session_activity` would arrive as a second, real state announcement. Hence the
+   *  exclusion rather than a tolerated double: exactly once, for every role. */
+  excludeSessionAttachments?: boolean;
+}
+
 export interface HubClient {
   clientName: string;
   /** session-activity-hygiene T5: the hello ROLE this connection authenticated as, as recorded on
@@ -27,10 +42,14 @@ export class SessionHub {
 
   // Set by the IPC server (Task 3): a narrow, additional broadcast path for event types that must
   // reach EVERY authed harness, not just clients attached to the session in question (mirrors the
-  // session_created broadcast the server already does for its own reasons). session_titled is the
-  // first (only) such type — a harness viewing the session list needs a session it isn't attached
-  // to to pick up its title live.
-  onGlobalEvent?: (event: SessionEvent) => void;
+  // session_created broadcast the server already does for its own reasons). session_titled was the
+  // first such type — a harness viewing the session list needs a session it isn't attached to to
+  // pick up its title live; session-activity-hygiene T9 added `session_activity` (see emitActivity).
+  //
+  // Reach, because the two paths are NOT the same set and the difference is load-bearing: this one
+  // goes to every conn that hello'd with role "harness", ATTACHED OR NOT — and to nothing else, so
+  // a remote (phone) connection never receives another session's global event.
+  onGlobalEvent?: (event: SessionEvent, opts?: GlobalDeliveryOptions) => void;
 
   // session-activity-hygiene T5: the hub RAISES the fact that a harness went away; it does not
   // decide what that means. Set by the IPC server (the `onGlobalEvent` precedent above), which wires
@@ -132,6 +151,16 @@ export class SessionHub {
     return this.attachments.get(sessionId)?.size ?? 0;
   }
 
+  /** Which session `client` is currently attached to, or `undefined` if none — read-only, no side
+   *  effects. session-activity-hygiene T9: the global sink asks this to answer "did `fanOut`
+   *  already deliver this event to that connection?" (see `GlobalDeliveryOptions`). Deliberately
+   *  the HUB's answer rather than a second attachment record kept on the connection: `byClient` is
+   *  the one place attachment is tracked, and it is already correct for a client that was detached
+   *  by a path the connection never learned about (`fanOut`'s dead-client eviction). */
+  attachedSession(client: HubClient): string | undefined {
+    return this.byClient.get(client);
+  }
+
   private appendAndBroadcast(sessionId: string, input: EventInput): SessionEvent {
     const event = this.store.append(sessionId, input);
     this.fanOut(sessionId, event);
@@ -179,7 +208,21 @@ export class SessionHub {
    *  no-op today: that would bake "nobody is listening" into the memo, and the next global fan-out
    *  path (T9's `norma agents` roster is the plan's own candidate, on the `session_titled`
    *  `onGlobalEvent` precedent) would then silently miss every change made while a session sat
-   *  unattached. The contract here is about the STATE changing, not about who hears it.
+   *  unattached. The contract here is about the STATE changing, not about who hears it. **T9 built
+   *  exactly that path** (below), which is what turned the note into a live requirement.
+   *
+   *  DELIVERED BOTH WAYS (T9), because neither path's reach contains the other's:
+   *    - `broadcastTransient` → `fanOut`: whoever is ATTACHED, any role — including a remote (phone)
+   *      connection, which is not a harness conn and so is unreachable from the global path. T4
+   *      allowlisted this type for remote deliberately (`REMOTE_STREAM_EVENT_TYPES`); routing
+   *      global-only would have cut the phone off it while the allowlist still claimed otherwise.
+   *    - `onGlobalEvent`: every authed HARNESS conn, attached or not. That is the half `norma
+   *      agents` needs — its whole subject is sessions nobody has open, which by definition have no
+   *      attachments for `fanOut` to reach.
+   *  The overlap (a harness attached to THIS session) is removed at the global sink via
+   *  `excludeSessionAttachments`, so every client receives each transition exactly once — see
+   *  `GlobalDeliveryOptions` for why a transient cannot tolerate the double the way `session_titled`
+   *  can.
    *
    *  Returns the broadcast event, or `null` when nothing was emitted. */
   emitActivity(sessionId: string, activity: SessionActivity | undefined): SessionEvent | null {
@@ -199,6 +242,12 @@ export class SessionHub {
     // our own (now stale) value over it would be the identical bug from the other direction.
     const before = this.lastActivity.get(sessionId);
     const event = this.broadcastTransient(sessionId, { type: "session_activity", sessionId, activity });
+    // T9's second half, immediately after the per-session one so the two deliveries of the SAME
+    // event object cannot be separated by anything. Not guarded: `appendAndBroadcast`'s
+    // `session_titled` call isn't either, and the server's sink already swallows per-connection
+    // failures (a dead socket is evicted by its own close handler). The nested-emit check below
+    // still covers a re-entrant emit raised from inside either delivery.
+    this.onGlobalEvent?.(event, { excludeSessionAttachments: true });
     if (this.lastActivity.get(sessionId) !== before) return event; // a nested emit recorded a newer state
     // Re-insert to move this session to the young end (Map iterates in insertion order), so the
     // eviction below drops the least-recently-CHANGED session rather than the oldest-known one.

@@ -638,8 +638,25 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   // watching the session list (but not attached to this particular session) still needs to learn
   // its title live. Attached harnesses may receive it twice (fanOut + this); seq-based dedupe
   // absorbs that (NormaKit dedupes on seq; the CLI ignores unknown/duplicate event types).
-  hub.onGlobalEvent = (event) => {
+  //
+  // session-activity-hygiene T9: `session_activity` rides this same path (SessionHub.emitActivity)
+  // — a roster of BACKGROUND sessions is by definition a view of sessions with no attachments, so
+  // the per-session fan-out reaches nobody who needs it. It passes `excludeSessionAttachments`
+  // because a TRANSIENT has no seq-dedupe to absorb the double the sentence above relies on; see
+  // `GlobalDeliveryOptions` (sessions/hub.ts).
+  //
+  // NOTE the reach, deliberately unchanged: `harnessConns` holds role "harness" ONLY (see the hello
+  // handler). A remote (phone) connection is never in it, so no global event — title or activity —
+  // ever tells a phone about a session it is not attached to. The phone's own copy comes through
+  // the per-session `HubClient` in `session.attach`, which is where the remote allowlist + capEvent
+  // are applied; there is no second remote seam to guard here.
+  hub.onGlobalEvent = (event, opts) => {
     for (const conn of harnessConns) {
+      // `hub.attachedSession` (not a flag on ConnState) is the authority: a client evicted mid-
+      // fan-out for a dead socket is gone from the hub the instant it happened, while `hubClient`
+      // on the connection still points at the stale object.
+      if (opts?.excludeSessionAttachments && conn.hubClient
+        && hub.attachedSession(conn.hubClient) === event.sessionId) continue;
       try { conn.writer.enqueue(encodeLine({ jsonrpc: "2.0", method: METHODS.event, params: event })); }
       catch { /* dead socket — its close() handler will evict it from harnessConns */ }
     }
