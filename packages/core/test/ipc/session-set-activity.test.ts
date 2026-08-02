@@ -458,4 +458,31 @@ describe("session.setActivity (session-activity-hygiene T3)", () => {
     expect(res.result).toEqual({ ok: true, activity: "background" });
     c.close();
   });
+
+  // T2 seam, closed by T3's shared `deriveActivity`: `startIpcServer` falls back to a PRIVATE
+  // SessionHub when none is injected (legal — the constructor only requires one alongside an
+  // engine), and that private hub is then the one every `session.attach` actually attaches to.
+  // T2's `session.list` derived off `opts.hub?.attachedCount(...) ?? 0`, so on such a server it
+  // reported a hard 0 — "idle" for a session with a live harness sitting on it. Deriving off the
+  // LOCAL binding is what makes both surfaces read the hub that holds the attachments.
+  test("a server built with NO injected hub still sees its own attachments (both surfaces)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-set-activity-nohub-"));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store });
+    stop = () => { server.stop(); store.close(); };
+
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "activity-setter");
+    const sessionId = store.createSession("global");
+    await c.request(METHODS.sessionAttach, { sessionId });
+
+    const listed = await c.request(METHODS.sessionList, {});
+    expect(listed.result.sessions.find((s: any) => s.sessionId === sessionId).activity).toBe("active");
+    expect((await c.request(METHODS.sessionSetActivity, { sessionId, activity: null })).result)
+      .toEqual({ ok: true, activity: "active" });
+    c.close();
+  });
 });
