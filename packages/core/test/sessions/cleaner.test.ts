@@ -424,6 +424,35 @@ describe("SessionCleaner rails — a railed session survives a delete-voting jud
     store.close();
   });
 
+  // Review Critical (T7): `activityFor` returns `undefined` at its FIRST line for any mode outside
+  // {code, cowork} (activity.ts:100), so for a chat session the three liveness signals the cleaner
+  // wires up were computed and then thrown away — and nothing else covered the gap (chat has no fs
+  // tools, so `hasFileWrite` can never fire; the title rail is vacuous; a Mac-minted chat id is
+  // `s_<hex>`, so the phone rail does not apply). The reachable shape was a menu-bar chat window
+  // left open over a weekend: attached, live, and fully deletable at the next Dreaming tick, with no
+  // `session_deleted` event to tell the open window. The rail now reads the RAW signals, so all
+  // three protect ALL modes symmetrically.
+  test("rail: an ATTACHED chat session — chat derives no activity state, so the RAW signal must rail it", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store, { mode: "chat" });
+    await expectRailed(store, home, id, { attachedCount: () => 1 });
+    store.close();
+  });
+
+  test("rail: a chat session with a RUNNING TURN", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store, { mode: "chat" });
+    await expectRailed(store, home, id, { turnRunning: () => true });
+    store.close();
+  });
+
+  test("rail: a chat session with BACKGROUND WORK outliving its turn", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store, { mode: "chat" });
+    await expectRailed(store, home, id, { bgWork: () => true });
+    store.close();
+  });
+
   test("rail: activity 'archived'", async () => {
     const { home, store } = freshStore();
     const id = junkSession(store);

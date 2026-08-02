@@ -233,22 +233,49 @@ export class SessionCleaner {
     // Fork parent or fork child — deleting either end orphans the other's provenance.
     if (this.deps.store.isForkRelated(sessionId)) return "fork";
 
-    // activity ∈ {active, background, archived}. `undefined` (chat/dispatch — a mode with no
-    // lifecycle) is NOT a rail: chat sessions are exactly the abandoned-New-Chat case the cleaner
-    // exists for, and the rail's meaning is "not active/background/archived".
+    const turnRunning = this.deps.turnRunning(sessionId);
+    const attachedCount = this.deps.attachedCount(sessionId);
+    const bgWork = this.deps.bgWork(sessionId);
+    const lastEventTs = this.deps.store.lastEventTs(sessionId);
+
+    // LIVENESS, straight off the RAW signals — checked INDEPENDENTLY of the derivation below, and
+    // this independence is load-bearing rather than defensive duplication.
+    //
+    // `activityFor` answers `undefined` on its FIRST line for every mode outside {code, cowork}
+    // (activity.ts's `participatesInActivity`) and discards these three inputs entirely. Deriving
+    // the rail from it alone therefore left CHAT sessions with no liveness protection at all: chat
+    // has no filesystem tools, so `hasFileWrite` can never fire for one; the title rail is vacuous;
+    // and a Mac-minted chat id is `s_<hex>`, so the phone rail does not apply — leaving only
+    // `judged`, `fork` and the 24h gate. A chat window left open across a weekend (attached, alive,
+    // no new messages) was a full candidate, and a delete verdict would have deleted it out from
+    // under the open window — with no `session_deleted` event to tell the client.
+    //
+    // "No lifecycle STATE" is not "no liveness". A session someone is looking at, or that is doing
+    // work right now, is never junk, whatever its mode calls itself. Redundant for code/cowork by
+    // construction (any of these three already derives `active` or `background` there), so this
+    // strictly ADDS protection and can regress nothing.
+    if (attachedCount > 0 || turnRunning || bgWork) return "activity";
+
+    // The DERIVED state adds what the raw signals cannot say: the STORED flags. `backgrounded` and
+    // `archived` rail a session with nothing attached and nothing running — the "keep it, I'll come
+    // back to it" bits — and only code/cowork carry them (`session.setActivity` refuses every other
+    // mode, ipc/server.ts). `undefined` here still means "this mode has no lifecycle", which after
+    // the liveness check above is correctly NOT a rail: a genuinely idle chat is exactly the
+    // abandoned-New-Chat case the cleaner exists for.
     const activity = activityFor(row, {
-      turnRunning: this.deps.turnRunning(sessionId),
-      attachedCount: this.deps.attachedCount(sessionId),
-      bgWork: this.deps.bgWork(sessionId),
-      lastEventTs: this.deps.store.lastEventTs(sessionId),
+      turnRunning, attachedCount, bgWork, lastEventTs,
       // `activeSince`/`autoBackground` are the ENFORCEMENT's in-memory signals (activity-
       // enforcement.ts), reachable only inside `startIpcServer`'s closure — not here. Omitting them
       // costs this gate nothing: both can only ever push a session from "idle" TOWARDS
       // background/archived, i.e. towards being railed, and in each case another input already
-      // rails it. `activeSince` is stamped only while a harness is attached, so `attachedCount > 0`
-      // has already answered "active"; `autoBackground` covers a ~2-minute post-turn grace, so the
-      // 24h idle gate below has already answered "not idle long enough".
+      // rails it. `activeSince` is stamped only while a harness is attached, so the raw
+      // `attachedCount > 0` check above has already railed it; `autoBackground` covers a ~2-minute
+      // post-turn grace, so the 24h idle gate below has already answered "not idle long enough".
     }, nowMs);
+    // `"active"` is listed even though the raw check above already rails every way `activityFor`
+    // can currently produce it (it needs `attachedCount > 0`). Keeping it costs nothing and means a
+    // future change in activity.ts that reaches "active" by some other route cannot silently
+    // un-rail a live session on this deletion path.
     if (activity === "active" || activity === "background" || activity === "archived") return "activity";
 
     // The idle gate itself (spec §3: "≥ 24 h since last event"). KNOWN CAVEAT, accepted: the store
@@ -256,7 +283,7 @@ export class SessionCleaner {
     // SECOND writer that resets that mtime at daemon boot — a repaired session therefore looks
     // freshly touched and is spared for another 24 h. That errs towards keeping, which is the only
     // direction this gate is allowed to err in.
-    if (this.deps.store.lastEventTs(sessionId) > nowMs - CLEANER_MIN_IDLE_MS) return "not-idle-24h";
+    if (lastEventTs > nowMs - CLEANER_MIN_IDLE_MS) return "not-idle-24h";
 
     // ---- the two transcript rails, one parse ----
     const events = this.deps.store.read(sessionId);
