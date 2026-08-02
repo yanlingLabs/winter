@@ -52,7 +52,7 @@ export interface CliSubagent {
  *  and it only ever fires when nothing is in flight — i.e. the child is waiting on the provider,
  *  which normally takes seconds. The daemon's window is not visible to the CLI (it's a daemon-side
  *  setting), so this is a local constant rather than a derived one. */
-export const ROSTER_STALL_MS = 60_000;
+export const ROSTER_STALL_MS = 180_000;
 
 type WireEvent = { type: string; threadId?: string; [k: string]: unknown };
 
@@ -68,8 +68,15 @@ function patch(items: CliSubagent[], threadId: string, f: (s: CliSubagent) => Cl
  *  empty patch that leaves the previous stamp standing. Spread into every child-event branch below
  *  so "which events count as this row showing signs of life" is one decision in one place — the
  *  CLI-side mirror of the daemon's single `onProgress` chokepoint (engine.ts's per-provider-event
- *  stall reset). What the wire gives us is a SUBSET of what that chokepoint sees (no reasoning or
- *  usage events reach the roster), which only ever makes this hint more conservative, never less. */
+ *  stall reset). What the wire gives us is a SUBSET of what that chokepoint sees — no reasoning or
+ *  usage events reach the roster, and `reasoning_item` only ever lands AFTER a block completes —
+ *  so fewer stamps make this hint fire SOONER, not later (T5 review: the original comment had the
+ *  direction backwards). That is exactly why ROSTER_STALL_MS matches `NORMA_TURN_STALL_MS`'s 180s
+ *  (main.ts) rather than something tighter: a high-effort child can legitimately think for over a
+ *  minute between rounds with total wire silence, and a roster that cries "Stalled" at a thinking
+ *  child destroys the verb's meaning. Known structural blind spot, accepted: a child stuck INSIDE
+ *  a tool call never fires this hint (in-flight > 0 excludes it) — that case stays invisible until
+ *  the daemon's 600s watchdog kill. */
 function stamp(e: WireEvent): { lastEventAt?: number } {
   return typeof e.ts === "number" ? { lastEventAt: e.ts } : {};
 }
