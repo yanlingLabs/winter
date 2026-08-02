@@ -67,6 +67,7 @@ import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
 import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, type Settings } from "../settings";
+import { DISPATCH_PIN_MESSAGE } from "../agent/dispatch-config";
 import {
   deriveInstallName, installPluginFromDir, missingConsents, buildConsentBlock, applyFreshPluginConsent,
   setPluginEnabled, grantPluginConsents, removePluginFromSettings, removePluginDir, stripPluginConsents,
@@ -1205,16 +1206,29 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         }
         return { ok: true };
       }
-      // Chat Slice D task 1: per-session model override — mode-agnostic (unlike session.setPolicy
-      // just above, this has NO chat/dispatch special case: there is no "fixed model" concept for
-      // any mode). `assertRemoteMayUseSession` guards it since it's REMOTE_ALLOWED_METHODS-listed
-      // and takes a bare caller-supplied sessionId, same as session.attach/send/history/interrupt
-      // above. `model: null` clears the override (AgentEngine.resolveSel falls back to the
-      // live/boot default on the NEXT turn — this never affects an already-running turn, mirroring
-      // how a live model-settings edit doesn't retroactively change the CURRENT turn either).
+      // Chat Slice D task 1: per-session model override — mode-agnostic for chat/code (unlike
+      // session.setPolicy just above's chat special case). `assertRemoteMayUseSession` guards it
+      // since it's REMOTE_ALLOWED_METHODS-listed and takes a bare caller-supplied sessionId, same
+      // as session.attach/send/history/interrupt above. `model: null` clears the override
+      // (AgentEngine.resolveSel falls back to the live/boot default on the NEXT turn — this never
+      // affects an already-running turn, mirroring how a live model-settings edit doesn't
+      // retroactively change the CURRENT turn either).
+      //
+      // session-activity-hygiene task 1: dispatch now DOES have a fixed-model concept — a user
+      // ruling (DISPATCH_MODEL/DISPATCH_EFFORT, dispatch-config.ts), refused here BEFORE
+      // resolveModelSelection runs (mirrors session.setPolicy's targetMode try/catch idiom just
+      // above: an unknown sessionId must still fall through to this method's own NOT_FOUND, not a
+      // confusing pin refusal that implies the session exists). Applies to `model: null` too —
+      // there is no per-session override on a dispatch session to clear in the first place, and the
+      // refusal is about the TARGET being dispatch, not about which value was sent.
       case METHODS.sessionSetModel: {
         const p = parseParams(SessionSetModelParams, params);
         assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        let targetMode: string | undefined;
+        try { targetMode = opts.store.meta(p.sessionId).mode; } catch { /* unknown id — NOT_FOUND below wins */ }
+        if (targetMode === "dispatch") {
+          throw new RpcFailure(ERR.INVALID_PARAMS, DISPATCH_PIN_MESSAGE);
+        }
         let model = p.model;
         // I1 review fix: this method is remote-reachable and hand-callable, so a future picker's
         // UI list must never be the only guard — reuse spawn_agent's own `known.length > 0`-guarded
@@ -1239,11 +1253,23 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // argument on session.setModel just above ("effort and model are two different things, just
       // like the CLI"). Everything structural is that method's, deliberately: the same
       // `assertRemoteMayUseSession` guard (it is REMOTE_ALLOWED_METHODS-listed and takes a bare
-      // caller-supplied sessionId), the same mode-agnosticism, the same `null` = clear, the same
-      // NOT_FOUND mapping, and the same "the next turn resolves it, never the running one".
+      // caller-supplied sessionId), the same mode-agnosticism for chat/code, the same `null` =
+      // clear, the same NOT_FOUND mapping, and the same "the next turn resolves it, never the
+      // running one" — and, as of session-activity-hygiene task 1, the same dispatch fixed-pin
+      // refusal (see session.setModel's own doc comment above for the reasoning).
       case METHODS.sessionSetEffort: {
         const p = parseParams(SessionSetEffortParams, params);
         assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        // Read ONCE, regardless of null-ness (session-activity-hygiene task 1 needs the mode even
+        // for a clear attempt — dispatch's effort can never be overridden OR cleared, there's
+        // nothing to clear). An unknown sessionId leaves this undefined and is left to
+        // `store.setEffort` to report — that keeps NOT_FOUND coming from one place regardless of
+        // which branch below ran (and is why none of them may refuse on an absent meta).
+        let sessionMeta: { model?: string; mode?: string } | undefined;
+        try { sessionMeta = opts.store.meta(p.sessionId); } catch { /* unknown id → the store call below owns the error */ }
+        if (sessionMeta?.mode === "dispatch") {
+          throw new RpcFailure(ERR.INVALID_PARAMS, DISPATCH_PIN_MESSAGE);
+        }
         // SET-TIME validation, for the reason session.setModel's exists (I1 review fix: an
         // unvalidated selection bricks every future turn SILENTLY — the provider 400s on each one
         // with nothing pointing back at the setting that caused it). The effort half needs it MORE,
@@ -1265,11 +1291,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // admitted HERE as a client-side selector translated before the request (at
         // `AgentEngine.resolveSel`), never by adding it to `effortsForModel`.
         if (p.effort !== null) {
-          // Read ONCE. An unknown sessionId leaves this undefined and is left to `store.setEffort`
-          // to report — that keeps NOT_FOUND coming from one place regardless of which branch of
-          // `assertEffortSelectable` ran (and is why neither branch may refuse on an absent meta).
-          let sessionMeta: { model?: string; mode?: string } | undefined;
-          try { sessionMeta = opts.store.meta(p.sessionId); } catch { /* unknown id → the store call below owns the error */ }
           // The session's EFFECTIVE model, by the same precedence AgentEngine.resolveSel applies:
           // its own override first, the daemon's live default second. Both rules — the tier's
           // code-only gate and the model-aware wire check, with the m2-review permissive carve-out

@@ -187,15 +187,37 @@ describe("session.setEffort round-trip RPC (provider-correctness T4)", () => {
     c.close();
   });
 
-  test("works for a DISPATCH session too", async () => {
+  // session-activity-hygiene task 1: dispatch's effort is a FIXED PIN (DISPATCH_EFFORT) — replaces
+  // the old "works for a DISPATCH session too" control (mode-agnosticism no longer holds for
+  // dispatch specifically; chat just above is unaffected). The door refuses OUTRIGHT, before
+  // assertEffortSelectable even runs.
+  test("refuses a DISPATCH target with INVALID_PARAMS naming the pin — the effort is never stored", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "effort-setter");
     const sessionId = store.createSession("global", { mode: "dispatch", origin: "dispatch" });
 
     const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort: "medium" });
-    expect(res.error).toBeUndefined();
-    expect(store.meta(sessionId).effort).toBe("medium");
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error.message).toContain("dispatch runs a fixed model");
+    expect(res.error.message).toContain("gpt-5.6-terra");
+    expect(res.error.message).toContain("medium");
+    expect(store.meta(sessionId).effort).toBeUndefined();
+    c.close();
+  });
+
+  // `effort: null` (clearing) is refused too — same reasoning as session.setModel's mirror test:
+  // there's nothing to clear, and the refusal is about the TARGET, not the value sent.
+  test("refuses effort: null (clear) against a DISPATCH target too", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "effort-setter");
+    const sessionId = store.createSession("global", { mode: "dispatch", origin: "dispatch" });
+
+    const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort: null });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
     c.close();
   });
 
@@ -409,28 +431,56 @@ describe("session.setEffort admits the ultra tier for CODE sessions only (provid
     c.close();
   });
 
-  for (const mode of ["chat", "dispatch"] as const) {
-    test(`a ${mode.toUpperCase()} session REFUSES \`ultra\` with the same INVALID_PARAMS shape, and the column stays empty`, async () => {
-      const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
-      const c = await TestClient.connect(socketPath);
-      await c.hello(harnessToken, "effort-setter");
-      const sessionId = store.createSession("global", { mode });
+  // CHAT only now — session-activity-hygiene task 1's dispatch pin (below) supersedes dispatch's
+  // half of what used to be a `["chat", "dispatch"]` parametrized loop: dispatch refuses EVERY
+  // effort (tier or wire) with the pin message rather than this tier-specific one. Chat is
+  // untouched by that task, so its case stays exactly as it was.
+  test("a CHAT session REFUSES `ultra` with the same INVALID_PARAMS shape, and the column stays empty", async () => {
+    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "effort-setter");
+    const sessionId = store.createSession("global", { mode: "chat" });
 
-      const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort: "ultra" });
+    const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort: "ultra" });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error.message).toContain("ultra");
+    expect(store.meta(sessionId).effort).toBeUndefined();
+
+    // ...and the refusal is scoped to the TIER: the same session still takes every WIRE effort,
+    // so this is not "chat cannot set an effort".
+    for (const effort of effortsForModel("gpt-5.6-sol")) {
+      expect((await c.request(METHODS.sessionSetEffort, { sessionId, effort })).error).toBeUndefined();
+      expect(store.meta(sessionId).effort).toBe(effort);
+    }
+    c.close();
+  });
+
+  // DISPATCH: the blanket pin refuses `ultra` too, but with the PIN message, not
+  // assertEffortSelectable's "Norma-level tier offered on code sessions only" one — and unlike
+  // chat, EVERY wire effort is refused as well (dispatch can't set an effort at all, tier or
+  // otherwise; chat only loses the tier). This is the contrast the comment above promises.
+  test("a DISPATCH session refuses `ultra` (and every wire effort) with the PIN message, not the tier-specific one", async () => {
+    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "effort-setter");
+    const sessionId = store.createSession("global", { mode: "dispatch" });
+
+    const tierRes = await c.request(METHODS.sessionSetEffort, { sessionId, effort: "ultra" });
+    expect(tierRes.error).toBeTruthy();
+    expect(tierRes.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(tierRes.error.message).toContain("dispatch runs a fixed model");
+    expect(store.meta(sessionId).effort).toBeUndefined();
+
+    for (const effort of effortsForModel("gpt-5.6-sol")) {
+      const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort });
       expect(res.error).toBeTruthy();
       expect(res.error.code).toBe(ERR.INVALID_PARAMS);
-      expect(res.error.message).toContain("ultra");
+      expect(res.error.message).toContain("dispatch runs a fixed model");
       expect(store.meta(sessionId).effort).toBeUndefined();
-
-      // ...and the refusal is scoped to the TIER: the same session still takes every WIRE effort,
-      // so this is not "chat/dispatch cannot set an effort".
-      for (const effort of effortsForModel("gpt-5.6-sol")) {
-        expect((await c.request(METHODS.sessionSetEffort, { sessionId, effort })).error).toBeUndefined();
-        expect(store.meta(sessionId).effort).toBe(effort);
-      }
-      c.close();
-    });
-  }
+    }
+    c.close();
+  });
 
   test("the tier is NOT routed through effortsForModel — an unenumerable model still accepts it", async () => {
     // `effortsForModel` describes what the ENDPOINT accepts; the tier never reaches the endpoint, so

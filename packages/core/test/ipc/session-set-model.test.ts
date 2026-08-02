@@ -169,15 +169,52 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
     c.close();
   });
 
-  test("works for a DISPATCH session too", async () => {
+  // session-activity-hygiene task 1: dispatch's model is a FIXED PIN (DISPATCH_MODEL, a user
+  // ruling — the RESEARCH_MODEL precedent) — the door refuses a dispatch target OUTRIGHT, before
+  // resolveModelSelection even runs. This replaces the old "works for a DISPATCH session too"
+  // control (mode-agnosticism no longer holds for dispatch specifically; chat is unaffected, see
+  // the test just above).
+  test("refuses a DISPATCH target with INVALID_PARAMS naming the pin — the model is never stored", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "model-setter");
     const sessionId = store.createSession("global", { mode: "dispatch", origin: "dispatch" });
 
     const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "claude-opus-5" });
-    expect(res.error).toBeUndefined();
-    expect(store.meta(sessionId).model).toBe("claude-opus-5");
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error.message).toContain("dispatch runs a fixed model");
+    expect(res.error.message).toContain("gpt-5.6-terra");
+    expect(res.error.message).toContain("medium");
+    expect(store.meta(sessionId).model).toBeUndefined();
+    c.close();
+  });
+
+  // `model: null` (clearing) is refused too — there is no per-session override to clear in the
+  // first place, and the refusal is about the TARGET being dispatch, not about which value was sent.
+  test("refuses model: null (clear) against a DISPATCH target too", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "model-setter");
+    const sessionId = store.createSession("global", { mode: "dispatch", origin: "dispatch" });
+
+    const res = await c.request(METHODS.sessionSetModel, { sessionId, model: null });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    c.close();
+  });
+
+  // Unknown session id must still win with NOT_FOUND — the dispatch-pin refusal must never fire for
+  // an id that doesn't resolve to a real session (mirrors session.setPolicy's own precedent, whose
+  // targetMode try/catch idiom this reuses).
+  test("an UNKNOWN session id is still NOT_FOUND, not the dispatch-pin refusal", async () => {
+    const { socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "model-setter");
+
+    const res = await c.request(METHODS.sessionSetModel, { sessionId: "s_does_not_exist", model: "claude-opus-5" });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.NOT_FOUND);
     c.close();
   });
 

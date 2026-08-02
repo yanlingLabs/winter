@@ -35,6 +35,7 @@ import { resolveModelAlias } from "./model-aliases";
 import type { LspManager } from "./lsp/manager";
 import { autoDiagnosticsSuffix, AUTO_DIAG_TOOL_NAMES } from "./lsp/auto-diagnostics";
 import { DISPATCH_SYSTEM_PROMPT } from "./dispatch-prompt";
+import { DISPATCH_MODEL, DISPATCH_EFFORT } from "./dispatch-config";
 import { CHAT_SYSTEM_PROMPT } from "./chat-prompt";
 import type { DispatchChildren } from "./dispatch-children";
 import type { WorkflowRuntime } from "../workflows/runtime";
@@ -2040,8 +2041,19 @@ export class AgentEngine {
    *  `meta.effort` and re-derive it (three call sites, three chances to disagree). It is gated here,
    *  once, on `clientEffortEligible(meta.mode)`: `session.setEffort` refuses a tier for chat/dispatch
    *  at the door, and this is the second enforcement for a stored tier that got in some other way (a
-   *  fork, a hand-edited index) — such a session still sends `max` and still gets no injection. */
+   *  fork, a hand-edited index) — such a session still sends `max` and still gets no injection.
+   *
+   *  session-activity-hygiene task 1: dispatch's model/effort are a FIXED PIN (`DISPATCH_MODEL`/
+   *  `DISPATCH_EFFORT`, dispatch-config.ts) — a user ruling, the same shape as `RESEARCH_MODEL`.
+   *  Checked FIRST, before `meta.model`/`meta.effort`/`live()`/the boot default are read at all: not
+   *  a translation (like `ultra`'s wireEffort hop) but a short-circuit, so a dispatch session's
+   *  stored override — however it got there — never has anything to win against. `ultra` stays
+   *  false unconditionally for the same reason `clientEffortEligible` already refused it for
+   *  dispatch: there is no resolved-from-meta effort here for the tier axis to apply to. */
   private resolveSel(meta: { model?: string; effort?: string; mode?: string }): { model: string; reasoningEffort?: string; ultra: boolean } {
+    if (meta.mode === "dispatch") {
+      return { model: DISPATCH_MODEL, reasoningEffort: DISPATCH_EFFORT, ultra: false };
+    }
     const base = this.cfg.provider.live?.() ?? { model: this.cfg.provider.model };
     // NOTE: `base`'s shape is exhaustive by construction here — `live()` is typed
     // `() => { model; reasoningEffort? }` and both fields are handled explicitly below. The pre-T5

@@ -4,6 +4,7 @@ import { setupEngine } from "./engine-steer.test";
 import { setup as setupSpawn } from "./engine-spawn.test";
 import type { ProviderEvent } from "../../src/providers/types";
 import { CLIENT_EFFORTS, REASONING_EFFORTS } from "../../src/settings";
+import { DISPATCH_MODEL, DISPATCH_EFFORT } from "../../src/agent/dispatch-config";
 
 const done = (reason: "end_turn" | "tool_calls"): ProviderEvent => ({ type: "done", stopReason: reason });
 const text = (t: string): ProviderEvent[] => [{ type: "text_delta", delta: t }, done("end_turn")];
@@ -389,20 +390,23 @@ describe("ultra is translated before the wire (provider-correctness T5)", () => 
     expect(provider.requests[0]!.instructions).not.toContain(POSTURE);
   });
 
-  for (const mode of ["chat", "dispatch"] as const) {
-    test(`a ${mode.toUpperCase()} session carrying ultra still sends max and injects NOTHING`, async () => {
-      // Unreachable through `session.setEffort` (it refuses the tier for these modes) — reachable by
-      // a fork or a hand-edited store, which is exactly why the engine cannot rely on the door.
-      const provider = new FakeProvider([text("ok")]);
-      const { engine, store, cwd } = setupEngine(provider, { live: () => ({ model: "live-model", reasoningEffort: "low" }) });
-      const sessionId = store.createSession("global", { cwd, approvalPolicy: "auto", mode });
-      store.setEffort(sessionId, "ultra");
+  // CHAT only now — session-activity-hygiene task 1 gives dispatch its OWN fixed-pin short-circuit
+  // in resolveSel (see "dispatch's model/effort are a fixed pin" below), which ignores meta.effort
+  // entirely rather than translating it. A hand-set `ultra` on a dispatch session therefore no
+  // longer resolves to `max` (this loop's old dispatch case) — it resolves to DISPATCH_EFFORT,
+  // pinned in its own test in that describe block, right alongside the model half of the same fix.
+  test("a CHAT session carrying ultra still sends max and injects NOTHING", async () => {
+    // Unreachable through `session.setEffort` (it refuses the tier for chat) — reachable by a fork
+    // or a hand-edited store, which is exactly why the engine cannot rely on the door.
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, store, cwd } = setupEngine(provider, { live: () => ({ model: "live-model", reasoningEffort: "low" }) });
+    const sessionId = store.createSession("global", { cwd, approvalPolicy: "auto", mode: "chat" });
+    store.setEffort(sessionId, "ultra");
 
-      await engine.runTurn(sessionId);
-      expect(provider.requests[0]!.reasoningEffort).toBe("max");   // still translated — never on the wire
-      expect(provider.requests[0]!.instructions).not.toContain(POSTURE); // but inert
-    });
-  }
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.reasoningEffort).toBe("max");   // still translated — never on the wire
+    expect(provider.requests[0]!.instructions).not.toContain(POSTURE); // but inert
+  });
 
   test("a subagent inherits the TRANSLATED effort — the child's own request never carries the tier either", async () => {
     // Same shape as the T4 inheritance test above (run_in_background:false so requests[1] is the
@@ -439,5 +443,117 @@ describe("ultra is translated before the wire (provider-correctness T5)", () => 
       expect(CLIENT_EFFORTS as readonly string[]).not.toContain(req.reasoningEffort ?? "");
       expect(REASONING_EFFORTS as readonly string[]).toContain(req.reasoningEffort!);
     }
+  });
+});
+
+// ================================================================================================
+// session-activity-hygiene task 1 — dispatch's model/effort are a FIXED PIN (dispatch-config.ts),
+// a user ruling exactly like RESEARCH_MODEL: dispatch is the ambient coordinator, not a session
+// someone tunes per-conversation, so there is no picker for it to answer to.
+//
+// This is LAYER 1 of the two-layer pattern the `ultra` tier established just above: `resolveSel`
+// short-circuits a dispatch session's resolution BEFORE meta.model, meta.effort, live(), AND the
+// boot default are even read — not merely "translates them to something safe" the way `ultra`'s
+// wireEffort hop does, but skips reading them at all. Layer 2 (the session.setModel/session.setEffort
+// door refusal) lives in ipc/session-set-model.test.ts / ipc/session-set-effort.test.ts; per the
+// two-layer mutation discipline, each layer's test must fail on its own when ONLY that layer is
+// removed.
+//
+// The store is written DIRECTLY here (`store.setModel`/`store.setEffort`), deliberately bypassing
+// the RPC doors — same reasoning as the ultra-tier block above: production reaches this only via a
+// fork or a hand-edited index (the doors refuse it), and resolveSel must hold even then.
+// ================================================================================================
+describe("dispatch's model/effort are a fixed pin (session-activity-hygiene task 1)", () => {
+  test("a dispatch session ignores live()'s model AND reasoningEffort entirely — always the pin", async () => {
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, store, cwd } = setupEngine(provider, { live: () => ({ model: "live-model", reasoningEffort: "xhigh" }) });
+    const sessionId = store.createSession("global", { cwd, approvalPolicy: "auto", mode: "dispatch" });
+
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.model).toBe(DISPATCH_MODEL);
+    expect(provider.requests[0]!.reasoningEffort).toBe(DISPATCH_EFFORT);
+  });
+
+  test("a dispatch session ignores the BOOT-SNAPSHOT default too (no live() wired)", async () => {
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, store, cwd } = setupEngine(provider); // no `live` opt — boot model is "gated-1"
+    const sessionId = store.createSession("global", { cwd, approvalPolicy: "auto", mode: "dispatch" });
+
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.model).toBe(DISPATCH_MODEL);
+    expect(provider.requests[0]!.reasoningEffort).toBe(DISPATCH_EFFORT);
+  });
+
+  // Bypasses the RPC doors on purpose (see the block comment above) — proves resolveSel itself
+  // never reads meta.model/meta.effort for dispatch, regardless of whether something reached the
+  // store some other way.
+  test("meta.model/meta.effort overrides are IGNORED for a dispatch session, even set directly on the store", async () => {
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, store, cwd } = setupEngine(provider, { live: () => ({ model: "live-model", reasoningEffort: "low" }) });
+    const sessionId = store.createSession("global", { cwd, approvalPolicy: "auto", mode: "dispatch" });
+    store.setModel(sessionId, "some-other-model");
+    store.setEffort(sessionId, "xhigh");
+
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.model).toBe(DISPATCH_MODEL);
+    expect(provider.requests[0]!.reasoningEffort).toBe(DISPATCH_EFFORT);
+  });
+
+  // Contrast with the "ultra is translated before the wire" block above: for chat, a hand-set
+  // `ultra` still resolves through wireEffort to `max`. For dispatch, the pin short-circuits BEFORE
+  // wireEffort even runs, so `ultra` never gets translated at all — it simply never gets read.
+  test("a hand-set `ultra` tier on a dispatch session resolves to the pin, not `max` — the tier axis never runs", async () => {
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, store, cwd } = setupEngine(provider, { live: () => ({ model: "live-model", reasoningEffort: "low" }) });
+    const sessionId = store.createSession("global", { cwd, approvalPolicy: "auto", mode: "dispatch" });
+    store.setEffort(sessionId, "ultra");
+
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.reasoningEffort).toBe(DISPATCH_EFFORT);
+    expect(provider.requests[0]!.reasoningEffort).not.toBe("max");
+  });
+
+  // `ultra` also changes the SYSTEM PROMPT (the delegation posture) — pinned here as a control that
+  // the pin doesn't accidentally leave that half reachable for dispatch. `clientEffortEligible`
+  // already returned false for dispatch before this task; this proves that stays true now that
+  // `meta.effort` isn't even read.
+  test("...and the delegation posture never rides a dispatch session's instructions either", async () => {
+    const provider = new FakeProvider([text("ok")]);
+    const { engine, store, cwd } = setupEngine(provider, { live: () => ({ model: "live-model" }) });
+    const sessionId = store.createSession("global", { cwd, approvalPolicy: "auto", mode: "dispatch" });
+    store.setEffort(sessionId, "ultra");
+
+    await engine.runTurn(sessionId);
+    expect(provider.requests[0]!.instructions).not.toContain("## Ultra effort");
+  });
+
+  test("a code session on the SAME engine is unaffected — the pin is scoped to dispatch mode only", async () => {
+    const provider = new FakeProvider([text("a"), text("b")]);
+    const { engine, store, sessionId: codeSession, cwd } = setupEngine(provider, { live: () => ({ model: "live-model", reasoningEffort: "low" }) });
+    const dispatchSession = store.createSession("global", { cwd, approvalPolicy: "auto", mode: "dispatch" });
+
+    await engine.runTurn(codeSession);
+    await engine.runTurn(dispatchSession);
+    expect(provider.requests[0]!.model).toBe("live-model");
+    expect(provider.requests[0]!.reasoningEffort).toBe("low");
+    expect(provider.requests[1]!.model).toBe(DISPATCH_MODEL);
+    expect(provider.requests[1]!.reasoningEffort).toBe(DISPATCH_EFFORT);
+  });
+
+  test("the ultra flag stays false for a dispatch session even when the tier is hand-set (tier is code-only, unchanged)", async () => {
+    // resolveSel's own return shape carries `ultra` as well as model/reasoningEffort — this can only
+    // be observed indirectly (no direct resolveSel accessor from a test), via the SAME instructions
+    // check the "delegation posture" test above uses, plus a code-session control proving the flag
+    // CAN be true when the axis is actually live.
+    const provider = new FakeProvider([text("a"), text("b")]);
+    const { engine, store, sessionId: codeSession, cwd } = setupEngine(provider, { live: () => ({ model: "live-model" }) });
+    const dispatchSession = store.createSession("global", { cwd, approvalPolicy: "auto", mode: "dispatch" });
+    store.setEffort(codeSession, "ultra");
+    store.setEffort(dispatchSession, "ultra");
+
+    await engine.runTurn(codeSession);
+    await engine.runTurn(dispatchSession);
+    expect(provider.requests[0]!.instructions).toContain("## Ultra effort"); // code: ultra is live
+    expect(provider.requests[1]!.instructions).not.toContain("## Ultra effort"); // dispatch: still inert
   });
 });
