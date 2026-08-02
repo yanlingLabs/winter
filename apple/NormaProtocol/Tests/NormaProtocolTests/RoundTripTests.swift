@@ -4,7 +4,7 @@ import XCTest
 final class RoundTripTests: XCTestCase {
     func fixtureURLs() throws -> [URL] {
         let urls = Bundle.module.urls(forResourcesWithExtension: "json", subdirectory: "Fixtures") ?? []
-        XCTAssertEqual(urls.count, 56, "expected 56 fixtures — regenerate via pnpm protocol:generate")
+        XCTAssertEqual(urls.count, 57, "expected 57 fixtures — regenerate via pnpm protocol:generate")
         return urls
     }
 
@@ -135,14 +135,20 @@ final class RoundTripTests: XCTestCase {
 
     /// followups T3 (ChatEngine as a second `turn_completed` producer): `contextTokens` is
     /// additive/optional — mirrors `testThreadStartedDescriptionOptional`'s with/without pattern.
-    /// No TS-generated fixture carries this field yet (the daemon-side producer's own doc comment
-    /// says "TS-only for now: no Swift mirror and no fixture" — this task is precisely what changes
-    /// that on the Swift side), so the "with" half is a literal JSON string here rather than a
-    /// `pnpm protocol:generate` fixture; the "without" half re-uses the pre-existing
-    /// `turn_completed.json` fixture to prove an OLDER event (predating this field) still decodes.
+    /// Fix-round-1 (review): the "with" half now loads the TS-generated
+    /// `turn_completed_with_contextTokens.json` fixture (`packages/protocol/scripts/generate.ts`)
+    /// rather than a hand-written JSON literal — a literal ties nothing to the TS schema, so a
+    /// future rename/drift there would leave this test green while a real daemon-emitted event
+    /// silently stopped matching. `inputTokens` (900) deliberately != `contextTokens` (300) in that
+    /// fixture, so it encodes the max-not-sum distinction, not just a present/absent one. The
+    /// "without" half re-uses the pre-existing `turn_completed.json` fixture to prove an OLDER
+    /// event (predating this field) still decodes.
     func testTurnCompletedContextTokensOptional() throws {
-        let with = #"{"type":"turn_completed","seq":9,"sessionId":"s","ts":5,"threadId":"main","stopReason":"end_turn","inputTokens":900,"outputTokens":40,"contextTokens":300}"#
-        guard case .turnCompleted(let v) = try JSONDecoder().decode(SessionEvent.self, from: Data(with.utf8)) else { return XCTFail() }
+        guard let withURL = Bundle.module.url(forResource: "turn_completed_with_contextTokens", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing turn_completed_with_contextTokens.json fixture")
+        }
+        let withData = try Data(contentsOf: withURL)
+        guard case .turnCompleted(let v) = try JSONDecoder().decode(SessionEvent.self, from: withData) else { return XCTFail() }
         XCTAssertEqual(v.contextTokens, 300)
         XCTAssertEqual(v.inputTokens, 900, "inputTokens keeps its billing (summed) meaning — untouched by this field")
 

@@ -6,7 +6,7 @@ import { buildCleanerVectorsFixture, buildDangerousDomainsFixture, CLEANER_VECTO
 /**
  * Chat Slice D, Task 4 — the freshness/drift tripwire for the two cross-language parity fixtures
  * (`fixtures/dangerous-domains.json`, `fixtures/cleaner-vectors.json`), mirroring the shape of the
- * existing Swift-side fixture-count tripwire (`RoundTripTests.fixtureURLs()`'s `count == 56`
+ * existing Swift-side fixture-count tripwire (`RoundTripTests.fixtureURLs()`'s `count == 57`
  * assertion): both call the SAME `parity-fixtures.ts` functions the generator itself calls, so a
  * fixture on disk that disagrees with what those functions compute RIGHT NOW means real drift —
  * `packages/core`'s `SHIPPED_DANGEROUS_DOMAINS`/`htmlToText` changed (or the vector list changed)
@@ -60,13 +60,13 @@ describe("cross-language parity fixtures (Chat Slice D, Task 4): regeneration fr
   });
 
   // Guards the generate.ts sync-selectivity fix (see its own comment): these two new fixtures live
-  // in the SAME fixDir as the 56 SessionEvent fixtures, but must never be swept into the Swift
+  // in the SAME fixDir as the 57 SessionEvent fixtures, but must never be swept into the Swift
   // NormaProtocol test bundle — RoundTripTests.swift decodes EVERY .json file it finds there as a
-  // SessionEvent and hard-asserts an exact count of 56.
-  test("did not leak into the Swift-synced fixture bundle, which still has exactly 56 files", () => {
+  // SessionEvent and hard-asserts an exact count of 57.
+  test("did not leak into the Swift-synced fixture bundle, which still has exactly 57 files", () => {
     const swiftFixDir = join(import.meta.dir, "..", "..", "..", "apple", "NormaProtocol", "Tests", "NormaProtocolTests", "Fixtures");
     const swiftFiles = readdirSync(swiftFixDir).filter((f) => f.endsWith(".json"));
-    expect(swiftFiles.length).toBe(56);
+    expect(swiftFiles.length).toBe(57);
     expect(swiftFiles).not.toContain("dangerous-domains.json");
     expect(swiftFiles).not.toContain("cleaner-vectors.json");
   });
