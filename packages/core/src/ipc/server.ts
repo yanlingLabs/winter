@@ -107,6 +107,13 @@ export interface IpcServerOptions {
   tokens: TokenAuthority;
   store: SessionStore;
   hub?: SessionHub;          // shared with the agent engine when the daemon wires one up
+  // session-activity-hygiene T6 (review fix round 1): the empty-session reaper invocation the
+  // `session.create` mint-time sweep calls — injectable ONLY so a test can observe/intercept
+  // exactly when the sweep runs relative to the create reply (a slow synchronous stub makes the
+  // property measurable: reaper.test.ts's "never delays the reply" case) without reaching into a
+  // private closure. Every real caller gets the true `reapEmptySessions` (sessions/reaper.ts) by
+  // leaving this unset.
+  reapEmptySessions?: typeof reapEmptySessions;
   engine?: AgentEngine | null;
   broker?: ApprovalBroker | null;
   // SP-approvals Task 5: the CC-grammar allow-rules store (Task 1) — daemon.ts hoists ONE instance
@@ -1015,12 +1022,23 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // session-activity-hygiene T6 (spec §2): the empty-session reaper's mint-time sweep — fires
         // on every `session.create`, but must never delay or fail THIS reply over hygiene against
         // unrelated sessions (the just-minted one above is always safe: `emptySessionIds`'s own
-        // 10-minute grace excludes anything this young regardless of timing). `Promise.resolve()
-        // .then(fn).catch(logger)` is the existing fire-and-forget-with-an-error-sink shape this
-        // codebase already uses for exactly this kind of non-blocking background work
-        // (settings-apply.ts's `applyMemoryMigrationDiff`) — a synchronous throw is impossible here
-        // (nothing runs until the microtask fires) and a later rejection is caught, never reaching
-        // this handler's own return.
+        // 10-minute grace excludes anything this young regardless of timing).
+        //
+        // Review fix round 1 (Finding 1, Important): a MICROTASK deferral here (`Promise.resolve()
+        // .then(fn)`) is NOT non-blocking — `reapEmptySessions` is entirely synchronous, and on an
+        // already-fulfilled promise `.then(fn)` queues `fn` as a microtask strictly AHEAD of this
+        // `async` handler's own resolution (whose continuation — `await handle(...)` back in the
+        // caller — is what writes this reply). The queue is FIFO, so the sweep would run to
+        // completion (sqlite query, per-candidate readFileSync, unlinkSync, appendFileSync) BEFORE
+        // the reply is even enqueued — the event loop is single-threaded, so every connection on
+        // this daemon sits blocked for however long that takes. `setTimeout(fn, 0)` is a MACROTASK:
+        // the event loop always fully drains the microtask queue (which includes the reply write)
+        // before running any macrotask, so this genuinely runs AFTER the reply is on its way out —
+        // proven by reaper.test.ts's "never delays the create reply" case (a slow synchronous stub,
+        // injected via `opts.reapEmptySessions` below, measurably delayed the round trip under the
+        // old microtask version and does not under this one). A synchronous throw from `reap` still
+        // can't reach this handler either way (it runs on a later turn, not inline) — the try/catch
+        // is the error sink for that turn.
         //
         // Skipped outright with no `opts.normaHome` wired (most existing tests): unlike the
         // destructive half (`store.emptySessionIds`/`deleteSession`, which need no normaHome at
@@ -1029,9 +1047,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // caller (daemon.ts) always wires `normaHome`.
         if (opts.normaHome) {
           const home = opts.normaHome;
-          Promise.resolve()
-            .then(() => reapEmptySessions({ store: opts.store, attachedCount: (id) => hub.attachedCount(id), home }))
-            .catch((err) => console.error("[reaper] mint-time sweep failed:", err));
+          const reap = opts.reapEmptySessions ?? reapEmptySessions;
+          setTimeout(() => {
+            try { reap({ store: opts.store, attachedCount: (id) => hub.attachedCount(id), home }); }
+            catch (err) { console.error("[reaper] mint-time sweep failed:", err); }
+          }, 0);
         }
         return { sessionId, trusted };
       }

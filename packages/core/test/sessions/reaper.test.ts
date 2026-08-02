@@ -526,6 +526,48 @@ describe("wired: session.create's mint-time sweep (session-activity-hygiene T6)"
     c.close();
   });
 
+  // Review fix round 1, Finding 1 (Important): the mint-time sweep must not merely fail to THROW
+  // into the reply — it must not DELAY it either. `opts.reapEmptySessions` (server.ts) exists ONLY
+  // so this test can intercept exactly when the sweep runs, via a deliberately slow but PURELY
+  // SYNCHRONOUS stub (a busy-wait, not a real sleep — this measures actual event-loop blocking, not
+  // wall-clock scheduling noise). If the sweep is scheduled such that it still runs BEFORE the reply
+  // is enqueued (the bug: `Promise.resolve().then(fn)` on an already-fulfilled promise queues `fn` as
+  // a microtask strictly ahead of the `await handle(...)` continuation that writes the reply), the
+  // whole single-threaded event loop is blocked for the stub's artificial delay and the round trip
+  // below is provably at least that slow. If the sweep is genuinely deferred past the reply (a
+  // macrotask via `setTimeout`, which only runs once the microtask queue — including the reply write
+  // — has fully drained), the round trip is unaffected by the stub's delay at all.
+  test("the mint-time sweep never delays the create reply, even when the sweep itself is slow", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-reaper-wire-"));
+    const store = new SessionStore(home);
+    const hub = new SessionHub(store);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    const ARTIFICIAL_SWEEP_DELAY_MS = 200; // generous margin over a normal <10ms round trip
+    let sweepRan = false;
+    const server = startIpcServer({
+      socketPath, serverVersion: "test", tokens: authority, store, hub, normaHome: home,
+      reapEmptySessions: () => {
+        const until = Date.now() + ARTIFICIAL_SWEEP_DELAY_MS;
+        while (Date.now() < until) { /* deliberate synchronous busy-wait — blocks the event loop */ }
+        sweepRan = true;
+        return [];
+      },
+    });
+    stop = () => { server.stop(); store.close(); };
+
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "harness");
+    const startedAt = Date.now();
+    await c.request(METHODS.sessionCreate, { scope: "global" });
+    const roundTripMs = Date.now() - startedAt;
+
+    expect(roundTripMs).toBeLessThan(ARTIFICIAL_SWEEP_DELAY_MS / 2);
+    await waitFor(() => sweepRan, "the deferred sweep to actually run");
+    c.close();
+  });
+
   test("with no normaHome wired, session.create still works and never throws over the sweep", async () => {
     const { socketPath, harnessToken } = await boot(false);
     const c = await TestClient.connect(socketPath);
