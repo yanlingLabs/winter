@@ -96,6 +96,51 @@ export type ActivityRow = Pick<SessionRow, "mode" | "backgrounded" | "archived">
  * Returns `undefined` for a non-participating mode (chat/dispatch): absence is the fourth answer,
  * meaning "no lifecycle here", and it outranks every flag — an archived chat row is still nothing.
  */
+/** The daemon's live SIGNAL SOURCES, one accessor per `ActivitySignals` field. Exactly the reads
+ *  `startIpcServer` already performed inline — `SessionHub.attachedCount`, `AgentEngine.isRunning`/
+ *  `.hasBackgroundWork`, `SessionStore.lastEventTs`, and (optionally) T5's enforcement span/grace.
+ *
+ *  The two enforcement sources are OPTIONAL because only one scope can reach them: the enforcement
+ *  is constructed inside the IPC server, and a consumer built elsewhere (daemon.ts) legitimately
+ *  has neither. Absent means ABSENT — `activeSince` stays `undefined` (never 0, which would demote
+ *  every session on earth) and `autoBackground` stays `undefined` (never a fabricated `false` that
+ *  claims knowledge). */
+export interface ActivitySignalSources {
+  attachedCount(sessionId: string): number;
+  turnRunning(sessionId: string): boolean;
+  bgWork(sessionId: string): boolean;
+  lastEventTs(sessionId: string): number;
+  activeSince?(sessionId: string): number | undefined;
+  autoBackground?(sessionId: string): boolean;
+}
+
+/** A bound derivation: the same `(row, sessionId, nowMs) → state` shape `session.list` stamps rows
+ *  with. `nowMs` stays the CALLER's (never read inside) so a batch of rows is derived against ONE
+ *  instant — `activityFor`'s own contract. */
+export type ActivityDeriver = (row: ActivityRow, sessionId: string, nowMs: number) => Activity | undefined;
+
+/** Binds live sources into ONE derivation, so every consumer that needs a session's state assembles
+ *  `ActivitySignals` the same way instead of hand-copying five reads (session-activity-hygiene T8:
+ *  `session.list`/`session.setActivity` and dispatch's `list_sessions` are two such consumers, and
+ *  a third hand-assembly is how the read surface and a management surface start disagreeing).
+ *
+ *  The non-participation short-circuit is part of the contract, not an optimization detail: it runs
+ *  BEFORE any source is read, which is what keeps `session.list` from paying a filesystem stat
+ *  (`lastEventTs`) per chat/dispatch row. */
+export function makeActivityDeriver(src: ActivitySignalSources): ActivityDeriver {
+  return (row, sessionId, nowMs) => {
+    if (!participatesInActivity(row.mode)) return undefined;
+    return activityFor(row, {
+      turnRunning: src.turnRunning(sessionId),
+      attachedCount: src.attachedCount(sessionId),
+      bgWork: src.bgWork(sessionId),
+      lastEventTs: src.lastEventTs(sessionId),
+      activeSince: src.activeSince?.(sessionId),
+      autoBackground: src.autoBackground?.(sessionId),
+    }, nowMs);
+  };
+}
+
 export function activityFor(row: ActivityRow, signals: ActivitySignals, nowMs: number): Activity | undefined {
   if (!participatesInActivity(row.mode)) return undefined;
   if (row.archived) return "archived";

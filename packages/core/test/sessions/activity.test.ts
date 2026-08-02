@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   ACTIVE_DEMOTION_MS,
   activityFor,
+  makeActivityDeriver,
   participatesInActivity,
   type Activity,
   type ActivitySignals,
@@ -296,5 +297,61 @@ describe("SessionStore.lastEventTs", () => {
     const { store } = makeStore();
     expect(() => store.lastEventTs("s_nope")).toThrow(/unknown session/);
     store.close();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// session-activity-hygiene T8: `makeActivityDeriver` — the ONE assembly of `ActivitySignals` from
+// the daemon's live sources, extracted from `startIpcServer`'s own `deriveActivity` closure so the
+// dispatch management tool (`list_sessions`) reads a session's state through EXACTLY the function
+// `session.list` stamps rows with, rather than a third hand-assembled copy of the same five reads.
+// ---------------------------------------------------------------------------------------------
+
+describe("makeActivityDeriver (T8)", () => {
+  const sources = (over: Partial<Parameters<typeof makeActivityDeriver>[0]> = {}) => ({
+    attachedCount: () => 0,
+    turnRunning: () => false,
+    bgWork: () => false,
+    lastEventTs: () => NOW - 5_000,
+    ...over,
+  });
+
+  test("assembles every signal from its sources and answers exactly what activityFor would", () => {
+    const derive = makeActivityDeriver(sources({ attachedCount: () => 1 }));
+    expect(derive(row(), "s_abc", NOW)).toBe("active");
+    expect(makeActivityDeriver(sources({ turnRunning: () => true }))(row(), "s_abc", NOW)).toBe("background");
+    expect(makeActivityDeriver(sources({ bgWork: () => true }))(row(), "s_abc", NOW)).toBe("background");
+    expect(makeActivityDeriver(sources())(row({ archived: true }), "s_abc", NOW)).toBe("archived");
+    expect(makeActivityDeriver(sources())(row(), "s_abc", NOW)).toBe("idle");
+  });
+
+  test("the OPTIONAL enforcement signals ride through when wired, and are absent (never 0/false-y stand-ins) when not", () => {
+    // activeSince: the >24h demotion only fires when the source is wired AND over the window.
+    const long = makeActivityDeriver(sources({
+      attachedCount: () => 1,
+      activeSince: () => NOW - ACTIVE_DEMOTION_MS - 1,
+    }));
+    expect(long(row(), "s_abc", NOW)).toBe("background");
+    // Unwired → `undefined`, which must read as "nothing is tracking a span", NOT as epoch 0
+    // (which would demote every session on earth — activity.ts's own warning).
+    expect(makeActivityDeriver(sources({ attachedCount: () => 1 }))(row(), "s_abc", NOW)).toBe("active");
+    // autoBackground: the post-turn grace window.
+    expect(makeActivityDeriver(sources({ autoBackground: () => true }))(row(), "s_abc", NOW)).toBe("background");
+  });
+
+  test("short-circuits a non-participating mode BEFORE reading any signal source", () => {
+    let reads = 0;
+    const count = () => { reads++; return 0; };
+    const derive = makeActivityDeriver({
+      attachedCount: count,
+      turnRunning: () => { reads++; return false; },
+      bgWork: () => { reads++; return false; },
+      lastEventTs: () => { reads++; return NOW; },
+    });
+    // A chat row is nothing to this lifecycle — and, load-bearing for `session.list`, it must not
+    // pay the per-session `lastEventTs` filesystem stat to learn that.
+    expect(derive(row({ mode: "chat" }), "s_abc", NOW)).toBeUndefined();
+    expect(derive(row({ mode: "dispatch" }), "s_abc", NOW)).toBeUndefined();
+    expect(reads).toBe(0);
   });
 });

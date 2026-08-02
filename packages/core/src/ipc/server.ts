@@ -39,7 +39,7 @@ import type { MemoryStore, MemoryErrorKind } from "../agent/memory";
 import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTailMemDir } from "../agent/memory-file-ops";
 import type { SessionStore } from "../sessions/store";
 import { readHistoryPage } from "../sessions/history";
-import { activityFor, participatesInActivity, type Activity, type ActivityRow } from "../sessions/activity";
+import { makeActivityDeriver, participatesInActivity, type ActivityDeriver } from "../sessions/activity";
 import { createActivityEnforcement } from "../sessions/activity-enforcement";
 import { reapEmptySessions } from "../sessions/reaper";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
@@ -114,6 +114,19 @@ export interface IpcServerOptions {
   // private closure. Every real caller gets the true `reapEmptySessions` (sessions/reaper.ts) by
   // leaving this unset.
   reapEmptySessions?: typeof reapEmptySessions;
+  // session-activity-hygiene T8: hands the caller THE bound activity derivation this server stamps
+  // `session.list` with, once, at construction. Called exactly once, synchronously, from inside
+  // startIpcServer.
+  //
+  // It is a PUBLISH rather than an injection because the derivation cannot be built anywhere else:
+  // two of its five signals come from T5's enforcement, which lives in this scope and is mutually
+  // recursive with the derivation itself. daemon.ts registers dispatch's `list_sessions` tool long
+  // before this server exists, so the tool reads a holder this fills in — which is what lets the
+  // management surface answer with the SAME state `session.list` serves (including the post-turn
+  // grace and the >24h demotion, both invisible to any derivation built outside this scope) instead
+  // of a third hand-assembled copy that would quietly disagree in exactly those two windows.
+  // Optional: every server built without it (all existing tests) is byte-identical.
+  onActivityDeriver?: (derive: ActivityDeriver) => void;
   engine?: AgentEngine | null;
   broker?: ApprovalBroker | null;
   // SP-approvals Task 5: the CC-grammar allow-rules store (Task 1) — daemon.ts hoists ONE instance
@@ -509,24 +522,27 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    *  Reads the LOCAL `hub`, not `opts.hub` — they differ on a server built without one (this
    *  function falls back to a private SessionHub, which is then the hub that actually holds every
    *  attachment `session.attach` makes). Deriving off `opts.hub?.attachedCount(...)` would report a
-   *  hard 0 on exactly those servers, i.e. "idle" for a session with a live harness on it. */
-  function deriveActivity(row: ActivityRow, sessionId: string, nowMs: number): Activity | undefined {
-    if (!participatesInActivity(row.mode)) return undefined;
-    return activityFor(row, {
-      turnRunning: opts.engine?.isRunning(sessionId) ?? false,
-      attachedCount: hub.attachedCount(sessionId),
-      bgWork: opts.engine?.hasBackgroundWork(sessionId) ?? false,
-      lastEventTs: opts.store.lastEventTs(sessionId),
-      // session-activity-hygiene T5: the two signals the ENFORCEMENT owns, fed back in here so the
-      // read surface and the enforced lifecycle are the same story. `activeSince` is `undefined`
-      // (never 0) for a session with nothing attached — activity.ts's own warning: an epoch stand-in
-      // would demote every session on earth. `autoBackground` matters for exactly one window, the
-      // post-turn grace, where without it `session.list` would answer "idle" the instant the turn
-      // settled while the emitted stream still (correctly) said "background".
-      activeSince: enforcement.activeSince(sessionId),
-      autoBackground: enforcement.autoBackgrounded(sessionId),
-    }, nowMs);
-  }
+   *  hard 0 on exactly those servers, i.e. "idle" for a session with a live harness on it.
+   *
+   *  T8: the five reads are no longer assembled inline here — `makeActivityDeriver` (sessions/
+   *  activity.ts) binds them, so dispatch's `list_sessions` management surface can consume THIS
+   *  EXACT bound function (published via `onActivityDeriver` below) rather than hand-copying the
+   *  same five reads a third time. Same sources, same order, same short-circuit — behaviour is
+   *  unchanged; only the assembly moved. */
+  const deriveActivity: ActivityDeriver = makeActivityDeriver({
+    turnRunning: (sessionId) => opts.engine?.isRunning(sessionId) ?? false,
+    attachedCount: (sessionId) => hub.attachedCount(sessionId),
+    bgWork: (sessionId) => opts.engine?.hasBackgroundWork(sessionId) ?? false,
+    lastEventTs: (sessionId) => opts.store.lastEventTs(sessionId),
+    // session-activity-hygiene T5: the two signals the ENFORCEMENT owns, fed back in here so the
+    // read surface and the enforced lifecycle are the same story. `activeSince` is `undefined`
+    // (never 0) for a session with nothing attached — activity.ts's own warning: an epoch stand-in
+    // would demote every session on earth. `autoBackground` matters for exactly one window, the
+    // post-turn grace, where without it `session.list` would answer "idle" the instant the turn
+    // settled while the emitted stream still (correctly) said "background".
+    activeSince: (sessionId) => enforcement.activeSince(sessionId),
+    autoBackground: (sessionId) => enforcement.autoBackgrounded(sessionId),
+  });
 
   /** session-activity-hygiene T5: the lifecycle's ENFORCEMENT — what the daemon does when the last
    *  harness lets go, when an auto-backgrounded turn ends, and when a session has called itself
@@ -534,10 +550,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    *  the hub's attachments and the store are all in reach — i.e. the only place `deriveActivity`
    *  can exist, and the enforcement must not grow a second derivation of its own.
    *
-   *  The mutual reference is deliberate and safe: `deriveActivity` (a hoisted function declaration)
-   *  reads `enforcement` for its two signals, and `enforcement` calls back into `deriveActivity` to
-   *  publish. Neither runs before this statement completes — every caller of `deriveActivity` is a
-   *  request handler or one of the hooks wired just below. */
+   *  The mutual reference is deliberate and safe: `deriveActivity`'s signal closures read
+   *  `enforcement` (lazily, at derive time — T8 turned it into a `const` bound above this
+   *  statement, so the read happens strictly later than this initialization, never during it), and
+   *  `enforcement` calls back into `deriveActivity` to publish. Neither runs before this statement
+   *  completes — every caller of `deriveActivity` is a request handler or one of the hooks wired
+   *  just below. */
   const enforcement = createActivityEnforcement({
     meta: (sessionId) => opts.store.meta(sessionId),
     // The ONE derive-then-emit path. Every enforced transition — attach, last detach (aborting or
@@ -580,6 +598,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   // and this is the same mutable-hook shape `hub.onGlobalEvent` uses just below.
   if (opts.engine) opts.engine.onTurnSettled = (sessionId) => enforcement.onTurnSettled(sessionId);
   enforcement.start();
+  // T8: published AFTER `enforcement` exists — the derivation's two enforcement signals are read
+  // lazily, but handing a consumer a function it could legally call before that binding initialized
+  // would be a TDZ throw waiting for a race nobody would reproduce.
+  opts.onActivityDeriver?.(deriveActivity);
 
   const helloTimeoutMs = opts.helloTimeoutMs ?? 5000;
   const maxConnections = opts.maxConnections ?? 64;
