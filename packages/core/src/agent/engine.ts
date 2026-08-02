@@ -4388,9 +4388,25 @@ export class AgentEngine {
     //   - no history at all (child aborted before its very first event ever persisted — a fresh
     //     spawn's opening prompt is never itself stored, see childHistoryInput's KNOWN GAP note) →
     //     still refused, just with a clearer message.
-    //   - anything else that isn't an assistant turn (e.g. a trailing BARE user message — only
-    //     reachable if a PRIOR resume of this same child itself ended before producing anything new)
-    //     stays refused with the original message — out of this fix's scope, unchanged behavior.
+    //   - ends on a BARE USER MESSAGE → resumable as-is (task-5; task-15 left this refused as "out
+    //     of scope"). It is reachable by exactly one route, and that route is not exotic: a RESUME
+    //     whose own run died before producing anything. resumeThread persists the new prompt as a
+    //     child user_message BEFORE running (D1 below), so a provider error on that run —
+    //     rate_limit, server, context-overflow — leaves the prompt as the child's last stored
+    //     event, and ONE unlucky resume then made the agent permanently unresumable: precisely the
+    //     failure task-15 set out to kill, surviving in the retry. The resulting input has two
+    //     adjacent user messages ([..., user "continue A", user "continue B"]), which needs no
+    //     repair for the same VERIFIED reason the paired-tool_result case above doesn't: mapInput
+    //     is a blind, order-agnostic 1:1 map with no adjacency validation, and the MAIN thread
+    //     already sends exactly this shape to the same endpoint whenever a turn errors before
+    //     producing assistant text (historyInput replays messages 1:1 too). The dead resume's
+    //     instruction is deliberately KEPT rather than dropped or coalesced — it is the user's own
+    //     text, and the model reading two consecutive asks is strictly better than losing one.
+    //   That leaves NOTHING refusable but an EMPTY history: eventToInput can only ever produce
+    //     message(user|assistant) / function_call / tool_result / reasoning, and all five shapes are
+    //     now resumable (orphan function_calls via repair). The shape check below is retained rather
+    //     than deleted so a FUTURE TurnInputItem kind fails closed — a new item type nobody has
+    //     reasoned about must not silently become a resumable tail.
     //   A STATUS CHECK IS INSUFFICIENT — status is orthogonal to last-event shape (verified against
     // this file): the tool-iteration cap path (~:1362) returns stopReason:"error" → the completion
     // fork (~:1188) maps that to isError:true → complete(ok:false) → status "failed" (NOT
@@ -4418,7 +4434,7 @@ export class AgentEngine {
         isError: true,
       };
     }
-    if (lastPrior.type !== "function_call" && lastPrior.type !== "tool_result" && !(lastPrior.type === "message" && lastPrior.role === "assistant")) {
+    if (lastPrior.type !== "function_call" && lastPrior.type !== "tool_result" && lastPrior.type !== "message") {
       return { output: `agent '${resumeArg}' didn't finish cleanly and can't be resumed`, isError: true };
     }
 
