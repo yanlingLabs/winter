@@ -17,8 +17,12 @@ const SCOPE_RE = /^[a-z0-9]([a-z0-9-]{0,39}[a-z0-9])?$/;
  *   2. NAMESPACE SEPARATION. Daemon-minted ids are `s_<12 hex>` (see `createSession`); a phone mints
  *      a UUID. Requiring a UUID here means a synced session can never collide with, or be mistaken
  *      for, one this daemon created itself. Any UUID version/variant is accepted — the phone's
- *      generator is not this daemon's business. */
-const SYNCED_SESSION_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+ *      generator is not this daemon's business.
+ *
+ *  EXPORTED for session-activity-hygiene T7 (spec §3): the cleaner's phone-synced rail is defined
+ *  as "the id matches this shape". Sharing the constant rather than re-typing the regex is what
+ *  keeps the rail and the admission check the same definition of "phone-minted" forever. */
+export const SYNCED_SESSION_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 /** session-activity-hygiene T6 (spec §2): the empty-session reaper's age gate — "created ≥ 10 min
  *  ago". A session younger than this may simply be mid-composition (the user hasn't sent their
@@ -172,6 +176,15 @@ export class SessionStore {
       // Stored 1/0 (NULL on every pre-existing row) and read back as `true | undefined`.
       "ALTER TABLE sessions ADD COLUMN backgrounded INTEGER",
       "ALTER TABLE sessions ADD COLUMN archived INTEGER",
+      // session-activity-hygiene T7 (spec §3): the cleaner's once-per-lifetime stamp — the epoch-ms
+      // at which an LLM judgment KEPT this session, NULL for every session never judged. Same
+      // additive index-only pattern as the columns above, with one consequence worth stating
+      // outright: a full index.db loss (recoverAll's pass-2 rebuild, which restores only `mode`)
+      // therefore clears it, and a previously-kept session becomes judgeable once more. That is the
+      // same accepted loss class as `backgrounded`/`archived`/`cwd`, and the only way out of it
+      // would be to put the stamp in the event log — a protocol change deliberately out of T7's
+      // scope. See cleaner.ts for the permanence rule this column implements.
+      "ALTER TABLE sessions ADD COLUMN judged INTEGER",
     ]) {
       try { this.db.run(ddl); }
       catch (e) {
@@ -543,6 +556,72 @@ export class SessionStore {
       if (!hasContent) candidates.push(sessionId);
     }
     return candidates;
+  }
+
+  /** session-activity-hygiene T7 (spec §3): the cleaner's cheap SQL pre-filter — every session
+   *  never judged, created at or before `createdBeforeMs`, that isn't the dispatch session.
+   *
+   *  `created_at` (not the real gate) is deliberate and SOUND: the cleaner's gate is "last event ≥
+   *  24 h old", and `lastEventTs` is `max(log mtime, created_at)` — never LESS than `created_at`.
+   *  So a row created after the cutoff cannot possibly have an older last event, and filtering on
+   *  `created_at` can only ever admit too many, never too few. The caller re-checks the real
+   *  `lastEventTs` gate per candidate (cleaner.ts's `railFor`); this query exists so that check
+   *  runs against a small set rather than every session ever created.
+   *
+   *  The dispatch exclusion is the BELT (`emptySessionIds`'s own precedent, and `deleteSession`
+   *  refuses it besides): the cleaner rails it independently too, so the singleton is protected by
+   *  three separate mechanisms. It also saves a pointless full parse of the daemon's single largest
+   *  log on every pass.
+   *
+   *  No index backs this (the `sessions` table has none beyond the primary key), so it is a full
+   *  table scan — fine at any plausible session count, and the alternative (a column index that
+   *  every write then maintains) is not worth it until a real N says otherwise. */
+  cleanerCandidateIds(createdBeforeMs: number): string[] {
+    return (this.db.query(
+      `SELECT session_id FROM sessions
+       WHERE judged IS NULL AND created_at <= ? AND (mode IS NULL OR mode != 'dispatch')
+       ORDER BY created_at`,
+    ).all(createdBeforeMs) as { session_id: string }[]).map((r) => r.session_id);
+  }
+
+  /** session-activity-hygiene T7: when an LLM judgment KEPT this session, or null if it was never
+   *  judged. The cleaner reads it twice per candidate — once through `cleanerCandidateIds`'s
+   *  `judged IS NULL` filter, and once again immediately before deleting (the mid-cycle re-check).
+   *  Throws on an unknown session, the `setModel`/`setEffort` precedent. */
+  judgedAt(sessionId: string): number | null {
+    const row = this.db.query("SELECT judged FROM sessions WHERE session_id = ?").get(sessionId) as
+      | { judged: number | null } | null;
+    if (!row) throw new Error(`unknown session: ${sessionId}`);
+    return row.judged;
+  }
+
+  /** session-activity-hygiene T7 (spec §3): stamps the once-per-lifetime judgment. WRITE-ONCE by
+   *  construction — `COALESCE(judged, ?)` keeps whatever is already there, so a second call can
+   *  never move the date and no caller has to remember to check first. That is the whole permanent-
+   *  immunity rule in one SQL function: a judged-kept session is never re-examined however it later
+   *  changes, and only the user can delete it thereafter.
+   *
+   *  There is deliberately NO un-stamp method. Throws on an unknown session (the `setModel`
+   *  precedent — `changes` counts the matched row whether or not COALESCE changed the value). */
+  markJudged(sessionId: string, atMs: number): void {
+    const res = this.db.run("UPDATE sessions SET judged = COALESCE(judged, ?) WHERE session_id = ?", [atMs, sessionId]);
+    if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
+  }
+
+  /** session-activity-hygiene T7 (spec §3): the fork rail, BOTH directions in one query — this
+   *  session is either a fork child (its own `forked_from_session_id` is set) or a fork parent
+   *  (some other row points at it). The parent direction needs the reverse lookup precisely because
+   *  a parent's own row records nothing about having been forked; without it, deleting a parent
+   *  would orphan its child's provenance. Unknown ids answer `false` rather than throwing — a rail
+   *  is a question about a session, and "no fork relationship on record" is the honest answer for a
+   *  row that isn't there. */
+  isForkRelated(sessionId: string): boolean {
+    const row = this.db.query(
+      `SELECT 1 AS hit FROM sessions
+       WHERE (session_id = ? AND forked_from_session_id IS NOT NULL) OR forked_from_session_id = ?
+       LIMIT 1`,
+    ).get(sessionId, sessionId) as { hit: number } | null;
+    return row !== null;
   }
 
   /** session-activity-hygiene T6 (spec §2, the amended sessions rule): FULL deletion — the JSONL
