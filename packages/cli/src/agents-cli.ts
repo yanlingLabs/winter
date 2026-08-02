@@ -1,0 +1,285 @@
+/** `norma agents` (session-activity-hygiene T9) — the live roster of BACKGROUND and ACTIVE
+ *  code/cowork sessions, and the four verbs that move them through the lifecycle T1-T8 built.
+ *
+ *  **It never attaches.** Two independent reasons, both load-bearing:
+ *
+ *   1. Attaching is what MAKES a session "active" (T2's derivation counts harness attachments), so a
+ *      roster that attached to look at a session would change the very state it is displaying.
+ *   2. Attaching enrols the connection in T5's detach enforcement — closing the roster would then
+ *      look like a terminal harness letting go, which for a `cli-` client aborts a running turn.
+ *      A window you opened to WATCH work must not be able to kill it by being closed.
+ *
+ *  So the roster reads `session.list` (which carries the derived `activity` since T2) and listens
+ *  for the `session_activity` transient, which since this task's core half reaches a harness that
+ *  attached to nothing (`SessionHub.emitActivity` → `onGlobalEvent`). Poll for truth, transient for
+ *  latency: the poll is the authority on titles/rows, the event is what makes a flip instant.
+ *
+ *  Everything here is pure and injectable for the same reason `cli-verb-gates.ts`'s route functions
+ *  are: main.ts's argv switch cannot be driven by a unit test (see main.test.ts's own header), so
+ *  anything that must be provable lives in this module and main.ts's `case` stays a thin wrapper.
+ *  The Ink view is `tui/agents-view.tsx`; this file holds the state machine, the keymap and the
+ *  verbs, so the component is presentation only.
+ *
+ *  ## What the roster CANNOT honestly show (and does not pretend to)
+ *
+ *  `session.list` carries neither a turn-start stamp nor `cwd` (`SessionListResult`,
+ *  packages/protocol/src/methods.ts). T8 added `AgentEngine.turnStartedAt`, but it reaches only the
+ *  dispatch-side `list_sessions` TOOL — the RPC never learned it, and widening the RPC is a protocol
+ *  change, deliberately out of scope here. The daemon also does not tell an unattached client WHEN a
+ *  state began. So the "for" column measures the span THIS VIEW has watched: an exact span when the
+ *  roster witnessed the transition (a `session_activity` event, whose `ts` is used), and a
+ *  `≥`-prefixed LOWER BOUND when the state was already set at open. A session backgrounded yesterday
+ *  reads `≥12s` three seconds after launch, and that is the honest answer — not `12s`.
+ */
+
+import type { SessionActivity } from "@norma/protocol";
+import type { NormaClient } from "./client";
+import { formatElapsed } from "./task-display";
+
+/** The client name this roster hello's with. `cli-` prefix ⇒ TERMINAL kind by T5's
+ *  `TERMINAL_CLIENT_PREFIXES` (core/src/sessions/activity-enforcement.ts). That classification is
+ *  moot while the roster never attaches — the enforcement only ever asks about a detaching
+ *  ATTACHMENT — but the family is what every other CLI connection uses (`cli-ping`, `cli-sessions`,
+ *  `cli-resume`), and a roster that called itself something else would be classified `app` the day
+ *  somebody did make it attach. */
+export const AGENTS_CLIENT_NAME = "cli-agents";
+
+/** Shown instead of an empty list — the brief's hard requirement: never a blank screen. */
+export const AGENTS_EMPTY_STATE = "no background sessions";
+
+/** The footer. Also a parity list: every verb named here must be a verb `runAgentVerb` accepts
+ *  (pinned in agents-cli.test.ts) and a key `keyToAgentsAction` maps. */
+export const AGENTS_KEY_HINT =
+  "↑↓ select · s stop · b background · c clear · a archive · o open (print resume) · q quit";
+
+/** How often the roster re-reads `session.list`. The transient carries every state CHANGE instantly,
+ *  so this poll exists for the rest — new sessions, titles, and any state a client could have missed
+ *  while it was starting up. */
+export const AGENTS_POLL_MS = 2000;
+
+/** The two states the roster shows. `idle`/`archived` sessions are not "agents you have running", and
+ *  a session with no `activity` at all does not participate in the lifecycle (chat/dispatch) — the
+ *  roster reads the daemon's derived value rather than keeping a mode allowlist of its own, which is
+ *  what makes `cowork` work here the day it ships without a line changing. */
+const ROSTER_ACTIVITIES: ReadonlySet<string> = new Set(["background", "active"]);
+
+/** Just the fields the roster reads off a `session.list` row (a structural subset of
+ *  `SessionListResult.sessions[]` — same plain-interface convention as client.ts's `Routine`). */
+export interface AgentSessionRow {
+  sessionId: string;
+  title?: string;
+  mode?: string;
+  activity?: string;
+}
+
+export interface AgentRow {
+  sessionId: string;
+  title?: string;
+  mode?: string;
+  activity: "background" | "active";
+  /** When this view first knew the session to be in THIS state. */
+  sinceMs: number;
+  /** `true` when `sinceMs` is merely when the roster first SAW the state, not when it began — the
+   *  difference between "3s" and "≥3s". See the module doc. */
+  observedOnly: boolean;
+}
+
+export interface AgentsState {
+  rows: AgentRow[];
+  /** The SESSION the cursor is on, not an index — rows come and go under it every poll. */
+  selectedId?: string;
+  notice?: string;
+}
+
+export function emptyAgentsState(): AgentsState {
+  return { rows: [] };
+}
+
+export function selectedAgent(s: AgentsState): AgentRow | undefined {
+  return s.rows.find((r) => r.sessionId === s.selectedId) ?? s.rows[0];
+}
+
+/** Background first (the roster's subject), then active; each group ordered by title, then id, so a
+ *  poll never reshuffles rows under the cursor for no reason. */
+function sortRows(rows: AgentRow[]): AgentRow[] {
+  const rank = (r: AgentRow): number => (r.activity === "background" ? 0 : 1);
+  return [...rows].sort((a, b) =>
+    rank(a) - rank(b)
+    || (a.title ?? "").localeCompare(b.title ?? "")
+    || a.sessionId.localeCompare(b.sessionId));
+}
+
+/** Keeps the cursor on a session that still exists, falling back to the first row (and to nothing
+ *  when the roster empties). */
+function reselect(rows: AgentRow[], selectedId?: string): string | undefined {
+  if (selectedId && rows.some((r) => r.sessionId === selectedId)) return selectedId;
+  return rows[0]?.sessionId;
+}
+
+/** Fold a fresh `session.list` into the roster. The list is the AUTHORITY on which rows exist and
+ *  what they are called; the only thing it cannot supply is when a state began, so a row already
+ *  known IN THE SAME STATE keeps its original stamp (otherwise every 2s poll would restart the
+ *  clock) and a row whose state moved between polls re-stamps as observed-only (we know it changed
+ *  by now, not when). */
+export function applySessionList(s: AgentsState, sessions: AgentSessionRow[], nowMs: number): AgentsState {
+  const known = new Map(s.rows.map((r) => [r.sessionId, r]));
+  const rows: AgentRow[] = [];
+  for (const row of sessions) {
+    if (!row.activity || !ROSTER_ACTIVITIES.has(row.activity)) continue;
+    const activity = row.activity as AgentRow["activity"];
+    const prev = known.get(row.sessionId);
+    const unchanged = prev !== undefined && prev.activity === activity;
+    rows.push({
+      sessionId: row.sessionId,
+      title: row.title,
+      mode: row.mode,
+      activity,
+      sinceMs: unchanged ? prev.sinceMs : nowMs,
+      observedOnly: unchanged ? prev.observedOnly : true,
+    });
+  }
+  const sorted = sortRows(rows);
+  return { ...s, rows: sorted, selectedId: reselect(sorted, s.selectedId) };
+}
+
+/** The live half: one `session_activity` transient. A transition INTO a roster state adds or flips a
+ *  row (stamped with the event's own `ts` — a witnessed transition, so no `≥`); a transition OUT of
+ *  one removes it, which is how an archive of a session nobody has open finally reaches a window.
+ *  A row added here carries no title: the next poll supplies it, and inventing one would be worse
+ *  than a bare id for the ~2s in between. */
+export function applyActivityEvent(
+  s: AgentsState,
+  event: { sessionId: string; activity: string; ts: number },
+  _nowMs: number,
+): AgentsState {
+  const inRoster = ROSTER_ACTIVITIES.has(event.activity);
+  const existing = s.rows.find((r) => r.sessionId === event.sessionId);
+  if (!inRoster) {
+    if (!existing) return s;
+    const rows = s.rows.filter((r) => r.sessionId !== event.sessionId);
+    return { ...s, rows, selectedId: reselect(rows, s.selectedId) };
+  }
+  const activity = event.activity as AgentRow["activity"];
+  if (existing && existing.activity === activity) return s; // a re-statement is not a new span
+  const next: AgentRow = existing
+    ? { ...existing, activity, sinceMs: event.ts, observedOnly: false }
+    : { sessionId: event.sessionId, activity, sinceMs: event.ts, observedOnly: false };
+  const rows = sortRows([...s.rows.filter((r) => r.sessionId !== event.sessionId), next]);
+  return { ...s, rows, selectedId: reselect(rows, s.selectedId) };
+}
+
+export function moveSelection(s: AgentsState, delta: number): AgentsState {
+  if (s.rows.length === 0) return s;
+  const current = s.rows.findIndex((r) => r.sessionId === s.selectedId);
+  const from = current === -1 ? 0 : current;
+  const next = Math.min(s.rows.length - 1, Math.max(0, from + delta));
+  return { ...s, selectedId: s.rows[next]!.sessionId };
+}
+
+export function withNotice(s: AgentsState, notice: string | undefined): AgentsState {
+  return { ...s, notice };
+}
+
+/** The "for" column. See the module doc for why the bound is explicit — printing an exact-looking
+ *  span for a state whose start we never learned would be a lie the user cannot detect. */
+export function formatForColumn(row: { sinceMs: number; observedOnly: boolean }, nowMs: number): string {
+  const span = formatElapsed(Math.max(0, nowMs - row.sinceMs));
+  return row.observedOnly ? `≥${span}` : span;
+}
+
+/** The EXACT resume invocation, verified against main.ts's own `case "resume"` route (`norma resume
+ *  <sessionId>` — a SUBCOMMAND, not a `--resume` flag) and matching `formatResumeHint`'s wording,
+ *  which is what the TUI already prints on exit. If those ever diverge, the roster is the surface
+ *  telling the user something that does not work. */
+export function agentResumeCommand(sessionId: string): string {
+  return `norma resume ${sessionId}`;
+}
+
+/** One plain (uncolored) line per row — used for the non-TTY snapshot and as the content the Ink
+ *  view's own row assertions can be checked against (the `routines-cli.ts` formatter precedent). */
+export function formatAgentsSnapshot(s: AgentsState, nowMs: number): string[] {
+  if (s.rows.length === 0) return [AGENTS_EMPTY_STATE];
+  return s.rows.map((r) =>
+    `${r.activity.padEnd(10)} ${(r.title ?? r.sessionId).padEnd(40)} ${formatForColumn(r, nowMs).padStart(8)}  ${r.sessionId}`);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The keymap
+// ---------------------------------------------------------------------------------------------
+
+export type AgentVerb = "stop" | "background" | "clear" | "archive" | "open";
+
+export type AgentsAction =
+  | { kind: "move"; delta: number }
+  | { kind: "verb"; verb: AgentVerb }
+  | { kind: "quit" };
+
+/** Ink's `useInput` payload, narrowed to what this keymap reads (so a test can hand it a literal). */
+export interface AgentsKey { upArrow: boolean; downArrow: boolean; escape: boolean; ctrl: boolean }
+
+/** Pure so the component's hook is one line and every binding is provable without a terminal.
+ *  ctrl+c is checked BEFORE the letter table — otherwise ctrl+c would clear the selected session's
+ *  flags on its way out. */
+export function keyToAgentsAction(input: string, key: AgentsKey): AgentsAction | null {
+  if (key.ctrl && input === "c") return { kind: "quit" };
+  if (key.escape) return { kind: "quit" };
+  if (key.downArrow || input === "j") return { kind: "move", delta: 1 };
+  if (key.upArrow || input === "k") return { kind: "move", delta: -1 };
+  switch (input) {
+    case "s": return { kind: "verb", verb: "stop" };
+    case "b": return { kind: "verb", verb: "background" };
+    case "c": return { kind: "verb", verb: "clear" };
+    case "a": return { kind: "verb", verb: "archive" };
+    case "o": case "\r": return { kind: "verb", verb: "open" };
+    case "q": return { kind: "quit" };
+    default: return null;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The verbs
+// ---------------------------------------------------------------------------------------------
+
+/** Exactly the two RPCs the roster may make, structurally — a fake in a test satisfies it, and the
+ *  type itself is the statement that `attach`/`send` are not on this surface. */
+export type AgentsVerbClient = Pick<NormaClient, "interrupt" | "sessionSetActivity">;
+
+export interface AgentVerbResult {
+  message: string;
+  /** `true` when the verb changed daemon state, so the caller should re-poll rather than wait out
+   *  the interval (the transient usually beats it, but a refused verb emits nothing at all). */
+  changed: boolean;
+}
+
+/** Runs one verb against one row and hands back the line to show. Never throws: a refusal (an
+ *  archived-target rule, a non-participating mode, a vanished session) is the daemon's own sentence,
+ *  shown verbatim — a management surface that swallowed refusals would be the "shown but broken"
+ *  shape this codebase keeps closing.
+ *
+ *  `background`/`clear`/`archive` report the daemon's POST-WRITE DERIVED activity, never the value
+ *  asked for: clearing a session whose detached bash task is still writing comes back "background",
+ *  and client.ts's own doc says to report this value. */
+export async function runAgentVerb(
+  client: AgentsVerbClient,
+  verb: AgentVerb,
+  row: { sessionId: string },
+): Promise<AgentVerbResult> {
+  // No RPC at all: "open" is a hand-off, not a command. The roster deliberately does not attach or
+  // spawn a session view of its own — it prints the invocation and lets the user run it.
+  if (verb === "open") return { message: agentResumeCommand(row.sessionId), changed: false };
+  try {
+    if (verb === "stop") {
+      const { wasRunning } = await client.interrupt(row.sessionId);
+      return {
+        message: wasRunning ? `${row.sessionId} stopped` : `${row.sessionId}: nothing was running`,
+        changed: wasRunning,
+      };
+    }
+    const activity: SessionActivity | null =
+      verb === "background" ? "background" : verb === "archive" ? "archived" : null;
+    const res = await client.sessionSetActivity({ sessionId: row.sessionId, activity: activity as "background" | "archived" | null });
+    return { message: `${row.sessionId} → ${res.activity ?? "(no lifecycle)"}`, changed: true };
+  } catch (e) {
+    return { message: `${row.sessionId}: ${(e as Error).message}`, changed: false };
+  }
+}
