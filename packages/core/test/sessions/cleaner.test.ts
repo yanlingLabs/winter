@@ -6,7 +6,7 @@ import type { Provider, ProviderEvent, TurnRequest } from "../../src/providers/t
 import { FakeProvider } from "../../src/agent/fake-provider";
 import { SessionStore } from "../../src/sessions/store";
 import {
-  SessionCleaner, CLEANER_MODEL, CLEANER_EFFORT, CLEANER_INSTRUCTION,
+  SessionCleaner, renderTranscript, CLEANER_MODEL, CLEANER_EFFORT, CLEANER_INSTRUCTION,
   CLEANER_MAX_JUDGMENTS_PER_PASS, CLEANER_MIN_IDLE_MS, CLEANER_TRANSCRIPT_MAX_CHARS,
   type CleanerDeps, type CleanerStore,
 } from "../../src/sessions/cleaner";
@@ -189,11 +189,19 @@ function makeCleaner(
 
 /** A session that is a plausible junk candidate: one user message, one assistant reply, aged past
  *  the 24h gate. Every rail test starts from this and adds exactly ONE railing fact. */
-function junkSession(store: SessionStore, opts: { mode?: "code" | "chat" | "dispatch" } = {}): string {
+function junkSession(store: SessionStore, opts: { mode?: "code" | "chat" | "dispatch"; ageMs?: number } = {}): string {
   const id = store.createSession("global", opts.mode ? { mode: opts.mode } : {});
   store.append(id, { type: "user_message", sessionId: id, threadId: "main", text: "hey", clientName: "cli" });
   store.append(id, { type: "assistant_message", sessionId: id, threadId: "main", text: "Hi! What can I do for you?" });
-  backdateCreatedAt(store, id, DAY + 60_000);
+  backdateCreatedAt(store, id, opts.ageMs ?? DAY + 60_000);
+  return id;
+}
+
+/** A session with exactly one user message and no reply of any kind — spec §3's hung auto-junk. */
+function hungSession(store: SessionStore, opts: { ageMs?: number } = {}): string {
+  const id = store.createSession("global");
+  store.append(id, { type: "user_message", sessionId: id, threadId: "main", text: "are you there?", clientName: "cli" });
+  backdateCreatedAt(store, id, opts.ageMs ?? DAY + 60_000);
   return id;
 }
 
@@ -481,6 +489,456 @@ describe("SessionCleaner — what is NOT railed (each rail's negative)", () => {
     const provider = deleteVotingJudge();
     await makeCleaner(store, home, provider, { now: agedNow }).runPass();
     expect(store.list().some((r) => r.sessionId === id)).toBe(false);
+    store.close();
+  });
+});
+
+/** A judge that answers with whatever raw text it is given — for the strict-parse cases. */
+function rawJudge(text: string): FakeProvider {
+  return new FakeProvider([[{ type: "text_delta", delta: text }, { type: "done", stopReason: "end_turn" }]]);
+}
+
+/** A provider whose streamTurn never yields (dreamer-gates.test.ts's own HangingProvider) — proves
+ *  the per-judgment timeout fires and that a hung provider means "keep, unstamped", not a wedge. */
+class HangingProvider implements Provider {
+  readonly id = "hanging";
+  readonly requests: TurnRequest[] = [];
+  models() { return [{ id: "hang-1", family: "hang", contextWindow: 1000, supportsVision: false }]; }
+  async *streamTurn(req: TurnRequest): AsyncIterable<ProviderEvent> {
+    const { signal, ...cloneable } = req;
+    this.requests.push({ ...structuredClone(cloneable), ...(signal ? { signal } : {}) });
+    await new Promise<never>(() => {});
+  }
+}
+
+/** Votes DELETE, but MUTATES the world first — the only way to exercise the pre-delete re-check,
+ *  which exists precisely because a judgment is an `await` a user can act during. */
+class MutatingJudge implements Provider {
+  readonly id = "mutating";
+  readonly requests: TurnRequest[] = [];
+  constructor(private readonly mutate: () => void) {}
+  models() { return [{ id: "m-1", family: "m", contextWindow: 1000, supportsVision: false }]; }
+  async *streamTurn(req: TurnRequest): AsyncIterable<ProviderEvent> {
+    const { signal, ...cloneable } = req;
+    this.requests.push({ ...structuredClone(cloneable), ...(signal ? { signal } : {}) });
+    this.mutate();
+    yield { type: "text_delta", delta: '{"verdict":"delete","reason":"trivial"}' };
+    yield { type: "done", stopReason: "end_turn" };
+  }
+}
+
+describe("SessionCleaner — hung auto-junk (no LLM)", () => {
+  test("one user message, no reply at all, past the gate: deleted with reason 'hung: no reply', judge never asked", async () => {
+    const { home, store } = freshStore();
+    const id = hungSession(store);
+    const provider = deleteVotingJudge();
+
+    const result = await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+
+    expect(result.deleted).toEqual([id]);
+    expect(provider.requests).toHaveLength(0); // decided BEFORE any judge call
+    expect(store.list().some((r) => r.sessionId === id)).toBe(false);
+    expect(cleanerLines(home)).toEqual([
+      { sessionId: id, reason: "hung: no reply", date: new Date(agedNow()).toISOString() },
+    ]);
+    store.close();
+  });
+
+  test("a lone user message that DID get tool work is not 'hung' — it goes to the judge", async () => {
+    const { home, store } = freshStore();
+    const id = hungSession(store);
+    store.append(id, { type: "tool_call", sessionId: id, threadId: "main", callId: "c1", name: "read", argsJson: "{}" });
+    const provider = keepVotingJudge();
+
+    await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+
+    expect(provider.requests).toHaveLength(1);
+    expect(store.judgedAt(id)).toBe(agedNow());
+    store.close();
+  });
+
+  test("TWO unanswered user messages are not the auto-junk shape — the judge decides", async () => {
+    const { home, store } = freshStore();
+    const id = hungSession(store);
+    store.append(id, { type: "user_message", sessionId: id, threadId: "main", text: "hello?", clientName: "cli" });
+    const provider = keepVotingJudge();
+
+    await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+
+    expect(provider.requests).toHaveLength(1);
+    expect(store.list().some((r) => r.sessionId === id)).toBe(true);
+    store.close();
+  });
+
+  test("a hung session is still RAILED like any other — the auto-junk path does not bypass the rails", async () => {
+    const { home, store } = freshStore();
+    const id = hungSession(store);
+    store.setArchived(id, true);
+    await expectRailed(store, home, id);
+    store.close();
+  });
+});
+
+describe("SessionCleaner — the judgment budget", () => {
+  const OVER = CLEANER_MAX_JUDGMENTS_PER_PASS + 2;
+
+  test(`at most ${CLEANER_MAX_JUDGMENTS_PER_PASS} judgments per pass; the remainder is untouched and unstamped`, async () => {
+    const { home, store } = freshStore();
+    // Distinct ages so `ORDER BY created_at` is deterministic (index 0 oldest, judged first).
+    const ids = Array.from({ length: OVER }, (_, i) => junkSession(store, { ageMs: DAY + 60_000 + (OVER - i) * 1000 }));
+    const provider = keepVotingJudge();
+
+    await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+
+    expect(provider.requests).toHaveLength(CLEANER_MAX_JUDGMENTS_PER_PASS);
+    const stamped = ids.filter((id) => store.judgedAt(id) !== null);
+    expect(stamped).toEqual(ids.slice(0, CLEANER_MAX_JUDGMENTS_PER_PASS));
+    store.close();
+  });
+
+  test("hung auto-junk is NOT charged to the budget: a hung candidate behind a full budget is still deleted", async () => {
+    const { home, store } = freshStore();
+    // 10 judgeable candidates (older, so they sort first and consume the whole budget)...
+    for (let i = 0; i < CLEANER_MAX_JUDGMENTS_PER_PASS; i++) {
+      junkSession(store, { ageMs: DAY + 60_000 + (100 - i) * 1000 });
+    }
+    // ...then the hung one, last in candidate order.
+    const hungId = hungSession(store, { ageMs: DAY + 60_000 });
+    const provider = keepVotingJudge();
+
+    const result = await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+
+    expect(provider.requests).toHaveLength(CLEANER_MAX_JUDGMENTS_PER_PASS);
+    expect(result.deleted).toEqual([hungId]);
+    expect(store.list().some((r) => r.sessionId === hungId)).toBe(false);
+    store.close();
+  });
+
+  test("the next pass picks up where the budget ran out (the unstamped remainder)", async () => {
+    const { home, store } = freshStore();
+    const ids = Array.from({ length: OVER }, (_, i) => junkSession(store, { ageMs: DAY + 60_000 + (OVER - i) * 1000 }));
+    const provider = keepVotingJudge();
+    const cleaner = makeCleaner(store, home, provider, { now: agedNow });
+
+    await cleaner.runPass();
+    await cleaner.runPass();
+
+    expect(provider.requests).toHaveLength(OVER);
+    expect(ids.every((id) => store.judgedAt(id) !== null)).toBe(true);
+    store.close();
+  });
+});
+
+describe("SessionCleaner — strict verdict parsing (ANY deviation ⇒ keep, NO stamp)", () => {
+  const DEVIATIONS: [string, string][] = [
+    ["plain prose, no JSON at all", "I think this one should be deleted."],
+    ["a missing verdict key", '{"reason":"junk"}'],
+    ["an unrecognized verdict value", '{"verdict":"purge","reason":"junk"}'],
+    ["a non-string reason", '{"verdict":"delete","reason":42}'],
+    ["a blank reason", '{"verdict":"delete","reason":"   "}'],
+    ["a truncated/unparseable object", '{"verdict":"delete","reason":'],
+    ["an empty answer", ""],
+  ];
+
+  for (const [label, text] of DEVIATIONS) {
+    test(`${label} ⇒ kept, unstamped, retried next pass`, async () => {
+      const { home, store } = freshStore();
+      const id = junkSession(store);
+      const provider = rawJudge(text);
+
+      await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+
+      expect(provider.requests).toHaveLength(1); // it WAS asked...
+      expect(store.list().some((r) => r.sessionId === id)).toBe(true); // ...and survived
+      expect(store.judgedAt(id)).toBeNull(); // ...unstamped: unexamined, not judged
+      expect(cleanerLines(home)).toEqual([]);
+      store.close();
+    });
+  }
+
+  test("a provider error ⇒ kept, unstamped", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store);
+    const provider = new FakeProvider([[{ type: "error", message: "upstream 500" }]]);
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+      expect(store.list().some((r) => r.sessionId === id)).toBe(true);
+      expect(store.judgedAt(id)).toBeNull();
+      expect(errSpy).toHaveBeenCalled();
+    } finally { errSpy.mockRestore(); }
+    store.close();
+  });
+
+  test("a hung provider times out ⇒ kept, unstamped, and the in-flight call is aborted", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store);
+    const provider = new HangingProvider();
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await makeCleaner(store, home, provider, { now: agedNow, timeoutMs: 1 }).runPass();
+      expect(store.list().some((r) => r.sessionId === id)).toBe(true);
+      expect(store.judgedAt(id)).toBeNull();
+      expect(provider.requests[0]!.signal?.aborted).toBe(true);
+    } finally { errSpy.mockRestore(); }
+    store.close();
+  });
+
+  test("the ONE leniency: a well-formed object wrapped in a code fence still counts", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store);
+    const provider = rawJudge('```json\n{"verdict":"delete","reason":"a bare greeting"}\n```');
+
+    await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+
+    expect(store.list().some((r) => r.sessionId === id)).toBe(false);
+    expect(cleanerLines(home)[0].reason).toBe("a bare greeting");
+    store.close();
+  });
+
+  test("extra keys are tolerated", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store);
+    const provider = rawJudge('{"verdict":"keep","reason":"useful","confidence":0.9}');
+
+    await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+
+    expect(store.judgedAt(id)).toBe(agedNow());
+    store.close();
+  });
+
+  test("a runaway reason is bounded before it reaches the audit log", async () => {
+    const { home, store } = freshStore();
+    junkSession(store);
+    const provider = rawJudge(JSON.stringify({ verdict: "delete", reason: "x".repeat(5000) }));
+
+    await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+
+    expect(cleanerLines(home)[0].reason.length).toBeLessThanOrEqual(200);
+    store.close();
+  });
+});
+
+describe("SessionCleaner — the pre-delete re-check (the session can change mid-judgment)", () => {
+  test("a session that becomes ATTACHED while the judge is thinking is not deleted, and not stamped", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store);
+    let attached = 0;
+    const provider = new MutatingJudge(() => { attached = 1; });
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await makeCleaner(store, home, provider, { now: agedNow, attachedCount: () => attached }).runPass();
+      expect(provider.requests).toHaveLength(1); // it was judged...
+      expect(store.list().some((r) => r.sessionId === id)).toBe(true); // ...but not deleted
+      expect(store.judgedAt(id)).toBeNull(); // ...and NOT stamped — a dropped delete is not a keep
+      expect(cleanerLines(home)).toEqual([]);
+      expect(errSpy.mock.calls.some((c) => String(c[0]).includes(id))).toBe(true);
+    } finally { errSpy.mockRestore(); }
+    store.close();
+  });
+
+  test("a session ARCHIVED while the judge is thinking is not deleted", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store);
+    const provider = new MutatingJudge(() => { store.setArchived(id, true); });
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+      expect(store.list().some((r) => r.sessionId === id)).toBe(true);
+      expect(store.judgedAt(id)).toBeNull();
+    } finally { errSpy.mockRestore(); }
+    store.close();
+  });
+
+  test("a session that gets STAMPED while the judge is thinking is not deleted — `judged IS NULL` is re-verified", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store);
+    const provider = new MutatingJudge(() => { store.markJudged(id, 1_754_000_000_000); });
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+      expect(store.list().some((r) => r.sessionId === id)).toBe(true);
+      expect(store.judgedAt(id)).toBe(1_754_000_000_000); // the other writer's stamp, untouched
+      expect(cleanerLines(home)).toEqual([]);
+    } finally { errSpy.mockRestore(); }
+    store.close();
+  });
+
+  test("a session that grows a fresh file WRITE while the judge is thinking is not deleted", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store);
+    const provider = new MutatingJudge(() => {
+      store.append(id, { type: "tool_call", sessionId: id, threadId: "main", callId: "c9", name: "write", argsJson: "{}" });
+      store.append(id, { type: "tool_result", sessionId: id, threadId: "main", callId: "c9", output: "ok", isError: false });
+    });
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+      expect(store.list().some((r) => r.sessionId === id)).toBe(true);
+      expect(store.judgedAt(id)).toBeNull();
+    } finally { errSpy.mockRestore(); }
+    store.close();
+  });
+});
+
+describe("SessionCleaner — `cleaner.enabled` hot-toggles the pass (no restart)", () => {
+  test("disabled: nothing is queried, judged or deleted — and flipping it back on mid-life runs the very next pass, same instance", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store);
+    let enabled = false;
+    const provider = deleteVotingJudge();
+    // ONE cleaner instance for the whole test — the setting is read live, per pass, so nothing is
+    // ever reconstructed and no daemon restart is involved.
+    const cleaner = makeCleaner(store, home, provider, { now: agedNow, enabled: () => enabled });
+
+    await cleaner.runPass();
+    expect(provider.requests).toHaveLength(0);
+    expect(store.list().some((r) => r.sessionId === id)).toBe(true);
+
+    enabled = true; // the settings watcher's atomic swap, as the live getter sees it
+    await cleaner.runPass();
+    expect(provider.requests).toHaveLength(1);
+    expect(store.list().some((r) => r.sessionId === id)).toBe(false);
+    store.close();
+  });
+
+  test("disabling mid-life stops the NEXT pass (a running daemon needs no restart in either direction)", async () => {
+    const { home, store } = freshStore();
+    junkSession(store, { ageMs: DAY + 120_000 });
+    const second = junkSession(store, { ageMs: DAY + 60_000 });
+    let enabled = true;
+    const provider = keepVotingJudge();
+    const cleaner = makeCleaner(store, home, provider, { now: agedNow, enabled: () => enabled });
+
+    await cleaner.runPass();
+    expect(provider.requests).toHaveLength(2);
+
+    enabled = false;
+    store.append(second, { type: "user_message", sessionId: second, threadId: "main", text: "more junk", clientName: "cli" });
+    await cleaner.runPass();
+    expect(provider.requests).toHaveLength(2); // unchanged — the pass was skipped entirely
+    store.close();
+  });
+});
+
+describe("SessionCleaner — resilience (never throws; one bad candidate never aborts the pass)", () => {
+  test("a candidate-query failure cleans nothing rather than throwing, and logs a warning", async () => {
+    const { home, store } = freshStore();
+    const injected = delegatingStore(store, { cleanerCandidateIds: () => { throw new Error("simulated query failure"); } });
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const cleaner = makeCleaner(store, home, deleteVotingJudge(), { now: agedNow, store: injected });
+      await expect(cleaner.runPass()).resolves.toEqual({ deleted: [], kept: [] });
+      expect(errSpy).toHaveBeenCalled();
+    } finally { errSpy.mockRestore(); }
+    store.close();
+  });
+
+  test("a candidate whose delete throws does not stop the rest of the pass", async () => {
+    const { home, store } = freshStore();
+    const bad = hungSession(store, { ageMs: DAY + 120_000 });
+    const good = hungSession(store, { ageMs: DAY + 60_000 });
+    const injected = delegatingStore(store, {
+      deleteSession: (id) => {
+        if (id === bad) throw new Error("simulated delete failure");
+        store.deleteSession(id);
+      },
+    });
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await makeCleaner(store, home, deleteVotingJudge(), { now: agedNow, store: injected }).runPass();
+      expect(result.deleted).toEqual([good]); // the failed one is never reported deleted
+      expect(cleanerLines(home).map((l) => l.sessionId)).toEqual([good]);
+      expect(errSpy.mock.calls.some((c) => String(c[0]).includes(bad))).toBe(true);
+    } finally { errSpy.mockRestore(); }
+    store.close();
+  });
+
+  test("a failed audit append does not undo or retry the delete, and logs a warning", async () => {
+    const { home, store } = freshStore();
+    const id = hungSession(store);
+    // A `home` that is a FILE makes appendCleanerLog's mkdirSync/appendFileSync throw (the T6
+    // reaper test's own trick) without touching real disk limits.
+    const bogusHome = join(home, "not-a-directory");
+    writeFileSync(bogusHome, "i am a file, not a directory");
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await makeCleaner(store, bogusHome, deleteVotingJudge(), { now: agedNow }).runPass();
+      expect(result.deleted).toEqual([id]);
+      expect(store.list().some((r) => r.sessionId === id)).toBe(false); // the delete stands
+      expect(errSpy.mock.calls.some((c) => String(c[0]).includes(id))).toBe(true);
+    } finally { errSpy.mockRestore(); }
+    store.close();
+  });
+
+  test("the audit line carries the session's title when it had one", async () => {
+    const { home, store } = freshStore();
+    const id = hungSession(store);
+    store.append(id, { type: "session_titled", sessionId: id, threadId: "main", title: "Unanswered question" });
+    // ...but a titled session is RAILED, so route around the rail to reach the audit path.
+    const injected = delegatingStore(store, { read: (sid) => store.read(sid).filter((e) => e.type !== "session_titled") });
+
+    await makeCleaner(store, home, deleteVotingJudge(), { now: agedNow, store: injected }).runPass();
+
+    expect(cleanerLines(home)[0]).toEqual({
+      sessionId: id, title: "Unanswered question", reason: "hung: no reply", date: new Date(agedNow()).toISOString(),
+    });
+    store.close();
+  });
+
+  test("defaults `now` to the real clock when omitted — a just-written session is nowhere near the gate", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store);
+    const provider = deleteVotingJudge();
+    const result = await makeCleaner(store, home, provider, { now: undefined }).runPass();
+    expect(result).toEqual({ deleted: [], kept: [] });
+    expect(store.list().some((r) => r.sessionId === id)).toBe(true);
+    store.close();
+  });
+});
+
+describe("renderTranscript (the ~4 KB head+tail cap)", () => {
+  test("a short transcript is rendered whole, role-labeled, tool calls by name only", () => {
+    const events: any[] = [
+      { type: "session_created", sessionId: "s", scope: "global", seq: 1, ts: 0 },
+      { type: "user_message", sessionId: "s", threadId: "main", text: "hi", clientName: "cli", seq: 2, ts: 0 },
+      { type: "tool_call", sessionId: "s", threadId: "main", callId: "c", name: "read", argsJson: '{"path":"/etc/passwd"}', seq: 3, ts: 0 },
+      { type: "tool_result", sessionId: "s", threadId: "main", callId: "c", output: "SECRET CONTENTS", isError: false, seq: 4, ts: 0 },
+      { type: "assistant_message", sessionId: "s", threadId: "main", text: "hello", seq: 5, ts: 0 },
+    ];
+    const rendered = renderTranscript(events);
+    expect(rendered).toBe("[user] hi\n[tool] read\n[norma] hello");
+    // Tool ARGUMENTS and OUTPUT never reach the judge — it only needs to know work happened.
+    expect(rendered).not.toContain("SECRET CONTENTS");
+    expect(rendered).not.toContain("/etc/passwd");
+  });
+
+  test("an over-long transcript keeps the HEAD and the TAIL with an explicit trim marker", () => {
+    const events: any[] = Array.from({ length: 400 }, (_, i) => ({
+      type: "user_message", sessionId: "s", threadId: "main", clientName: "cli", seq: i + 1, ts: 0,
+      text: i === 0 ? "FIRST-LINE-MARKER" : i === 399 ? "LAST-LINE-MARKER" : "x".repeat(40),
+    }));
+    const rendered = renderTranscript(events);
+    expect(rendered).toContain("FIRST-LINE-MARKER");
+    expect(rendered).toContain("LAST-LINE-MARKER");
+    expect(rendered).toContain("trimmed");
+    expect(rendered.length).toBeLessThanOrEqual(CLEANER_TRANSCRIPT_MAX_CHARS + 60);
+  });
+
+  test("the judge's prompt is capped for a huge session", async () => {
+    const { home, store } = freshStore();
+    const id = store.createSession("global");
+    for (let i = 0; i < 200; i++) {
+      store.append(id, { type: "user_message", sessionId: id, threadId: "main", text: "y".repeat(60), clientName: "cli" });
+      store.append(id, { type: "assistant_message", sessionId: id, threadId: "main", text: "z".repeat(60) });
+    }
+    backdateCreatedAt(store, id, DAY + 60_000);
+    const provider = keepVotingJudge();
+
+    await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+
+    const content = (provider.requests[0]!.input[0] as { content: string }).content;
+    expect(content.length).toBeLessThanOrEqual(CLEANER_TRANSCRIPT_MAX_CHARS + 60);
     store.close();
   });
 });
