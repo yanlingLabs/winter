@@ -269,9 +269,12 @@ describe("list_sessions (T8): the BOUNDED keyword scan", () => {
     expect((await h.call(LIST_SESSIONS_TOOL, { keywords: "BURIEDWORD" })).output).toBe("no sessions matched");
   });
 
-  test("when the TOTAL budget runs out the answer says how many sessions went unscanned", async () => {
-    // Four ~1.2KB transcripts against a 2KB total budget: the two newest are scanned, the rest are
-    // reported as unscanned rather than silently reported as non-matching.
+  test("when the TOTAL budget runs out mid-list, the remainder is reported as unscanned — never a silent clean non-match", async () => {
+    // Four ~1KB transcripts against a 2KB total budget: granting the newest session its full
+    // per-session cap exhausts the budget, so every remaining session's GRANTED budget falls below
+    // the cap. Pre-fix, that residual (however small — down to the degenerate 0/1-byte case where
+    // `sampleTranscript`'s head/tail halves floor to nothing) was still handed to a real scan and
+    // came back a "clean" non-match; fixed, a below-cap grant is counted as unscanned outright.
     const h = harness({ scanBytesPerSession: 2000, scanBytesTotal: 2000 });
     const cwd = realDir("budget");
     const ids: string[] = [];
@@ -283,9 +286,14 @@ describe("list_sessions (T8): the BOUNDED keyword scan", () => {
     }
 
     const res = await h.call(LIST_SESSIONS_TOOL, { keywords: "FINDME" });
-    expect(res.output).toMatch(/2 sessions were not scanned for keywords \(budget spent\)/);
-    // Newest-first: the LAST sessions created are the ones the budget reached.
+    expect(res.output).toMatch(/3 sessions were not scanned for keywords \(budget spent\)/);
+    // Newest-first: only the ONE session granted the full per-session budget was actually scanned.
+    expect(res.output).toContain("1 session\n");
     expect(res.output).toContain(ids[3]!);
+    // The other three are absent because they went UNSCANNED, not because "FINDME" failed to
+    // match — every transcript here contains it, so a pre-fix run reported these as non-matches.
+    expect(res.output).not.toContain(ids[2]!);
+    expect(res.output).not.toContain(ids[1]!);
     expect(res.output).not.toContain(ids[0]!);
   });
 });

@@ -222,8 +222,12 @@ export function registerListSessionsTools(
         let spent = 0;
         const hits: typeof withTs = [];
         for (const c of withTs) {
-          if (spent >= totalBudget) { unscanned++; continue; }
+          // A GRANTED budget below the per-session cap (including the exhausted 0 case) is treated
+          // as unscanned outright rather than sampled — a degenerate residual (e.g. 1 byte) makes
+          // `sampleTranscript`'s head/tail halves floor to 0 and read nothing, which then reported a
+          // clean non-match forever without `spent` ever advancing to end the loop honestly.
           const budget = Math.min(perSession, totalBudget - spent);
+          if (budget < perSession) { unscanned++; continue; }
           const { text, bytes } = sampleTranscript(deps.store.transcriptPath(c.row.sessionId), budget);
           spent += bytes;
           const hay = text.toLowerCase();
