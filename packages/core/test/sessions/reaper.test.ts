@@ -1,10 +1,28 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
 import { SessionStore, EMPTY_SESSION_GRACE_MS } from "../../src/sessions/store";
+import { SessionHub } from "../../src/sessions/hub";
 import { appendCleanerLog } from "../../src/sessions/cleaner-log";
 import { reapEmptySessions, type ReaperStore } from "../../src/sessions/reaper";
+import { startIpcServer } from "../../src/ipc/server";
+import { startDaemon, type RunningDaemon } from "../../src/daemon";
+import { FileSecretStore } from "../../src/auth/secret-store";
+import { TokenAuthority } from "../../src/auth/tokens";
+
+/** Test-only backdoor: pushes a session's stored `created_at` back by `ms`, so a wiring test can
+ *  prove the REAL (un-injected) `Date.now()` sweep reaps a genuinely old candidate without a real
+ *  10-minute sleep. `createSession` itself has no clock injection (unlike `emptySessionIds`, which
+ *  takes `nowMs` as a parameter) — this reaches past the `private` TS-only annotation on
+ *  `SessionStore.db` (still a plain runtime property) rather than widening the class's real surface
+ *  for a need only this one integration test has. */
+function backdateCreatedAt(store: SessionStore, sessionId: string, ms: number): void {
+  (store as unknown as { db: { run(sql: string, params: unknown[]): void } }).db.run(
+    "UPDATE sessions SET created_at = created_at - ? WHERE session_id = ?", [ms, sessionId],
+  );
+}
 
 // session-activity-hygiene T6: the empty-session reaper + `deleteSession`.
 //
@@ -337,5 +355,189 @@ describe("reapEmptySessions (session-activity-hygiene T6)", () => {
     } finally {
       errSpy.mockRestore();
     }
+  });
+});
+
+/** Minimal raw NDJSON JSON-RPC client (this codebase's convention: no shared test-harness module —
+ *  cf. activity-enforcement.test.ts's own copy). Only what these wiring tests need: hello + request. */
+class TestClient {
+  private decoder = new LineDecoder();
+  private nextId = 1;
+  private pending = new Map<number, (msg: any) => void>();
+  private socket!: Awaited<ReturnType<typeof Bun.connect>>;
+  private writer!: ConnWriter;
+
+  static async connect(socketPath: string): Promise<TestClient> {
+    const c = new TestClient();
+    c.socket = await Bun.connect({
+      unix: socketPath,
+      socket: {
+        data(_s, chunk) {
+          for (const line of c.decoder.push(chunk)) {
+            const msg = JSON.parse(line);
+            if (msg.id !== undefined && c.pending.has(msg.id)) {
+              c.pending.get(msg.id)!(msg);
+              c.pending.delete(msg.id);
+            }
+          }
+        },
+        drain(_s) { c.writer.onDrain(); },
+      },
+    });
+    c.writer = new ConnWriter(c.socket as unknown as WritableSocket);
+    return c;
+  }
+
+  request(method: string, params?: unknown): Promise<any> {
+    const id = this.nextId++;
+    this.writer.enqueue(encodeLine({ jsonrpc: "2.0", id, method, params }));
+    return new Promise((resolve) => this.pending.set(id, resolve));
+  }
+
+  hello(token: string, clientName: string, role = "harness"): Promise<any> {
+    return this.request(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role, token, clientName });
+  }
+
+  close(): void { this.socket.end(); }
+}
+
+async function waitFor(pred: () => boolean | Promise<boolean>, what: string): Promise<void> {
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    if (await pred()) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+describe("wired: session.create's mint-time sweep (session-activity-hygiene T6)", () => {
+  let stop: (() => void) | undefined;
+  afterEach(() => { stop?.(); stop = undefined; });
+
+  async function boot(withNormaHome: boolean): Promise<{ store: SessionStore; hub: SessionHub; socketPath: string; harnessToken: string; home: string }> {
+    const home = mkdtempSync(join(tmpdir(), "norma-reaper-wire-"));
+    const store = new SessionStore(home);
+    const hub = new SessionHub(store);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({
+      socketPath, serverVersion: "test", tokens: authority, store, hub,
+      normaHome: withNormaHome ? home : undefined,
+    });
+    stop = () => { server.stop(); store.close(); };
+    return { store, hub, socketPath, harnessToken: tokens.harness, home };
+  }
+
+  test("session.create replies normally, and the brand-new session is never reaped by its own sweep", async () => {
+    const { store, socketPath, harnessToken } = await boot(true);
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "harness");
+    const res = await c.request(METHODS.sessionCreate, { scope: "global" });
+    expect(res.result.sessionId).toBeTruthy();
+    const sessionId = res.result.sessionId as string;
+
+    // Give the fire-and-forget sweep a moment to run (it's deferred, never awaited by the reply).
+    await new Promise((r) => setTimeout(r, 20));
+    expect(store.list().some((r) => r.sessionId === sessionId)).toBe(true);
+    c.close();
+  });
+
+  test("an old, empty, unattached candidate is reaped as a side effect of a LATER session.create call", async () => {
+    const { store, socketPath, harnessToken, home } = await boot(true);
+    const oldId = store.createSession("global");
+    backdateCreatedAt(store, oldId, EMPTY_SESSION_GRACE_MS + 1);
+
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "harness");
+    const res = await c.request(METHODS.sessionCreate, { scope: "global" }); // triggers the sweep
+    expect(res.result.sessionId).toBeTruthy();
+
+    await waitFor(() => !store.list().some((r) => r.sessionId === oldId), "the old candidate to be reaped");
+    const lines = readFileSync(join(home, "cleaner.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines.some((l) => l.sessionId === oldId && l.reason === "reaped: empty")).toBe(true);
+    c.close();
+  });
+
+  // Leak check (controller instruction): does deleting a session leave a stale timer/listener/map
+  // entry behind in the hub or the activity-enforcement module, both of which key private in-memory
+  // state off sessionId? `hub.attachedCount === 0` is ALREADY a precondition `emptySessionIds`
+  // enforces, so the ONE enforcement hook that can touch bookkeeping for a still-empty session
+  // (`onAttached`, which cares only about attachment, never content) is exercised here deliberately
+  // — attach then fully detach BEFORE reaping — to prove the paired detach already cleared it, and
+  // that the shared hub/enforcement singleton keeps working correctly for a DIFFERENT session
+  // afterward.
+  test("a reaped session that was attached-then-detached before deletion leaves no stale state behind", async () => {
+    const { store, hub, socketPath, harnessToken } = await boot(true);
+    const oldId = store.createSession("global");
+
+    const viewer = await TestClient.connect(socketPath);
+    await viewer.hello(harnessToken, "orb");
+    await viewer.request(METHODS.sessionAttach, { sessionId: oldId });
+    expect(hub.attachedCount(oldId)).toBe(1);
+    viewer.close();
+    await waitFor(() => hub.attachedCount(oldId) === 0, "the detach to land");
+
+    backdateCreatedAt(store, oldId, EMPTY_SESSION_GRACE_MS + 1);
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "harness");
+    await c.request(METHODS.sessionCreate, { scope: "global" }); // triggers the sweep
+    await waitFor(() => !store.list().some((r) => r.sessionId === oldId), "the old candidate to be reaped");
+
+    // The dead id itself stays a safe, non-throwing default...
+    expect(hub.attachedCount(oldId)).toBe(0);
+    // ...and — the actual leak check — the shared hub/enforcement singleton is still healthy for a
+    // FRESH session: if the deleted id's bookkeeping had wedged shared state, this is where it
+    // would misbehave (wrong activity, a hang, a thrown error) rather than in isolation.
+    const freshId = store.createSession("global");
+    const fresh = await TestClient.connect(socketPath);
+    await fresh.hello(harnessToken, "fresh-viewer");
+    await fresh.request(METHODS.sessionAttach, { sessionId: freshId });
+    const listed = await fresh.request(METHODS.sessionList, {});
+    expect(listed.result.sessions.find((s: any) => s.sessionId === freshId)?.activity).toBe("active");
+    fresh.close();
+    c.close();
+  });
+
+  test("with no normaHome wired, session.create still works and never throws over the sweep", async () => {
+    const { socketPath, harnessToken } = await boot(false);
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "harness");
+    const res = await c.request(METHODS.sessionCreate, { scope: "global" });
+    expect(res.result.sessionId).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 20)); // nothing should throw/crash in the background either
+    c.close();
+  });
+});
+
+describe("wired: daemon.ts's boot sweep (session-activity-hygiene T6)", () => {
+  let daemon: RunningDaemon | undefined;
+  afterEach(() => { daemon?.stop(); daemon = undefined; });
+
+  test("an old, empty, unattached session left over from a previous run is gone after the NEXT boot", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-reaper-boot-"));
+    // Seed the leftover candidate using a throwaway SessionStore instance, exactly as a previous
+    // daemon run would have left it on disk — then close it before startDaemon opens its own (a
+    // second live sqlite writer on the same file, even briefly, is unnecessary risk to take on).
+    const seed = new SessionStore(home);
+    const oldId = seed.createSession("global");
+    backdateCreatedAt(seed, oldId, EMPTY_SESSION_GRACE_MS + 1);
+    seed.close();
+
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    daemon = await startDaemon({ home, secrets, agentProvider: null });
+
+    // Verified through the daemon's OWN socket (never a second SessionStore instance opened
+    // against the same file while the daemon's is live) — the same convention every other
+    // real-daemon test in this codebase uses to observe server-side state.
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(daemon.tokens.harness, "boot-sweep-checker");
+    await waitFor(async () => {
+      const res = await c.request(METHODS.sessionList, {});
+      return !res.result.sessions.some((s: any) => s.sessionId === oldId);
+    }, "the leftover candidate to be reaped at boot");
+    const lines = readFileSync(join(home, "cleaner.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines.some((l) => l.sessionId === oldId && l.reason === "reaped: empty")).toBe(true);
+    c.close();
   });
 });

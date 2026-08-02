@@ -41,6 +41,7 @@ import type { SessionStore } from "../sessions/store";
 import { readHistoryPage } from "../sessions/history";
 import { activityFor, participatesInActivity, type Activity, type ActivityRow } from "../sessions/activity";
 import { createActivityEnforcement } from "../sessions/activity-enforcement";
+import { reapEmptySessions } from "../sessions/reaper";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
@@ -1010,6 +1011,27 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             try { conn.writer.enqueue(encodeLine({ jsonrpc: "2.0", method: METHODS.event, params: created })); }
             catch { /* dead socket — its close() handler will evict it from harnessConns */ }
           }
+        }
+        // session-activity-hygiene T6 (spec §2): the empty-session reaper's mint-time sweep — fires
+        // on every `session.create`, but must never delay or fail THIS reply over hygiene against
+        // unrelated sessions (the just-minted one above is always safe: `emptySessionIds`'s own
+        // 10-minute grace excludes anything this young regardless of timing). `Promise.resolve()
+        // .then(fn).catch(logger)` is the existing fire-and-forget-with-an-error-sink shape this
+        // codebase already uses for exactly this kind of non-blocking background work
+        // (settings-apply.ts's `applyMemoryMigrationDiff`) — a synchronous throw is impossible here
+        // (nothing runs until the microtask fires) and a later rejection is caught, never reaching
+        // this handler's own return.
+        //
+        // Skipped outright with no `opts.normaHome` wired (most existing tests): unlike the
+        // destructive half (`store.emptySessionIds`/`deleteSession`, which need no normaHome at
+        // all), reaping with no audit trail at all is not a degraded mode this feature should ever
+        // run in — see reaper.ts's own doc comment on the delete-then-audit order. Every real
+        // caller (daemon.ts) always wires `normaHome`.
+        if (opts.normaHome) {
+          const home = opts.normaHome;
+          Promise.resolve()
+            .then(() => reapEmptySessions({ store: opts.store, attachedCount: (id) => hub.attachedCount(id), home }))
+            .catch((err) => console.error("[reaper] mint-time sweep failed:", err));
         }
         return { sessionId, trusted };
       }

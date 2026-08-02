@@ -7,6 +7,7 @@ import { TokenAuthority } from "./auth/tokens";
 import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
+import { reapEmptySessions } from "./sessions/reaper";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
 import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
@@ -210,6 +211,19 @@ export async function startDaemon(opts: {
 
   const store = new SessionStore(dirs.home);
   const hub = new SessionHub(store);
+
+  // session-activity-hygiene T6 (spec §2): the empty-session reaper's boot sweep — once, here,
+  // right after store/hub exist and before anything can attach to anything. Catches sessions left
+  // empty by a previous run that never triggered another `session.create` (that sweep only fires at
+  // the NEXT mint) — without this, a daemon that's never asked to create a session again would keep
+  // an old empty one forever. Synchronous (nothing is replying at boot to protect) and wrapped in
+  // its own try/catch anyway (the same caution this file already gives other best-effort boot steps,
+  // e.g. the settings load above) even though `reapEmptySessions` is designed to never throw.
+  try {
+    reapEmptySessions({ store, attachedCount: (id) => hub.attachedCount(id), home: dirs.home });
+  } catch (err) {
+    console.error(`empty-session boot sweep failed: ${(err as Error).message}`);
+  }
 
   const normaHome = dirs.home;
 
