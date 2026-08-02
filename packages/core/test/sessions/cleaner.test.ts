@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Provider, ProviderEvent, TurnRequest } from "../../src/providers/types";
 import { FakeProvider } from "../../src/agent/fake-provider";
+import { SessionEvent } from "@norma/protocol";
 import { SessionStore } from "../../src/sessions/store";
 import {
-  SessionCleaner, renderTranscript, CLEANER_MODEL, CLEANER_EFFORT, CLEANER_INSTRUCTION,
+  SessionCleaner, renderTranscript, hasUserSetTitle, CLEANER_MODEL, CLEANER_EFFORT, CLEANER_INSTRUCTION,
   CLEANER_MAX_JUDGMENTS_PER_PASS, CLEANER_MIN_IDLE_MS, CLEANER_TRANSCRIPT_MAX_CHARS,
   type CleanerDeps, type CleanerStore,
 } from "../../src/sessions/cleaner";
@@ -456,13 +457,10 @@ describe("SessionCleaner rails — a railed session survives a delete-voting jud
     store.close();
   });
 
-  test("rail: a user-set title (a session_titled event in the transcript)", async () => {
-    const { home, store } = freshStore();
-    const id = junkSession(store);
-    store.append(id, { type: "session_titled", sessionId: id, threadId: "main", title: "Kept on purpose" });
-    await expectRailed(store, home, id);
-    store.close();
-  });
+  // NOTE: the user-set-title rail has NO test here, deliberately — see the "the title rail is
+  // vacuous today" describe block below. It is the one rail that cannot fire, because no user-set
+  // title exists in this system to fire it.
+
 
   test("rail: already judged — PERMANENT immunity, even after the session grows fresh junk", async () => {
     const { home, store } = freshStore();
@@ -504,6 +502,42 @@ describe("SessionCleaner — what is NOT railed (each rail's negative)", () => {
     const provider = deleteVotingJudge();
     await makeCleaner(store, home, provider, { now: agedNow }).runPass();
     expect(store.list().some((r) => r.sessionId === id)).toBe(false);
+    store.close();
+  });
+
+  // Controller ruling 2026-08-02, after this task's producer sweep found that `session_titled` is
+  // never user-authored: the title rail is an explicitly-documented NO-OP. These pin the
+  // PRODUCTION-SHAPED behavior, which is the whole point — in a real daemon the auto-titler runs at
+  // every depth-0 turn completion and is on by default, so a "hey" session HAS a session_titled
+  // event by the time the cleaner ever sees it. Railing on that would make spec §3's own worked
+  // example impossible and the plan's close-out live gate ("a 'hey' session deleted by the cleaner
+  // next Dreaming cycle") unfailable-by-construction.
+  test("an AUTO-TITLED 'hey' session is still judged and still deletable — the production shape", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store);
+    // Exactly what agent/titles.ts writes after the first turn completes: a model-written title.
+    store.append(id, { type: "session_titled", sessionId: id, threadId: "main", title: "Casual greeting exchange" });
+    const provider = deleteVotingJudge();
+
+    await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+
+    expect(provider.requests).toHaveLength(1); // it reached the judge...
+    expect(store.list().some((r) => r.sessionId === id)).toBe(false); // ...and the verdict landed
+    expect(cleanerLines(home)[0]).toEqual({
+      sessionId: id, title: "Casual greeting exchange", reason: "trivial exchange",
+      date: new Date(agedNow()).toISOString(),
+    });
+    store.close();
+  });
+
+  test("an auto-titled session judged KEEP is stamped like any other — the title changes nothing either way", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store);
+    store.append(id, { type: "session_titled", sessionId: id, threadId: "main", title: "Casual greeting exchange" });
+
+    await makeCleaner(store, home, keepVotingJudge(), { now: agedNow }).runPass();
+
+    expect(store.judgedAt(id)).toBe(agedNow());
     store.close();
   });
 
@@ -906,10 +940,8 @@ describe("SessionCleaner — resilience (never throws; one bad candidate never a
     const { home, store } = freshStore();
     const id = hungSession(store);
     store.append(id, { type: "session_titled", sessionId: id, threadId: "main", title: "Unanswered question" });
-    // ...but a titled session is RAILED, so route around the rail to reach the audit path.
-    const injected = delegatingStore(store, { read: (sid) => store.read(sid).filter((e) => e.type !== "session_titled") });
 
-    await makeCleaner(store, home, deleteVotingJudge(), { now: agedNow, store: injected }).runPass();
+    await makeCleaner(store, home, deleteVotingJudge(), { now: agedNow }).runPass();
 
     expect(cleanerLines(home)[0]).toEqual({
       sessionId: id, title: "Unanswered question", reason: "hung: no reply", date: new Date(agedNow()).toISOString(),
@@ -971,5 +1003,31 @@ describe("renderTranscript (the ~4 KB head+tail cap)", () => {
     const content = (provider.requests[0]!.input[0] as { content: string }).content;
     expect(content.length).toBeLessThanOrEqual(CLEANER_TRANSCRIPT_MAX_CHARS + 60);
     store.close();
+  });
+});
+
+describe("hasUserSetTitle — the title rail is vacuous today, by verification (controller ruling)", () => {
+  test("no transcript rails on a title, because no user-set title exists in this system", () => {
+    // Every shape a `session_titled` event actually takes in production, all machine-authored:
+    const autoTitled: any[] = [
+      { type: "session_titled", sessionId: "s", threadId: "main", title: "Casual greeting exchange", seq: 1, ts: 0 },
+    ];
+    const routineTitled: any[] = [
+      { type: "session_titled", sessionId: "s", threadId: "main", title: "routine/nightly-sweep", seq: 1, ts: 0 },
+    ];
+    expect(hasUserSetTitle(autoTitled)).toBe(false);
+    expect(hasUserSetTitle(routineTitled)).toBe(false);
+    expect(hasUserSetTitle([])).toBe(false);
+  });
+
+  // THE OBLIGATION, written down where it will be read: this test is the tripwire for whoever
+  // builds a user set-title mechanism. `SessionTitledEvent` is `{type, threadId, title}` — it
+  // carries no source field, so the day a user can name a session, the event needs a discriminator
+  // AND `hasUserSetTitle` needs to read it. Until then, a title is Norma's own guess about a
+  // session, never the user's investment in one, and must not spare it from judgment.
+  test("the event schema still carries no source discriminator — the reason the rail cannot be honest yet", () => {
+    const titled: any = { type: "session_titled", sessionId: "s", threadId: "main", title: "t", seq: 1, ts: 0 };
+    const parsed = SessionEvent.parse(titled);
+    expect(Object.keys(parsed).sort()).toEqual(["seq", "sessionId", "threadId", "title", "ts", "type"]);
   });
 });

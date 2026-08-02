@@ -261,7 +261,10 @@ export class SessionCleaner {
     // ---- the two transcript rails, one parse ----
     const events = this.deps.store.read(sessionId);
     if (hasFileWrite(events)) return "file-write";
-    if (events.some((e) => e.type === "session_titled")) return "titled";
+    // The user-set-title rail. VACUOUS TODAY — see `hasUserSetTitle` for the verification and the
+    // standing obligation. Kept as a live slot (not deleted) so the rail's place in this order
+    // survives and there is exactly ONE line to re-engage the day user titles ship.
+    if (hasUserSetTitle(events)) return "titled";
     return null;
   }
 
@@ -348,6 +351,38 @@ export function hasFileWrite(events: SessionEvent[]): boolean {
     else if (e.type === "tool_result" && e.isError) failed.add(e.callId);
   }
   return writeCalls.some((callId) => !failed.has(callId));
+}
+
+/**
+ * The user-set-title rail's predicate — **VACUOUS TODAY, deliberately and by verification**
+ * (controller ruling, 2026-08-02).
+ *
+ * Spec §3 rails a session with a "user-set title", and its referent is USER INVESTMENT. No such
+ * mechanism exists anywhere in this system. Verified by sweeping every producer, both languages:
+ *
+ *   * There is NO title-writing RPC — no `session.setTitle`, no rename, in
+ *     `packages/protocol/src/methods.ts`. The phone's own session list records the absence in a
+ *     comment ("no swipe actions or context menus — there is no delete/rename RPC").
+ *   * `agent/titles.ts`'s `SessionTitler` — a MODEL-written title, fired fire-and-forget at every
+ *     depth-0 turn completion and ON BY DEFAULT. Nearly every session that ever received a reply
+ *     carries one.
+ *   * `routines/runner.ts` — stamps a routine's own `routine/<id>` origin as the title.
+ *   * `appendSynced`/`applySyncMeta` merely REPLICATE a phone's bytes; and a phone-minted session
+ *     is already spared by the phone-synced rail above.
+ *   * Swift produces none at all — `NormaProtocol`/`NormaKit` only decode the variant.
+ *
+ * So railing on the event's mere presence would rail nearly every session in existence — including
+ * spec §3's own worked example, the "hey" exchange that MUST stay deletable — and would quietly
+ * disable the feature the cleaner exists to provide. Hence: always false, with the rail SLOT kept
+ * live in `railFor` so the structure and ordering survive.
+ *
+ * **STANDING OBLIGATION.** The day a user-set-title mechanism ships (a `session.setTitle` RPC, an
+ * app or phone rename affordance), it MUST carry a source discriminator on the event —
+ * `SessionTitledEvent` has none today, it is `{type, threadId, title}` — and this predicate MUST be
+ * re-engaged to read it. Shipping user titles without both silently regresses this rail.
+ */
+export function hasUserSetTitle(_events: SessionEvent[]): boolean {
+  return false;
 }
 
 /** Renders a transcript for the judge: role-labeled lines, HEAD + TAIL within
