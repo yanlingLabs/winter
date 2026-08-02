@@ -191,7 +191,15 @@ export class SessionHub {
     // detach/sweep call sites (a detach racing a delete). Writing the memo first would record a
     // state nobody ever received, and the next attempt at that same state would be suppressed as a
     // repeat — a permanently missed update, silently.
+    //
+    // The same reasoning forces the RE-ENTRANCY check below. This broadcast can nest: `fanOut`
+    // evicts a client whose `deliver` failed, that eviction raises `onDetached`, and the enforcement
+    // answers a last detach with an emit of its own — for this same session, from inside this very
+    // call. The nested emit is the LATER one and the one clients actually received last, so stamping
+    // our own (now stale) value over it would be the identical bug from the other direction.
+    const before = this.lastActivity.get(sessionId);
     const event = this.broadcastTransient(sessionId, { type: "session_activity", sessionId, activity });
+    if (this.lastActivity.get(sessionId) !== before) return event; // a nested emit recorded a newer state
     // Re-insert to move this session to the young end (Map iterates in insertion order), so the
     // eviction below drops the least-recently-CHANGED session rather than the oldest-known one.
     this.lastActivity.delete(sessionId);

@@ -320,6 +320,35 @@ describe("SessionHub", () => {
     expect(hub.emitActivity("s_deadbeef0001", "background")).toBeNull(); // …and NOW it is memoized
   });
 
+  test("a RE-ENTRANT emit wins the memo — the outer call must not overwrite a newer state it never delivered", () => {
+    // The reachable trace, all inside ONE emitActivity: the demotion sweep announces "background" →
+    // fanOut finds the session's only client dead (a slow-consumer backlog cap) → evicts it →
+    // `onDetached(remaining: 0)` → the enforcement derives "idle" and emits it. The NESTED emit is
+    // the last thing clients actually received, so it is what the memo must hold.
+    const { store, hub } = setup();
+    const id = store.createSession("global");
+    let sockedDied = false;
+    const client: HubClient = { clientName: "cli-p", deliver() { return !sockedDied; } };
+    hub.attach(client, id, 0);
+    sockedDied = true;
+
+    const detaches: { clientName: string; remaining: number }[] = [];
+    hub.onDetached = (sessionId, c, remaining) => {
+      detaches.push({ clientName: c.clientName, remaining });
+      hub.emitActivity(sessionId, "idle");
+    };
+
+    hub.emitActivity(id, "background");
+
+    // The eviction path really does raise the detach (nothing else covers this hook).
+    expect(detaches).toEqual([{ clientName: "cli-p", remaining: 0 }]);
+    // "idle" is what was delivered last, so re-stating it is the thing to suppress...
+    expect(hub.emitActivity(id, "idle")).toBeNull();
+    // ...and "background" is a genuine change again. An outer call that stamped its own, older value
+    // over the nested one would drop this — silently, and forever.
+    expect(hub.emitActivity(id, "background")).not.toBeNull();
+  });
+
   test("broadcastTransient evicts a dead client like a normal broadcast", () => {
     const { store, hub } = setup();
     const id = store.createSession("global");
