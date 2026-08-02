@@ -43,7 +43,13 @@ const CONTEXT_LENGTH_CODES = new Set(["context_length_exceeded"]);
  *  echoes the offending input back — i.e. the user's own prose ("explain how context length
  *  works") can land in `message`. `\b` likewise keeps `subcontext_length_exceeded_flag` and
  *  `contextlength` from matching. Compare `agent/research.ts`'s looser `/context.length/`, which
- *  is safe there only because it guards a much weaker decision (whether to burn one retry). */
+ *  is safe there only because it guards a much weaker decision (whether to burn one retry).
+ *
+ *  KNOWN, ACCEPTED false positive (T1 review M2): an unrelated 400 with NO structured code whose
+ *  body echoes user prose that makes an overflow CLAIM — e.g. "please do not exceed the context
+ *  window" — matches. Cost: one wasted summarization and detail dropping out of the model's view
+ *  (the session log itself is never touched). Accepted because demanding the claim already filters
+ *  the common echoes, and tightening further starts missing real overflows, the worse direction. */
 const CONTEXT_LENGTH_PROSE_RE =
   /\bcontext_length_exceeded\b|\bmaximum context length\b|\bexceeds? the context (?:window|length)\b/i;
 

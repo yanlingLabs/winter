@@ -292,7 +292,12 @@ async function handleFetchPage(
  *  even after the IMPORTANT cap fix above, just bounded instead of unbounded). Checked first, ahead
  *  of every other rule below, so it wins even when the message also happens to name the model
  *  (a real "context length exceeded" message routinely does: "gpt-5.4-mini's maximum context
- *  length is..."). */
+ *  length is...").
+ *
+ *  DELIBERATELY LOOSER than `providers/errors.ts`'s `isContextLengthError` — this regex guards a
+ *  much weaker decision (don't burn the one fallback retry; a false positive is the SAFE failure),
+ *  while that one triggers a compaction. If you touch either pattern, read the other first: they
+ *  recognize the same phenomenon and must not drift in opposite directions (T1 review M1). */
 const CONTEXT_LENGTH_RE = /context.length|context_length_exceeded/;
 
 /** Phrases that read as a genuine unknown/unsupported-model complaint, independent of the error
