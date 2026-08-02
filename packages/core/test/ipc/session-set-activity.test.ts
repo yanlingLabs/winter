@@ -69,12 +69,13 @@ describe("session.setActivity (session-activity-hygiene T3)", () => {
 
   afterEach(() => { stop?.(); stop = undefined; });
 
-  /** The two engine signals the activity derivation reads (`isRunning`, `hasBackgroundWork` — the
-   *  SAME pair `session.list`'s own signal builder consumes, T2). Both back onto MUTABLE sets the
-   *  caller keeps, so a test can mark a session running AFTER creating it (the engine is bound at
-   *  server construction, before any session id exists). `any`-cast because
-   *  `IpcServerOptions.engine` is the full `AgentEngine`: a missing method here would be a runtime
-   *  TypeError inside the handler, never a compile error, which is why both are declared. */
+  /** The engine signals the activity derivation reads (`isRunning`, `hasBackgroundWork` — the SAME
+   *  pair `session.list`'s own signal builder consumes, T2) plus `interrupt`, which T5's last-detach
+   *  enforcement calls. The first two back onto MUTABLE sets the caller keeps, so a test can mark a
+   *  session running AFTER creating it (the engine is bound at server construction, before any
+   *  session id exists). `any`-cast because `IpcServerOptions.engine` is the full `AgentEngine`: a
+   *  missing method here would be a runtime TypeError inside the handler, never a compile error,
+   *  which is why all three are declared. */
   async function boot(): Promise<{
     store: SessionStore; hub: SessionHub; socketPath: string; harnessToken: string; remoteToken: string;
     running: Set<string>; bgWork: Set<string>;
@@ -90,6 +91,7 @@ describe("session.setActivity (session-activity-hygiene T3)", () => {
     const engine: any = {
       isRunning: (id: string) => running.has(id),
       hasBackgroundWork: (id: string) => bgWork.has(id),
+      interrupt: (id: string) => { running.delete(id); return { wasRunning: true }; },
     };
     const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, hub, engine });
     stop = () => { server.stop(); store.close(); };

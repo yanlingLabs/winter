@@ -48,9 +48,10 @@ class FakeSecretStore implements SecretStore {
  *  is deliberately read off `opts.engine`, never a parallel `IpcServerOptions` getter: a second
  *  source could serve the phone a lineup the daemon's own `session.setModel` would then reject. */
 function fakeEngine(models: () => ModelInfo[]): any {
-  // session-activity-hygiene T2: `hasBackgroundWork` beside `isRunning` — session.list's activity
-  // signals read both, and an `any`-cast double missing one fails at runtime, not at compile time.
-  return { knownModels: () => models(), isRunning: () => false, hasBackgroundWork: () => false };
+  // session-activity-hygiene T2/T5: `hasBackgroundWork` beside `isRunning`, and `interrupt` beside
+  // both — session.list's activity signals read the first two and T5's last-detach enforcement calls
+  // the third. An `any`-cast double missing one fails at RUNTIME, not at compile time.
+  return { knownModels: () => models(), isRunning: () => false, hasBackgroundWork: () => false, interrupt: () => ({ wasRunning: false }) };
 }
 
 class TestClient {

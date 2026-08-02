@@ -326,7 +326,7 @@ function fakeEngine(models: ModelInfo[]): any {
   // now builds activity signals from BOTH — and this double is an `any` cast, so a missing method
   // is a runtime TypeError inside the handler (the RPC answers INTERNAL, not "no activity"), not a
   // compile error. Every AgentEngine double that a session.list-calling test can reach owes both.
-  return { knownModels: () => models, isRunning: () => false, hasBackgroundWork: () => false };
+  return { knownModels: () => models, isRunning: () => false, hasBackgroundWork: () => false, interrupt: () => ({ wasRunning: false }) };
 }
 
 const CATALOGUE: ModelInfo[] = [

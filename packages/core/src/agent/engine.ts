@@ -964,6 +964,18 @@ export class AgentEngine {
     this.subagentTranscripts = new SubagentTranscripts((sessionId) => this.cfg.tmpDirOf?.(sessionId));
   }
 
+  /** session-activity-hygiene T5: a top-level turn for this session has SETTLED — every terminal
+   *  path, abort included. Assigned by `startIpcServer` (the `SessionHub.onGlobalEvent` precedent:
+   *  a mutable public field, not a constructor dep, because the engine is built before the server
+   *  and the consumer is the server's activity enforcement).
+   *
+   *  Distinct from `cfg.onTurnEnd` (dispatch's child-status registry) on purpose — two unrelated
+   *  concerns, and one of them is wired at construction while the other cannot be. Called LAST in
+   *  the finally, after the between-turns drain decision, so a follow-up turn the drain just started
+   *  is already visible to `isRunning` and the lifecycle never announces an idle that a re-started
+   *  turn immediately contradicts. */
+  onTurnSettled?: (sessionId: string) => void;
+
   /** Public path accessor (CC parity: surfacing a subagent's transcript file path) — undefined when
    *  cfg.tmpDirOf is absent/unresolved for this session. Every surface that shows the path (bg spawn
    *  tool_result, task_notification, the sync trailer, agent_output) goes through this ONE
@@ -1117,6 +1129,13 @@ export class AgentEngine {
         // queue drain) so the model reacts without a user message.
         void this.runTurn(sessionId).catch((err) => console.error("bg-notification/message drain failed:", err));
       }
+      // session-activity-hygiene T5: LAST, deliberately — the drain above starts its follow-up turn
+      // synchronously up to its first await (runningTurns.add is the second statement of runTurn),
+      // so by here `isRunning` already tells the truth about whether this session is really done.
+      // Swallowed like every other hook in this finally: a lifecycle bug must not turn a completed
+      // turn into a rejected runTurn.
+      try { this.onTurnSettled?.(sessionId); }
+      catch (err) { console.error("turn-settled hook failed:", err); }
     }
   }
 

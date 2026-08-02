@@ -11,6 +11,13 @@ export const ACTIVITY_MEMO_CAP = 512;
 
 export interface HubClient {
   clientName: string;
+  /** session-activity-hygiene T5: the hello ROLE this connection authenticated as, as recorded on
+   *  `ConnState.authedRole` (ipc/server.ts). Optional because a HubClient is fundamentally a
+   *  delivery sink and most producers of one don't have a role to state; carried here because the
+   *  detach-time harness classification needs it and the client object is the ONLY identity the
+   *  hub's removal paths hold. `"remote"` is what makes the phone's gateway app-kind by the
+   *  daemon's own record rather than by string-matching its name (`harnessKindOf`). */
+  role?: string | null;
   deliver(event: SessionEvent): boolean;
 }
 
@@ -24,6 +31,18 @@ export class SessionHub {
   // first (only) such type — a harness viewing the session list needs a session it isn't attached
   // to to pick up its title live.
   onGlobalEvent?: (event: SessionEvent) => void;
+
+  // session-activity-hygiene T5: the hub RAISES the fact that a harness went away; it does not
+  // decide what that means. Set by the IPC server (the `onGlobalEvent` precedent above), which wires
+  // it to the activity enforcement — the policy needs `AgentEngine.isRunning`/`interrupt` and the
+  // one `deriveActivity` closure, none of which the hub owns or should learn to.
+  //
+  // Fired from BOTH removal paths, which is the whole reason this is a hub hook rather than a line
+  // in the server's `close()` handler: a client can also be dropped by `fanOut`'s dead-client
+  // eviction (a broken socket found mid-broadcast), and that path never goes through `detach()`.
+  // `remaining` is the attachment count AFTER the removal — the "was this the last one" question,
+  // answered by the only object that can answer it.
+  onDetached?: (sessionId: string, client: HubClient, remaining: number) => void;
 
   // Dispatch (Phase 7): lightweight in-process observers — fan-out of every appended/broadcast
   // event of EVERY session. Unlike HubClient attach, observing appends nothing (no
@@ -76,6 +95,17 @@ export class SessionHub {
     this.appendAndBroadcast(sessionId, {
       type: "harness_detached", sessionId, clientName: client.clientName,
     });
+    this.raiseDetached(sessionId, client);
+  }
+
+  /** session-activity-hygiene T5: hand the detach fact to whoever is enforcing the lifecycle, AFTER
+   *  the removal and its `harness_detached` are done — so a hook that turns around and derives this
+   *  session's activity sees the finished state, not a half-removed one. Errors are logged and
+   *  swallowed on the `notifyObservers` precedent: an enforcement bug must never break the detach
+   *  path (a client that fails to come off the fan-out would be re-delivered to forever). */
+  private raiseDetached(sessionId: string, client: HubClient): void {
+    try { this.onDetached?.(sessionId, client, this.attachedCount(sessionId)); }
+    catch (err) { console.error(`[hub] detach hook failed for ${sessionId}:`, err); }
   }
 
   send(client: HubClient, sessionId: string, text: string): number {
@@ -155,6 +185,13 @@ export class SessionHub {
   emitActivity(sessionId: string, activity: SessionActivity | undefined): SessionEvent | null {
     if (activity === undefined) return null;
     if (this.lastActivity.get(sessionId) === activity) return null;
+    // BROADCAST FIRST, memo second. The memo records the last state actually DELIVERED, and that is
+    // only true if a failed broadcast leaves it untouched: `broadcastTransient` reads
+    // `store.lastSeq(sessionId)`, which throws for a session whose row is gone — reachable from T5's
+    // detach/sweep call sites (a detach racing a delete). Writing the memo first would record a
+    // state nobody ever received, and the next attempt at that same state would be suppressed as a
+    // repeat — a permanently missed update, silently.
+    const event = this.broadcastTransient(sessionId, { type: "session_activity", sessionId, activity });
     // Re-insert to move this session to the young end (Map iterates in insertion order), so the
     // eviction below drops the least-recently-CHANGED session rather than the oldest-known one.
     this.lastActivity.delete(sessionId);
@@ -163,7 +200,7 @@ export class SessionHub {
       const oldest = this.lastActivity.keys().next().value;
       if (oldest !== undefined) this.lastActivity.delete(oldest);
     }
-    return this.broadcastTransient(sessionId, { type: "session_activity", sessionId, activity });
+    return event;
   }
 
   private fanOut(sessionId: string, event: SessionEvent): void {
@@ -186,6 +223,10 @@ export class SessionHub {
       this.appendAndBroadcast(sessionId, {
         type: "harness_detached", sessionId, clientName: c.clientName,
       }); // bounded recursion: each level evicts at least one client
+      // A socket that died is a detach like any other — and for a CLI harness mid-turn it is the
+      // COMMON one (the terminal was closed). Missing it here would make the enforcement fire only
+      // for orderly disconnects.
+      this.raiseDetached(sessionId, c);
     }
   }
 }

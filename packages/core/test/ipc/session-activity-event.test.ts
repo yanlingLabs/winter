@@ -112,6 +112,7 @@ describe("session_activity transient (session-activity-hygiene T4)", () => {
     const engine: any = {
       isRunning: (id: string) => running.has(id),
       hasBackgroundWork: (id: string) => bgWork.has(id),
+      interrupt: (id: string) => { running.delete(id); return { wasRunning: true }; },
     };
     const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, hub, engine });
     stop = () => { server.stop(); store.close(); };
@@ -136,8 +137,10 @@ describe("session_activity transient (session-activity-hygiene T4)", () => {
     await setter.hello(harnessToken, "setter");
     const res = await setter.request(METHODS.sessionSetActivity, { sessionId, activity: "background" });
 
-    await waitFor(() => viewer.activities().length === 1, "the session_activity transient");
-    expect(viewer.activities()).toEqual(["background"]);
+    await waitFor(() => viewer.activities().length === 2, "the session_activity transient");
+    // The leading "active" is T5's attach transition (see test/sessions/activity-enforcement.ts);
+    // this seam is the one that follows it.
+    expect(viewer.activities()).toEqual(["active", "background"]);
     // The SAME value the caller was handed — one derivation, so the two surfaces cannot describe
     // different states.
     expect(res.result.activity).toBe("background");
@@ -157,10 +160,10 @@ describe("session_activity transient (session-activity-hygiene T4)", () => {
 
     await viewer.request(METHODS.sessionSetActivity, { sessionId, activity: "archived" });
     await viewer.request(METHODS.sessionSetActivity, { sessionId, activity: null });
-    await waitFor(() => viewer.activities().length === 2, "both transitions");
+    await waitFor(() => viewer.activities().length === 3, "both transitions");
     // The clear lands on "active", not "idle": this connection is attached, and the emitted value
-    // is the DERIVED state, not the flag that was written.
-    expect(viewer.activities()).toEqual(["archived", "active"]);
+    // is the DERIVED state, not the flag that was written. (The leading "active" is T5's attach.)
+    expect(viewer.activities()).toEqual(["active", "archived", "active"]);
     viewer.close();
   });
 
@@ -172,10 +175,10 @@ describe("session_activity transient (session-activity-hygiene T4)", () => {
     await viewer.request(METHODS.sessionAttach, { sessionId });
 
     await viewer.request(METHODS.sessionSetActivity, { sessionId, activity: "background" });
-    await waitFor(() => viewer.activities().length === 1, "the first transient");
+    await waitFor(() => viewer.activities().length === 2, "the first transient");
     await viewer.request(METHODS.sessionSetActivity, { sessionId, activity: "background" });
     await settle();
-    expect(viewer.activities()).toEqual(["background"]); // still one
+    expect(viewer.activities()).toEqual(["active", "background"]); // still one background
     viewer.close();
   });
 
@@ -231,15 +234,18 @@ describe("session_activity transient (session-activity-hygiene T4)", () => {
     viewer.close();
   });
 
-  test("attaching to a NON-archived session announces nothing — attach alone is not a lifecycle change", async () => {
+  test("attaching to a NON-archived session announces 'active' — T5's transition, on the same seam", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const sessionId = store.createSession("global");
     const viewer = await TestClient.connect(socketPath);
     await viewer.hello(harnessToken, "viewer");
     await viewer.request(METHODS.sessionAttach, { sessionId });
     await settle();
-    // T5 owns attach/detach-driven transitions; T4 emits only where a flag actually moved.
-    expect(viewer.activities()).toEqual([]);
+    // Reserved for T5 when this file was written ("T4 emits only where a flag actually moved") and
+    // delivered by it: the attach hook fires AFTER the archived-clear above, which is what stops an
+    // un-archiving attach announcing "archived" on its way to "active". The rest of T5's
+    // enforcement lives in test/sessions/activity-enforcement.test.ts.
+    expect(viewer.activities()).toEqual(["active"]);
     viewer.close();
   });
 

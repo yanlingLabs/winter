@@ -299,6 +299,27 @@ describe("SessionHub", () => {
     expect(hub.emitActivity(ids[2]!, "background")).toBeNull();
   });
 
+  test("a FAILED broadcast leaves the memo untouched — it records what was DELIVERED, not what was attempted", () => {
+    // The reachable version of this (session-activity-hygiene T5): the enforcement's detach and
+    // demotion-sweep call sites can reach a session whose row is gone, and `broadcastTransient`
+    // reads `store.lastSeq(sessionId)`, which throws for exactly that session.
+    let broken = true;
+    const store = {
+      lastSeq(_sessionId: string): number {
+        if (broken) throw new Error("unknown session s_deadbeef0001");
+        return 7;
+      },
+    } as unknown as SessionStore;
+    const hub = new SessionHub(store);
+
+    expect(() => hub.emitActivity("s_deadbeef0001", "background")).toThrow();
+    broken = false;
+    // A memo written BEFORE the broadcast would suppress this as a repeat — losing the state
+    // permanently and silently, since nothing ever re-states it.
+    expect(hub.emitActivity("s_deadbeef0001", "background")).not.toBeNull();
+    expect(hub.emitActivity("s_deadbeef0001", "background")).toBeNull(); // …and NOW it is memoized
+  });
+
   test("broadcastTransient evicts a dead client like a normal broadcast", () => {
     const { store, hub } = setup();
     const id = store.createSession("global");

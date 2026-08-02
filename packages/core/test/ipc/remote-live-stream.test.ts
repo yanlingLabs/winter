@@ -304,7 +304,10 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     hub.broadcastTransient(sessionId, { type: "plugin_tile_updated", sessionId, pluginId: "p1", tile: null });
     hub.broadcastTransient(sessionId, { type: "session_activity", sessionId, activity: "background" });
 
-    await waitFor(() => phone.types().includes("session_activity"), "the last transient");
+    // Keyed to this broadcast's own VALUE, not just its type: since T5 the attach above emits a
+    // `session_activity` of its own ("active"), so a type-only wait would already be satisfied
+    // before any of the eight broadcasts had crossed the socket.
+    await waitFor(() => phone.ofType("session_activity").some((e: any) => e.activity === "background"), "the last transient");
     for (const t of TRANSIENT_EVENT_TYPES) {
       expect(phone.types()).toContain(t);
     }

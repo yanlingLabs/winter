@@ -40,6 +40,7 @@ import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTai
 import type { SessionStore } from "../sessions/store";
 import { readHistoryPage } from "../sessions/history";
 import { activityFor, participatesInActivity, type Activity, type ActivityRow } from "../sessions/activity";
+import { createActivityEnforcement } from "../sessions/activity-enforcement";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
@@ -508,11 +509,65 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       attachedCount: hub.attachedCount(sessionId),
       bgWork: opts.engine?.hasBackgroundWork(sessionId) ?? false,
       lastEventTs: opts.store.lastEventTs(sessionId),
-      // T5 owns the continuously-active span; until it exists nothing tracks one, and `undefined`
-      // is the honest way to say so (it reads as "not over the window").
-      activeSince: undefined,
+      // session-activity-hygiene T5: the two signals the ENFORCEMENT owns, fed back in here so the
+      // read surface and the enforced lifecycle are the same story. `activeSince` is `undefined`
+      // (never 0) for a session with nothing attached — activity.ts's own warning: an epoch stand-in
+      // would demote every session on earth. `autoBackground` matters for exactly one window, the
+      // post-turn grace, where without it `session.list` would answer "idle" the instant the turn
+      // settled while the emitted stream still (correctly) said "background".
+      activeSince: enforcement.activeSince(sessionId),
+      autoBackground: enforcement.autoBackgrounded(sessionId),
     }, nowMs);
   }
+
+  /** session-activity-hygiene T5: the lifecycle's ENFORCEMENT — what the daemon does when the last
+   *  harness lets go, when an auto-backgrounded turn ends, and when a session has called itself
+   *  active for a day. Constructed HERE because this is the only scope where the engine's signals,
+   *  the hub's attachments and the store are all in reach — i.e. the only place `deriveActivity`
+   *  can exist, and the enforcement must not grow a second derivation of its own.
+   *
+   *  The mutual reference is deliberate and safe: `deriveActivity` (a hoisted function declaration)
+   *  reads `enforcement` for its two signals, and `enforcement` calls back into `deriveActivity` to
+   *  publish. Neither runs before this statement completes — every caller of `deriveActivity` is a
+   *  request handler or one of the hooks wired just below. */
+  const enforcement = createActivityEnforcement({
+    meta: (sessionId) => opts.store.meta(sessionId),
+    // The ONE derive-then-emit path. Every enforced transition — attach, last detach (aborting or
+    // not), grace expiry, demotion — goes through here rather than announcing a state it decided
+    // for itself, which is what keeps `SessionHub.emitActivity`'s change memo an accurate record of
+    // what the session IS rather than of what one code path believed.
+    emit: (sessionId) => {
+      hub.emitActivity(sessionId, deriveActivity(opts.store.meta(sessionId), sessionId, Date.now()));
+    },
+    turnRunning: (sessionId) => opts.engine?.isRunning(sessionId) ?? false,
+    // The EXISTING ESC-abort path, verbatim — `session.interrupt`'s own handler is the same one
+    // call. So a turn killed by a closed terminal ends exactly as a user's ESC ends it:
+    // `turn_completed(aborted)`, resumable, no second abort mechanism to keep in step.
+    abortTurn: (sessionId) => { opts.engine?.interrupt(sessionId); },
+    // "No scheduled wake-up" (spec §1.2), implemented over what this daemon ACTUALLY has.
+    //
+    // Routines/cron have NO session linkage: a `Routine` row is {spec, prompt, policy, cwd,
+    // enabled, nextRunAt} (routines/store.ts) and every fire MINTS A NEW SESSION
+    // (`makeDaemonRoutineRunner` → `store.createSession(...)`, routines/runner.ts). There is
+    // therefore no such thing as a routine that will wake THIS session, and a predicate that
+    // pretended to check for one would be theatre.
+    //
+    // What genuinely re-starts a turn on an existing session unattended is background work
+    // finishing: a `run_in_background` bash task or a detached agent thread, whose completion sets
+    // the engine's retrigger and drains into a fresh `runTurn`. That is exactly
+    // `hasBackgroundWork` — the same signal the derivation already reads as `bgWork`, which is why
+    // suppressing the grace here costs no flicker: such a session derives "background" on its own.
+    // (The engine's other two wake sources — `retriggerPending` and a stranded `threadSteerQueue`
+    // message — are both consumed inside `runTurn`'s finally BEFORE `onTurnSettled` fires, so by
+    // the time this predicate is asked they have already become a running turn, which
+    // `onTurnSettled` checks for directly.)
+    scheduledWakeup: (sessionId) => opts.engine?.hasBackgroundWork(sessionId) ?? false,
+  });
+  hub.onDetached = (sessionId, client, remaining) => enforcement.onDetached(sessionId, client, remaining);
+  // Assigned rather than passed at construction: the engine is built before this server (daemon.ts),
+  // and this is the same mutable-hook shape `hub.onGlobalEvent` uses just below.
+  if (opts.engine) opts.engine.onTurnSettled = (sessionId) => enforcement.onTurnSettled(sessionId);
+  enforcement.start();
 
   const helloTimeoutMs = opts.helloTimeoutMs ?? 5000;
   const maxConnections = opts.maxConnections ?? 64;
@@ -998,6 +1053,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const isRemote = socket.data.authedRole === "remote";
         const hubClient: HubClient = {
           clientName: socket.data.clientName,
+          // T5: carried so the hub's detach hook can classify this harness by the daemon's OWN
+          // record of how it authenticated — `"remote"` is the phone's gateway, and a phone must
+          // never lose a running turn to a connection blip whatever it calls itself.
+          role: socket.data.authedRole,
           deliver(event: SessionEvent): boolean {
             // The remote live/replay policy (sessions/remote-stream.ts): allowlist the type,
             // then bound the serialized size. Harness/admin connections are untouched — they
@@ -1044,6 +1103,14 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
               hub.emitActivity(p.sessionId, deriveActivity(opts.store.meta(p.sessionId), p.sessionId, Date.now()));
             }
           } catch { /* the row vanished between attach and here — nothing left to clear */ }
+          // T5: the attach half of the enforcement — opens the continuously-active span, cancels any
+          // post-turn grace this attachment just interrupted, and announces the new state. Server-
+          // side rather than a hub hook precisely so it runs AFTER the archived-clear above: an
+          // attach-time derivation that ran first would announce "archived" for a session that is
+          // being un-archived by this very call. Its own emit is normally a no-op after the clear's
+          // (same derived value, and the hub's memo eats the repeat) and carries the whole
+          // announcement for the ordinary, non-archived attach.
+          enforcement.onAttached(p.sessionId);
           return { ok: true, lastSeq };
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
@@ -2242,5 +2309,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     }
   }
 
-  return { stop() { server.stop(true); } };
+  // T5: the enforcement owns real timers (the demotion sweep interval, plus any pending post-turn
+  // grace) — a server torn down without stopping them leaves callbacks that fire against a dead
+  // store, which in a test run is a cross-test leak rather than a crash (they're unref'd).
+  return { stop() { enforcement.stop(); server.stop(true); } };
 }

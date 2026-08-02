@@ -72,6 +72,13 @@ export class DispatchChildren {
       cwd: opts.dir, approvalPolicy: "auto", origin: "dispatch-child", mode: "code",
       parentSessionId: opts.dispatchSessionId,
     });
+    // session-activity-hygiene T5: a dispatch child is unattended BY CONSTRUCTION — it is a code
+    // session nobody has a harness on, whose turn starts three lines below with no terminal and no
+    // window behind it. Stamping the stored flag at birth is what stops it from ever being read as
+    // "idle" between turns, and what keeps a harness that later attaches to inspect it from being
+    // able to kill its turn by detaching again (the last-detach abort skips a backgrounded session).
+    // The flag is the user-explicit one everywhere else; here the spawn IS the explicit act.
+    this.deps.store.setBackgrounded(childId, true);
     // set BEFORE runTurn (below) so onTurnEnd can't race a bookkeeping-less child — spawnChild is
     // fully synchronous up to the `void runTurn(...)` call, so this always lands first.
     this.dispatchId = opts.dispatchSessionId;

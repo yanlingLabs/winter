@@ -35,9 +35,22 @@ export interface ActivitySignals {
   lastEventTs: number;
   /** Start of the session's current continuously-active span, for the >24h demotion. ABSENT means
    *  "nothing is tracking a span", which must read as "not over the window" — never as 0/epoch,
-   *  which would demote every session on earth. Who maintains it is T5's problem; every builder
-   *  before then passes `undefined`. */
+   *  which would demote every session on earth. Maintained in memory by T5's enforcement
+   *  (`activity-enforcement.ts`: stamped when a session goes from zero attachments to one, dropped
+   *  when its last harness detaches). */
   activeSince?: number;
+  /** T5's PROVISIONAL background: the daemon auto-backgrounded this session because its APP-kind
+   *  harness detached mid-turn, and the post-turn grace window has not expired yet. Ephemeral and
+   *  in-memory — deliberately NOT the stored `backgrounded` flag, which stays user-explicit
+   *  (`session.setActivity` is its only writer).
+   *
+   *  A signal rather than a row overlay because that is exactly what it is: a live fact the daemon
+   *  owns, on the same footing as `turnRunning`/`attachedCount`. It matters for ONE window — after
+   *  the turn ends the session has no turn, no attachment and (typically) no background work, so
+   *  without this input the derivation would answer "idle" the instant the turn settled and the
+   *  2-minute grace would be invisible to `session.list` while the emitted stream still said
+   *  "background". Absent/false for every caller that isn't the daemon's own enforcement. */
+  autoBackground?: boolean;
 }
 
 /** The modes that HAVE a lifecycle (spec §1: "Code and cowork participate fully"). Absent mode is
@@ -75,7 +88,8 @@ export type ActivityRow = Pick<SessionRow, "mode" | "backgrounded" | "archived">
  * Priority, highest first — the order is the whole design, not an implementation detail:
  *   1. `archived` flag                                    → "archived"
  *   2. `backgrounded` flag, OR work running with nothing
- *      attached, OR continuously active > 24 h            → "background"
+ *      attached, OR continuously active > 24 h, OR the
+ *      daemon's provisional auto-background               → "background"
  *   3. any harness attached                               → "active"
  *   4. otherwise                                          → "idle"
  *
@@ -89,7 +103,9 @@ export function activityFor(row: ActivityRow, signals: ActivitySignals, nowMs: n
   // them matters to the ENFORCEMENT hook (T5 aborts a turn; it does not kill a bash task), not here.
   const working = signals.turnRunning || signals.bgWork;
   const demoted = signals.activeSince !== undefined && nowMs - signals.activeSince > ACTIVE_DEMOTION_MS;
-  if (row.backgrounded || (working && signals.attachedCount === 0) || demoted) return "background";
+  if (row.backgrounded || (working && signals.attachedCount === 0) || demoted || signals.autoBackground) {
+    return "background";
+  }
   if (signals.attachedCount > 0) return "active";
   return "idle";
 }
