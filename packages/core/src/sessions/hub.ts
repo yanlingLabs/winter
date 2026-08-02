@@ -242,13 +242,20 @@ export class SessionHub {
     // our own (now stale) value over it would be the identical bug from the other direction.
     const before = this.lastActivity.get(sessionId);
     const event = this.broadcastTransient(sessionId, { type: "session_activity", sessionId, activity });
-    // T9's second half, immediately after the per-session one so the two deliveries of the SAME
-    // event object cannot be separated by anything. Not guarded: `appendAndBroadcast`'s
-    // `session_titled` call isn't either, and the server's sink already swallows per-connection
-    // failures (a dead socket is evicted by its own close handler). The nested-emit check below
-    // still covers a re-entrant emit raised from inside either delivery.
+    // Checked BEFORE `onGlobalEvent`, not after: a nested emit — raised from inside the `fanOut`
+    // that `broadcastTransient` just ran, via dead-client eviction → `onDetached` → enforcement →
+    // another `emitActivity` for this SAME session — can complete BOTH its own deliveries (fanOut
+    // and global) before this call resumes here. Checking first and returning early means this one
+    // check now guards the global send below too, so a stale outer event is never delivered
+    // globally — global recipients see the same [older, newer] order attached clients already got
+    // from the two `fanOut` calls, instead of the inverted [newer, older] a post-hoc check allows.
+    if (this.lastActivity.get(sessionId) !== before) return event;
+    // T9's second half, immediately after the per-session one (short of the nested-emit case just
+    // excluded above) so the two deliveries of the SAME event object cannot be separated by
+    // anything. Not otherwise guarded: `appendAndBroadcast`'s `session_titled` call isn't either,
+    // and the server's sink already swallows per-connection failures (a dead socket is evicted by
+    // its own close handler).
     this.onGlobalEvent?.(event, { excludeSessionAttachments: true });
-    if (this.lastActivity.get(sessionId) !== before) return event; // a nested emit recorded a newer state
     // Re-insert to move this session to the young end (Map iterates in insertion order), so the
     // eviction below drops the least-recently-CHANGED session rather than the oldest-known one.
     this.lastActivity.delete(sessionId);

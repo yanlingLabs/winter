@@ -337,11 +337,21 @@ describe("SessionHub", () => {
       detaches.push({ clientName: c.clientName, remaining });
       hub.emitActivity(sessionId, "idle");
     };
+    // m34: the GLOBAL side of the identical race. Pre-fix, the outer call's now-stale "background"
+    // still reached `onGlobalEvent` AFTER the nested call's "idle" already had — global recipients
+    // saw [idle, background], inverted, while attached clients (reached inside `broadcastTransient`,
+    // unaffected by this bug) correctly saw [background, idle]. The fix is the same sentinel check
+    // moved above the global send, so the stale outer event must never reach this sink at all.
+    const globalActivity: string[] = [];
+    hub.onGlobalEvent = (e) => { if (e.type === "session_activity") globalActivity.push(e.activity); };
 
     hub.emitActivity(id, "background");
 
     // The eviction path really does raise the detach (nothing else covers this hook).
     expect(detaches).toEqual([{ clientName: "cli-p", remaining: 0 }]);
+    // The global sink saw ONLY the nested call's "idle" — the outer's stale "background" never
+    // reached it, in any order.
+    expect(globalActivity).toEqual(["idle"]);
     // "idle" is what was delivered last, so re-stating it is the thing to suppress...
     expect(hub.emitActivity(id, "idle")).toBeNull();
     // ...and "background" is a genuine change again. An outer call that stamped its own, older value
