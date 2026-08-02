@@ -1218,15 +1218,24 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // ruling (DISPATCH_MODEL/DISPATCH_EFFORT, dispatch-config.ts), refused here BEFORE
       // resolveModelSelection runs (mirrors session.setPolicy's targetMode try/catch idiom just
       // above: an unknown sessionId must still fall through to this method's own NOT_FOUND, not a
-      // confusing pin refusal that implies the session exists). Applies to `model: null` too —
-      // there is no per-session override on a dispatch session to clear in the first place, and the
-      // refusal is about the TARGET being dispatch, not about which value was sent.
+      // confusing pin refusal that implies the session exists).
+      //
+      // Fix round 1 (reviewer finding): `model: null` (clearing) is the ONE exception — it is
+      // allowed through even for a dispatch target, never refused. Dispatch is a LONG-LIVED
+      // SINGLETON (`store.dispatchSessionId()` reuses the same row forever), and before this pin
+      // shipped both doors were mode-agnostic, so a stored override from that era is a genuine
+      // historical possibility, not a hypothetical. `session.list` reports the raw stored `model`
+      // column VERBATIM (store.ts's `list()`), independent of `resolveSel` — so refusing the clear
+      // unconditionally would make such a pre-pin override PERMANENTLY un-clearable while still
+      // displaying as truth forever. `resolveSel`'s short-circuit ignores the column either way
+      // (zero runtime effect), so letting the clear through is safe and closes a pure
+      // display/data-hygiene hole rather than reopening the pin.
       case METHODS.sessionSetModel: {
         const p = parseParams(SessionSetModelParams, params);
         assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
         let targetMode: string | undefined;
         try { targetMode = opts.store.meta(p.sessionId).mode; } catch { /* unknown id — NOT_FOUND below wins */ }
-        if (targetMode === "dispatch") {
+        if (targetMode === "dispatch" && p.model !== null) {
           throw new RpcFailure(ERR.INVALID_PARAMS, DISPATCH_PIN_MESSAGE);
         }
         let model = p.model;
@@ -1256,18 +1265,20 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // caller-supplied sessionId), the same mode-agnosticism for chat/code, the same `null` =
       // clear, the same NOT_FOUND mapping, and the same "the next turn resolves it, never the
       // running one" — and, as of session-activity-hygiene task 1, the same dispatch fixed-pin
-      // refusal (see session.setModel's own doc comment above for the reasoning).
+      // refusal for a non-null set, INCLUDING fix round 1's same null-clear exception (see
+      // session.setModel's own doc comment above for the full reasoning: a pre-pin stored override
+      // on the long-lived dispatch singleton must stay clearable, even though it has zero runtime
+      // effect on what the session actually runs).
       case METHODS.sessionSetEffort: {
         const p = parseParams(SessionSetEffortParams, params);
         assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
-        // Read ONCE, regardless of null-ness (session-activity-hygiene task 1 needs the mode even
-        // for a clear attempt — dispatch's effort can never be overridden OR cleared, there's
-        // nothing to clear). An unknown sessionId leaves this undefined and is left to
+        // Read ONCE, regardless of null-ness (the dispatch check below needs the mode even for a
+        // clear attempt). An unknown sessionId leaves this undefined and is left to
         // `store.setEffort` to report — that keeps NOT_FOUND coming from one place regardless of
         // which branch below ran (and is why none of them may refuse on an absent meta).
         let sessionMeta: { model?: string; mode?: string } | undefined;
         try { sessionMeta = opts.store.meta(p.sessionId); } catch { /* unknown id → the store call below owns the error */ }
-        if (sessionMeta?.mode === "dispatch") {
+        if (sessionMeta?.mode === "dispatch" && p.effort !== null) {
           throw new RpcFailure(ERR.INVALID_PARAMS, DISPATCH_PIN_MESSAGE);
         }
         // SET-TIME validation, for the reason session.setModel's exists (I1 review fix: an

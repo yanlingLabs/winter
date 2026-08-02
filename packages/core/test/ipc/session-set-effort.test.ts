@@ -207,17 +207,48 @@ describe("session.setEffort round-trip RPC (provider-correctness T4)", () => {
     c.close();
   });
 
-  // `effort: null` (clearing) is refused too — same reasoning as session.setModel's mirror test:
-  // there's nothing to clear, and the refusal is about the TARGET, not the value sent.
-  test("refuses effort: null (clear) against a DISPATCH target too", async () => {
+  // Fix round 1 (reviewer finding, mirrors session.setModel's own): dispatch is a LONG-LIVED
+  // SINGLETON (store.dispatchSessionId() reuses the same row forever), and BEFORE this task's
+  // commit both doors were mode-agnostic — a stored override written during that era is a genuine
+  // historical possibility. `session.list` reports the raw stored `effort` column VERBATIM
+  // (store.ts's `list()`), independent of `resolveSel` — so refusing the clear unconditionally
+  // would make a pre-pin override PERMANENTLY un-clearable while displaying as truth forever
+  // (zero runtime effect, since resolveSel's short-circuit wins regardless — but a real
+  // display/data-hygiene defect). `effort: null` therefore SUCCEEDS even against a dispatch
+  // target; only a non-null SET is refused (the test just above).
+  test("effort: null SUCCEEDS as a clear even against a DISPATCH target — only a non-null set is refused", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "effort-setter");
     const sessionId = store.createSession("global", { mode: "dispatch", origin: "dispatch" });
 
     const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort: null });
-    expect(res.error).toBeTruthy();
-    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error).toBeUndefined();
+    expect(store.meta(sessionId).effort).toBeUndefined();
+    c.close();
+  });
+
+  // The historical-override scenario itself, end to end: a stored override from BEFORE this
+  // task's pin shipped (simulated here by writing it directly via `store.setEffort`, bypassing
+  // the RPC door entirely — exactly how such a row would have gotten there pre-fix) is removable
+  // by the null-clear above, and `session.list` — which reads the raw column, never `resolveSel`
+  // — stops reporting it the moment it's cleared.
+  test("a PRE-PIN stored override on a dispatch session is clearable, and session.list stops reporting it once cleared", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "effort-setter");
+    const sessionId = store.createSession("global", { mode: "dispatch", origin: "dispatch" });
+    store.setEffort(sessionId, "xhigh"); // simulates a row written before this fix existed
+
+    const listedBefore = await c.request(METHODS.sessionList, {});
+    expect(listedBefore.result.sessions.find((s: any) => s.sessionId === sessionId).effort).toBe("xhigh");
+
+    const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort: null });
+    expect(res.error).toBeUndefined();
+    expect(store.meta(sessionId).effort).toBeUndefined();
+
+    const listedAfter = await c.request(METHODS.sessionList, {});
+    expect(listedAfter.result.sessions.find((s: any) => s.sessionId === sessionId).effort).toBeUndefined();
     c.close();
   });
 
