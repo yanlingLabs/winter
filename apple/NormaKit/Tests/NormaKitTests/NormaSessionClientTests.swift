@@ -163,17 +163,19 @@ final class NormaSessionClientTests: XCTestCase {
     private func types(_ envs: [SessionEnvelope]) -> [String] { envs.map { $0.json["type"]?.stringValue ?? "<untyped>" } }
     private func deltas(_ envs: [SessionEnvelope]) -> [String] { envs.compactMap { $0.json["delta"]?.stringValue } }
 
-    /// The seven broadcast-only TRANSIENT event types — the list this suite drives the phone client
+    /// The eight broadcast-only TRANSIENT event types — the list this suite drives the phone client
     /// with. An INDEPENDENT literal, deliberately not read from `SessionEvent.transientTypes`: the
     /// remote-allowlist parity pattern, where each copy pins itself to the same literal names so
     /// editing one alone fails a test (`testTransientListMatchesTheProtocolConstant` just below)
     /// instead of silently diverging.
+    ///
+    /// Growth log: 7 → 8 (session-activity-hygiene T4, `session_activity`).
     private static let transientTypes = [
         "assistant_delta", "lease_granted", "lease_lost", "peripheral_call_requested",
-        "plugin_tool_invoke", "hardware_requested", "plugin_tile_updated",
+        "plugin_tool_invoke", "hardware_requested", "plugin_tile_updated", "session_activity",
     ]
 
-    /// Parity: this suite's literal seven ARE the protocol's canonical seven. Without this, a type
+    /// Parity: this suite's literal eight ARE the protocol's canonical eight. Without this, a type
     /// added to `SessionEvent.transientTypes` (and therefore honoured by the shipped client) would
     /// silently go untested here, and a type dropped from it would leave these tests passing
     /// against a list the client no longer uses.

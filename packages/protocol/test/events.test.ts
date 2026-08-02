@@ -416,6 +416,26 @@ describe("SessionEvent discriminated union", () => {
     expect(SessionEvent.safeParse({ ...t, type: "tool_review", toolName: "", verdict: "safe", reason: "x", summary: "y" }).success).toBe(false);
   });
 
+  // session-activity-hygiene T4: the lifecycle's live signal. A NEW variant, TRANSIENT, and
+  // SESSION-scoped — the `harness_attached` shape (bare Base), never ThreadBase: activity is a fact
+  // about the whole session, so a threadId would imply a per-thread state that does not exist.
+  test("session_activity round-trips for all four states", () => {
+    for (const activity of ["active", "background", "idle", "archived"] as const) {
+      const e = { ...base, type: "session_activity", activity } as const;
+      expect(SessionEvent.parse(e)).toEqual(e);
+    }
+  });
+
+  test("session_activity rejects a state outside the four, and carries no threadId", () => {
+    expect(SessionEvent.safeParse({ ...base, type: "session_activity", activity: "none" }).success).toBe(false);
+    expect(SessionEvent.safeParse({ ...base, type: "session_activity" }).success).toBe(false);
+    // The wire shape has no threadId at all: zod strips unknown keys, so one supplied by a
+    // confused producer is DROPPED rather than round-tripped — which is the assertion that would
+    // fail the day someone "helpfully" re-bases this variant on ThreadBase.
+    const stripped = SessionEvent.parse({ ...base, type: "session_activity", activity: "idle", threadId: "main" });
+    expect((stripped as { threadId?: string }).threadId).toBeUndefined();
+  });
+
   // approval_requested.reviewerReason is additive/optional (5e T1) — an older-shaped event with no
   // reviewerReason still parses (the "agent event variants parse" test above already covers the
   // bare shape), and a reviewer-escalated one carrying it round-trips losslessly.

@@ -83,6 +83,11 @@ const TRANSCRIPT_INCLUDE = {
   plugin_tile_updated: false,
   shortcut_invoke: false,
   tile_action: false,
+  // session-activity-hygiene T4: TRANSIENT and SESSION-scoped (it carries no threadId at all — it
+  // is a fact about the whole session's lifecycle, not about any thread), so it is in the same
+  // bucket as harness_attached/session_created above twice over. It also never reaches the engine's
+  // emit() chokepoint: `SessionHub.emitActivity` broadcasts it directly.
+  session_activity: false,
   // CC-parity phase 3 (Workflows, Track D Task D1): main-thread-only — see the doc comment above.
   workflow_started: false,
   workflow_progress: false,

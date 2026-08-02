@@ -308,6 +308,7 @@ extension SessionEvent {
         case .workflowProgress(let v): return v.seq
         case .workflowCompleted(let v): return v.seq
         case .workflowFailed(let v): return v.seq
+        case .sessionActivity(let v): return v.seq
         }
     }
 
@@ -357,6 +358,7 @@ extension SessionEvent {
         case .workflowProgress(let v): return v.sessionId
         case .workflowCompleted(let v): return v.sessionId
         case .workflowFailed(let v): return v.sessionId
+        case .sessionActivity(let v): return v.sessionId
         }
     }
 }

@@ -452,6 +452,50 @@ export const NotificationRequestedEvent = ThreadBase.extend({
   message: z.string().min(1).max(500),
 });
 
+/** session-activity-hygiene (spec §1): a code/cowork session's lifecycle state.
+ *
+ *  A REAL lifecycle, not a cosmetic label — from T5 on, `active` carries enforcement (when the last
+ *  harness detaches and the session is not backgrounded, its running turn is aborted through the
+ *  ESC-abort path). Two of the four are STORED flags (`backgrounded`, `archived` — index columns on
+ *  `SessionRow`); the rest is derived at read time from signals the daemon already owns (running
+ *  turns, hub attachments, background bash/agent registries). The single derivation lives in
+ *  `packages/core/src/sessions/activity.ts` (`activityFor`) — never re-derive it at a call site.
+ *
+ *  ABSENT IS A REAL VALUE: "this session does not participate". Chat and dispatch never carry one
+ *  (dispatch is definitionally the daemon itself; chat needs none of this), so a client must render
+ *  absence as "no state", never coerce it to `idle`.
+ *
+ *  Lives HERE rather than beside its first consumer (`SessionListResult`, methods.ts) because the
+ *  `session_activity` event below needs the same enum and methods.ts already imports from this
+ *  file — the reverse edge would be a module cycle. */
+export const SessionActivity = z.enum(["active", "background", "idle", "archived"]);
+export type SessionActivity = z.infer<typeof SessionActivity>;
+
+/** TRANSIENT (broadcast-only via `broadcastTransient`, like `assistant_delta` and the lease events
+ *  above) — session-activity-hygiene T4, the LIVE half of the lifecycle `session.list` made
+ *  readable and `session.setActivity` made writable.
+ *
+ *  Emitted by the daemon (`SessionHub.emitActivity`) whenever a participating session's DERIVED
+ *  state actually changes, so an open UI flips without polling `session.list`. Session-scoped, not
+ *  thread-scoped: activity is a fact about the whole session (an attachment, a stored flag), never
+ *  about one thread — hence the `harness_attached`/`harness_detached` shape (bare `Base`, no
+ *  `threadId`) rather than `ThreadBase`.
+ *
+ *  Why transient rather than persisted: the state is a pure FUNCTION of the two stored flags plus
+ *  live signals (attachments, running turns) and is re-derived on every read, so a replayed history
+ *  of past transitions would be a second, staler source of truth for something the next
+ *  `session.list` answers exactly. Persisting it would also make every attach/detach churn append
+ *  to the JSONL. Clients must treat it as advisory-and-current, and exempt it from seq dedupe /
+ *  cursor advancement like every other transient (see `TRANSIENT_EVENT_TYPES` below).
+ *
+ *  Only ever carries a state a participating session can actually be in: chat/dispatch derive to
+ *  `undefined` ("no lifecycle"), and `emitActivity` emits nothing for them — absence is never
+ *  represented on the wire. */
+export const SessionActivityEvent = Base.extend({
+  type: z.literal("session_activity"),
+  activity: SessionActivity,
+});
+
 export const SessionEvent = z.discriminatedUnion("type", [
   SessionCreatedEvent,
   HarnessAttachedEvent,
@@ -498,10 +542,11 @@ export const SessionEvent = z.discriminatedUnion("type", [
   WorkflowProgressEvent,
   WorkflowCompletedEvent,
   WorkflowFailedEvent,
+  SessionActivityEvent,
 ]);
 export type SessionEvent = z.infer<typeof SessionEvent>;
 
-/** The seven BROADCAST-ONLY TRANSIENT event types — the canonical, cross-language definition.
+/** The eight BROADCAST-ONLY TRANSIENT event types — the canonical, cross-language definition.
  *
  *  A transient is fanned out to attached clients by `SessionHub.broadcastTransient` and is NEVER
  *  appended to the session log: absent from the JSONL, absent from attach replay, absent from
@@ -518,9 +563,15 @@ export type SessionEvent = z.infer<typeof SessionEvent>;
  *  daemon but missing from a client's copy is dropped 100% of the time, silently, with a green
  *  suite (exactly the iOS-streaming bug — the phone's client was missing the whole list). The
  *  Swift mirror is `SessionEvent.transientTypes` in `apple/NormaProtocol`; both sides are pinned to
- *  the same literal seven by parity tests (`packages/core/test/ipc/remote-live-stream.test.ts`
+ *  the same literal eight by parity tests (`packages/core/test/ipc/remote-live-stream.test.ts`
  *  and `SessionEventTransientTests`), so editing one side alone fails a test rather than silently
- *  diverging. */
+ *  diverging.
+ *
+ *  **Adding a transient is a TWO-list edit** (CLAUDE.md's protocol-checklist addendum): this set AND
+ *  `REMOTE_STREAM_EVENT_TYPES` (`packages/core/src/sessions/remote-stream.ts`, which derives its
+ *  transient half from here — so membership here is what gets a new transient to the phone at all).
+ *  The parity tests pin "exactly the current set", which catches an ADDITION on one side only; they
+ *  cannot catch an omission from a list that was never told the type exists. */
 export const TRANSIENT_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<SessionEvent["type"]>([
   "assistant_delta",
   "lease_granted",
@@ -529,6 +580,8 @@ export const TRANSIENT_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<
   "plugin_tool_invoke",
   "hardware_requested",
   "plugin_tile_updated",
+  // session-activity-hygiene T4: the lifecycle's live signal (7 → 8).
+  "session_activity",
 ]);
 
 /** Event payload before the store assigns seq/ts (distributes Omit over the union). */

@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { SessionEvent, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption } from "./events";
+// `SessionActivity` is defined in ./events (not here, where its first consumer `SessionListResult`
+// lives): the `session_activity` EVENT variant needs the same enum, and events.ts cannot import
+// from this file — methods.ts already imports from events.ts, so the reverse edge would be a module
+// cycle whose `z.enum(...)` const would be in the TDZ at events.ts's evaluation. Re-exported by the
+// package index either way, so `@norma/protocol` consumers see no difference.
+import { SessionEvent, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption } from "./events";
 
 export const PROTOCOL_VERSION = 0;
 
@@ -127,21 +132,6 @@ export const SessionCreateParams = z.object({
   effort: z.string().min(1).max(SESSION_EFFORT_MAX_CHARS).optional(),
 });
 export const SessionCreateResult = z.object({ sessionId: z.string(), trusted: z.boolean() });
-
-/** session-activity-hygiene (spec §1): a code/cowork session's lifecycle state.
- *
- *  A REAL lifecycle, not a cosmetic label — from T5 on, `active` carries enforcement (when the last
- *  harness detaches and the session is not backgrounded, its running turn is aborted through the
- *  ESC-abort path). Two of the four are STORED flags (`backgrounded`, `archived` — index columns on
- *  `SessionRow`); the rest is derived at read time from signals the daemon already owns (running
- *  turns, hub attachments, background bash/agent registries). The single derivation lives in
- *  `packages/core/src/sessions/activity.ts` (`activityFor`) — never re-derive it at a call site.
- *
- *  ABSENT IS A REAL VALUE: "this session does not participate". Chat and dispatch never carry one
- *  (dispatch is definitionally the daemon itself; chat needs none of this), so a client must render
- *  absence as "no state", never coerce it to `idle`. */
-export const SessionActivity = z.enum(["active", "background", "idle", "archived"]);
-export type SessionActivity = z.infer<typeof SessionActivity>;
 
 export const SessionListResult = z.object({
   sessions: z.array(z.object({
