@@ -814,9 +814,14 @@ describe("SessionCleaner — `cleaner.enabled` hot-toggles the pass (no restart)
     expect(provider.requests).toHaveLength(2);
 
     enabled = false;
-    store.append(second, { type: "user_message", sessionId: second, threadId: "main", text: "more junk", clientName: "cli" });
+    // A BRAND-NEW eligible candidate: without it the second pass would find nothing to judge anyway
+    // (pass 1 stamped both), and the assertion below would hold with the gate deleted — proven by a
+    // mutation probe that removed `enabled()` and left this test green.
+    const fresh = junkSession(store, { ageMs: DAY + 30_000 });
     await cleaner.runPass();
     expect(provider.requests).toHaveLength(2); // unchanged — the pass was skipped entirely
+    expect(store.judgedAt(fresh)).toBeNull();
+    expect(store.list().some((r) => r.sessionId === second)).toBe(true);
     store.close();
   });
 });
