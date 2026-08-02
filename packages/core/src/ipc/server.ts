@@ -161,8 +161,9 @@ export interface IpcServerOptions {
   // means UNSET, never `"none"` (see SyncConfigContext.liveEffort for why those differ on the wire).
   //
   // The model CATALOGUE that ships beside it has deliberately NO option here: it is read straight
-  // off `opts.engine.knownModels()`, the same accessor session.setModel/sync.push already validate
-  // against, so the phone can never be served a lineup this daemon would itself reject.
+  // off `opts.engine.knownModels()`, the same accessor session.setModel/session.create/sync.push
+  // already validate against, so the phone can never be served a lineup this daemon would itself
+  // reject.
   liveEffort?: () => string;
   // Whole-branch review C1 (`sync.config`): WHICH provider the two fields above describe — the id
   // of the running `Provider` instance, which is `ProviderSettings.type`'s own vocabulary. Optional
@@ -432,6 +433,33 @@ function assertEffortSelectable(effort: string, model: string, mode: string | un
     const forModel = model ? `by model '${model}'` : "by the configured provider";
     throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${effort}' is not accepted ${forModel} — supported: ${allowed.join(", ")}`);
   }
+}
+
+/** followups batch T2: the ONE model-resolution+selection rule, shared verbatim by
+ *  `session.setModel` and `session.create` (which — unlike `effort` above, T6's own extraction —
+ *  never validated `model` AT ALL until this task: a bogus id bricked every subsequent turn on the
+ *  session, each one 400ing against the provider with nothing pointing back at create, and an alias
+ *  like "sol" was stored verbatim, never matching the catalogue's canonical "gpt-5.6-sol" — which
+ *  also renders that session's effort menu wire-empty on the Mac, since the picker matches
+ *  `row.model` against catalogue ids).
+ *
+ *  Mirrors `assertEffortSelectable` just above in shape (extracted so the two model-writing
+ *  surfaces cannot drift) but returns the RESOLVED id rather than only asserting, because model
+ *  selection has an alias step effort selection does not: `resolveModelAlias` turns a short name
+ *  ("sol") into the full id ("gpt-5.6-sol") it should be STORED as, not merely validated against.
+ *
+ *  `knownModels.length === 0` (a BYO openai-compatible endpoint that cannot enumerate) skips both
+ *  resolution and membership and returns `model` unchanged — the exact `known.length > 0` gate
+ *  `assertEffortSelectable` uses for effort, so neither surface can be bricked by a provider it
+ *  cannot ask. Otherwise a resolved id that still isn't a member throws
+ *  `RpcFailure(INVALID_PARAMS)`. */
+function resolveModelSelection(model: string, knownModels: { id: string }[]): string {
+  if (knownModels.length === 0) return model;
+  const resolved = resolveModelAlias(model, knownModels.map((m) => m.id));
+  if (!knownModels.some((m) => m.id === resolved)) {
+    throw new RpcFailure(ERR.INVALID_PARAMS, `unknown model '${resolved}' — available models: ${knownModels.map((m) => m.id).join(", ")}`);
+  }
+  return resolved;
 }
 
 /** Maps a failed `PluginSupervisor.invoke()` result to the message a `throw new Error(...)` in
@@ -857,15 +885,30 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // SessionApprovalPolicy doc comment), so this coercion is the ONLY way a session's stored
         // policy ever becomes "chat".
         const approvalPolicy = p.mode === "chat" ? "chat" : p.approvalPolicy;
+        // followups batch T2: `model` itself, resolved+validated by the SAME `resolveModelSelection`
+        // helper `session.setModel` applies (extracted above, beside `assertEffortSelectable`) — an
+        // alias like "sol" is stamped as its canonical id ("gpt-5.6-sol") rather than stored
+        // verbatim, and an unresolvable slug is refused OUTRIGHT when the catalogue can enumerate,
+        // exactly like `session.setModel` (a BYO endpoint that can't enumerate is never bricked).
+        // MUST run BEFORE the effort check just below: effort validates against the model THIS CALL
+        // is about to stamp, and that model is the RESOLVED id, never whatever the caller typed —
+        // a create that validated effort against an unresolved alias would name the wrong model in
+        // its own refusal message, and (once `effortsForModel` ever diverges per model) could
+        // validate against the wrong list entirely.
+        let model = p.model;
+        if (model !== undefined) {
+          model = resolveModelSelection(model, opts.engine?.knownModels() ?? []);
+        }
         // provider-correctness T6: the effort half of `model`, validated by the SAME rule
         // `session.setEffort` applies (`assertEffortSelectable`) so a create can never accept what a
-        // set would refuse. Both inputs are the ones THIS CALL is about to stamp — `p.model` (before
-        // the daemon's live default: checking against a model this session will not use would
-        // validate the wrong thing) and `p.mode` (absent = code, which `clientEffortEligible` reads
-        // as tier-eligible). Refused OUTRIGHT rather than dropped, unlike `sync.push`'s ingress:
-        // there is no irreplaceable log riding along here, so the caller can simply be told.
-        if (p.effort !== undefined) assertEffortSelectable(p.effort, p.model ?? opts.liveModel?.() ?? "", p.mode);
-        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy, origin: p.origin, mode: p.mode, model: p.model, effort: p.effort });
+        // set would refuse. Both inputs are the ones THIS CALL is about to stamp — `model` (the
+        // RESOLVED id from just above; before the daemon's live default: checking against a model
+        // this session will not use would validate the wrong thing) and `p.mode` (absent = code,
+        // which `clientEffortEligible` reads as tier-eligible). Refused OUTRIGHT rather than dropped,
+        // unlike `sync.push`'s ingress: there is no irreplaceable log riding along here, so the
+        // caller can simply be told.
+        if (p.effort !== undefined) assertEffortSelectable(p.effort, model ?? opts.liveModel?.() ?? "", p.mode);
+        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy, origin: p.origin, mode: p.mode, model, effort: p.effort });
         const trusted = cwd ? (opts.trust?.isTrusted(cwd) ?? false) : false;
         // Broadcast the session_created event to every authed harness (not just attachments —
         // a brand-new session has none) so other harnesses can offer to follow (spec §4.4).
@@ -1177,15 +1220,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // UI list must never be the only guard — reuse spawn_agent's own `known.length > 0`-guarded
         // validation idiom (engine.ts's spawn bridge, and session_spawn's mirror of it) rather than
         // inventing a second one. `null` (clearing) is never validated — there's no model id to
-        // check. A provider that can't enumerate its models (empty `knownModels()`, e.g. an
-        // arbitrary openai-compatible endpoint) can't validate anything either, so the value is
-        // stored freely, same as spawn_agent's own fallback for that case.
+        // check. followups T2 extracted the resolve+validate body into `resolveModelSelection`
+        // (just above `assertEffortSelectable`'s own extraction) so `session.create` shares this
+        // EXACT idiom rather than a second copy — a provider that can't enumerate its models (empty
+        // `knownModels()`, e.g. an arbitrary openai-compatible endpoint) can't validate anything
+        // either, so the value is stored freely, same as spawn_agent's own fallback for that case.
         if (model !== null) {
-          const known = opts.engine?.knownModels() ?? [];
-          if (known.length > 0) model = resolveModelAlias(model, known.map((m) => m.id));
-          if (known.length > 0 && !known.some((m) => m.id === model)) {
-            throw new RpcFailure(ERR.INVALID_PARAMS, `unknown model '${model}' — available models: ${known.map((m) => m.id).join(", ")}`);
-          }
+          model = resolveModelSelection(model, opts.engine?.knownModels() ?? []);
         }
         try {
           opts.store.setModel(p.sessionId, model);

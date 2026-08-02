@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, SESSION_MODEL_MAX_CHARS, type WritableSocket } from "@norma/protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
+import { SessionHub } from "../../src/sessions/hub";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
+import type { ModelInfo } from "../../src/providers/types";
 
 // Chat Slice D task 1: per-session model override — session.setModel {sessionId, model: string|null}
 // → {} (null clears), mode-agnostic (works for code/dispatch/chat, unlike session.setPolicy which
@@ -243,6 +245,145 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
     const atCap = "m".repeat(SESSION_MODEL_MAX_CHARS);
     expect((await c.request(METHODS.sessionSetModel, { sessionId, model: atCap })).error).toBeUndefined();
     expect(store.meta(sessionId).model).toBe(atCap);
+    c.close();
+  });
+});
+
+/** The `session.setModel`/`sync.push`/`sync.config` catalogue shape — same fake used by
+ *  sync-push-effort.test.ts/sync-config.test.ts, and the SAME production ids
+ *  (providers/codex-config.ts's CODEX_MODELS) so an alias like "sol" resolves the way it really
+ *  would in production. */
+function fakeEngine(models: ModelInfo[]): any {
+  return { knownModels: () => models, isRunning: () => false };
+}
+
+const CATALOGUE: ModelInfo[] = [
+  { id: "gpt-5.6-sol", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
+  { id: "gpt-5.6-terra", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
+  { id: "gpt-5.6-luna", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
+];
+
+// ================================================================================================
+// followups batch T2: `session.create`'s OWN `model` was never validated — unlike `session.setModel`
+// above (already alias-resolving + membership-checking since Chat Slice D task 1), a bogus model
+// handed to `session.create` was stored VERBATIM and bricked every subsequent turn on that session
+// (each one 400s against the provider, with nothing pointing back at create), and an alias like
+// "sol" never matched the catalogue's canonical "gpt-5.6-sol" — which ALSO makes that session's
+// effort menu render wire-empty on the Mac (the picker matches `row.model` against catalogue ids).
+// Fixed with the SAME idiom `session.setModel` already applies (now a shared helper so the two
+// surfaces cannot drift): resolve aliases, refuse membership only when the catalogue can enumerate
+// (`known.length > 0` — a BYO endpoint that cannot enumerate is never bricked).
+// ================================================================================================
+describe("session.create validates model exactly like session.setModel (followups T2)", () => {
+  let stop2: (() => void) | undefined;
+  afterEach(() => { stop2?.(); stop2 = undefined; });
+
+  async function boot2(models: ModelInfo[]): Promise<{ store: SessionStore; socketPath: string; harnessToken: string }> {
+    const home = mkdtempSync(join(tmpdir(), "norma-create-model-rpc-"));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, engine: fakeEngine(models), hub: new SessionHub(store) });
+    stop2 = () => { server.stop(); store.close(); };
+    return { store, socketPath, harnessToken: tokens.harness };
+  }
+
+  test("a garbage model is REFUSED at create when the catalogue can enumerate — the brick, closed", async () => {
+    const { store, socketPath, harnessToken } = await boot2(CATALOGUE);
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "creator");
+
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "garbage" });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error.message).toContain("garbage");
+    // Refused BEFORE the row exists, same precedent as the effort refusal (T6) just above in the
+    // sibling suite — a bricked session (every future turn 400s, silently) is worse than an upfront
+    // refusal the caller can act on immediately.
+    expect(store.list().length).toBe(0);
+    c.close();
+  });
+
+  test("an alias is RESOLVED to its canonical id at create, not stored verbatim", async () => {
+    const { store, socketPath, harnessToken } = await boot2(CATALOGUE);
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "creator");
+
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "sol" });
+    expect(res.error).toBeUndefined();
+    expect(store.meta(res.result.sessionId).model).toBe("gpt-5.6-sol");
+
+    const listed = await c.request(METHODS.sessionList, {});
+    const row = listed.result.sessions.find((s: any) => s.sessionId === res.result.sessionId);
+    expect(row.model).toBe("gpt-5.6-sol");
+    c.close();
+  });
+
+  test("a full canonical id passes through unchanged (control)", async () => {
+    const { store, socketPath, harnessToken } = await boot2(CATALOGUE);
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "creator");
+
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "gpt-5.6-terra" });
+    expect(res.error).toBeUndefined();
+    expect(store.meta(res.result.sessionId).model).toBe("gpt-5.6-terra");
+    c.close();
+  });
+
+  test("without an enumerable catalogue, an arbitrary model is stored freely — a BYO endpoint is never bricked (control)", async () => {
+    const { store, socketPath, harnessToken } = await boot2([]);
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "creator");
+
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "garbage" });
+    expect(res.error).toBeUndefined();
+    expect(store.meta(res.result.sessionId).model).toBe("garbage");
+    c.close();
+  });
+
+  test("omitting model is unaffected — no resolution/validation runs at all (control)", async () => {
+    const { store, socketPath, harnessToken } = await boot2(CATALOGUE);
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "creator");
+
+    const res = await c.request(METHODS.sessionCreate, { scope: "global" });
+    expect(res.error).toBeUndefined();
+    expect(store.meta(res.result.sessionId).model).toBeUndefined();
+    c.close();
+  });
+
+  // The interaction the brief's own checklist calls out by name: create's effort validation (T6,
+  // `assertEffortSelectable`) must run against the RESOLVED model, not whatever alias the caller
+  // typed. `effortsForModel` is uniform (ignores its modelId argument today — untouched by this
+  // task), so a divergent ALLOWED-list can't be the probe; the refusal MESSAGE naming the model can
+  // be: it is built from whatever string `assertEffortSelectable` was handed. If create ran the
+  // effort check before resolving the alias, the message would name 'sol'; run in the correct
+  // order, it names the canonical id the row is about to be stamped with.
+  test("effort validates against the RESOLVED model, not the alias the caller sent", async () => {
+    const { store, socketPath, harnessToken } = await boot2(CATALOGUE);
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "creator");
+
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "sol", effort: "minimal" });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error.message).toContain("gpt-5.6-sol");
+    expect(res.error.message).not.toContain("'sol'");
+    // Refused before the row exists, exactly like the T6 "wire-invalid effort" refusal.
+    expect(store.list().length).toBe(0);
+    c.close();
+  });
+
+  test("a resolved alias's canonical id is what actually gets stamped when effort ALSO validates fine", async () => {
+    const { store, socketPath, harnessToken } = await boot2(CATALOGUE);
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "creator");
+
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "luna", effort: "high" });
+    expect(res.error).toBeUndefined();
+    expect(store.meta(res.result.sessionId).model).toBe("gpt-5.6-luna");
+    expect(store.meta(res.result.sessionId).effort).toBe("high");
     c.close();
   });
 });
