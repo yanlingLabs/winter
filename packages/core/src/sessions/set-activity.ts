@@ -29,9 +29,11 @@ export interface SetActivityDeps {
 }
 
 /** The participation refusal, verbatim, as ONE constant: `session.setActivity` and dispatch's
- *  `manage_session` both answer with it (including `manage_session`'s `stop`, which is not a
- *  setActivity call but is governed by the same allowlist), so the rule reads identically at every
- *  door instead of being three near-identical sentences that drift. */
+ *  `manage_session` both answer with it for the three STATE-SETTING verbs (background/archive/
+ *  resume), so the rule reads identically at every door instead of being near-identical sentences
+ *  that drift. `manage_session`'s `stop` is governed by the same allowlist but sets no activity
+ *  state, so it answers with its own honest refusal instead (`STOP_MODE_REFUSAL`,
+ *  agent/tools/list-sessions.ts). */
 export const ACTIVITY_MODE_REFUSAL = "activity states apply to code and cowork sessions only";
 
 /** `kind` exists so each caller can map a refusal into its own vocabulary — the RPC into

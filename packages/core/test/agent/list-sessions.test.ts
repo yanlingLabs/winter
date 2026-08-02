@@ -8,6 +8,7 @@ import {
   LIST_SESSIONS_MAX_ROWS,
   LIST_SESSIONS_TOOL,
   MANAGE_SESSION_TOOL,
+  STOP_MODE_REFUSAL,
 } from "../../src/agent/tools/list-sessions";
 import { makeActivityDeriver } from "../../src/sessions/activity";
 import { ACTIVITY_MODE_REFUSAL } from "../../src/sessions/set-activity";
@@ -358,7 +359,9 @@ describe("manage_session (T8): the write half, with session.setActivity's own se
       for (const action of ["stop", "background", "archive", "resume"] as const) {
         const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: target, action });
         expect(res.isError).toBe(true);
-        expect(res.output).toBe(ACTIVITY_MODE_REFUSAL);
+        // `stop` sets no activity state, so it answers with its own honest refusal — every other
+        // verb shares the one "activity states apply to..." sentence.
+        expect(res.output).toBe(action === "stop" ? STOP_MODE_REFUSAL : ACTIVITY_MODE_REFUSAL);
       }
     }
     expect(h.interrupted).toHaveLength(0);

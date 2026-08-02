@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { ToolRegistry } from "./registry";
 import type { ActivityDeriver } from "../../sessions/activity";
 import { participatesInActivity } from "../../sessions/activity";
-import { setSessionActivity, ACTIVITY_MODE_REFUSAL, type SetActivityDeps } from "../../sessions/set-activity";
+import { setSessionActivity, type SetActivityDeps } from "../../sessions/set-activity";
 import type { SessionRow } from "../../sessions/store";
 
 /** Rows shown in one answer. A hard cap rather than a paging cursor: this is a coordinator's
@@ -33,6 +33,12 @@ export const DEFAULT_MAX_DEPTH = 20;
 
 export const LIST_SESSIONS_TOOL = "list_sessions";
 export const MANAGE_SESSION_TOOL = "manage_session";
+
+/** `manage_session`'s `stop` refusal for a non-participating session. Deliberately its OWN sentence,
+ *  not the shared `ACTIVITY_MODE_REFUSAL` ("activity states apply to...") — `stop` sets no activity
+ *  state, so that wording would describe a thing this verb never does. Exported so the covering test
+ *  pins the same string production answers with, rather than a second hand-copy. */
+export const STOP_MODE_REFUSAL = "stop applies to code and cowork sessions only";
 
 /** The read slice of `SessionStore` this tool needs — a narrow structural interface (the
  *  `ReaperStore`/`CleanerStore` precedent) so tests drive it without a live daemon. */
@@ -287,7 +293,9 @@ export function registerListSessionsTools(
         // participation rule is the same one every other door applies — it is what keeps the
         // coordinator from aborting its own turn, or a chat session's.
         const { mode } = deps.store.meta(sessionId);
-        if (!participatesInActivity(mode)) throw new Error(ACTIVITY_MODE_REFUSAL);
+        // Its OWN refusal, not `ACTIVITY_MODE_REFUSAL`: stop sets no activity state, so the shared
+        // "activity states apply to..." sentence would describe a thing this verb never does.
+        if (!participatesInActivity(mode)) throw new Error(STOP_MODE_REFUSAL);
         if (!deps.isRunning(sessionId)) return `session '${sessionId}' has no turn running — nothing to stop`;
         deps.interrupt(sessionId);
         return `stopped the running turn in session '${sessionId}' — it stays resumable`;
