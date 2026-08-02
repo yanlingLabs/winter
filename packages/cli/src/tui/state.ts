@@ -30,6 +30,15 @@
  *  `thread_completed` commits its finish note, reading stats from that still-live row (which, by
  *  construction, can never be undefined here).
  *
+ *  LIVE STALL HINT (task-5): three more child events now ALSO reach `feedAgents` —
+ *  `tool_result`, `approval_requested`, `approval_resolved`. They contribute nothing to the roster's
+ *  display aggregates; they exist so `updateSubagents` can keep the row's freshness stamp and its
+ *  two "legitimate silence" counters honest, which is what `subagentStalled` (subagent-state.ts)
+ *  needs to call a LIVE child stalled before the daemon's watchdog kills it. Routing them here was
+ *  mandatory rather than cosmetic: `tool_call` was already fed, so an unfed `tool_result` left the
+ *  in-flight counter permanently climbing and every child mid-tool would have been mislabelled.
+ *  (`norma -p`'s main.ts feeds this reducer every event already, so it needed no equivalent change.)
+ *
  *  PURE: `nowMs` is the caller's injected clock (App.tsx will tick it); `reduce` itself never calls
  *  `Date.now()`. ZERO Ink/React import — unit-testable in isolation (state.test.ts). */
 
@@ -263,12 +272,18 @@ export function reduce(s: TuiState, e: WireEvent, nowMs: number): TuiState {
         // Pair with the child's own pending call (stashed by tool_call above) and commit into
         // that child's block list — mirrors MAIN's pairing below via the shared buildToolBlock
         // helper, so both paths produce byte-identical tool Block shapes.
+        //
+        // task-5 (live stall hint): ALSO fed to the roster now. `tool_call` was already routed
+        // (it bumps toolCalls/activity), so without its matching result the row's in-flight
+        // counter could only ever climb — and a child mid-`bash` would be mislabelled "Stalled"
+        // the moment the silence threshold elapsed, which is the one thing that hint must not do.
+        const fed = feedAgents(s, e);
         const threadId = str(e.threadId);
-        const call = s.childPendingTool[threadId];
+        const call = fed.childPendingTool[threadId];
         const block = buildToolBlock(call, str(e.output), e.isError === true);
-        const childPendingTool = { ...s.childPendingTool };
+        const childPendingTool = { ...fed.childPendingTool };
         delete childPendingTool[threadId];
-        return { ...s, childPendingTool, childBlocks: withChildBlock(s.childBlocks, threadId, block) };
+        return { ...fed, childPendingTool, childBlocks: withChildBlock(fed.childBlocks, threadId, block) };
       }
       // Main-thread tool_call/tool_result always alternate one at a time — the engine's dispatch
       // loop (packages/core/src/agent/engine.ts's `for (const call of calls)`) emits tool_call,
@@ -413,8 +428,13 @@ export function reduce(s: TuiState, e: WireEvent, nowMs: number): TuiState {
       // below (no per-item validation here either — pending-cards.tsx's ApprovalCard is the render-
       // time consumer, same division of labor as QuestionCard/`LegacyQuestion`).
       const options = Array.isArray(e.options) ? (e.options as ApprovalOption[]) : undefined;
+      // task-5 (live stall hint): a CHILD's approval parks that child on a human, which is
+      // legitimate silence — the roster must know, or it would call the row "Stalled" while the
+      // card it is blocked on sits right there on screen. A MAIN-thread approval (the common case)
+      // is a no-op inside updateSubagents, and the `pending` card below is untouched either way.
+      const fed = feedAgents(s, e);
       return {
-        ...s,
+        ...fed,
         pending: {
           kind: "approval",
           callId: str(e.callId),
@@ -430,7 +450,10 @@ export function reduce(s: TuiState, e: WireEvent, nowMs: number): TuiState {
       const pending = s.pending;
       const toolName = pending?.kind === "approval" && pending.callId === e.callId ? pending.toolName : str(e.callId);
       const text = `${e.approved ? "approved" : "denied"} ${toolName}`;
-      return { ...s, pending: null, committed: [...s.committed, { kind: "note", text }] };
+      // task-5: the release half of approval_requested's roster feed above — the child is off the
+      // human's hook and its silence is measurable again from here.
+      const fed = feedAgents(s, e);
+      return { ...fed, pending: null, committed: [...fed.committed, { kind: "note", text }] };
     }
 
     case "question_asked":

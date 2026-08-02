@@ -4,6 +4,7 @@ import { CommittedTranscript, formatArgsHead } from "../../src/tui/transcript";
 import { ActiveTurn } from "../../src/tui/active-turn";
 import { TaskList } from "../../src/tui/task-list";
 import { AgentList } from "../../src/tui/agent-list";
+import { ROSTER_STALL_MS } from "../../src/subagent-state";
 import { pickVerb, TURN_VERBS } from "../../src/tui/spinner-verbs";
 import type { Block, AgentRow } from "../../src/tui/state";
 import type { TaskRow } from "../../src/task-display";
@@ -231,6 +232,54 @@ describe("AgentList — tree rows (phase 3b Task 6, c)", () => {
     expect(frame).toContain("Stalled");
     expect(frame).not.toContain("Done");
     expect(frame).not.toContain("Failed");
+  });
+
+  // task-5 (live stall hint): the "Stalled" verb above is a POST-MORTEM — it only exists once the
+  // daemon's 600s stall watchdog has already killed the child. These pin the PRE-KILL half: a
+  // working row that has gone silent past the roster threshold, with nothing in flight, swaps its
+  // activity verb for a distinct "Stalled · no output for …" line, so the user can SEE it without
+  // having to kill it first.
+  test("a WORKING row silent past the threshold with nothing in flight reads 'Stalled · no output for …', not its activity", () => {
+    const row = agent({ status: "working", activity: "reading src/app.ts", lastEventAt: 1_000 });
+    const frame = render(<AgentList agents={[row]} nowMs={1_000 + ROSTER_STALL_MS + 1} />).lastFrame() ?? "";
+    expect(frame).toContain("Stalled");
+    expect(frame).toContain("no output for");
+    expect(frame).not.toContain("reading src/app.ts");
+    expect(frame).not.toContain("Working…");
+  });
+
+  test("the stalled line reports the REAL silence span, formatted like every other elapsed span", () => {
+    const row = agent({ status: "working", lastEventAt: 0 });
+    const frame = render(<AgentList agents={[row]} nowMs={125_000} />).lastFrame() ?? "";
+    expect(frame).toContain("no output for 2m 5s");
+  });
+
+  test("under the threshold the row is untouched — the activity verb still shows", () => {
+    const row = agent({ status: "working", activity: "reading src/app.ts", lastEventAt: 1_000 });
+    const frame = render(<AgentList agents={[row]} nowMs={1_000 + ROSTER_STALL_MS} />).lastFrame() ?? "";
+    expect(frame).toContain("reading src/app.ts");
+    expect(frame).not.toContain("Stalled");
+  });
+
+  test("a long-running TOOL is never called stalled, however long it has been silent", () => {
+    const row = agent({ status: "working", activity: "bun test", lastEventAt: 0, toolsInFlight: 1 });
+    const frame = render(<AgentList agents={[row]} nowMs={9_999_999} />).lastFrame() ?? "";
+    expect(frame).toContain("bun test");
+    expect(frame).not.toContain("Stalled");
+  });
+
+  test("a row parked on an approval is never called stalled — it is waiting on a human", () => {
+    const row = agent({ status: "working", lastEventAt: 0, approvalsPending: 1 });
+    const frame = render(<AgentList agents={[row]} nowMs={9_999_999} />).lastFrame() ?? "";
+    expect(frame).toContain("Working…");
+    expect(frame).not.toContain("Stalled");
+  });
+
+  test("a DONE row keeps its finish verb — the live hint never overrides the post-mortem", () => {
+    const row = agent({ status: "done", finish: "done", lastEventAt: 0 });
+    const frame = render(<AgentList agents={[row]} nowMs={9_999_999} />).lastFrame() ?? "";
+    expect(frame).toContain("Done");
+    expect(frame).not.toContain("Stalled");
   });
 
   test("a terminal row with NO finish recorded (pre-change replay) falls back to 'Done'", () => {

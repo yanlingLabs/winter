@@ -38,6 +38,8 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { AgentRow } from "./state";
+import { subagentSilentMs, subagentStalled } from "../subagent-state";
+import { formatElapsed } from "../task-display";
 
 function pluralizeToolUse(n: number): string {
   return `${n} tool use${n === 1 ? "" : "s"}`;
@@ -52,12 +54,24 @@ function pluralizeToolUse(n: number): string {
 // continuation.
 export const FINISH_LABEL: Record<string, string> = { done: "Done", failed: "Failed", stopped: "Stopped", stalled: "Stalled" };
 
-function AgentTreeRow({ agent, isLast, isSelected }: { agent: AgentRow; isLast: boolean; isSelected: boolean }) {
+function AgentTreeRow({ agent, isLast, isSelected, nowMs }: { agent: AgentRow; isLast: boolean; isSelected: boolean; nowMs: number }) {
   const headGutter = isSelected ? "▶  " : isLast ? "└─ " : "├─ ";
   const contGutter = isLast ? "   ⎿  " : "│  ⎿  ";
+  // task-5 (LIVE stall hint): `FINISH_LABEL`'s "Stalled" above is a post-mortem — it only appears
+  // once the daemon's stall watchdog has already killed the child (600s of silence by default), so
+  // until then a wedged child rendered exactly like a busy one and the only way to find out was to
+  // kill it. `subagentStalled` (subagent-state.ts) is the pre-kill verdict, and it is deliberately
+  // conservative: a child mid-tool or parked on an approval is NEVER called stalled, so this line
+  // means "waiting on the provider, and has been for a while" — the one silence nobody expects.
+  // The span itself is rendered, not just the verb, because a growing clock is what tells the user
+  // whether to wait or to re-task it. `nowMs` (ticked ~100ms by app.tsx, previously accepted-and-
+  // ignored here) is what makes it live.
+  const stalled = agent.status !== "done" && subagentStalled(agent, nowMs);
   const continuation = agent.status === "done"
     ? (FINISH_LABEL[agent.finish ?? "done"] ?? "Done")
-    : (agent.activity ?? "Working…");
+    : stalled
+      ? `Stalled · no output for ${formatElapsed(subagentSilentMs(agent, nowMs))}`
+      : (agent.activity ?? "Working…");
   return (
     <Box flexDirection="column">
       <Text inverse={isSelected}>
@@ -68,7 +82,10 @@ function AgentTreeRow({ agent, isLast, isSelected }: { agent: AgentRow; isLast: 
         {` (${agent.name ?? agent.label})`}
         {` · ${pluralizeToolUse(agent.toolCalls)}`}
       </Text>
-      <Text inverse={isSelected} dimColor={!isSelected}>
+      {/* A stalled row drops OUT of the dim treatment (yellow, undimmed) — the whole point is that
+          it must not read like the other continuation lines. Selection (inverse) still wins the
+          same way it does for every other row. */}
+      <Text inverse={isSelected} dimColor={!isSelected && !stalled} color={stalled && !isSelected ? "yellow" : undefined}>
         {contGutter}
         {continuation}
       </Text>
@@ -77,12 +94,11 @@ function AgentTreeRow({ agent, isLast, isSelected }: { agent: AgentRow; isLast: 
 }
 
 export function AgentList({ agents, nowMs, selectedIndex }: { agents: AgentRow[]; nowMs: number; selectedIndex?: number }) {
-  void nowMs;
   if (agents.length === 0) return null;
   return (
     <Box flexDirection="column">
       {agents.map((a, i) => (
-        <AgentTreeRow key={a.threadId} agent={a} isLast={i === agents.length - 1} isSelected={i === selectedIndex} />
+        <AgentTreeRow key={a.threadId} agent={a} isLast={i === agents.length - 1} isSelected={i === selectedIndex} nowMs={nowMs} />
       ))}
     </Box>
   );
