@@ -41,6 +41,7 @@ import type { SessionStore } from "../sessions/store";
 import { readHistoryPage } from "../sessions/history";
 import { makeActivityDeriver, participatesInActivity, type ActivityDeriver } from "../sessions/activity";
 import { createActivityEnforcement } from "../sessions/activity-enforcement";
+import { setSessionActivity, type SetActivityDeps } from "../sessions/set-activity";
 import { reapEmptySessions } from "../sessions/reaper";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
@@ -597,6 +598,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   // Assigned rather than passed at construction: the engine is built before this server (daemon.ts),
   // and this is the same mutable-hook shape `hub.onGlobalEvent` uses just below.
   if (opts.engine) opts.engine.onTurnSettled = (sessionId) => enforcement.onTurnSettled(sessionId);
+  /** T8: the deps `session.setActivity` hands to the shared write half. Bound once, here, off the
+   *  same store/engine/hub/derivation everything else in this file reads — the tool's own copy of
+   *  these deps (daemon.ts) is bound off the SAME instances, which is what makes "same semantics"
+   *  a fact about the code rather than a claim about two wirings. */
+  const setActivityDeps: SetActivityDeps = {
+    store: opts.store,
+    isRunning: (sessionId) => opts.engine?.isRunning(sessionId) ?? false,
+    derive: deriveActivity,
+    emit: (sessionId, activity) => hub.emitActivity(sessionId, activity),
+  };
+
   enforcement.start();
   // T8: published AFTER `enforcement` exists — the derivation's two enforcement signals are read
   // lazily, but handing a consumer a function it could legally call before that binding initialized
@@ -1535,52 +1547,21 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       //     `deriveActivity` that stamps `session.list` — so a caller learns what its write actually
       //     produced (clearing a session whose detached bash task is still writing reads back
       //     "background", not "idle") without a second round trip that could observe a later moment.
+      //
+      // T8: the body moved to `setSessionActivity` (sessions/set-activity.ts) VERBATIM — same
+      // refusals, same wording, same write order, same post-write re-read, same emission — because
+      // dispatch's `manage_session` tool is now a SECOND door onto this same state machine. Two
+      // doors are fine; two implementations are how "archiving a running session is refused" ends
+      // up true on one door and false on the other. What stays here is what is genuinely the RPC's:
+      // parsing and the remote gate.
       case METHODS.sessionSetActivity: {
         const p = parseParams(SessionSetActivityParams, params);
         assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
-        let meta: ReturnType<SessionStore["meta"]>;
-        try { meta = opts.store.meta(p.sessionId); }
-        catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
-        // T2's participation ALLOWLIST (code + cowork + absent-means-code) — chat and dispatch have
-        // no lifecycle at all, so there is no state to set on them. Refused for a CLEAR too: the
-        // refusal is about the session, not the value.
-        if (!participatesInActivity(meta.mode)) {
-          throw new RpcFailure(ERR.INVALID_PARAMS, "activity states apply to code and cowork sessions only");
+        const res = setSessionActivity(setActivityDeps, p.sessionId, p.activity);
+        if (!res.ok) {
+          throw new RpcFailure(res.kind === "not_found" ? ERR.NOT_FOUND : ERR.INVALID_PARAMS, res.error);
         }
-        // Archived is a flag over IDLE (spec §1.4): archiving a session with a turn in flight would
-        // strand that turn behind a hidden tab, so the door refuses and names the two ways out.
-        // Scoped to `"archived"` on purpose — BACKGROUNDING a running session is the entire point of
-        // that flag ("keep running unattended"), and a CLEAR must stay available or a mis-flagged
-        // running session could never be un-flagged. `isRunning` (a TURN) rather than the wider
-        // "any work" signal: a detached bash task already derives as `background`, so such a session
-        // has literally done what this message asks for.
-        if (p.activity === "archived" && (opts.engine?.isRunning(p.sessionId) ?? false)) {
-          throw new RpcFailure(ERR.INVALID_PARAMS, "stop or background it first");
-        }
-        // The value names a TARGET STATE, not a flag — which is why `"background"` also clears the
-        // archive flag: `archived` outranks `backgrounded` in the derivation, so writing one while
-        // leaving the other set would answer "archived" to a caller who asked for background, a wire
-        // no-op. Naming background as the target is a deliberate act on that session, exactly like a
-        // resume. NOT symmetric: `"archived"` leaves `backgrounded` alone (it contradicts nothing
-        // below it) — store.setArchived's documented independence, which is what returns a resumed
-        // session to background rather than to idle.
-        if (p.activity === "archived") {
-          opts.store.setArchived(p.sessionId, true);
-        } else {
-          // "background" and null (clear) differ only in the background bit; both clear the archive.
-          opts.store.setBackgrounded(p.sessionId, p.activity === "background");
-          opts.store.setArchived(p.sessionId, false);
-        }
-        // Re-read rather than assuming what was just written: the derivation's inputs are the STORED
-        // flags, and re-reading them is what keeps this echo an observation instead of a restatement.
-        const after = opts.store.meta(p.sessionId);
-        const activity = deriveActivity(after, p.sessionId, Date.now());
-        // T4: the LIVE half. The RPC's own answer reaches only the caller; every OTHER harness with
-        // this session open would otherwise learn of the flag write on its next `session.list`.
-        // The SAME derived value the caller is handed, so the two can never describe different
-        // states, and the hub suppresses a re-statement (an idempotent set emits nothing).
-        hub.emitActivity(p.sessionId, activity);
-        return { ok: true, activity };
+        return { ok: true, activity: res.activity };
       }
 
       // -----------------------------------------------------------------------------------------
