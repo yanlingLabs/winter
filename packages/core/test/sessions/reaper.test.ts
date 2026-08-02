@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore, EMPTY_SESSION_GRACE_MS } from "../../src/sessions/store";
+import { appendCleanerLog } from "../../src/sessions/cleaner-log";
 
 // session-activity-hygiene T6: the empty-session reaper + `deleteSession`.
 //
@@ -146,5 +147,37 @@ describe("SessionStore.deleteSession (session-activity-hygiene T6)", () => {
     expect(store.list().some((r) => r.sessionId === dispatchId)).toBe(true);
     expect(existsSync(join(dir, "sessions", "global", `${dispatchId}.jsonl`))).toBe(true);
     store.close();
+  });
+});
+
+describe("appendCleanerLog (session-activity-hygiene T6)", () => {
+  test("creates the file if missing and appends one NDJSON line matching the spec shape", () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const logPath = join(home, "cleaner.jsonl");
+    expect(existsSync(logPath)).toBe(false);
+    appendCleanerLog(home, { sessionId: "s_abc123", title: "Abandoned chat", reason: "reaped: empty", date: "2026-08-02T00:00:00.000Z" });
+    expect(existsSync(logPath)).toBe(true);
+    const lines = readFileSync(logPath, "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!)).toEqual({
+      sessionId: "s_abc123", title: "Abandoned chat", reason: "reaped: empty", date: "2026-08-02T00:00:00.000Z",
+    });
+  });
+
+  test("appends without truncating existing lines", () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    appendCleanerLog(home, { sessionId: "s_1", reason: "reaped: empty", date: "2026-08-02T00:00:00.000Z" });
+    appendCleanerLog(home, { sessionId: "s_2", reason: "reaped: empty", date: "2026-08-02T00:01:00.000Z" });
+    const lines = readFileSync(join(home, "cleaner.jsonl"), "utf8").trim().split("\n");
+    expect(lines).toHaveLength(2);
+    expect(JSON.parse(lines[0]!).sessionId).toBe("s_1");
+    expect(JSON.parse(lines[1]!).sessionId).toBe("s_2");
+  });
+
+  test("an absent title is omitted from the line entirely, never written as null", () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    appendCleanerLog(home, { sessionId: "s_1", reason: "reaped: empty", date: "2026-08-02T00:00:00.000Z" });
+    const parsed = JSON.parse(readFileSync(join(home, "cleaner.jsonl"), "utf8").trim());
+    expect("title" in parsed).toBe(false);
   });
 });
