@@ -871,7 +871,11 @@ export interface EngineConfig {
 }
 
 export class AgentEngine {
-  private runningTurns = new Set<string>();
+  // sessionId → the ms timestamp its current top-level turn started at. T8 turned this from a Set
+  // into a Map for exactly one reason: "a turn is running" and "since when" are the same fact, and
+  // the management surface (`list_sessions`) has to show the second. Membership semantics are
+  // unchanged — every `has`/`delete`/`size` reader below reads it identically.
+  private runningTurns = new Map<string, number>();
   // bg-retrigger Task 2: sessionIds with a detached-agent completion that landed WHILE a turn was
   // already running for that session — notifyBgCompletion sets this instead of starting a
   // reentrant turn; runTurn's finally drains it (starts exactly one follow-up turn) once the
@@ -988,6 +992,13 @@ export class AgentEngine {
   /** True while a turn is executing for the session. */
   isRunning(sessionId: string): boolean { return this.runningTurns.has(sessionId); }
 
+  /** session-activity-hygiene T8: when the session's CURRENT top-level turn started, or `undefined`
+   *  when no turn is running. The honest source for "how long has this been going" — the daemon
+   *  already owns the fact (`runningTurns`), it just wasn't stamped; the alternative (scanning the
+   *  session log for the last turn-start event) would re-derive from disk something held in memory
+   *  three feet away, and would answer for a FINISHED turn too, which is not the question. */
+  turnStartedAt(sessionId: string): number | undefined { return this.runningTurns.get(sessionId); }
+
   /** session-activity-hygiene T2 (spec §1): true while the session has unattended work that
    *  OUTLIVES a turn — a backgrounded bash task (`bgRegistry`) or a detached agent thread
    *  (`bgAgents`). Both registries, because they are two halves of one fact and either alone would
@@ -1051,7 +1062,7 @@ export class AgentEngine {
 
   async runTurn(sessionId: string): Promise<void> {
     if (this.runningTurns.has(sessionId)) throw new Error(`turn already running for ${sessionId}`);
-    this.runningTurns.add(sessionId);
+    this.runningTurns.set(sessionId, Date.now());
     const ac = new AbortController();
     this.aborters.set(sessionId, ac);
     try {
@@ -1131,7 +1142,7 @@ export class AgentEngine {
         void this.runTurn(sessionId).catch((err) => console.error("bg-notification/message drain failed:", err));
       }
       // session-activity-hygiene T5: LAST, deliberately — the drain above starts its follow-up turn
-      // synchronously up to its first await (runningTurns.add is the second statement of runTurn),
+      // synchronously up to its first await (runningTurns.set is the second statement of runTurn),
       // so by here `isRunning` already tells the truth about whether this session is really done.
       // Swallowed like every other hook in this finally: a lifecycle bug must not turn a completed
       // turn into a rejected runTurn.

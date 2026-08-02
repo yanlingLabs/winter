@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -296,6 +296,23 @@ describe("SessionStore.lastEventTs", () => {
   test("throws on an unknown session", () => {
     const { store } = makeStore();
     expect(() => store.lastEventTs("s_nope")).toThrow(/unknown session/);
+    store.close();
+  });
+});
+
+// session-activity-hygiene T8: the transcript path dispatch's `list_sessions` shows per row — the
+// public form of the private `logPath` the store's own appends/reads use, so the surface that
+// displays it cannot compose a second guess at the layout.
+describe("SessionStore.transcriptPath", () => {
+  test("is the file the store actually appends to, and throws on an unknown session", () => {
+    const { store, dir } = makeStore();
+    const id = store.createSession("global");
+    const path = store.transcriptPath(id);
+    expect(path).toBe(join(dir, "sessions", "global", `${id}.jsonl`));
+    // Not a composed guess: this is the file the session's own events land in.
+    store.append(id, { type: "user_message", sessionId: id, threadId: "main", text: "hello", clientName: "t" });
+    expect(readFileSync(path, "utf8")).toContain("hello");
+    expect(() => store.transcriptPath("s_nope")).toThrow(/unknown session/);
     store.close();
   });
 });

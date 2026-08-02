@@ -482,6 +482,22 @@ export class SessionStore {
     catch { return row.created_at; } // no log on disk yet (or unreadable): creation is the honest floor
   }
 
+  /** session-activity-hygiene T8: where this session's append-only JSONL actually lives — the
+   *  PUBLIC form of the private `logPath` every write/read in this class already uses, so the one
+   *  surface that shows a user (or a model) that path cannot compose its own guess of it.
+   *
+   *  Read-only and existence-agnostic: it answers "where would this session's log be", which is a
+   *  fact about the store's layout, not about the filesystem — a brand-new session whose log has
+   *  not been flushed yet still has a correct path. Throws on an unknown session (the
+   *  `lastEventTs`/`setApprovalPolicy` precedent): composing a path for a session that does not
+   *  exist is a bug, not a blank answer. */
+  transcriptPath(sessionId: string): string {
+    const row = this.db.query("SELECT scope FROM sessions WHERE session_id = ?").get(sessionId) as
+      | { scope: string } | null;
+    if (!row) throw new Error(`unknown session: ${sessionId}`);
+    return this.logPath(row.scope, sessionId);
+  }
+
   meta(sessionId: string): {
     sessionId: string; scope: string; cwd: string | null; approvalPolicy: SessionApprovalPolicy;
     origin?: string; mode?: string; parentSessionId?: string; model?: string; effort?: string;
