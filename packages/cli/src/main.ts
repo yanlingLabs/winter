@@ -46,6 +46,8 @@ import {
 import { parseModelArgs, validateEffort, validateModelSlug } from "./model-cli";
 import { formatElapsed, formatTokens } from "./task-display";
 import { formatRoutineDetail } from "./routines-cli";
+import { runAgentsCommand } from "./agents-cli";
+import { mountAgents } from "./tui/agents-view";
 import { MEMORY_USAGE, formatDeleted, formatFactDetail, parseMemoryArgs, runMemoryRoute } from "./memory-cli";
 import { formatOptionLines, isOtherChoice, parseQuestionAnswer } from "./questions";
 import { parsePlanResponse } from "./plan-response";
@@ -1128,6 +1130,19 @@ if (import.meta.main) {
     c.close();
     break;
   }
+  case "agents": {
+    // session-activity-hygiene T9. Thin on purpose — everything provable lives in agents-cli.ts
+    // (main.ts's dispatch can't be driven by a unit test; see main.test.ts's header). Note this
+    // route NEVER attaches: `connect`'s onEvent is the roster's only event source, and it works
+    // without an attachment because `session_activity` fans out globally (this task's core half).
+    await runAgentsCommand({
+      connect: (name, onEvent) => connect(name, onEvent),
+      isTTY: !!process.stdout.isTTY,
+      log: (line) => console.log(line),
+      mount: mountAgents,
+    });
+    break;
+  }
   case "status": {
     const c = await connect("cli-status");
     const s = await c.daemonStatus();
@@ -1925,6 +1940,7 @@ if (import.meta.main) {
   daemon run | daemon install | daemon uninstall | daemon status
   ping | sessions | status | quota | send <sessionId|new> <text> | watch <sessionId> | add-dir <sessionId> <path> [--persist] | cd <sessionId> <path>
   steer <sessionId> <text> | interrupt <sessionId> | compact <sessionId>
+  agents                                          live roster of background/active sessions (stop, background, archive, resume)
   resume [id] [msg]   list sessions, or continue an existing one
   trust <dir> [--list] | trust list | trust remove <path>
   skills                                          list discovered skills for this directory

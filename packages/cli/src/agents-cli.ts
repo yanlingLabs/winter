@@ -99,13 +99,16 @@ export function selectedAgent(s: AgentsState): AgentRow | undefined {
   return s.rows.find((r) => r.sessionId === s.selectedId) ?? s.rows[0];
 }
 
-/** Background first (the roster's subject), then active; each group ordered by title, then id, so a
- *  poll never reshuffles rows under the cursor for no reason. */
+/** Background first (the roster's subject), then active; each group ordered by the text actually
+ *  DISPLAYED (title, or the id when a row has none yet), then by id — so a poll never reshuffles
+ *  rows under the cursor for no reason, and a row added by a transient before its title is known
+ *  doesn't leap to the top of the group and then move again when the poll names it. */
 function sortRows(rows: AgentRow[]): AgentRow[] {
   const rank = (r: AgentRow): number => (r.activity === "background" ? 0 : 1);
+  const shown = (r: AgentRow): string => r.title ?? r.sessionId;
   return [...rows].sort((a, b) =>
     rank(a) - rank(b)
-    || (a.title ?? "").localeCompare(b.title ?? "")
+    || shown(a).localeCompare(shown(b))
     || a.sessionId.localeCompare(b.sessionId));
 }
 
@@ -282,4 +285,111 @@ export async function runAgentVerb(
   } catch (e) {
     return { message: `${row.sessionId}: ${(e as Error).message}`, changed: false };
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The runner — what main.ts's `case "agents"` is a thin wrapper around
+// ---------------------------------------------------------------------------------------------
+
+/** The roster's state holder: the poll and the event stream write into it, the Ink tree reads it.
+ *  Framework-free on purpose (this module has no React), and it notifies only on a REAL change —
+ *  `update` returning the same object is a no-op, which is what keeps an idempotent poll from
+ *  repainting the terminal every 2 seconds. */
+export class AgentsStore {
+  private state: AgentsState = emptyAgentsState();
+  private listeners = new Set<() => void>();
+  get(): AgentsState { return this.state; }
+  subscribe(fn: () => void): () => void { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
+  update(fn: (s: AgentsState) => AgentsState): void {
+    const next = fn(this.state);
+    if (next === this.state) return;
+    this.state = next;
+    for (const fn2 of this.listeners) fn2();
+  }
+}
+
+/** Exactly what the roster asks of a daemon connection. `attach`/`send` are deliberately absent —
+ *  see the module doc for why a roster that attached would be a bug, not a feature. */
+export type AgentsRosterClient = AgentsVerbClient & Pick<NormaClient, "listSessions" | "close">;
+
+export interface AgentsMountHandle {
+  waitUntilExit(): Promise<void>;
+  unmount(): void;
+}
+
+export type AgentsMount = (opts: { store: AgentsStore; onAction(action: AgentsAction): void }) => AgentsMountHandle;
+
+export interface RunAgentsDeps {
+  connect(clientName: string, onEvent: (event: { type?: string } & Record<string, unknown>) => void): Promise<AgentsRosterClient>;
+  isTTY: boolean;
+  log(line: string): void;
+  mount: AgentsMount;
+  now?(): number;
+  pollMs?: number;
+}
+
+/** `norma agents`, whole. Every dependency is injected for the reason at the top of this file:
+ *  main.ts's `case` cannot be unit-tested, so the command's behaviour has to be provable here.
+ *
+ *  Poll AND subscribe, deliberately both: the transient carries every state CHANGE the instant it
+ *  happens (including on sessions with nothing attached, which is what this task's core half
+ *  delivered), while the poll is the authority on which rows exist and what they are called — a
+ *  session created, titled or backgrounded before this process started has no event to replay. */
+export async function runAgentsCommand(deps: RunAgentsDeps): Promise<void> {
+  const now = deps.now ?? (() => Date.now());
+  const pollMs = deps.pollMs ?? AGENTS_POLL_MS;
+  const store = new AgentsStore();
+
+  const client = await deps.connect(AGENTS_CLIENT_NAME, (event) => {
+    if (!event || event.type !== "session_activity") return;
+    const e = event as unknown as { sessionId: string; activity: string; ts: number };
+    store.update((s) => applyActivityEvent(s, e, now()));
+  });
+
+  const refresh = async (): Promise<void> => {
+    try {
+      const { sessions } = await client.listSessions();
+      store.update((s) => applySessionList(s, sessions as AgentSessionRow[], now()));
+    } catch {
+      // A daemon blip must not blank the roster: the last known rows are still the best answer we
+      // have, and the next poll heals. (Losing the connection entirely surfaces as a stale view,
+      // which the socket's own close will end.)
+    }
+  };
+  await refresh();
+
+  // Piped/redirected: print the roster once and exit. Same headless safety net `mountTui` has —
+  // never render, never take over a terminal that isn't one. Makes `norma agents | grep …` work.
+  if (!deps.isTTY) {
+    for (const line of formatAgentsSnapshot(store.get(), now())) deps.log(line);
+    client.close();
+    return;
+  }
+
+  const timer = setInterval(() => { void refresh(); }, pollMs);
+  let handle: AgentsMountHandle | undefined;
+  /** The last `open` hand-off, re-printed after the tree comes down: a command you asked for in
+   *  order to copy it is worthless if it dies with the frame it was rendered in (the
+   *  `formatResumeHint`-after-unmount discipline main.ts already follows). */
+  let lastOpen: string | undefined;
+
+  const onAction = (action: AgentsAction): void => {
+    if (action.kind === "quit") { handle?.unmount(); return; }
+    if (action.kind === "move") { store.update((s) => moveSelection(s, action.delta)); return; }
+    const row = selectedAgent(store.get());
+    if (!row) { store.update((s) => withNotice(s, AGENTS_EMPTY_STATE)); return; }
+    void runAgentVerb(client, action.verb, row).then((result) => {
+      if (action.verb === "open") lastOpen = result.message;
+      store.update((s) => withNotice(s, result.message));
+      // Re-read immediately rather than waiting out the interval: the transient normally beats the
+      // poll, but a REFUSED verb emits nothing at all, and the row's real state is worth confirming.
+      if (result.changed) void refresh();
+    });
+  };
+
+  handle = deps.mount({ store, onAction });
+  await handle.waitUntilExit();
+  clearInterval(timer);
+  client.close();
+  if (lastOpen) deps.log(lastOpen);
 }

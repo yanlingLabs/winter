@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   AGENTS_EMPTY_STATE, AGENTS_KEY_HINT,
   agentResumeCommand, applyActivityEvent, applySessionList, emptyAgentsState,
-  formatAgentsSnapshot, formatForColumn, keyToAgentsAction, moveSelection, runAgentVerb, selectedAgent,
+  formatAgentsSnapshot, formatForColumn, keyToAgentsAction, moveSelection, runAgentVerb,
+  runAgentsCommand, selectedAgent, AgentsStore,
   type AgentsState,
 } from "../src/agents-cli";
 import type { NormaClient } from "../src/client";
@@ -298,5 +299,168 @@ describe("state shape", () => {
     const s: AgentsState = emptyAgentsState();
     expect(s.rows).toEqual([]);
     expect(selectedAgent(s)).toBeUndefined();
+  });
+});
+
+// -------------------------------------------------------------------------------------------
+// The runner: the wiring main.ts's `case "agents"` is a thin wrapper around. Every dependency is
+// injected, so this proves the whole command — connect, poll, subscribe, verbs, exit — with no
+// daemon, no socket and no terminal.
+// -------------------------------------------------------------------------------------------
+
+function makeRunnerDeps(over: Partial<Record<string, any>> = {}) {
+  const logged: string[] = [];
+  const calls: { method: string; args: unknown[] }[] = [];
+  let sessions: any[] = over.sessions ?? [row("s_bg", { activity: "background", title: "Fix the reaper" })];
+  let onEvent: ((e: any) => void) | undefined;
+  let connectedAs: string | undefined;
+  let mounted: { store: AgentsStore; onAction: (a: any) => void } | undefined;
+  let unmount!: () => void;
+  const exited = new Promise<void>((resolve) => { unmount = () => resolve(); });
+
+  const client = {
+    listSessions: async () => { calls.push({ method: "listSessions", args: [] }); return { sessions }; },
+    interrupt: async (id: string) => { calls.push({ method: "interrupt", args: [id] }); return { wasRunning: true }; },
+    sessionSetActivity: async (p: any) => { calls.push({ method: "sessionSetActivity", args: [p] }); return { ok: true, activity: "archived" }; },
+    close: () => { calls.push({ method: "close", args: [] }); },
+    ...(over.client ?? {}),
+  };
+
+  const deps = {
+    connect: async (name: string, cb: (e: any) => void) => { connectedAs = name; onEvent = cb; return client as any; },
+    isTTY: over.isTTY ?? true,
+    log: (line: string) => logged.push(line),
+    mount: (o: any) => { mounted = o; return { waitUntilExit: () => exited, unmount }; },
+    now: () => T0,
+    pollMs: 60_000, // never fires inside a test — the initial refresh is explicit
+  };
+  return {
+    deps, logged, calls,
+    setSessions: (next: any[]) => { sessions = next; },
+    emit: (e: any) => onEvent!(e),
+    act: (a: any) => mounted!.onAction(a),
+    store: () => mounted!.store,
+    connectedAs: () => connectedAs,
+    mounted: () => mounted,
+    quit: () => unmount(),
+  };
+}
+
+describe("runAgentsCommand", () => {
+  test("connects as cli-agents and NEVER attaches — not on start, not on any verb", async () => {
+    const h = makeRunnerDeps();
+    const done = runAgentsCommand(h.deps as any);
+    await Bun.sleep(5);
+    expect(h.connectedAs()).toBe("cli-agents");
+    h.act({ kind: "verb", verb: "archive" });
+    await Bun.sleep(5);
+    h.quit();
+    await done;
+    expect(h.calls.map((c) => c.method)).not.toContain("attach");
+    expect(h.calls.map((c) => c.method)).not.toContain("send");
+  });
+
+  test("NON-TTY prints the snapshot once and exits — never mounts an Ink tree", async () => {
+    const h = makeRunnerDeps({ isTTY: false });
+    await runAgentsCommand(h.deps as any);
+    expect(h.mounted()).toBeUndefined();
+    expect(h.logged.length).toBe(1);
+    expect(h.logged[0]).toContain("Fix the reaper");
+    expect(h.calls.at(-1)!.method).toBe("close"); // the socket is not left open
+  });
+
+  test("NON-TTY with nothing running still says something — the empty state reaches a pipe too", async () => {
+    const h = makeRunnerDeps({ isTTY: false, sessions: [] });
+    await runAgentsCommand(h.deps as any);
+    expect(h.logged).toEqual([AGENTS_EMPTY_STATE]);
+  });
+
+  test("the initial poll seeds the roster before the first frame", async () => {
+    const h = makeRunnerDeps();
+    const done = runAgentsCommand(h.deps as any);
+    await Bun.sleep(5);
+    expect(h.store().get().rows.map((r) => r.sessionId)).toEqual(["s_bg"]);
+    h.quit(); await done;
+  });
+
+  test("a session_activity transient reaches the store WITHOUT a poll — the live half", async () => {
+    const h = makeRunnerDeps();
+    const done = runAgentsCommand(h.deps as any);
+    await Bun.sleep(5);
+    h.emit({ type: "session_activity", sessionId: "s_new", activity: "background", ts: T0, seq: 4 });
+    expect(h.store().get().rows.map((r) => r.sessionId)).toEqual(["s_bg", "s_new"]);
+    // An archive of a session nobody has open removes it live — the whole point of the core half.
+    h.emit({ type: "session_activity", sessionId: "s_bg", activity: "archived", ts: T0, seq: 5 });
+    expect(h.store().get().rows.map((r) => r.sessionId)).toEqual(["s_new"]);
+    h.quit(); await done;
+  });
+
+  test("events that are not session_activity are ignored", async () => {
+    const h = makeRunnerDeps();
+    const done = runAgentsCommand(h.deps as any);
+    await Bun.sleep(5);
+    h.emit({ type: "assistant_delta", sessionId: "s_bg", delta: "hi", seq: 9 });
+    expect(h.store().get().rows.map((r) => r.sessionId)).toEqual(["s_bg"]);
+    h.quit(); await done;
+  });
+
+  test("a verb runs against the SELECTED row and shows the daemon's answer as the notice", async () => {
+    const h = makeRunnerDeps();
+    const done = runAgentsCommand(h.deps as any);
+    await Bun.sleep(5);
+    h.act({ kind: "verb", verb: "archive" });
+    await Bun.sleep(5);
+    expect(h.calls.some((c) => c.method === "sessionSetActivity"
+      && (c.args[0] as any).sessionId === "s_bg" && (c.args[0] as any).activity === "archived")).toBe(true);
+    expect(h.store().get().notice).toContain("archived");
+    h.quit(); await done;
+  });
+
+  test("a move action moves the cursor", async () => {
+    const h = makeRunnerDeps({
+      sessions: [row("s_1", { activity: "background" }), row("s_2", { activity: "background" })],
+    });
+    const done = runAgentsCommand(h.deps as any);
+    await Bun.sleep(5);
+    h.act({ kind: "move", delta: 1 });
+    expect(h.store().get().selectedId).toBe("s_2");
+    h.quit(); await done;
+  });
+
+  test("a verb on an EMPTY roster says so instead of throwing", async () => {
+    const h = makeRunnerDeps({ sessions: [] });
+    const done = runAgentsCommand(h.deps as any);
+    await Bun.sleep(5);
+    h.act({ kind: "verb", verb: "stop" });
+    await Bun.sleep(5);
+    expect(h.calls.map((c) => c.method)).not.toContain("interrupt");
+    expect(h.store().get().notice).toBe(AGENTS_EMPTY_STATE);
+    h.quit(); await done;
+  });
+
+  test("quit closes the socket, and the last `open` command is re-printed so it survives the TUI", async () => {
+    const h = makeRunnerDeps();
+    const done = runAgentsCommand(h.deps as any);
+    await Bun.sleep(5);
+    h.act({ kind: "verb", verb: "open" });
+    await Bun.sleep(5);
+    h.quit();
+    await done;
+    expect(h.logged).toEqual(["norma resume s_bg"]);
+    expect(h.calls.at(-1)!.method).toBe("close");
+  });
+
+  test("a daemon blip during a poll keeps the last known roster rather than blanking it", async () => {
+    let fail = false;
+    const h = makeRunnerDeps({
+      client: { listSessions: async () => { if (fail) throw new Error("connection closed"); return { sessions: [row("s_bg", { activity: "background", title: "Fix the reaper" })] }; } },
+    });
+    const done = runAgentsCommand(h.deps as any);
+    await Bun.sleep(5);
+    fail = true;
+    h.act({ kind: "verb", verb: "archive" }); // `changed` triggers a refresh, which now throws
+    await Bun.sleep(10);
+    expect(h.store().get().rows.map((r) => r.sessionId)).toEqual(["s_bg"]);
+    h.quit(); await done;
   });
 });

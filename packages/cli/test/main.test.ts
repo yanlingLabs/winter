@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { formatQuestionHeadlineLine, formatResumeHint, invisibleKeyCharWarning, routeCliInvocation, type CliRoute } from "../src/main";
+import { agentResumeCommand } from "../src/agents-cli";
 
 // Pure arg-routing table test (final-review Findings 3+4). `routeCliInvocation` is the ONLY piece
 // of the bare/--auto/--plan/-p/resume dispatch that's cheaply unit-testable without a real
@@ -102,6 +103,16 @@ describe("formatResumeHint (Phase 3c Task 5 — the dim post-exit resume hint)",
   test("no trailing newline is added beyond the one already in the spec string (process.stdout.write, not console.log)", () => {
     const hint = formatResumeHint("x");
     expect(hint.endsWith("\n\x1b[0m")).toBe(true); // ends with the required "\n" then the RESET code — no EXTRA "\n"
+  });
+
+  // session-activity-hygiene T9: `norma agents`' "open" verb prints a resume invocation for the
+  // selected session. Two surfaces now tell a user how to get back into a session, and a roster that
+  // printed a command the CLI does not accept would be worse than printing nothing — so the strings
+  // are bound together here rather than each being asserted against a literal in its own file.
+  // `norma resume <id>` is a SUBCOMMAND (main.ts's `case "resume"`), NOT a `--resume` flag.
+  test("agentResumeCommand is exactly the invocation formatResumeHint already advertises", () => {
+    expect(formatResumeHint("s_abc123")).toContain(agentResumeCommand("s_abc123"));
+    expect(agentResumeCommand("s_abc123")).toBe("norma resume s_abc123");
   });
 });
 
