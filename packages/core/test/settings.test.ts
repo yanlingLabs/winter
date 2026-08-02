@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom } from "../src/settings";
 import { DEFAULT_CODEX_MODEL } from "../src/providers/codex-config";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 
@@ -488,6 +488,32 @@ describe("hooksEnabledFrom (4f: hooks.enabled default-ON semantics)", () => {
 
   test("hooks.enabled: false → disabled", () => {
     expect(hooksEnabledFrom(Settings.parse({ ...base, hooks: { enabled: false } }))).toBe(false);
+  });
+});
+
+describe("cleanerEnabledFrom (session-activity-hygiene T7: cleaner.enabled default-ON semantics)", () => {
+  const base = { schemaVersion: 2 as const, provider: { type: "codex-oauth" as const, model: "gpt-5.4" } };
+
+  test("cleaner block absent → enabled", () => {
+    expect(cleanerEnabledFrom(Settings.parse(base))).toBe(true);
+  });
+
+  test("cleaner.enabled absent (block present, field absent) → enabled", () => {
+    expect(cleanerEnabledFrom(Settings.parse({ ...base, cleaner: {} }))).toBe(true);
+  });
+
+  test("cleaner.enabled: true → enabled", () => {
+    expect(cleanerEnabledFrom(Settings.parse({ ...base, cleaner: { enabled: true } }))).toBe(true);
+  });
+
+  test("cleaner.enabled: false → disabled", () => {
+    expect(cleanerEnabledFrom(Settings.parse({ ...base, cleaner: { enabled: false } }))).toBe(false);
+  });
+
+  test("the flag round-trips through a real settings.json (the watcher's own read path)", () => {
+    const p = join(mkdtempSync(join(tmpdir(), "norma-cleaner-settings-")), "settings.json");
+    saveSettings(p, { ...base, cleaner: { enabled: false } });
+    expect(cleanerEnabledFrom(loadSettings(p))).toBe(false);
   });
 });
 
