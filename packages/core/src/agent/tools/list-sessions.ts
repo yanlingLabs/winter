@@ -99,7 +99,14 @@ function elapsedS(fromMs: number, nowMs: number): number {
 
 /** Reads at most `KEYWORD_SCAN_BYTES_PER_SESSION` of a transcript — the whole file when it fits,
  *  otherwise its head and tail halves. Returns `""` for anything unreadable (a log not yet flushed,
- *  a file removed under us): a scan failure must narrow the answer, never throw the listing away. */
+ *  a file removed under us): a scan failure must narrow the answer, never throw the listing away.
+ *
+ *  THE TEXT THIS RETURNS NEVER REACHES THE MODEL, and must not start to. A session JSONL is the
+ *  sole sink for provider `encrypted_content` / `reasoning_item.itemJson` (CLAUDE.md: never log it,
+ *  never write it into a model-readable transcript) — this samples those raw bytes to answer a
+ *  yes/no `includes` question and nothing else. Adding a "matching excerpt" to the tool's output
+ *  would pipe opaque provider state straight into another model's context. Match on it; never
+ *  quote it. */
 function sampleTranscript(path: string, budget: number): { text: string; bytes: number } {
   let fd: number | undefined;
   try {
@@ -271,12 +278,11 @@ export function registerListSessionsTools(
     run(args: z.infer<typeof ManageSessionArgs>) {
       const { sessionId, action } = args;
       if (action === "stop") {
-        // Read the row FIRST: an unknown session must answer "unknown", not "nothing to stop", and
-        // the participation rule is the same one every other door applies (it is what keeps the
-        // coordinator from aborting its own turn, or a chat session's).
-        let mode: string | undefined;
-        try { mode = deps.store.meta(sessionId).mode; }
-        catch (e) { throw new Error((e as Error).message); }
+        // Read the row FIRST: an unknown session must answer "unknown" (store.meta throws, and
+        // registry.execute turns a throw into the isError outcome), not "nothing to stop". The
+        // participation rule is the same one every other door applies — it is what keeps the
+        // coordinator from aborting its own turn, or a chat session's.
+        const { mode } = deps.store.meta(sessionId);
         if (!participatesInActivity(mode)) throw new Error(ACTIVITY_MODE_REFUSAL);
         if (!deps.isRunning(sessionId)) return `session '${sessionId}' has no turn running — nothing to stop`;
         deps.interrupt(sessionId);
