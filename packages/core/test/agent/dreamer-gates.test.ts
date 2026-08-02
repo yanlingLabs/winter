@@ -239,3 +239,112 @@ describe("Dreamer — carried-over review fix: timeout aborts the in-flight prov
     }
   });
 });
+
+// session-activity-hygiene T7 (spec §3): the cleaner "rides the existing Dreaming cycle (its
+// scheduler, its model configuration, low effort)". These pin the SEAM — that the cleaner runs on
+// the dreamer's scheduler slot, AFTER the dream pass, and that neither can break the other. The
+// cleaner's own behavior lives in test/sessions/cleaner.test.ts.
+describe("Dreamer — the T7 cleaner rides the same scheduler slot", () => {
+  /** A cleaner double: records when it ran, relative to the dream. */
+  function recordingCleaner(order: string[], opts: { throws?: boolean } = {}) {
+    return {
+      runs: 0,
+      async runPass(): Promise<void> {
+        this.runs++;
+        order.push("cleaner");
+        if (opts.throws) throw new Error("simulated cleaner explosion");
+      },
+    };
+  }
+
+  test("the cleaner pass runs on EVERY tick, including ticks where no dream happens", async () => {
+    const { store, dir } = setup("norma-dreamer-cleaner-notick-");
+    const order: string[] = [];
+    const cleaner = recordingCleaner(order);
+    // No dispatch session and no substantive events: every dream gate blocks.
+    const provider = okProvider();
+    const dreamer = new Dreamer({
+      provider: { provider, model: "x" }, store, dir: () => dir,
+      enabled: () => true, activeTurnCount: () => 0, cleaner,
+    });
+
+    await dreamer.tick();
+    await dreamer.tick();
+
+    expect(provider.requests).toHaveLength(0); // no dream...
+    expect(cleaner.runs).toBe(2); // ...but the cleaner still rode both slots
+  });
+
+  test("on a tick where a dream DOES happen, the cleaner runs AFTER it", async () => {
+    const { store, dispatchId, dir } = setup("norma-dreamer-cleaner-after-");
+    fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
+    const order: string[] = [];
+    const cleaner = recordingCleaner(order);
+    class OrderingProvider implements Provider {
+      readonly id = "ordering";
+      readonly requests: TurnRequest[] = [];
+      models() { return [{ id: "o-1", family: "o", contextWindow: 1000, supportsVision: false }]; }
+      async *streamTurn(req: TurnRequest): AsyncIterable<ProviderEvent> {
+        this.requests.push(req);
+        order.push("dream");
+        yield { type: "text_delta", delta: '{"ops":[]}' };
+        yield { type: "done", stopReason: "end_turn" };
+      }
+    }
+    const provider = new OrderingProvider();
+    const dreamer = new Dreamer({
+      provider: { provider, model: "x" }, store, dir: () => dir,
+      enabled: () => true, activeTurnCount: () => 0, cleaner,
+    });
+
+    await dreamer.tick();
+
+    expect(order).toEqual(["dream", "cleaner"]);
+  });
+
+  test("`memory.enabled: false` stops DREAMS but not the cleaner — they are separate settings", async () => {
+    const { store, dispatchId, dir } = setup("norma-dreamer-cleaner-memoff-");
+    fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
+    const cleaner = recordingCleaner([]);
+    const provider = okProvider();
+    const dreamer = new Dreamer({
+      provider: { provider, model: "x" }, store, dir: () => dir,
+      enabled: () => false, activeTurnCount: () => 0, cleaner,
+    });
+
+    await dreamer.tick();
+
+    expect(provider.requests).toHaveLength(0);
+    expect(cleaner.runs).toBe(1); // cleaner.enabled is the cleaner's OWN gate, checked inside runPass
+  });
+
+  test("a dream that throws does not skip the cleaner, and a cleaner that throws never escapes tick()", async () => {
+    const { store, dispatchId, dir } = setup("norma-dreamer-cleaner-throws-");
+    fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
+    const cleaner = recordingCleaner([], { throws: true });
+    const provider = okProvider("not json at all"); // makes runCycle throw
+    const dreamer = new Dreamer({
+      provider: { provider, model: "x" }, store, dir: () => dir,
+      enabled: () => true, activeTurnCount: () => 0, cleaner,
+    });
+
+    await expect(dreamer.tick()).resolves.toBeUndefined();
+    expect(cleaner.runs).toBe(1);
+
+    // ...and the re-entrancy guard was released despite both failures, so the next tick still works.
+    await dreamer.tick();
+    expect(cleaner.runs).toBe(2);
+  });
+
+  test("no cleaner wired: tick() behaves exactly as before", async () => {
+    const { store, dispatchId, dir } = setup("norma-dreamer-cleaner-absent-");
+    fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
+    const provider = okProvider();
+    const dreamer = new Dreamer({
+      provider: { provider, model: "x" }, store, dir: () => dir,
+      enabled: () => true, activeTurnCount: () => 0,
+    });
+    await expect(dreamer.tick()).resolves.toBeUndefined();
+    expect(provider.requests).toHaveLength(1);
+  });
+});
