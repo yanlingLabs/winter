@@ -143,6 +143,20 @@ export const SessionListResult = z.object({
     // the daemon's first-message fallback). Values already flow from store.list(); this declares them
     // so a schema-validating client (the phone's SessionSummary) reads them without smuggling.
     title: z.string().optional(),
+    // session-activity-hygiene T9: the session's working directory — round-trips SessionRow.cwd
+    // (store.ts), which `store.list()` has always selected and this handler has always returned
+    // verbatim. DECLARED here rather than left to smuggle through undeclared, for exactly the reason
+    // `title`/`forkedFrom` above are: the value really does flow out of `store.list()`, so a
+    // schema-validating client must be able to read it. It could not — a zod object strips every key
+    // it does not name, so the TS client (packages/cli/src/client.ts `validated()`) silently dropped
+    // a field the daemon was already putting on the socket, while Swift's `NormaClient.listSessions()`
+    // (which reads raw JSON, not a schema) has been consuming `s["cwd"]` all along. This declaration
+    // closes that asymmetry; `norma agents`' cwd column is its first schema-validating consumer.
+    //
+    // Optional and index-only, on `origin`'s exact terms: absent means "no recorded cwd" — a session
+    // created without one, or one whose index was rebuilt (cwd does NOT ride the event log, so a full
+    // index.db rebuild resets it, same class as `origin`/`model`/`effort`). Never fabricated.
+    cwd: z.string().optional(),
     // Additive (phase 5 routines T3): round-trips SessionCreateParams.origin — undefined for
     // every session created before this field existed, or created without one.
     origin: z.string().optional(),

@@ -12,14 +12,15 @@
  *  Row shape, one line each (the `<AgentList>` selected-row idiom: a `▶ ` pointer that is plain
  *  ASCII, so tests never parse ANSI):
  *
- *    ▶ ● background  Fix the reaper                    4m 12s  s_1a2b3c4d5e6f
- *      ○ active      Refactor the hub                    ≥13s  s_0f1e2d3c4b5a
+ *    ▶ ● background  Fix the reaper                    4m 12s  ~/code/norma        s_1a2b3c4d5e6f
+ *      ○ active      Refactor the hub                    ≥13s  ~/code/other        s_0f1e2d3c4b5a
  */
 
 import React, { useEffect, useState } from "react";
 import { Box, Text, render as inkRender, useInput } from "ink";
+import { homedir } from "node:os";
 import {
-  AGENTS_EMPTY_STATE, AGENTS_KEY_HINT, formatForColumn, keyToAgentsAction,
+  AGENTS_EMPTY_STATE, AGENTS_KEY_HINT, CWD_WIDTH, formatCwdColumn, formatForColumn, keyToAgentsAction,
   type AgentRow, type AgentsAction, type AgentsMount, type AgentsState,
 } from "../agents-cli";
 import { theme } from "./theme";
@@ -33,7 +34,7 @@ function titleCell(row: AgentRow): string {
   return text.length > TITLE_WIDTH ? `${text.slice(0, TITLE_WIDTH - 1)}…` : text.padEnd(TITLE_WIDTH);
 }
 
-function AgentRowView({ row, selected, nowMs }: { row: AgentRow; selected: boolean; nowMs: number }) {
+function AgentRowView({ row, selected, nowMs, home }: { row: AgentRow; selected: boolean; nowMs: number; home: string }) {
   // A backgrounded session is the one doing work nobody is watching — the filled dot. An active one
   // already has a window on it somewhere.
   const glyph = row.activity === "background" ? "●" : "○";
@@ -44,19 +45,24 @@ function AgentRowView({ row, selected, nowMs }: { row: AgentRow; selected: boole
         {`${glyph} ${row.activity.padEnd(STATE_WIDTH)}`}
       </Text>
       {titleCell(row)}
-      <Text dimColor={!selected}>{`  ${formatForColumn(row, nowMs).padStart(8)}  ${row.sessionId}`}</Text>
+      <Text dimColor={!selected}>
+        {`  ${formatForColumn(row, nowMs).padStart(8)}  ${formatCwdColumn(row.cwd, home).padEnd(CWD_WIDTH)}  ${row.sessionId}`}
+      </Text>
     </Text>
   );
 }
 
-export function AgentsView({ state, nowMs }: { state: AgentsState; nowMs: number }) {
+/** `home` is a prop with a `homedir()` default rather than a call inside the row, keeping this
+ *  component pure (no environment reads) and its `~`-collapsing deterministic under test — the same
+ *  reason `nowMs` is a prop and not a `Date.now()`. */
+export function AgentsView({ state, nowMs, home = homedir() }: { state: AgentsState; nowMs: number; home?: string }) {
   return (
     <Box flexDirection="column">
       <Text bold color={theme.accent}>norma agents</Text>
       {state.rows.length === 0
         ? <Text dimColor>{AGENTS_EMPTY_STATE}</Text>
         : state.rows.map((r) => (
-          <AgentRowView key={r.sessionId} row={r} selected={r.sessionId === state.selectedId} nowMs={nowMs} />
+          <AgentRowView key={r.sessionId} row={r} selected={r.sessionId === state.selectedId} nowMs={nowMs} home={home} />
         ))}
       {state.notice ? <Text color={theme.success}>{state.notice}</Text> : null}
       <Text dimColor>{AGENTS_KEY_HINT}</Text>

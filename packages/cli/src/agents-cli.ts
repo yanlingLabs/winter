@@ -22,16 +22,20 @@
  *
  *  ## What the roster CANNOT honestly show (and does not pretend to)
  *
- *  `session.list` carries neither a turn-start stamp nor `cwd` (`SessionListResult`,
- *  packages/protocol/src/methods.ts). T8 added `AgentEngine.turnStartedAt`, but it reaches only the
- *  dispatch-side `list_sessions` TOOL — the RPC never learned it, and widening the RPC is a protocol
- *  change, deliberately out of scope here. The daemon also does not tell an unattached client WHEN a
- *  state began. So the "for" column measures the span THIS VIEW has watched: an exact span when the
- *  roster witnessed the transition (a `session_activity` event, whose `ts` is used), and a
- *  `≥`-prefixed LOWER BOUND when the state was already set at open. A session backgrounded yesterday
- *  reads `≥12s` three seconds after launch, and that is the honest answer — not `12s`.
+ *  `session.list` carries no TURN-START stamp. T8 added `AgentEngine.turnStartedAt`, but it reaches
+ *  only the dispatch-side `list_sessions` TOOL — the RPC never learned it. The daemon also does not
+ *  tell an unattached client WHEN a state began. So the "for" column measures the span THIS VIEW has
+ *  watched: an exact span when the roster witnessed the transition (a `session_activity` event, whose
+ *  `ts` is used), and a `≥`-prefixed LOWER BOUND when the state was already set at open. A session
+ *  backgrounded yesterday reads `≥12s` three seconds after launch — the honest answer, not `12s`.
+ *
+ *  `cwd` WAS in this list until T9's amendment. The daemon had always sent it (`store.list()` selects
+ *  it, the handler returns rows verbatim) but `SessionListResult` never declared it, so the cli
+ *  client's schema validation stripped it — a field on the socket that died at the door. It is
+ *  declared now, so the column is real; see `formatCwdColumn`.
  */
 
+import { homedir } from "node:os";
 import type { NormaClient } from "./client";
 import { formatElapsed } from "./task-display";
 
@@ -69,12 +73,18 @@ export interface AgentSessionRow {
   title?: string;
   mode?: string;
   activity?: string;
+  /** Declared on the wire by T9's amendment (`SessionListResult`, packages/protocol/src/methods.ts).
+   *  The daemon always sent it; the cli client's schema validation stripped it until it was named. */
+  cwd?: string;
 }
 
 export interface AgentRow {
   sessionId: string;
   title?: string;
   mode?: string;
+  /** Absent means "no recorded cwd" (a session created without one, or one whose index was rebuilt
+   *  — cwd does not ride the event log). Never fabricated; rendered as a dash. */
+  cwd?: string;
   activity: "background" | "active";
   /** When this view first knew the session to be in THIS state. */
   sinceMs: number;
@@ -135,6 +145,7 @@ export function applySessionList(s: AgentsState, sessions: AgentSessionRow[], no
       sessionId: row.sessionId,
       title: row.title,
       mode: row.mode,
+      cwd: row.cwd,
       activity,
       sinceMs: unchanged ? prev.sinceMs : nowMs,
       observedOnly: unchanged ? prev.observedOnly : true,
@@ -189,6 +200,23 @@ export function formatForColumn(row: { sinceMs: number; observedOnly: boolean },
   return row.observedOnly ? `≥${span}` : span;
 }
 
+export const CWD_WIDTH = 28;
+
+/** The cwd column: home collapsed to `~`, then truncated from the LEFT — a roster answers "which
+ *  project is this?", and that is the TAIL of a path, not its head. `home` is a parameter (not a
+ *  `homedir()` call inside) so the formatting is pure and testable, matching every other formatter
+ *  in this file.
+ *
+ *  A dash, not a blank, when there is no recorded cwd: an empty cell in an aligned column reads as a
+ *  rendering bug, while absence here is a real and ordinary state (a session created without a cwd,
+ *  or one whose index was rebuilt). Never substitutes a plausible-looking path. */
+export function formatCwdColumn(cwd: string | undefined, home: string): string {
+  if (!cwd) return "—";
+  // `cwd === home` OR strictly under it — a bare `startsWith` would turn /Users/xavier into ~avier.
+  const collapsed = cwd === home ? "~" : cwd.startsWith(`${home}/`) ? `~${cwd.slice(home.length)}` : cwd;
+  return collapsed.length > CWD_WIDTH ? `…${collapsed.slice(collapsed.length - (CWD_WIDTH - 1))}` : collapsed;
+}
+
 /** The EXACT resume invocation, verified against main.ts's own `case "resume"` route (`norma resume
  *  <sessionId>` — a SUBCOMMAND, not a `--resume` flag) and matching `formatResumeHint`'s wording,
  *  which is what the TUI already prints on exit. If those ever diverge, the roster is the surface
@@ -199,10 +227,11 @@ export function agentResumeCommand(sessionId: string): string {
 
 /** One plain (uncolored) line per row — used for the non-TTY snapshot and as the content the Ink
  *  view's own row assertions can be checked against (the `routines-cli.ts` formatter precedent). */
-export function formatAgentsSnapshot(s: AgentsState, nowMs: number): string[] {
+export function formatAgentsSnapshot(s: AgentsState, nowMs: number, home = homedir()): string[] {
   if (s.rows.length === 0) return [AGENTS_EMPTY_STATE];
   return s.rows.map((r) =>
-    `${r.activity.padEnd(10)} ${(r.title ?? r.sessionId).padEnd(40)} ${formatForColumn(r, nowMs).padStart(8)}  ${r.sessionId}`);
+    `${r.activity.padEnd(10)} ${(r.title ?? r.sessionId).padEnd(40)} ${formatForColumn(r, nowMs).padStart(8)}  `
+    + `${formatCwdColumn(r.cwd, home).padEnd(CWD_WIDTH)}  ${r.sessionId}`);
 }
 
 // ---------------------------------------------------------------------------------------------

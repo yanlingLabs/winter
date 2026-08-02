@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   AGENTS_EMPTY_STATE, AGENTS_KEY_HINT,
   agentResumeCommand, applyActivityEvent, applySessionList, emptyAgentsState,
-  formatAgentsSnapshot, formatForColumn, keyToAgentsAction, moveSelection, runAgentVerb,
+  formatAgentsSnapshot, formatCwdColumn, formatForColumn, keyToAgentsAction, moveSelection, runAgentVerb,
   runAgentsCommand, selectedAgent, AgentsStore,
   type AgentsState,
 } from "../src/agents-cli";
@@ -127,6 +127,54 @@ describe("applyActivityEvent — the live half (no polling delay)", () => {
     let s = applySessionList(emptyAgentsState(), [row("s_1", { activity: "background" })], T0);
     s = applyActivityEvent(s, { sessionId: "s_1", activity: "background", ts: T0 + 30_000 }, T0 + 30_000);
     expect(s.rows[0]!.sinceMs).toBe(T0);
+  });
+});
+
+describe("cwd — declared on SessionSummary by the T9 amendment, so the roster can finally show it", () => {
+  test("applySessionList carries the row's cwd", () => {
+    const s = applySessionList(emptyAgentsState(), [
+      row("s_bg", { activity: "background", title: "Fix the reaper", cwd: "/Users/x/code/norma" }),
+    ], T0);
+    expect(s.rows[0]!.cwd).toBe("/Users/x/code/norma");
+  });
+
+  test("a session with no recorded cwd stays ABSENT — never a fabricated path", () => {
+    const s = applySessionList(emptyAgentsState(), [row("s_bg", { activity: "background" })], T0);
+    expect(s.rows[0]!.cwd).toBeUndefined();
+  });
+
+  test("a live transient does not erase a cwd the poll already supplied", () => {
+    let s = applySessionList(emptyAgentsState(), [
+      row("s_1", { activity: "active", title: "Work", cwd: "/Users/x/code/norma" }),
+    ], T0);
+    s = applyActivityEvent(s, { sessionId: "s_1", activity: "background", ts: T0 + 5_000 }, T0 + 5_000);
+    expect(s.rows[0]!.cwd).toBe("/Users/x/code/norma");
+  });
+
+  test("formatCwdColumn collapses the home directory to ~", () => {
+    expect(formatCwdColumn("/Users/x/code/norma", "/Users/x")).toBe("~/code/norma");
+    expect(formatCwdColumn("/Users/x", "/Users/x")).toBe("~");
+    // A path merely PREFIXED by the home string is not under it — /Users/xavier is not ~/avier.
+    expect(formatCwdColumn("/Users/xavier/code", "/Users/x")).toBe("/Users/xavier/code");
+  });
+
+  test("formatCwdColumn truncates from the LEFT — the project directory is the part worth keeping", () => {
+    const long = `/Users/x/${"deep/".repeat(20)}project`;
+    const cell = formatCwdColumn(long, "/Users/x");
+    expect(cell.length).toBeLessThanOrEqual(28);
+    expect(cell.startsWith("…")).toBe(true);
+    expect(cell.endsWith("project")).toBe(true);
+  });
+
+  test("an absent cwd renders as a dash, not an empty column", () => {
+    expect(formatCwdColumn(undefined, "/Users/x")).toBe("—");
+  });
+
+  test("the snapshot line carries the cwd", () => {
+    const s = applySessionList(emptyAgentsState(), [
+      row("s_bg", { activity: "background", title: "Fix the reaper", cwd: "/Users/x/code/norma" }),
+    ], T0);
+    expect(formatAgentsSnapshot(s, T0, "/Users/x")[0]).toContain("~/code/norma");
   });
 });
 

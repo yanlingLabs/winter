@@ -381,6 +381,34 @@ describe("NormaClient", () => {
     expect(seen.some((e) => e.type === "user_message" && e.text === "first")).toBe(false);
     c2.close();
   });
+
+  // session-activity-hygiene T9 (amendment): `session.list` has always SENT `cwd` — `store.list()`
+  // selects it and the handler returns rows verbatim — but `SessionListResult` never declared it, and
+  // `validated()`'s safeParse strips every undeclared key. So the field reached the wire and died at
+  // this client, silently: `norma agents` could not show a cwd column for data the daemon was already
+  // putting on the socket. (Swift's own `NormaClient.listSessions()` reads `s["cwd"]` off the raw
+  // JSON and has been consuming it all along — the TS schema was the odd one out.)
+  //
+  // This is a LIVE round-trip on purpose: a schema unit test would pass the day the daemon stopped
+  // populating the field, and a daemon-side test would pass the day the schema stopped declaring it.
+  // Only both ends at once prove the value survives.
+  test("session.list round-trips `cwd` through the client's schema validation (T9)", async () => {
+    await boot();
+    const client = await NormaClient.connect({
+      socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli-cwd", onEvent: () => {},
+    });
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-cli-listcwd-")));
+    const { sessionId } = await client.createSession("global", { cwd });
+    const withCwd = (await client.listSessions()).sessions.find((s: { sessionId: string }) => s.sessionId === sessionId);
+    expect(withCwd!.cwd).toBe(cwd);
+
+    // Absent stays ABSENT — a session created without one must not acquire a fabricated cwd (the
+    // store writes NULL, `store.list()` maps it to undefined, and the optional field omits it).
+    const { sessionId: bare } = await client.createSession("global");
+    const withoutCwd = (await client.listSessions()).sessions.find((s: { sessionId: string }) => s.sessionId === bare);
+    expect(withoutCwd!.cwd).toBeUndefined();
+    client.close();
+  });
 });
 
 describe("NormaClient against a hostile/fake server", () => {

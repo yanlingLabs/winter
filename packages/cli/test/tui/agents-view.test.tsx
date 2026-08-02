@@ -72,6 +72,24 @@ describe("<AgentsView>", () => {
     expect(render(<AgentsView state={s} nowMs={T0} />).lastFrame() ?? "").toContain("s_bare");
   });
 
+  // T9 amendment: the cwd column, restored once `SessionListResult` declared the field the daemon
+  // had always been sending.
+  test("renders the cwd column, home-collapsed", () => {
+    const s = applySessionList(emptyAgentsState(), [
+      { sessionId: "s_bg", activity: "background", title: "Fix the reaper", cwd: "/Users/x/code/norma" },
+    ], T0);
+    const frame = render(<AgentsView state={s} nowMs={T0} home="/Users/x" />).lastFrame() ?? "";
+    expect(frame).toContain("~/code/norma");
+  });
+
+  test("a session with no recorded cwd renders a dash, not a fabricated path", () => {
+    const s = applySessionList(emptyAgentsState(), [
+      { sessionId: "s_bg", activity: "background", title: "Fix the reaper" },
+    ], T0);
+    const frame = render(<AgentsView state={s} nowMs={T0} home="/Users/x" />).lastFrame() ?? "";
+    expect(frame).toContain("—");
+  });
+
   test("a long title is truncated with an ellipsis rather than wrapping the row", () => {
     const s = applySessionList(emptyAgentsState(), [
       { sessionId: "s_long", activity: "background", title: "x".repeat(80) },
