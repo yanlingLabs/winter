@@ -32,7 +32,6 @@
  *  reads `≥12s` three seconds after launch, and that is the honest answer — not `12s`.
  */
 
-import type { SessionActivity } from "@norma/protocol";
 import type { NormaClient } from "./client";
 import { formatElapsed } from "./task-display";
 
@@ -278,9 +277,12 @@ export async function runAgentVerb(
         changed: wasRunning,
       };
     }
-    const activity: SessionActivity | null =
+    // The RPC's own three-valued write surface: the two settable flags, or `null` to clear BOTH
+    // back to purely derived. `active`/`idle` are DERIVED states and deliberately not writable —
+    // which is why this is narrower than `SessionActivity` and needs no cast.
+    const activity: "background" | "archived" | null =
       verb === "background" ? "background" : verb === "archive" ? "archived" : null;
-    const res = await client.sessionSetActivity({ sessionId: row.sessionId, activity: activity as "background" | "archived" | null });
+    const res = await client.sessionSetActivity({ sessionId: row.sessionId, activity });
     return { message: `${row.sessionId} → ${res.activity ?? "(no lifecycle)"}`, changed: true };
   } catch (e) {
     return { message: `${row.sessionId}: ${(e as Error).message}`, changed: false };
