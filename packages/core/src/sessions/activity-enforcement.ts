@@ -106,8 +106,9 @@ export interface ActivityEnforcementDeps {
 
 export interface ActivityEnforcement {
   /** A harness attached (called AFTER the attach is registered and after `session.attach`'s
-   *  archived-clear, so the derivation sees the finished state). */
-  onAttached(sessionId: string): void;
+   *  archived-clear, so the derivation sees the finished state). `attachedCount` is the session's
+   *  attachment count now — zero means the attach did not take (see the implementation). */
+  onAttached(sessionId: string, attachedCount: number): void;
   /** A harness went away. `remaining` is the attachment count AFTER the removal. */
   onDetached(sessionId: string, client: EnforcementClient, remaining: number): void;
   /** A top-level turn settled (all terminal paths, including abort). */
@@ -156,12 +157,23 @@ export function createActivityEnforcement(deps: ActivityEnforcementDeps): Activi
   /** Every hook starts here: the row is the enforcement's own gate. A vanished row (deleted
    *  session, a detach racing a delete) means there is nothing left to enforce OR announce — and
    *  `emit` on such a session would throw out of the hub's fan-out, which is exactly the reachable
-   *  path the memo-ordering fix in `SessionHub.emitActivity` guards. `undefined` = don't proceed. */
+   *  path the memo-ordering fix in `SessionHub.emitActivity` guards. `undefined` = don't proceed.
+   *
+   *  A session that is GONE is also forgotten here, which is the only place that can happen for a
+   *  session deleted between two hooks (the detach that would normally clear its span never comes).
+   *  Deliberately not done for a merely non-participating mode: chat/dispatch never acquire any
+   *  bookkeeping to drop, and a mode is not a disappearance. */
   function lifecycleRow(sessionId: string): ActivityRow | undefined {
     let row: ActivityRow;
     try { row = deps.meta(sessionId); }
-    catch { return undefined; }
+    catch { forget(sessionId); return undefined; }
     return participatesInActivity(row.mode) ? row : undefined;
+  }
+
+  function forget(sessionId: string): void {
+    spanStart.delete(sessionId);
+    autoBackground.delete(sessionId);
+    cancelGrace(sessionId);
   }
 
   function cancelGrace(sessionId: string): void {
@@ -176,6 +188,9 @@ export function createActivityEnforcement(deps: ActivityEnforcementDeps): Activi
     grace.set(sessionId, timers.setTimeout(() => {
       grace.delete(sessionId);
       autoBackground.delete(sessionId);
+      // Two minutes is long enough for the session to have been deleted meanwhile, so re-check
+      // rather than announce into the void (`lifecycleRow` also forgets what we still held).
+      if (!lifecycleRow(sessionId)) return;
       // The provisional background is over; ask the derivation what the session is NOW (idle,
       // normally — but "background" again if the stored flag went on meanwhile, or a new turn
       // started, in which case the memo swallows this).
@@ -185,7 +200,13 @@ export function createActivityEnforcement(deps: ActivityEnforcementDeps): Activi
   }
 
   return {
-    onAttached(sessionId: string): void {
+    onAttached(sessionId: string, attachedCount: number): void {
+      // An attach that left the session with NOTHING attached did not take: `SessionHub.attach`
+      // returns early without registering a client whose socket died during the replay drain (a
+      // slow-consumer backlog cap), and that client never produces a detach either — so stamping a
+      // span here would open one nothing can ever close, and 24h later the sweep would demote a
+      // session with no harness on it at all.
+      if (attachedCount === 0) return;
       if (!lifecycleRow(sessionId)) return;
       // An attachment ends any provisional background outright — the whole point of the grace
       // window is to wait and see whether somebody comes back, and somebody just did.
@@ -259,10 +280,8 @@ export function createActivityEnforcement(deps: ActivityEnforcementDeps): Activi
       for (const [sessionId, since] of spanStart) {
         if (at - since <= ACTIVE_DEMOTION_MS) continue;
         // A span whose session no longer exists (deleted while attached) is bookkeeping for nothing
-        // — drop it rather than re-attempting a doomed emit on every tick. This is the only place
-        // that can garbage-collect such an entry: the detach that would normally clear it never
-        // came.
-        if (!lifecycleRow(sessionId)) { spanStart.delete(sessionId); continue; }
+        // — `lifecycleRow` drops it rather than re-attempting a doomed emit on every tick.
+        if (!lifecycleRow(sessionId)) continue;
         // ONLY the emit. The derivation computes "background" from `activeSince` by itself, so
         // there is no state to flip here and no stored flag to write — and re-deriving the
         // threshold in two places is how the two would eventually disagree. Repeats cost nothing:

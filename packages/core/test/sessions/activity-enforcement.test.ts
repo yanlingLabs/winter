@@ -147,7 +147,12 @@ function harness(rows: Record<string, ActivityRow> = { s1: { mode: "code" } }) {
     advance: (ms: number) => { clock += ms; },
     attach(id: string): void {
       attached.set(id, (attached.get(id) ?? 0) + 1);
-      enf.onAttached(id);
+      enf.onAttached(id, attached.get(id)!);
+    },
+    /** `SessionHub.attach`'s early return: a client whose socket died during the replay drain is
+     *  never registered — and never detaches either. */
+    attachThatDidNotTake(id: string): void {
+      enf.onAttached(id, attached.get(id) ?? 0);
     },
     detach(id: string, clientName = "cli-p", role: string | null = "harness"): void {
       const remaining = Math.max(0, (attached.get(id) ?? 0) - 1);
@@ -233,13 +238,29 @@ describe("last-detach enforcement (session-activity-hygiene T5)", () => {
     expect(h.enf.activeSince("chat")).toBeUndefined();
   });
 
-  test("a session whose row vanished mid-detach never throws out of the hook", () => {
+  test("a session whose row vanished mid-detach never throws out of the hook, and is forgotten", () => {
     const h = harness();
+    h.attach("s1");
+    h.running.add("s1");
+    h.detach("s1", "orb");                       // leaves a span AND a provisional background
     h.attach("s1");
     h.meta.delete("s1");
     expect(() => h.detach("s1", "cli-p")).not.toThrow();
-    expect(() => h.enf.onAttached("s1")).not.toThrow();
+    expect(() => h.enf.onAttached("s1", 1)).not.toThrow();
     expect(() => h.enf.onTurnSettled("s1")).not.toThrow();
+    // Nothing about a session that no longer exists may outlive it — the detach that would
+    // normally clear this bookkeeping is exactly what never comes.
+    expect(h.enf.activeSince("s1")).toBeUndefined();
+    expect(h.enf.autoBackgrounded("s1")).toBe(false);
+  });
+
+  test("an attach that did NOT take opens no span — a dead-on-replay client never detaches either", () => {
+    const h = harness();
+    h.attachThatDidNotTake("s1");
+    // Left open, this span could never be closed, and 24h later the sweep would demote a session
+    // with no harness on it at all.
+    expect(h.enf.activeSince("s1")).toBeUndefined();
+    expect(h.emitted).toEqual([]);
   });
 
   test("every transition announces — the change memo only means anything if nothing skips the emit", () => {

@@ -1110,7 +1110,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // being un-archived by this very call. Its own emit is normally a no-op after the clear's
           // (same derived value, and the hub's memo eats the repeat) and carries the whole
           // announcement for the ordinary, non-archived attach.
-          enforcement.onAttached(p.sessionId);
+          enforcement.onAttached(p.sessionId, hub.attachedCount(p.sessionId));
           return { ok: true, lastSeq };
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
