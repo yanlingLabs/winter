@@ -11,7 +11,7 @@ func summarize(_ e: SessionEvent) -> String {
     case .assistantMessage(let v): return "[\(v.seq)] assistant_message: \(v.text.prefix(100))"
     case .userMessage(let v): return "[\(v.seq)] user_message(\(v.clientName)): \(v.text.prefix(100))"
     case .turnStarted(let v): return "[\(v.seq)] turn_started (\(v.threadId))"
-    case .turnCompleted(let v): return "[\(v.seq)] turn_completed: \(v.stopReason) in=\(v.inputTokens) out=\(v.outputTokens)"
+    case .turnCompleted(let v): return "[\(v.seq)] turn_completed: \(v.stopReason) in=\(v.inputTokens) out=\(v.outputTokens) ctx=\(v.contextTokens.map(String.init) ?? "-")"
     case .toolCall(let v): return "[\(v.seq)] tool_call: \(v.name) \(v.argsJson.prefix(80))"
     case .toolResult(let v): return "[\(v.seq)] tool_result(\(v.isError ? "ERR" : "ok")): \(v.output.prefix(80))"
     case .approvalRequested(let v): return "[\(v.seq)] approval_requested: \(v.toolName) — \(v.summary.prefix(80))"

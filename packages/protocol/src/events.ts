@@ -146,10 +146,15 @@ export const ApprovalResolvedEvent = ThreadBase.extend({
  *  it is the per-round MAXIMUM (`Math.max` across the turn's requests), never a sum and never the
  *  last round's value.
  *
- *  TS-only for now: no Swift mirror and no fixture, because no client renders it — it is a
- *  daemon-internal trigger input. But `NormaChatKit`'s `ChatEngine` is a live SECOND producer of
- *  `turn_completed` whose events reach this daemon's log verbatim via `sync.push`, so "TS-only"
- *  describes the READERS, not the writers. */
+ *  Mirrored on the Swift side too (followups T3, `apple/NormaProtocol/Sources/NormaProtocol/
+ *  SessionEvent.swift`'s `TurnCompleted.contextTokens`), with a TS-generated fixture
+ *  (`turn_completed_with_contextTokens.json`) proving the round-trip — the "TS-only, no Swift
+ *  mirror, no client renders it" reasoning that used to sit here expired the moment
+ *  `NormaChatKit`'s `ChatEngine` became a live SECOND producer of `turn_completed`: its events reach
+ *  this daemon's log verbatim via `sync.push`, and the field only survives that trip because the
+ *  Swift type that gets JSON-encoded once (on the phone, at emit time) actually carries it. A
+ *  future field addition to an existing variant should re-ask this question fresh rather than
+ *  assume "no Swift mirror needed" still holds — it holds only until a second producer exists. */
 export const TurnCompletedEvent = ThreadBase.extend({
   type: z.literal("turn_completed"), stopReason: z.enum(["end_turn", "aborted", "error"]),
   inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(),

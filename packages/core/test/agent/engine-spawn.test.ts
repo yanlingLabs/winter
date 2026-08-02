@@ -647,6 +647,55 @@ describe("AgentEngine: spawn_agent bridge (1d-iv T5)", () => {
     expect((result as Extract<SessionEvent, { type: "tool_result" }>).output).toContain("upstream 404: model not found");
   });
 
+  /** followups T1 — the MAIN-THREAD scoping of the context-length compaction trigger (the trigger
+   *  itself is pinned in engine-compaction.test.ts; this is the negative half, and it lives here
+   *  because this file owns the only harness that can actually drive a child thread).
+   *
+   *  A child's context overflow must NOT compact the PARENT's history: the Compactor only ever
+   *  folds main-thread events (`historyInput` filters other threads out), so doing so would rewrite
+   *  the parent's context in response to a subagent's problem while doing nothing for the child.
+   *  The child's failure already has a channel — the isError tool_result pinned above. */
+  test("a CHILD thread's context-length error does not compact the parent's main history", async () => {
+    class CtxLenChild implements Provider {
+      readonly id = "fake";
+      readonly instructions: Array<string | undefined> = [];
+      private call = 0;
+      models() { return [{ id: "fake-1", family: "fake", contextWindow: 100_000, supportsVision: false }]; }
+      async *streamTurn(req: TurnRequest): AsyncIterable<ProviderEvent> {
+        this.instructions.push(req.instructions);
+        const n = this.call++;
+        if (n === 0) { yield spawnCall("s1", "do X"); yield done("tool_calls"); return; } // parent spawns
+        if (n === 1) {
+          // the child's only round — the exact mapHttpError shape for a context overflow
+          yield {
+            type: "error", code: "bad_request",
+            message: 'HTTP 400 — {"error":{"message":"This model\'s maximum context length is 272000 tokens. However, your messages resulted in 289431 tokens.","type":"invalid_request_error","',
+            providerCode: "context_length_exceeded",
+          };
+          return;
+        }
+        yield { type: "text_delta", delta: "parent wrapped up despite the child's failure" };
+        yield done("end_turn");
+      }
+    }
+    const provider = new CtxLenChild();
+    const { engine, store, sessionId } = setup([], { provider });
+    // 10 main-thread messages > the Compactor's keepTail(6), so a spurious compaction WOULD land a
+    // checkpoint here — the assertion below is discriminating, not vacuous.
+    for (let i = 0; i < 5; i++) {
+      store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: `u${i}`, clientName: "test" });
+      store.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: `a${i}` });
+    }
+
+    await engine.runTurn(sessionId);
+
+    expect(store.read(sessionId).some((e) => e.type === "checkpoint")).toBe(false);
+    expect(provider.instructions.some((i) => (i ?? "").includes("compacting"))).toBe(false); // no summarization call at all
+    // the child's failure still reaches the parent through its own channel, unchanged:
+    const result = store.read(sessionId).find((e) => e.type === "tool_result" && e.callId === "s1");
+    expect(result).toMatchObject({ isError: true });
+  });
+
   test("child-thread deltas carry the child threadId, not main", async () => {
     const { engine, sessionId, events } = setup([
       [spawnCall("c1", "do a thing"), done("tool_calls")],

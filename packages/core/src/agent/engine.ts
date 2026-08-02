@@ -5,6 +5,7 @@ import type { ApprovalOption, NewSessionEvent, Question, SessionEvent, Task } fr
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
 import type { ModelInfo, Provider, ProviderEvent, TurnInputItem } from "../providers/types";
+import { isContextLengthError } from "../providers/errors";
 import type { ToolRegistry, Mode } from "./tools/registry";
 import { isExternalToolName } from "./tools/registry";
 import type { PermissionGate, SessionApprovalPolicy } from "./gate";
@@ -1429,6 +1430,45 @@ export class AgentEngine {
     if (used > limit) await this.cfg.compactor.compact(sessionId, this.aborters.get(sessionId)?.signal);
   }
 
+  /** THE SECOND COMPACTION TRIGGER — the provider's own context-length rejection. Composes with
+   *  `maybeAutoCompact` above, which stays primary; this is strictly the recovery for the one case
+   *  that trigger structurally cannot reach.
+   *
+   *  That case: a session ALREADY over the provider's hard ceiling. Its request is rejected in
+   *  ~400ms, before a single `usage` event exists, so the turn emits
+   *  `turn_completed{error, contextTokens: 0}` — which `maybeAutoCompact` correctly refuses to read
+   *  as a context size (its DIRECTION 4/5 defenses: "no figure ≠ a figure of zero"). The
+   *  measurement it needs therefore can NEVER arrive: every subsequent turn rebuilds the identical
+   *  oversized input and fails identically, and the session is bricked with no path back. The
+   *  pre-2026-07-31 code was equally stuck (it read `inputTokens`, also 0 here) — the fix round
+   *  only removed an accidental, wrong-pointing escape hatch. So the error itself becomes the
+   *  trigger.
+   *
+   *  Three deliberate scopings:
+   *  - MAIN THREAD ONLY, exactly like `maybeAutoCompact` and for the identical reason: the
+   *    Compactor only ever folds main-thread history (`historyInput` filters other threads out), so
+   *    compacting on a CHILD's overflow would rewrite the parent's context in response to a
+   *    subagent's problem while doing nothing at all for the child. A child's overflow surfaces to
+   *    the parent as an isError tool_result, which is the right channel.
+   *  - NO AUTOMATIC RETRY. The failed turn is not re-sent: the user still sees the `agent_error`
+   *    (already emitted above — recovery is not concealment), and the NEXT turn is the one that
+   *    runs on the compacted context. Retrying here would make a mis-recognized error into an
+   *    infinite request loop.
+   *  - FAILURE IS ABSORBED. A compaction that throws must never mask the provider error that
+   *    caused it — same degradation contract as `maybeAutoCompact`'s call site. Nothing to compact
+   *    (a short session) is a no-op by the Compactor's own keepTail rule, not an error.
+   *
+   *  No recursion risk: the Compactor drives `provider.streamTurn` directly, never `runThread`, so
+   *  a summarization request that ALSO overflows just fails and returns NOT_COMPACTED. */
+  private async maybeCompactOnContextError(sessionId: string, threadId: string, ev: Extract<ProviderEvent, { type: "error" }>): Promise<void> {
+    if (threadId !== MAIN_THREAD || !isContextLengthError(ev)) return;
+    try {
+      await this.cfg.compactor.compact(sessionId, this.aborters.get(sessionId)?.signal);
+    } catch (e) {
+      console.error("context-length recovery compaction failed", e);
+    }
+  }
+
   /** Builds the turn's starting input from history: if the session has been compacted (a
    *  `checkpoint` event exists), the input opens with the checkpoint's summary in place of the
    *  messages it covers, followed only by messages after its `uptoSeq` — this is what actually
@@ -2561,6 +2601,7 @@ export class AgentEngine {
           this.emit(sessionId, { type: "agent_error", sessionId, threadId, message: ev.message, code: ev.code });
           this.emit(sessionId, { type: "turn_completed", sessionId, threadId, stopReason: "error", ...usage });
           if (this.cfg.hooks) await this.fireTurnEnd(sessionId, threadId, "error", usage); // [4f turn-end] provider-error terminal
+          await this.maybeCompactOnContextError(sessionId, threadId, ev);
           // `errorMessage` is consumed ONLY by the spawn bridge below (a CHILD thread's failure
           // must surface through the parent's tool_result — the agent_error/turn_completed events
           // just emitted are invisible to the parent model, which only sees the child's return

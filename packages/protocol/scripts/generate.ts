@@ -40,6 +40,14 @@ const fixtures: Record<string, unknown> = {
   "approval_requested_with_reviewer_reason": { ...base, threadId: "main", type: "approval_requested", callId: "call_31", toolName: "bash", summary: "run rm -rf /tmp/scratch", issuedAt: 1781270000000, expiresAt: 1781270300000, reviewerReason: "recursive delete outside the session cwd" },
   "approval_resolved": { ...base, threadId: "main", type: "approval_resolved", callId: "call_2", approved: true, by: "orb" },
   "turn_completed": { ...base, threadId: "main", type: "turn_completed", stopReason: "end_turn", inputTokens: 12, outputTokens: 3 },
+  // followups T3 (ChatEngine as a second turn_completed producer): contextTokens is additive/
+  // optional on the EXISTING turn_completed shape — a dedicated fixture (distinct from
+  // turn_completed.json above, which stays absent) so Swift round-trips one carrying it, mirroring
+  // approval_requested_with_reviewer_reason's with/without pattern. inputTokens (900) deliberately
+  // != contextTokens (300): the fixture itself must encode the max-not-sum distinction, not just a
+  // present/absent one — a Swift-side implementation that confused the two fields would fail this
+  // fixture's round-trip content check even though both are merely optional Ints on the wire.
+  "turn_completed_with_contextTokens": { ...base, threadId: "main", type: "turn_completed", stopReason: "end_turn", inputTokens: 900, outputTokens: 40, contextTokens: 300 },
   "agent_error": { ...base, threadId: "main", type: "agent_error", message: "provider unavailable" },
   "directory_added": { ...base, threadId: "main", type: "directory_added", path: "/opt/data", persisted: true },
   "bg_task_started": { ...base, threadId: "main", type: "bg_task_started", taskId: "bg_a1", command: "npm run dev" },
@@ -146,7 +154,7 @@ for (const [name, value] of Object.entries(fixtures)) {
 // Written into the SAME fixtures/ directory as the SessionEvent fixtures above, but deliberately
 // NOT added to the `fixtures` map itself and NOT swept into the Swift NormaProtocol test bundle
 // below: RoundTripTests.swift decodes EVERY .json file it finds under Fixtures/ as a SessionEvent
-// and asserts an exact count of 56 — these two are a different shape entirely, so the sync step
+// and asserts an exact count of 57 — these two are a different shape entirely, so the sync step
 // below now copies the SessionEvent set explicitly (never a blanket directory copy) to keep that
 // gate byte-for-byte unchanged. A later task wires these two into their own Swift consumer.
 writeFileSync(join(fixDir, "dangerous-domains.json"), JSON.stringify(buildDangerousDomainsFixture(), null, 2));
@@ -156,7 +164,7 @@ writeFileSync(join(fixDir, "cleaner-vectors.json"), JSON.stringify(cleanerVector
 // 3. Sync fixtures into the Swift test bundle — the SessionEvent per-variant fixtures ONLY (see
 // the comment above): a blanket directory copy would also carry dangerous-domains.json/
 // cleaner-vectors.json into RoundTripTests.swift's Fixtures/, which decodes every file there as a
-// SessionEvent and hard-asserts a count of 56.
+// SessionEvent and hard-asserts a count of 57.
 const swiftFixDir = join(import.meta.dir, "..", "..", "..", "apple", "NormaProtocol", "Tests", "NormaProtocolTests", "Fixtures");
 rmSync(swiftFixDir, { recursive: true, force: true }); // delete-then-copy: no orphaned fixtures after variant renames
 mkdirSync(swiftFixDir, { recursive: true });

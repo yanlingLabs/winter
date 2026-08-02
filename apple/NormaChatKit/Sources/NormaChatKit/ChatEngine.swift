@@ -176,6 +176,12 @@ public final class ChatEngine: @unchecked Sendable {
 
         var inputTokens = 0
         var outputTokens = 0
+        // followups T3: `inputTokens` above keeps its BILLING meaning (summed across rounds) — do
+        // not fold this into it. `contextTokens` tracks the largest SINGLE round's input, i.e. how
+        // full the context actually got, mirroring the daemon's own `usage.contextTokens` (Math.max
+        // across rounds, `engine.ts`). It is what makes a phone-authored turn usable by the Mac's
+        // auto-compaction trigger instead of silently skipped for lacking the field entirely.
+        var contextTokens = 0
         var stopReason = "end_turn"
 
         var round = 0
@@ -198,6 +204,7 @@ public final class ChatEngine: @unchecked Sendable {
             if signal.isAborted { stopReason = "aborted"; break }
             inputTokens += outcome.inputTokens
             outputTokens += outcome.outputTokens
+            contextTokens = max(contextTokens, outcome.inputTokens)
 
             // Emission-order replay (spec §B4): reasoning items precede the round's message/calls.
             // Opaque — appended to the log and fed back to the provider, NEVER emitted.
@@ -259,7 +266,8 @@ public final class ChatEngine: @unchecked Sendable {
         // The turn ALWAYS ends on a complete turn_completed line (atomic append — never a torn log),
         // whether it finished, errored, or was interrupted. The next runTurn continues the session.
         emit(.turnCompleted(.init(seq: seq.next(), sessionId: sid, ts: nowMs(), threadId: MainThread,
-                                  stopReason: stopReason, inputTokens: inputTokens, outputTokens: outputTokens)))
+                                  stopReason: stopReason, inputTokens: inputTokens, outputTokens: outputTokens,
+                                  contextTokens: contextTokens)))
     }
 
     // MARK: - round consumption

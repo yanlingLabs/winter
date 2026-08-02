@@ -1,5 +1,6 @@
 import type { ModelInfo, Provider, ProviderEvent, TurnInputItem, TurnRequest, ToolSpec } from "./types";
 import { ResponsesSseParser } from "./responses-sse";
+import { parseProviderErrorCode } from "./errors";
 
 export interface OpenAICompatibleConfig {
   baseUrl: string;            // e.g. https://api.openai.com/v1
@@ -85,20 +86,27 @@ export function buildRequestBody(req: TurnRequest): Record<string, unknown> {
 }
 
 export async function mapHttpError(status: number, retryAfterHeader: string | null, body: Promise<string>): Promise<ProviderEvent> {
-  const snippet = (await body.catch(() => "")).slice(0, 200);
+  const raw = await body.catch(() => "");
+  const snippet = raw.slice(0, 200);
   const suffix = snippet ? ` — ${snippet}` : "";
-  if (status === 401 || status === 403) return { type: "error", code: "auth", message: `HTTP ${status}${suffix}` };
+  // The provider's structured `error.code` is read off the FULL body, BEFORE the 200-char cap —
+  // the envelope puts `code` after the unbounded human message, so on a real context-overflow body
+  // the cap eats exactly the field a consumer wants (see providers/errors.ts). Spread as an
+  // optional so every error with no structured code keeps its pre-existing shape byte-identical.
+  const providerCode = parseProviderErrorCode(raw);
+  const extra = providerCode ? { providerCode } : {};
+  if (status === 401 || status === 403) return { type: "error", code: "auth", message: `HTTP ${status}${suffix}`, ...extra };
   if (status === 429) {
     const secs = retryAfterHeader ? Number(retryAfterHeader) : NaN;
     // HTTP-date form of Retry-After (RFC 7231 §7.1.3) → NaN → omit retryAfterMs; QuotaManager applies fallback.
     // secs <= 0 treated as absent (a "retry immediately" hint still gets default backoff).
     return {
-      type: "error", code: "rate_limit", message: `HTTP 429${suffix}`,
+      type: "error", code: "rate_limit", message: `HTTP 429${suffix}`, ...extra,
       ...(Number.isFinite(secs) && secs > 0 ? { retryAfterMs: Math.round(secs * 1000) } : {}),
     };
   }
-  if (status >= 400 && status < 500) return { type: "error", code: "bad_request", message: `HTTP ${status}${suffix}` };
-  return { type: "error", code: "server", message: `HTTP ${status}${suffix}` };
+  if (status >= 400 && status < 500) return { type: "error", code: "bad_request", message: `HTTP ${status}${suffix}`, ...extra };
+  return { type: "error", code: "server", message: `HTTP ${status}${suffix}`, ...extra };
 }
 
 export class OpenAICompatibleProvider implements Provider {

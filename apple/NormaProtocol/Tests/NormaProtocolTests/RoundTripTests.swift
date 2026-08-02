@@ -4,7 +4,7 @@ import XCTest
 final class RoundTripTests: XCTestCase {
     func fixtureURLs() throws -> [URL] {
         let urls = Bundle.module.urls(forResourcesWithExtension: "json", subdirectory: "Fixtures") ?? []
-        XCTAssertEqual(urls.count, 56, "expected 56 fixtures — regenerate via pnpm protocol:generate")
+        XCTAssertEqual(urls.count, 57, "expected 57 fixtures — regenerate via pnpm protocol:generate")
         return urls
     }
 
@@ -131,6 +131,45 @@ final class RoundTripTests: XCTestCase {
         guard case .notificationRequested(let v) = try JSONDecoder().decode(SessionEvent.self, from: data) else { return XCTFail() }
         XCTAssertEqual(v.title, "Norma")
         XCTAssertFalse(v.message.isEmpty)
+    }
+
+    /// followups T3 (ChatEngine as a second `turn_completed` producer): `contextTokens` is
+    /// additive/optional — mirrors `testThreadStartedDescriptionOptional`'s with/without pattern.
+    /// Fix-round-1 (review): the "with" half now loads the TS-generated
+    /// `turn_completed_with_contextTokens.json` fixture (`packages/protocol/scripts/generate.ts`)
+    /// rather than a hand-written JSON literal — a literal ties nothing to the TS schema, so a
+    /// future rename/drift there would leave this test green while a real daemon-emitted event
+    /// silently stopped matching. `inputTokens` (900) deliberately != `contextTokens` (300) in that
+    /// fixture, so it encodes the max-not-sum distinction, not just a present/absent one. The
+    /// "without" half re-uses the pre-existing `turn_completed.json` fixture to prove an OLDER
+    /// event (predating this field) still decodes.
+    func testTurnCompletedContextTokensOptional() throws {
+        guard let withURL = Bundle.module.url(forResource: "turn_completed_with_contextTokens", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing turn_completed_with_contextTokens.json fixture")
+        }
+        let withData = try Data(contentsOf: withURL)
+        guard case .turnCompleted(let v) = try JSONDecoder().decode(SessionEvent.self, from: withData) else { return XCTFail() }
+        XCTAssertEqual(v.contextTokens, 300)
+        XCTAssertEqual(v.inputTokens, 900, "inputTokens keeps its billing (summed) meaning — untouched by this field")
+
+        // Round-trips losslessly: re-encoding a present contextTokens must not drop it.
+        let reencoded = try JSONEncoder().encode(SessionEvent.turnCompleted(v))
+        guard case .turnCompleted(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(v, redecoded)
+        let obj = try JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
+        XCTAssertEqual((obj?["contextTokens"] as? NSNumber)?.intValue, 300)
+
+        guard let withoutURL = Bundle.module.url(forResource: "turn_completed", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing turn_completed.json fixture")
+        }
+        let withoutData = try Data(contentsOf: withoutURL)
+        guard case .turnCompleted(let without) = try JSONDecoder().decode(SessionEvent.self, from: withoutData) else { return XCTFail() }
+        XCTAssertNil(without.contextTokens)
+        // Re-encoding an ABSENT contextTokens must not invent the key (encodeIfPresent semantics) —
+        // load-bearing for byte-verbatim replication of an older/absent-field event.
+        let withoutReencoded = try JSONEncoder().encode(SessionEvent.turnCompleted(without))
+        let withoutObj = try JSONSerialization.jsonObject(with: withoutReencoded) as? [String: Any]
+        XCTAssertNil(withoutObj?["contextTokens"], "an absent contextTokens must stay absent on re-encode")
     }
 
     /// SP-approvals T4: `approval_requested.options` is additive/optional — mirrors

@@ -211,12 +211,25 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let ts: Int
         public let threadId: String
         public let stopReason: String
+        /// `inputTokens`/`outputTokens` are the turn's BILLING totals, summed across every tool
+        /// round — never a context-size proxy (see the TS mirror, `packages/protocol/src/events.ts`'s
+        /// `TurnCompletedEvent` doc comment, for the full rationale).
         public let inputTokens: Int
         public let outputTokens: Int
+        /// Additive/optional (provider-correctness T2, mirrored here for followups T3 now that
+        /// `NormaChatKit.ChatEngine` is a second live producer of `turn_completed`): the provider-
+        /// reported input size of the turn's LARGEST single round, i.e. how full the context actually
+        /// got — the only correct input to the daemon's auto-compaction trigger. ABSENT (older events,
+        /// or a producer that doesn't emit it) means "skip this event", never "fall back to
+        /// `inputTokens`" — that sums across rounds and would reintroduce the premature-compaction bug
+        /// this field exists to fix. A producer that emits it must emit the per-round MAXIMUM, never a
+        /// sum and never the last round's value alone.
+        public let contextTokens: Int?
         public init(seq: Int, sessionId: String, ts: Int, threadId: String, stopReason: String,
-                    inputTokens: Int, outputTokens: Int) {
+                    inputTokens: Int, outputTokens: Int, contextTokens: Int? = nil) {
             self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
             self.stopReason = stopReason; self.inputTokens = inputTokens; self.outputTokens = outputTokens
+            self.contextTokens = contextTokens
         }
     }
 

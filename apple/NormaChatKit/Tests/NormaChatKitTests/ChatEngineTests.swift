@@ -45,8 +45,47 @@ final class ChatEngineTests: XCTestCase {
         XCTAssertEqual(done.stopReason, "end_turn")
         XCTAssertEqual(done.inputTokens, 8)
         XCTAssertEqual(done.outputTokens, 3)
+        // followups T3: a single-round turn's contextTokens equals that round's input — the
+        // trivial case where max-of-one is just the value itself.
+        XCTAssertEqual(done.contextTokens, 8)
         // The sessionId is stamped on every event.
         XCTAssertTrue(collector.events.allSatisfy { eventSessionId($0) == "ses_1" })
+    }
+
+    // MARK: - contextTokens (followups T3): the per-round MAX, never the sum
+
+    /// The brief's exact pinned scenario: a 3-round turn with 300 input tokens EVERY round must
+    /// emit `contextTokens: 300` — proof this isn't secretly `inputTokens` (900, the sum) under a
+    /// new name. `inputTokens` itself keeps its billing (summed) meaning, untouched.
+    func testTurnCompletedContextTokensIsPerRoundMaxNotSum() async {
+        let provider = ScriptedChatProvider([
+            [.toolCall(callId: "c1", name: "Nope", argumentsJSON: "{}"), .usage(inputTokens: 300, outputTokens: 10), .done(.toolCalls)],
+            [.toolCall(callId: "c2", name: "Nope", argumentsJSON: "{}"), .usage(inputTokens: 300, outputTokens: 10), .done(.toolCalls)],
+            [.textDelta("done"), .usage(inputTokens: 300, outputTokens: 10), .done(.endTurn)],
+        ])
+        let collector = EventCollector()
+        await engine(provider).runTurn(session: ScriptedLocalSession(), userText: "x", model: "m",
+                                       tools: toolset(), emit: collector.callback)
+        guard case .turnCompleted(let done) = collector.events.last else { return XCTFail() }
+        XCTAssertEqual(done.inputTokens, 900, "inputTokens keeps its BILLING (summed) meaning — untouched by this field")
+        XCTAssertEqual(done.contextTokens, 300, "contextTokens is the per-round max, not the 900-token sum")
+    }
+
+    /// A stronger property test than the equal-per-round case above: varying round sizes (100, 500,
+    /// 200) distinguish MAX (500) from both the SUM (800) and the LAST round's value alone (200) —
+    /// any implementation that tracked the wrong one of those three fails this test.
+    func testTurnCompletedContextTokensIsMaxAcrossRoundsNotLastOrSum() async {
+        let provider = ScriptedChatProvider([
+            [.toolCall(callId: "c1", name: "Nope", argumentsJSON: "{}"), .usage(inputTokens: 100, outputTokens: 5), .done(.toolCalls)],
+            [.toolCall(callId: "c2", name: "Nope", argumentsJSON: "{}"), .usage(inputTokens: 500, outputTokens: 5), .done(.toolCalls)],
+            [.textDelta("done"), .usage(inputTokens: 200, outputTokens: 5), .done(.endTurn)],
+        ])
+        let collector = EventCollector()
+        await engine(provider).runTurn(session: ScriptedLocalSession(), userText: "x", model: "m",
+                                       tools: toolset(), emit: collector.callback)
+        guard case .turnCompleted(let done) = collector.events.last else { return XCTFail() }
+        XCTAssertEqual(done.inputTokens, 800)
+        XCTAssertEqual(done.contextTokens, 500)
     }
 
     func testDeltasEmittedInStreamOrder() async {
