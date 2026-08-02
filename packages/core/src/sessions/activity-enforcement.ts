@@ -92,6 +92,8 @@ export interface ActivityEnforcementDeps {
   emit(sessionId: string): void;
   /** `AgentEngine.isRunning`. */
   turnRunning(sessionId: string): boolean;
+  /** `SessionHub.attachedCount` — how many harnesses hold this session RIGHT NOW. */
+  attachedCount(sessionId: string): number;
   /** `AgentEngine.interrupt` — the EXISTING ESC-abort path, so an enforcement abort produces the
    *  same `turn_completed(aborted)` a user's ESC does, and is resumable on identical terms. */
   abortTurn(sessionId: string): void;
@@ -106,9 +108,8 @@ export interface ActivityEnforcementDeps {
 
 export interface ActivityEnforcement {
   /** A harness attached (called AFTER the attach is registered and after `session.attach`'s
-   *  archived-clear, so the derivation sees the finished state). `attachedCount` is the session's
-   *  attachment count now — zero means the attach did not take (see the implementation). */
-  onAttached(sessionId: string, attachedCount: number): void;
+   *  archived-clear, so the derivation sees the finished state). */
+  onAttached(sessionId: string): void;
   /** A harness went away. `remaining` is the attachment count AFTER the removal. */
   onDetached(sessionId: string, client: EnforcementClient, remaining: number): void;
   /** A top-level turn settled (all terminal paths, including abort). */
@@ -148,8 +149,21 @@ export function createActivityEnforcement(deps: ActivityEnforcementDeps): Activi
 
   /** sessionId -> start of its current continuously-active span. Present ⇔ something is attached. */
   const spanStart = new Map<string, number>();
-  /** Sessions provisionally auto-backgrounded (app-kind harness detached mid-turn). */
+  /** The DERIVATION mark: sessions currently deriving as background because the daemon put them
+   *  there provisionally. Cleared the moment a harness attaches, so a session somebody is looking at
+   *  lists as "active". */
   const autoBackground = new Set<string>();
+  /** The PROTECTION, and deliberately not the same thing: turns that an app-kind harness walked away
+   *  from mid-flight, which no later terminal detach may abort.
+   *
+   *  Separate because the two have different lifetimes. The plan's words are "auto-background FOR
+   *  THAT TURN": the protection belongs to the turn and ends with it (`onTurnSettled`), while the
+   *  derivation mark belongs to the moment and ends as soon as anyone attaches. Collapsing them let
+   *  a read-only viewer strip the protection just by looking: `norma watch` attaches, and it is
+   *  terminal-kind (`cli-watch`), so closing it would have aborted a turn the app had deliberately
+   *  left running — the stored `backgrounded` flag is not set (that is the whole point of the mark
+   *  being provisional), so nothing else stood in the way. */
+  const protectedTurns = new Set<string>();
   /** sessionId -> the pending post-turn grace timer. */
   const grace = new Map<string, unknown>();
   let sweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -173,6 +187,7 @@ export function createActivityEnforcement(deps: ActivityEnforcementDeps): Activi
   function forget(sessionId: string): void {
     spanStart.delete(sessionId);
     autoBackground.delete(sessionId);
+    protectedTurns.delete(sessionId);
     cancelGrace(sessionId);
   }
 
@@ -185,6 +200,10 @@ export function createActivityEnforcement(deps: ActivityEnforcementDeps): Activi
 
   function armGrace(sessionId: string): void {
     cancelGrace(sessionId);
+    // armGrace owns the whole promise — "hold this session at background for graceMs, then release
+    // it" — so it sets the derivation mark itself rather than trusting each caller to have left one
+    // behind. A viewer that came and went during the turn cleared it, and the grace still applies.
+    autoBackground.add(sessionId);
     grace.set(sessionId, timers.setTimeout(() => {
       grace.delete(sessionId);
       autoBackground.delete(sessionId);
@@ -200,16 +219,20 @@ export function createActivityEnforcement(deps: ActivityEnforcementDeps): Activi
   }
 
   return {
-    onAttached(sessionId: string, attachedCount: number): void {
+    onAttached(sessionId: string): void {
       // An attach that left the session with NOTHING attached did not take: `SessionHub.attach`
       // returns early without registering a client whose socket died during the replay drain (a
       // slow-consumer backlog cap), and that client never produces a detach either — so stamping a
       // span here would open one nothing can ever close, and 24h later the sweep would demote a
       // session with no harness on it at all.
-      if (attachedCount === 0) return;
+      if (deps.attachedCount(sessionId) === 0) return;
       if (!lifecycleRow(sessionId)) return;
       // An attachment ends any provisional background outright — the whole point of the grace
       // window is to wait and see whether somebody comes back, and somebody just did.
+      //
+      // The DERIVATION mark only. `protectedTurns` is deliberately untouched: attaching is looking,
+      // and looking at a turn the app walked away from must not hand the looker the power to kill
+      // it on the way out.
       cancelGrace(sessionId);
       autoBackground.delete(sessionId);
       // Only the FIRST attachment opens a span: "continuously active" means continuously, so a
@@ -230,7 +253,9 @@ export function createActivityEnforcement(deps: ActivityEnforcementDeps): Activi
         // has nothing to add — and no provisional mark either, since the state it would provision
         // is already the answer.
         if (!row.backgrounded && !row.archived && deps.turnRunning(sessionId)) {
-          if (harnessKindOf(client.clientName, client.role) === "terminal") {
+          const ownsTheTurn = harnessKindOf(client.clientName, client.role) === "terminal"
+            && !protectedTurns.has(sessionId);
+          if (ownsTheTurn) {
             // The user's terminal went away mid-turn. Same abort a user's ESC performs — a
             // `turn_completed(aborted)`, resumable, no new machinery. NOT emitted as "idle" here:
             // the turn is still unwinding, so at this instant the honest derivation is "background"
@@ -239,10 +264,12 @@ export function createActivityEnforcement(deps: ActivityEnforcementDeps): Activi
             // `session.list` and the live stream disagree.
             deps.abortTurn(sessionId);
           } else {
-            // App/phone: the turn keeps running, and the session says so — provisionally, in
-            // memory. NEVER the stored flag: nobody asked for this session to be backgrounded, so
-            // nothing may survive the grace window (or a restart) as if they had.
+            // App/phone — or a terminal harness that merely VISITED a turn already protected. The
+            // turn keeps running, and the session says so again — provisionally, in memory. NEVER
+            // the stored flag: nobody asked for this session to be backgrounded, so nothing may
+            // survive the grace window (or a restart) as if they had.
             autoBackground.add(sessionId);
+            protectedTurns.add(sessionId);
           }
         }
       }
@@ -252,10 +279,18 @@ export function createActivityEnforcement(deps: ActivityEnforcementDeps): Activi
     onTurnSettled(sessionId: string): void {
       if (!lifecycleRow(sessionId)) return;
       // `turnRunning` still true means the engine's between-turns drain already started a follow-up
-      // (a background notification, a stranded cross-session message). The grace belongs to the
-      // turn that really is the last one, so keep the mark and wait for that settle instead.
-      if (autoBackground.has(sessionId) && !deps.turnRunning(sessionId)) {
-        if (deps.scheduledWakeup(sessionId)) {
+      // (a background notification, a stranded cross-session message). The protection — and the
+      // grace that ends it — belong to the turn that really is the last one, so hold both and wait
+      // for that settle instead.
+      if (protectedTurns.has(sessionId) && !deps.turnRunning(sessionId)) {
+        // The turn the app walked away from is over, and so is its protection: the NEXT turn is a
+        // turn whoever starts it owns, abortable on the ordinary terms.
+        protectedTurns.delete(sessionId);
+        if (deps.attachedCount(sessionId) > 0) {
+          // Somebody is watching it — grace-ing a session with a live harness on it would announce
+          // "background" for something `session.list` calls "active".
+          autoBackground.delete(sessionId);
+        } else if (deps.scheduledWakeup(sessionId)) {
           // Something will wake this session on its own; it is not going idle, it is waiting — and
           // that work already derives as "background" through `bgWork`, so dropping the provisional
           // mark costs no flicker.

@@ -540,6 +540,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       hub.emitActivity(sessionId, deriveActivity(opts.store.meta(sessionId), sessionId, Date.now()));
     },
     turnRunning: (sessionId) => opts.engine?.isRunning(sessionId) ?? false,
+    // The LOCAL `hub`, for the same reason `deriveActivity` reads it — a server built without one
+    // falls back to a private SessionHub, and `opts.hub?.attachedCount(...)` would report a hard 0
+    // on exactly those servers.
+    attachedCount: (sessionId) => hub.attachedCount(sessionId),
     // The EXISTING ESC-abort path, verbatim — `session.interrupt`'s own handler is the same one
     // call. So a turn killed by a closed terminal ends exactly as a user's ESC ends it:
     // `turn_completed(aborted)`, resumable, no second abort mechanism to keep in step.
@@ -1110,7 +1114,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // being un-archived by this very call. Its own emit is normally a no-op after the clear's
           // (same derived value, and the hub's memo eats the repeat) and carries the whole
           // announcement for the ordinary, non-archived attach.
-          enforcement.onAttached(p.sessionId, hub.attachedCount(p.sessionId));
+          enforcement.onAttached(p.sessionId);
           return { ok: true, lastSeq };
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);

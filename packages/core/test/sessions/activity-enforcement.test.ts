@@ -135,6 +135,7 @@ function harness(rows: Record<string, ActivityRow> = { s1: { mode: "code" } }) {
       }, clock) ?? "none");
     },
     turnRunning: (id) => running.has(id),
+    attachedCount: (id) => attached.get(id) ?? 0,
     abortTurn: (id) => { aborted.push(id); },
     scheduledWakeup: (id) => wakeup.has(id),
     now: () => clock,
@@ -147,12 +148,12 @@ function harness(rows: Record<string, ActivityRow> = { s1: { mode: "code" } }) {
     advance: (ms: number) => { clock += ms; },
     attach(id: string): void {
       attached.set(id, (attached.get(id) ?? 0) + 1);
-      enf.onAttached(id, attached.get(id)!);
+      enf.onAttached(id);
     },
     /** `SessionHub.attach`'s early return: a client whose socket died during the replay drain is
-     *  never registered — and never detaches either. */
+     *  never registered (so the count does not move) — and never detaches either. */
     attachThatDidNotTake(id: string): void {
-      enf.onAttached(id, attached.get(id) ?? 0);
+      enf.onAttached(id);
     },
     detach(id: string, clientName = "cli-p", role: string | null = "harness"): void {
       const remaining = Math.max(0, (attached.get(id) ?? 0) - 1);
@@ -226,6 +227,67 @@ describe("last-detach enforcement (session-activity-hygiene T5)", () => {
     expect(h.emitted).toEqual(["active", "idle"]);
   });
 
+  // -------------------------------------------------------------------------------------------
+  // The protection an app detach installs is FOR THAT TURN — not for "until somebody looks at it".
+  // `norma watch` attaches (main.ts:1578) and is terminal-kind (`cli-watch`), so without this a
+  // read-only peek at an unattended turn, followed by ctrl-C, destroys it.
+  // -------------------------------------------------------------------------------------------
+
+  test("a terminal VIEWER cannot destroy a turn an app detach left running", () => {
+    const h = harness();
+    h.attach("s1");
+    h.running.add("s1");
+    h.detach("s1", "orb");            // the app leaves mid-turn: the turn is protected
+    h.attach("s1");                   // `norma watch` peeks...
+    h.detach("s1", "cli-watch");      // ...and ctrl-C
+    expect(h.aborted).toEqual([]);
+    // …and the session goes back to announcing itself as background, unattended.
+    expect(h.enf.autoBackgrounded("s1")).toBe(true);
+    expect(h.emitted.at(-1)).toBe("background");
+  });
+
+  test("the viewer's visit does not skip the grace — the protected turn still settles to idle", () => {
+    const h = harness();
+    h.attach("s1");
+    h.running.add("s1");
+    h.detach("s1", "orb");
+    h.attach("s1");                   // the peek clears the DERIVATION mark (it lists active)...
+    expect(h.emitted.at(-1)).toBe("active");
+    h.detach("s1", "cli-watch");
+    h.running.delete("s1");
+    h.enf.onTurnSettled("s1");        // ...but the turn is still the one the app walked away from
+    expect(h.timers.count()).toBe(1);
+    h.timers.fireAll();
+    expect(h.emitted.at(-1)).toBe("idle");
+  });
+
+  test("the protection expires WITH the turn — the NEXT turn is abortable again", () => {
+    const h = harness();
+    h.attach("s1");
+    h.running.add("s1");
+    h.detach("s1", "orb");            // turn 1 protected
+    h.running.delete("s1");
+    h.enf.onTurnSettled("s1");        // turn 1 over — and so is its protection
+    h.timers.fireAll();
+
+    h.attach("s1");                   // a terminal harness starts turn 2 and owns it
+    h.running.add("s1");
+    h.detach("s1", "cli-p");
+    expect(h.aborted).toEqual(["s1"]); // no inherited immunity
+  });
+
+  test("a protected turn settling while somebody WATCHES arms no grace and lists active", () => {
+    const h = harness();
+    h.attach("s1");
+    h.running.add("s1");
+    h.detach("s1", "orb");
+    h.attach("s1");                   // the viewer stays
+    h.running.delete("s1");
+    h.enf.onTurnSettled("s1");
+    expect(h.timers.count()).toBe(0); // graceing a session with a live harness on it would be a lie
+    expect(h.emitted.at(-1)).toBe("active");
+  });
+
   test("chat and dispatch are untouched — no lifecycle means no enforcement", () => {
     const h = harness({ chat: { mode: "chat" }, disp: { mode: "dispatch" } });
     for (const id of ["chat", "disp"]) {
@@ -246,7 +308,7 @@ describe("last-detach enforcement (session-activity-hygiene T5)", () => {
     h.attach("s1");
     h.meta.delete("s1");
     expect(() => h.detach("s1", "cli-p")).not.toThrow();
-    expect(() => h.enf.onAttached("s1", 1)).not.toThrow();
+    expect(() => h.enf.onAttached("s1")).not.toThrow();
     expect(() => h.enf.onTurnSettled("s1")).not.toThrow();
     // Nothing about a session that no longer exists may outlive it — the detach that would
     // normally clear this bookkeeping is exactly what never comes.
