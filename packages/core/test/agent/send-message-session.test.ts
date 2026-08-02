@@ -226,6 +226,48 @@ describe("AgentEngine: send_message can target a session (D1-T4)", () => {
     expect(injectedIdx).toBeGreaterThan(resultIdx);
   });
 
+  // session-activity-hygiene T8 (HARD pin, T3-review Important): the bridge's session-target branch
+  // used to run a turn with ZERO knowledge of `archived` — a session could display "archived"
+  // (hidden under its own tab) while actually burning tokens: the invisible-runner bug inverted.
+  // The ruling is REFUSE: archived is a USER-visible hidden state, and silent resurrection by an
+  // agent is worse than the original bug. These drive the ENGINE path (runTurn → the send_message
+  // bridge), which is the ONLY seam that can see it — the attach-gated `session.send` RPC never
+  // reaches an archived session at all (session.attach clears the flag first, T3).
+  test("an ARCHIVED session-target is refused — no user_message is appended and no turn is started", async () => {
+    class P implements Provider {
+      readonly id = "fake";
+      targetChild!: string;
+      models(): ModelInfo[] { return [{ id: "fake-1", family: "fake", contextWindow: 100_000, supportsVision: false }]; }
+      async *streamTurn(): AsyncIterable<ProviderEvent> {
+        yield sendMessage("m1", this.targetChild, "wake up"); yield done("tool_calls");
+      }
+    }
+    const provider = new P();
+    const { engine, store, sessionId } = setupSend([], { provider });
+    const childCwd = mkChildCwd("archived");
+    const childId = store.createSession("global", { cwd: childCwd, mode: "code", parentSessionId: sessionId });
+    store.setArchived(childId, true);
+    provider.targetChild = childId;
+
+    await engine.runTurn(sessionId);
+    const result = toolResult(store.read(sessionId), "m1");
+    expect(result?.isError).toBe(true);
+    expect(result?.output).toMatch(/archived/i);
+    // The remedy is named, and it is the DELIBERATE two-step (resume/background), never a silent
+    // un-archive by the sender.
+    expect(result?.output).toMatch(/manage_session|session\.setActivity/);
+
+    // Settle any turn the pre-guard code would have started, then prove nothing happened at all.
+    for (let i = 0; i < 40 && !store.read(childId).some((e) => e.type === "turn_completed"); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const childEvents = store.read(childId);
+    expect(childEvents.some((e) => e.type === "user_message")).toBe(false);
+    expect(childEvents.some((e) => e.type === "turn_completed")).toBe(false);
+    // And the flag is untouched — refusal never resurrects.
+    expect(store.meta(childId).archived).toBe(true);
+  });
+
   test("unknown session id and an already-ended child each get a distinct, actionable message", async () => {
     // (a) unknown id: never a real agent, name, or session.
     {

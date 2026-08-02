@@ -3547,6 +3547,30 @@ export class AgentEngine {
             sendMessageOutcomes.set(call.callId, { output: `session '${to}' is not a session you spawned`, isError: true });
             continue;
           }
+          // session-activity-hygiene T8 (HARD — the T3-review Important, which existed here BEFORE
+          // any widening): both branches below used to run with ZERO knowledge of `archived`, so a
+          // session could display "archived" — hidden under its own tab, which is what a user MEANS
+          // by archiving — while a turn burned tokens inside it. The invisible-runner bug, inverted.
+          //
+          // The ruling is REFUSE, not silent un-archive. Archived is a USER-VISIBLE hidden state;
+          // an agent resurrecting it silently recreates the same blindness in a worse form (now the
+          // resurrection has no author). Refusing makes a resume a DELIBERATE, auditable two-step:
+          // the sender calls the management verb (`manage_session`, dispatch) or the `session
+          // .setActivity` RPC, whose T4 emission flips every open UI live — so no new emission seam
+          // is needed here, which is exactly why this guard refuses rather than clearing the flag.
+          //
+          // Placed at the CALL SITE, before the running/idle split, so it binds every caller in
+          // every mode (a code session messaging its own archived child refuses identically) and
+          // both branches (a running-and-archived target is a contradiction the setActivity door
+          // already refuses to create, but this must not depend on that door being the only writer).
+          if (targetMeta.archived) {
+            sendMessageOutcomes.set(call.callId, {
+              output: `session '${to}' is archived — archived sessions are resumed deliberately, never by a message: `
+                + `resume or background it first (manage_session, or the session.setActivity RPC), then send again`,
+              isError: true,
+            });
+            continue;
+          }
           const wasRunning = this.isRunning(to);
           // Fix round 1 (Important): this used to call a missing `cwd` "already ended" — wrong.
           // SessionRow carries no stored terminal/ended status (deliberately — do not invent one:
