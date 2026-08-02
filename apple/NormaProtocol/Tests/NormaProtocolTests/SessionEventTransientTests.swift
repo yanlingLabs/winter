@@ -63,7 +63,7 @@ final class SessionEventTransientTests: XCTestCase {
         }
 
         // A typo in `transientTypes` would pass the check above vacuously (a string no fixture ever
-        // carries is never tested). Every one of the seven must correspond to a real, emitted type.
+        // carries is never tested). Every one of them must correspond to a real, emitted type.
         for t in SessionEvent.transientTypes {
             XCTAssertTrue(seenTypes.contains(t), "\(t) is in transientTypes but matches no protocol fixture — typo, or a removed event type")
         }

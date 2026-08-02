@@ -713,11 +713,14 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     ///
     /// `activity` is a plain `String`, not a Swift enum, deliberately — the same call
     /// `ThreadCompleted.stopReason` and `ToolReview.verdict` make. Today's four values are
-    /// `active` / `background` / `idle` / `archived`; a fifth added by a newer daemon must DECODE on
-    /// an older client rather than throw, because a decode failure on this stream is not cosmetic
-    /// (NormaSessionClient treats a malformed frame as a stream fault). Absence — "this session has
-    /// no lifecycle", which is what chat and dispatch sessions carry in `session.list` — is never
-    /// represented here: the daemon emits no event at all for a non-participating session.
+    /// `active` / `background` / `idle` / `archived`, and a fifth added by a newer daemon must
+    /// DECODE on an older client rather than throw. Where that bites is the STRICT path: the Mac
+    /// app's `NormaClient` decodes every pushed frame into this very type, so an unknown case would
+    /// throw there. (The phone's `NormaSessionClient` is not the reason — it decodes the live stream
+    /// opaquely into `JSONValue` and falls back to `.null`, so a value it cannot read is skipped,
+    /// not fatal.) Absence — "this session has no lifecycle", which is what chat and dispatch
+    /// sessions carry in `session.list` — is never represented here: the daemon emits no event at
+    /// all for a non-participating session.
     public struct SessionActivity: Codable, Equatable, Sendable {
         public let seq: Int
         public let sessionId: String

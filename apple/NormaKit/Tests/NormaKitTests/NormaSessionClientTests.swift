@@ -502,7 +502,7 @@ final class NormaSessionClientTests: XCTestCase {
     /// events, `plugin_tool_invoke`, `hardware_requested` and `plugin_tile_updated` are broadcast
     /// with the same borrowed seq. Pins the phone's exemption list against the Mac client's
     /// (`NormaClient.swift`) — membership drift in either direction fails here.
-    func testAllSevenTransientTypesAtCursorSeqAreExempt() async throws {
+    func testEveryTransientTypeAtCursorSeqIsExempt() async throws {
         let conn = ScriptedRemoteConn()
         let cursors = InMemoryCursorStore()
         let client = makeClient(conn: conn, cursors: cursors)
@@ -518,7 +518,7 @@ final class NormaSessionClientTests: XCTestCase {
 
         try await waitUntil({ self.types(events.items).last == "assistant_message" }, "the barrier event")
         XCTAssertEqual(types(events.items), ["turn_started"] + Self.transientTypes + ["assistant_message"],
-                       "all seven transient types must pass the dedupe gate at seq == cursor")
+                       "every transient type must pass the dedupe gate at seq == cursor")
         XCTAssertEqual(cursors.cursor(host: "mac-host", session: "s1", stream: "s1"), 6,
                        "no transient moved the cursor")
     }
