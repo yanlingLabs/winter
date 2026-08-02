@@ -266,6 +266,32 @@ describe("SessionCleaner — the happy path (session-activity-hygiene T7)", () =
   // The brief's decision-plumbing fixtures: the SAME cleaner, the SAME session shape, opposite
   // scripted verdicts — what is pinned is that the verdict drives the outcome, never that a model
   // would actually answer either way.
+  test("fixture: a short-but-SUBSTANTIVE exchange, judged keep, is stamped and kept whole", async () => {
+    const { home, store } = freshStore();
+    const id = store.createSession("global");
+    store.append(id, {
+      type: "user_message", sessionId: id, threadId: "main", clientName: "cli",
+      text: "What's the difference between a rebase and a merge for a long-lived branch?",
+    });
+    store.append(id, {
+      type: "assistant_message", sessionId: id, threadId: "main",
+      text: "A merge preserves both histories and records the join; a rebase rewrites your commits onto the new base, which keeps history linear but changes commit ids — avoid it on anything already pushed and shared.",
+    });
+    backdateCreatedAt(store, id, DAY + 60_000);
+    const provider = keepVotingJudge();
+
+    await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+
+    // The judge saw the WHOLE exchange, both roles, before answering.
+    const content = (provider.requests[0]!.input[0] as { content: string }).content;
+    expect(content).toContain("[user] What's the difference between a rebase and a merge");
+    expect(content).toContain("[norma] A merge preserves both histories");
+    expect(store.list().some((r) => r.sessionId === id)).toBe(true);
+    expect(store.judgedAt(id)).toBe(agedNow());
+    expect(cleanerLines(home)).toEqual([]);
+    store.close();
+  });
+
   test("fixtures: a 'hey'-shaped session is deleted on a delete verdict and kept on a keep verdict", async () => {
     for (const [provider, expectAlive] of [[deleteVotingJudge(), false], [keepVotingJudge(), true]] as const) {
       const { home, store } = freshStore();
