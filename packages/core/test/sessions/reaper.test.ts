@@ -1,9 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore, EMPTY_SESSION_GRACE_MS } from "../../src/sessions/store";
 import { appendCleanerLog } from "../../src/sessions/cleaner-log";
+import { reapEmptySessions, type ReaperStore } from "../../src/sessions/reaper";
 
 // session-activity-hygiene T6: the empty-session reaper + `deleteSession`.
 //
@@ -179,5 +180,162 @@ describe("appendCleanerLog (session-activity-hygiene T6)", () => {
     appendCleanerLog(home, { sessionId: "s_1", reason: "reaped: empty", date: "2026-08-02T00:00:00.000Z" });
     const parsed = JSON.parse(readFileSync(join(home, "cleaner.jsonl"), "utf8").trim());
     expect("title" in parsed).toBe(false);
+  });
+});
+
+describe("reapEmptySessions (session-activity-hygiene T6)", () => {
+  function tempHome(): string { return mkdtempSync(join(tmpdir(), "norma-reaper-test-")); }
+  function cleanerLines(home: string): any[] {
+    if (!existsSync(join(home, "cleaner.jsonl"))) return [];
+    return readFileSync(join(home, "cleaner.jsonl"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  }
+
+  test("reaps an eligible candidate: deletes it and appends the audit line with reason 'reaped: empty'", () => {
+    const home = tempHome();
+    const store = new SessionStore(home);
+    const id = store.createSession("global");
+    store.append(id, { type: "session_titled", sessionId: id, threadId: "main", title: "Untitled experiment" });
+    const nowMs = agedNow(store, id, 1);
+
+    const reaped = reapEmptySessions({ store, attachedCount: NOBODY_ATTACHED, home, now: () => nowMs });
+
+    expect(reaped).toEqual([id]);
+    expect(store.list().some((r) => r.sessionId === id)).toBe(false);
+    const lines = cleanerLines(home);
+    expect(lines).toEqual([
+      { sessionId: id, title: "Untitled experiment", reason: "reaped: empty", date: new Date(nowMs).toISOString() },
+    ]);
+    store.close();
+  });
+
+  test("leaves attached empties alone — no delete, no audit line", () => {
+    const home = tempHome();
+    const store = new SessionStore(home);
+    const id = store.createSession("global");
+    const nowMs = agedNow(store, id, 1);
+
+    const reaped = reapEmptySessions({ store, attachedCount: () => 1, home, now: () => nowMs });
+
+    expect(reaped).toEqual([]);
+    expect(store.list().some((r) => r.sessionId === id)).toBe(true);
+    expect(cleanerLines(home)).toEqual([]);
+    store.close();
+  });
+
+  test("the just-minted session itself is never reaped by its own sweep", () => {
+    const home = tempHome();
+    const store = new SessionStore(home);
+    const id = store.createSession("global");
+    const createdAt = createdAtOf(store, id);
+
+    // No time has passed at all — the sweep a `session.create` call triggers runs against the
+    // session it JUST minted, at (as close to) the same instant.
+    const reaped = reapEmptySessions({ store, attachedCount: NOBODY_ATTACHED, home, now: () => createdAt });
+
+    expect(reaped).toEqual([]);
+    expect(store.list().some((r) => r.sessionId === id)).toBe(true);
+    store.close();
+  });
+
+  test("never reaps the dispatch session, even old/empty/unattached, end-to-end through the sweep", () => {
+    const home = tempHome();
+    const store = new SessionStore(home);
+    const dispatchId = store.createSession("global", { mode: "dispatch" });
+    const nowMs = agedNow(store, dispatchId, 1);
+
+    const reaped = reapEmptySessions({ store, attachedCount: NOBODY_ATTACHED, home, now: () => nowMs });
+
+    expect(reaped).toEqual([]);
+    expect(store.list().some((r) => r.sessionId === dispatchId)).toBe(true);
+    store.close();
+  });
+
+  test("defaults `now` to the real clock when omitted", () => {
+    const home = tempHome();
+    const store = new SessionStore(home);
+    const id = store.createSession("global");
+    // Just-minted under the REAL clock: still inside the 10-minute grace window.
+    const reaped = reapEmptySessions({ store, attachedCount: NOBODY_ATTACHED, home });
+    expect(reaped).toEqual([]);
+    expect(store.list().some((r) => r.sessionId === id)).toBe(true);
+    store.close();
+  });
+
+  // ---- Resilience: a narrow structural fake (ReaperStore), not a real SessionStore, since these
+  // failure modes (one candidate's delete throwing while another succeeds) aren't easy to provoke
+  // deliberately against the real sqlite/fs-backed store on a single call.
+
+  function fakeStore(over: Partial<ReaperStore> = {}): ReaperStore {
+    return {
+      emptySessionIds: over.emptySessionIds ?? (() => []),
+      getTitle: over.getTitle ?? (() => null),
+      deleteSession: over.deleteSession ?? (() => {}),
+    };
+  }
+
+  test("a candidate that fails to delete does not stop the rest of the sweep, and logs a warning", () => {
+    const home = tempHome();
+    const deleted: string[] = [];
+    const store = fakeStore({
+      emptySessionIds: () => ["s_bad", "s_good"],
+      getTitle: () => null,
+      deleteSession: (id) => {
+        if (id === "s_bad") throw new Error("simulated delete failure");
+        deleted.push(id);
+      },
+    });
+
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const reaped = reapEmptySessions({ store, attachedCount: NOBODY_ATTACHED, home, now: () => 1_700_000_000_000 });
+      expect(deleted).toEqual(["s_good"]);
+      expect(reaped).toEqual(["s_good"]); // the failed one is never reported reaped
+      expect(cleanerLines(home).map((l) => l.sessionId)).toEqual(["s_good"]);
+      // "A sweep error is a daemon-log warning, never a thrown error" — pinned, not just implied by
+      // the absence of a throw.
+      expect(errSpy).toHaveBeenCalled();
+      expect(errSpy.mock.calls.some((call) => String(call[0]).includes("s_bad"))).toBe(true);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  test("a failed audit-log append does not undo or retry the delete, and logs a warning", () => {
+    // A `home` that is actually a FILE (not a directory) makes appendCleanerLog's mkdirSync/
+    // appendFileSync throw — simulating a disk/permissions failure without touching real fs limits.
+    const parent = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const bogusHome = join(parent, "not-a-directory");
+    writeFileSync(bogusHome, "i am a file, not a directory");
+    const deleted: string[] = [];
+    const store = fakeStore({
+      emptySessionIds: () => ["s_1"],
+      deleteSession: (id) => { deleted.push(id); },
+    });
+
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const reaped = reapEmptySessions({ store, attachedCount: NOBODY_ATTACHED, home: bogusHome, now: () => 1_700_000_000_000 });
+      expect(deleted).toEqual(["s_1"]); // the delete happened...
+      expect(reaped).toEqual(["s_1"]); // ...and is reported reaped regardless of the audit failure
+      expect(errSpy).toHaveBeenCalled();
+      expect(errSpy.mock.calls.some((call) => String(call[0]).includes("s_1"))).toBe(true);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  test("a candidate query failure reaps nothing rather than throwing, and logs a warning", () => {
+    const home = tempHome();
+    const store = fakeStore({
+      emptySessionIds: () => { throw new Error("simulated query failure"); },
+    });
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(() => reapEmptySessions({ store, attachedCount: NOBODY_ATTACHED, home, now: () => 1_700_000_000_000 })).not.toThrow();
+      expect(reapEmptySessions({ store, attachedCount: NOBODY_ATTACHED, home, now: () => 1_700_000_000_000 })).toEqual([]);
+      expect(errSpy).toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });
