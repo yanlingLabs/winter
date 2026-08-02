@@ -423,6 +423,7 @@ describe("list_sessions (T8): wired to the real daemon", () => {
     private pending = new Map<number, (msg: any) => void>();
     private socket!: Awaited<ReturnType<typeof Bun.connect>>;
     private writer!: ConnWriter;
+    readonly notifications: any[] = [];
 
     static async connect(socketPath: string): Promise<TestClient> {
       const c = new TestClient();
@@ -435,6 +436,8 @@ describe("list_sessions (T8): wired to the real daemon", () => {
               if (msg.id !== undefined && c.pending.has(msg.id)) {
                 c.pending.get(msg.id)!(msg);
                 c.pending.delete(msg.id);
+              } else if (msg.method) {
+                c.notifications.push(msg);
               }
             }
           },
@@ -485,6 +488,12 @@ describe("list_sessions (T8): wired to the real daemon", () => {
     expect(managed.isError).toBe(false);
     const { result: listed } = await c.request(METHODS.sessionList, {});
     expect(listed.sessions.find((s: { sessionId: string }) => s.sessionId === sessionId).activity).toBe("background");
+    // T4's LIVE half, reached from the TOOL: the attached harness is told, without polling. Same
+    // hub, same emission path `session.setActivity` uses — which is why the tool needs no emission
+    // seam of its own.
+    const activityEvents = c.notifications.filter((n) => n.method === METHODS.event && n.params.type === "session_activity");
+    expect(activityEvents.length).toBeGreaterThan(0);
+    expect(activityEvents.at(-1)!.params).toMatchObject({ sessionId, activity: "background" });
 
     c.close();
   });
