@@ -11,7 +11,10 @@ import {
 } from "../../src/agent/tools/list-sessions";
 import { makeActivityDeriver } from "../../src/sessions/activity";
 import { ACTIVITY_MODE_REFUSAL } from "../../src/sessions/set-activity";
-import type { SessionActivity } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type SessionActivity, type WritableSocket } from "@norma/protocol";
+import { startDaemon, type RunningDaemon } from "../../src/daemon";
+import { FileSecretStore } from "../../src/auth/secret-store";
+import { FakeProvider } from "../../src/agent/fake-provider";
 import { SessionStore } from "../../src/sessions/store";
 
 // session-activity-hygiene T8: dispatch's management surface — `list_sessions` (the read) and
@@ -390,5 +393,99 @@ describe("the per-mode registry (T8)", () => {
       expect(h.registry.namesForMode("code").has(name)).toBe(false);
       expect(h.registry.namesForMode("chat").has(name)).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The WIRING pin. Everything above drives the tools with injected deps — which proves the logic
+// and nothing about whether daemon.ts hooked them to the daemon's real store/hub/engine. The T7
+// review recorded the exact failure that costs: a consumer handed a DIFFERENT hub instance reads
+// `attachedCount` as 0 forever and calls every attached session idle, silently, for good. So this
+// boots the REAL daemon (temp NORMA_HOME + injected FakeProvider, the mode-toolset-census.test.ts
+// precedent), attaches a REAL harness over the REAL socket, and asks the REAL registry's tool.
+// ---------------------------------------------------------------------------------------------
+describe("list_sessions (T8): wired to the real daemon", () => {
+  let daemon: RunningDaemon | undefined;
+  let daemonHome: string | undefined;
+
+  afterEach(() => {
+    daemon?.stop();
+    daemon = undefined;
+    if (daemonHome) rmSync(daemonHome, { recursive: true, force: true });
+    daemonHome = undefined;
+  });
+
+  /** Minimal raw NDJSON client — each daemon-IPC test file in this repo carries its own copy (see
+   *  mode-toolset-census.test.ts / settings-hot-e2e.test.ts for the convention). */
+  class TestClient {
+    private decoder = new LineDecoder();
+    private nextId = 1;
+    private pending = new Map<number, (msg: any) => void>();
+    private socket!: Awaited<ReturnType<typeof Bun.connect>>;
+    private writer!: ConnWriter;
+
+    static async connect(socketPath: string): Promise<TestClient> {
+      const c = new TestClient();
+      c.socket = await Bun.connect({
+        unix: socketPath,
+        socket: {
+          data(_s, chunk) {
+            for (const line of c.decoder.push(chunk)) {
+              const msg = JSON.parse(line);
+              if (msg.id !== undefined && c.pending.has(msg.id)) {
+                c.pending.get(msg.id)!(msg);
+                c.pending.delete(msg.id);
+              }
+            }
+          },
+          drain(_s) { c.writer.onDrain(); },
+        },
+      });
+      c.writer = new ConnWriter(c.socket as unknown as WritableSocket);
+      return c;
+    }
+
+    request(method: string, params?: unknown): Promise<any> {
+      const id = this.nextId++;
+      this.writer.enqueue(encodeLine({ jsonrpc: "2.0", id, method, params }));
+      return new Promise((resolve) => this.pending.set(id, resolve));
+    }
+
+    close(): void { this.socket.end(); }
+  }
+
+  test("reports a LIVE attachment as active — the same hub, the same derivation session.list uses", async () => {
+    daemonHome = mkdtempSync(join(tmpdir(), "norma-list-sessions-daemon-"));
+    const secrets = new FileSecretStore(join(daemonHome, "test-secrets"));
+    daemon = await startDaemon({
+      home: daemonHome,
+      secrets,
+      agentProvider: { provider: new FakeProvider([]), model: "fake-1" },
+    });
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.request(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "harness", token: daemon.tokens.harness, clientName: "list-sessions-wiring" });
+
+    const cwd = realDir("wired");
+    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
+    const sessionId: string = created.sessionId;
+
+    const ctx = { cwd, roots: [cwd], sessionId: "s_dispatch", mode: "dispatch" as const };
+    const beforeAttach = await daemon.registry!.execute(LIST_SESSIONS_TOOL, { type: "all" }, ctx);
+    expect(beforeAttach.output).toContain(`${sessionId} | idle`);
+
+    await c.request(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+    const attached = await daemon.registry!.execute(LIST_SESSIONS_TOOL, { type: "active" }, ctx);
+    // Not "idle": the tool's derivation counts the attachment the daemon's OWN hub just recorded.
+    expect(attached.output).toContain(sessionId);
+    const idleNow = await daemon.registry!.execute(LIST_SESSIONS_TOOL, { type: "idle" }, ctx);
+    expect(idleNow.output).not.toContain(sessionId);
+
+    // And the write half reaches the same store, through the same setters session.setActivity uses.
+    const managed = await daemon.registry!.execute(MANAGE_SESSION_TOOL, { sessionId, action: "background" }, ctx);
+    expect(managed.isError).toBe(false);
+    const { result: listed } = await c.request(METHODS.sessionList, {});
+    expect(listed.sessions.find((s: { sessionId: string }) => s.sessionId === sessionId).activity).toBe("background");
+
+    c.close();
   });
 });

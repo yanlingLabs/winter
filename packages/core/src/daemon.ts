@@ -8,6 +8,7 @@ import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
 import { reapEmptySessions } from "./sessions/reaper";
+import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
 import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
@@ -34,6 +35,7 @@ import { registerNotebookTool } from "./agent/tools/notebook";
 import { registerWorktreeTools } from "./agent/tools/worktree";
 import { registerSpawnAgentTool } from "./agent/tools/spawn";
 import { registerSessionSpawnTool } from "./agent/tools/session-spawn";
+import { registerListSessionsTools } from "./agent/tools/list-sessions";
 import { DispatchChildren } from "./agent/dispatch-children";
 import { registerSendMessageTool } from "./agent/tools/send-message";
 import { registerTaskStopTool } from "./agent/tools/task-stop";
@@ -212,6 +214,14 @@ export async function startDaemon(opts: {
 
   const store = new SessionStore(dirs.home);
   const hub = new SessionHub(store);
+
+  // session-activity-hygiene T8: THE activity derivation, filled in by `startIpcServer` below
+  // (`onActivityDeriver`) and read live by dispatch's `list_sessions` tool, which is registered long
+  // before the server exists. It cannot be built here: two of its five signals come from T5's
+  // enforcement, which lives inside the server's scope and is mutually recursive with the derivation
+  // — see `IpcServerOptions.onActivityDeriver`. `startIpcServer` is called unconditionally further
+  // down (before any turn can run), so the tool never actually observes the unset holder.
+  let activityDeriver: ActivityDeriver | undefined;
 
   // session-activity-hygiene T6 (spec §2): the empty-session reaper's boot sweep — once, here,
   // right after store/hub exist and before anything can attach to anything. Catches sessions left
@@ -708,6 +718,32 @@ export async function startDaemon(opts: {
     // aliases) so the bridge's alias resolution (engine.ts) always accepts whatever this tool's own
     // schema enum advertised.
     registerSessionSpawnTool(registry, { models: [...knownModelIds, ...deriveModelAliases(knownModelIds)] });
+    // session-activity-hygiene T8: dispatch's MANAGEMENT surface over the session lifecycle —
+    // `list_sessions` (read) and `manage_session` (stop/background/archive/resume). Both declare
+    // `modes: ["dispatch"]` in their own file (the per-mode registry's single declaration site), so
+    // registering them on the shared registry here cannot make them code-visible.
+    //
+    // WIRED FROM THE SAME INSTANCES the rest of the daemon uses — the `store` and `hub` consts
+    // above, and the `engine` binding these closures read LIVE (assigned further down; the
+    // `registerAgentQueryTools` lazy-closure precedent). Handing a management surface its own hub
+    // would read `attachedCount` as a hard 0 forever and quietly report every attached session as
+    // idle — the T7 review's own finding, avoided here by construction rather than by care.
+    //
+    // `derive` is THE activity derivation `session.list` stamps rows with, published out of
+    // `startIpcServer` into `activityDeriver` below: a management listing that derived state its own
+    // way would disagree with the session list in exactly the two windows that matter most (the
+    // post-turn grace and the >24h demotion), because those two signals live only in that scope.
+    registerListSessionsTools(registry, {
+      store,
+      derive: (row, sessionId, nowMs) => activityDeriver?.(row, sessionId, nowMs),
+      turnStartedAt: (sid) => engine?.turnStartedAt(sid),
+      isRunning: (sid) => engine?.isRunning(sid) ?? false,
+      // The EXISTING abort path, verbatim — the same `engine.interrupt` `session.interrupt` and T5's
+      // last-detach enforcement call, so a turn the coordinator stops ends exactly as a user's ESC
+      // ends it (`turn_completed(aborted)`, resumable).
+      interrupt: (sid) => { engine?.interrupt(sid); },
+      emit: (sid, activity) => { hub.emitActivity(sid, activity); },
+    });
     // 4h-ii-b Task 4 (CC SendMessage): registered alongside spawn_agent (only when subagents are
     // available) so the MAIN thread can address a subagent by agentId/name — a running one gets the
     // message at its next step, a finished one is resumed with it. Like spawn_agent it's an engine
@@ -1288,6 +1324,11 @@ export async function startDaemon(opts: {
     store,
     hub,
     engine,
+    // session-activity-hygiene T8: fills the `activityDeriver` holder above with THE derivation the
+    // server stamps `session.list` with, so dispatch's `list_sessions` answers with the same state
+    // this daemon serves everywhere else — including the two signals (post-turn grace, >24h
+    // demotion) that exist only inside the server's own enforcement scope.
+    onActivityDeriver: (derive) => { activityDeriver = derive; },
     broker: approvalBroker,
     // SP-approvals Task 5: the SAME PermissionRules instance the engine's ask-policy rule-consult
     // path reads (hoisted above, assigned inside the `if (agentProvider)` gate) — lets

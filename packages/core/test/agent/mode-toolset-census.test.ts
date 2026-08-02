@@ -134,13 +134,21 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
   //   so dispatch's namesForMode simply never included it. Task 4 gives dispatch a real reason to
   //   call send_message (messaging the sessions it spawns via session_spawn), so `modes` widened
   //   to `["code", "dispatch"]` — making this list 13 names now, not a re-baseline of anything else.
-  test("dispatch mode is offered EXACTLY this set (14 tools)", async () => {
+  // session-activity-hygiene T8: ADDED "list_sessions" and "manage_session" — dispatch's management
+  //   surface over the session lifecycle, both registered `modes: ["dispatch"]` in list-sessions.ts
+  //   (never eligible for code or chat; the "no modes = code-only" default is what makes that an
+  //   opt-in rather than an omission). NOT deferred: they are the coordinator's primary situational-
+  //   awareness and control verbs, on the same footing as session_spawn, and making the model
+  //   ToolSearch for "what sessions exist" before it can ask would be a round trip for nothing.
+  //   16 names now — a deliberate pin move for two new tools, not a re-baseline of anything else.
+  test("dispatch mode is offered EXACTLY this set (16 tools)", async () => {
     const d = await boot();
     const offered = [...d.registry!.namesForMode("dispatch", { builtinDeferral: true })];
     expect(offered.sort()).toEqual(
       [
         "Search", "ReadPage", "ToolSearch", "AskQuestion", "bash", "computer", "glob", "grep", "ls",
         "push_notification", "read", "send_message", "session_spawn", "task_stop",
+        "list_sessions", "manage_session",
       ].sort(),
     );
   });
