@@ -596,6 +596,32 @@ describe("state.ts — child transcript accumulation (child-transcript-view T2)"
     expect(s.childPendingTool["th_a"]).toBeUndefined();
   });
 
+  // task-5 (live stall hint): the roster's pre-kill "Stalled" verdict is only honest if the two
+  // legitimate-silence signals reach `updateSubagents`. In the TUI that routing is this reducer's
+  // job (unlike `norma -p`'s main.ts, which already feeds it every event) — a child's tool_result
+  // and approval events previously stopped at childBlocks/`pending` and never touched the row, so
+  // a child mid-`bash` would have been mislabelled the moment the threshold elapsed.
+  test("a child's tool_result and approval events reach the roster row's in-flight counters", () => {
+    let s = initialState();
+    s = reduce(s, { type: "thread_started", threadId: "th_a", parentThreadId: "main", agentType: "general-purpose", prompt: "go", ts: T0 }, T0);
+    s = reduce(s, { type: "turn_started", threadId: "th_a", ts: T0 + 1 }, T0 + 1);
+
+    s = reduce(s, { type: "tool_call", threadId: "th_a", callId: "c1", name: "bash", argsJson: '{"command":"bun test"}', ts: T0 + 2 }, T0 + 2);
+    expect(s.agents[0]!.toolsInFlight).toBe(1);
+    s = reduce(s, { type: "tool_result", threadId: "th_a", callId: "c1", output: "ok", isError: false, ts: T0 + 3 }, T0 + 3);
+    expect(s.agents[0]!.toolsInFlight).toBe(0);
+    expect(s.agents[0]!.lastEventAt).toBe(T0 + 3);
+    // the child transcript half is unchanged by the added routing
+    expect(s.childBlocks["th_a"]).toEqual([{ kind: "tool", name: "bash", argsJson: '{"command":"bun test"}', output: "ok", isError: false }]);
+
+    s = reduce(s, { type: "approval_requested", threadId: "th_a", callId: "c2", toolName: "bash", summary: "rm", ts: T0 + 4 }, T0 + 4);
+    expect(s.agents[0]!.approvalsPending).toBe(1);
+    expect(s.pending).toMatchObject({ kind: "approval", callId: "c2" }); // the card still appears
+    s = reduce(s, { type: "approval_resolved", threadId: "th_a", callId: "c2", approved: true, by: "user", ts: T0 + 5 }, T0 + 5);
+    expect(s.agents[0]!.approvalsPending).toBe(0);
+    expect(s.pending).toBeNull();
+  });
+
   test("user_message from a steer drain (clientName 'send_message', non-MAIN threadId) renders as a user block in the child's list, not the main transcript", () => {
     let s = initialState();
     s = reduce(s, { type: "thread_started", threadId: "th_c", parentThreadId: "main", agentType: "general-purpose", prompt: "go" }, T0);

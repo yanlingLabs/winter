@@ -697,6 +697,58 @@ describe("AgentEngine: spawn_agent resume (4h-ii-b Task 3)", () => {
     );
   });
 
+  // task-5 (the surviving unresumable shape): task-15 made a stall-killed / errored child resumable
+  // by REPAIRING its history instead of refusing it — but only for three tail shapes. The fourth,
+  // a trailing BARE USER MESSAGE, stayed refused as "out of scope", and it is reachable by exactly
+  // one route: a RESUME whose own run dies before producing anything (resumeThread persists the new
+  // prompt as a child user_message BEFORE running, so that prompt becomes the child's last stored
+  // event). A provider error on a resume is not exotic — rate_limit/server/context-overflow all
+  // land here — and the result was that ONE unlucky resume made the agent permanently unresumable,
+  // which is the precise failure task-15 set out to kill.
+  test("(task-5) a resume whose own run dies before producing anything stays resumable — a trailing bare user turn is not a broken transcript", async () => {
+    const { engine, store, sessionId, provider, bgAgents } = setup([
+      [spawnNamed("s1", "do the task", "worker"), done("tool_calls")],  // turn 1 round 0: spawn
+      text("child-out-1"),                                              // the child's own run — clean, ends on an assistant turn
+      text("parent turn1"),                                             // turn 1 round 1: parent continuation
+      [resumeCall("r1", "worker", "continue A"), done("tool_calls")],   // turn 2 round 0: resume #1
+      [{ type: "error", code: "server", message: "boom" }],             // resume #1's run: terminal provider error, ZERO output
+      text("parent turn2"),                                             // turn 2 round 1: parent continuation
+      [resumeCall("r2", "worker", "continue B"), done("tool_calls")],   // turn 3 round 0: resume #2 — used to be refused forever
+      text("child-out-3"),                                              // resume #2's run (only reached once it is allowed)
+      text("parent turn3"),                                             // turn 3 round 1: parent continuation
+    ]);
+
+    await engine.runTurn(sessionId); // spawn + clean child run
+    await engine.runTurn(sessionId); // resume #1 — dies on a provider error before producing anything
+    const worker = bgAgents.get("worker", sessionId)!;
+    expect(worker.status).toBe("failed");
+
+    // The setup really is the shape under test: the child's LAST reconstructable item is the bare
+    // user turn resume #1 persisted, with no assistant/tool item after it.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const priorHistory = (engine as any).childHistoryInput(sessionId, worker.threadId) as Array<{ type: string; role?: string; content?: string }>;
+    expect(priorHistory.at(-1)).toEqual({ type: "message", role: "user", content: "continue A" });
+
+    await engine.runTurn(sessionId); // resume #2
+
+    const result = store.read(sessionId).find((e) => e.type === "tool_result" && e.callId === "r2");
+    expect(result).toMatchObject({ isError: false }); // no longer "didn't finish cleanly and can't be resumed"
+
+    // BOTH user turns survive into the resumed request — the instruction from the resume that died
+    // is not silently dropped, and nothing is coalesced. Two adjacent user messages are the same
+    // shape the MAIN thread already sends whenever a turn errors before producing assistant text
+    // (historyInput replays messages 1:1 with no adjacency fixup), so this is not a new risk.
+    const fp = provider as FakeProvider;
+    const resumed = fp.requests.find((r) => isChildRun(r.input, "do the task") && lastUserOf(r.input) === "continue B");
+    expect(resumed).toBeDefined();
+    expect(resumed!.input).toEqual([
+      M("user", "do the task"),   // opening prompt, prepended
+      M("assistant", "child-out-1"), // the original clean run
+      M("user", "continue A"),    // the prompt whose resume died — kept, not dropped
+      M("user", "continue B"),    // the new prompt, last
+    ]);
+  });
+
   // THE FIX'S HEADLINE CASE (task-15, case 1): a child that stalls MID-TOOL — its tool_call is
   // ALREADY persisted (engine.ts's per-call dispatch loop always emits tool_call BEFORE awaiting
   // the tool's execution), but the tool itself never resolves, so its tool_result is NEVER

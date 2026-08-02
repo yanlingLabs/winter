@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { updateSubagents, type CliSubagent } from "../src/subagent-state";
+import { ROSTER_STALL_MS, subagentSilentMs, subagentStalled, updateSubagents, type CliSubagent } from "../src/subagent-state";
 
 const spawn = { type: "thread_started", threadId: "th_a", parentThreadId: "main", agentType: "general-purpose", prompt: "go do it", description: "explore auth module" };
 
@@ -76,5 +76,94 @@ describe("updateSubagents (spec §2, CLI column: lifecycle + tokens, NO time)", 
     // distinct `finish`, never folded into "failed".
     const stalled = updateSubagents(updateSubagents([], spawn), { type: "thread_completed", threadId: "th_a", stopReason: "stalled" });
     expect(stalled[0]).toMatchObject({ status: "done", finish: "stalled" });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// LIVE stall hint (task-5): the terminal "Stalled" verb above only appears AFTER the daemon's
+// progress-stall watchdog has already killed the child (600s of provider silence by default).
+// Until then a wedged child is indistinguishable from a working one on the roster. These pin the
+// PRE-KILL signal: the row banks the ts of every wire event it sees plus the two "legitimate
+// silence" counters, and a pure predicate — deliberately the same shape as watchdog.ts's own
+// `isStalled` for `norma -p` — turns that into a live verdict.
+// ---------------------------------------------------------------------------------------------
+describe("live stall hint (task-5): lastEventAt / in-flight counters / subagentStalled", () => {
+  const at = (ts: number) => ({ ts });
+
+  test("every tracked child event stamps lastEventAt from the event's OWN ts (never Date.now)", () => {
+    let s = updateSubagents([], { ...spawn, ...at(1000) });
+    expect(s[0]!.lastEventAt).toBe(1000);
+    s = updateSubagents(s, { type: "turn_started", threadId: "th_a", ...at(2000) });
+    expect(s[0]!.lastEventAt).toBe(2000);
+    s = updateSubagents(s, { type: "assistant_delta", threadId: "th_a", delta: "hi", ...at(3000) });
+    expect(s[0]!.lastEventAt).toBe(3000);
+    s = updateSubagents(s, { type: "tool_call", threadId: "th_a", name: "bash", argsJson: "{}", ...at(4000) });
+    expect(s[0]!.lastEventAt).toBe(4000);
+    s = updateSubagents(s, { type: "tool_result", threadId: "th_a", output: "ok", ...at(5000) });
+    expect(s[0]!.lastEventAt).toBe(5000);
+    // a ts-less event (only ever a hand-built test fixture) leaves the last stamp standing
+    s = updateSubagents(s, { type: "assistant_delta", threadId: "th_a", delta: "x" });
+    expect(s[0]!.lastEventAt).toBe(5000);
+  });
+
+  test("subagentSilentMs is nowMs - lastEventAt, clamped ≥ 0; 0 when nothing was ever stamped", () => {
+    const s = updateSubagents([], { ...spawn, ...at(1000) });
+    expect(subagentSilentMs(s[0]!, 4000)).toBe(3000);
+    expect(subagentSilentMs(s[0]!, 500)).toBe(0); // clock skew never reads negative
+    const unstamped = updateSubagents([], spawn);
+    expect(subagentSilentMs(unstamped[0]!, 999_999)).toBe(0);
+  });
+
+  test("a WORKING child silent past the threshold is stalled; under it is not", () => {
+    const s = updateSubagents(updateSubagents([], spawn), { type: "turn_started", threadId: "th_a", ...at(1000) });
+    expect(subagentStalled(s[0]!, 1000 + ROSTER_STALL_MS, ROSTER_STALL_MS)).toBe(false); // exactly at the edge
+    expect(subagentStalled(s[0]!, 1000 + ROSTER_STALL_MS + 1, ROSTER_STALL_MS)).toBe(true);
+  });
+
+  test("an in-flight TOOL is legitimate silence — never stalled until its tool_result lands", () => {
+    let s = updateSubagents(updateSubagents([], spawn), { type: "turn_started", threadId: "th_a", ...at(1000) });
+    s = updateSubagents(s, { type: "tool_call", threadId: "th_a", name: "bash", argsJson: JSON.stringify({ command: "bun test" }), ...at(2000) });
+    expect(s[0]!.toolsInFlight).toBe(1);
+    expect(subagentStalled(s[0]!, 9_999_999, ROSTER_STALL_MS)).toBe(false); // a long bash is working, not stalled
+    s = updateSubagents(s, { type: "tool_result", threadId: "th_a", output: "done", ...at(3000) });
+    expect(s[0]!.toolsInFlight).toBe(0);
+    expect(subagentStalled(s[0]!, 3000 + ROSTER_STALL_MS + 1, ROSTER_STALL_MS)).toBe(true);
+    // never negative: a stray/ghost tool_result can't push the counter below zero
+    s = updateSubagents(s, { type: "tool_result", threadId: "th_a", output: "stray", ...at(3500) });
+    expect(s[0]!.toolsInFlight).toBe(0);
+  });
+
+  test("a PENDING APPROVAL is legitimate silence — waiting on a human is not a stall", () => {
+    let s = updateSubagents(updateSubagents([], spawn), { type: "turn_started", threadId: "th_a", ...at(1000) });
+    s = updateSubagents(s, { type: "approval_requested", threadId: "th_a", callId: "c1", toolName: "bash", summary: "rm", ...at(2000) });
+    expect(s[0]!.approvalsPending).toBe(1);
+    expect(subagentStalled(s[0]!, 9_999_999, ROSTER_STALL_MS)).toBe(false);
+    s = updateSubagents(s, { type: "approval_resolved", threadId: "th_a", callId: "c1", approved: true, by: "user", ...at(3000) });
+    expect(s[0]!.approvalsPending).toBe(0);
+    expect(subagentStalled(s[0]!, 3000 + ROSTER_STALL_MS + 1, ROSTER_STALL_MS)).toBe(true);
+  });
+
+  test("QUEUED (waiting on a pool slot) and DONE rows are never stalled, however long they sit", () => {
+    const queued = updateSubagents([], { ...spawn, ...at(1000) });
+    expect(queued[0]!.status).toBe("queued");
+    expect(subagentStalled(queued[0]!, 9_999_999, ROSTER_STALL_MS)).toBe(false);
+    const done = updateSubagents(queued, { type: "thread_completed", threadId: "th_a", stopReason: "stalled", ...at(2000) });
+    expect(subagentStalled(done[0]!, 9_999_999, ROSTER_STALL_MS)).toBe(false); // the FINISH verb owns this row now
+  });
+
+  test("a row that never saw a stamped event is never stalled (nothing to measure)", () => {
+    const s = updateSubagents(updateSubagents([], spawn), { type: "turn_started", threadId: "th_a" });
+    expect(s[0]!.status).toBe("working");
+    expect(s[0]!.lastEventAt).toBeUndefined();
+    expect(subagentStalled(s[0]!, 9_999_999, ROSTER_STALL_MS)).toBe(false);
+  });
+
+  test("main-thread tool_result / approval events never touch the roster (same reference)", () => {
+    const s = updateSubagents([], { ...spawn, ...at(1000) });
+    expect(updateSubagents(s, { type: "tool_result", threadId: "main", output: "x", ...at(2000) })).toBe(s);
+    expect(updateSubagents(s, { type: "approval_requested", threadId: "main", callId: "c", toolName: "bash", summary: "s", ...at(2000) })).toBe(s);
+    expect(updateSubagents(s, { type: "approval_resolved", threadId: "main", callId: "c", approved: true, by: "u", ...at(2000) })).toBe(s);
+    // ghost child threadIds are no-ops too
+    expect(updateSubagents(s, { type: "tool_result", threadId: "th_ghost", output: "x", ...at(2000) })).toBe(s);
   });
 });

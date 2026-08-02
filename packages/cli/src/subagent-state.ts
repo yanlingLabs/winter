@@ -30,7 +30,29 @@ export interface CliSubagent {
   activeSince?: number; // event ts the current turn window opened; undefined while not mid-turn
   toolCalls: number; // count of child tool_call events
   activity?: string; // extractToolDetail() of the most recent tool_call that yielded a detail
+  // ---- LIVE stall hint (task-5) -------------------------------------------------------------
+  // `finish: "stalled"` above is a POST-MORTEM: it only exists once the daemon's progress-stall
+  // watchdog has already aborted the child (600s of provider silence by default,
+  // packages/core/src/agent/subagents.ts). Until then the roster row shows its last activity verb
+  // and a wedged child is indistinguishable from a busy one. These three fields are what
+  // `subagentStalled()` below turns into a PRE-KILL verdict, and they are deliberately the same
+  // three the `norma -p` headless watchdog (src/watchdog.ts's `WatchdogState`) already keeps:
+  // last-event time plus the two kinds of legitimate silence.
+  //
+  // All three are OPTIONAL and spread-omitted until something actually sets them, so a row built
+  // from ts-less events (only ever a hand-built fixture — every real wire event carries `ts`)
+  // stays byte-identical to the pre-task shape.
+  lastEventAt?: number; // event-ts of the last wire event this row saw — never Date.now()
+  toolsInFlight?: number; // child tool_calls without their tool_result yet (a long bash is WORKING)
+  approvalsPending?: number; // child approval_requesteds awaiting a human (waiting is not stalling)
 }
+
+/** Default silence window before the roster calls a live child stalled. Much shorter than the
+ *  daemon's own 600s kill window on purpose: this is a HINT the user reads, not a kill decision,
+ *  and it only ever fires when nothing is in flight — i.e. the child is waiting on the provider,
+ *  which normally takes seconds. The daemon's window is not visible to the CLI (it's a daemon-side
+ *  setting), so this is a local constant rather than a derived one. */
+export const ROSTER_STALL_MS = 180_000;
 
 type WireEvent = { type: string; threadId?: string; [k: string]: unknown };
 
@@ -40,6 +62,23 @@ function patch(items: CliSubagent[], threadId: string, f: (s: CliSubagent) => Cl
   const next = items.slice();
   next[idx] = f(items[idx]!);
   return next;
+}
+
+/** Live stall hint (task-5): `{ lastEventAt: e.ts }` when the event carries a usable `ts`, else an
+ *  empty patch that leaves the previous stamp standing. Spread into every child-event branch below
+ *  so "which events count as this row showing signs of life" is one decision in one place — the
+ *  CLI-side mirror of the daemon's single `onProgress` chokepoint (engine.ts's per-provider-event
+ *  stall reset). What the wire gives us is a SUBSET of what that chokepoint sees — no reasoning or
+ *  usage events reach the roster, and `reasoning_item` only ever lands AFTER a block completes —
+ *  so fewer stamps make this hint fire SOONER, not later (T5 review: the original comment had the
+ *  direction backwards). That is exactly why ROSTER_STALL_MS matches `NORMA_TURN_STALL_MS`'s 180s
+ *  (main.ts) rather than something tighter: a high-effort child can legitimately think for over a
+ *  minute between rounds with total wire silence, and a roster that cries "Stalled" at a thinking
+ *  child destroys the verb's meaning. Known structural blind spot, accepted: a child stuck INSIDE
+ *  a tool call never fires this hint (in-flight > 0 excludes it) — that case stays invisible until
+ *  the daemon's 600s watchdog kill. */
+function stamp(e: WireEvent): { lastEventAt?: number } {
+  return typeof e.ts === "number" ? { lastEventAt: e.ts } : {};
 }
 
 export function updateSubagents(items: CliSubagent[], e: WireEvent): CliSubagent[] {
@@ -57,14 +96,15 @@ export function updateSubagents(items: CliSubagent[], e: WireEvent): CliSubagent
         liveOutputChars: 0,
         activeMs: 0,
         toolCalls: 0,
+        ...stamp(e),
       }];
     }
     case "turn_started":
       if (threadId === "main") return items;
-      return patch(items, threadId, (s) => ({ ...s, status: "working", activeSince: typeof e.ts === "number" ? e.ts : s.activeSince }));
+      return patch(items, threadId, (s) => ({ ...s, status: "working", activeSince: typeof e.ts === "number" ? e.ts : s.activeSince, ...stamp(e) }));
     case "assistant_delta":
       if (threadId === "main") return items;
-      return patch(items, threadId, (s) => ({ ...s, liveOutputChars: s.liveOutputChars + String(e.delta ?? "").length }));
+      return patch(items, threadId, (s) => ({ ...s, liveOutputChars: s.liveOutputChars + String(e.delta ?? "").length, ...stamp(e) }));
     case "turn_completed":
       if (threadId === "main") return items.length ? [] : items; // prune: children finish first
       return patch(items, threadId, (s) => ({
@@ -73,6 +113,7 @@ export function updateSubagents(items: CliSubagent[], e: WireEvent): CliSubagent
         outputTokens: s.outputTokens + (typeof e.outputTokens === "number" ? e.outputTokens : 0),
         liveOutputChars: 0, // reconciled — the banked outputTokens now carries this turn's output
         ...closeSpan(s, e),
+        ...stamp(e),
       }));
     case "thread_completed":
       // status is ALWAYS "done" (the terminal marker — see the `finish` field's doc comment);
@@ -85,6 +126,7 @@ export function updateSubagents(items: CliSubagent[], e: WireEvent): CliSubagent
           : e.stopReason === "stalled" ? "stalled"
           : "done",
         ...closeSpan(s, e),
+        ...stamp(e),
       }));
     case "tool_call": {
       if (threadId === "main") return items;
@@ -94,8 +136,26 @@ export function updateSubagents(items: CliSubagent[], e: WireEvent): CliSubagent
         ...s,
         toolCalls: s.toolCalls + 1,
         activity: extractToolDetail(name, argsJson) ?? s.activity,
+        // live stall hint: the call is now executing — silence from here until its tool_result is
+        // the tool doing its job (a 9-minute `bun test`), never a stall.
+        toolsInFlight: (s.toolsInFlight ?? 0) + 1,
+        ...stamp(e),
       }));
     }
+    // Live stall hint (task-5) — the three branches below exist ONLY to keep the two
+    // legitimate-silence counters and the freshness stamp honest; none of them touches any
+    // pre-existing field, so every counter/label/token aggregate is unchanged by their addition.
+    // (In the TUI these reach here via tui/state.ts's `feedAgents` routing; `norma -p`'s main.ts
+    // already fed every event through this reducer.)
+    case "tool_result":
+      if (threadId === "main") return items;
+      return patch(items, threadId, (s) => ({ ...s, toolsInFlight: Math.max(0, (s.toolsInFlight ?? 0) - 1), ...stamp(e) }));
+    case "approval_requested":
+      if (threadId === "main") return items;
+      return patch(items, threadId, (s) => ({ ...s, approvalsPending: (s.approvalsPending ?? 0) + 1, ...stamp(e) }));
+    case "approval_resolved":
+      if (threadId === "main") return items;
+      return patch(items, threadId, (s) => ({ ...s, approvalsPending: Math.max(0, (s.approvalsPending ?? 0) - 1), ...stamp(e) }));
     case "agent_error":
       if (threadId === "main") return items.length ? [] : items; // defensive prune
       return items;
@@ -112,4 +172,35 @@ function closeSpan(s: CliSubagent, e: WireEvent): Pick<CliSubagent, "activeMs" |
   const ts = typeof e.ts === "number" ? e.ts : undefined;
   if (s.activeSince === undefined || ts === undefined) return { activeMs: s.activeMs, activeSince: undefined };
   return { activeMs: s.activeMs + Math.max(0, ts - s.activeSince), activeSince: undefined };
+}
+
+/** How long this row has shown no sign of life, in ms — the daemon-stamped `lastEventAt` against
+ *  the caller's `nowMs` (the same mixed-clock idiom `subagent-display.ts`'s `subagentElapsedMs`
+ *  already uses for `activeSince`; daemon and CLI share a machine). Clamped ≥ 0 so clock skew
+ *  never reads negative, and 0 when nothing was ever stamped. */
+export function subagentSilentMs(s: CliSubagent, nowMs: number): number {
+  return s.lastEventAt === undefined ? 0 : Math.max(0, nowMs - s.lastEventAt);
+}
+
+/**
+ * Live stall verdict for ONE roster row (task-5) — pure, `now` injected, no timers, exactly the
+ * shape `src/watchdog.ts`'s `isStalled` already uses for the `norma -p` turn watchdog, per-child:
+ *
+ *   working, nothing in flight, no approval awaiting a human, and silent past `thresholdMs`.
+ *
+ * The two exclusions are the whole point of the honesty: a child mid-`bash` streams no events for
+ * as long as the command runs (subagents.ts's own header says so — it is why the daemon's stall
+ * window is pinned to bash's max timeout), and a child parked on an approval card is waiting on a
+ * PERSON. Calling either one "Stalled" would be crying wolf on the roster's most-read line.
+ *
+ * Never true for a terminal row: once `thread_completed` lands, `finish` owns the verb (a
+ * watchdog-killed child reads "Stalled" there already — task-16); a "queued" row is waiting on a
+ * SubagentManager slot, which is legitimate waiting, not silence.
+ */
+export function subagentStalled(s: CliSubagent, nowMs: number, thresholdMs: number = ROSTER_STALL_MS): boolean {
+  if (s.status !== "working") return false;
+  if ((s.toolsInFlight ?? 0) > 0) return false;
+  if ((s.approvalsPending ?? 0) > 0) return false;
+  if (s.lastEventAt === undefined) return false;
+  return nowMs - s.lastEventAt > thresholdMs;
 }
