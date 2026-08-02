@@ -28,6 +28,12 @@ export interface SetActivityDeps {
   now?: () => number;
 }
 
+/** The participation refusal, verbatim, as ONE constant: `session.setActivity` and dispatch's
+ *  `manage_session` both answer with it (including `manage_session`'s `stop`, which is not a
+ *  setActivity call but is governed by the same allowlist), so the rule reads identically at every
+ *  door instead of being three near-identical sentences that drift. */
+export const ACTIVITY_MODE_REFUSAL = "activity states apply to code and cowork sessions only";
+
 /** `kind` exists so each caller can map a refusal into its own vocabulary — the RPC into
  *  `ERR.NOT_FOUND`/`ERR.INVALID_PARAMS`, a tool into an isError outcome — without either of them
  *  re-deciding WHICH refusals exist. */
@@ -63,7 +69,7 @@ export function setSessionActivity(
   // lifecycle at all, so there is no state to set on them. Refused for a CLEAR too: the refusal is
   // about the session, not the value.
   if (!participatesInActivity(meta.mode)) {
-    return { ok: false, kind: "invalid", error: "activity states apply to code and cowork sessions only" };
+    return { ok: false, kind: "invalid", error: ACTIVITY_MODE_REFUSAL };
   }
   // Archived is a flag over IDLE (spec §1.4): archiving a session with a turn in flight would
   // strand that turn behind a hidden tab, so the door refuses and names the two ways out. Scoped to
