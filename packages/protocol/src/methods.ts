@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { SessionEvent, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption } from "./events";
+// `SessionActivity` is defined in ./events (not here, where its first consumer `SessionListResult`
+// lives): the `session_activity` EVENT variant needs the same enum, and events.ts cannot import
+// from this file — methods.ts already imports from events.ts, so the reverse edge would be a module
+// cycle whose `z.enum(...)` const would be in the TDZ at events.ts's evaluation. Re-exported by the
+// package index either way, so `@norma/protocol` consumers see no difference.
+import { SessionEvent, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption } from "./events";
 
 export const PROTOCOL_VERSION = 0;
 
@@ -138,6 +143,20 @@ export const SessionListResult = z.object({
     // the daemon's first-message fallback). Values already flow from store.list(); this declares them
     // so a schema-validating client (the phone's SessionSummary) reads them without smuggling.
     title: z.string().optional(),
+    // session-activity-hygiene T9: the session's working directory — round-trips SessionRow.cwd
+    // (store.ts), which `store.list()` has always selected and this handler has always returned
+    // verbatim. DECLARED here rather than left to smuggle through undeclared, for exactly the reason
+    // `title`/`forkedFrom` above are: the value really does flow out of `store.list()`, so a
+    // schema-validating client must be able to read it. It could not — a zod object strips every key
+    // it does not name, so the TS client (packages/cli/src/client.ts `validated()`) silently dropped
+    // a field the daemon was already putting on the socket, while Swift's `NormaClient.listSessions()`
+    // (which reads raw JSON, not a schema) has been consuming `s["cwd"]` all along. This declaration
+    // closes that asymmetry; `norma agents`' cwd column is its first schema-validating consumer.
+    //
+    // Optional and index-only, on `origin`'s exact terms: absent means "no recorded cwd" — a session
+    // created without one, or one whose index was rebuilt (cwd does NOT ride the event log, so a full
+    // index.db rebuild resets it, same class as `origin`/`model`/`effort`). Never fabricated.
+    cwd: z.string().optional(),
     // Additive (phase 5 routines T3): round-trips SessionCreateParams.origin — undefined for
     // every session created before this field existed, or created without one.
     origin: z.string().optional(),
@@ -162,6 +181,12 @@ export const SessionListResult = z.object({
     // really does flow out of `store.list()`, so a schema-validating client must be able to read
     // it. Absent for every session that isn't a fork.
     forkedFrom: SessionForkRef.optional(),
+    // session-activity-hygiene T2 (spec §1): the DERIVED lifecycle state — see `SessionActivity`
+    // above. Unlike every other field on this row it is not a stored column read back verbatim: the
+    // daemon computes it per row at list time from the two stored flags plus live signals, so two
+    // calls a second apart legitimately differ. Absent means "does not participate" (chat/dispatch)
+    // — NOT "idle", and not "old daemon" for any daemon at or past this version.
+    activity: SessionActivity.optional(),
   })),
 });
 
@@ -420,6 +445,43 @@ export const SessionSetModelResult = z.object({});
 // would be a second, drift-prone copy of a set the protocol package cannot see change.
 export const SessionSetEffortParams = z.object({ sessionId: z.string().min(1), effort: z.string().min(1).max(SESSION_EFFORT_MAX_CHARS).nullable() });
 export const SessionSetEffortResult = z.object({});
+
+// session-activity-hygiene T3 (spec §1): the WRITE half of the session lifecycle — `session.list`'s
+// derived `activity` (T2) is the read half. ONE method behind every surface that moves a session's
+// state: the TUI's `/background` and `/archive`, dispatch's management verbs (T8), the `norma
+// agents` TUI (T9), and the phone (which is why it joins the remote allowlist — 19 → 20).
+//
+// The VALUE NAMES A TARGET STATE, not a flag, and only the two STORED states are settable —
+// `active` and `idle` are pure consequences of live signals (an attachment, a running turn), so
+// offering them would be offering a write that cannot be honoured. `null` CLEARS BOTH flags,
+// returning the session to purely-derived; it is required-but-nullable, not optional, for the same
+// reason `session.setModel`/`session.setEffort`'s clears are — a caller must never be able to
+// confuse "didn't send it" with "explicitly clearing it".
+//
+// Because the value is a target STATE, `"background"` on an archived session also clears the
+// archive flag: `archived` outranks `backgrounded` in the derivation, so writing one flag while
+// leaving the other set would answer "archived" to a caller who asked for background — a wire
+// no-op. The reverse is NOT symmetric: `"archived"` leaves `backgrounded` alone (it contradicts
+// nothing below it), which is what returns a RESUMED session to background rather than to idle.
+//
+// Refusals, all daemon-side (ipc/server.ts): an unknown session is `NOT_FOUND` and takes precedence
+// over everything below it; a chat/dispatch target is `INVALID_PARAMS` ("activity states apply to
+// code and cowork sessions only" — those modes have no lifecycle at all, T2's participation
+// allowlist); `"archived"` on a session with a RUNNING TURN is `INVALID_PARAMS` ("stop or background
+// it first"), because archived is a flag over IDLE (spec §1.4) and archiving a live turn would
+// strand it behind a hidden tab.
+export const SessionSetActivityParams = z.object({
+  sessionId: z.string().min(1),
+  activity: z.enum(["background", "archived"]).nullable(),
+});
+/** `activity` is the POST-WRITE DERIVED state, not an echo of what was written — a caller learns
+ *  what its write actually produced without a second `session.list` round trip (clearing a session
+ *  whose detached bash task is still writing reads back `"background"`, not `"idle"`). Optional for
+ *  exactly the reason `SessionSummary.activity` is: absence means "does not participate". No
+ *  successful call can currently produce that (a non-participating target is refused above), so the
+ *  field is present in practice — it stays optional so the two surfaces express absence identically
+ *  and a future participating-mode change has one vocabulary, not two. */
+export const SessionSetActivityResult = z.object({ ok: z.literal(true), activity: SessionActivity.optional() });
 
 export const ThreadInfoSchema = z.object({
   threadId: z.string(), parentThreadId: z.string().optional(), agentType: z.string().optional(),
@@ -1340,6 +1402,7 @@ export const METHODS = {
   sessionSetPolicy: "session.setPolicy",
   sessionSetModel: "session.setModel",
   sessionSetEffort: "session.setEffort",
+  sessionSetActivity: "session.setActivity",
   threadList: "thread.list",
   threadSend: "thread.send",
   agentStop: "agent.stop",

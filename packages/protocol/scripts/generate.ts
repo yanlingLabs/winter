@@ -138,6 +138,12 @@ const fixtures: Record<string, unknown> = {
   "workflow_progress": { ...base, threadId: "main", type: "workflow_progress", runId: "wf_a1b2c3", phase: "synthesize", log: "merging findings", running: 3, completed: 17, total: 20 },
   "workflow_completed": { ...base, threadId: "main", type: "workflow_completed", runId: "wf_a1b2c3", resultSummary: "12 issues found across 20 files; report written." },
   "workflow_failed": { ...base, threadId: "main", type: "workflow_failed", runId: "wf_a1b2c3", error: "workflow exceeded the per-run agent cap (1000)" },
+  // session-activity-hygiene T4: a NEW SessionEvent variant (full NormaKit switch-trap discipline,
+  // like tool_review / notification_requested / the workflow_* four above). TRANSIENT — but a
+  // fixture is still REQUIRED: Swift mirrors the variant, so the round-trip gate is what proves the
+  // mirror decodes it (assistant_delta, the original transient, carries one for the same reason).
+  // Session-scoped, so NO threadId — the `harness_attached` shape, not `ThreadBase`.
+  "session_activity": { ...base, type: "session_activity", activity: "background" },
 };
 for (const [name, value] of Object.entries(fixtures)) {
   SessionEvent.parse(value); // fixtures must be valid by construction
@@ -154,7 +160,7 @@ for (const [name, value] of Object.entries(fixtures)) {
 // Written into the SAME fixtures/ directory as the SessionEvent fixtures above, but deliberately
 // NOT added to the `fixtures` map itself and NOT swept into the Swift NormaProtocol test bundle
 // below: RoundTripTests.swift decodes EVERY .json file it finds under Fixtures/ as a SessionEvent
-// and asserts an exact count of 57 — these two are a different shape entirely, so the sync step
+// and asserts an exact count of 58 — these two are a different shape entirely, so the sync step
 // below now copies the SessionEvent set explicitly (never a blanket directory copy) to keep that
 // gate byte-for-byte unchanged. A later task wires these two into their own Swift consumer.
 writeFileSync(join(fixDir, "dangerous-domains.json"), JSON.stringify(buildDangerousDomainsFixture(), null, 2));
@@ -164,7 +170,7 @@ writeFileSync(join(fixDir, "cleaner-vectors.json"), JSON.stringify(cleanerVector
 // 3. Sync fixtures into the Swift test bundle — the SessionEvent per-variant fixtures ONLY (see
 // the comment above): a blanket directory copy would also carry dangerous-domains.json/
 // cleaner-vectors.json into RoundTripTests.swift's Fixtures/, which decodes every file there as a
-// SessionEvent and hard-asserts a count of 57.
+// SessionEvent and hard-asserts a count of 58.
 const swiftFixDir = join(import.meta.dir, "..", "..", "..", "apple", "NormaProtocol", "Tests", "NormaProtocolTests", "Fixtures");
 rmSync(swiftFixDir, { recursive: true, force: true }); // delete-then-copy: no orphaned fixtures after variant renames
 mkdirSync(swiftFixDir, { recursive: true });

@@ -60,13 +60,13 @@ describe("cross-language parity fixtures (Chat Slice D, Task 4): regeneration fr
   });
 
   // Guards the generate.ts sync-selectivity fix (see its own comment): these two new fixtures live
-  // in the SAME fixDir as the 57 SessionEvent fixtures, but must never be swept into the Swift
+  // in the SAME fixDir as the 58 SessionEvent fixtures, but must never be swept into the Swift
   // NormaProtocol test bundle — RoundTripTests.swift decodes EVERY .json file it finds there as a
-  // SessionEvent and hard-asserts an exact count of 57.
-  test("did not leak into the Swift-synced fixture bundle, which still has exactly 57 files", () => {
+  // SessionEvent and hard-asserts an exact count of 58.
+  test("did not leak into the Swift-synced fixture bundle, which still has exactly 58 files", () => {
     const swiftFixDir = join(import.meta.dir, "..", "..", "..", "apple", "NormaProtocol", "Tests", "NormaProtocolTests", "Fixtures");
     const swiftFiles = readdirSync(swiftFixDir).filter((f) => f.endsWith(".json"));
-    expect(swiftFiles.length).toBe(57);
+    expect(swiftFiles.length).toBe(58);
     expect(swiftFiles).not.toContain("dangerous-domains.json");
     expect(swiftFiles).not.toContain("cleaner-vectors.json");
   });

@@ -344,6 +344,38 @@ async function runWorkflows(ctx: CommandCtx, argText: string): Promise<void> {
   ctx.appendNote(usage);
 }
 
+/** session-activity-hygiene T3 (spec §1): `/background` and `/archive` — the two lifecycle verbs,
+ *  one shared runner over the ONE `session.setActivity` RPC, always against the CURRENT session
+ *  (`ctx.sessionId`), which in this shell is always a code session (the TUI is code-only,
+ *  plan-immunity Task 2 — so the daemon's participation refusal is unreachable from here).
+ *
+ *  No main.ts route to mirror: these have no headless counterpart yet, deliberately. Every
+ *  session-targeted headless verb in this codebase carries a client-side `checkCodeSession` gate
+ *  extracted into its own route function plus a `cli-verb-gates.test.ts` case (main.ts's
+ *  plan-immunity fix round), and that gate's vocabulary is NARROWER than activity participation —
+ *  it hides cowork, which participates fully — so a headless `norma background <id>` would need a
+ *  new gate predicate rather than the existing one. T8 (dispatch's management verbs) and T9
+ *  (`norma agents`) are the plan's own homes for that surface.
+ *
+ *  `off` is how the RPC's `null` (clear BOTH flags) half is reachable from the shell at all; no
+ *  sub-token means the verb's own value, the overwhelmingly common case (`/bg`'s "a bare verb reads
+ *  naturally as the obvious thing" precedent). The note reports the DAEMON'S DERIVED answer, never
+ *  the value that was sent: a clear on a session whose detached bash task is still writing comes
+ *  back `"background"`, and echoing the request would quietly lie about it. */
+async function runSetActivity(ctx: CommandCtx, verb: "background" | "archive", argText: string): Promise<void> {
+  const on = verb === "background" ? "background" as const : "archived" as const;
+  const token = argText.trim().toLowerCase();
+  if (token !== "" && token !== "on" && token !== "off") {
+    ctx.appendNote(`usage: /${verb} [on|off]`);
+    return;
+  }
+  const r = await ctx.client.sessionSetActivity({ sessionId: ctx.sessionId, activity: token === "off" ? null : on });
+  // `activity` is optional on the wire for the same reason `SessionSummary.activity` is (absent =
+  // "does not participate"). A code session can never produce that — but a client must render
+  // absence as "no state" rather than inventing `idle`, so it is spelled out rather than defaulted.
+  ctx.appendNote(`activity → ${r.activity ?? "(none)"}`);
+}
+
 // ---- registry -------------------------------------------------------------------------------
 
 export const COMMANDS: SlashCommand[] = [
@@ -362,6 +394,8 @@ export const COMMANDS: SlashCommand[] = [
   { name: "routines", description: "List scheduled routines", run: (ctx) => runRoutines(ctx) },
   { name: "memory", description: "List saved memory facts (user scope)", run: (ctx) => runMemory(ctx) },
   { name: "workflows", args: "[run <name> [json]|stop <runId>]", description: "List saved + running workflows", run: (ctx, argText) => runWorkflows(ctx, argText) },
+  { name: "background", args: "[on|off]", description: "Keep this session running unattended", run: (ctx, argText) => runSetActivity(ctx, "background", argText) },
+  { name: "archive", args: "[on|off]", description: "Archive this session (hidden until resumed)", run: (ctx, argText) => runSetActivity(ctx, "archive", argText) },
 ];
 
 // ---- parse / filter / dispatch ---------------------------------------------------------------

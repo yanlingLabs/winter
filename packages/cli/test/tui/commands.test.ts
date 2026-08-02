@@ -546,6 +546,70 @@ describe("runners — mirror main.ts's routes", () => {
     expect(calls).toEqual([]);
     expect(notes[0]).toContain("usage:");
   });
+
+  // session-activity-hygiene T3: the two lifecycle verbs. Both drive the ONE `session.setActivity`
+  // RPC against the CURRENT session, and both REPORT THE DAEMON'S DERIVED ANSWER rather than
+  // restating the request — the whole reason that field is on the result. `off` is how the null
+  // (clear-both-flags) half of the RPC is reachable from the shell at all.
+  test("/background — sets the current session's activity, reports the DERIVED state back", async () => {
+    const { client, calls } = makeClient({ sessionSetActivity: () => ({ ok: true, activity: "background" }) });
+    const { ctx, notes } = makeCtx(client, { sessionId: "sess-9" });
+    await runCommand(ctx, "/background");
+    expect(calls).toEqual([{ method: "sessionSetActivity", args: [{ sessionId: "sess-9", activity: "background" }] }]);
+    expect(notes).toEqual(["activity → background"]);
+  });
+
+  test("/archive — same shape, the archived value", async () => {
+    const { client, calls } = makeClient({ sessionSetActivity: () => ({ ok: true, activity: "archived" }) });
+    const { ctx, notes } = makeCtx(client, { sessionId: "sess-9" });
+    await runCommand(ctx, "/archive");
+    expect(calls).toEqual([{ method: "sessionSetActivity", args: [{ sessionId: "sess-9", activity: "archived" }] }]);
+    expect(notes).toEqual(["activity → archived"]);
+  });
+
+  test.each(["/background off", "/archive off"])("%s — sends the null CLEAR (both flags)", async (input) => {
+    const { client, calls } = makeClient({ sessionSetActivity: () => ({ ok: true, activity: "idle" }) });
+    const { ctx, notes } = makeCtx(client, { sessionId: "sess-9" });
+    await runCommand(ctx, input as string);
+    expect(calls).toEqual([{ method: "sessionSetActivity", args: [{ sessionId: "sess-9", activity: null }] }]);
+    expect(notes).toEqual(["activity → idle"]);
+  });
+
+  test("/background on — the explicit form of the default", async () => {
+    const { client, calls } = makeClient({ sessionSetActivity: () => ({ ok: true, activity: "background" }) });
+    const { ctx } = makeCtx(client, { sessionId: "sess-9" });
+    await runCommand(ctx, "/background on");
+    expect(calls).toEqual([{ method: "sessionSetActivity", args: [{ sessionId: "sess-9", activity: "background" }] }]);
+  });
+
+  // The derived answer is NOT the value that was sent: clearing a session whose detached bash task
+  // is still writing reads back "background". A runner that echoed its own request would print
+  // "idle" here and quietly lie about what the daemon did.
+  test("/background off — reports what the daemon DERIVED, not what was asked for", async () => {
+    const { client } = makeClient({ sessionSetActivity: () => ({ ok: true, activity: "background" }) });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/background off");
+    expect(notes).toEqual(["activity → background"]);
+  });
+
+  test.each(["/background bogus", "/archive nope"])("%s — usage note, no client call", async (input) => {
+    const { client, calls } = makeClient({ sessionSetActivity: () => ({ ok: true, activity: "idle" }) });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, input as string);
+    expect(calls).toEqual([]);
+    expect(notes[0]).toContain("usage:");
+  });
+
+  // A refused set (chat/dispatch target, or archiving a running turn) surfaces as runCommand's
+  // standard failure note — the daemon's own message, never swallowed into a false success.
+  test("/archive — a daemon refusal surfaces verbatim, not as a success note", async () => {
+    const { client } = makeClient({
+      sessionSetActivity: () => { throw new Error("stop or background it first"); },
+    });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/archive");
+    expect(notes).toEqual(["/archive failed: stop or background it first"]);
+  });
 });
 
 describe("runCommand — saved-workflow /name dispatch (CC-parity phase 3 Track C Task C4)", () => {

@@ -321,6 +321,37 @@ describe("daemon IPC", () => {
     c.close();
   });
 
+  // session-activity-hygiene T2 (spec §1): `session.list` surfaces the derived activity state.
+  // The derivation itself is exhaustively tested in test/sessions/activity.test.ts — what these
+  // two cover is the WIRING: that the handler actually builds signals and stamps the field, and
+  // that the "absent = none" half survives the trip (a chat row must carry no `activity` at all,
+  // not `"idle"`).
+  test("session.list stamps activity: a fresh code session is idle, chat carries none", async () => {
+    await boot();
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(harnessToken, "activity-lister");
+    const code = await c.request(METHODS.sessionCreate, { scope: "global" });
+    const chat = await c.request(METHODS.sessionCreate, { scope: "global", mode: "chat" });
+    const { result } = await c.request(METHODS.sessionList);
+    const codeRow = result.sessions.find((s: any) => s.sessionId === code.result.sessionId);
+    const chatRow = result.sessions.find((s: any) => s.sessionId === chat.result.sessionId);
+    // Nothing attached (this client never called session.attach), nothing running.
+    expect(codeRow.activity).toBe("idle");
+    expect(chatRow.activity).toBeUndefined();
+    c.close();
+  });
+
+  test("session.list reports an attached code session as active", async () => {
+    await boot();
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(harnessToken, "activity-attacher");
+    const created = await c.request(METHODS.sessionCreate, { scope: "global" });
+    await c.request(METHODS.sessionAttach, { sessionId: created.result.sessionId });
+    const { result } = await c.request(METHODS.sessionList);
+    expect(result.sessions.find((s: any) => s.sessionId === created.result.sessionId).activity).toBe("active");
+    c.close();
+  });
+
   test("bad params yield INVALID_PARAMS (-32602) with sanitized message", async () => {
     await boot();
     const c = await TestClient.connect(daemon.socketPath);

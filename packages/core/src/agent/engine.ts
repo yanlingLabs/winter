@@ -4,6 +4,7 @@ import { relative, sep, isAbsolute, resolve, dirname, basename, join } from "nod
 import type { ApprovalOption, NewSessionEvent, Question, SessionEvent, Task } from "@norma/protocol";
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
+import { participatesInActivity } from "../sessions/activity";
 import type { ModelInfo, Provider, ProviderEvent, TurnInputItem } from "../providers/types";
 import { isContextLengthError } from "../providers/errors";
 import type { ToolRegistry, Mode } from "./tools/registry";
@@ -35,6 +36,7 @@ import { resolveModelAlias } from "./model-aliases";
 import type { LspManager } from "./lsp/manager";
 import { autoDiagnosticsSuffix, AUTO_DIAG_TOOL_NAMES } from "./lsp/auto-diagnostics";
 import { DISPATCH_SYSTEM_PROMPT } from "./dispatch-prompt";
+import { DISPATCH_MODEL, DISPATCH_EFFORT } from "./dispatch-config";
 import { CHAT_SYSTEM_PROMPT } from "./chat-prompt";
 import type { DispatchChildren } from "./dispatch-children";
 import type { WorkflowRuntime } from "../workflows/runtime";
@@ -869,7 +871,11 @@ export interface EngineConfig {
 }
 
 export class AgentEngine {
-  private runningTurns = new Set<string>();
+  // sessionId → the ms timestamp its current top-level turn started at. T8 turned this from a Set
+  // into a Map for exactly one reason: "a turn is running" and "since when" are the same fact, and
+  // the management surface (`list_sessions`) has to show the second. Membership semantics are
+  // unchanged — every `has`/`delete`/`size` reader below reads it identically.
+  private runningTurns = new Map<string, number>();
   // bg-retrigger Task 2: sessionIds with a detached-agent completion that landed WHILE a turn was
   // already running for that session — notifyBgCompletion sets this instead of starting a
   // reentrant turn; runTurn's finally drains it (starts exactly one follow-up turn) once the
@@ -963,6 +969,18 @@ export class AgentEngine {
     this.subagentTranscripts = new SubagentTranscripts((sessionId) => this.cfg.tmpDirOf?.(sessionId));
   }
 
+  /** session-activity-hygiene T5: a top-level turn for this session has SETTLED — every terminal
+   *  path, abort included. Assigned by `startIpcServer` (the `SessionHub.onGlobalEvent` precedent:
+   *  a mutable public field, not a constructor dep, because the engine is built before the server
+   *  and the consumer is the server's activity enforcement).
+   *
+   *  Distinct from `cfg.onTurnEnd` (dispatch's child-status registry) on purpose — two unrelated
+   *  concerns, and one of them is wired at construction while the other cannot be. Called LAST in
+   *  the finally, after the between-turns drain decision, so a follow-up turn the drain just started
+   *  is already visible to `isRunning` and the lifecycle never announces an idle that a re-started
+   *  turn immediately contradicts. */
+  onTurnSettled?: (sessionId: string) => void;
+
   /** Public path accessor (CC parity: surfacing a subagent's transcript file path) — undefined when
    *  cfg.tmpDirOf is absent/unresolved for this session. Every surface that shows the path (bg spawn
    *  tool_result, task_notification, the sync trailer, agent_output) goes through this ONE
@@ -973,6 +991,29 @@ export class AgentEngine {
 
   /** True while a turn is executing for the session. */
   isRunning(sessionId: string): boolean { return this.runningTurns.has(sessionId); }
+
+  /** session-activity-hygiene T8: when the session's CURRENT top-level turn started, or `undefined`
+   *  when no turn is running. The honest source for "how long has this been going" — the daemon
+   *  already owns the fact (`runningTurns`), it just wasn't stamped; the alternative (scanning the
+   *  session log for the last turn-start event) would re-derive from disk something held in memory
+   *  three feet away, and would answer for a FINISHED turn too, which is not the question. */
+  turnStartedAt(sessionId: string): number | undefined { return this.runningTurns.get(sessionId); }
+
+  /** session-activity-hygiene T2 (spec §1): true while the session has unattended work that
+   *  OUTLIVES a turn — a backgrounded bash task (`bgRegistry`) or a detached agent thread
+   *  (`bgAgents`). Both registries, because they are two halves of one fact and either alone would
+   *  under-report: a session whose turn ended while a `run_in_background` task keeps writing is
+   *  still working, and calling that "idle" is precisely the invisible-runner blindness the
+   *  activity model exists to fix.
+   *
+   *  Read-only, no side effects, and false when neither registry is wired (every test/config
+   *  without them) — the same "absent dep degrades to the quiet answer" shape as `pinnedTools`'
+   *  own `bgRegistry?.list(...) ?? []` below. Deliberately NOT folded into `isRunning`: that one
+   *  answers "can I start a turn", a question background work must not affect. */
+  hasBackgroundWork(sessionId: string): boolean {
+    if ((this.cfg.bgRegistry?.list(sessionId) ?? []).some((t) => t.status === "running")) return true;
+    return (this.cfg.bgAgents?.list(sessionId) ?? []).some((a) => a.status === "running");
+  }
 
   /** Number of sessions with a turn executing right now (update idle gate). */
   activeTurnCount(): number {
@@ -1021,7 +1062,7 @@ export class AgentEngine {
 
   async runTurn(sessionId: string): Promise<void> {
     if (this.runningTurns.has(sessionId)) throw new Error(`turn already running for ${sessionId}`);
-    this.runningTurns.add(sessionId);
+    this.runningTurns.set(sessionId, Date.now());
     const ac = new AbortController();
     this.aborters.set(sessionId, ac);
     try {
@@ -1100,6 +1141,13 @@ export class AgentEngine {
         // queue drain) so the model reacts without a user message.
         void this.runTurn(sessionId).catch((err) => console.error("bg-notification/message drain failed:", err));
       }
+      // session-activity-hygiene T5: LAST, deliberately — the drain above starts its follow-up turn
+      // synchronously up to its first await (runningTurns.set is the second statement of runTurn),
+      // so by here `isRunning` already tells the truth about whether this session is really done.
+      // Swallowed like every other hook in this finally: a lifecycle bug must not turn a completed
+      // turn into a rejected runTurn.
+      try { this.onTurnSettled?.(sessionId); }
+      catch (err) { console.error("turn-settled hook failed:", err); }
     }
   }
 
@@ -2040,8 +2088,19 @@ export class AgentEngine {
    *  `meta.effort` and re-derive it (three call sites, three chances to disagree). It is gated here,
    *  once, on `clientEffortEligible(meta.mode)`: `session.setEffort` refuses a tier for chat/dispatch
    *  at the door, and this is the second enforcement for a stored tier that got in some other way (a
-   *  fork, a hand-edited index) — such a session still sends `max` and still gets no injection. */
+   *  fork, a hand-edited index) — such a session still sends `max` and still gets no injection.
+   *
+   *  session-activity-hygiene task 1: dispatch's model/effort are a FIXED PIN (`DISPATCH_MODEL`/
+   *  `DISPATCH_EFFORT`, dispatch-config.ts) — a user ruling, the same shape as `RESEARCH_MODEL`.
+   *  Checked FIRST, before `meta.model`/`meta.effort`/`live()`/the boot default are read at all: not
+   *  a translation (like `ultra`'s wireEffort hop) but a short-circuit, so a dispatch session's
+   *  stored override — however it got there — never has anything to win against. `ultra` stays
+   *  false unconditionally for the same reason `clientEffortEligible` already refused it for
+   *  dispatch: there is no resolved-from-meta effort here for the tier axis to apply to. */
   private resolveSel(meta: { model?: string; effort?: string; mode?: string }): { model: string; reasoningEffort?: string; ultra: boolean } {
+    if (meta.mode === "dispatch") {
+      return { model: DISPATCH_MODEL, reasoningEffort: DISPATCH_EFFORT, ultra: false };
+    }
     const base = this.cfg.provider.live?.() ?? { model: this.cfg.provider.model };
     // NOTE: `base`'s shape is exhaustive by construction here — `live()` is typed
     // `() => { model; reasoningEffort? }` and both fields are handled explicitly below. The pre-T5
@@ -3496,8 +3555,52 @@ export class AgentEngine {
             sendMessageOutcomes.set(call.callId, { output: `no agent or session '${to}' to message`, isError: true });
             continue;
           }
-          if (targetMeta.parentSessionId !== sessionId) {
+          // session-activity-hygiene T8: the DISPATCH WIDENING. Dispatch is the fleet coordinator —
+          // the user ruling gives it management over every cowork/code session, not just the ones it
+          // started — so for a dispatch-mode CALLER the direct-parent-edge test is replaced by the
+          // PARTICIPATION test (activity.ts's ACTIVITY_MODES allowlist: code + cowork, absent =
+          // code). Chat and dispatch targets stay refused: they have no lifecycle to manage, and a
+          // dispatch session addressing another dispatch session is the one loop this widening could
+          // otherwise open (the coordinator is a singleton and nobody's child, which is what makes
+          // widening it safe — it can never be on the receiving end of a spawn edge).
+          //
+          // EVERY OTHER CALLER keeps the parent-edge rule VERBATIM: a code session still reaches only
+          // its own direct children, so the tree property that makes inter-session cycles impossible
+          // is untouched everywhere except the one node that has no parent to cycle back to.
+          if (meta.mode === "dispatch") {
+            if (!participatesInActivity(targetMeta.mode)) {
+              sendMessageOutcomes.set(call.callId, {
+                output: `session '${to}' is a ${targetMeta.mode ?? "code"} session — send_message targets code and cowork sessions only`,
+                isError: true,
+              });
+              continue;
+            }
+          } else if (targetMeta.parentSessionId !== sessionId) {
             sendMessageOutcomes.set(call.callId, { output: `session '${to}' is not a session you spawned`, isError: true });
+            continue;
+          }
+          // session-activity-hygiene T8 (HARD — the T3-review Important, which existed here BEFORE
+          // any widening): both branches below used to run with ZERO knowledge of `archived`, so a
+          // session could display "archived" — hidden under its own tab, which is what a user MEANS
+          // by archiving — while a turn burned tokens inside it. The invisible-runner bug, inverted.
+          //
+          // The ruling is REFUSE, not silent un-archive. Archived is a USER-VISIBLE hidden state;
+          // an agent resurrecting it silently recreates the same blindness in a worse form (now the
+          // resurrection has no author). Refusing makes a resume a DELIBERATE, auditable two-step:
+          // the sender calls the management verb (`manage_session`, dispatch) or the `session
+          // .setActivity` RPC, whose T4 emission flips every open UI live — so no new emission seam
+          // is needed here, which is exactly why this guard refuses rather than clearing the flag.
+          //
+          // Placed at the CALL SITE, before the running/idle split, so it binds every caller in
+          // every mode (a code session messaging its own archived child refuses identically) and
+          // both branches (a running-and-archived target is a contradiction the setActivity door
+          // already refuses to create, but this must not depend on that door being the only writer).
+          if (targetMeta.archived) {
+            sendMessageOutcomes.set(call.callId, {
+              output: `session '${to}' is archived — archived sessions are resumed deliberately, never by a message: `
+                + `resume or background it first (manage_session, or the session.setActivity RPC), then send again`,
+              isError: true,
+            });
             continue;
           }
           const wasRunning = this.isRunning(to);

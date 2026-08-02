@@ -169,15 +169,83 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
     c.close();
   });
 
-  test("works for a DISPATCH session too", async () => {
+  // session-activity-hygiene task 1: dispatch's model is a FIXED PIN (DISPATCH_MODEL, a user
+  // ruling — the RESEARCH_MODEL precedent) — the door refuses a dispatch target OUTRIGHT, before
+  // resolveModelSelection even runs. This replaces the old "works for a DISPATCH session too"
+  // control (mode-agnosticism no longer holds for dispatch specifically; chat is unaffected, see
+  // the test just above).
+  test("refuses a DISPATCH target with INVALID_PARAMS naming the pin — the model is never stored", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "model-setter");
     const sessionId = store.createSession("global", { mode: "dispatch", origin: "dispatch" });
 
     const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "claude-opus-5" });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error.message).toContain("dispatch runs a fixed model");
+    expect(res.error.message).toContain("gpt-5.6-terra");
+    expect(res.error.message).toContain("medium");
+    expect(store.meta(sessionId).model).toBeUndefined();
+    c.close();
+  });
+
+  // Fix round 1 (reviewer finding): dispatch is a LONG-LIVED SINGLETON
+  // (store.dispatchSessionId() reuses the same row forever), and BEFORE this task's commit both
+  // doors were mode-agnostic — a stored override written during that era is a genuine historical
+  // possibility, not a hypothetical. `session.list` reports the raw stored `model` column
+  // VERBATIM (store.ts's `list()`), independent of `resolveSel` — so refusing the clear
+  // unconditionally would make a pre-pin override PERMANENTLY un-clearable while displaying as
+  // truth forever (zero runtime effect, since resolveSel's short-circuit wins regardless — but a
+  // real display/data-hygiene defect). `model: null` therefore SUCCEEDS even against a dispatch
+  // target; only a non-null SET is refused (the test just above).
+  test("model: null SUCCEEDS as a clear even against a DISPATCH target — only a non-null set is refused", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "model-setter");
+    const sessionId = store.createSession("global", { mode: "dispatch", origin: "dispatch" });
+
+    const res = await c.request(METHODS.sessionSetModel, { sessionId, model: null });
     expect(res.error).toBeUndefined();
-    expect(store.meta(sessionId).model).toBe("claude-opus-5");
+    expect(store.meta(sessionId).model).toBeUndefined();
+    c.close();
+  });
+
+  // The historical-override scenario itself, end to end: a stored override from BEFORE this
+  // task's pin shipped (simulated here by writing it directly via `store.setModel`, bypassing the
+  // RPC door entirely — exactly how such a row would have gotten there pre-fix) is removable by
+  // the null-clear above, and `session.list` — which reads the raw column, never `resolveSel` —
+  // stops reporting it the moment it's cleared.
+  test("a PRE-PIN stored override on a dispatch session is clearable, and session.list stops reporting it once cleared", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "model-setter");
+    const sessionId = store.createSession("global", { mode: "dispatch", origin: "dispatch" });
+    store.setModel(sessionId, "pre-pin-legacy-override"); // simulates a row written before this fix existed
+
+    const listedBefore = await c.request(METHODS.sessionList, {});
+    expect(listedBefore.result.sessions.find((s: any) => s.sessionId === sessionId).model).toBe("pre-pin-legacy-override");
+
+    const res = await c.request(METHODS.sessionSetModel, { sessionId, model: null });
+    expect(res.error).toBeUndefined();
+    expect(store.meta(sessionId).model).toBeUndefined();
+
+    const listedAfter = await c.request(METHODS.sessionList, {});
+    expect(listedAfter.result.sessions.find((s: any) => s.sessionId === sessionId).model).toBeUndefined();
+    c.close();
+  });
+
+  // Unknown session id must still win with NOT_FOUND — the dispatch-pin refusal must never fire for
+  // an id that doesn't resolve to a real session (mirrors session.setPolicy's own precedent, whose
+  // targetMode try/catch idiom this reuses).
+  test("an UNKNOWN session id is still NOT_FOUND, not the dispatch-pin refusal", async () => {
+    const { socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "model-setter");
+
+    const res = await c.request(METHODS.sessionSetModel, { sessionId: "s_does_not_exist", model: "claude-opus-5" });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.NOT_FOUND);
     c.close();
   });
 
@@ -254,7 +322,11 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
  *  (providers/codex-config.ts's CODEX_MODELS) so an alias like "sol" resolves the way it really
  *  would in production. */
 function fakeEngine(models: ModelInfo[]): any {
-  return { knownModels: () => models, isRunning: () => false };
+  // session-activity-hygiene T2: `hasBackgroundWork` joins `isRunning` here because `session.list`
+  // now builds activity signals from BOTH — and this double is an `any` cast, so a missing method
+  // is a runtime TypeError inside the handler (the RPC answers INTERNAL, not "no activity"), not a
+  // compile error. Every AgentEngine double that a session.list-calling test can reach owes both.
+  return { knownModels: () => models, isRunning: () => false, hasBackgroundWork: () => false, interrupt: () => ({ wasRunning: false }) };
 }
 
 const CATALOGUE: ModelInfo[] = [

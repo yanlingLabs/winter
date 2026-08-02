@@ -56,8 +56,14 @@ const STREAM_CONTROL_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<Se
  *  UPSTREAM of the phone client that was just fixed to accept them, silently restoring the
  *  no-streaming-on-iOS bug with a fully green suite, because nothing else covers a transient
  *  traversing this seam. The live policy is therefore history's allowlist PLUS
- *  `TRANSIENT_EVENT_TYPES` (the canonical seven, hoisted into `@norma/protocol` so the daemon and
+ *  `TRANSIENT_EVENT_TYPES` (the canonical eight, hoisted into `@norma/protocol` so the daemon and
  *  both Swift clients derive from ONE definition) PLUS the three stream-control types above.
+ *
+ *  The transient half is SPREAD, never re-listed: that is what discharges CLAUDE.md's
+ *  protocol-checklist addendum ("a new transient variant must be added to `TRANSIENT_EVENT_TYPES`
+ *  *and* to `REMOTE_STREAM_EVENT_TYPES`") by construction — the one edit in `@norma/protocol`
+ *  reaches both lists. Do not replace the spread with literals to "make the set explicit": the
+ *  parity tests pin the RESULT, and they cannot catch a type that was never added to a hand-copy.
  *
  *  Deliberately absent, and verified harmless: `session_titled`, `turn_started`, and the rest of the
  *  lifecycle/opaque surface. The phone's transcript folds exactly

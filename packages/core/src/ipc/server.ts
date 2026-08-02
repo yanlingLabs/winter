@@ -12,7 +12,7 @@ import {
   SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams,
   SkillsReadParams, SkillsWriteParams, SkillsDeleteParams,
   PluginsListParams, AskUserRespondParams, TaskListParams, PlanRespondParams, SessionSetPolicyParams,
-  SessionSetModelParams, SessionSetEffortParams,
+  SessionSetModelParams, SessionSetEffortParams, SessionSetActivityParams,
   ThreadListParams, ThreadSendParams, AgentStopParams,
   PeripheralLeaseParams, PeripheralRenewParams, PeripheralReleaseParams, PeripheralAdvertiseParams,
   PeripheralRevokeParams, PeripheralRespondParams, DaemonStatusParams, EngineActivityParams, QuotaStateParams,
@@ -39,6 +39,10 @@ import type { MemoryStore, MemoryErrorKind } from "../agent/memory";
 import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTailMemDir } from "../agent/memory-file-ops";
 import type { SessionStore } from "../sessions/store";
 import { readHistoryPage } from "../sessions/history";
+import { makeActivityDeriver, participatesInActivity, type ActivityDeriver } from "../sessions/activity";
+import { createActivityEnforcement } from "../sessions/activity-enforcement";
+import { setSessionActivity, type SetActivityDeps } from "../sessions/set-activity";
+import { reapEmptySessions } from "../sessions/reaper";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
@@ -67,6 +71,7 @@ import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
 import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, type Settings } from "../settings";
+import { DISPATCH_PIN_MESSAGE } from "../agent/dispatch-config";
 import {
   deriveInstallName, installPluginFromDir, missingConsents, buildConsentBlock, applyFreshPluginConsent,
   setPluginEnabled, grantPluginConsents, removePluginFromSettings, removePluginDir, stripPluginConsents,
@@ -103,6 +108,26 @@ export interface IpcServerOptions {
   tokens: TokenAuthority;
   store: SessionStore;
   hub?: SessionHub;          // shared with the agent engine when the daemon wires one up
+  // session-activity-hygiene T6 (review fix round 1): the empty-session reaper invocation the
+  // `session.create` mint-time sweep calls — injectable ONLY so a test can observe/intercept
+  // exactly when the sweep runs relative to the create reply (a slow synchronous stub makes the
+  // property measurable: reaper.test.ts's "never delays the reply" case) without reaching into a
+  // private closure. Every real caller gets the true `reapEmptySessions` (sessions/reaper.ts) by
+  // leaving this unset.
+  reapEmptySessions?: typeof reapEmptySessions;
+  // session-activity-hygiene T8: hands the caller THE bound activity derivation this server stamps
+  // `session.list` with, once, at construction. Called exactly once, synchronously, from inside
+  // startIpcServer.
+  //
+  // It is a PUBLISH rather than an injection because the derivation cannot be built anywhere else:
+  // two of its five signals come from T5's enforcement, which lives in this scope and is mutually
+  // recursive with the derivation itself. daemon.ts registers dispatch's `list_sessions` tool long
+  // before this server exists, so the tool reads a holder this fills in — which is what lets the
+  // management surface answer with the SAME state `session.list` serves (including the post-turn
+  // grace and the >24h demotion, both invisible to any derivation built outside this scope) instead
+  // of a third hand-assembled copy that would quietly disagree in exactly those two windows.
+  // Optional: every server built without it (all existing tests) is byte-identical.
+  onActivityDeriver?: (derive: ActivityDeriver) => void;
   engine?: AgentEngine | null;
   broker?: ApprovalBroker | null;
   // SP-approvals Task 5: the CC-grammar allow-rules store (Task 1) — daemon.ts hoists ONE instance
@@ -346,6 +371,12 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   // other half of its model picker, and a separate method for the same reason it is separate on the
   // CLI. Same bare-sessionId shape, so the same assertRemoteMayUseSession guard applies below.
   METHODS.sessionSetEffort,
+  // session-activity-hygiene T3: the phone backgrounds/archives a remote-driven code session — the
+  // WRITE half of the `activity` state `session.list` (already on this list) has served since T2.
+  // Same bare-sessionId shape, so the same assertRemoteMayUseSession guard applies below; the
+  // handler's own participation check is a SECOND, narrower gate (chat is remote-eligible yet has
+  // no lifecycle, so a phone reaching a chat session here is refused by mode, not by role).
+  METHODS.sessionSetActivity,
   // Chat Slice D task 2 (session sync): the phone replicates its own chat-session logs both ways.
   // The phone is the ONLY client that has ever needed these three — they exist for exactly this
   // role. All three are additionally CHAT-ONLY and fail closed on an absent/unknown session mode
@@ -481,6 +512,109 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   }
   const hub = opts.hub ?? new SessionHub(opts.store);
 
+  /** session-activity-hygiene: the ONE place this server turns a session into a lifecycle state.
+   *  `session.list` stamps every participating row through it, and `session.setActivity` echoes its
+   *  post-write result through it — so the read surface and the write surface can never disagree
+   *  about WHICH SIGNALS feed the derivation, only about when they were sampled.
+   *
+   *  `nowMs` is the caller's, never read here: `session.list` derives a whole batch against ONE
+   *  instant so two rows can't straddle the same 24h boundary (`activityFor`'s own contract).
+   *
+   *  Reads the LOCAL `hub`, not `opts.hub` — they differ on a server built without one (this
+   *  function falls back to a private SessionHub, which is then the hub that actually holds every
+   *  attachment `session.attach` makes). Deriving off `opts.hub?.attachedCount(...)` would report a
+   *  hard 0 on exactly those servers, i.e. "idle" for a session with a live harness on it.
+   *
+   *  T8: the five reads are no longer assembled inline here — `makeActivityDeriver` (sessions/
+   *  activity.ts) binds them, so dispatch's `list_sessions` management surface can consume THIS
+   *  EXACT bound function (published via `onActivityDeriver` below) rather than hand-copying the
+   *  same five reads a third time. Same sources, same order, same short-circuit — behaviour is
+   *  unchanged; only the assembly moved. */
+  const deriveActivity: ActivityDeriver = makeActivityDeriver({
+    turnRunning: (sessionId) => opts.engine?.isRunning(sessionId) ?? false,
+    attachedCount: (sessionId) => hub.attachedCount(sessionId),
+    bgWork: (sessionId) => opts.engine?.hasBackgroundWork(sessionId) ?? false,
+    lastEventTs: (sessionId) => opts.store.lastEventTs(sessionId),
+    // session-activity-hygiene T5: the two signals the ENFORCEMENT owns, fed back in here so the
+    // read surface and the enforced lifecycle are the same story. `activeSince` is `undefined`
+    // (never 0) for a session with nothing attached — activity.ts's own warning: an epoch stand-in
+    // would demote every session on earth. `autoBackground` matters for exactly one window, the
+    // post-turn grace, where without it `session.list` would answer "idle" the instant the turn
+    // settled while the emitted stream still (correctly) said "background".
+    activeSince: (sessionId) => enforcement.activeSince(sessionId),
+    autoBackground: (sessionId) => enforcement.autoBackgrounded(sessionId),
+  });
+
+  /** session-activity-hygiene T5: the lifecycle's ENFORCEMENT — what the daemon does when the last
+   *  harness lets go, when an auto-backgrounded turn ends, and when a session has called itself
+   *  active for a day. Constructed HERE because this is the only scope where the engine's signals,
+   *  the hub's attachments and the store are all in reach — i.e. the only place `deriveActivity`
+   *  can exist, and the enforcement must not grow a second derivation of its own.
+   *
+   *  The mutual reference is deliberate and safe: `deriveActivity`'s signal closures read
+   *  `enforcement` (lazily, at derive time — T8 turned it into a `const` bound above this
+   *  statement, so the read happens strictly later than this initialization, never during it), and
+   *  `enforcement` calls back into `deriveActivity` to publish. Neither runs before this statement
+   *  completes — every caller of `deriveActivity` is a request handler or one of the hooks wired
+   *  just below. */
+  const enforcement = createActivityEnforcement({
+    meta: (sessionId) => opts.store.meta(sessionId),
+    // The ONE derive-then-emit path. Every enforced transition — attach, last detach (aborting or
+    // not), grace expiry, demotion — goes through here rather than announcing a state it decided
+    // for itself, which is what keeps `SessionHub.emitActivity`'s change memo an accurate record of
+    // what the session IS rather than of what one code path believed.
+    emit: (sessionId) => {
+      hub.emitActivity(sessionId, deriveActivity(opts.store.meta(sessionId), sessionId, Date.now()));
+    },
+    turnRunning: (sessionId) => opts.engine?.isRunning(sessionId) ?? false,
+    // The LOCAL `hub`, for the same reason `deriveActivity` reads it — a server built without one
+    // falls back to a private SessionHub, and `opts.hub?.attachedCount(...)` would report a hard 0
+    // on exactly those servers.
+    attachedCount: (sessionId) => hub.attachedCount(sessionId),
+    // The EXISTING ESC-abort path, verbatim — `session.interrupt`'s own handler is the same one
+    // call. So a turn killed by a closed terminal ends exactly as a user's ESC ends it:
+    // `turn_completed(aborted)`, resumable, no second abort mechanism to keep in step.
+    abortTurn: (sessionId) => { opts.engine?.interrupt(sessionId); },
+    // "No scheduled wake-up" (spec §1.2), implemented over what this daemon ACTUALLY has.
+    //
+    // Routines/cron have NO session linkage: a `Routine` row is {spec, prompt, policy, cwd,
+    // enabled, nextRunAt} (routines/store.ts) and every fire MINTS A NEW SESSION
+    // (`makeDaemonRoutineRunner` → `store.createSession(...)`, routines/runner.ts). There is
+    // therefore no such thing as a routine that will wake THIS session, and a predicate that
+    // pretended to check for one would be theatre.
+    //
+    // What genuinely re-starts a turn on an existing session unattended is background work
+    // finishing: a `run_in_background` bash task or a detached agent thread, whose completion sets
+    // the engine's retrigger and drains into a fresh `runTurn`. That is exactly
+    // `hasBackgroundWork` — the same signal the derivation already reads as `bgWork`, which is why
+    // suppressing the grace here costs no flicker: such a session derives "background" on its own.
+    // (The engine's other two wake sources — `retriggerPending` and a stranded `threadSteerQueue`
+    // message — are both consumed inside `runTurn`'s finally BEFORE `onTurnSettled` fires, so by
+    // the time this predicate is asked they have already become a running turn, which
+    // `onTurnSettled` checks for directly.)
+    scheduledWakeup: (sessionId) => opts.engine?.hasBackgroundWork(sessionId) ?? false,
+  });
+  hub.onDetached = (sessionId, client, remaining) => enforcement.onDetached(sessionId, client, remaining);
+  // Assigned rather than passed at construction: the engine is built before this server (daemon.ts),
+  // and this is the same mutable-hook shape `hub.onGlobalEvent` uses just below.
+  if (opts.engine) opts.engine.onTurnSettled = (sessionId) => enforcement.onTurnSettled(sessionId);
+  /** T8: the deps `session.setActivity` hands to the shared write half. Bound once, here, off the
+   *  same store/engine/hub/derivation everything else in this file reads — the tool's own copy of
+   *  these deps (daemon.ts) is bound off the SAME instances, which is what makes "same semantics"
+   *  a fact about the code rather than a claim about two wirings. */
+  const setActivityDeps: SetActivityDeps = {
+    store: opts.store,
+    isRunning: (sessionId) => opts.engine?.isRunning(sessionId) ?? false,
+    derive: deriveActivity,
+    emit: (sessionId, activity) => hub.emitActivity(sessionId, activity),
+  };
+
+  enforcement.start();
+  // T8: published AFTER `enforcement` exists — the derivation's two enforcement signals are read
+  // lazily, but handing a consumer a function it could legally call before that binding initialized
+  // would be a TDZ throw waiting for a race nobody would reproduce.
+  opts.onActivityDeriver?.(deriveActivity);
+
   const helloTimeoutMs = opts.helloTimeoutMs ?? 5000;
   const maxConnections = opts.maxConnections ?? 64;
   const preAuthMaxLine = opts.preAuthMaxLine ?? 64 * 1024;
@@ -504,8 +638,25 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   // watching the session list (but not attached to this particular session) still needs to learn
   // its title live. Attached harnesses may receive it twice (fanOut + this); seq-based dedupe
   // absorbs that (NormaKit dedupes on seq; the CLI ignores unknown/duplicate event types).
-  hub.onGlobalEvent = (event) => {
+  //
+  // session-activity-hygiene T9: `session_activity` rides this same path (SessionHub.emitActivity)
+  // — a roster of BACKGROUND sessions is by definition a view of sessions with no attachments, so
+  // the per-session fan-out reaches nobody who needs it. It passes `excludeSessionAttachments`
+  // because a TRANSIENT has no seq-dedupe to absorb the double the sentence above relies on; see
+  // `GlobalDeliveryOptions` (sessions/hub.ts).
+  //
+  // NOTE the reach, deliberately unchanged: `harnessConns` holds role "harness" ONLY (see the hello
+  // handler). A remote (phone) connection is never in it, so no global event — title or activity —
+  // ever tells a phone about a session it is not attached to. The phone's own copy comes through
+  // the per-session `HubClient` in `session.attach`, which is where the remote allowlist + capEvent
+  // are applied; there is no second remote seam to guard here.
+  hub.onGlobalEvent = (event, opts) => {
     for (const conn of harnessConns) {
+      // `hub.attachedSession` (not a flag on ConnState) is the authority: a client evicted mid-
+      // fan-out for a dead socket is gone from the hub the instant it happened, while `hubClient`
+      // on the connection still points at the stale object.
+      if (opts?.excludeSessionAttachments && conn.hubClient
+        && hub.attachedSession(conn.hubClient) === event.sessionId) continue;
       try { conn.writer.enqueue(encodeLine({ jsonrpc: "2.0", method: METHODS.event, params: event })); }
       catch { /* dead socket — its close() handler will evict it from harnessConns */ }
     }
@@ -919,10 +1070,55 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             catch { /* dead socket — its close() handler will evict it from harnessConns */ }
           }
         }
+        // session-activity-hygiene T6 (spec §2): the empty-session reaper's mint-time sweep — fires
+        // on every `session.create`, but must never delay or fail THIS reply over hygiene against
+        // unrelated sessions (the just-minted one above is always safe: `emptySessionIds`'s own
+        // 10-minute grace excludes anything this young regardless of timing).
+        //
+        // Review fix round 1 (Finding 1, Important): a MICROTASK deferral here (`Promise.resolve()
+        // .then(fn)`) is NOT non-blocking — `reapEmptySessions` is entirely synchronous, and on an
+        // already-fulfilled promise `.then(fn)` queues `fn` as a microtask strictly AHEAD of this
+        // `async` handler's own resolution (whose continuation — `await handle(...)` back in the
+        // caller — is what writes this reply). The queue is FIFO, so the sweep would run to
+        // completion (sqlite query, per-candidate readFileSync, unlinkSync, appendFileSync) BEFORE
+        // the reply is even enqueued — the event loop is single-threaded, so every connection on
+        // this daemon sits blocked for however long that takes. `setTimeout(fn, 0)` is a MACROTASK:
+        // the event loop always fully drains the microtask queue (which includes the reply write)
+        // before running any macrotask, so this genuinely runs AFTER the reply is on its way out —
+        // proven by reaper.test.ts's "never delays the create reply" case (a slow synchronous stub,
+        // injected via `opts.reapEmptySessions` below, measurably delayed the round trip under the
+        // old microtask version and does not under this one). A synchronous throw from `reap` still
+        // can't reach this handler either way (it runs on a later turn, not inline) — the try/catch
+        // is the error sink for that turn.
+        //
+        // Skipped outright with no `opts.normaHome` wired (most existing tests): unlike the
+        // destructive half (`store.emptySessionIds`/`deleteSession`, which need no normaHome at
+        // all), reaping with no audit trail at all is not a degraded mode this feature should ever
+        // run in — see reaper.ts's own doc comment on the delete-then-audit order. Every real
+        // caller (daemon.ts) always wires `normaHome`.
+        if (opts.normaHome) {
+          const home = opts.normaHome;
+          const reap = opts.reapEmptySessions ?? reapEmptySessions;
+          setTimeout(() => {
+            try { reap({ store: opts.store, attachedCount: (id) => hub.attachedCount(id), home }); }
+            catch (err) { console.error("[reaper] mint-time sweep failed:", err); }
+          }, 0);
+        }
         return { sessionId, trusted };
       }
       case METHODS.sessionList: {
-        const sessions = opts.store.list();
+        // session-activity-hygiene T2 (spec §1): stamp each row's derived lifecycle state. ONE
+        // instant for the whole batch (`now`), so two rows in the same response can never disagree
+        // about whether the same 24h boundary has passed.
+        //
+        // `deriveActivity` (defined beside the `hub` binding, shared with `session.setActivity`)
+        // returns undefined for chat/dispatch and builds no signals for those rows — which also
+        // keeps the per-row `lastEventTs` stat off the chat/dispatch rows entirely.
+        const now = Date.now();
+        const sessions = opts.store.list().map((s) => {
+          if (!participatesInActivity(s.mode)) return s;
+          return { ...s, activity: deriveActivity(s, s.sessionId, now) };
+        });
         // Chat mode Slice C: chat sessions are now visible to remote too. A mode outside
         // REMOTE_ELIGIBLE_SESSION_MODES (Mac-local-only — e.g. a future cowork surface) stays
         // filtered out for remote — see assertRemoteMayUseSession's doc comment above for why this
@@ -954,6 +1150,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const isRemote = socket.data.authedRole === "remote";
         const hubClient: HubClient = {
           clientName: socket.data.clientName,
+          // T5: carried so the hub's detach hook can classify this harness by the daemon's OWN
+          // record of how it authenticated — `"remote"` is the phone's gateway, and a phone must
+          // never lose a running turn to a connection blip whatever it calls itself.
+          role: socket.data.authedRole,
           deliver(event: SessionEvent): boolean {
             // The remote live/replay policy (sessions/remote-stream.ts): allowlist the type,
             // then bound the serialized size. Harness/admin connections are untouched — they
@@ -974,6 +1174,40 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         try {
           const lastSeq = hub.attach(hubClient, p.sessionId, p.fromSeq);
           socket.data.hubClient = hubClient;
+          // session-activity-hygiene T3 (spec §1.4): archived is "resumable only DELIBERATELY —
+          // resume clears the flag", and attaching IS the resume. This is the ONLY clearing point
+          // the daemon needs, because there is no send path around it: `session.send` refuses until
+          // the same connection has attached ("attach to the session first", just below), so no user
+          // message can reach a session without passing through here first — on the Mac (CLI/TUI/
+          // app) and on the phone alike, whose Gateway relays session.attach into this same handler.
+          //
+          // AFTER the attach, never before: a failed attach is not a resume. Conditional on the flag
+          // actually being set so an ordinary attach is a single indexed SELECT with no write, and
+          // so "an archive was cleared" stays a real state change rather than a write-over-NULL on
+          // every session open. `backgrounded` is deliberately NOT touched — the two flags are
+          // independent (store.setArchived's own doc), which is what returns a resumed session to
+          // background rather than to idle.
+          try {
+            if (opts.store.meta(p.sessionId).archived) {
+              opts.store.setArchived(p.sessionId, false);
+              // T4: this un-archive is a real, observable state change — the second `emitActivity`
+              // call site, and the one that is easy to miss because it lives in a different handler
+              // from the RPC that owns the lifecycle. Derived AFTER the clear and after `hub.attach`
+              // (this connection is already counted), so the value announced is what `session.list`
+              // would now answer: "active", or "background" if the background flag survived the
+              // resume. Inside the same try as the read above — a row that vanished mid-attach has
+              // nothing to announce either.
+              hub.emitActivity(p.sessionId, deriveActivity(opts.store.meta(p.sessionId), p.sessionId, Date.now()));
+            }
+          } catch { /* the row vanished between attach and here — nothing left to clear */ }
+          // T5: the attach half of the enforcement — opens the continuously-active span, cancels any
+          // post-turn grace this attachment just interrupted, and announces the new state. Server-
+          // side rather than a hub hook precisely so it runs AFTER the archived-clear above: an
+          // attach-time derivation that ran first would announce "archived" for a session that is
+          // being un-archived by this very call. Its own emit is normally a no-op after the clear's
+          // (same derived value, and the hub's memo eats the repeat) and carries the whole
+          // announcement for the ordinary, non-archived attach.
+          enforcement.onAttached(p.sessionId);
           return { ok: true, lastSeq };
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
@@ -1205,16 +1439,38 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         }
         return { ok: true };
       }
-      // Chat Slice D task 1: per-session model override — mode-agnostic (unlike session.setPolicy
-      // just above, this has NO chat/dispatch special case: there is no "fixed model" concept for
-      // any mode). `assertRemoteMayUseSession` guards it since it's REMOTE_ALLOWED_METHODS-listed
-      // and takes a bare caller-supplied sessionId, same as session.attach/send/history/interrupt
-      // above. `model: null` clears the override (AgentEngine.resolveSel falls back to the
-      // live/boot default on the NEXT turn — this never affects an already-running turn, mirroring
-      // how a live model-settings edit doesn't retroactively change the CURRENT turn either).
+      // Chat Slice D task 1: per-session model override — mode-agnostic for chat/code (unlike
+      // session.setPolicy just above's chat special case). `assertRemoteMayUseSession` guards it
+      // since it's REMOTE_ALLOWED_METHODS-listed and takes a bare caller-supplied sessionId, same
+      // as session.attach/send/history/interrupt above. `model: null` clears the override
+      // (AgentEngine.resolveSel falls back to the live/boot default on the NEXT turn — this never
+      // affects an already-running turn, mirroring how a live model-settings edit doesn't
+      // retroactively change the CURRENT turn either).
+      //
+      // session-activity-hygiene task 1: dispatch now DOES have a fixed-model concept — a user
+      // ruling (DISPATCH_MODEL/DISPATCH_EFFORT, dispatch-config.ts), refused here BEFORE
+      // resolveModelSelection runs (mirrors session.setPolicy's targetMode try/catch idiom just
+      // above: an unknown sessionId must still fall through to this method's own NOT_FOUND, not a
+      // confusing pin refusal that implies the session exists).
+      //
+      // Fix round 1 (reviewer finding): `model: null` (clearing) is the ONE exception — it is
+      // allowed through even for a dispatch target, never refused. Dispatch is a LONG-LIVED
+      // SINGLETON (`store.dispatchSessionId()` reuses the same row forever), and before this pin
+      // shipped both doors were mode-agnostic, so a stored override from that era is a genuine
+      // historical possibility, not a hypothetical. `session.list` reports the raw stored `model`
+      // column VERBATIM (store.ts's `list()`), independent of `resolveSel` — so refusing the clear
+      // unconditionally would make such a pre-pin override PERMANENTLY un-clearable while still
+      // displaying as truth forever. `resolveSel`'s short-circuit ignores the column either way
+      // (zero runtime effect), so letting the clear through is safe and closes a pure
+      // display/data-hygiene hole rather than reopening the pin.
       case METHODS.sessionSetModel: {
         const p = parseParams(SessionSetModelParams, params);
         assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        let targetMode: string | undefined;
+        try { targetMode = opts.store.meta(p.sessionId).mode; } catch { /* unknown id — NOT_FOUND below wins */ }
+        if (targetMode === "dispatch" && p.model !== null) {
+          throw new RpcFailure(ERR.INVALID_PARAMS, DISPATCH_PIN_MESSAGE);
+        }
         let model = p.model;
         // I1 review fix: this method is remote-reachable and hand-callable, so a future picker's
         // UI list must never be the only guard — reuse spawn_agent's own `known.length > 0`-guarded
@@ -1239,11 +1495,25 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // argument on session.setModel just above ("effort and model are two different things, just
       // like the CLI"). Everything structural is that method's, deliberately: the same
       // `assertRemoteMayUseSession` guard (it is REMOTE_ALLOWED_METHODS-listed and takes a bare
-      // caller-supplied sessionId), the same mode-agnosticism, the same `null` = clear, the same
-      // NOT_FOUND mapping, and the same "the next turn resolves it, never the running one".
+      // caller-supplied sessionId), the same mode-agnosticism for chat/code, the same `null` =
+      // clear, the same NOT_FOUND mapping, and the same "the next turn resolves it, never the
+      // running one" — and, as of session-activity-hygiene task 1, the same dispatch fixed-pin
+      // refusal for a non-null set, INCLUDING fix round 1's same null-clear exception (see
+      // session.setModel's own doc comment above for the full reasoning: a pre-pin stored override
+      // on the long-lived dispatch singleton must stay clearable, even though it has zero runtime
+      // effect on what the session actually runs).
       case METHODS.sessionSetEffort: {
         const p = parseParams(SessionSetEffortParams, params);
         assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        // Read ONCE, regardless of null-ness (the dispatch check below needs the mode even for a
+        // clear attempt). An unknown sessionId leaves this undefined and is left to
+        // `store.setEffort` to report — that keeps NOT_FOUND coming from one place regardless of
+        // which branch below ran (and is why none of them may refuse on an absent meta).
+        let sessionMeta: { model?: string; mode?: string } | undefined;
+        try { sessionMeta = opts.store.meta(p.sessionId); } catch { /* unknown id → the store call below owns the error */ }
+        if (sessionMeta?.mode === "dispatch" && p.effort !== null) {
+          throw new RpcFailure(ERR.INVALID_PARAMS, DISPATCH_PIN_MESSAGE);
+        }
         // SET-TIME validation, for the reason session.setModel's exists (I1 review fix: an
         // unvalidated selection bricks every future turn SILENTLY — the provider 400s on each one
         // with nothing pointing back at the setting that caused it). The effort half needs it MORE,
@@ -1265,11 +1535,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // admitted HERE as a client-side selector translated before the request (at
         // `AgentEngine.resolveSel`), never by adding it to `effortsForModel`.
         if (p.effort !== null) {
-          // Read ONCE. An unknown sessionId leaves this undefined and is left to `store.setEffort`
-          // to report — that keeps NOT_FOUND coming from one place regardless of which branch of
-          // `assertEffortSelectable` ran (and is why neither branch may refuse on an absent meta).
-          let sessionMeta: { model?: string; mode?: string } | undefined;
-          try { sessionMeta = opts.store.meta(p.sessionId); } catch { /* unknown id → the store call below owns the error */ }
           // The session's EFFECTIVE model, by the same precedence AgentEngine.resolveSel applies:
           // its own override first, the daemon's live default second. Both rules — the tier's
           // code-only gate and the model-aware wire check, with the m2-review permissive carve-out
@@ -1283,6 +1548,37 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
         return {};
+      }
+      // session-activity-hygiene T3 (spec §1): the WRITE half of the lifecycle T2 made readable.
+      // Structurally a sibling of the two setters above — `assertRemoteMayUseSession` guard (it is
+      // REMOTE_ALLOWED_METHODS-listed and takes a bare caller-supplied sessionId), required-but-
+      // nullable value where `null` CLEARS — with two deliberate differences:
+      //
+      //  1. NOT_FOUND is resolved FIRST, explicitly, instead of being left to the store setter to
+      //     report at the end. Every refusal below reads a FACT about the session (its mode, whether
+      //     a turn is running), so an unknown id must come back as unknown rather than as a refusal
+      //     that implies the session exists. setModel/setEffort get that ordering for free (their
+      //     one refusal is a `=== "dispatch"` test an absent meta can't satisfy); this handler's
+      //     running-turn refusal would NOT — `engine.isRunning` answers for any string handed to it.
+      //  2. It answers with the POST-WRITE DERIVED state rather than a bare `{}`, through the SAME
+      //     `deriveActivity` that stamps `session.list` — so a caller learns what its write actually
+      //     produced (clearing a session whose detached bash task is still writing reads back
+      //     "background", not "idle") without a second round trip that could observe a later moment.
+      //
+      // T8: the body moved to `setSessionActivity` (sessions/set-activity.ts) VERBATIM — same
+      // refusals, same wording, same write order, same post-write re-read, same emission — because
+      // dispatch's `manage_session` tool is now a SECOND door onto this same state machine. Two
+      // doors are fine; two implementations are how "archiving a running session is refused" ends
+      // up true on one door and false on the other. What stays here is what is genuinely the RPC's:
+      // parsing and the remote gate.
+      case METHODS.sessionSetActivity: {
+        const p = parseParams(SessionSetActivityParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        const res = setSessionActivity(setActivityDeps, p.sessionId, p.activity);
+        if (!res.ok) {
+          throw new RpcFailure(res.kind === "not_found" ? ERR.NOT_FOUND : ERR.INVALID_PARAMS, res.error);
+        }
+        return { ok: true, activity: res.activity };
       }
 
       // -----------------------------------------------------------------------------------------
@@ -2079,5 +2375,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     }
   }
 
-  return { stop() { server.stop(true); } };
+  // T5: the enforcement owns real timers (the demotion sweep interval, plus any pending post-turn
+  // grace) — a server torn down without stopping them leaves callbacks that fire against a dead
+  // store, which in a test run is a cross-test leak rather than a crash (they're unref'd).
+  return { stop() { enforcement.stop(); server.stop(true); } };
 }

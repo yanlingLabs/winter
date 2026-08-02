@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { SessionEvent, SESSION_TITLE_MAX_CHARS, type NewSessionEvent } from "@norma/protocol";
@@ -17,8 +17,21 @@ const SCOPE_RE = /^[a-z0-9]([a-z0-9-]{0,39}[a-z0-9])?$/;
  *   2. NAMESPACE SEPARATION. Daemon-minted ids are `s_<12 hex>` (see `createSession`); a phone mints
  *      a UUID. Requiring a UUID here means a synced session can never collide with, or be mistaken
  *      for, one this daemon created itself. Any UUID version/variant is accepted — the phone's
- *      generator is not this daemon's business. */
-const SYNCED_SESSION_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+ *      generator is not this daemon's business.
+ *
+ *  EXPORTED for session-activity-hygiene T7 (spec §3): the cleaner's phone-synced rail is defined
+ *  as "the id matches this shape". Sharing the constant rather than re-typing the regex is what
+ *  keeps the rail and the admission check the same definition of "phone-minted" forever. */
+export const SYNCED_SESSION_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+/** session-activity-hygiene T6 (spec §2): the empty-session reaper's age gate — "created ≥ 10 min
+ *  ago". A session younger than this may simply be mid-composition (the user hasn't sent their
+ *  first message yet), so it must never look like an abandoned empty. Exported so tests pin the
+ *  exact value, mirroring `AUTO_BACKGROUND_GRACE_MS` (activity-enforcement.ts)'s own precedent.
+ *  Inclusive boundary (`emptySessionIds` uses `created_at <= nowMs - EMPTY_SESSION_GRACE_MS`):
+ *  exactly 10 minutes old already counts — this task's own "≥" wording, deliberately not the same
+ *  strict "> 24h" convention T5's demotion sweep uses for an unrelated threshold. */
+export const EMPTY_SESSION_GRACE_MS = 10 * 60_000;
 
 /** Chat Slice D task 2: fork provenance — mirrors the protocol's `SessionForkRef`. */
 export interface SessionForkRef { sessionId: string; atSeq: number }
@@ -66,6 +79,24 @@ export interface SessionRow {
    *  reset-on-rebuild caveat as `model` above — the phone re-sends it on its next push, which is
    *  how it heals. Absent for every session that isn't a fork (almost all of them). */
   forkedFrom?: SessionForkRef;
+  /** session-activity-hygiene T2 (spec §1): the "keep running unattended" flag — one of the TWO
+   *  stored bits of the activity lifecycle (the rest is derived live; see `activityFor` in
+   *  ./activity.ts). Index-only metadata on exactly the `model`/`effort` terms: it does NOT ride
+   *  the event log, so it resets to undefined on a full index.db rebuild.
+   *
+   *  That reset class is a deliberate, acceptable loss here for the same reason it is for `model`:
+   *  the flag is a live-session preference, and an index rebuild already returns every session to
+   *  "nothing running, nothing attached" — a backgrounded session whose flag vanished reads as
+   *  idle, which is exactly what it is after a daemon that lost its index. Absent means "not
+   *  backgrounded"; the flag is never stored as an explicit false. */
+  backgrounded?: boolean;
+  /** session-activity-hygiene T2 (spec §1.4): "hidden under a dedicated tab, resumable only
+   *  deliberately". The second stored bit, on identical terms to `backgrounded` above — additive
+   *  index column, same reset-on-rebuild class as `model`/`effort`, absent means "not archived".
+   *
+   *  Independent of `backgrounded`, not a second value of one column: a session can be flagged
+   *  background and later archived, and clearing one must not clear the other. */
+  archived?: boolean;
 }
 
 /** Chat Slice D task 2 fix round (review I2): bounds a title at `SESSION_TITLE_MAX_CHARS`.
@@ -140,6 +171,20 @@ export class SessionStore {
       // blob so the pair is queryable and can never be half-parseable.
       "ALTER TABLE sessions ADD COLUMN forked_from_session_id TEXT",
       "ALTER TABLE sessions ADD COLUMN forked_from_at_seq INTEGER",
+      // session-activity-hygiene T2 (spec §1): the two stored bits of the activity lifecycle. The
+      // SAME additive index-only pattern as `model`/`effort` above, deliberately not a third shape.
+      // Stored 1/0 (NULL on every pre-existing row) and read back as `true | undefined`.
+      "ALTER TABLE sessions ADD COLUMN backgrounded INTEGER",
+      "ALTER TABLE sessions ADD COLUMN archived INTEGER",
+      // session-activity-hygiene T7 (spec §3): the cleaner's once-per-lifetime stamp — the epoch-ms
+      // at which an LLM judgment KEPT this session, NULL for every session never judged. Same
+      // additive index-only pattern as the columns above, with one consequence worth stating
+      // outright: a full index.db loss (recoverAll's pass-2 rebuild, which restores only `mode`)
+      // therefore clears it, and a previously-kept session becomes judgeable once more. That is the
+      // same accepted loss class as `backgrounded`/`archived`/`cwd`, and the only way out of it
+      // would be to put the stamp in the event log — a protocol change deliberately out of T7's
+      // scope. See cleaner.ts for the permanence rule this column implements.
+      "ALTER TABLE sessions ADD COLUMN judged INTEGER",
     ]) {
       try { this.db.run(ddl); }
       catch (e) {
@@ -318,8 +363,8 @@ export class SessionStore {
   }
 
   list(): SessionRow[] {
-    return (this.db.query("SELECT session_id, scope, created_at, last_seq, title, first_message, cwd, origin, mode, parent_session_id, model, effort, forked_from_session_id, forked_from_at_seq FROM sessions ORDER BY created_at").all() as
-      { session_id: string; scope: string; created_at: number; last_seq: number; title: string | null; first_message: string | null; cwd: string | null; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null; effort: string | null; forked_from_session_id: string | null; forked_from_at_seq: number | null }[])
+    return (this.db.query("SELECT session_id, scope, created_at, last_seq, title, first_message, cwd, origin, mode, parent_session_id, model, effort, forked_from_session_id, forked_from_at_seq, backgrounded, archived FROM sessions ORDER BY created_at").all() as
+      { session_id: string; scope: string; created_at: number; last_seq: number; title: string | null; first_message: string | null; cwd: string | null; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null; effort: string | null; forked_from_session_id: string | null; forked_from_at_seq: number | null; backgrounded: number | null; archived: number | null }[])
       .map((r) => ({
         sessionId: r.session_id,
         scope: r.scope,
@@ -340,6 +385,12 @@ export class SessionStore {
         forkedFrom: r.forked_from_session_id !== null && r.forked_from_at_seq !== null
           ? { sessionId: r.forked_from_session_id, atSeq: r.forked_from_at_seq }
           : undefined,
+        // session-activity-hygiene T2: `true | undefined`, never `false` — a cleared flag must be
+        // indistinguishable from one never set (that is what makes `absent = off` a single case for
+        // every reader instead of two). Truthiness rather than `=== 1` so a hand-edited row or a
+        // future writer that stores some other non-zero integer still reads as "on".
+        backgrounded: r.backgrounded ? true : undefined,
+        archived: r.archived ? true : undefined,
       }));
   }
 
@@ -389,12 +440,71 @@ export class SessionStore {
     if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
   }
 
+  /** session-activity-hygiene T2 (spec §1.2): the "keep running unattended" flag. `on: false`
+   *  CLEARS it (stored NULL, so it reads back absent — see `list()`'s mapping for why a cleared
+   *  flag must not become `false`). Same contract as `setModel`/`setEffort` directly above: throws
+   *  on an unknown session so the IPC layer maps it to NOT_FOUND, and setting the same value twice
+   *  is a successful no-op.
+   *
+   *  Storage only — this writes the bit and nothing else. Deciding WHEN it flips (the `/background`
+   *  verb, dispatch-spawned defaults, the app's per-turn auto-background, the >24h demotion) and
+   *  announcing the flip belong to their own seams, exactly as `setEffort` stores a value whose
+   *  legality is checked at the RPC boundary. */
+  setBackgrounded(sessionId: string, on: boolean): void {
+    const res = this.db.run("UPDATE sessions SET backgrounded = ? WHERE session_id = ?", [on ? 1 : null, sessionId]);
+    if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
+  }
+
+  /** session-activity-hygiene T2 (spec §1.4): the archive flag — identical contract to
+   *  `setBackgrounded` directly above, and an INDEPENDENT column: archiving a backgrounded session
+   *  leaves it backgrounded, and un-archiving does not clear that. */
+  setArchived(sessionId: string, on: boolean): void {
+    const res = this.db.run("UPDATE sessions SET archived = ? WHERE session_id = ?", [on ? 1 : null, sessionId]);
+    if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
+  }
+
+  /** session-activity-hygiene T2: when this session's log was last appended to, from the log
+   *  file's mtime (the JSONL is append-only, so its mtime IS its last event's timestamp) with
+   *  `created_at` as both the floor and the fallback for a session whose log is missing.
+   *
+   *  Derived rather than stored on purpose: a `last_event_ts` column would be a second writer on
+   *  every `append()` that a full index rebuild would then have to re-derive from the logs anyway.
+   *
+   *  DELIBERATELY NOT part of `list()`: that method is shared with `sync.heads` and
+   *  `daemon.status`, neither of which needs a filesystem stat per session. Callers that need the
+   *  value take the per-session cost — see `ActivitySignals.lastEventTs` for why a plausible
+   *  stand-in (e.g. `createdAt`) is not an acceptable substitute. */
+  lastEventTs(sessionId: string): number {
+    const row = this.db.query("SELECT scope, created_at FROM sessions WHERE session_id = ?").get(sessionId) as
+      | { scope: string; created_at: number } | null;
+    if (!row) throw new Error(`unknown session: ${sessionId}`);
+    try { return Math.max(Math.round(statSync(this.logPath(row.scope, sessionId)).mtimeMs), row.created_at); }
+    catch { return row.created_at; } // no log on disk yet (or unreadable): creation is the honest floor
+  }
+
+  /** session-activity-hygiene T8: where this session's append-only JSONL actually lives — the
+   *  PUBLIC form of the private `logPath` every write/read in this class already uses, so the one
+   *  surface that shows a user (or a model) that path cannot compose its own guess of it.
+   *
+   *  Read-only and existence-agnostic: it answers "where would this session's log be", which is a
+   *  fact about the store's layout, not about the filesystem — a brand-new session whose log has
+   *  not been flushed yet still has a correct path. Throws on an unknown session (the
+   *  `lastEventTs`/`setApprovalPolicy` precedent): composing a path for a session that does not
+   *  exist is a bug, not a blank answer. */
+  transcriptPath(sessionId: string): string {
+    const row = this.db.query("SELECT scope FROM sessions WHERE session_id = ?").get(sessionId) as
+      | { scope: string } | null;
+    if (!row) throw new Error(`unknown session: ${sessionId}`);
+    return this.logPath(row.scope, sessionId);
+  }
+
   meta(sessionId: string): {
     sessionId: string; scope: string; cwd: string | null; approvalPolicy: SessionApprovalPolicy;
     origin?: string; mode?: string; parentSessionId?: string; model?: string; effort?: string;
+    backgrounded?: boolean; archived?: boolean;
   } {
-    const row = this.db.query("SELECT scope, cwd, approval_policy, origin, mode, parent_session_id, model, effort FROM sessions WHERE session_id = ?").get(sessionId) as
-      | { scope: string; cwd: string | null; approval_policy: string; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null; effort: string | null } | null;
+    const row = this.db.query("SELECT scope, cwd, approval_policy, origin, mode, parent_session_id, model, effort, backgrounded, archived FROM sessions WHERE session_id = ?").get(sessionId) as
+      | { scope: string; cwd: string | null; approval_policy: string; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null; effort: string | null; backgrounded: number | null; archived: number | null } | null;
     if (!row) throw new Error(`unknown session: ${sessionId}`);
     const p = row.approval_policy;
     // Plan-immunity (2026-07-28, USER-REVISED design): "chat" (gate.ts's SessionApprovalPolicy)
@@ -411,7 +521,144 @@ export class SessionStore {
       origin: row.origin ?? undefined, mode: row.mode ?? undefined, parentSessionId: row.parent_session_id ?? undefined,
       model: row.model ?? undefined,
       effort: row.effort ?? undefined,
+      // session-activity-hygiene T3: the two activity flags, mapped `1 → true` / `NULL → undefined`
+      // EXACTLY as `list()` maps them — a cleared flag must stay indistinguishable from one never
+      // set (never coerced to `false`), or the derivation's "absent means not backgrounded" rule
+      // would read differently through this door than through that one. Served here, and not left
+      // to a `list()` scan, because the per-session readers that need them (`session.setActivity`'s
+      // post-write derivation, `session.attach`'s resume-clears-archived check) address ONE session
+      // and must not pay a full-table read plus its per-row title capping to learn one bit.
+      backgrounded: row.backgrounded ? true : undefined,
+      archived: row.archived ? true : undefined,
     };
+  }
+
+  /** session-activity-hygiene T6 (spec §2): candidate ids for the empty-session reaper — sessions
+   *  with zero user/assistant messages, old enough that composing a first message is implausible,
+   *  and not currently attached to any harness. The dispatch session (if one exists) is excluded
+   *  outright: it is the daemon's one long-lived coordinator, driven by tool calls rather than chat
+   *  messages, so it normally carries no main-thread `user_message` at all — without this exclusion
+   *  it would look permanently empty. `deleteSession` below refuses it too (belt, not suspenders:
+   *  every future caller gets the same protection independent of this exclusion).
+   *
+   *  `first_message IS NULL` (set by `append`/`appendSynced`'s `user_message` derivation) is the
+   *  cheap SQL pre-filter — a full table scan (the `sessions` table carries no index beyond its
+   *  primary key), same as `cleanerCandidateIds` below — narrowing to a small candidate set in the
+   *  common case — most sessions get a first message within seconds of creation. It is NOT trusted
+   *  alone: it only ever tracks main-thread USER messages, so it says nothing about assistant
+   *  output, and `recoverAll`'s skip-bad-lines repair (a corrupt line is dropped, not stopped at —
+   *  see `readGoodLines`) can
+   *  leave a log whose `user_message` line was corrupted-and-dropped while a LATER `assistant_message`
+   *  line survived — `first_message` would then read NULL on a session that plainly produced real
+   *  output (reaper.test.ts's "recovered log" case reproduces exactly this). So every
+   *  first_message-IS-NULL candidate that survives the attached-check below gets a real scan of its
+   *  parsed log (`read()`, already skip-bad-lines-safe) for ANY `user_message`/`assistant_message`
+   *  event before being called empty — cheap, because the SQL filter already narrowed the set this
+   *  scan ever runs against.
+   *
+   *  `attachedCount` is injected rather than read off a stored `SessionHub`: the store has never
+   *  held a hub reference (hub depends on store, never the reverse) — mirrors
+   *  `ActivityEnforcementDeps.attachedCount` (activity-enforcement.ts)'s identical shape. `nowMs` is
+   *  a plain required parameter (the `activityFor`/`deriveActivity` precedent) rather than a clock
+   *  dependency: this is a one-shot query with no state of its own to hold a clock across calls. */
+  emptySessionIds(attachedCount: (sessionId: string) => number, nowMs: number): string[] {
+    const cutoff = nowMs - EMPTY_SESSION_GRACE_MS;
+    const rows = this.db.query(
+      `SELECT session_id FROM sessions
+       WHERE first_message IS NULL AND created_at <= ? AND (mode IS NULL OR mode != 'dispatch')`,
+    ).all(cutoff) as { session_id: string }[];
+    const candidates: string[] = [];
+    for (const { session_id: sessionId } of rows) {
+      if (attachedCount(sessionId) !== 0) continue;
+      const hasContent = this.read(sessionId).some((e) => e.type === "user_message" || e.type === "assistant_message");
+      if (!hasContent) candidates.push(sessionId);
+    }
+    return candidates;
+  }
+
+  /** session-activity-hygiene T7 (spec §3): the cleaner's cheap SQL pre-filter — every session
+   *  never judged, created at or before `createdBeforeMs`, that isn't the dispatch session.
+   *
+   *  `created_at` (not the real gate) is deliberate and SOUND: the cleaner's gate is "last event ≥
+   *  24 h old", and `lastEventTs` is `max(log mtime, created_at)` — never LESS than `created_at`.
+   *  So a row created after the cutoff cannot possibly have an older last event, and filtering on
+   *  `created_at` can only ever admit too many, never too few. The caller re-checks the real
+   *  `lastEventTs` gate per candidate (cleaner.ts's `railFor`); this query exists so that check
+   *  runs against a small set rather than every session ever created.
+   *
+   *  The dispatch exclusion is the BELT (`emptySessionIds`'s own precedent, and `deleteSession`
+   *  refuses it besides): the cleaner rails it independently too, so the singleton is protected by
+   *  three separate mechanisms. It also saves a pointless full parse of the daemon's single largest
+   *  log on every pass.
+   *
+   *  No index backs this (the `sessions` table has none beyond the primary key), so it is a full
+   *  table scan — fine at any plausible session count, and the alternative (a column index that
+   *  every write then maintains) is not worth it until a real N says otherwise. */
+  cleanerCandidateIds(createdBeforeMs: number): string[] {
+    return (this.db.query(
+      `SELECT session_id FROM sessions
+       WHERE judged IS NULL AND created_at <= ? AND (mode IS NULL OR mode != 'dispatch')
+       ORDER BY created_at`,
+    ).all(createdBeforeMs) as { session_id: string }[]).map((r) => r.session_id);
+  }
+
+  /** session-activity-hygiene T7: when an LLM judgment KEPT this session, or null if it was never
+   *  judged. The cleaner reads it twice per candidate — once through `cleanerCandidateIds`'s
+   *  `judged IS NULL` filter, and once again immediately before deleting (the mid-cycle re-check).
+   *  Throws on an unknown session, the `setModel`/`setEffort` precedent. */
+  judgedAt(sessionId: string): number | null {
+    const row = this.db.query("SELECT judged FROM sessions WHERE session_id = ?").get(sessionId) as
+      | { judged: number | null } | null;
+    if (!row) throw new Error(`unknown session: ${sessionId}`);
+    return row.judged;
+  }
+
+  /** session-activity-hygiene T7 (spec §3): stamps the once-per-lifetime judgment. WRITE-ONCE by
+   *  construction — `COALESCE(judged, ?)` keeps whatever is already there, so a second call can
+   *  never move the date and no caller has to remember to check first. That is the whole permanent-
+   *  immunity rule in one SQL function: a judged-kept session is never re-examined however it later
+   *  changes, and only the user can delete it thereafter.
+   *
+   *  There is deliberately NO un-stamp method. Throws on an unknown session (the `setModel`
+   *  precedent — `changes` counts the matched row whether or not COALESCE changed the value). */
+  markJudged(sessionId: string, atMs: number): void {
+    const res = this.db.run("UPDATE sessions SET judged = COALESCE(judged, ?) WHERE session_id = ?", [atMs, sessionId]);
+    if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
+  }
+
+  /** session-activity-hygiene T7 (spec §3): the fork rail, BOTH directions in one query — this
+   *  session is either a fork child (its own `forked_from_session_id` is set) or a fork parent
+   *  (some other row points at it). The parent direction needs the reverse lookup precisely because
+   *  a parent's own row records nothing about having been forked; without it, deleting a parent
+   *  would orphan its child's provenance. Unknown ids answer `false` rather than throwing — a rail
+   *  is a question about a session, and "no fork relationship on record" is the honest answer for a
+   *  row that isn't there. */
+  isForkRelated(sessionId: string): boolean {
+    const row = this.db.query(
+      `SELECT 1 AS hit FROM sessions
+       WHERE (session_id = ? AND forked_from_session_id IS NOT NULL) OR forked_from_session_id = ?
+       LIMIT 1`,
+    ).get(sessionId, sessionId) as { hit: number } | null;
+    return row !== null;
+  }
+
+  /** session-activity-hygiene T6 (spec §2, the amended sessions rule): FULL deletion — the JSONL
+   *  log file and the index row. Refuses the dispatch session UNCONDITIONALLY: this is the belt for
+   *  every caller (T7's cleaner calls this same method), not just `emptySessionIds`'s own exclusion
+   *  above — a singleton this fundamental (`DispatchChildren.start()` rebuilds its child roster
+   *  against `dispatchSessionId()`) must never be deletable through any path, even a future one that
+   *  forgets to check first. Throws on an unknown session — the `setApprovalPolicy`/`setModel`
+   *  precedent: a caller deleting a session that doesn't exist is a bug, not a silent no-op. A
+   *  missing log file (already gone, somehow) is tolerated — the index row is still the correct
+   *  thing to remove. */
+  deleteSession(sessionId: string): void {
+    const row = this.db.query("SELECT scope, mode FROM sessions WHERE session_id = ?").get(sessionId) as
+      | { scope: string; mode: string | null } | null;
+    if (!row) throw new Error(`unknown session: ${sessionId}`);
+    if (row.mode === "dispatch") throw new Error(`refusing to delete the dispatch session: ${sessionId}`);
+    const path = this.logPath(row.scope, sessionId);
+    if (existsSync(path)) unlinkSync(path);
+    this.db.run("DELETE FROM sessions WHERE session_id = ?", [sessionId]);
   }
 
   // -----------------------------------------------------------------------------------------

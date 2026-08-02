@@ -187,15 +187,68 @@ describe("session.setEffort round-trip RPC (provider-correctness T4)", () => {
     c.close();
   });
 
-  test("works for a DISPATCH session too", async () => {
+  // session-activity-hygiene task 1: dispatch's effort is a FIXED PIN (DISPATCH_EFFORT) — replaces
+  // the old "works for a DISPATCH session too" control (mode-agnosticism no longer holds for
+  // dispatch specifically; chat just above is unaffected). The door refuses OUTRIGHT, before
+  // assertEffortSelectable even runs.
+  test("refuses a DISPATCH target with INVALID_PARAMS naming the pin — the effort is never stored", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "effort-setter");
     const sessionId = store.createSession("global", { mode: "dispatch", origin: "dispatch" });
 
     const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort: "medium" });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error.message).toContain("dispatch runs a fixed model");
+    expect(res.error.message).toContain("gpt-5.6-terra");
+    expect(res.error.message).toContain("medium");
+    expect(store.meta(sessionId).effort).toBeUndefined();
+    c.close();
+  });
+
+  // Fix round 1 (reviewer finding, mirrors session.setModel's own): dispatch is a LONG-LIVED
+  // SINGLETON (store.dispatchSessionId() reuses the same row forever), and BEFORE this task's
+  // commit both doors were mode-agnostic — a stored override written during that era is a genuine
+  // historical possibility. `session.list` reports the raw stored `effort` column VERBATIM
+  // (store.ts's `list()`), independent of `resolveSel` — so refusing the clear unconditionally
+  // would make a pre-pin override PERMANENTLY un-clearable while displaying as truth forever
+  // (zero runtime effect, since resolveSel's short-circuit wins regardless — but a real
+  // display/data-hygiene defect). `effort: null` therefore SUCCEEDS even against a dispatch
+  // target; only a non-null SET is refused (the test just above).
+  test("effort: null SUCCEEDS as a clear even against a DISPATCH target — only a non-null set is refused", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "effort-setter");
+    const sessionId = store.createSession("global", { mode: "dispatch", origin: "dispatch" });
+
+    const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort: null });
     expect(res.error).toBeUndefined();
-    expect(store.meta(sessionId).effort).toBe("medium");
+    expect(store.meta(sessionId).effort).toBeUndefined();
+    c.close();
+  });
+
+  // The historical-override scenario itself, end to end: a stored override from BEFORE this
+  // task's pin shipped (simulated here by writing it directly via `store.setEffort`, bypassing
+  // the RPC door entirely — exactly how such a row would have gotten there pre-fix) is removable
+  // by the null-clear above, and `session.list` — which reads the raw column, never `resolveSel`
+  // — stops reporting it the moment it's cleared.
+  test("a PRE-PIN stored override on a dispatch session is clearable, and session.list stops reporting it once cleared", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "effort-setter");
+    const sessionId = store.createSession("global", { mode: "dispatch", origin: "dispatch" });
+    store.setEffort(sessionId, "xhigh"); // simulates a row written before this fix existed
+
+    const listedBefore = await c.request(METHODS.sessionList, {});
+    expect(listedBefore.result.sessions.find((s: any) => s.sessionId === sessionId).effort).toBe("xhigh");
+
+    const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort: null });
+    expect(res.error).toBeUndefined();
+    expect(store.meta(sessionId).effort).toBeUndefined();
+
+    const listedAfter = await c.request(METHODS.sessionList, {});
+    expect(listedAfter.result.sessions.find((s: any) => s.sessionId === sessionId).effort).toBeUndefined();
     c.close();
   });
 
@@ -409,28 +462,56 @@ describe("session.setEffort admits the ultra tier for CODE sessions only (provid
     c.close();
   });
 
-  for (const mode of ["chat", "dispatch"] as const) {
-    test(`a ${mode.toUpperCase()} session REFUSES \`ultra\` with the same INVALID_PARAMS shape, and the column stays empty`, async () => {
-      const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
-      const c = await TestClient.connect(socketPath);
-      await c.hello(harnessToken, "effort-setter");
-      const sessionId = store.createSession("global", { mode });
+  // CHAT only now — session-activity-hygiene task 1's dispatch pin (below) supersedes dispatch's
+  // half of what used to be a `["chat", "dispatch"]` parametrized loop: dispatch refuses EVERY
+  // effort (tier or wire) with the pin message rather than this tier-specific one. Chat is
+  // untouched by that task, so its case stays exactly as it was.
+  test("a CHAT session REFUSES `ultra` with the same INVALID_PARAMS shape, and the column stays empty", async () => {
+    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "effort-setter");
+    const sessionId = store.createSession("global", { mode: "chat" });
 
-      const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort: "ultra" });
+    const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort: "ultra" });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error.message).toContain("ultra");
+    expect(store.meta(sessionId).effort).toBeUndefined();
+
+    // ...and the refusal is scoped to the TIER: the same session still takes every WIRE effort,
+    // so this is not "chat cannot set an effort".
+    for (const effort of effortsForModel("gpt-5.6-sol")) {
+      expect((await c.request(METHODS.sessionSetEffort, { sessionId, effort })).error).toBeUndefined();
+      expect(store.meta(sessionId).effort).toBe(effort);
+    }
+    c.close();
+  });
+
+  // DISPATCH: the blanket pin refuses `ultra` too, but with the PIN message, not
+  // assertEffortSelectable's "Norma-level tier offered on code sessions only" one — and unlike
+  // chat, EVERY wire effort is refused as well (dispatch can't set an effort at all, tier or
+  // otherwise; chat only loses the tier). This is the contrast the comment above promises.
+  test("a DISPATCH session refuses `ultra` (and every wire effort) with the PIN message, not the tier-specific one", async () => {
+    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "effort-setter");
+    const sessionId = store.createSession("global", { mode: "dispatch" });
+
+    const tierRes = await c.request(METHODS.sessionSetEffort, { sessionId, effort: "ultra" });
+    expect(tierRes.error).toBeTruthy();
+    expect(tierRes.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(tierRes.error.message).toContain("dispatch runs a fixed model");
+    expect(store.meta(sessionId).effort).toBeUndefined();
+
+    for (const effort of effortsForModel("gpt-5.6-sol")) {
+      const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort });
       expect(res.error).toBeTruthy();
       expect(res.error.code).toBe(ERR.INVALID_PARAMS);
-      expect(res.error.message).toContain("ultra");
+      expect(res.error.message).toContain("dispatch runs a fixed model");
       expect(store.meta(sessionId).effort).toBeUndefined();
-
-      // ...and the refusal is scoped to the TIER: the same session still takes every WIRE effort,
-      // so this is not "chat/dispatch cannot set an effort".
-      for (const effort of effortsForModel("gpt-5.6-sol")) {
-        expect((await c.request(METHODS.sessionSetEffort, { sessionId, effort })).error).toBeUndefined();
-        expect(store.meta(sessionId).effort).toBe(effort);
-      }
-      c.close();
-    });
-  }
+    }
+    c.close();
+  });
 
   test("the tier is NOT routed through effortsForModel — an unenumerable model still accepts it", async () => {
     // `effortsForModel` describes what the ENDPOINT accepts; the tier never reaches the endpoint, so

@@ -16,11 +16,13 @@ import XCTest
 /// drifting — from the TypeScript side, and from its own case-level twin `isTransient`.
 final class SessionEventTransientTests: XCTestCase {
 
-    /// The canonical seven, as literals. Deliberately NOT read from `transientTypes` — this is the
+    /// The canonical eight, as literals. Deliberately NOT read from `transientTypes` — this is the
     /// remote-allowlist parity pattern: each side pins its own copy to the same literal list, so
     /// editing one side alone fails a test instead of silently diverging. The TypeScript half is
-    /// `packages/core/test/ipc/remote-live-stream.test.ts`, which pins the identical seven strings.
-    private static let seven: Set<String> = [
+    /// `packages/core/test/ipc/remote-live-stream.test.ts`, which pins the identical eight strings.
+    ///
+    /// Growth log: 7 → 8 (session-activity-hygiene T4, `session_activity`).
+    private static let eight: Set<String> = [
         "assistant_delta",
         "lease_granted",
         "lease_lost",
@@ -28,12 +30,13 @@ final class SessionEventTransientTests: XCTestCase {
         "plugin_tool_invoke",
         "hardware_requested",
         "plugin_tile_updated",
+        "session_activity",
     ]
 
-    func testTransientTypesIsExactlyTheSeven() {
-        XCTAssertEqual(SessionEvent.transientTypes, Self.seven,
+    func testTransientTypesIsExactlyTheEight() {
+        XCTAssertEqual(SessionEvent.transientTypes, Self.eight,
                        "SessionEvent.transientTypes must stay in lockstep with TRANSIENT_EVENT_TYPES in packages/protocol/src/events.ts")
-        XCTAssertEqual(SessionEvent.transientTypes.count, 7)
+        XCTAssertEqual(SessionEvent.transientTypes.count, 8)
     }
 
     /// `isTransient` (the case switch, used by `NormaClient` on decoded events) and
@@ -60,7 +63,7 @@ final class SessionEventTransientTests: XCTestCase {
         }
 
         // A typo in `transientTypes` would pass the check above vacuously (a string no fixture ever
-        // carries is never tested). Every one of the seven must correspond to a real, emitted type.
+        // carries is never tested). Every one of them must correspond to a real, emitted type.
         for t in SessionEvent.transientTypes {
             XCTAssertTrue(seenTypes.contains(t), "\(t) is in transientTypes but matches no protocol fixture — typo, or a removed event type")
         }
@@ -80,5 +83,12 @@ final class SessionEventTransientTests: XCTestCase {
 
         let attached = SessionEvent.harnessAttached(.init(seq: 2, sessionId: "s1", ts: 0, clientName: "cli"))
         XCTAssertFalse(attached.isTransient, "harness_attached is PERSISTED bookkeeping — it consumes a real seq slot")
+
+        // session-activity-hygiene T4: the lifecycle signal is transient for the same reason the
+        // delta is — it borrows the store's lastSeq and is never appended, so a client that deduped
+        // it on seq would drop every state flip, permanently and silently.
+        let activity = SessionEvent.sessionActivity(.init(seq: 2, sessionId: "s1", ts: 0, activity: "background"))
+        XCTAssertTrue(activity.isTransient)
+        XCTAssertTrue(SessionEvent.transientTypes.contains("session_activity"))
     }
 }

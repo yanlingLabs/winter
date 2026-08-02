@@ -94,7 +94,10 @@ function uuid(): string { return crypto.randomUUID(); }
 
 /** The `session.setModel`/`sync.push`/`sync.config` shape — the ONE catalogue source. */
 function fakeEngine(models: ModelInfo[]): any {
-  return { knownModels: () => models, isRunning: () => false };
+  // session-activity-hygiene T2/T5: `hasBackgroundWork` beside `isRunning`, and `interrupt` beside
+  // both — session.list's activity signals read the first two and T5's last-detach enforcement calls
+  // the third. An `any`-cast double missing one fails at RUNTIME, not at compile time.
+  return { knownModels: () => models, isRunning: () => false, hasBackgroundWork: () => false, interrupt: () => ({ wasRunning: false }) };
 }
 
 const CATALOGUE: ModelInfo[] = [

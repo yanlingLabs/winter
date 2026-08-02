@@ -2335,6 +2335,46 @@
         "error"
       ],
       "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "type": {
+          "type": "string",
+          "const": "session_activity"
+        },
+        "activity": {
+          "type": "string",
+          "enum": [
+            "active",
+            "background",
+            "idle",
+            "archived"
+          ]
+        }
+      },
+      "required": [
+        "seq",
+        "sessionId",
+        "ts",
+        "type",
+        "activity"
+      ],
+      "additionalProperties": false
     }
   ]
 }

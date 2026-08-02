@@ -298,6 +298,18 @@ export const Settings = z.object({
     enabled: z.boolean().optional(),
     keywordTrigger: z.boolean().optional(),
   }).optional(),
+  /** The session cleaner (session-activity-hygiene T7, spec §3) — the LLM-judged pass that deletes
+   *  old, idle, unjudged junk sessions. `enabled` default-ON (`!== false`, the same shape as
+   *  hooks/memory/lsp/workflows above), read LIVE by daemon.ts's `cleanerEnabledHot` closure over
+   *  the hot-swapped settings holder: turning it off stops the very NEXT pass, and turning it back
+   *  on resumes at the next one, with no daemon restart in either direction (the project's standing
+   *  no-restart-for-settings rule).
+   *
+   *  Deliberately does NOT gate the empty-session reaper (T6) — that path deletes only sessions
+   *  with no content at all and is not a judgment. */
+  cleaner: z.object({
+    enabled: z.boolean().optional(),
+  }).optional(),
 });
 export type Settings = z.infer<typeof Settings>;
 
@@ -330,6 +342,13 @@ export const keywordTriggerEnabledFrom = (s: Settings): boolean => s.workflows?.
  *  off. The single place THIS decision is made — engine.ts's post-write/edit/notebook_edit hook
  *  calls this (via a live getter over the `settings` holder) rather than re-deriving it inline. */
 export const lspAutoDiagnosticsEnabledFrom = (s: Settings): boolean => s.lsp?.autoDiagnostics !== false;
+
+/** session-activity-hygiene T7: same default-ON shape as `memoryEnabledFrom`/`workflowsEnabledFrom`
+ *  above — absent block, absent field, or `true` all mean the session cleaner's pass runs; only an
+ *  explicit `false` turns it off. The single place THIS decision is made: daemon.ts's
+ *  `cleanerEnabledHot` live getter calls it rather than re-deriving the `!== false` shape inline,
+ *  so the two can never drift. */
+export const cleanerEnabledFrom = (s: Settings): boolean => s.cleaner?.enabled !== false;
 
 // gpt-5.4 was the pre-deprecation default; fully deprecated per the 2026-07-10 user decision
 // (packages/core/src/providers/codex-config.ts) — a fresh v1→v2 migration must not persist a

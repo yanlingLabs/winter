@@ -160,7 +160,7 @@ public actor NormaClient {
             // `sessionId:"$system"` sentinel, never a real attached session).
             //
             // The membership test is `SessionEvent.isTransient` (NormaProtocol) — the ONE
-            // cross-language definition of the seven, mirroring the daemon's own
+            // cross-language definition of the transient set, mirroring the daemon's own
             // `TRANSIENT_EVENT_TYPES`. It used to be a literal case list here, hand-copied into
             // the phone client and the daemon's live filter; the phone's copy was simply missing,
             // which killed 100% of iOS streaming with a green suite. Derive, never re-list.
@@ -308,6 +308,7 @@ extension SessionEvent {
         case .workflowProgress(let v): return v.seq
         case .workflowCompleted(let v): return v.seq
         case .workflowFailed(let v): return v.seq
+        case .sessionActivity(let v): return v.seq
         }
     }
 
@@ -357,6 +358,7 @@ extension SessionEvent {
         case .workflowProgress(let v): return v.sessionId
         case .workflowCompleted(let v): return v.sessionId
         case .workflowFailed(let v): return v.sessionId
+        case .sessionActivity(let v): return v.sessionId
         }
     }
 }

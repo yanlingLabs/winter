@@ -25,3 +25,34 @@ test("activeTurnCount is 0 when idle, 1 mid-turn, 0 after", async () => {
   await turn;
   expect(engine.activeTurnCount()).toBe(0);
 });
+
+// session-activity-hygiene T8: the same `runningTurns` map, now stamped — `turnStartedAt` is the
+// running-turn DURATION source dispatch's `list_sessions` shows. Undefined is the load-bearing
+// half: "no turn is running" must never read as a zero-length turn that started at the epoch.
+test("turnStartedAt is undefined when idle, a real start stamp mid-turn, and undefined again after", async () => {
+  const gate = deferred();
+  const provider = new GatedProvider(
+    [[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]],
+    [gate.promise],
+  );
+  const { engine, sessionId } = setupEngine(provider);
+
+  expect(engine.turnStartedAt(sessionId)).toBeUndefined();
+
+  const before = Date.now();
+  const turn = engine.runTurn(sessionId);
+  await Bun.sleep(20);
+  const startedAt = engine.turnStartedAt(sessionId);
+  expect(startedAt).toBeDefined();
+  expect(startedAt!).toBeGreaterThanOrEqual(before);
+  expect(startedAt!).toBeLessThanOrEqual(Date.now());
+  // Same map as isRunning — the two can never disagree about whether a turn is in flight.
+  expect(engine.isRunning(sessionId)).toBe(true);
+
+  gate.resolve();
+  await turn;
+  expect(engine.turnStartedAt(sessionId)).toBeUndefined();
+  expect(engine.isRunning(sessionId)).toBe(false);
+  // A session that never ran anything is undefined too, not 0.
+  expect(engine.turnStartedAt("s_never_ran")).toBeUndefined();
+});

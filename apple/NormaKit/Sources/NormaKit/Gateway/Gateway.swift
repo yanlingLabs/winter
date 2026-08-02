@@ -41,7 +41,7 @@ import NormaSessionKit
 public actor Gateway {
     /// Mirrors the daemon's own `REMOTE_ALLOWED_METHODS` (packages/core/src/ipc/server.ts) as an
     /// independent Swift constant — defense in depth: the gateway rejects an off-list method
-    /// BEFORE it ever reaches the daemon, which enforces the identical 16-method allowlist itself.
+    /// BEFORE it ever reaches the daemon, which enforces the identical 20-method allowlist itself.
     /// SP3 T4b added `approval.list` (10th). SP3.4 added `session.create` (11th). Session history
     /// (design 2026-07-23) added `session.history` (12th) — a pure passthrough, no special-casing.
     /// Chat Slice D task 1 added `session.setModel` (13th) — the phone sets the model on a
@@ -57,6 +57,10 @@ public actor Gateway {
     /// effort on a remote-driven session. A separate method from `session.setModel` on purpose
     /// ("effort and model are two different things, just like the CLI"); also a pure passthrough —
     /// the daemon owns the per-model validity check, since only it knows the session's model.
+    /// session-activity-hygiene T3 added `session.setActivity` (20th) — the phone backgrounds or
+    /// archives a remote-driven code session, the write half of the `activity` state `session.list`
+    /// has carried since T2. Also a pure passthrough: the daemon owns the participation rule
+    /// (chat/dispatch have no lifecycle) and the "can't archive a running turn" refusal.
     static let remoteAllowedMethods: Set<String> = [
         "protocol.hello", "session.list", "session.attach", "session.send",
         "session.dispatch", "approval.respond", "ask_user.respond",
@@ -69,6 +73,8 @@ public actor Gateway {
         "session.setModel",
         // provider-correctness T4: and its reasoning effort, a separate axis with its own method.
         "session.setEffort",
+        // session-activity-hygiene T3: and its lifecycle state (background/archive/clear).
+        "session.setActivity",
         // Chat Slice D task 2: the phone replicates its own chat-session logs both ways.
         "sync.heads", "sync.pull", "sync.push",
         // Chat Slice D task 3: the phone's standalone-chat config bundle + memory-bucket replica.

@@ -123,7 +123,10 @@ async function pushChunked(
 
 /** A stub engine exposing only what `session.setModel`/`sync.push` consult. */
 function fakeEngine(ids: string[]): any {
-  return { knownModels: () => ids.map((id) => ({ id })), isRunning: () => false };
+  // session-activity-hygiene T2/T5: `hasBackgroundWork` beside `isRunning`, and `interrupt` beside
+  // both — session.list's activity signals read the first two and T5's last-detach enforcement calls
+  // the third. An `any`-cast double missing one fails at RUNTIME, not at compile time.
+  return { knownModels: () => ids.map((id) => ({ id })), isRunning: () => false, hasBackgroundWork: () => false, interrupt: () => ({ wasRunning: false }) };
 }
 
 describe("I1 — a pushed meta.model is validated exactly like session.setModel's", () => {

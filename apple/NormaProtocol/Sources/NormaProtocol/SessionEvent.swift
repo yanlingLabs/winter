@@ -44,6 +44,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     case workflowProgress(WorkflowProgress)
     case workflowCompleted(WorkflowCompleted)
     case workflowFailed(WorkflowFailed)
+    case sessionActivity(SessionActivity)
 
     public struct SessionCreated: Codable, Equatable, Sendable {
         public let seq: Int
@@ -699,6 +700,34 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let error: String
     }
 
+    /// session-activity-hygiene T4: a code/cowork session's derived lifecycle state, pushed live
+    /// whenever it actually CHANGES so an open UI flips without re-polling `session.list`.
+    ///
+    /// TRANSIENT (see `transientTypes` at the bottom of this file): broadcast-only, never in the
+    /// session log, and stamped with the store's current `lastSeq` — so it must be exempted from
+    /// seq dedupe and cursor advancement like every other transient.
+    ///
+    /// SESSION-scoped, hence no `threadId` (the `HarnessAttached` shape): activity is a fact about
+    /// the whole session — an attachment, a stored background/archive flag — never about one
+    /// thread.
+    ///
+    /// `activity` is a plain `String`, not a Swift enum, deliberately — the same call
+    /// `ThreadCompleted.stopReason` and `ToolReview.verdict` make. Today's four values are
+    /// `active` / `background` / `idle` / `archived`, and a fifth added by a newer daemon must
+    /// DECODE on an older client rather than throw. Where that bites is the STRICT path: the Mac
+    /// app's `NormaClient` decodes every pushed frame into this very type, so an unknown case would
+    /// throw there. (The phone's `NormaSessionClient` is not the reason — it decodes the live stream
+    /// opaquely into `JSONValue` and falls back to `.null`, so a value it cannot read is skipped,
+    /// not fatal.) Absence — "this session has no lifecycle", which is what chat and dispatch
+    /// sessions carry in `session.list` — is never represented here: the daemon emits no event at
+    /// all for a non-participating session.
+    public struct SessionActivity: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let activity: String
+    }
+
     private enum Discriminator: String, Codable {
         case session_created
         case harness_attached
@@ -743,6 +772,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case workflow_progress
         case workflow_completed
         case workflow_failed
+        case session_activity
     }
 
     private enum TypeKey: String, CodingKey { case type }
@@ -793,6 +823,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case .workflow_progress:    self = .workflowProgress(try WorkflowProgress(from: decoder))
         case .workflow_completed:   self = .workflowCompleted(try WorkflowCompleted(from: decoder))
         case .workflow_failed:      self = .workflowFailed(try WorkflowFailed(from: decoder))
+        case .session_activity:     self = .sessionActivity(try SessionActivity(from: decoder))
         }
     }
 
@@ -970,6 +1001,10 @@ public enum SessionEvent: Codable, Equatable, Sendable {
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)
             try c.encode(Discriminator.workflow_failed.rawValue, forKey: .type)
+        case .sessionActivity(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.session_activity.rawValue, forKey: .type)
         }
     }
 }
@@ -979,7 +1014,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
 // ================================================================================================
 
 extension SessionEvent {
-    /// The seven BROADCAST-ONLY TRANSIENT event types, as wire discriminators. Mirrors
+    /// The eight BROADCAST-ONLY TRANSIENT event types, as wire discriminators. Mirrors
     /// `TRANSIENT_EVENT_TYPES` in `packages/protocol/src/events.ts` — read that constant's doc
     /// comment for the full contract; the short version:
     ///
@@ -1005,6 +1040,8 @@ extension SessionEvent {
         "plugin_tool_invoke",
         "hardware_requested",
         "plugin_tile_updated",
+        // session-activity-hygiene T4: the lifecycle's live signal (7 → 8).
+        "session_activity",
     ]
 
     /// Case-level mirror of `transientTypes`, for callers holding a DECODED event (`NormaClient`)
@@ -1016,7 +1053,7 @@ extension SessionEvent {
     public var isTransient: Bool {
         switch self {
         case .assistantDelta, .leaseGranted, .leaseLost, .peripheralCallRequested,
-             .pluginToolInvoke, .hardwareRequested, .pluginTileUpdated:
+             .pluginToolInvoke, .hardwareRequested, .pluginTileUpdated, .sessionActivity:
             return true
         default:
             return false
