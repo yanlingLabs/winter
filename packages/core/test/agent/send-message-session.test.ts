@@ -268,6 +268,105 @@ describe("AgentEngine: send_message can target a session (D1-T4)", () => {
     expect(store.meta(childId).archived).toBe(true);
   });
 
+  // session-activity-hygiene T8: the dispatch WIDENING. A dispatch-mode caller may message ANY
+  // cowork/code session (the user ruling: dispatch manages the whole fleet, not just what it
+  // started). Every OTHER caller keeps the direct-parent-edge rule verbatim — which is what keeps
+  // inter-session loops structurally impossible outside the one coordinator that is a singleton and
+  // is nobody's child.
+  describe("dispatch widening (T8)", () => {
+    /** A provider that sends ONE send_message on the next turn it is asked for, then behaves like a
+     *  plain "say ok and stop" provider for every subsequent turn (including the TARGET's own). */
+    class SendOnce implements Provider {
+      readonly id = "fake";
+      armed = false;
+      to = "";
+      callId = "m1";
+      models(): ModelInfo[] { return [{ id: "fake-1", family: "fake", contextWindow: 100_000, supportsVision: false }]; }
+      async *streamTurn(): AsyncIterable<ProviderEvent> {
+        if (this.armed) {
+          this.armed = false;
+          yield sendMessage(this.callId, this.to, "fleet message");
+          yield done("tool_calls");
+          return;
+        }
+        yield { type: "text_delta", delta: "ok" };
+        yield done("end_turn");
+      }
+    }
+
+    test("BOTH directions on one fixture: a dispatch caller reaches a session it never spawned; a code caller still cannot", async () => {
+      const provider = new SendOnce();
+      const { engine, store, cwd, sessionId: codeCaller } = setupSend([], { provider });
+      // Nobody's child — no parentSessionId anywhere.
+      const foreign = store.createSession("global", { cwd: mkChildCwd("foreign"), mode: "code", approvalPolicy: "auto" });
+      const dispatchCaller = store.createSession("global", { cwd, mode: "dispatch", approvalPolicy: "auto" });
+
+      // (1) CODE caller → refused, with today's exact wording (the untouched half).
+      provider.armed = true; provider.to = foreign; provider.callId = "code-call";
+      await engine.runTurn(codeCaller);
+      const codeResult = toolResult(store.read(codeCaller), "code-call");
+      expect(codeResult?.isError).toBe(true);
+      expect(codeResult?.output).toBe(`session '${foreign}' is not a session you spawned`);
+      expect(store.read(foreign).some((e) => e.type === "user_message")).toBe(false);
+
+      // (2) DISPATCH caller → delivered, on the SAME session the code caller was just refused.
+      provider.armed = true; provider.to = foreign; provider.callId = "disp-call";
+      await engine.runTurn(dispatchCaller);
+      const dispResult = toolResult(store.read(dispatchCaller), "disp-call");
+      expect(dispResult).toMatchObject({ isError: false });
+      for (let i = 0; i < 400 && !store.read(foreign).some((e) => e.type === "turn_completed"); i++) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      const foreignEvents = store.read(foreign);
+      expect(foreignEvents.some((e) => e.type === "user_message" && (e as Extract<SessionEvent, { type: "user_message" }>).text === "fleet message")).toBe(true);
+    });
+
+    test("a chat session-target is refused even for dispatch — chat and dispatch have no lifecycle to manage", async () => {
+      const provider = new SendOnce();
+      const { engine, store, cwd } = setupSend([], { provider });
+      const chat = store.createSession("global", { cwd: mkChildCwd("chat"), mode: "chat", approvalPolicy: "auto" });
+      const dispatchCaller = store.createSession("global", { cwd, mode: "dispatch", approvalPolicy: "auto" });
+
+      provider.armed = true; provider.to = chat; provider.callId = "c1";
+      await engine.runTurn(dispatchCaller);
+      const result = toolResult(store.read(dispatchCaller), "c1");
+      expect(result?.isError).toBe(true);
+      expect(result?.output).toMatch(/code and cowork sessions/i);
+      expect(store.read(chat).some((e) => e.type === "user_message")).toBe(false);
+    });
+
+    test("the ARCHIVED refusal binds the widened path too — a dispatch caller cannot resurrect a foreign archived session", async () => {
+      const provider = new SendOnce();
+      const { engine, store, cwd } = setupSend([], { provider });
+      const foreign = store.createSession("global", { cwd: mkChildCwd("arch-foreign"), mode: "code", approvalPolicy: "auto" });
+      store.setArchived(foreign, true);
+      const dispatchCaller = store.createSession("global", { cwd, mode: "dispatch", approvalPolicy: "auto" });
+
+      provider.armed = true; provider.to = foreign; provider.callId = "a1";
+      await engine.runTurn(dispatchCaller);
+      const result = toolResult(store.read(dispatchCaller), "a1");
+      expect(result?.isError).toBe(true);
+      expect(result?.output).toMatch(/archived/i);
+      expect(store.read(foreign).some((e) => e.type === "user_message")).toBe(false);
+      expect(store.meta(foreign).archived).toBe(true);
+    });
+
+    test("the AGENT half is untouched: a dispatch caller cannot address another session's subagent", async () => {
+      const provider = new SendOnce();
+      const { engine, store, cwd } = setupSend([], { provider });
+      const dispatchCaller = store.createSession("global", { cwd, mode: "dispatch", approvalPolicy: "auto" });
+
+      // A thread id shaped like a real agent's, belonging to nobody this caller started — agent
+      // resolution is still per-session (bgAgents.get(to, sessionId)), so it falls through to
+      // SESSION resolution and dies there rather than becoming reachable via the widening.
+      provider.armed = true; provider.to = "th_someone_elses_agent"; provider.callId = "g1";
+      await engine.runTurn(dispatchCaller);
+      const result = toolResult(store.read(dispatchCaller), "g1");
+      expect(result?.isError).toBe(true);
+      expect(result?.output).toBe("no agent or session 'th_someone_elses_agent' to message");
+    });
+  });
+
   test("unknown session id and an already-ended child each get a distinct, actionable message", async () => {
     // (a) unknown id: never a real agent, name, or session.
     {

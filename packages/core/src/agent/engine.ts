@@ -4,6 +4,7 @@ import { relative, sep, isAbsolute, resolve, dirname, basename, join } from "nod
 import type { ApprovalOption, NewSessionEvent, Question, SessionEvent, Task } from "@norma/protocol";
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
+import { participatesInActivity } from "../sessions/activity";
 import type { ModelInfo, Provider, ProviderEvent, TurnInputItem } from "../providers/types";
 import { isContextLengthError } from "../providers/errors";
 import type { ToolRegistry, Mode } from "./tools/registry";
@@ -3543,7 +3544,27 @@ export class AgentEngine {
             sendMessageOutcomes.set(call.callId, { output: `no agent or session '${to}' to message`, isError: true });
             continue;
           }
-          if (targetMeta.parentSessionId !== sessionId) {
+          // session-activity-hygiene T8: the DISPATCH WIDENING. Dispatch is the fleet coordinator —
+          // the user ruling gives it management over every cowork/code session, not just the ones it
+          // started — so for a dispatch-mode CALLER the direct-parent-edge test is replaced by the
+          // PARTICIPATION test (activity.ts's ACTIVITY_MODES allowlist: code + cowork, absent =
+          // code). Chat and dispatch targets stay refused: they have no lifecycle to manage, and a
+          // dispatch session addressing another dispatch session is the one loop this widening could
+          // otherwise open (the coordinator is a singleton and nobody's child, which is what makes
+          // widening it safe — it can never be on the receiving end of a spawn edge).
+          //
+          // EVERY OTHER CALLER keeps the parent-edge rule VERBATIM: a code session still reaches only
+          // its own direct children, so the tree property that makes inter-session cycles impossible
+          // is untouched everywhere except the one node that has no parent to cycle back to.
+          if (meta.mode === "dispatch") {
+            if (!participatesInActivity(targetMeta.mode)) {
+              sendMessageOutcomes.set(call.callId, {
+                output: `session '${to}' is a ${targetMeta.mode ?? "code"} session — send_message targets code and cowork sessions only`,
+                isError: true,
+              });
+              continue;
+            }
+          } else if (targetMeta.parentSessionId !== sessionId) {
             sendMessageOutcomes.set(call.callId, { output: `session '${to}' is not a session you spawned`, isError: true });
             continue;
           }
