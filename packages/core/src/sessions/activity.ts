@@ -57,6 +57,16 @@ export function participatesInActivity(mode?: string): boolean {
   return ACTIVITY_MODES.has(mode ?? "code");
 }
 
+/** Everything `activityFor` reads off a session, and nothing else. Narrowed from `SessionRow` in T3
+ *  so the SAME derivation serves both per-session readers the daemon has: `session.list`, which
+ *  holds full rows, and `session.setActivity`/`session.attach`, which hold a `store.meta()` result
+ *  (one indexed SELECT for one session — a full `list()` scan to learn one session's two flags
+ *  would be the wrong cost, and fabricating the row's missing fields to satisfy a wider type would
+ *  be exactly the plausible-stand-in this module's signal docs warn against).
+ *
+ *  `SessionRow` remains assignable, so every existing caller is unaffected. */
+export type ActivityRow = Pick<SessionRow, "mode" | "backgrounded" | "archived">;
+
 /**
  * The ONE derivation of a session's activity state (spec §1). PURE: same inputs, same answer, no
  * clock read (`nowMs` is a parameter precisely so the >24h demotion is testable and so a batch of
@@ -72,7 +82,7 @@ export function participatesInActivity(mode?: string): boolean {
  * Returns `undefined` for a non-participating mode (chat/dispatch): absence is the fourth answer,
  * meaning "no lifecycle here", and it outranks every flag — an archived chat row is still nothing.
  */
-export function activityFor(row: SessionRow, signals: ActivitySignals, nowMs: number): Activity | undefined {
+export function activityFor(row: ActivityRow, signals: ActivitySignals, nowMs: number): Activity | undefined {
   if (!participatesInActivity(row.mode)) return undefined;
   if (row.archived) return "archived";
   // A turn and a detached task are the same fact to this derivation: work is happening. Splitting

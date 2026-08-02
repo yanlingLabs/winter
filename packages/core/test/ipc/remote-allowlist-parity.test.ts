@@ -9,10 +9,10 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 
 // SP2a Task 2 — the cross-language drift tripwire (gate G7) + the remote token type (gate G8).
 //
-// The gateway enforces the SAME nineteen-method `remote` allowlist twice, once per language: here
+// The gateway enforces the SAME twenty-method `remote` allowlist twice, once per language: here
 // in TS (`REMOTE_ALLOWED_METHODS`, ipc/server.ts) and once in Swift (`Gateway.remoteAllowedMethods`,
 // GatewayGateTests' testG7). Neither test imports the other's list — each pins its own side to the
-// literal nineteen names, so editing ONE side without the other fails here (or in Swift) rather
+// literal twenty names, so editing ONE side without the other fails here (or in Swift) rather
 // than silently letting the two allowlists diverge and admitting/denying a method inconsistently.
 //
 // SP3 T4b grew the list 9→10: `approval.list` (queryable pending-approval state) is remote-facing
@@ -30,13 +30,16 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 // provider-correctness T4 grew it 18→19: `session.setEffort` (the phone sets the reasoning effort
 // on a remote-driven session — the other half of its model picker, and its own method for the same
 // reason the CLI keeps `norma model` and `norma model --effort` separate).
+// session-activity-hygiene T3 grew it 19→20: `session.setActivity` (the phone backgrounds/archives
+// a remote-driven code session — the write half of the `activity` state `session.list`, already on
+// this list, has served since T2; a read-only phone could see the state but never move it).
 
 describe("remote allowlist parity (SP2a gate G7)", () => {
-  // The canonical nineteen (SP1 §6 + SP3 T4b approval.list + SP3.4 session.create +
+  // The canonical twenty (SP1 §6 + SP3 T4b approval.list + SP3.4 session.create +
   // session-history session.history + Chat Slice D session.setModel + Chat Slice D tasks 2/3's
-  // five sync verbs + provider-correctness T4's session.setEffort) — the exact method STRINGS the
-  // Swift Gateway mirrors.
-  const NINETEEN = [
+  // five sync verbs + provider-correctness T4's session.setEffort + session-activity-hygiene T3's
+  // session.setActivity) — the exact method STRINGS the Swift Gateway mirrors.
+  const TWENTY = [
     METHODS.hello,
     METHODS.sessionList,
     METHODS.sessionAttach,
@@ -51,6 +54,7 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
     METHODS.sessionHistory,
     METHODS.sessionSetModel,
     METHODS.sessionSetEffort,
+    METHODS.sessionSetActivity,
     METHODS.syncHeads,
     METHODS.syncPull,
     METHODS.syncPush,
@@ -58,15 +62,15 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
     METHODS.syncMemory,
   ];
 
-  test("REMOTE_ALLOWED_METHODS is EXACTLY the nineteen names", () => {
-    expect(REMOTE_ALLOWED_METHODS.size).toBe(19);
-    for (const m of NINETEEN) {
+  test("REMOTE_ALLOWED_METHODS is EXACTLY the twenty names", () => {
+    expect(REMOTE_ALLOWED_METHODS.size).toBe(20);
+    for (const m of TWENTY) {
       expect(REMOTE_ALLOWED_METHODS.has(m)).toBe(true);
     }
-    expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual([...NINETEEN].sort());
+    expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual([...TWENTY].sort());
   });
 
-  test("the nineteen string VALUES match the Swift Gateway.remoteAllowedMethods literals", () => {
+  test("the twenty string VALUES match the Swift Gateway.remoteAllowedMethods literals", () => {
     expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual(
       [
         "protocol.hello",
@@ -83,6 +87,7 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
         "session.history",
         "session.setModel",
         "session.setEffort",
+        "session.setActivity",
         "sync.heads",
         "sync.pull",
         "sync.push",

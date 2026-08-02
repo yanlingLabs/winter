@@ -463,9 +463,10 @@ export class SessionStore {
   meta(sessionId: string): {
     sessionId: string; scope: string; cwd: string | null; approvalPolicy: SessionApprovalPolicy;
     origin?: string; mode?: string; parentSessionId?: string; model?: string; effort?: string;
+    backgrounded?: boolean; archived?: boolean;
   } {
-    const row = this.db.query("SELECT scope, cwd, approval_policy, origin, mode, parent_session_id, model, effort FROM sessions WHERE session_id = ?").get(sessionId) as
-      | { scope: string; cwd: string | null; approval_policy: string; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null; effort: string | null } | null;
+    const row = this.db.query("SELECT scope, cwd, approval_policy, origin, mode, parent_session_id, model, effort, backgrounded, archived FROM sessions WHERE session_id = ?").get(sessionId) as
+      | { scope: string; cwd: string | null; approval_policy: string; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null; effort: string | null; backgrounded: number | null; archived: number | null } | null;
     if (!row) throw new Error(`unknown session: ${sessionId}`);
     const p = row.approval_policy;
     // Plan-immunity (2026-07-28, USER-REVISED design): "chat" (gate.ts's SessionApprovalPolicy)
@@ -482,6 +483,15 @@ export class SessionStore {
       origin: row.origin ?? undefined, mode: row.mode ?? undefined, parentSessionId: row.parent_session_id ?? undefined,
       model: row.model ?? undefined,
       effort: row.effort ?? undefined,
+      // session-activity-hygiene T3: the two activity flags, mapped `1 → true` / `NULL → undefined`
+      // EXACTLY as `list()` maps them — a cleared flag must stay indistinguishable from one never
+      // set (never coerced to `false`), or the derivation's "absent means not backgrounded" rule
+      // would read differently through this door than through that one. Served here, and not left
+      // to a `list()` scan, because the per-session readers that need them (`session.setActivity`'s
+      // post-write derivation, `session.attach`'s resume-clears-archived check) address ONE session
+      // and must not pay a full-table read plus its per-row title capping to learn one bit.
+      backgrounded: row.backgrounded ? true : undefined,
+      archived: row.archived ? true : undefined,
     };
   }
 

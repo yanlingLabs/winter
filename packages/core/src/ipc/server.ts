@@ -12,7 +12,7 @@ import {
   SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams,
   SkillsReadParams, SkillsWriteParams, SkillsDeleteParams,
   PluginsListParams, AskUserRespondParams, TaskListParams, PlanRespondParams, SessionSetPolicyParams,
-  SessionSetModelParams, SessionSetEffortParams,
+  SessionSetModelParams, SessionSetEffortParams, SessionSetActivityParams,
   ThreadListParams, ThreadSendParams, AgentStopParams,
   PeripheralLeaseParams, PeripheralRenewParams, PeripheralReleaseParams, PeripheralAdvertiseParams,
   PeripheralRevokeParams, PeripheralRespondParams, DaemonStatusParams, EngineActivityParams, QuotaStateParams,
@@ -39,7 +39,7 @@ import type { MemoryStore, MemoryErrorKind } from "../agent/memory";
 import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTailMemDir } from "../agent/memory-file-ops";
 import type { SessionStore } from "../sessions/store";
 import { readHistoryPage } from "../sessions/history";
-import { activityFor, participatesInActivity } from "../sessions/activity";
+import { activityFor, participatesInActivity, type Activity, type ActivityRow } from "../sessions/activity";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
@@ -348,6 +348,12 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   // other half of its model picker, and a separate method for the same reason it is separate on the
   // CLI. Same bare-sessionId shape, so the same assertRemoteMayUseSession guard applies below.
   METHODS.sessionSetEffort,
+  // session-activity-hygiene T3: the phone backgrounds/archives a remote-driven code session — the
+  // WRITE half of the `activity` state `session.list` (already on this list) has served since T2.
+  // Same bare-sessionId shape, so the same assertRemoteMayUseSession guard applies below; the
+  // handler's own participation check is a SECOND, narrower gate (chat is remote-eligible yet has
+  // no lifecycle, so a phone reaching a chat session here is refused by mode, not by role).
+  METHODS.sessionSetActivity,
   // Chat Slice D task 2 (session sync): the phone replicates its own chat-session logs both ways.
   // The phone is the ONLY client that has ever needed these three — they exist for exactly this
   // role. All three are additionally CHAT-ONLY and fail closed on an absent/unknown session mode
@@ -482,6 +488,31 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     throw new Error("startIpcServer: an engine requires a shared hub (engine and server must broadcast through the same SessionHub)");
   }
   const hub = opts.hub ?? new SessionHub(opts.store);
+
+  /** session-activity-hygiene: the ONE place this server turns a session into a lifecycle state.
+   *  `session.list` stamps every participating row through it, and `session.setActivity` echoes its
+   *  post-write result through it — so the read surface and the write surface can never disagree
+   *  about WHICH SIGNALS feed the derivation, only about when they were sampled.
+   *
+   *  `nowMs` is the caller's, never read here: `session.list` derives a whole batch against ONE
+   *  instant so two rows can't straddle the same 24h boundary (`activityFor`'s own contract).
+   *
+   *  Reads the LOCAL `hub`, not `opts.hub` — they differ on a server built without one (this
+   *  function falls back to a private SessionHub, which is then the hub that actually holds every
+   *  attachment `session.attach` makes). Deriving off `opts.hub?.attachedCount(...)` would report a
+   *  hard 0 on exactly those servers, i.e. "idle" for a session with a live harness on it. */
+  function deriveActivity(row: ActivityRow, sessionId: string, nowMs: number): Activity | undefined {
+    if (!participatesInActivity(row.mode)) return undefined;
+    return activityFor(row, {
+      turnRunning: opts.engine?.isRunning(sessionId) ?? false,
+      attachedCount: hub.attachedCount(sessionId),
+      bgWork: opts.engine?.hasBackgroundWork(sessionId) ?? false,
+      lastEventTs: opts.store.lastEventTs(sessionId),
+      // T5 owns the continuously-active span; until it exists nothing tracks one, and `undefined`
+      // is the honest way to say so (it reads as "not over the window").
+      activeSince: undefined,
+    }, nowMs);
+  }
 
   const helloTimeoutMs = opts.helloTimeoutMs ?? 5000;
   const maxConnections = opts.maxConnections ?? 64;
@@ -928,22 +959,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // instant for the whole batch (`now`), so two rows in the same response can never disagree
         // about whether the same 24h boundary has passed.
         //
-        // `activityFor` returns undefined for chat/dispatch, and the signal builders are only run
-        // for rows that participate — which also keeps the per-row `lastEventTs` stat off the
-        // chat/dispatch rows entirely.
+        // `deriveActivity` (defined beside the `hub` binding, shared with `session.setActivity`)
+        // returns undefined for chat/dispatch and builds no signals for those rows — which also
+        // keeps the per-row `lastEventTs` stat off the chat/dispatch rows entirely.
         const now = Date.now();
         const sessions = opts.store.list().map((s) => {
           if (!participatesInActivity(s.mode)) return s;
-          const activity = activityFor(s, {
-            turnRunning: opts.engine?.isRunning(s.sessionId) ?? false,
-            attachedCount: opts.hub?.attachedCount(s.sessionId) ?? 0,
-            bgWork: opts.engine?.hasBackgroundWork(s.sessionId) ?? false,
-            lastEventTs: opts.store.lastEventTs(s.sessionId),
-            // T5 owns the continuously-active span; until it exists nothing tracks one, and
-            // `undefined` is the honest way to say so (it reads as "not over the window").
-            activeSince: undefined,
-          }, now);
-          return { ...s, activity };
+          return { ...s, activity: deriveActivity(s, s.sessionId, now) };
         });
         // Chat mode Slice C: chat sessions are now visible to remote too. A mode outside
         // REMOTE_ELIGIBLE_SESSION_MODES (Mac-local-only — e.g. a future cowork surface) stays
@@ -996,6 +1018,22 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         try {
           const lastSeq = hub.attach(hubClient, p.sessionId, p.fromSeq);
           socket.data.hubClient = hubClient;
+          // session-activity-hygiene T3 (spec §1.4): archived is "resumable only DELIBERATELY —
+          // resume clears the flag", and attaching IS the resume. This is the ONLY clearing point
+          // the daemon needs, because there is no send path around it: `session.send` refuses until
+          // the same connection has attached ("attach to the session first", just below), so no user
+          // message can reach a session without passing through here first — on the Mac (CLI/TUI/
+          // app) and on the phone alike, whose Gateway relays session.attach into this same handler.
+          //
+          // AFTER the attach, never before: a failed attach is not a resume. Conditional on the flag
+          // actually being set so an ordinary attach is a single indexed SELECT with no write, and
+          // so "an archive was cleared" stays a real state change rather than a write-over-NULL on
+          // every session open. `backgrounded` is deliberately NOT touched — the two flags are
+          // independent (store.setArchived's own doc), which is what returns a resumed session to
+          // background rather than to idle.
+          try {
+            if (opts.store.meta(p.sessionId).archived) opts.store.setArchived(p.sessionId, false);
+          } catch { /* the row vanished between attach and here — nothing left to clear */ }
           return { ok: true, lastSeq };
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
@@ -1336,6 +1374,62 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
         return {};
+      }
+      // session-activity-hygiene T3 (spec §1): the WRITE half of the lifecycle T2 made readable.
+      // Structurally a sibling of the two setters above — `assertRemoteMayUseSession` guard (it is
+      // REMOTE_ALLOWED_METHODS-listed and takes a bare caller-supplied sessionId), required-but-
+      // nullable value where `null` CLEARS — with two deliberate differences:
+      //
+      //  1. NOT_FOUND is resolved FIRST, explicitly, instead of being left to the store setter to
+      //     report at the end. Every refusal below reads a FACT about the session (its mode, whether
+      //     a turn is running), so an unknown id must come back as unknown rather than as a refusal
+      //     that implies the session exists. setModel/setEffort get that ordering for free (their
+      //     one refusal is a `=== "dispatch"` test an absent meta can't satisfy); this handler's
+      //     running-turn refusal would NOT — `engine.isRunning` answers for any string handed to it.
+      //  2. It answers with the POST-WRITE DERIVED state rather than a bare `{}`, through the SAME
+      //     `deriveActivity` that stamps `session.list` — so a caller learns what its write actually
+      //     produced (clearing a session whose detached bash task is still writing reads back
+      //     "background", not "idle") without a second round trip that could observe a later moment.
+      case METHODS.sessionSetActivity: {
+        const p = parseParams(SessionSetActivityParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        let meta: ReturnType<SessionStore["meta"]>;
+        try { meta = opts.store.meta(p.sessionId); }
+        catch (e) { throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message); }
+        // T2's participation ALLOWLIST (code + cowork + absent-means-code) — chat and dispatch have
+        // no lifecycle at all, so there is no state to set on them. Refused for a CLEAR too: the
+        // refusal is about the session, not the value.
+        if (!participatesInActivity(meta.mode)) {
+          throw new RpcFailure(ERR.INVALID_PARAMS, "activity states apply to code and cowork sessions only");
+        }
+        // Archived is a flag over IDLE (spec §1.4): archiving a session with a turn in flight would
+        // strand that turn behind a hidden tab, so the door refuses and names the two ways out.
+        // Scoped to `"archived"` on purpose — BACKGROUNDING a running session is the entire point of
+        // that flag ("keep running unattended"), and a CLEAR must stay available or a mis-flagged
+        // running session could never be un-flagged. `isRunning` (a TURN) rather than the wider
+        // "any work" signal: a detached bash task already derives as `background`, so such a session
+        // has literally done what this message asks for.
+        if (p.activity === "archived" && (opts.engine?.isRunning(p.sessionId) ?? false)) {
+          throw new RpcFailure(ERR.INVALID_PARAMS, "stop or background it first");
+        }
+        // The value names a TARGET STATE, not a flag — which is why `"background"` also clears the
+        // archive flag: `archived` outranks `backgrounded` in the derivation, so writing one while
+        // leaving the other set would answer "archived" to a caller who asked for background, a wire
+        // no-op. Naming background as the target is a deliberate act on that session, exactly like a
+        // resume. NOT symmetric: `"archived"` leaves `backgrounded` alone (it contradicts nothing
+        // below it) — store.setArchived's documented independence, which is what returns a resumed
+        // session to background rather than to idle.
+        if (p.activity === "archived") {
+          opts.store.setArchived(p.sessionId, true);
+        } else {
+          // "background" and null (clear) differ only in the background bit; both clear the archive.
+          opts.store.setBackgrounded(p.sessionId, p.activity === "background");
+          opts.store.setArchived(p.sessionId, false);
+        }
+        // Re-read rather than assuming what was just written: the derivation's inputs are the STORED
+        // flags, and re-reading them is what keeps this echo an observation instead of a restatement.
+        const after = opts.store.meta(p.sessionId);
+        return { ok: true, activity: deriveActivity(after, p.sessionId, Date.now()) };
       }
 
       // -----------------------------------------------------------------------------------------

@@ -442,6 +442,43 @@ export const SessionSetModelResult = z.object({});
 export const SessionSetEffortParams = z.object({ sessionId: z.string().min(1), effort: z.string().min(1).max(SESSION_EFFORT_MAX_CHARS).nullable() });
 export const SessionSetEffortResult = z.object({});
 
+// session-activity-hygiene T3 (spec §1): the WRITE half of the session lifecycle — `session.list`'s
+// derived `activity` (T2) is the read half. ONE method behind every surface that moves a session's
+// state: the TUI's `/background` and `/archive`, dispatch's management verbs (T8), the `norma
+// agents` TUI (T9), and the phone (which is why it joins the remote allowlist — 19 → 20).
+//
+// The VALUE NAMES A TARGET STATE, not a flag, and only the two STORED states are settable —
+// `active` and `idle` are pure consequences of live signals (an attachment, a running turn), so
+// offering them would be offering a write that cannot be honoured. `null` CLEARS BOTH flags,
+// returning the session to purely-derived; it is required-but-nullable, not optional, for the same
+// reason `session.setModel`/`session.setEffort`'s clears are — a caller must never be able to
+// confuse "didn't send it" with "explicitly clearing it".
+//
+// Because the value is a target STATE, `"background"` on an archived session also clears the
+// archive flag: `archived` outranks `backgrounded` in the derivation, so writing one flag while
+// leaving the other set would answer "archived" to a caller who asked for background — a wire
+// no-op. The reverse is NOT symmetric: `"archived"` leaves `backgrounded` alone (it contradicts
+// nothing below it), which is what returns a RESUMED session to background rather than to idle.
+//
+// Refusals, all daemon-side (ipc/server.ts): an unknown session is `NOT_FOUND` and takes precedence
+// over everything below it; a chat/dispatch target is `INVALID_PARAMS` ("activity states apply to
+// code and cowork sessions only" — those modes have no lifecycle at all, T2's participation
+// allowlist); `"archived"` on a session with a RUNNING TURN is `INVALID_PARAMS` ("stop or background
+// it first"), because archived is a flag over IDLE (spec §1.4) and archiving a live turn would
+// strand it behind a hidden tab.
+export const SessionSetActivityParams = z.object({
+  sessionId: z.string().min(1),
+  activity: z.enum(["background", "archived"]).nullable(),
+});
+/** `activity` is the POST-WRITE DERIVED state, not an echo of what was written — a caller learns
+ *  what its write actually produced without a second `session.list` round trip (clearing a session
+ *  whose detached bash task is still writing reads back `"background"`, not `"idle"`). Optional for
+ *  exactly the reason `SessionSummary.activity` is: absence means "does not participate". No
+ *  successful call can currently produce that (a non-participating target is refused above), so the
+ *  field is present in practice — it stays optional so the two surfaces express absence identically
+ *  and a future participating-mode change has one vocabulary, not two. */
+export const SessionSetActivityResult = z.object({ ok: z.literal(true), activity: SessionActivity.optional() });
+
 export const ThreadInfoSchema = z.object({
   threadId: z.string(), parentThreadId: z.string().optional(), agentType: z.string().optional(),
   status: z.enum(["running", "completed"]), stopReason: z.string().optional(),
@@ -1361,6 +1398,7 @@ export const METHODS = {
   sessionSetPolicy: "session.setPolicy",
   sessionSetModel: "session.setModel",
   sessionSetEffort: "session.setEffort",
+  sessionSetActivity: "session.setActivity",
   threadList: "thread.list",
   threadSend: "thread.send",
   agentStop: "agent.stop",
