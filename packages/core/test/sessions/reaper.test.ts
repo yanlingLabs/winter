@@ -99,6 +99,33 @@ describe("SessionStore.emptySessionIds (session-activity-hygiene T6)", () => {
     store.close();
   });
 
+  // Controller ruling: "chat sessions ARE reapable when empty — the spec's motivating case is the
+  // abandoned New Chat. The code/cowork participation rule limits ACTIVITY states, not the reaper."
+  // Pinned explicitly (not just "not excluded by omission") since the activity-participation
+  // allowlist (activity.ts's ACTIVITY_MODES = code/cowork only) could otherwise look like a
+  // precedent this reaper should mirror — it must not: `emptySessionIds` excludes ONLY the dispatch
+  // mode, nothing else.
+  test("a chat session IS a candidate when empty — the reaper only excludes dispatch, not chat", () => {
+    const store = freshStore();
+    const chatId = store.createSession("global", { mode: "chat" });
+    expect(store.emptySessionIds(NOBODY_ATTACHED, agedNow(store, chatId, 1))).toEqual([chatId]);
+    store.close();
+  });
+
+  // Controller ruling: "Phone-synced empties have NO rail here — §2 of the spec has no exclusions
+  // beyond the dispatch session; the Task-7 cleaner is where synced sessions get railed." A synced
+  // session's id is a UUID (SYNCED_SESSION_ID_RE), created via `createSynced` rather than
+  // `createSession` — `emptySessionIds`'s query has no id-shape/origin check at all, so this is
+  // exercised directly against the real synced-creation path rather than assumed from the code
+  // simply not mentioning it.
+  test("a phone-synced session (createSynced, UUID id) IS a candidate when empty — no rail here by design", () => {
+    const store = freshStore();
+    const syncedId = "11111111-2222-4333-8444-555555555555";
+    store.createSynced(syncedId, { scope: "global" });
+    expect(store.emptySessionIds(NOBODY_ATTACHED, agedNow(store, syncedId, 1))).toEqual([syncedId]);
+    store.close();
+  });
+
   // The assistant-only edge (ambiguity resolution: verify `first_message` covers it — it does not).
   // `deriveIndexFields` (store.ts) only ever looks at `user_message` events for `first_message`;
   // it has no idea whether `assistant_message` content exists. A session holding only assistant
