@@ -9,7 +9,7 @@ import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
 import { reapEmptySessions } from "./sessions/reaper";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom } from "./settings";
+import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -67,6 +67,7 @@ import { BackgroundAgentRegistry } from "./agent/bg-agent-registry";
 import { AgentEngine, SYSTEM_PROMPT } from "./agent/engine";
 import { OutputStyleStore } from "./agent/output-styles";
 import { Dreamer } from "./agent/dreamer";
+import { SessionCleaner } from "./sessions/cleaner";
 import { deriveModelAliases } from "./agent/model-aliases";
 import { BashReviewer } from "./agent/reviewer";
 import { SessionTitler } from "./agent/titles";
@@ -303,6 +304,12 @@ export async function startDaemon(opts: {
   // assembler's injection — a `memory.enabled`/`memory.directory` edit applies to the session's
   // NEXT tool call / turn, no daemon restart, same shape as `hooksEnabledHot` further down.
   const memoryEnabledHot = (): boolean => (settings ? memoryEnabledFrom(settings) : true);
+  // session-activity-hygiene T7 (spec §3): the session cleaner's own switch, on exactly the
+  // `memoryEnabledHot` terms one line up — a live getter over the reassignable `settings` holder
+  // (the settings watcher swaps a NEW object into that same binding), so a `cleaner.enabled` edit
+  // takes effect on the very next cleaner pass with no daemon restart in either direction. Read
+  // inside `SessionCleaner.runPass`, first thing, every pass.
+  const cleanerEnabledHot = (): boolean => (settings ? cleanerEnabledFrom(settings) : true);
   const memoryDirOf = (cwd: string): string => memoryDirFor(cwd, { normaHome, directory: settings?.memory?.directory });
   const memoryGlobalDirOf = (): string => globalMemoryDirFor({ normaHome, directory: settings?.memory?.directory });
   const assembler = new ContextAssembler({
@@ -1122,6 +1129,28 @@ export async function startDaemon(opts: {
       dir: () => assistantMemoryDirFor({ normaHome }),
       enabled: memoryEnabledHot,
       activeTurnCount: () => engine?.activeTurnCount() ?? 1, // no engine yet -> treat as busy
+      // session-activity-hygiene T7 (spec §3): the cleaner rides THIS scheduler slot. Constructed
+      // here (not at the top of the file) for the same reason the Dreamer is: it needs a provider,
+      // and the signals it derives activity from (`engine`, `hub`) are only final by this point.
+      //
+      // SIGNAL ASSEMBLY, deliberately LOCAL rather than shared with `startIpcServer`'s
+      // `deriveActivity`: two of that closure's five signals (`activeSince`, `autoBackground`) come
+      // from the activity ENFORCEMENT, which lives inside the IPC server's scope and is not
+      // reachable here — so a "shared" helper would still take them as parameters and dedupe
+      // nothing. Their absence costs the cleaner's rail nothing: both can only push a session from
+      // idle TOWARDS background, i.e. towards being railed, and in each case another input already
+      // rails it (see `SessionCleaner.railFor`'s own note). The three signals that DO matter —
+      // attachments, running turns, background work — are read from the SAME hub and the SAME
+      // engine `session.list` reads, so the two can never disagree about a live session.
+      cleaner: new SessionCleaner({
+        provider: agentProvider,
+        store,
+        attachedCount: (sid) => hub.attachedCount(sid),
+        turnRunning: (sid) => engine?.isRunning(sid) ?? false,
+        bgWork: (sid) => engine?.hasBackgroundWork(sid) ?? false,
+        home: normaHome,
+        enabled: cleanerEnabledHot,
+      }),
     });
     dreamer.start();
 

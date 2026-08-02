@@ -659,7 +659,7 @@ describe("SessionCleaner — strict verdict parsing (ANY deviation ⇒ keep, NO 
   test("a provider error ⇒ kept, unstamped", async () => {
     const { home, store } = freshStore();
     const id = junkSession(store);
-    const provider = new FakeProvider([[{ type: "error", message: "upstream 500" }]]);
+    const provider = new FakeProvider([[{ type: "error", code: "server", message: "upstream 500" }]]);
     const errSpy = spyOn(console, "error").mockImplementation(() => {});
     try {
       await makeCleaner(store, home, provider, { now: agedNow }).runPass();
