@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { SessionEvent, SESSION_TITLE_MAX_CHARS, type NewSessionEvent } from "@norma/protocol";
@@ -19,6 +19,15 @@ const SCOPE_RE = /^[a-z0-9]([a-z0-9-]{0,39}[a-z0-9])?$/;
  *      for, one this daemon created itself. Any UUID version/variant is accepted — the phone's
  *      generator is not this daemon's business. */
 const SYNCED_SESSION_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+/** session-activity-hygiene T6 (spec §2): the empty-session reaper's age gate — "created ≥ 10 min
+ *  ago". A session younger than this may simply be mid-composition (the user hasn't sent their
+ *  first message yet), so it must never look like an abandoned empty. Exported so tests pin the
+ *  exact value, mirroring `AUTO_BACKGROUND_GRACE_MS` (activity-enforcement.ts)'s own precedent.
+ *  Inclusive boundary (`emptySessionIds` uses `created_at <= nowMs - EMPTY_SESSION_GRACE_MS`):
+ *  exactly 10 minutes old already counts — this task's own "≥" wording, deliberately not the same
+ *  strict "> 24h" convention T5's demotion sweep uses for an unrelated threshold. */
+export const EMPTY_SESSION_GRACE_MS = 10 * 60_000;
 
 /** Chat Slice D task 2: fork provenance — mirrors the protocol's `SessionForkRef`. */
 export interface SessionForkRef { sessionId: string; atSeq: number }
@@ -493,6 +502,66 @@ export class SessionStore {
       backgrounded: row.backgrounded ? true : undefined,
       archived: row.archived ? true : undefined,
     };
+  }
+
+  /** session-activity-hygiene T6 (spec §2): candidate ids for the empty-session reaper — sessions
+   *  with zero user/assistant messages, old enough that composing a first message is implausible,
+   *  and not currently attached to any harness. The dispatch session (if one exists) is excluded
+   *  outright: it is the daemon's one long-lived coordinator, driven by tool calls rather than chat
+   *  messages, so it normally carries no main-thread `user_message` at all — without this exclusion
+   *  it would look permanently empty. `deleteSession` below refuses it too (belt, not suspenders:
+   *  every future caller gets the same protection independent of this exclusion).
+   *
+   *  `first_message IS NULL` (set by `append`/`appendSynced`'s `user_message` derivation) is the
+   *  cheap indexed pre-filter, narrowing to a small candidate set in the common case — most sessions
+   *  get a first message within seconds of creation. It is NOT trusted alone: it only ever tracks
+   *  main-thread USER messages, so it says nothing about assistant output, and `recoverAll`'s
+   *  skip-bad-lines repair (a corrupt line is dropped, not stopped at — see `readGoodLines`) can
+   *  leave a log whose `user_message` line was corrupted-and-dropped while a LATER `assistant_message`
+   *  line survived — `first_message` would then read NULL on a session that plainly produced real
+   *  output (reaper.test.ts's "recovered log" case reproduces exactly this). So every
+   *  first_message-IS-NULL candidate that survives the attached-check below gets a real scan of its
+   *  parsed log (`read()`, already skip-bad-lines-safe) for ANY `user_message`/`assistant_message`
+   *  event before being called empty — cheap, because the SQL filter already narrowed the set this
+   *  scan ever runs against.
+   *
+   *  `attachedCount` is injected rather than read off a stored `SessionHub`: the store has never
+   *  held a hub reference (hub depends on store, never the reverse) — mirrors
+   *  `ActivityEnforcementDeps.attachedCount` (activity-enforcement.ts)'s identical shape. `nowMs` is
+   *  a plain required parameter (the `activityFor`/`deriveActivity` precedent) rather than a clock
+   *  dependency: this is a one-shot query with no state of its own to hold a clock across calls. */
+  emptySessionIds(attachedCount: (sessionId: string) => number, nowMs: number): string[] {
+    const cutoff = nowMs - EMPTY_SESSION_GRACE_MS;
+    const rows = this.db.query(
+      `SELECT session_id FROM sessions
+       WHERE first_message IS NULL AND created_at <= ? AND (mode IS NULL OR mode != 'dispatch')`,
+    ).all(cutoff) as { session_id: string }[];
+    const candidates: string[] = [];
+    for (const { session_id: sessionId } of rows) {
+      if (attachedCount(sessionId) !== 0) continue;
+      const hasContent = this.read(sessionId).some((e) => e.type === "user_message" || e.type === "assistant_message");
+      if (!hasContent) candidates.push(sessionId);
+    }
+    return candidates;
+  }
+
+  /** session-activity-hygiene T6 (spec §2, the amended sessions rule): FULL deletion — the JSONL
+   *  log file and the index row. Refuses the dispatch session UNCONDITIONALLY: this is the belt for
+   *  every caller (T7's cleaner calls this same method), not just `emptySessionIds`'s own exclusion
+   *  above — a singleton this fundamental (`DispatchChildren.start()` rebuilds its child roster
+   *  against `dispatchSessionId()`) must never be deletable through any path, even a future one that
+   *  forgets to check first. Throws on an unknown session — the `setApprovalPolicy`/`setModel`
+   *  precedent: a caller deleting a session that doesn't exist is a bug, not a silent no-op. A
+   *  missing log file (already gone, somehow) is tolerated — the index row is still the correct
+   *  thing to remove. */
+  deleteSession(sessionId: string): void {
+    const row = this.db.query("SELECT scope, mode FROM sessions WHERE session_id = ?").get(sessionId) as
+      | { scope: string; mode: string | null } | null;
+    if (!row) throw new Error(`unknown session: ${sessionId}`);
+    if (row.mode === "dispatch") throw new Error(`refusing to delete the dispatch session: ${sessionId}`);
+    const path = this.logPath(row.scope, sessionId);
+    if (existsSync(path)) unlinkSync(path);
+    this.db.run("DELETE FROM sessions WHERE session_id = ?", [sessionId]);
   }
 
   // -----------------------------------------------------------------------------------------
