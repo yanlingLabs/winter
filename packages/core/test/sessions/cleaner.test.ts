@@ -310,7 +310,12 @@ describe("SessionCleaner rails — a railed session survives a delete-voting jud
   test("rail: the dispatch session — independent of both the candidate query AND deleteSession's own refusal", async () => {
     const { home, store } = freshStore();
     const dispatchId = store.createSession("global", { mode: "dispatch" });
+    // Deliberately NOT hung-shaped (a user message AND a reply): a lone-user-message fixture would
+    // take the no-LLM hung path and be stopped by `deleteSession`'s in-store guard instead, so the
+    // test would pass with the cleaner's own dispatch rail deleted — proven by a mutation probe that
+    // removed every rail and left this one test green. What is pinned here is the CLEANER's rail.
     store.append(dispatchId, { type: "user_message", sessionId: dispatchId, threadId: "main", text: "hey", clientName: "cli" });
+    store.append(dispatchId, { type: "assistant_message", sessionId: dispatchId, threadId: "main", text: "on it" });
     backdateCreatedAt(store, dispatchId, DAY + 60_000);
     // The real query already excludes it, so hand it over anyway: this pins the CLEANER's own rail,
     // not the store's.
