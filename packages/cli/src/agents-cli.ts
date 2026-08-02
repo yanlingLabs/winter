@@ -104,8 +104,13 @@ export function emptyAgentsState(): AgentsState {
   return { rows: [] };
 }
 
+/** No `?? s.rows[0]` fallback: every producer of `AgentsState` (`applySessionList`'s and
+ *  `applyActivityEvent`'s own `reselect` calls) already resolves `selectedId` to a concrete, valid
+ *  row — or deliberately to `undefined` — before this is ever called, so a fallback here could only
+ *  ever silently resurrect a selection one of those callers chose to clear (m36: exactly what let a
+ *  rapid repeat of a destructive verb land on a row nobody asked for). */
 export function selectedAgent(s: AgentsState): AgentRow | undefined {
-  return s.rows.find((r) => r.sessionId === s.selectedId) ?? s.rows[0];
+  return s.rows.find((r) => r.sessionId === s.selectedId);
 }
 
 /** Background first (the roster's subject), then active; each group ordered by the text actually
@@ -170,7 +175,13 @@ export function applyActivityEvent(
   if (!inRoster) {
     if (!existing) return s;
     const rows = s.rows.filter((r) => r.sessionId !== event.sessionId);
-    return { ...s, rows, selectedId: reselect(rows, s.selectedId) };
+    // m36: a LIVE removal of the SELECTED row must not auto-advance onto whatever is now first —
+    // a rapid repeat of the very verb that just removed it (a second `a` before the frame even
+    // repaints) would otherwise land on THAT row instead of doing nothing. Clear outright when it
+    // was the row just removed; `reselect` still applies when some OTHER session left the roster
+    // (the selection, if still valid, is untouched either way).
+    const selectedId = s.selectedId === event.sessionId ? undefined : reselect(rows, s.selectedId);
+    return { ...s, rows, selectedId };
   }
   const activity = event.activity as AgentRow["activity"];
   if (existing && existing.activity === activity) return s; // a re-statement is not a new span

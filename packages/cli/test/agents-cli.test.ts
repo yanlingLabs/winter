@@ -112,6 +112,26 @@ describe("applyActivityEvent — the live half (no polling delay)", () => {
     expect(s.rows).toEqual([]);
   });
 
+  test("m36: removing the SELECTED row clears the selection instead of auto-advancing onto the next one", () => {
+    let s = applySessionList(emptyAgentsState(), [
+      row("s_1", { activity: "background" }), row("s_2", { activity: "background" }),
+    ], T0);
+    expect(selectedAgent(s)!.sessionId).toBe("s_1"); // sorted first, selected by the initial reselect
+    s = applyActivityEvent(s, { sessionId: "s_1", activity: "archived", ts: T0 + 1 }, T0 + 1);
+    // NOT "s_2": auto-advancing onto whatever is now first is exactly what let a rapid repeat of the
+    // verb that just removed s_1 land on s_2 instead of doing nothing.
+    expect(s.selectedId).toBeUndefined();
+    expect(selectedAgent(s)).toBeUndefined();
+
+    // Removing a DIFFERENT (non-selected) row leaves an untouched selection alone.
+    let t = applySessionList(emptyAgentsState(), [
+      row("s_3", { activity: "background" }), row("s_4", { activity: "background" }),
+    ], T0);
+    t = moveSelection(t, 1); // select s_4
+    t = applyActivityEvent(t, { sessionId: "s_3", activity: "archived", ts: T0 + 1 }, T0 + 1);
+    expect(t.selectedId).toBe("s_4");
+  });
+
   test("ADDS a session the roster has never listed — a background session born between polls", () => {
     const s = applyActivityEvent(emptyAgentsState(), { sessionId: "s_new", activity: "background", ts: T0 }, T0);
     expect(s.rows.map((r) => r.sessionId)).toEqual(["s_new"]);
@@ -461,6 +481,29 @@ describe("runAgentsCommand", () => {
     expect(h.calls.some((c) => c.method === "sessionSetActivity"
       && (c.args[0] as any).sessionId === "s_bg" && (c.args[0] as any).activity === "archived")).toBe(true);
     expect(h.store().get().notice).toContain("archived");
+    h.quit(); await done;
+  });
+
+  test("m36: two rapid archives hit exactly one session — the cursor does not auto-advance onto the next row", async () => {
+    const h = makeRunnerDeps({
+      sessions: [row("s_1", { activity: "background" }), row("s_2", { activity: "background" })],
+    });
+    const done = runAgentsCommand(h.deps as any);
+    await Bun.sleep(5);
+    expect(h.store().get().selectedId).toBe("s_1"); // sorted first, selected by the initial poll
+
+    h.act({ kind: "verb", verb: "archive" }); // press 1: archives s_1, the selected row
+    // The daemon's live transient normally beats the RPC's own round trip back to this client —
+    // simulate it landing here, before the second keypress even happens.
+    h.emit({ type: "session_activity", sessionId: "s_1", activity: "archived", ts: T0, seq: 9 });
+    // Pre-fix, s_1 leaving the roster auto-advanced the cursor onto s_2, so this second press —
+    // indistinguishable from a key-repeat or an eager double-tap of the first — would have archived
+    // s_2 too. Fixed, the selection is cleared instead, so there is no row to act on.
+    h.act({ kind: "verb", verb: "archive" }); // press 2: must be a no-op, not a second archive
+
+    const archiveCalls = h.calls.filter((c) => c.method === "sessionSetActivity");
+    expect(archiveCalls.map((c) => (c.args[0] as any).sessionId)).toEqual(["s_1"]);
+    expect(h.store().get().selectedId).toBeUndefined();
     h.quit(); await done;
   });
 
