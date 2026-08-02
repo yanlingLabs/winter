@@ -39,6 +39,7 @@ import type { MemoryStore, MemoryErrorKind } from "../agent/memory";
 import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTailMemDir } from "../agent/memory-file-ops";
 import type { SessionStore } from "../sessions/store";
 import { readHistoryPage } from "../sessions/history";
+import { activityFor, participatesInActivity } from "../sessions/activity";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
@@ -923,7 +924,27 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         return { sessionId, trusted };
       }
       case METHODS.sessionList: {
-        const sessions = opts.store.list();
+        // session-activity-hygiene T2 (spec §1): stamp each row's derived lifecycle state. ONE
+        // instant for the whole batch (`now`), so two rows in the same response can never disagree
+        // about whether the same 24h boundary has passed.
+        //
+        // `activityFor` returns undefined for chat/dispatch, and the signal builders are only run
+        // for rows that participate — which also keeps the per-row `lastEventTs` stat off the
+        // chat/dispatch rows entirely.
+        const now = Date.now();
+        const sessions = opts.store.list().map((s) => {
+          if (!participatesInActivity(s.mode)) return s;
+          const activity = activityFor(s, {
+            turnRunning: opts.engine?.isRunning(s.sessionId) ?? false,
+            attachedCount: opts.hub?.attachedCount(s.sessionId) ?? 0,
+            bgWork: opts.engine?.hasBackgroundWork(s.sessionId) ?? false,
+            lastEventTs: opts.store.lastEventTs(s.sessionId),
+            // T5 owns the continuously-active span; until it exists nothing tracks one, and
+            // `undefined` is the honest way to say so (it reads as "not over the window").
+            activeSince: undefined,
+          }, now);
+          return { ...s, activity };
+        });
         // Chat mode Slice C: chat sessions are now visible to remote too. A mode outside
         // REMOTE_ELIGIBLE_SESSION_MODES (Mac-local-only — e.g. a future cowork surface) stays
         // filtered out for remote — see assertRemoteMayUseSession's doc comment above for why this

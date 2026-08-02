@@ -322,7 +322,11 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
  *  (providers/codex-config.ts's CODEX_MODELS) so an alias like "sol" resolves the way it really
  *  would in production. */
 function fakeEngine(models: ModelInfo[]): any {
-  return { knownModels: () => models, isRunning: () => false };
+  // session-activity-hygiene T2: `hasBackgroundWork` joins `isRunning` here because `session.list`
+  // now builds activity signals from BOTH — and this double is an `any` cast, so a missing method
+  // is a runtime TypeError inside the handler (the RPC answers INTERNAL, not "no activity"), not a
+  // compile error. Every AgentEngine double that a session.list-calling test can reach owes both.
+  return { knownModels: () => models, isRunning: () => false, hasBackgroundWork: () => false };
 }
 
 const CATALOGUE: ModelInfo[] = [

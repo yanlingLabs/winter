@@ -128,6 +128,21 @@ export const SessionCreateParams = z.object({
 });
 export const SessionCreateResult = z.object({ sessionId: z.string(), trusted: z.boolean() });
 
+/** session-activity-hygiene (spec §1): a code/cowork session's lifecycle state.
+ *
+ *  A REAL lifecycle, not a cosmetic label — from T5 on, `active` carries enforcement (when the last
+ *  harness detaches and the session is not backgrounded, its running turn is aborted through the
+ *  ESC-abort path). Two of the four are STORED flags (`backgrounded`, `archived` — index columns on
+ *  `SessionRow`); the rest is derived at read time from signals the daemon already owns (running
+ *  turns, hub attachments, background bash/agent registries). The single derivation lives in
+ *  `packages/core/src/sessions/activity.ts` (`activityFor`) — never re-derive it at a call site.
+ *
+ *  ABSENT IS A REAL VALUE: "this session does not participate". Chat and dispatch never carry one
+ *  (dispatch is definitionally the daemon itself; chat needs none of this), so a client must render
+ *  absence as "no state", never coerce it to `idle`. */
+export const SessionActivity = z.enum(["active", "background", "idle", "archived"]);
+export type SessionActivity = z.infer<typeof SessionActivity>;
+
 export const SessionListResult = z.object({
   sessions: z.array(z.object({
     sessionId: z.string(),
@@ -162,6 +177,12 @@ export const SessionListResult = z.object({
     // really does flow out of `store.list()`, so a schema-validating client must be able to read
     // it. Absent for every session that isn't a fork.
     forkedFrom: SessionForkRef.optional(),
+    // session-activity-hygiene T2 (spec §1): the DERIVED lifecycle state — see `SessionActivity`
+    // above. Unlike every other field on this row it is not a stored column read back verbatim: the
+    // daemon computes it per row at list time from the two stored flags plus live signals, so two
+    // calls a second apart legitimately differ. Absent means "does not participate" (chat/dispatch)
+    // — NOT "idle", and not "old daemon" for any daemon at or past this version.
+    activity: SessionActivity.optional(),
   })),
 });
 

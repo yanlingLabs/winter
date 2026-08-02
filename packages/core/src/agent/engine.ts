@@ -975,6 +975,22 @@ export class AgentEngine {
   /** True while a turn is executing for the session. */
   isRunning(sessionId: string): boolean { return this.runningTurns.has(sessionId); }
 
+  /** session-activity-hygiene T2 (spec §1): true while the session has unattended work that
+   *  OUTLIVES a turn — a backgrounded bash task (`bgRegistry`) or a detached agent thread
+   *  (`bgAgents`). Both registries, because they are two halves of one fact and either alone would
+   *  under-report: a session whose turn ended while a `run_in_background` task keeps writing is
+   *  still working, and calling that "idle" is precisely the invisible-runner blindness the
+   *  activity model exists to fix.
+   *
+   *  Read-only, no side effects, and false when neither registry is wired (every test/config
+   *  without them) — the same "absent dep degrades to the quiet answer" shape as `pinnedTools`'
+   *  own `bgRegistry?.list(...) ?? []` below. Deliberately NOT folded into `isRunning`: that one
+   *  answers "can I start a turn", a question background work must not affect. */
+  hasBackgroundWork(sessionId: string): boolean {
+    if ((this.cfg.bgRegistry?.list(sessionId) ?? []).some((t) => t.status === "running")) return true;
+    return (this.cfg.bgAgents?.list(sessionId) ?? []).some((a) => a.status === "running");
+  }
+
   /** Number of sessions with a turn executing right now (update idle gate). */
   activeTurnCount(): number {
     return this.runningTurns.size;

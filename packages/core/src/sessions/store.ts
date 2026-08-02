@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { SessionEvent, SESSION_TITLE_MAX_CHARS, type NewSessionEvent } from "@norma/protocol";
@@ -66,6 +66,24 @@ export interface SessionRow {
    *  reset-on-rebuild caveat as `model` above — the phone re-sends it on its next push, which is
    *  how it heals. Absent for every session that isn't a fork (almost all of them). */
   forkedFrom?: SessionForkRef;
+  /** session-activity-hygiene T2 (spec §1): the "keep running unattended" flag — one of the TWO
+   *  stored bits of the activity lifecycle (the rest is derived live; see `activityFor` in
+   *  ./activity.ts). Index-only metadata on exactly the `model`/`effort` terms: it does NOT ride
+   *  the event log, so it resets to undefined on a full index.db rebuild.
+   *
+   *  That reset class is a deliberate, acceptable loss here for the same reason it is for `model`:
+   *  the flag is a live-session preference, and an index rebuild already returns every session to
+   *  "nothing running, nothing attached" — a backgrounded session whose flag vanished reads as
+   *  idle, which is exactly what it is after a daemon that lost its index. Absent means "not
+   *  backgrounded"; the flag is never stored as an explicit false. */
+  backgrounded?: boolean;
+  /** session-activity-hygiene T2 (spec §1.4): "hidden under a dedicated tab, resumable only
+   *  deliberately". The second stored bit, on identical terms to `backgrounded` above — additive
+   *  index column, same reset-on-rebuild class as `model`/`effort`, absent means "not archived".
+   *
+   *  Independent of `backgrounded`, not a second value of one column: a session can be flagged
+   *  background and later archived, and clearing one must not clear the other. */
+  archived?: boolean;
 }
 
 /** Chat Slice D task 2 fix round (review I2): bounds a title at `SESSION_TITLE_MAX_CHARS`.
@@ -140,6 +158,11 @@ export class SessionStore {
       // blob so the pair is queryable and can never be half-parseable.
       "ALTER TABLE sessions ADD COLUMN forked_from_session_id TEXT",
       "ALTER TABLE sessions ADD COLUMN forked_from_at_seq INTEGER",
+      // session-activity-hygiene T2 (spec §1): the two stored bits of the activity lifecycle. The
+      // SAME additive index-only pattern as `model`/`effort` above, deliberately not a third shape.
+      // Stored 1/0 (NULL on every pre-existing row) and read back as `true | undefined`.
+      "ALTER TABLE sessions ADD COLUMN backgrounded INTEGER",
+      "ALTER TABLE sessions ADD COLUMN archived INTEGER",
     ]) {
       try { this.db.run(ddl); }
       catch (e) {
@@ -318,8 +341,8 @@ export class SessionStore {
   }
 
   list(): SessionRow[] {
-    return (this.db.query("SELECT session_id, scope, created_at, last_seq, title, first_message, cwd, origin, mode, parent_session_id, model, effort, forked_from_session_id, forked_from_at_seq FROM sessions ORDER BY created_at").all() as
-      { session_id: string; scope: string; created_at: number; last_seq: number; title: string | null; first_message: string | null; cwd: string | null; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null; effort: string | null; forked_from_session_id: string | null; forked_from_at_seq: number | null }[])
+    return (this.db.query("SELECT session_id, scope, created_at, last_seq, title, first_message, cwd, origin, mode, parent_session_id, model, effort, forked_from_session_id, forked_from_at_seq, backgrounded, archived FROM sessions ORDER BY created_at").all() as
+      { session_id: string; scope: string; created_at: number; last_seq: number; title: string | null; first_message: string | null; cwd: string | null; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null; effort: string | null; forked_from_session_id: string | null; forked_from_at_seq: number | null; backgrounded: number | null; archived: number | null }[])
       .map((r) => ({
         sessionId: r.session_id,
         scope: r.scope,
@@ -340,6 +363,12 @@ export class SessionStore {
         forkedFrom: r.forked_from_session_id !== null && r.forked_from_at_seq !== null
           ? { sessionId: r.forked_from_session_id, atSeq: r.forked_from_at_seq }
           : undefined,
+        // session-activity-hygiene T2: `true | undefined`, never `false` — a cleared flag must be
+        // indistinguishable from one never set (that is what makes `absent = off` a single case for
+        // every reader instead of two). Truthiness rather than `=== 1` so a hand-edited row or a
+        // future writer that stores some other non-zero integer still reads as "on".
+        backgrounded: r.backgrounded ? true : undefined,
+        archived: r.archived ? true : undefined,
       }));
   }
 
@@ -387,6 +416,48 @@ export class SessionStore {
   setEffort(sessionId: string, effort: string | null): void {
     const res = this.db.run("UPDATE sessions SET effort = ? WHERE session_id = ?", [effort, sessionId]);
     if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
+  }
+
+  /** session-activity-hygiene T2 (spec §1.2): the "keep running unattended" flag. `on: false`
+   *  CLEARS it (stored NULL, so it reads back absent — see `list()`'s mapping for why a cleared
+   *  flag must not become `false`). Same contract as `setModel`/`setEffort` directly above: throws
+   *  on an unknown session so the IPC layer maps it to NOT_FOUND, and setting the same value twice
+   *  is a successful no-op.
+   *
+   *  Storage only — this writes the bit and nothing else. Deciding WHEN it flips (the `/background`
+   *  verb, dispatch-spawned defaults, the app's per-turn auto-background, the >24h demotion) and
+   *  announcing the flip belong to their own seams, exactly as `setEffort` stores a value whose
+   *  legality is checked at the RPC boundary. */
+  setBackgrounded(sessionId: string, on: boolean): void {
+    const res = this.db.run("UPDATE sessions SET backgrounded = ? WHERE session_id = ?", [on ? 1 : null, sessionId]);
+    if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
+  }
+
+  /** session-activity-hygiene T2 (spec §1.4): the archive flag — identical contract to
+   *  `setBackgrounded` directly above, and an INDEPENDENT column: archiving a backgrounded session
+   *  leaves it backgrounded, and un-archiving does not clear that. */
+  setArchived(sessionId: string, on: boolean): void {
+    const res = this.db.run("UPDATE sessions SET archived = ? WHERE session_id = ?", [on ? 1 : null, sessionId]);
+    if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
+  }
+
+  /** session-activity-hygiene T2: when this session's log was last appended to, from the log
+   *  file's mtime (the JSONL is append-only, so its mtime IS its last event's timestamp) with
+   *  `created_at` as both the floor and the fallback for a session whose log is missing.
+   *
+   *  Derived rather than stored on purpose: a `last_event_ts` column would be a second writer on
+   *  every `append()` that a full index rebuild would then have to re-derive from the logs anyway.
+   *
+   *  DELIBERATELY NOT part of `list()`: that method is shared with `sync.heads` and
+   *  `daemon.status`, neither of which needs a filesystem stat per session. Callers that need the
+   *  value take the per-session cost — see `ActivitySignals.lastEventTs` for why a plausible
+   *  stand-in (e.g. `createdAt`) is not an acceptable substitute. */
+  lastEventTs(sessionId: string): number {
+    const row = this.db.query("SELECT scope, created_at FROM sessions WHERE session_id = ?").get(sessionId) as
+      | { scope: string; created_at: number } | null;
+    if (!row) throw new Error(`unknown session: ${sessionId}`);
+    try { return Math.max(Math.round(statSync(this.logPath(row.scope, sessionId)).mtimeMs), row.created_at); }
+    catch { return row.created_at; } // no log on disk yet (or unreadable): creation is the honest floor
   }
 
   meta(sessionId: string): {
