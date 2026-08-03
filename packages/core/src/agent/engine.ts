@@ -3591,6 +3591,12 @@ export class AgentEngine {
           // .setActivity` RPC, whose T4 emission flips every open UI live — so no new emission seam
           // is needed here, which is exactly why this guard refuses rather than clearing the flag.
           //
+          // activity-verb-semantics ruling 5: the remedy names RESUME ONLY. It used to offer
+          // "resume or background it first", which was true when backgrounding an archived session
+          // un-archived it as a side effect; that verb is now REFUSED on an archived session
+          // (sessions/set-activity.ts), so naming it here would send the sender at a door that
+          // answers "session is archived — resume it first".
+          //
           // Placed at the CALL SITE, before the running/idle split, so it binds every caller in
           // every mode (a code session messaging its own archived child refuses identically) and
           // both branches (a running-and-archived target is a contradiction the setActivity door
@@ -3598,7 +3604,7 @@ export class AgentEngine {
           if (targetMeta.archived) {
             sendMessageOutcomes.set(call.callId, {
               output: `session '${to}' is archived — archived sessions are resumed deliberately, never by a message: `
-                + `resume or background it first (manage_session, or the session.setActivity RPC), then send again`,
+                + `resume it first (manage_session's resume, or the session.setActivity RPC), then send again`,
               isError: true,
             });
             continue;
