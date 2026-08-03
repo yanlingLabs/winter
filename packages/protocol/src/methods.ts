@@ -453,26 +453,32 @@ export const SessionSetEffortResult = z.object({});
 //
 // The VALUE NAMES A TARGET STATE, not a flag, and only the two STORED states are settable —
 // `active` and `idle` are pure consequences of live signals (an attachment, a running turn), so
-// offering them would be offering a write that cannot be honoured. `null` CLEARS BOTH flags,
-// returning the session to purely-derived; it is required-but-nullable, not optional, for the same
-// reason `session.setModel`/`session.setEffort`'s clears are — a caller must never be able to
-// confuse "didn't send it" with "explicitly clearing it".
+// offering them would be offering a write that cannot be honoured.
 //
-// Because the value is a target STATE, `"background"` on an archived session also clears the
-// archive flag: `archived` outranks `backgrounded` in the derivation, so writing one flag while
-// leaving the other set would answer "archived" to a caller who asked for background — a wire
-// no-op. The reverse is NOT symmetric: `"archived"` leaves `backgrounded` alone (it contradicts
-// nothing below it), which is what returns a RESUMED session to background rather than to idle.
+// activity-verb-semantics: FOUR values, one per stored bit in each direction. `"background"` and
+// `"archived"` SET their bit; `"unbackground"` clears the background bit; `null` — RESUME — clears
+// the ARCHIVE bit. Each clear touches exactly one flag, which is what lets an archived background
+// worker be resumed BACK INTO background rather than into a state nobody asked for. `null` is
+// required-but-nullable, not optional, for the same reason `session.setModel`/`session.setEffort`'s
+// clears are — a caller must never be able to confuse "didn't send it" with "explicitly clearing".
 //
-// Refusals, all daemon-side (ipc/server.ts): an unknown session is `NOT_FOUND` and takes precedence
-// over everything below it; a chat/dispatch target is `INVALID_PARAMS` ("activity states apply to
-// code and cowork sessions only" — those modes have no lifecycle at all, T2's participation
-// allowlist); `"archived"` on a session with a RUNNING TURN is `INVALID_PARAMS` ("stop or background
-// it first"), because archived is a flag over IDLE (spec §1.4) and archiving a live turn would
-// strand it behind a hidden tab.
+// ARCHIVED IS IMMUTABLE EXCEPT THROUGH RESUME (the ruling that replaced T3's "background is a
+// target state, so it un-archives"). On a session whose archive flag is set, `"background"` and
+// `"unbackground"` are REFUSED and name the remedy; `"archived"` is an idempotent success; `null`
+// is the one door out. A verb that silently un-hid what the user hid would be exactly the
+// invisible-resurrection `send_message`'s own archived guard already refuses, spelled differently.
+// Resume matches resume-by-opening: `session.attach` has always cleared only the archive flag.
+//
+// Refusals, all daemon-side (sessions/set-activity.ts, behind ipc/server.ts): an unknown session is
+// `NOT_FOUND` and takes precedence over everything below it; a chat/dispatch target is
+// `INVALID_PARAMS` ("activity states apply to code and cowork sessions only" — those modes have no
+// lifecycle at all, T2's participation allowlist); `"background"`/`"unbackground"` on an ARCHIVED
+// session is `INVALID_PARAMS` ("session is archived — resume it first"); `"archived"` on a session
+// with a RUNNING TURN is `INVALID_PARAMS` ("stop or background it first"), because archived is a
+// flag over IDLE (spec §1.4) and archiving a live turn would strand it behind a hidden tab.
 export const SessionSetActivityParams = z.object({
   sessionId: z.string().min(1),
-  activity: z.enum(["background", "archived"]).nullable(),
+  activity: z.enum(["background", "archived", "unbackground"]).nullable(),
 });
 /** `activity` is the POST-WRITE DERIVED state, not an echo of what was written — a caller learns
  *  what its write actually produced without a second `session.list` round trip (clearing a session
