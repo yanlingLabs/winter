@@ -11,9 +11,16 @@ import { TokenAuthority } from "../../src/auth/tokens";
 
 // session-activity-hygiene T3: `session.setActivity` — the WRITE half of spec §1's lifecycle
 // (`session.list`'s derived `activity`, T2, is the read half). Params
-// `{sessionId, activity: "background" | "archived" | null}`; `null` clears BOTH stored flags back
-// to purely-derived. The result echoes the POST-WRITE derived state so a caller never has to guess
-// what its write actually produced.
+// `{sessionId, activity: "background" | "archived" | "unbackground" | null}`.
+//
+// activity-verb-semantics: ONE FLAG PER VERB. The two setters write their own stored bit and leave
+// the other alone; `"unbackground"` clears the background bit only; `null` is RESUME and clears the
+// ARCHIVE bit only, so `backgrounded` survives it (matching `session.attach`, the other resume
+// door). `null` cleared BOTH until that round. And an ARCHIVED session is IMMUTABLE except through
+// resume: `"background"`/`"unbackground"` are refused on one, `"archived"` is idempotent.
+//
+// The result echoes the POST-WRITE derived state so a caller never has to guess what its write
+// actually produced.
 //
 // Exercised over a bare IPC server (own SessionStore + SessionHub + TokenAuthority, engine doubled)
 // — the same harness shape as session-set-effort.test.ts, whose copy of TestClient this duplicates
@@ -127,7 +134,11 @@ describe("session.setActivity (session-activity-hygiene T3)", () => {
     c.close();
   });
 
-  test("null clears BOTH flags — the state falls back to purely derived", async () => {
+  // activity-verb-semantics ruling 2: RESUME (`null`) clears the ARCHIVE flag ONLY. `backgrounded`
+  // survives it, which is what makes verb-resume mean the same thing as resume-by-opening
+  // (`session.attach` has always cleared only the archive bit) — an archived background worker comes
+  // back as a background worker, not as a session the fleet has forgotten how to think about.
+  test("resume (null) clears the ARCHIVE flag only — backgrounded survives", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "activity-setter");
@@ -139,30 +150,97 @@ describe("session.setActivity (session-activity-hygiene T3)", () => {
 
     const res = await c.request(METHODS.sessionSetActivity, { sessionId, activity: null });
     expect(res.error).toBeUndefined();
-    expect(res.result).toEqual({ ok: true, activity: "idle" });
+    // The derived answer, not just the flag: a resumed background worker READS "background".
+    expect(res.result).toEqual({ ok: true, activity: "background" });
 
     const row = store.list().find((s) => s.sessionId === sessionId)!;
-    expect(row.backgrounded).toBeUndefined();
+    expect(row.backgrounded).toBe(true);
     expect(row.archived).toBeUndefined();
     c.close();
   });
 
-  // The param names a TARGET STATE, not a flag. `archived` outranks `backgrounded` in the
-  // derivation, so writing the background flag while leaving an archive flag set would be a wire
-  // no-op — the caller asks for background and is told "archived". Naming background as the target
-  // is therefore a deliberate un-archive, exactly like a resume.
-  test("background on an ARCHIVED session un-archives it (the value is a target state, not a flag)", async () => {
+  // activity-verb-semantics ruling 3: `unbackground` clears the BACKGROUND flag only — the exact
+  // mirror of resume. Before it existed, `null` was the only way to un-background and it dragged the
+  // archive flag with it; now each stored bit has its own clearing verb.
+  test("unbackground clears the BACKGROUND flag only", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "activity-setter");
+    const sessionId = store.createSession("global");
+    store.setBackgrounded(sessionId, true);
+
+    const res = await c.request(METHODS.sessionSetActivity, { sessionId, activity: "unbackground" });
+    expect(res.error).toBeUndefined();
+    expect(res.result).toEqual({ ok: true, activity: "idle" });
+    expect(store.list().find((s) => s.sessionId === sessionId)!.backgrounded).toBeUndefined();
+    c.close();
+  });
+
+  test("unbackground on a session that was never backgrounded is an idempotent success", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "activity-setter");
+    const sessionId = store.createSession("global");
+
+    const res = await c.request(METHODS.sessionSetActivity, { sessionId, activity: "unbackground" });
+    expect(res.result).toEqual({ ok: true, activity: "idle" });
+    expect(store.list().find((s) => s.sessionId === sessionId)!.backgrounded).toBeUndefined();
+    c.close();
+  });
+
+  // ------------------------------------------------------------------------------------------
+  // activity-verb-semantics ruling 1: an ARCHIVED session is IMMUTABLE except through resume.
+  //
+  // This DELIBERATELY REVERSES T3's "background is a target state, so it un-archives" — a target
+  // state that silently un-hides what the user hid is the same invisible-resurrection the
+  // send_message guard already refuses, just spelled with a different verb. Resume is now the ONE
+  // door out, and it is named in the refusal.
+  // ------------------------------------------------------------------------------------------
+  for (const activity of ["background", "unbackground"] as const) {
+    test(`${activity} on an ARCHIVED session is REFUSED and names resume — nothing is written`, async () => {
+      const { store, socketPath, harnessToken } = await boot();
+      const c = await TestClient.connect(socketPath);
+      await c.hello(harnessToken, "activity-setter");
+      const sessionId = store.createSession("global");
+      store.setArchived(sessionId, true);
+
+      const res = await c.request(METHODS.sessionSetActivity, { sessionId, activity });
+      expect(res.error).toBeTruthy();
+      expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+      expect(res.error.message).toBe("session is archived — resume it first");
+      const row = store.list().find((s) => s.sessionId === sessionId)!;
+      expect(row.archived).toBe(true);
+      expect(row.backgrounded).toBeUndefined();
+      c.close();
+    });
+  }
+
+  test("archive on an ALREADY-ARCHIVED session is an idempotent success, not a refusal", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "activity-setter");
     const sessionId = store.createSession("global");
     store.setArchived(sessionId, true);
 
-    const res = await c.request(METHODS.sessionSetActivity, { sessionId, activity: "background" });
-    expect(res.result).toEqual({ ok: true, activity: "background" });
-    const row = store.list().find((s) => s.sessionId === sessionId)!;
-    expect(row.archived).toBeUndefined();
-    expect(row.backgrounded).toBe(true);
+    const res = await c.request(METHODS.sessionSetActivity, { sessionId, activity: "archived" });
+    expect(res.error).toBeUndefined();
+    expect(res.result).toEqual({ ok: true, activity: "archived" });
+    expect(store.list().find((s) => s.sessionId === sessionId)!.archived).toBe(true);
+    c.close();
+  });
+
+  test("resume is the door OUT of archived, and it leaves the background flag exactly as it found it", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "activity-setter");
+    const sessionId = store.createSession("global");
+    store.setArchived(sessionId, true);
+
+    expect((await c.request(METHODS.sessionSetActivity, { sessionId, activity: null })).result)
+      .toEqual({ ok: true, activity: "idle" });
+    // …and now that it is resumed, the refused verbs work.
+    expect((await c.request(METHODS.sessionSetActivity, { sessionId, activity: "background" })).result)
+      .toEqual({ ok: true, activity: "background" });
     c.close();
   });
 
@@ -343,6 +421,11 @@ describe("session.setActivity (session-activity-hygiene T3)", () => {
     // Nothing attached + a turn running ⇒ the derivation says "background" regardless of the flag.
     expect((await c.request(METHODS.sessionSetActivity, { sessionId, activity: null })).result)
       .toEqual({ ok: true, activity: "background" });
+    // Resume clears the archive bit only (ruling 2), so the flag this test just set survives it —
+    // `unbackground` is the verb that takes it back off.
+    expect(store.list().find((s) => s.sessionId === sessionId)!.backgrounded).toBe(true);
+    expect((await c.request(METHODS.sessionSetActivity, { sessionId, activity: "unbackground" })).result)
+      .toEqual({ ok: true, activity: "background" });
     expect(store.list().find((s) => s.sessionId === sessionId)!.backgrounded).toBeUndefined();
     c.close();
   });
@@ -386,6 +469,34 @@ describe("session.setActivity (session-activity-hygiene T3)", () => {
     const row = store.list().find((s) => s.sessionId === sessionId)!;
     expect(row.archived).toBeUndefined();
     expect(row.backgrounded).toBe(true);
+    c.close();
+  });
+
+  // activity-verb-semantics ruling 2, stated as the PARITY it exists to create: there are two ways
+  // to resume a session — name it (`setActivity` null) or open it (`session.attach`) — and before
+  // this round they disagreed about the background flag. `attach` cleared only `archived`; the verb
+  // cleared both. A user who resumed an archived background worker got a background worker one way
+  // and a plain idle session the other. Same two flags in, same two flags out, both doors.
+  test("verb-resume ≡ attach-resume: both clear archived and both leave backgrounded set", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "activity-resumer");
+    const viaVerb = store.createSession("global");
+    const viaAttach = store.createSession("global");
+    for (const id of [viaVerb, viaAttach]) {
+      store.setBackgrounded(id, true);
+      store.setArchived(id, true);
+    }
+
+    await c.request(METHODS.sessionSetActivity, { sessionId: viaVerb, activity: null });
+    await c.request(METHODS.sessionAttach, { sessionId: viaAttach });
+
+    const flagsOf = (id: string) => {
+      const row = store.list().find((s) => s.sessionId === id)!;
+      return { archived: row.archived, backgrounded: row.backgrounded };
+    };
+    expect(flagsOf(viaVerb)).toEqual({ archived: undefined, backgrounded: true });
+    expect(flagsOf(viaVerb)).toEqual(flagsOf(viaAttach));
     c.close();
   });
 

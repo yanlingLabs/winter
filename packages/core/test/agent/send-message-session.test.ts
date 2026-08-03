@@ -253,9 +253,13 @@ describe("AgentEngine: send_message can target a session (D1-T4)", () => {
     const result = toolResult(store.read(sessionId), "m1");
     expect(result?.isError).toBe(true);
     expect(result?.output).toMatch(/archived/i);
-    // The remedy is named, and it is the DELIBERATE two-step (resume/background), never a silent
-    // un-archive by the sender.
+    // The remedy is named, and it is the DELIBERATE two-step, never a silent un-archive by the
+    // sender. activity-verb-semantics ruling 5: RESUME ONLY — background used to be offered here as
+    // a second way out, back when it un-archived as a side effect; it is now refused on an archived
+    // session, so naming it would point the sender at a door that says "resume it first".
     expect(result?.output).toMatch(/manage_session|session\.setActivity/);
+    expect(result?.output).toContain("resume it first");
+    expect(result?.output).not.toContain("or background it");
 
     // Settle any turn the pre-guard code would have started, then prove nothing happened at all.
     for (let i = 0; i < 40 && !store.read(childId).some((e) => e.type === "turn_completed"); i++) {

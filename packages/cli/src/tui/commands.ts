@@ -357,19 +357,26 @@ async function runWorkflows(ctx: CommandCtx, argText: string): Promise<void> {
  *  new gate predicate rather than the existing one. T8 (dispatch's management verbs) and T9
  *  (`norma agents`) are the plan's own homes for that surface.
  *
- *  `off` is how the RPC's `null` (clear BOTH flags) half is reachable from the shell at all; no
- *  sub-token means the verb's own value, the overwhelmingly common case (`/bg`'s "a bare verb reads
- *  naturally as the obvious thing" precedent). The note reports the DAEMON'S DERIVED answer, never
- *  the value that was sent: a clear on a session whose detached bash task is still writing comes
- *  back `"background"`, and echoing the request would quietly lie about it. */
+ *  `off` is how the RPC's clearing half is reachable from the shell at all; no sub-token means the
+ *  verb's own value, the overwhelmingly common case (`/bg`'s "a bare verb reads naturally as the
+ *  obvious thing" precedent). The note reports the DAEMON'S DERIVED answer, never the value that was
+ *  sent: a clear on a session whose detached bash task is still writing comes back `"background"`,
+ *  and echoing the request would quietly lie about it.
+ *
+ *  activity-verb-semantics ruling 6: EACH TOGGLE'S OFF CLEARS ITS OWN FLAG AND ONLY ITS OWN.
+ *  `/background off` sends `"unbackground"`; `/archive off` sends `null`, which is RESUME and clears
+ *  the archive bit alone. Both used to send `null` back when `null` cleared both flags — so
+ *  `/background off` silently un-archived a hidden session and `/archive off` silently took a worker
+ *  off background duty, each toggle answering a question the user had not asked. */
 async function runSetActivity(ctx: CommandCtx, verb: "background" | "archive", argText: string): Promise<void> {
   const on = verb === "background" ? "background" as const : "archived" as const;
+  const off = verb === "background" ? "unbackground" as const : null;
   const token = argText.trim().toLowerCase();
   if (token !== "" && token !== "on" && token !== "off") {
     ctx.appendNote(`usage: /${verb} [on|off]`);
     return;
   }
-  const r = await ctx.client.sessionSetActivity({ sessionId: ctx.sessionId, activity: token === "off" ? null : on });
+  const r = await ctx.client.sessionSetActivity({ sessionId: ctx.sessionId, activity: token === "off" ? off : on });
   // `activity` is optional on the wire for the same reason `SessionSummary.activity` is (absent =
   // "does not participate"). A code session can never produce that — but a client must render
   // absence as "no state" rather than inventing `idle`, so it is spelled out rather than defaulted.

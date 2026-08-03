@@ -145,7 +145,7 @@ const ListSessionsArgs = z.object({
 
 const ManageSessionArgs = z.object({
   sessionId: z.string().min(1),
-  action: z.enum(["stop", "background", "archive", "resume"]),
+  action: z.enum(["stop", "background", "unbackground", "archive", "resume"]),
 });
 
 /**
@@ -275,7 +275,7 @@ export function registerListSessionsTools(
       const footer = unscanned > 0
         ? `\n${unscanned} sessions were not scanned for keywords (budget spent) — narrow with cwd or type to reach them.`
         : "";
-      return `${header}\n${lines.join("\n")}${footer}\nManage one with manage_session (stop/background/archive/resume); message one with send_message.`;
+      return `${header}\n${lines.join("\n")}${footer}\nManage one with manage_session (stop/background/unbackground/archive/resume); message one with send_message.`;
     },
   });
 
@@ -287,11 +287,12 @@ export function registerListSessionsTools(
     deferred: true,
     description: [
       "Change a code or cowork session's lifecycle state, or stop the turn it is running. Find sessions with list_sessions.",
-      "action: stop — abort the running turn (the same abort the user's ESC performs; the session stays resumable).",
-      "background — keep it running unattended (also un-archives it).",
+      "action: stop — take it off duty: abort the running turn (the same abort the user's ESC performs; the session stays resumable) AND clear its background flag, even when no turn is running.",
+      "background — keep it running unattended.",
+      "unbackground — clear the keep-running-unattended flag without stopping anything; refused on archived sessions.",
       "archive — hide it under the archived tab; refused while a turn is running (stop or background it first).",
-      "resume — clear both flags, returning it to the state its live signals say it is in.",
-      "Every change is announced live to the user's open windows. Archiving is user-visible: a message can never resurrect an archived session, only a deliberate resume/background here.",
+      "resume — un-archive it; a session that was backgrounded comes back backgrounded.",
+      "Every change is announced live to the user's open windows. An ARCHIVED session is what the user hid: resume is the only way to change it — background and stop leave its flags alone, and a message can never resurrect it.",
     ].join(" "),
     args: ManageSessionArgs,
     run(args: z.infer<typeof ManageSessionArgs>) {
@@ -301,15 +302,55 @@ export function registerListSessionsTools(
         // registry.execute turns a throw into the isError outcome), not "nothing to stop". The
         // participation rule is the same one every other door applies — it is what keeps the
         // coordinator from aborting its own turn, or a chat session's.
-        const { mode } = deps.store.meta(sessionId);
+        const meta = deps.store.meta(sessionId);
         // Its OWN refusal, not `ACTIVITY_MODE_REFUSAL`: stop sets no activity state, so the shared
         // "activity states apply to..." sentence would describe a thing this verb never does.
-        if (!participatesInActivity(mode)) throw new Error(STOP_MODE_REFUSAL);
-        if (!deps.isRunning(sessionId)) return `session '${sessionId}' has no turn running — nothing to stop`;
-        deps.interrupt(sessionId);
-        return `stopped the running turn in session '${sessionId}' — it stays resumable`;
+        if (!participatesInActivity(meta.mode)) throw new Error(STOP_MODE_REFUSAL);
+        // activity-verb-semantics ruling 4a: A FLEET STOP DECOMMISSIONS. Aborting the turn is only
+        // half of what a coordinator means by "stop this worker" — the other half is that it stops
+        // being a background session at all, which is why the flag is cleared EVEN WHEN NO TURN IS
+        // RUNNING (a flagged-but-idle worker is still on duty). ESC / `session.interrupt` are
+        // deliberately untouched: pausing a session you are sitting in front of is not the same act.
+        const wasRunning = deps.isRunning(sessionId);
+        if (wasRunning) deps.interrupt(sessionId);
+        // Ruling 1 binds this verb too: an ARCHIVED session's flags are not the coordinator's to
+        // move — resume is the only door. Archived ∧ running is unreachable (the archive door
+        // refuses a running turn), so the interrupt above is defensive, and this branch is simply
+        // "mutate nothing, say something honest". Returned rather than thrown: nothing failed, there
+        // was nothing here to stop.
+        if (meta.archived) {
+          return wasRunning
+            ? `stopped the running turn in session '${sessionId}' — it stays resumable; it is archived, so its flags are untouched (resume it first to manage it)`
+            : `session '${sessionId}' is archived — no turn was running, and an archived session's flags stay untouched until it is resumed`;
+        }
+        // ONE WRITER. The flag goes through the shared state machine, not `store.setBackgrounded`,
+        // so the change reaches every open window on the SAME emission path as `background`/
+        // `archive`/`resume` — a hand-written flag write here would desync any UI showing this
+        // session until its next `session.list`. Run unconditionally (an unflagged session's write
+        // is a no-op and `SessionHub.emitActivity` suppresses the restatement) so there is no
+        // branch in which this tool becomes a second writer.
+        const res = setSessionActivity(deps, sessionId, "unbackground");
+        if (!res.ok) throw new Error(res.error);
+        if (wasRunning) {
+          return `stopped the running turn in session '${sessionId}' — it stays resumable; it is now ${res.activity}`;
+        }
+        // The notice SAYS WHAT IT DID. "nothing to stop" on a session that just came off background
+        // duty would hide the very change the coordinator asked for.
+        if (meta.backgrounded) {
+          return `session '${sessionId}': no turn was running; cleared its background flag — it is now ${res.activity}`;
+        }
+        return `session '${sessionId}' has no turn running — nothing to stop`;
       }
-      const target = action === "background" ? "background" : action === "archive" ? "archived" : null;
+      // Every non-stop action is a TARGET handed to the shared state machine — the archived
+      // refusal, the idempotence, the emission and the derived-state answer all come from there, so
+      // this line is a vocabulary map and nothing else. `unbackground` exists here because without
+      // it the coordinator's only way to clear the flag was `stop`, which aborts a running turn:
+      // the TUI could take a worker off background duty without disturbing its work and dispatch
+      // could not, against the standing ruling that dispatch manages the fleet with the same verbs.
+      const target = action === "background" ? "background"
+        : action === "unbackground" ? "unbackground"
+        : action === "archive" ? "archived"
+        : null;
       const res = setSessionActivity(deps, sessionId, target);
       // A refusal is a tool ERROR (throw → registry.execute wraps it as isError) so the model cannot
       // read it as a completed change; the wording is `session.setActivity`'s own, because it IS

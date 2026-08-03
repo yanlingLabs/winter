@@ -311,17 +311,29 @@ export async function runAgentVerb(
   if (verb === "open") return { message: agentResumeCommand(row.sessionId), changed: false };
   try {
     if (verb === "stop") {
+      // activity-verb-semantics ruling 4b: a roster stop DECOMMISSIONS, the same act dispatch's
+      // `manage_session` stop performs — abort the turn AND take the session off background duty.
+      // Two RPCs rather than one, because the daemon has no combined verb and inventing one would
+      // be a third door onto the state machine; INTERRUPT FIRST, since aborting a live turn is the
+      // urgent half and must not wait behind a flag write. Both are idempotent, so the pair is safe
+      // on every row the roster can show (including one whose turn ended a moment ago).
       const { wasRunning } = await client.interrupt(row.sessionId);
+      const res = await client.sessionSetActivity({ sessionId: row.sessionId, activity: "unbackground" });
+      const state = res.activity ?? "(no lifecycle)";
       return {
-        message: wasRunning ? `${row.sessionId} stopped` : `${row.sessionId}: nothing was running`,
-        changed: wasRunning,
+        message: wasRunning
+          ? `${row.sessionId} stopped → ${state}`
+          : `${row.sessionId}: nothing was running → ${state}`,
+        changed: true,
       };
     }
-    // The RPC's own three-valued write surface: the two settable flags, or `null` to clear BOTH
-    // back to purely derived. `active`/`idle` are DERIVED states and deliberately not writable —
-    // which is why this is narrower than `SessionActivity` and needs no cast.
-    const activity: "background" | "archived" | null =
-      verb === "background" ? "background" : verb === "archive" ? "archived" : null;
+    // The RPC's four-valued write surface: the two settable flags and the two clears, ONE FLAG PER
+    // VERB. `clear` is the background toggle's OFF half — it sends `unbackground`, never `null`;
+    // `null` means RESUME (un-archive), which is not what `c` is for and is unreachable from a
+    // roster that never lists archived sessions anyway. `active`/`idle` are DERIVED states and
+    // deliberately not writable, which is why this is narrower than `SessionActivity`.
+    const activity: "background" | "archived" | "unbackground" =
+      verb === "background" ? "background" : verb === "archive" ? "archived" : "unbackground";
     const res = await client.sessionSetActivity({ sessionId: row.sessionId, activity });
     return { message: `${row.sessionId} → ${res.activity ?? "(no lifecycle)"}`, changed: true };
   } catch (e) {

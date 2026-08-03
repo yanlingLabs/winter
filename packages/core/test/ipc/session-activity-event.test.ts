@@ -182,6 +182,45 @@ describe("session_activity transient (session-activity-hygiene T4)", () => {
     viewer.close();
   });
 
+  // activity-verb-semantics ruling 1: archiving an ALREADY-ARCHIVED session succeeds (it is a
+  // restatement of hiddenness, not a mutation of it) — and because emission is change-only, the
+  // success puts NOTHING on the wire. That pairing is the whole reason the verb can be idempotent
+  // without spamming every open window: "already archived" costs a no-op write and zero frames.
+  test("archive on an ALREADY-ARCHIVED session succeeds and re-emits NOTHING", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const sessionId = store.createSession("global");
+    const viewer = await TestClient.connect(socketPath);
+    await viewer.hello(harnessToken, "viewer");
+    await viewer.request(METHODS.sessionAttach, { sessionId });
+
+    await viewer.request(METHODS.sessionSetActivity, { sessionId, activity: "archived" });
+    await waitFor(() => viewer.activities().length === 2, "the first transient");
+    const again = await viewer.request(METHODS.sessionSetActivity, { sessionId, activity: "archived" });
+    await settle();
+    expect(again.error).toBeUndefined();
+    expect(again.result).toEqual({ ok: true, activity: "archived" });
+    expect(viewer.activities()).toEqual(["active", "archived"]); // still one archived
+    viewer.close();
+  });
+
+  // The other half of ruling 1 on this seam: the two REFUSED verbs move nothing, so they announce
+  // nothing — an archived session's open windows must not flicker because an agent tried.
+  test("background on an ARCHIVED session is refused and emits nothing", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const sessionId = store.createSession("global");
+    const viewer = await TestClient.connect(socketPath);
+    await viewer.hello(harnessToken, "viewer");
+    await viewer.request(METHODS.sessionAttach, { sessionId });
+
+    await viewer.request(METHODS.sessionSetActivity, { sessionId, activity: "archived" });
+    await waitFor(() => viewer.activities().length === 2, "the archive transient");
+    const refused = await viewer.request(METHODS.sessionSetActivity, { sessionId, activity: "background" });
+    await settle();
+    expect(refused.error.message).toBe("session is archived — resume it first");
+    expect(viewer.activities()).toEqual(["active", "archived"]);
+    viewer.close();
+  });
+
   test("a REFUSED set emits nothing — no state moved", async () => {
     const { store, socketPath, harnessToken } = await boot();
     const chatId = store.createSession("global", { mode: "chat" });
