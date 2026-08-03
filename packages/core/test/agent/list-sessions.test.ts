@@ -11,7 +11,7 @@ import {
   STOP_MODE_REFUSAL,
 } from "../../src/agent/tools/list-sessions";
 import { makeActivityDeriver } from "../../src/sessions/activity";
-import { ACTIVITY_MODE_REFUSAL } from "../../src/sessions/set-activity";
+import { ACTIVITY_MODE_REFUSAL, ARCHIVED_IMMUTABLE_REFUSAL } from "../../src/sessions/set-activity";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type SessionActivity, type WritableSocket } from "@norma/protocol";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -317,21 +317,41 @@ describe("manage_session (T8): the write half, with session.setActivity's own se
     expect(h.store.meta(id).backgrounded).toBe(true);
     expect(h.emitted.at(-1)).toEqual({ sessionId: id, activity: "archived" });
 
+    // activity-verb-semantics ruling 2: resume clears the ARCHIVE flag only, so this session comes
+    // back as what it was before it was hidden — a background worker.
     const resumed = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "resume" });
-    expect(resumed.output).toBe(`session '${id}' is now idle`);
+    expect(resumed.output).toBe(`session '${id}' is now background`);
     expect(h.store.meta(id).archived).toBeUndefined();
-    expect(h.store.meta(id).backgrounded).toBeUndefined();
-    expect(h.emitted.at(-1)).toEqual({ sessionId: id, activity: "idle" });
+    expect(h.store.meta(id).backgrounded).toBe(true);
+    expect(h.emitted.at(-1)).toEqual({ sessionId: id, activity: "background" });
   });
 
-  test("background on an ARCHIVED session un-archives it (the target names a STATE, not a flag)", async () => {
+  // activity-verb-semantics ruling 1, at dispatch's door. The T3-era pin here asserted the exact
+  // opposite (background un-archives, "the target names a STATE, not a flag") — it is flipped, not
+  // deleted, because the coordinator is precisely the caller that must not be able to un-hide a
+  // session the user hid without saying the word "resume".
+  test("background on an ARCHIVED session is REFUSED and names resume — nothing is written", async () => {
     const h = harness();
     const id = h.store.createSession("global", { cwd: realDir("unarchive"), mode: "code" });
     h.store.setArchived(id, true);
 
     const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "background" });
-    expect(res.output).toBe(`session '${id}' is now background`);
-    expect(h.store.meta(id).archived).toBeUndefined();
+    expect(res.isError).toBe(true);
+    expect(res.output).toBe(ARCHIVED_IMMUTABLE_REFUSAL);
+    expect(h.store.meta(id).archived).toBe(true);
+    expect(h.store.meta(id).backgrounded).toBeUndefined();
+    expect(h.emitted).toHaveLength(0);
+  });
+
+  test("archive on an ALREADY-ARCHIVED session is an idempotent success", async () => {
+    const h = harness();
+    const id = h.store.createSession("global", { cwd: realDir("rearchive"), mode: "code" });
+    h.store.setArchived(id, true);
+
+    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "archive" });
+    expect(res.isError).toBe(false);
+    expect(res.output).toBe(`session '${id}' is now archived`);
+    expect(h.store.meta(id).archived).toBe(true);
   });
 
   test("archiving a RUNNING session is refused with the same two ways out the RPC names", async () => {
@@ -377,21 +397,72 @@ describe("manage_session (T8): the write half, with session.setActivity's own se
     }
   });
 
-  test("stop aborts a running turn through the engine's own interrupt, and is a no-op message when nothing runs", async () => {
+  // ------------------------------------------------------------------------------------------
+  // activity-verb-semantics ruling 4a: A FLEET STOP DECOMMISSIONS. `stop` no longer only aborts a
+  // turn — it also takes the session OFF background duty, because that is what a coordinator means
+  // by stopping one of its workers. Interactive interrupt (ESC / `session.interrupt`) is
+  // deliberately NOT changed: pausing a session you are sitting in front of is not decommissioning
+  // it. The flag write goes through `setSessionActivity` rather than `store.setBackgrounded`, so
+  // there stays exactly ONE writer and the change reaches open windows on the same emission path
+  // every other lifecycle move uses.
+  // ------------------------------------------------------------------------------------------
+  test("stop on a RUNNING background worker aborts the turn AND clears the background flag, announcing the result", async () => {
     const h = harness();
-    const id = h.store.createSession("global", { cwd: realDir("stop"), mode: "code" });
-
-    const quiet = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "stop" });
-    expect(quiet.isError).toBe(false);
-    expect(quiet.output).toMatch(/no turn running/);
-    expect(h.interrupted).toHaveLength(0);
-
+    const id = h.store.createSession("global", { cwd: realDir("stop-run"), mode: "code" });
+    h.store.setBackgrounded(id, true);
     h.running.set(id, NOW - 5_000);
-    const stopped = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "stop" });
-    expect(stopped.isError).toBe(false);
+
+    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "stop" });
+    expect(res.isError).toBe(false);
+    expect(res.output).toMatch(/stopped the running turn/);
     expect(h.interrupted).toEqual([id]);
-    // Stopping is not archiving: no flag is written, nothing is announced.
-    expect(h.store.meta(id).archived).toBeUndefined();
+    expect(h.store.meta(id).backgrounded).toBeUndefined();
+    // The derived state is still "background" — the turn is running until the abort lands, and a
+    // running session with nothing attached derives background regardless of the flag. The point of
+    // the assertion is that the change WAS announced, through the state-setters' own path.
+    expect(h.emitted.at(-1)).toEqual({ sessionId: id, activity: "background" });
+  });
+
+  test("stop on an IDLE-but-FLAGGED worker clears the flag and SAYS SO — no turn is not nothing to do", async () => {
+    const h = harness();
+    const id = h.store.createSession("global", { cwd: realDir("stop-idle"), mode: "code" });
+    h.store.setBackgrounded(id, true);
+
+    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "stop" });
+    expect(res.isError).toBe(false);
+    expect(res.output).toMatch(/no turn was running/);
+    expect(res.output).toMatch(/background flag/);
+    expect(h.interrupted).toHaveLength(0);
+    expect(h.store.meta(id).backgrounded).toBeUndefined();
+    expect(h.emitted.at(-1)).toEqual({ sessionId: id, activity: "idle" });
+  });
+
+  test("stop on an UNFLAGGED idle session is the plain nothing-to-stop notice", async () => {
+    const h = harness();
+    const id = h.store.createSession("global", { cwd: realDir("stop-quiet"), mode: "code" });
+
+    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "stop" });
+    expect(res.isError).toBe(false);
+    expect(res.output).toMatch(/no turn running/);
+    expect(res.output).not.toMatch(/background flag/);
+    expect(h.interrupted).toHaveLength(0);
+  });
+
+  // Ruling 1 binds `stop` too: an archived session's flags are not the coordinator's to move. Since
+  // archived ∧ running is unreachable (the archive door refuses a running turn), this is simply
+  // "don't clear flags on an archived session, and say something honest".
+  test("stop on an ARCHIVED session mutates NOTHING and says why", async () => {
+    const h = harness();
+    const id = h.store.createSession("global", { cwd: realDir("stop-arch"), mode: "code" });
+    h.store.setBackgrounded(id, true);
+    h.store.setArchived(id, true);
+
+    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "stop" });
+    expect(res.isError).toBe(false);
+    expect(res.output).toMatch(/archived/);
+    expect(h.interrupted).toHaveLength(0);
+    expect(h.store.meta(id).backgrounded).toBe(true);
+    expect(h.store.meta(id).archived).toBe(true);
     expect(h.emitted).toHaveLength(0);
   });
 });
