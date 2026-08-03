@@ -245,7 +245,18 @@ export class NormaClient {
     await this.sessionSetPolicy({ sessionId, policy });
   }
   /** session-activity-hygiene T3: `session.setActivity` — the lifecycle write verb behind the TUI's
-   *  `/background` and `/archive`. `activity: null` clears BOTH stored flags back to purely derived.
+   *  `/background` and `/archive` and the `norma agents` roster's verbs.
+   *
+   *  activity-verb-semantics: FOUR values, ONE FLAG PER VERB. `"background"`/`"archived"` SET their
+   *  own stored bit and leave the other alone; `"unbackground"` clears the background bit only; and
+   *  `null` is RESUME — it clears the ARCHIVE bit only, so a session that was backgrounded before it
+   *  was archived comes back backgrounded (matching `session.attach`, which has always cleared
+   *  exactly the archive flag). `null` did clear BOTH until this round: any caller still sending it
+   *  to un-background is now writing a resume.
+   *
+   *  An ARCHIVED session is IMMUTABLE except through resume: `"background"` and `"unbackground"` are
+   *  REFUSED on one ("session is archived — resume it first"), `"archived"` is an idempotent success,
+   *  and `null` is the one door out.
    *
    *  The returned `activity` is the daemon's POST-WRITE DERIVED state, not an echo of what was sent
    *  (a clear on a session whose detached bash task is still writing comes back `"background"`), and

@@ -73,7 +73,8 @@ public actor Gateway {
         "session.setModel",
         // provider-correctness T4: and its reasoning effort, a separate axis with its own method.
         "session.setEffort",
-        // session-activity-hygiene T3: and its lifecycle state (background/archive/clear).
+        // session-activity-hygiene T3: and its lifecycle state
+        // (background/unbackground/archive/resume).
         "session.setActivity",
         // Chat Slice D task 2: the phone replicates its own chat-session logs both ways.
         "sync.heads", "sync.pull", "sync.push",

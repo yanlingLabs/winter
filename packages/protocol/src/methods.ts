@@ -476,6 +476,13 @@ export const SessionSetEffortResult = z.object({});
 // session is `INVALID_PARAMS` ("session is archived — resume it first"); `"archived"` on a session
 // with a RUNNING TURN is `INVALID_PARAMS` ("stop or background it first"), because archived is a
 // flag over IDLE (spec §1.4) and archiving a live turn would strand it behind a hidden tab.
+// PHONE DEBT (activity-verb-semantics, owed at the next kit bump): the iOS companion consumes this
+// method through NormaKit's Gateway allowlist and has NOT been updated. It owes BOTH halves — the
+// widened `activity` param (`"unbackground"` is new; the result shape is unchanged, so nothing
+// breaks on the wire today) AND the changed SEMANTICS of what it already sends: `null` no longer
+// clears both flags, it is RESUME (archive bit only), so a phone control that sends `null` to
+// un-background is now writing a resume; and `"background"` on an archived session no longer
+// un-archives it, it is REFUSED ("session is archived — resume it first").
 export const SessionSetActivityParams = z.object({
   sessionId: z.string().min(1),
   activity: z.enum(["background", "archived", "unbackground"]).nullable(),

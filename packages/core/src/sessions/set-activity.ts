@@ -128,6 +128,14 @@ export function setSessionActivity(
     case "background": deps.store.setBackgrounded(sessionId, true); break;
     case "unbackground": deps.store.setBackgrounded(sessionId, false); break;
     case null: deps.store.setArchived(sessionId, false); break;
+    // This union just grew once, and the failure mode of the next growth is silent: an unhandled
+    // target writes NOTHING and still returns `{ok: true}` with a derived state, so the caller is
+    // told its write succeeded and the flag never moved. The `never` assignment (the house pattern
+    // — tui/transcript.tsx, flatten-blocks.ts) makes that a compile error instead.
+    default: {
+      const _exhaustive: never = target;
+      throw new Error(`unhandled activity target: ${String(_exhaustive)}`);
+    }
   }
   // Re-read rather than assuming what was just written: the derivation's inputs are the STORED
   // flags, and re-reading them is what keeps this echo an observation instead of a restatement.

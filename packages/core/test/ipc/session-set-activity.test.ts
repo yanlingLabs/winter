@@ -11,9 +11,16 @@ import { TokenAuthority } from "../../src/auth/tokens";
 
 // session-activity-hygiene T3: `session.setActivity` — the WRITE half of spec §1's lifecycle
 // (`session.list`'s derived `activity`, T2, is the read half). Params
-// `{sessionId, activity: "background" | "archived" | null}`; `null` clears BOTH stored flags back
-// to purely-derived. The result echoes the POST-WRITE derived state so a caller never has to guess
-// what its write actually produced.
+// `{sessionId, activity: "background" | "archived" | "unbackground" | null}`.
+//
+// activity-verb-semantics: ONE FLAG PER VERB. The two setters write their own stored bit and leave
+// the other alone; `"unbackground"` clears the background bit only; `null` is RESUME and clears the
+// ARCHIVE bit only, so `backgrounded` survives it (matching `session.attach`, the other resume
+// door). `null` cleared BOTH until that round. And an ARCHIVED session is IMMUTABLE except through
+// resume: `"background"`/`"unbackground"` are refused on one, `"archived"` is idempotent.
+//
+// The result echoes the POST-WRITE derived state so a caller never has to guess what its write
+// actually produced.
 //
 // Exercised over a bare IPC server (own SessionStore + SessionHub + TokenAuthority, engine doubled)
 // — the same harness shape as session-set-effort.test.ts, whose copy of TestClient this duplicates
