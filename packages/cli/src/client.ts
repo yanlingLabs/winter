@@ -252,7 +252,7 @@ export class NormaClient {
    *  it is DECLARED on `SessionSetActivityResult` — `validated`'s safeParse strips anything the
    *  schema doesn't name, so an undeclared field would vanish here silently. Callers should report
    *  this value, never the value they asked for. */
-  async sessionSetActivity(params: { sessionId: string; activity: "background" | "archived" | null }): Promise<{ ok: true; activity?: SessionActivity }> {
+  async sessionSetActivity(params: { sessionId: string; activity: "background" | "archived" | "unbackground" | null }): Promise<{ ok: true; activity?: SessionActivity }> {
     return this.validated(SessionSetActivityResult, await this.request(METHODS.sessionSetActivity, params), METHODS.sessionSetActivity);
   }
   /** Dashboard read methods (Phase 2f Task 6 — CLI riders over Task 3's new methods). */

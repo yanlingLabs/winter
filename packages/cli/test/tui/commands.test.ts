@@ -567,10 +567,23 @@ describe("runners — mirror main.ts's routes", () => {
     expect(notes).toEqual(["activity → archived"]);
   });
 
-  test.each(["/background off", "/archive off"])("%s — sends the null CLEAR (both flags)", async (input) => {
+  // activity-verb-semantics ruling 6: each toggle's OFF is the clear of ITS OWN flag, never the
+  // other one's. `/background off` sends `unbackground`; `/archive off` sends `null` (RESUME), which
+  // clears the archive bit only. Before this round both sent `null` and `null` cleared both, so
+  // `/background off` on an archived session silently un-archived it and `/archive off` silently
+  // un-backgrounded it — each toggle quietly answering a question the user did not ask.
+  test("/background off — sends the unbackground CLEAR, not a resume", async () => {
     const { client, calls } = makeClient({ sessionSetActivity: () => ({ ok: true, activity: "idle" }) });
     const { ctx, notes } = makeCtx(client, { sessionId: "sess-9" });
-    await runCommand(ctx, input as string);
+    await runCommand(ctx, "/background off");
+    expect(calls).toEqual([{ method: "sessionSetActivity", args: [{ sessionId: "sess-9", activity: "unbackground" }] }]);
+    expect(notes).toEqual(["activity → idle"]);
+  });
+
+  test("/archive off — still sends null: resume is what un-archiving means everywhere", async () => {
+    const { client, calls } = makeClient({ sessionSetActivity: () => ({ ok: true, activity: "idle" }) });
+    const { ctx, notes } = makeCtx(client, { sessionId: "sess-9" });
+    await runCommand(ctx, "/archive off");
     expect(calls).toEqual([{ method: "sessionSetActivity", args: [{ sessionId: "sess-9", activity: null }] }]);
     expect(notes).toEqual(["activity → idle"]);
   });

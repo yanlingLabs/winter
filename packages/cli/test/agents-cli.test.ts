@@ -257,17 +257,32 @@ function makeClient(impl: Impl): { client: NormaClient; calls: { method: string;
 const bgRow = { sessionId: "s_1", activity: "background" as const, sinceMs: T0, observedOnly: false };
 
 describe("runAgentVerb", () => {
-  test("stop drives session.interrupt and reports whether a turn was actually running", async () => {
-    const { client, calls } = makeClient({ interrupt: () => ({ wasRunning: true }) });
+  // activity-verb-semantics ruling 4b: the roster's stop DECOMMISSIONS, exactly like dispatch's
+  // manage_session stop — two RPCs, interrupt FIRST (aborting the turn is the urgent half), then
+  // the flag clear. Both are idempotent, so the pair is safe on any row the roster can show.
+  test("stop drives session.interrupt AND THEN unbackground — in that order", async () => {
+    const { client, calls } = makeClient({
+      interrupt: () => ({ wasRunning: true }),
+      sessionSetActivity: () => ({ ok: true, activity: "idle" }),
+    });
     const r = await runAgentVerb(client, "stop", bgRow);
-    expect(calls).toEqual([{ method: "interrupt", args: ["s_1"] }]);
+    expect(calls).toEqual([
+      { method: "interrupt", args: ["s_1"] },
+      { method: "sessionSetActivity", args: [{ sessionId: "s_1", activity: "unbackground" }] },
+    ]);
     expect(r.message).toContain("stopped");
+    expect(r.changed).toBe(true);
   });
 
-  test("stop on a session with no turn running says so instead of claiming a stop", async () => {
-    const { client } = makeClient({ interrupt: () => ({ wasRunning: false }) });
+  test("stop on a session with no turn running still takes it off background duty", async () => {
+    const { client, calls } = makeClient({
+      interrupt: () => ({ wasRunning: false }),
+      sessionSetActivity: () => ({ ok: true, activity: "idle" }),
+    });
     const r = await runAgentVerb(client, "stop", bgRow);
     expect(r.message).toContain("nothing was running");
+    expect(calls.map((c) => c.method)).toEqual(["interrupt", "sessionSetActivity"]);
+    expect((calls[1]!.args[0] as any).activity).toBe("unbackground");
   });
 
   test("background drives session.setActivity and REPORTS THE DAEMON'S derived answer, not what was asked", async () => {
@@ -279,10 +294,12 @@ describe("runAgentVerb", () => {
     expect(r.message).toContain("background");
   });
 
-  test("clear sends activity: null — the both-flags clear, not a second value", async () => {
+  // The roster's `clear` is the background toggle's OFF half — it undoes `b`, and nothing else.
+  // It sent `null` while `null` cleared both flags; that made `c` an un-archive too (ruling 6).
+  test("clear sends activity: 'unbackground' — it undoes background, not the archive flag", async () => {
     const { client, calls } = makeClient({ sessionSetActivity: () => ({ ok: true, activity: "idle" }) });
     const r = await runAgentVerb(client, "clear", bgRow);
-    expect(calls).toEqual([{ method: "sessionSetActivity", args: [{ sessionId: "s_1", activity: null }] }]);
+    expect(calls).toEqual([{ method: "sessionSetActivity", args: [{ sessionId: "s_1", activity: "unbackground" }] }]);
     expect(r.message).toContain("idle");
   });
 
