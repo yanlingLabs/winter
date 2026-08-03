@@ -343,6 +343,55 @@ describe("manage_session (T8): the write half, with session.setActivity's own se
     expect(h.emitted).toHaveLength(0);
   });
 
+  // activity-verb-semantics amendment: the coordinator gets `unbackground` too. Without it,
+  // dispatch's ONLY way to clear the flag was `stop` — which aborts a running turn — so the TUI
+  // could take a worker off background duty without disturbing its work and the coordinator could
+  // not. That contradicts the standing ruling that dispatch manages the whole fleet with the same
+  // verbs. Nothing here is hand-rolled: the action maps onto the shared state machine, so the
+  // archived refusal, the idempotence, the emission and the derived answer all arrive with it.
+  test("unbackground clears the flag WITHOUT stopping anything, and answers the derived state", async () => {
+    const h = harness();
+    const id = h.store.createSession("global", { cwd: realDir("unbg"), mode: "code" });
+    h.store.setBackgrounded(id, true);
+    h.running.set(id, NOW - 5_000);
+
+    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "unbackground" });
+    expect(res.isError).toBe(false);
+    // Still "background": the turn is running with nothing attached, so the derivation says so
+    // regardless of the flag — which is exactly the point. The verb moved the FLAG and left the
+    // WORK alone; `stop` is the verb that touches the turn.
+    expect(res.output).toBe(`session '${id}' is now background`);
+    expect(h.store.meta(id).backgrounded).toBeUndefined();
+    expect(h.interrupted).toHaveLength(0);
+  });
+
+  test("unbackground on an idle flagged worker takes it off duty and reads back idle", async () => {
+    const h = harness();
+    const id = h.store.createSession("global", { cwd: realDir("unbg-idle"), mode: "code" });
+    h.store.setBackgrounded(id, true);
+
+    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "unbackground" });
+    expect(res.output).toBe(`session '${id}' is now idle`);
+    expect(h.store.meta(id).backgrounded).toBeUndefined();
+    expect(h.emitted.at(-1)).toEqual({ sessionId: id, activity: "idle" });
+  });
+
+  // Ruling 1 through THIS door, not merely through the RPC: the tool and the RPC are two doors onto
+  // one state machine, and this is the pin that says so for the new verb.
+  test("unbackground on an ARCHIVED session is REFUSED here too — nothing is written", async () => {
+    const h = harness();
+    const id = h.store.createSession("global", { cwd: realDir("unbg-arch"), mode: "code" });
+    h.store.setBackgrounded(id, true);
+    h.store.setArchived(id, true);
+
+    const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: id, action: "unbackground" });
+    expect(res.isError).toBe(true);
+    expect(res.output).toBe(ARCHIVED_IMMUTABLE_REFUSAL);
+    expect(h.store.meta(id).backgrounded).toBe(true);
+    expect(h.store.meta(id).archived).toBe(true);
+    expect(h.emitted).toHaveLength(0);
+  });
+
   test("archive on an ALREADY-ARCHIVED session is an idempotent success", async () => {
     const h = harness();
     const id = h.store.createSession("global", { cwd: realDir("rearchive"), mode: "code" });
@@ -376,7 +425,7 @@ describe("manage_session (T8): the write half, with session.setActivity's own se
     h.running.set(dispatch, NOW - 10_000);
 
     for (const target of [chat, dispatch]) {
-      for (const action of ["stop", "background", "archive", "resume"] as const) {
+      for (const action of ["stop", "background", "unbackground", "archive", "resume"] as const) {
         const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: target, action });
         expect(res.isError).toBe(true);
         // `stop` sets no activity state, so it answers with its own honest refusal — every other
@@ -390,7 +439,7 @@ describe("manage_session (T8): the write half, with session.setActivity's own se
 
   test("an unknown session is UNKNOWN, never a state refusal", async () => {
     const h = harness();
-    for (const action of ["stop", "background", "archive", "resume"] as const) {
+    for (const action of ["stop", "background", "unbackground", "archive", "resume"] as const) {
       const res = await h.call(MANAGE_SESSION_TOOL, { sessionId: "s_nope", action });
       expect(res.isError).toBe(true);
       expect(res.output).toMatch(/unknown session/);
