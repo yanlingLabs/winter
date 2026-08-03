@@ -339,17 +339,18 @@ describe("dispatch-tool-deferral: list_sessions, manage_session and send_message
     expect(ms?.output).toContain("deferred — load its schema via ToolSearch first");
   });
 
-  // `approvalPolicy: "bypass"` is deliberate and narrowly scoped to THIS test: gate.ts's READ_ONLY
-  // set (agent/gate.ts) was never extended for list_sessions/manage_session at T8 — a SEPARATE,
-  // pre-existing classification gap this task did not introduce and does not fix (out of scope for
-  // a deferral-only change; every list-sessions.test.ts call bypasses engine.ts's gate entirely via
-  // a direct registry.execute(), which is why that file's extensive coverage never surfaced it).
-  // Left unclassified, both fall through gate.ts's fail-closed default and return "ask" even under
-  // `auto`, so `auto` here would hang this test on an approval nobody answers — unrelated to the
-  // deferred guard this test exists to prove. `bypass` isolates the ONE thing under test: that a
-  // ToolSearch load clears the deferred rejection and the call actually runs.
+  // Runs under the harness's plain default policy ("auto" — the SAME default a real dispatch
+  // session gets from server.ts's session.dispatch handler, never overridden to chat's fixed
+  // policy: engine.ts's turn-time resolution only coerces `meta.approvalPolicy` for `isChat`, not
+  // `isDispatch`). This used to need an `approvalPolicy: "bypass"` override: gate.ts's READ_ONLY
+  // set had never been extended for list_sessions/manage_session, so both fell through to
+  // evaluate()'s unclassified-tool fallback, which fails closed to "ask" under `auto` too — a card
+  // nobody answers, hanging this test (list-sessions.test.ts's own extensive coverage never
+  // surfaced it because it calls registry.execute() directly, bypassing engine.ts's gate
+  // entirely). Now that gate.ts classifies both READ_ONLY, `auto` allows them unconditionally
+  // (same as every other READ_ONLY tool) and the override is unnecessary — this IS the honest pin.
   test("list_sessions and manage_session become callable after a ToolSearch load", async () => {
-    const disp = await harness({ mode: "dispatch", approvalPolicy: "bypass" });
+    const disp = await harness({ mode: "dispatch" });
     const targetCwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-dispatch-deferred-target-")));
     const targetId = disp.store.createSession("global", { cwd: targetCwd, mode: "code" });
 
