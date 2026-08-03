@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { SessionEvent } from "@norma/protocol";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub, type HubClient } from "../../src/sessions/hub";
+import { makeActivityDeriver } from "../../src/sessions/activity";
 import { ToolRegistry } from "../../src/agent/tools/registry";
 import { registerReadTools } from "../../src/agent/tools/fs-read";
 import { registerWriteTools } from "../../src/agent/tools/fs-write";
@@ -14,12 +15,14 @@ import { registerTaskStopTool } from "../../src/agent/tools/task-stop";
 import { registerNotebookTool } from "../../src/agent/tools/notebook";
 import { registerSpawnAgentTool } from "../../src/agent/tools/spawn";
 import { registerSessionSpawnTool } from "../../src/agent/tools/session-spawn";
+import { registerSendMessageTool } from "../../src/agent/tools/send-message";
 import { registerPushNotificationTool } from "../../src/agent/tools/push-notification";
 import { registerAskUserTool } from "../../src/agent/tools/ask-user";
 import { registerAskQuestionTool } from "../../src/agent/tools/ask-question";
 import { registerSearchTool } from "../../src/agent/tools/search";
 import { registerWebTools } from "../../src/agent/tools/web";
 import { registerToolSearchTool } from "../../src/agent/tools/toolsearch";
+import { registerListSessionsTools } from "../../src/agent/tools/list-sessions";
 import { PermissionGate } from "../../src/agent/gate";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
@@ -49,7 +52,7 @@ import type { ModelInfo, Provider, ProviderEvent, TurnRequest } from "../../src/
  * that. The brief's own tests assert `not.toContain` on `offered()` and `toContain` on
  * `deferredBullets()` for the SAME tool name in the same test, so the two must stay distinct here.
  */
-function harness(opts: { mode: "code" | "dispatch" | "chat" }) {
+function harness(opts: { mode: "code" | "dispatch" | "chat"; approvalPolicy?: "auto" | "bypass" }) {
   const home = mkdtempSync(join(tmpdir(), "norma-dispatch-deferred-"));
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-dispatch-deferred-cwd-")));
   const store = new SessionStore(home);
@@ -77,6 +80,32 @@ function harness(opts: { mode: "code" | "dispatch" | "chat" }) {
   registerSearchTool(registry);
   registerWebTools(registry);
   registerToolSearchTool(registry);
+  // dispatch-tool-deferral: send_message's dispatch-deferral (send-message.ts's D1-T2 `deferred:
+  // ["dispatch"]`, D1-T4's `modes: ["code", "dispatch"]`) had NO real-turn pin in this file despite
+  // this being the purpose-built harness for exactly that axis — it was simply never registered
+  // here. Registered bare (no deferred override — the flag lives in the tool's own file).
+  registerSendMessageTool(registry);
+  // dispatch-tool-deferral: list_sessions/manage_session (T8's dispatch management surface) get the
+  // SAME real-turn proof bash/task_stop/computer/AskQuestion/send_message already have in this file.
+  // Their `deferred: true` is hardcoded inside list-sessions.ts itself (the agent_list/agent_output
+  // precedent — not a caller-supplied flag like task_stop's/computer's), so there is nothing to pass
+  // here beyond the tool's own deps. Deps mirror list-sessions.test.ts's own harness / daemon.ts's
+  // real wiring, minimally stubbed (this file's tests only need list/background to run without
+  // throwing, not activity-derivation fidelity).
+  const activityDerive = makeActivityDeriver({
+    attachedCount: () => 0,
+    turnRunning: () => false,
+    bgWork: () => false,
+    lastEventTs: (id) => store.lastEventTs(id),
+  });
+  registerListSessionsTools(registry, {
+    store,
+    derive: activityDerive,
+    turnStartedAt: () => undefined,
+    isRunning: () => false,
+    interrupt: () => {},
+    emit: () => {},
+  });
 
   const assemblerHome = mkdtempSync(join(tmpdir(), "norma-dispatch-deferred-actx-"));
   const assemblerTrust = new TrustStore(join(assemblerHome, "trust.json"));
@@ -99,13 +128,14 @@ function harness(opts: { mode: "code" | "dispatch" | "chat" }) {
     // user never touched toolSearch.enabled. Deliberately NOT `{ enabled: () => true }`.
     toolSearch: { enabled: () => undefined },
   });
-  const sessionId = store.createSession("global", { cwd, approvalPolicy: "auto", mode: opts.mode });
+  const sessionId = store.createSession("global", { cwd, approvalPolicy: opts.approvalPolicy ?? "auto", mode: opts.mode });
   const events: SessionEvent[] = [];
   hub.attach({ clientName: "test-observer", deliver: (e) => { events.push(e); return true; } }, sessionId, 0);
 
   return {
     provider,
     events,
+    store, // exposed so a test can mint a SECOND session as a manage_session/list_sessions target
     turn: async (_message: string) => { await engine.runTurn(sessionId); },
     // specs()-visible names ONLY (never unioned with the deferred bullet list — see this file's
     // own header comment for why that distinction is load-bearing for these exact assertions).
@@ -266,5 +296,72 @@ describe("D1-T2: dispatch's toolset slims to a deferred set + AskQuestion", () =
       expect(h.offered()).not.toContain("push_notification");
       expect(h.deferredBullets()).toContain("push_notification");
     }
+  });
+});
+
+/**
+ * dispatch-tool-deferral: user directive — list_sessions, manage_session and send_message must
+ * start DEFERRED in dispatch, loaded via ToolSearch. send_message already satisfies this (see the
+ * first test below — a confirming pin, no code change). list_sessions/manage_session did not:
+ * T8 registered both `modes: ["dispatch"]` with no `deferred` field at all, so they were immediate.
+ * list-sessions.ts now sets `deferred: true` on both (the agent_list/agent_output precedent — a
+ * hardcoded unconditional flag, since dispatch is the ONLY mode either tool is eligible for, so
+ * `true` and `["dispatch"]` mean exactly the same thing there).
+ */
+describe("dispatch-tool-deferral: list_sessions, manage_session and send_message defer like bash/task_stop/computer/AskQuestion", () => {
+  test("send_message is ALREADY deferred in dispatch (send-message.ts) — confirms the pre-existing requirement, no code change needed here", async () => {
+    const code = await harness({ mode: "code" }); await code.turn("hi");
+    const disp = await harness({ mode: "dispatch" }); await disp.turn("hi");
+    expect(code.offered()).toContain("send_message");
+    expect(disp.offered()).not.toContain("send_message");
+    expect(disp.deferredBullets()).toContain("send_message");
+  });
+
+  test("list_sessions and manage_session are absent from dispatch's immediate specs but advertised as deferred", async () => {
+    const disp = await harness({ mode: "dispatch" }); await disp.turn("hi");
+    expect(disp.offered()).not.toContain("list_sessions");
+    expect(disp.offered()).not.toContain("manage_session");
+    expect(disp.deferredBullets()).toContain("list_sessions");
+    expect(disp.deferredBullets()).toContain("manage_session");
+  });
+
+  test("calling list_sessions/manage_session before a ToolSearch load is refused by execute()'s deferred guard", async () => {
+    const disp = await harness({ mode: "dispatch" });
+    disp.provider.enqueueToolCall("list_sessions", {});
+    disp.provider.enqueueToolCall("manage_session", { sessionId: "whatever", action: "stop" });
+    await disp.turn("hi");
+    const results = disp.toolResults();
+    const ls = results.find((r) => r.name === "list_sessions");
+    const ms = results.find((r) => r.name === "manage_session");
+    expect(ls?.isError).toBe(true);
+    expect(ls?.output).toContain("deferred — load its schema via ToolSearch first");
+    expect(ms?.isError).toBe(true);
+    expect(ms?.output).toContain("deferred — load its schema via ToolSearch first");
+  });
+
+  // Runs under the harness's plain default policy ("auto" — the SAME default a real dispatch
+  // session gets from server.ts's session.dispatch handler, never overridden to chat's fixed
+  // policy: engine.ts's turn-time resolution only coerces `meta.approvalPolicy` for `isChat`, not
+  // `isDispatch`). This used to need an `approvalPolicy: "bypass"` override: gate.ts's READ_ONLY
+  // set had never been extended for list_sessions/manage_session, so both fell through to
+  // evaluate()'s unclassified-tool fallback, which fails closed to "ask" under `auto` too — a card
+  // nobody answers, hanging this test (list-sessions.test.ts's own extensive coverage never
+  // surfaced it because it calls registry.execute() directly, bypassing engine.ts's gate
+  // entirely). Now that gate.ts classifies both READ_ONLY, `auto` allows them unconditionally
+  // (same as every other READ_ONLY tool) and the override is unnecessary — this IS the honest pin.
+  test("list_sessions and manage_session become callable after a ToolSearch load", async () => {
+    const disp = await harness({ mode: "dispatch" });
+    const targetCwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-dispatch-deferred-target-")));
+    const targetId = disp.store.createSession("global", { cwd: targetCwd, mode: "code" });
+
+    disp.loadDeferred("list_sessions");
+    disp.provider.enqueueToolCall("list_sessions", {});
+    disp.loadDeferred("manage_session");
+    disp.provider.enqueueToolCall("manage_session", { sessionId: targetId, action: "background" });
+    await disp.turn("survey and background a session");
+
+    const results = disp.toolResults();
+    expect(results.find((r) => r.name === "list_sessions")?.isError).toBe(false);
+    expect(results.find((r) => r.name === "manage_session")?.isError).toBe(false);
   });
 });

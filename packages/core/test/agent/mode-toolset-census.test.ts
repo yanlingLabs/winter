@@ -137,10 +137,14 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
   // session-activity-hygiene T8: ADDED "list_sessions" and "manage_session" — dispatch's management
   //   surface over the session lifecycle, both registered `modes: ["dispatch"]` in list-sessions.ts
   //   (never eligible for code or chat; the "no modes = code-only" default is what makes that an
-  //   opt-in rather than an omission). NOT deferred: they are the coordinator's primary situational-
-  //   awareness and control verbs, on the same footing as session_spawn, and making the model
-  //   ToolSearch for "what sessions exist" before it can ask would be a round trip for nothing.
-  //   16 names now — a deliberate pin move for two new tools, not a re-baseline of anything else.
+  //   opt-in rather than an omission). 16 names now — a deliberate pin move for two new tools, not a
+  //   re-baseline of anything else.
+  // dispatch-tool-deferral: both are now ALSO `deferred: true` (list-sessions.ts) — loaded via
+  //   ToolSearch like bash/task_stop/computer/AskQuestion/send_message, superseding this comment's
+  //   original "NOT deferred" call. This list is UNCHANGED by that: `namesForMode` reports
+  //   ELIGIBILITY, not deferred-vs-immediate (registry.ts's own doc comment — see the task_stop
+  //   describe block below for the axis this list structurally can't see); the eligible-vs-loadable
+  //   distinction is pinned separately, in dispatch-deferred.test.ts.
   test("dispatch mode is offered EXACTLY this set (16 tools)", async () => {
     const d = await boot();
     const offered = [...d.registry!.namesForMode("dispatch", { builtinDeferral: true })];

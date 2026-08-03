@@ -82,7 +82,20 @@ export type SessionApprovalPolicy = "plan" | "dont-ask" | "ask" | "accept-edits"
 // something, which defeats the point (CC's own PushNotification prompts no approval either). Must
 // stay allowed under `plan` too — flagging a decision/finish is exactly the kind of thing a
 // planning session should still be able to do.
-const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "AskQuestion", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification"]);
+// list_sessions/manage_session are read-only too (dispatch-tool-deferral gate-classification
+// follow-up): list_sessions only ever reads SessionStore/registry state and bounded transcript
+// bytes, same class as task_get/agent_list. manage_session's targets are Norma's OWN session
+// bookkeeping, never an arbitrary external process — `stop` is the SAME resumable ESC abort
+// task_stop already rides free above; `background`/`archive`/`resume` only flip two reversible
+// per-session flags (sessions/set-activity.ts). The reviewed design substitutes LOUDNESS for a
+// confirmation card: every change broadcasts `session_activity` globally (T4) so every attached
+// harness sees it live, rather than a human approving it first — matching dispatch's standing "no
+// permission cards" posture. Left unclassified, both fell through to evaluate()'s final
+// unclassified-tool branch below, which fails closed to "ask" under EVERY policy including `auto`
+// (dispatch's own default — server.ts's session.dispatch) — a card a headless coordinator can never
+// answer, so in practice a silent hang/timeout-deny on every real call. Same fix shape as
+// task_stop's own entry above.
+const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "AskQuestion", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification", "list_sessions", "manage_session"]);
 // `computer` (Phase 5 CU) is MUTATING: a computer-use action drives real mouse/keyboard/screen, so
 // it must pass the gate on EVERY call (spec §4.6: "every CU action passes the permission gate") —
 // ask → per-action approval card, auto → allow, plan → deny (CU makes changes). Note this is the

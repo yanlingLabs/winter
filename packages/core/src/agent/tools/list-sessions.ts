@@ -174,6 +174,12 @@ export function registerListSessionsTools(
   r.register({
     name: LIST_SESSIONS_TOOL,
     modes: ["dispatch"],
+    // dispatch-tool-deferral: `true` unconditionally (the agent_list/agent_output precedent, not a
+    // caller-supplied flag like task_stop's/computer's `deferred: ["dispatch"]`) — dispatch is the
+    // ONLY mode this tool is ever eligible for, so `true` and `["dispatch"]` mean the same thing
+    // here; `true` says that plainly instead of naming a one-element array. Loaded via ToolSearch
+    // like the rest of dispatch's control surface (bash/task_stop/computer/AskQuestion/send_message).
+    deferred: true,
     description: [
       "List the work sessions on this Mac — code and cowork sessions only (chat and the dispatch session itself never appear).",
       "Each row: session id, mode, working directory, title, transcript file, and how long its turn has been running when one is.",
@@ -276,6 +282,9 @@ export function registerListSessionsTools(
   r.register({
     name: MANAGE_SESSION_TOOL,
     modes: ["dispatch"],
+    // dispatch-tool-deferral: see LIST_SESSIONS_TOOL's registration above — same reasoning, same
+    // unconditional `true` (dispatch-only tool, so `true` and `["dispatch"]` coincide).
+    deferred: true,
     description: [
       "Change a code or cowork session's lifecycle state, or stop the turn it is running. Find sessions with list_sessions.",
       "action: stop — abort the running turn (the same abort the user's ESC performs; the session stays resumable).",
