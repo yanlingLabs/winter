@@ -364,7 +364,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { [weak self] in
             guard let self else { return }
             let rows = (try? await model.client.listSessions())?.map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs)
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity)
             } ?? []
             if let sid = Self.chatSessionToOpen(in: rows) {
                 let title = rows.first { $0.sessionId == sid }?.title
@@ -470,6 +470,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // step, since the shell hides itself instead of closing — there is no `onClosed` to hang
         // it on, the way `dashboardWindow`/`detachedWindows` do.
         controller.onVisibilityChange = { [weak self] _ in self?.syncDockPresence() }
+        // Task 2: the `session.list` poll cadence — visible AND unoccluded starts it, everything
+        // else (hidden, occluded, ⌘Q's closeMainWindows()) stops it. `model.directory` is the SAME
+        // instance this controller renders (`directory: model.directory` above) and every other
+        // app-shell surface reads, so gating polling here gates it for all of them. Wired BEFORE
+        // `summon()` below so the very first `syncState()` it triggers (occlusionVisible starts
+        // `true`, `window.isVisible` flips `true` on `makeKeyAndOrderFront`) already starts the poll
+        // — a freshly summoned shell must not sit unpolled until some LATER occlusion notification.
+        controller.onRenderingActiveChange = { [weak model] active in model?.directory.setPolling(active: active) }
         appWindow = controller
         controller.summon(navigatingTo: destination)
     }
