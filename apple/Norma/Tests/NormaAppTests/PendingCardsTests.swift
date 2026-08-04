@@ -212,4 +212,43 @@ final class PendingCardsTests: XCTestCase {
         guard case .question(_, _, let questionChildId) = relayedQuestion else { return XCTFail("expected .question") }
         XCTAssertEqual(questionChildId, "child_2")
     }
+
+    // MARK: - approvalAdditionalOptions (working-directories T7/T8: the quiet row's contents)
+
+    /// Same `[SessionEvent.ApprovalOption]` construction trick as `questions(_:)` above — the type
+    /// is a cross-module `Codable` struct with no public memberwise initializer.
+    func options(_ json: String) -> [SessionEvent.ApprovalOption] {
+        try! JSONDecoder().decode([SessionEvent.ApprovalOption].self, from: Data(json.utf8))
+    }
+
+    /// The with-dirs dirGrant card, verbatim from the daemon (engine.ts, T6.5): FOUR options, of
+    /// which `allow_add_dir` carries NO `rule` — it adopts a directory into the session's working
+    /// set rather than persisting a permission rule. The old `rule != nil` filter dropped exactly
+    /// that one, making the app's only fence-widening card option unreachable.
+    func testDirGrantAllowAddDirReachesTheQuietRow() {
+        let dirGrant = options(#"""
+        [{"id":"allow_once","label":"Allow once","rule":null,"scope":null},
+         {"id":"allow_add_dir","label":"Allow and add as working directory","rule":null,"scope":null},
+         {"id":"allow_project","label":"Allow Write(/repo/**) in this project","rule":"Write(/repo/**)","scope":"project"},
+         {"id":"deny","label":"Deny","rule":null,"scope":null}]
+        """#)
+        XCTAssertEqual(approvalAdditionalOptions(dirGrant).map(\.id), ["allow_add_dir", "allow_project"],
+                       "every option except the two the primary buttons already are")
+    }
+
+    /// The pre-existing rule-bearing shapes are untouched — the widening is additive, and the
+    /// primary Approve/Deny row keeps its exact contents.
+    func testRuleBearingOptionsAreUnchangedAndPrimariesNeverDuplicate() {
+        let ruleOnly = options(#"""
+        [{"id":"allow_once","label":"Allow once","rule":null,"scope":null},
+         {"id":"allow_project","label":"Allow Bash(ls:*) in this project","rule":"Bash(ls:*)","scope":"project"},
+         {"id":"allow_global","label":"Allow Bash(ls:*) everywhere","rule":"Bash(ls:*)","scope":"global"},
+         {"id":"deny","label":"Deny","rule":null,"scope":null}]
+        """#)
+        XCTAssertEqual(approvalAdditionalOptions(ruleOnly).map(\.id), ["allow_project", "allow_global"])
+
+        XCTAssertEqual(approvalAdditionalOptions(options(#"[{"id":"allow_once","label":"Allow once","rule":null,"scope":null},{"id":"deny","label":"Deny","rule":null,"scope":null}]"#)), [],
+                       "a card carrying only the two primaries renders no quiet row at all")
+        XCTAssertEqual(approvalAdditionalOptions(nil), [], "no options at all is the pre-T6 card, byte-identical")
+    }
 }

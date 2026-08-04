@@ -34,6 +34,12 @@ struct WindowContentView<Accessory: View>: View {
     /// independent affordances and must never open off one boolean.
     @State private var showingEffortMenu = false
 
+    /// working-directories T8: the working-folders chip's own popover state — a FOURTH independent
+    /// flag, same reasoning again. Internal (not `private`) so `WorkingDirsMenu.swift`'s
+    /// cross-file `extension WindowContentView` can bind it, the same access widening
+    /// `currentSidebarSessionSummary`/`policyPickerRow` already carry for the WorkSidebar split.
+    @State var showingDirsMenu = false
+
     /// Task 3 (2e-i): whether the "… +N completed" tail is expanded to the full completed list.
     /// Local presentational state, same convention as `showingPolicyMenu` above — resets whenever
     /// this view is recreated (e.g. a new session), which is fine: there's nothing worth
@@ -79,6 +85,14 @@ struct WindowContentView<Accessory: View>: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer()
+                // working-directories T8: the working-folders chip. Its gate is the DAEMON's own
+                // participation answer (`dirs != nil` — see `dirsMenuIsVisible`), not a mode list
+                // mirrored on this side: a chat/dispatch window gets no chip because `session.list`
+                // populated no set for it, and a workdir-less code session (`[]`) DOES get one,
+                // since that is exactly the session that needs the adopt door.
+                if dirsMenuIsVisible(currentSidebarSessionSummary?.dirs) {
+                    dirsMenuButton
+                }
                 // Task 10 (Chat Slice D): the model menu — deliberately the OPPOSITE gate from the
                 // policy button just below (`modelMenuIsVisible`'s own doc comment explains the
                 // asymmetry: chat hides POLICY but shows MODEL). Placed beside the policy button,

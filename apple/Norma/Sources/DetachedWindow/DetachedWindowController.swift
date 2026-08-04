@@ -1,4 +1,5 @@
 import AppKit
+import NormaKit
 import SwiftUI
 
 /// Task 3 (2d-ii-b): one detached chat window end-to-end — a REAL, native-chrome `NSWindow`
@@ -59,6 +60,11 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// Registry removal hook (`AppDelegate.registerDetachedWindow`) — fires exactly once.
     var onClosed: ((DetachedWindowController) -> Void)?
 
+    /// working-directories T8: the live create-time folder sheet, held for its lifetime and dropped
+    /// in its own completion. Nothing else retains a sheet controller, so without this it would be
+    /// deallocated the instant `newSession()` returned, taking its Start/Cancel callbacks with it.
+    private var dirPickerSheet: WorkingDirPickerSheetController?
+
     /// Test-only read-through — lets tests assert on the constructed window's frame/styleMask
     /// without exposing `window` itself past this seam (same convention as
     /// `OrbWindowController.panelFrameForTesting`/`windowForTesting`-style accessors elsewhere).
@@ -95,7 +101,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         let feedClient = feed.client
         let sessionDirectory = SessionDirectory(lister: {
             try await feedClient.listSessions().map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort)
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs)
             }
         })
         directory = sessionDirectory
@@ -262,6 +268,12 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
             }
         }
 
+        // working-directories T8: the header chip's two doors. `[weak self]` and a FRESH `sessionId`
+        // read for the same reason every callback above takes one — `selectSession` repins this
+        // controller in place, and a captured id would keep mutating the previous session's dirs.
+        adapter.onSetDirs = { [weak self] op, path in self?.applyDirsOp(op, path: path) }
+        adapter.onPickWorkingDir = { [weak self] op in self?.pickWorkingDir(op) }
+
         // provider-correctness T6: the synced catalogue this window's pickers read. Fetched once at
         // construction — `sync.config` is a snapshot, never a subscription — and re-fetched on a
         // session switch (`selectSession`), which is also when a `norma model --effort` edit made
@@ -341,6 +353,9 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         adapter.pendingModel = .none
         adapter.pendingEffort = .none
         adapter.selectionProbation = nil
+        // working-directories T8: a refusal is about the session it was refused FOR — "that directory
+        // is locked for this session" rendered over a different session's chip is a lie about a rule.
+        adapter.dirsRefusal = nil
         Task { @MainActor [weak self] in
             await self?.feed.repin(to: sessionId)
         }
@@ -374,11 +389,82 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// `.pinned` feed ignores `session_created` broadcasts entirely — see
     /// `SessionFeedTests.testPinnedFeedIgnoresSessionCreated` — so an explicit `selectSession` call
     /// is the only way this controller ever re-targets itself).
+    ///
+    /// working-directories T8: THE app's one code-session create path, and so the one place the
+    /// create-time folder picker mounts (the other two create paths are `AppModel.startFreshSession`,
+    /// which resolves the DISPATCH singleton, and `AppDelegate.createAndOpenChat`, `mode:"chat"` —
+    /// neither participates in working directories at all). It no longer hardcodes
+    /// `cwd: NSHomeDirectory()`: the sheet's answer decides, and **"No folder (outputs only)" creates
+    /// with NO cwd at all**, which is what makes the daemon write `dirs = []` (T6) rather than
+    /// silently adopting the home directory as a writable root. Cancelling the sheet creates nothing.
     func newSession() {
+        // A sheet is modal to this window, so a second click can't normally arrive — but replacing a
+        // live sheet controller would deallocate it out from under its own attached sheet, orphaning
+        // it on the host window. Belt: one at a time.
+        guard dirPickerSheet == nil else { return }
+        // Recents ride the directory this window already keeps loaded — no extra RPC (design doc §2).
+        let sheet = WorkingDirPickerSheetController(
+            recents: recentWorkingDirs(directory.rows), host: window
+        ) { [weak self] choice in
+            self?.dirPickerSheet = nil
+            guard let choice else { return } // cancelled: create nothing
+            self?.startSession(with: choice)
+        }
+        dirPickerSheet = sheet
+        sheet.present()
+    }
+
+    /// `newSession()`'s second half — the create+repin the picker's answer feeds. Split out (and
+    /// internal, not private) because it is also the TESTABLE seam: an AppKit sheet cannot be driven
+    /// from a unit test, so `DetachedWindowTests` drives the choice directly here, which is the half
+    /// that actually touches the wire.
+    ///
+    /// `choice.cwdParam` is `nil` for the outputs-only choice — `createSession`'s own `cwd` is
+    /// optional and `obj(...)` omits an absent key entirely, so no `cwd` reaches the wire at all.
+    func startSession(with choice: WorkingDirChoice) {
         let client = feed.client
         Task { @MainActor [weak self] in
-            guard let created = try? await client.createSession(scope: "global", cwd: NSHomeDirectory(), approvalPolicy: "auto") else { return }
+            guard let created = try? await client.createSession(scope: "global", cwd: choice.cwdParam, approvalPolicy: "auto") else { return }
             self?.selectSession(created.sessionId)
+        }
+    }
+
+    /// working-directories T8: the chip's per-entry action (today: "Remove") — a path already in the
+    /// set, so no panel and no confirm; the row the user clicked IS the selection.
+    ///
+    /// A refusal is published VERBATIM (`adapter.dirsRefusal`) — `set-dirs.ts` writes one sentence
+    /// per rule and each names the rule it enforced. On success the refusal clears and the DIRECTORY
+    /// row is refreshed: the dirs set lives on `session.list`'s row exactly like `model` does, so
+    /// there is no second source of truth here to keep in sync (the `onSetModel` precedent).
+    private func applyDirsOp(_ op: SessionDirsOp, path: String) {
+        let client = feed.client
+        adapter.dirsChangeInFlight = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await client.setDirs(sessionId: self.sessionId, op: op, path: path)
+                await self.directory.refresh()
+                self.adapter.dirsRefusal = nil
+            } catch let error as RpcError {
+                self.adapter.dirsRefusal = error.message
+            } catch {
+                self.adapter.dirsRefusal = "couldn't reach the daemon — try again"
+            }
+            self.adapter.dirsChangeInFlight = false
+        }
+    }
+
+    /// working-directories T8: the chip's "Add folder…"/"Change primary folder…" — panel, then the
+    /// CONFIRM alert (the user's ruling: a manual add is selection + confirm), then the RPC. AppKit
+    /// lives here rather than in the SwiftUI menu, same seam as every other controller-owned side
+    /// effect on this adapter.
+    private func pickWorkingDir(_ op: SessionDirsOp) {
+        runWorkingDirOpenPanel(on: window) { [weak self] path in
+            guard let self, let path else { return } // cancelled panel: nothing happens
+            confirmWorkingDir(op: op, path: path, on: self.window) { [weak self] confirmed in
+                guard let self, confirmed else { return } // declined confirm: nothing happens
+                self.applyDirsOp(op, path: path)
+            }
         }
     }
 
