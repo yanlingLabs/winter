@@ -33,13 +33,16 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 // session-activity-hygiene T3 grew it 19→20: `session.setActivity` (the phone backgrounds/archives
 // a remote-driven code session — the write half of the `activity` state `session.list`, already on
 // this list, has served since T2; a read-only phone could see the state but never move it).
+// working-directories T3 grew it 20→21: `session.setDirs` (the phone mutates a remote-driven code
+// session's working-directory set — the write half of the `dirs` field `session.list` now carries).
 
 describe("remote allowlist parity (SP2a gate G7)", () => {
-  // The canonical twenty (SP1 §6 + SP3 T4b approval.list + SP3.4 session.create +
+  // The canonical twenty-one (SP1 §6 + SP3 T4b approval.list + SP3.4 session.create +
   // session-history session.history + Chat Slice D session.setModel + Chat Slice D tasks 2/3's
   // five sync verbs + provider-correctness T4's session.setEffort + session-activity-hygiene T3's
-  // session.setActivity) — the exact method STRINGS the Swift Gateway mirrors.
-  const TWENTY = [
+  // session.setActivity + working-directories T3's session.setDirs) — the exact method STRINGS the
+  // Swift Gateway mirrors.
+  const TWENTY_ONE = [
     METHODS.hello,
     METHODS.sessionList,
     METHODS.sessionAttach,
@@ -60,17 +63,18 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
     METHODS.syncPush,
     METHODS.syncConfig,
     METHODS.syncMemory,
+    METHODS.sessionSetDirs,
   ];
 
-  test("REMOTE_ALLOWED_METHODS is EXACTLY the twenty names", () => {
-    expect(REMOTE_ALLOWED_METHODS.size).toBe(20);
-    for (const m of TWENTY) {
+  test("REMOTE_ALLOWED_METHODS is EXACTLY the twenty-one names", () => {
+    expect(REMOTE_ALLOWED_METHODS.size).toBe(21);
+    for (const m of TWENTY_ONE) {
       expect(REMOTE_ALLOWED_METHODS.has(m)).toBe(true);
     }
-    expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual([...TWENTY].sort());
+    expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual([...TWENTY_ONE].sort());
   });
 
-  test("the twenty string VALUES match the Swift Gateway.remoteAllowedMethods literals", () => {
+  test("the twenty-one string VALUES match the Swift Gateway.remoteAllowedMethods literals", () => {
     expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual(
       [
         "protocol.hello",
@@ -93,6 +97,7 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
         "sync.push",
         "sync.config",
         "sync.memory",
+        "session.setDirs",
       ].sort(),
     );
   });

@@ -409,6 +409,55 @@ describe("NormaClient", () => {
     expect(withoutCwd!.cwd).toBeUndefined();
     client.close();
   });
+
+  // working-directories T3 (the T9-hygiene precedent, applied to `dirs`): `SessionListResult`'s
+  // `dirs` field is declared in the SAME schema `listSessions()` validates against — the risk T9
+  // found is exactly this: an undeclared field the daemon already sends dies silently at
+  // `validated()`'s safeParse. A schema-only unit test would pass the day the daemon stopped
+  // populating `dirs`; a daemon-only test would pass the day the schema stopped declaring it. Only
+  // a LIVE round trip through a real daemon + the real client proves the value survives both ends.
+  //
+  // Also pins the `cwd` alias (`cwd === dirs[0]?.path`) two ways: (1) a freshly created session with
+  // an explicit `cwd` and no `session.setDirs` write ever made — the "migrated pre-branch row"
+  // shape (T1's lazy migration: the `dirs` column is NULL, `store.dirs()` derives `[{path: cwd,
+  // locked: true}]` straight from the stored `cwd` column) — and (2) after a REAL `session.setDirs`
+  // write, which changes `dirs[0].path` without ever touching the stored `cwd` column
+  // (`setDirsRaw`'s own contract) — proving `session.list`'s `cwd` is populated FROM `dirs` at read
+  // time, not trusted from that now-stale column.
+  test("session.list round-trips `dirs` through the client's schema validation, cwd kept an alias (working-directories T3)", async () => {
+    await boot();
+    const client = await NormaClient.connect({
+      socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli-dirs", onEvent: () => {},
+    });
+
+    // (1) A migrated pre-branch-style row: `cwd` set at create time, `dirs` column never written.
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-cli-listdirs-")));
+    const { sessionId } = await client.createSession("global", { cwd });
+    const migrated = (await client.listSessions()).sessions.find((s: { sessionId: string }) => s.sessionId === sessionId);
+    expect(migrated!.dirs).toEqual([{ path: cwd, locked: true }]);
+    expect(migrated!.cwd).toBe(cwd);
+    expect(migrated!.cwd).toBe(migrated!.dirs![0]!.path); // the alias, stated as itself
+
+    // (2) A REAL session.setDirs write changes the primary — `dirs` reflects it, and `cwd` (the
+    // alias) follows it too, even though `setDirsRaw` never touches the `cwd` column. A FRESH,
+    // cwd-LESS session (not the migrated one above): the migrated row's `dirs[0]` derives
+    // `locked: true` (T1's `deriveFromCwd`), and `setPrimary` correctly REFUSES over a locked
+    // primary (T2) — this proves the write path on a session where it's actually legal to write.
+    const { sessionId: bareId } = await client.createSession("global");
+    const newPrimary = realpathSync(mkdtempSync(join(tmpdir(), "norma-cli-listdirs-2-")));
+    const written = await client.sessionSetDirs({ sessionId: bareId, op: "setPrimary", path: newPrimary });
+    expect(written.dirs).toEqual([{ path: newPrimary, locked: false }]);
+    const afterWrite = (await client.listSessions()).sessions.find((s: { sessionId: string }) => s.sessionId === bareId);
+    expect(afterWrite!.dirs).toEqual([{ path: newPrimary, locked: false }]);
+    expect(afterWrite!.cwd).toBe(newPrimary);
+
+    // Absent stays ABSENT for a chat session — `dirs` applies to code/cowork only (same
+    // participation gate as `activity`), mirroring the `cwd` test's own bare-session absence check.
+    const chatCreate = await client.request(METHODS.sessionCreate, { scope: "global", mode: "chat" });
+    const chatRow = (await client.listSessions()).sessions.find((s: { sessionId: string }) => s.sessionId === chatCreate.sessionId);
+    expect(chatRow!.dirs).toBeUndefined();
+    client.close();
+  });
 });
 
 describe("NormaClient against a hostile/fake server", () => {

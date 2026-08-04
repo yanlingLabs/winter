@@ -992,6 +992,16 @@ export class AgentEngine {
   /** True while a turn is executing for the session. */
   isRunning(sessionId: string): boolean { return this.runningTurns.has(sessionId); }
 
+  /** working-directories T3: the smallest honest public accessor onto the private `grantDenied`
+   *  below — the SAME control-plane denylist predicate (`~/.norma`-class prefixes, bidirectional
+   *  containment) the out-of-root dirGrant approval flow consults, exposed so `session.setDirs`'s
+   *  RPC can refuse a directory this engine will never grant for ANY approval flow, through the
+   *  identical rule rather than a second copy that could silently diverge from it. `dir` must
+   *  already be canonicalized (realpathed) by the caller — `setSessionDirs` (sessions/set-dirs.ts)
+   *  does this before calling `grantDenied`, matching the convention `grantDenied`'s own doc comment
+   *  documents for its other caller (the dirGrant flow's `fsWriteOutOfRootDir`-computed `dir`). */
+  isGrantDenied(dir: string): boolean { return this.grantDenied(dir); }
+
   /** session-activity-hygiene T8: when the session's CURRENT top-level turn started, or `undefined`
    *  when no turn is running. The honest source for "how long has this been going" — the daemon
    *  already owns the fact (`runningTurns`), it just wasn't stamped; the alternative (scanning the

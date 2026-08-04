@@ -61,6 +61,10 @@ public actor Gateway {
     /// archives a remote-driven code session, the write half of the `activity` state `session.list`
     /// has carried since T2. Also a pure passthrough: the daemon owns the participation rule
     /// (chat/dispatch have no lifecycle) and the "can't archive a running turn" refusal.
+    /// working-directories T3 added `session.setDirs` (21st) — the phone mutates a remote-driven
+    /// code session's working-directory set, the write half of the `dirs` field `session.list` now
+    /// carries. Also a pure passthrough: the daemon owns the participation rule (chat/dispatch have
+    /// no writable root) and the locked/denylist/remove-primary refusals.
     static let remoteAllowedMethods: Set<String> = [
         "protocol.hello", "session.list", "session.attach", "session.send",
         "session.dispatch", "approval.respond", "ask_user.respond",
@@ -80,6 +84,8 @@ public actor Gateway {
         "sync.heads", "sync.pull", "sync.push",
         // Chat Slice D task 3: the phone's standalone-chat config bundle + memory-bucket replica.
         "sync.config", "sync.memory",
+        // working-directories T3: and its working-directory set (setPrimary/add/remove).
+        "session.setDirs",
     ]
 
     /// Session-map cap (SP2b Task 4) — see `evictIfNeeded()`.
