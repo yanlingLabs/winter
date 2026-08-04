@@ -431,10 +431,20 @@ describe("working-directories T5: the adoption matrix", () => {
 
     await engine.runTurn(sessionId);
     const events = store.read(sessionId);
-    expect(events.some((e) => e.type === "approval_requested")).toBe(true);
+    const card = events.find((e) => e.type === "approval_requested") as any;
+    expect(card).toBeDefined();
     expect(readFileSync(target, "utf8")).toBe("approved");   // the one-shot write lands
     expect(store.dirs(sessionId).map((d) => d.path)).toEqual([cwd]); // and adopts nothing
     expect(events.some((e) => e.type === "directory_added")).toBe(false);
+    // …and the CARD SAID SO. The wording pin lives in the same test as the behavior pin on purpose:
+    // an approval card that misdescribes what approving does is a defect even when the behavior is
+    // right, and these two can only drift apart if someone edits them both.
+    expect(card.summary).toContain("outside your project");            // still the grant seam's marker
+    expect(card.summary).toContain("for this request");
+    expect(card.summary).toContain("does not add a working directory");
+    expect(card.summary).not.toMatch(/adds it as a working directory/i); // no adoption language
+    expect(card.summary).not.toMatch(/permanent/i);
+    expect(card.options?.[0]).toEqual({ id: "allow_once", label: "Allow once" });
   });
 
   test("WORKDIR-LESS + auto: the SILENT pre-grant DOES adopt — as the primary, born locked, exiting the mode (the empty-set rule)", async () => {
@@ -602,6 +612,12 @@ describe("working-directories T5: workdir-less sessions", () => {
     const card = events.find((e) => e.type === "approval_requested") as any;
     expect(card).toBeDefined();                          // ONE card, the same dirGrant card
     expect(card.summary).toContain(join(outside, "first.txt"));
+    // The wording pin, beside the behavior it describes (see the with-dirs card's own pin for why):
+    // this card DOES promise adoption, because this one really adopts.
+    expect(card.summary).toMatch(/adds it as a working directory/i);
+    expect(card.summary).toContain("permanent once written");
+    expect(card.summary).not.toContain("outside your project"); // a workdir-less session has no project
+    expect(card.options?.[0]).toEqual({ id: "allow_once", label: "Allow and add as working directory" });
     expect(readFileSync(join(outside, "first.txt"), "utf8")).toBe("adopted");
     // Adopted as the PRIMARY (the empty-set rule) and BORN LOCKED (the approved write is its first).
     expect(store.dirs(sessionId)).toEqual([{ path: outside, locked: true }]);

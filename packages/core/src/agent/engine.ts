@@ -4273,12 +4273,32 @@ export class AgentEngine {
           // requestApproval's deniedByHuman path unchanged (nothing created, nothing persisted).
           const grant = dirGrant; // narrow for the closure
           const oneShot = [...this.writableRoots(sessionId, projectRoot, rootsOverride), grant.dir];
+          // T5 fix round 1 (amendment): the card must SAY what approving it does, and after the
+          // adoption ruling that differs by session — so the WORDING branches on the SAME
+          // `preCallSessionDirs` snapshot the adoption itself branches on, one source that cannot
+          // disagree with the behavior it describes. Workdir-less: approving adopts the directory
+          // permanently (spec §3's own wording, near-verbatim). With-dirs: approving is a one-time
+          // allowance and adds NO working directory — the honest reading of SP-policies Task 9's
+          // one-shot grant, which the generic "allow this edit?" left ambiguous and which the
+          // spec's adoption wording would have made an outright lie. "outside your project" is
+          // retained in the with-dirs line (three shipped tests read it as the marker that a card
+          // rode the grant seam rather than the plain-ask one) and deliberately absent from the
+          // workdir-less line — such a session has no project for anything to be outside of.
+          // The persistent-rule option is untouched in both. When the 4th option lands (the
+          // with-dirs adoption follow-up), it ADDS a choice beside this honest default rather than
+          // redefining what approving already means.
+          const adoptOnApprove = preCallSessionDirs.length === 0;
           outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
             timeoutMs: this.approvalTimeoutFor(meta),
-            summary: `${call.name} ${grant.path} — outside your project; allow this edit?`,
+            summary: adoptOnApprove
+              ? `${call.name} ${grant.path} — allow writes in ${grant.dir}? Adds it as a working directory for this session (permanent once written).`
+              : `${call.name} ${grant.path} — outside your project; allow writes in ${grant.dir} for this request? It does not add a working directory.`,
             // no denialMessage → the helper defaults to `denied by ${res.by}` (unchanged behavior)
             options: [
-              { id: "allow_once", label: "Allow once" },
+              // Same id (approval.respond's routing is keyed by id, never by label) — only the
+              // LABEL tells the truth of the branch: "once" would misdescribe an adoption just as
+              // badly as the summary would.
+              { id: "allow_once", label: adoptOnApprove ? "Allow and add as working directory" : "Allow once" },
               { id: "allow_project", label: `Always allow edits in ${grant.dir}`, rule: `Edit(${grant.dir})`, scope: "project" },
               { id: "deny", label: "Deny" },
             ],
