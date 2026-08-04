@@ -57,6 +57,56 @@ public struct PluginContribEntry: Equatable, Sendable {
     public let provider: [String: JSONValue]?
 }
 
+// MARK: - working-directories T8: a session's ordered working-directory set
+
+/// One entry of a session's working-directory set — mirrors the protocol's `SessionDirEntry`
+/// (`packages/protocol/src/methods.ts`) field-for-field. Shared by BOTH halves of the wire, exactly
+/// as it is on the daemon side: `session.list`'s per-row `dirs` (read) and `session.setDirs`'s
+/// result (write).
+///
+/// **`dirs[0]` is the PRIMARY by POSITION, not by a flag** — there is no `primary` field to read,
+/// and a set is never "secondaries without a primary" (the daemon refuses `remove` of index 0
+/// outright). `locked` is the first-write lock: once Norma has successfully written inside a
+/// directory, that entry can never be replaced or removed for the session's lifetime.
+///
+/// An EMPTY array is a real, meaningful state (a workdir-less session — writable only in
+/// `$OUTDIR`/`$TMPDIR`/`$MEMDIR`) and must never be conflated with `dirs == nil`; see
+/// `listSessions()`'s own doc comment for what the absent case means.
+public struct SessionDirEntry: Equatable, Hashable, Sendable {
+    public let path: String
+    public let locked: Bool
+
+    public init(path: String, locked: Bool) {
+        self.path = path
+        self.locked = locked
+    }
+}
+
+/// The three mutations `session.setDirs` supports (`SessionSetDirsParams.op`'s zod enum, mirrored
+/// by `DirsOp` in `packages/core/src/sessions/set-dirs.ts`). A closed, three-value wire enum with
+/// no growth pressure, so this is a Swift enum rather than the bare `String` `setPolicy`/`setModel`
+/// take — those mirror wire enums that HAVE widened (three approval policies became six), where a
+/// Swift enum would have to be re-edited to pass a value the daemon already accepts. `rawValue` is
+/// the verbatim wire string; nothing else is ever sent.
+///
+/// There is deliberately no "clear"/"remove all": emptying a set back to `[]` is not a supported
+/// transition (set-dirs.ts's own doc) — a session that has ever had a primary keeps one.
+public enum SessionDirsOp: String, Equatable, Sendable {
+    /// Replace `dirs[0]` (or ESTABLISH it on an empty set, exiting workdir-less mode).
+    ///
+    /// Replaces index 0 and keeps 1…n untouched, so passing a path the set ALREADY holds at a later
+    /// index produces a duplicate rather than promoting it — "make this existing entry the primary"
+    /// is not an operation this wire has. Callers offering a swap should always be picking a NEW
+    /// directory.
+    case setPrimary
+    /// Append a directory (idempotent for one already in the set; establishes the primary when the
+    /// set is empty, since appending to `[]` produces `dirs[0]`).
+    case add
+    /// Drop a directory. Idempotent for one that isn't in the set; refused for index 0 (the primary
+    /// is a position — `setPrimary` is the way to replace it) and for a locked entry.
+    case remove
+}
+
 extension JSONValue {
     /// Not in JSONValue.swift's core accessor set (stringValue/boolValue/intValue/arrayValue) —
     /// added here since `plugins.contrib`'s `tile`/`provider` fields are opaque JSON objects
@@ -239,6 +289,23 @@ extension NormaClient {
         return (id, created)
     }
 
+    /// working-directories T8: the ONE decoder for a wire `dirs` array, shared by `listSessions()`'s
+    /// per-row read and `setDirs`'s post-write result — one function, so the two surfaces can never
+    /// describe an entry differently (the same reason the protocol gives them one zod schema).
+    ///
+    /// Returns `nil` for an ABSENT key (see `listSessions()`'s doc for why that is distinct from an
+    /// empty set) and for a value that isn't an array at all. Both fields are REQUIRED per entry
+    /// (`SessionDirEntry`'s zod schema has no optionals): an entry missing either is dropped rather
+    /// than defaulted, because both directions of a guessed `locked` are wrong — `false` invites a
+    /// remove the daemon will refuse, `true` hides an affordance that legitimately exists.
+    private func decodeSessionDirs(_ value: JSONValue?) -> [SessionDirEntry]? {
+        guard let entries = value?.arrayValue else { return nil }
+        return entries.compactMap { e in
+            guard let path = e["path"]?.stringValue, let locked = e["locked"]?.boolValue else { return nil }
+            return SessionDirEntry(path: path, locked: locked)
+        }
+    }
+
     /// Chat Slice D Task 10: `model` (T1's per-session override, round-tripped by
     /// `session.list`'s own row — see `SessionListResult` in methods.ts) appended at the END of
     /// the tuple, same "purely additive, positional destructuring never used" precedent as
@@ -254,12 +321,32 @@ extension NormaClient {
     /// Norma-level TIER (`sync.config.clientEfforts`, e.g. `"ultra"`) reported verbatim rather than
     /// rewritten to its wire translation, so a picker matching it against the model's `efforts`
     /// array alone will miss. Match against BOTH lists.
-    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?)] {
+    ///
+    /// working-directories T8: `dirs` appended LAST, same purely-additive precedent as `model`/
+    /// `effort` above (no call site destructures positionally). Decoded off the raw JSON row beside
+    /// `cwd` — the precedent this very line already sets — rather than through a `Codable` row type
+    /// this wrapper doesn't have.
+    ///
+    /// **`nil` and `[]` are DIFFERENT answers and the difference is load-bearing.** The daemon
+    /// populates `dirs` only for rows that PARTICIPATE in working directories (code + cowork +
+    /// absent-means-code — `session.list`'s own `participatesInActivity` gate, ipc/server.ts), so:
+    ///   * `nil` — this session has no working-directory concept at all (chat/dispatch), or the
+    ///     daemon predates the field. A picker must be ABSENT, not empty.
+    ///   * `[]` — a real, participating, WORKDIR-LESS session: writable only in `$OUTDIR`/`$TMPDIR`/
+    ///     `$MEMDIR` until something adopts a directory. A picker belongs here, offering exactly the
+    ///     adopt door.
+    /// Collapsing the two (`?? []`) is how a chat window grows a folder menu whose every tap comes
+    /// back `DIRS_MODE_REFUSAL`.
+    ///
+    /// `cwd` is the ALIAS of `dirs[0]?.path` for a participating row — the daemon overwrites it at
+    /// `session.list` time from the dirs set, because `session.setDirs` deliberately never touches
+    /// the stored `cwd` column. Read whichever suits, but never treat them as independent facts.
+    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?, dirs: [SessionDirEntry]?)] {
         let r = try await request("session.list", params: nil)
         return (r["sessions"]?.arrayValue ?? []).compactMap { s in
             guard let id = s["sessionId"]?.stringValue, let scope = s["scope"]?.stringValue,
                   let created = s["createdAt"]?.intValue, let last = s["lastSeq"]?.intValue else { return nil }
-            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue)
+            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue, decodeSessionDirs(s["dirs"]))
         }
     }
 
@@ -434,6 +521,33 @@ extension NormaClient {
 
     public func setCwd(sessionId: String, cwd: String) async throws -> String {
         try await request("session.setCwd", params: obj(["sessionId": .string(sessionId), "cwd": .string(cwd)]))["cwd"]?.stringValue ?? cwd
+    }
+
+    /// `session.setDirs {sessionId, op, path}` (working-directories T3) — THE one write door onto a
+    /// session's working-directory set, for every client surface. Returns the POST-WRITE set (not an
+    /// echo of what was sent), so a caller renders the daemon's answer rather than its own guess:
+    /// an idempotent `add` of a directory already in the set, for instance, comes back unchanged.
+    ///
+    /// **Every refusal is a thrown `RpcError` carrying the daemon's own wording, and that wording is
+    /// meant to be SHOWN.** `set-dirs.ts` owns the refusal matrix and names each rule in its own
+    /// sentence — "working directories apply to code and cowork sessions only" (chat/dispatch),
+    /// "that directory is locked for this session" (the first-write lock), "that directory can never
+    /// be a working directory" (the dirGrant denylist), and the remove-primary refusal that names
+    /// `setPrimary` as the way out. Surfacing them VERBATIM is what makes a refusal teachable; a
+    /// client-side "couldn't set folder" erases the one sentence that says why. There is deliberately
+    /// no outcome enum here (unlike the plugin-lifecycle wrappers): the refusals are open-ended
+    /// prose, not a closed set a caller could switch on, and re-deriving the matrix on this side is
+    /// exactly the two-implementations-of-one-state-machine drift the setter exists to prevent.
+    ///
+    /// An unknown session throws too (NOT_FOUND) — same precedent as `setPolicy`/`setModel`.
+    public func setDirs(sessionId: String, op: SessionDirsOp, path: String) async throws -> [SessionDirEntry] {
+        let r = try await request("session.setDirs", params: obj([
+            "sessionId": .string(sessionId), "op": .string(op.rawValue), "path": .string(path),
+        ]))
+        guard let dirs = decodeSessionDirs(r["dirs"]) else {
+            throw RpcError(code: -3, message: "invalid result from server for session.setDirs")
+        }
+        return dirs
     }
 
     public func trustDir(path: String) async throws -> Bool {

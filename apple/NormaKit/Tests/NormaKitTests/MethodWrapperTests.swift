@@ -1050,4 +1050,111 @@ extension MethodWrapperTests {
                        "a Norma tier is reported verbatim, never rewritten to its wire translation")
         XCTAssertNil(rows.first { $0.sessionId == "s_3" }?.effort, "absent = no override")
     }
+
+    // MARK: - working-directories T8: `session.list`'s `dirs` + `session.setDirs`
+
+    /// The read half. THE discrimination this test exists for is `nil` vs `[]`: the daemon populates
+    /// `dirs` only for participating rows (code/cowork), so an ABSENT array means "this session has
+    /// no working-directory concept" while an EMPTY one means "a real, workdir-less session". A
+    /// decoder that answers `[]` to both makes a chat window grow a folder menu whose every tap is
+    /// refused.
+    func testListSessionsDecodesDirsDistinguishingAbsentFromEmpty() async throws {
+        let (client, t) = try await connected()
+        // ONE line: the envelope this is spliced into is NDJSON — an embedded newline breaks framing.
+        let listBody = #"{"sessions":[{"sessionId":"s_code","scope":"global","createdAt":3,"lastSeq":0,"cwd":"/repo","dirs":[{"path":"/repo","locked":true},{"path":"/tmp/scratch","locked":false}]},{"sessionId":"s_bare","scope":"global","createdAt":2,"lastSeq":0,"dirs":[]},{"sessionId":"s_chat","scope":"global","createdAt":1,"lastSeq":0,"mode":"chat"}]}"#
+        let (_, rows) = try await roundTrip(t, sentIndex: 1, result: listBody) {
+            try await client.listSessions()
+        }
+        XCTAssertEqual(rows.first { $0.sessionId == "s_code" }?.dirs,
+                       [SessionDirEntry(path: "/repo", locked: true),
+                        SessionDirEntry(path: "/tmp/scratch", locked: false)],
+                       "order is the wire's order — dirs[0] is the primary BY POSITION")
+        XCTAssertEqual(rows.first { $0.sessionId == "s_code" }?.cwd, "/repo",
+                       "cwd is the daemon's own alias of dirs[0].path")
+        XCTAssertEqual(rows.first { $0.sessionId == "s_bare" }?.dirs, [],
+                       "an EMPTY set is a real workdir-less session, not an absent field")
+        XCTAssertNil(rows.first { $0.sessionId == "s_chat" }?.dirs,
+                     "a non-participating row has no dirs at all — never conflate with []")
+    }
+
+    /// A malformed entry is DROPPED rather than defaulted: both directions of a guessed `locked` are
+    /// wrong (`false` invites a remove the daemon refuses; `true` hides a legitimate affordance).
+    func testListSessionsDropsMalformedDirEntries() async throws {
+        let (client, t) = try await connected()
+        let listBody = #"{"sessions":[{"sessionId":"s_1","scope":"global","createdAt":1,"lastSeq":0,"dirs":[{"path":"/a","locked":false},{"path":"/b"},{"locked":true}]}]}"#
+        let (_, rows) = try await roundTrip(t, sentIndex: 1, result: listBody) {
+            try await client.listSessions()
+        }
+        XCTAssertEqual(rows[0].dirs, [SessionDirEntry(path: "/a", locked: false)])
+    }
+
+    /// The write half: method + params for each of the three ops, and the POST-WRITE set decoded off
+    /// the result (never an echo of what was sent — an idempotent `add` comes back unchanged).
+    func testSetDirsEncodesEachOpAndDecodesThePostWriteSet() async throws {
+        let (client, t) = try await connected()
+
+        let (addReq, afterAdd) = try await roundTrip(
+            t, sentIndex: 1, result: #"{"ok":true,"dirs":[{"path":"/repo","locked":true},{"path":"/tmp/x","locked":false}]}"#
+        ) { try await client.setDirs(sessionId: "s_1", op: .add, path: "/tmp/x") }
+        XCTAssertEqual(addReq["method"] as? String, "session.setDirs")
+        XCTAssertEqual((addReq["params"] as? [String: Any])?["sessionId"] as? String, "s_1")
+        XCTAssertEqual((addReq["params"] as? [String: Any])?["op"] as? String, "add")
+        XCTAssertEqual((addReq["params"] as? [String: Any])?["path"] as? String, "/tmp/x")
+        XCTAssertEqual(afterAdd, [SessionDirEntry(path: "/repo", locked: true),
+                                  SessionDirEntry(path: "/tmp/x", locked: false)])
+
+        let (primaryReq, afterPrimary) = try await roundTrip(
+            t, sentIndex: 2, result: #"{"ok":true,"dirs":[{"path":"/other","locked":false}]}"#
+        ) { try await client.setDirs(sessionId: "s_1", op: .setPrimary, path: "/other") }
+        XCTAssertEqual((primaryReq["params"] as? [String: Any])?["op"] as? String, "setPrimary",
+                       "the wire string is the enum's rawValue verbatim — camelCase, not snake")
+        XCTAssertEqual(afterPrimary, [SessionDirEntry(path: "/other", locked: false)])
+
+        let (removeReq, afterRemove) = try await roundTrip(
+            t, sentIndex: 3, result: #"{"ok":true,"dirs":[{"path":"/repo","locked":true}]}"#
+        ) { try await client.setDirs(sessionId: "s_1", op: .remove, path: "/tmp/x") }
+        XCTAssertEqual((removeReq["params"] as? [String: Any])?["op"] as? String, "remove")
+        XCTAssertEqual(afterRemove, [SessionDirEntry(path: "/repo", locked: true)])
+    }
+
+    /// Every refusal is a thrown `RpcError` carrying the daemon's OWN sentence — the wording
+    /// `set-dirs.ts` writes is the whole point of the refusal, and this wrapper must not replace it
+    /// with a generic failure. Pinned on the exact constants (`DIR_LOCKED_REFUSAL` &co) a surface
+    /// then shows verbatim.
+    func testSetDirsRefusalsSurfaceTheDaemonsWordingVerbatim() async throws {
+        for refusal in [
+            "that directory is locked for this session",
+            "working directories apply to code and cowork sessions only",
+            "that directory can never be a working directory",
+            "the primary directory can't be removed — use setPrimary to replace it instead",
+        ] {
+            let (client, t) = try await connected()
+            async let call = client.setDirs(sessionId: "s_1", op: .remove, path: "/repo")
+            let sent = try await waitForSent(t, count: 2)
+            let req = decodeLine(sent[1])
+            t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"error":{"code":-32602,"message":"\#(refusal)"}}"#)
+            do {
+                _ = try await call
+                XCTFail("expected setDirs to throw for a refusal")
+            } catch let error as RpcError {
+                XCTAssertEqual(error.message, refusal)
+            }
+        }
+    }
+
+    /// A result without a `dirs` array is server nonsense, not a soft empty set — answering `[]`
+    /// would render a workdir-less session that the daemon never reported.
+    func testSetDirsThrowsOnAResultWithoutDirs() async throws {
+        let (client, t) = try await connected()
+        async let call = client.setDirs(sessionId: "s_1", op: .add, path: "/x")
+        let sent = try await waitForSent(t, count: 2)
+        let req = decodeLine(sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"ok":true}}"#)
+        do {
+            _ = try await call
+            XCTFail("expected setDirs to throw on a malformed result")
+        } catch let error as RpcError {
+            XCTAssertEqual(error.code, -3)
+        }
+    }
 }
