@@ -3949,14 +3949,14 @@ export class AgentEngine {
         // consulted by both the auto pre-grant below and the deny branch in the dispatch chain.
         const dirGrantDenied = dirGrant !== null && this.grantDenied(dirGrant.dir);
         // working-directories T5: the session's working directories as of the START of this call —
-        // the fs safety reviewer's classification set (below). Snapshotted HERE, before the auto
-        // pre-grant can adopt this very call's grant dir into the row, because a dir adopted BY
-        // this call must NOT retroactively make this call ordinary: task-24 review F1's invariant
-        // is that an out-of-root write under `auto` is granted SILENTLY but still rides the fs
-        // reviewer (under auto the reviewer is the only safety net there is). The adopted dir is a
-        // full session dir from the NEXT call on — which is exactly what "the approved write is its
-        // first write" means. A worktree-isolated child classifies against its fixed confinement.
-        const preCallSessionDirs = rootsOverride ?? this.sessionDirPaths(sessionId);
+        // the fs safety reviewer's classification set (below), live primary first (F2b, see
+        // `classificationDirs`). Snapshotted HERE, before any adoption this call might trigger,
+        // because a dir adopted BY this call must NOT retroactively make this call ordinary:
+        // task-24 review F1's invariant is that an out-of-root write under `auto` is granted
+        // SILENTLY but still rides the fs reviewer (under auto the reviewer is the only safety net
+        // there is). It is ALSO the "is this session workdir-less?" reading the adoption ruling
+        // below keys off — one snapshot, both questions, so they can never disagree mid-call.
+        const preCallSessionDirs = this.classificationDirs(sessionId, rootsOverride);
         // SP-approvals final review (composition hole): the permission-rules store itself is NEVER
         // a valid write/edit target — checked here, unconditionally (not gated on `decision`,
         // `dirGrant`, or anything ruleAllowed-related below), so it is computed and dispatched
@@ -5153,6 +5153,32 @@ export class AgentEngine {
    *  the same-turn bridge), so a captured `meta` goes stale exactly where this matters — the
    *  MEMDIR anchor below must agree with what daemon.ts's roots closure is folding into the fence
    *  AT THIS MOMENT, and that closure re-reads the store on every call. One indexed lookup. */
+  /** working-directories T5 fix round 1 (F2b): the set `fsWriteIsUnusual` classifies against — the
+   *  session's LIVE primary first, then the row's directories, deduped. A worktree-isolated child
+   *  passes its `rootsOverride` instead (that fixed confinement IS its whole world).
+   *
+   *  Why the live primary leads rather than the row's `dirs[0]`: `enter_worktree` moves ONLY the
+   *  `cwd` column (`store.setCwd`), never the row — correctly, since a temporary worktree is not
+   *  one of the user's declared working directories. But a non-isolated worktree lives at
+   *  `<repoRoot>/.norma/worktrees/<name>`, so anchoring on the row's repo root makes
+   *  `relative(repoRoot, target)` start with `.norma` and the DOT RULE fires on every single write
+   *  of the stint — an LLM review per write under auto, where pre-branch was silent. Putting the
+   *  live primary first makes the worktree win `fsWriteIsUnusual`'s first-containing-dir race, so
+   *  the dot rule is anchored where the work is actually happening. For every ordinary session the
+   *  live primary IS `dirs[0]` and the `new Set` collapses this to the row, unchanged.
+   *
+   *  This does not widen anything: the live primary is `meta.cwd`, already a fence root by every
+   *  path (daemon.ts's closure puts it first), and this set only ever decides REVIEW vs SILENT. */
+  private classificationDirs(sessionId: string, rootsOverride: string[] | undefined): string[] {
+    if (rootsOverride) return rootsOverride;
+    const live = this.primaryDir(sessionId);
+    const head: string[] = [];
+    if (live) {
+      try { head.push(canonicalizeDirPath(live)); } catch { /* unusable spelling — the row still speaks */ }
+    }
+    return [...new Set([...head, ...this.sessionDirPaths(sessionId)])];
+  }
+
   private primaryDir(sessionId: string): string | undefined {
     try {
       const m = this.cfg.store.meta(sessionId);

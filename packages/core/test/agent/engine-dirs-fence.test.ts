@@ -25,6 +25,9 @@ import { sessionTmpDir } from "../../src/agent/session-tmp";
 import { ensureOutdir } from "../../src/sessions/outdir";
 import { setSessionDirs, lockDir, type SetDirsDeps } from "../../src/sessions/set-dirs";
 import { memoryDirFor } from "../../src/agent/memory-dir";
+import { registerWorktreeTools } from "../../src/agent/tools/worktree";
+import { WorktreeManager } from "../../src/agent/worktree";
+import { repo } from "./engine-worktree.test";
 
 /**
  * working-directories T5 — the generalized write fence, driven through REAL engine turns.
@@ -170,6 +173,41 @@ function establishUnlockedPrimary(store: SessionStore, sessionId: string, path: 
   store.setDirsRaw(sessionId, [{ path, locked: false }]);
 }
 
+/** F2b's harness: a real git repo + WorktreeManager, the daemon-shaped roots closure, and a
+ *  reviewer that BLOCKS whatever it sees — so "silent" is proved by the write landing. A
+ *  non-isolated worktree lives at `<repoRoot>/.norma/worktrees/<name>`, which is why the dot rule
+ *  and the classification anchor collide there. */
+function setupWorktree(script: ProviderEvent[][]) {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-wt-home-")));
+  const cwd = repo();
+  const store = new SessionStore(home);
+  const hub = new SessionHub(store);
+  const registry = new ToolRegistry();
+  registerWriteTools(registry);
+  registerWorktreeTools(registry);
+  const dirs = daemonLikeDirs(store, home, (c) => memoryDirFor(c, { normaHome: home }));
+  const provider = new FakeProvider(script);
+  const skillsHome = mkdtempSync(join(tmpdir(), "norma-dirs-fence-wt-skills-"));
+  const trust = new TrustStore(join(skillsHome, "trust.json"));
+  const engine = new AgentEngine({
+    store, hub, registry,
+    broker: new ApprovalBroker(),
+    gate: new PermissionGate(),
+    provider: { provider, model: "gated-1" },
+    dirs,
+    approvalTimeoutMs: 300,
+    assembler: new ContextAssembler({ normaHome: skillsHome, trust, skills: new SkillStore({ normaHome: skillsHome, trust }) }),
+    compactor: new Compactor({ provider: { provider, model: "gated-1" }, store, hub }),
+    reviewer: stubReviewer({ verdict: "unsafe", reason: "would have blocked if consulted" }),
+    outDirOf: (sid) => ensureOutdir(home, sid),
+    memDirOf: (c) => memoryDirFor(c, { normaHome: home }),
+    grantDeniedPrefixes: [home],
+    worktrees: new WorktreeManager({ baseRef: () => "head" }),
+  });
+  const sessionId = store.createSession("global", { cwd, approvalPolicy: "auto" });
+  return { engine, store, hub, sessionId, cwd, home };
+}
+
 // ── the fence table (spec §2) ──────────────────────────────────────────────────────────────────
 
 describe("working-directories T5: the generalized write fence", () => {
@@ -264,6 +302,44 @@ describe("working-directories T5: the generalized write fence", () => {
     expect(card).toBeDefined();
     expect(card.summary).toContain(outside);
     expect(existsSync(target)).toBe(false); // denied → nothing written
+  });
+});
+
+// ── the LIVE primary in the classification set (F2b) ───────────────────────────────────────────
+
+describe("working-directories T5: a non-isolated worktree stint classifies against the LIVE primary", () => {
+  test("a plain write inside an entered worktree is SILENT — the worktree (not the row's repo root) anchors the dot rule, so `.norma/worktrees/…` is not read as a dotted escape", async () => {
+    const script: ProviderEvent[][] = [];
+    const { engine, store, hub, sessionId, cwd } = setupWorktree(script);
+    // The row must be WRITTEN for this to bite: a never-written row derives from the `cwd` column,
+    // which `enter_worktree` moves, so it follows the stint by itself. A picker/RPC/adopt-written
+    // row does NOT move — that is the case where the anchor and the live primary diverge.
+    establishUnlockedPrimary(store, sessionId, cwd);
+    script.push(
+      [{ type: "tool_call", callId: "e1", name: "enter_worktree", argsJson: JSON.stringify({ name: "feat" }) }, { type: "done", stopReason: "tool_calls" }],
+      // The write round is appended by the observer below, once the worktree dir exists.
+    );
+    let wtDir = "";
+    hub.attach({
+      clientName: "wt-observer",
+      deliver(e) {
+        if (e.type === "worktree_entered" && !wtDir) {
+          wtDir = (e as any).path as string;
+          script.push(
+            [{ type: "tool_call", callId: "w1", name: "write", argsJson: JSON.stringify({ path: "scratch.txt", content: "in the worktree" }) }, { type: "done", stopReason: "tool_calls" }],
+            [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+          );
+        }
+        return true;
+      },
+    }, sessionId, 0);
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+    expect(wtDir).not.toBe("");
+    expect(wtDir).toContain(join(".norma", "worktrees")); // the collision's actual shape
+    expect(events.some((e) => e.type === "tool_review")).toBe(false); // silent, exactly as pre-branch
+    expect(readFileSync(join(wtDir, "scratch.txt"), "utf8")).toBe("in the worktree");
   });
 });
 
