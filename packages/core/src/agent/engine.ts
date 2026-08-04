@@ -460,8 +460,22 @@ function resolveFsReviewTarget(path: string, roots: string[], tmpDir: string): s
  *  plain in-cwd, non-dotted write is NOT reviewed — this is the "unusual", not "every write",
  *  trigger the brief specifies. primaryCwd is realpathed here too: `resolved` is canonical, so a
  *  non-canonical root (possible via rootsOverride) would make relative() emit spurious ".."
- *  segments — a false-positive review, never a bypass, but still wrong. */
-function fsWriteIsUnusual(resolved: string, primaryCwd: string): boolean {
+ *  segments — a false-positive review, never a bypass, but still wrong.
+ *
+ *  working-directories T4 fix round 1 (spec §2: "Norma-owned spaces ($OUTDIR/$TMPDIR/$MEMDIR):
+ *  always silent; the dotfile rule does not apply inside them"): `alwaysSilentDirs` — checked
+ *  FIRST, before either the outside-primary or dotfile check — exempts a target inside one of
+ *  them from BOTH. Deliberately NOT "any root beyond primaryCwd": an out-of-project grant/added
+ *  root (task-24 review F1's own pinned case) or a worktree-entered dir must stay reviewable under
+ *  auto — only these three specific Norma-owned dirs are exempt, so callers must pass exactly
+ *  that short list, never the full `roots` array. This is a surgical addition, not the
+ *  generalized any-session-dir classification the plan's own fence table (§2) eventually wants —
+ *  T5 absorbs it into that rewrite. Falsy entries (an unwired outDirOf/memDirOf, or a session with
+ *  memory disabled) are simply skipped — callers may pass an unfiltered array. */
+function fsWriteIsUnusual(resolved: string, primaryCwd: string, alwaysSilentDirs: (string | undefined)[] = []): boolean {
+  for (const d of alwaysSilentDirs) {
+    if (d && isWithin(resolved, d)) return false;
+  }
   let cwd = primaryCwd;
   try { cwd = realpathSync(primaryCwd); } catch { /* vanished root — raw comparison is all there is */ }
   if (!isWithin(resolved, cwd)) return true;
@@ -838,6 +852,16 @@ export interface EngineConfig {
   // never wires it) → `ctx.outDir` stays undefined and bash's env/writable-set additions are
   // skipped entirely — byte-identical to before this feature.
   outDirOf?: (sessionId: string) => string;
+  // working-directories T4 fix round 1: the session's project MEMDIR for a given `cwd` — the SAME
+  // computation daemon.ts's `sessionDirs` roots callback already folds into the session's write
+  // roots when `memory.enabled` is on (`memoryDirOf`, gated on `memoryEnabledHot()`), exposed here
+  // ONLY so the fs-reviewer call site (below) can pass it to `fsWriteIsUnusual`'s `alwaysSilentDirs`
+  // — spec §2's "MEMDIR is always silent" — without re-deriving a second, possibly-diverging
+  // computation. Absent/undefined (memory disabled, or a test harness that never wires it) simply
+  // drops out of that array; nothing else reads this getter. Takes `cwd`, not `sessionId` —
+  // `memoryDirFor` is itself a pure function of `cwd` (memory-dir.ts), and the fs-reviewer call
+  // site already has this thread's `cwd` in scope, so no extra session-store read is needed.
+  memDirOf?: (cwd: string) => string | undefined;
   // Auto-diagnostics after edit (lsp-consolidation T3, design doc `2026-07-15-lsp-consolidation-
   // design.md` §2) — CC parity: "after each file edit, it automatically reports type errors and
   // warnings so Claude can fix issues without a separate build step." Both getters, same hot-
@@ -4386,7 +4410,12 @@ export class AgentEngine {
           const fsRoots = this.writableRoots(sessionId, projectRoot, rootsOverride);
           const fsTmpDir = sessionTmpDir(sessionId);
           const resolved = path ? resolveFsReviewTarget(path, fsRoots, fsTmpDir) : null;
-          if (resolved && fsWriteIsUnusual(resolved, fsRoots[0]!)) {
+          // working-directories T4 fix round 1 (spec §2): the three Norma-owned dirs are always
+          // silent — never "unusual" here, regardless of the outside-primary/dotfile checks.
+          // `cfg.outDirOf`/`cfg.memDirOf` absent (a test harness predating this fix) simply drops
+          // out of the array; `fsTmpDir` is always present.
+          const alwaysSilentDirs = [fsTmpDir, this.cfg.outDirOf?.(sessionId), this.cfg.memDirOf?.(cwd)];
+          if (resolved && fsWriteIsUnusual(resolved, fsRoots[0]!, alwaysSilentDirs)) {
             const precis = fsWritePrecis(call, resolved);
             outcome = await this.reviewAndDispatch(
               { class: "fs", precis }, precis,

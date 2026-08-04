@@ -6,6 +6,7 @@ import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type Wr
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { outdirPath, ensureOutdir } from "../../src/sessions/outdir";
+import { memoryDirFor } from "../../src/agent/memory-dir";
 import { ToolRegistry } from "../../src/agent/tools/registry";
 import { registerBashTool } from "../../src/agent/tools/bash";
 import { sandboxAvailable } from "../../src/agent/sandbox";
@@ -177,6 +178,26 @@ function writeSettingsFile(home: string, overrides: Record<string, unknown> = {}
   );
 }
 
+/** working-directories T4 fix round 1: the reviewer's finding was specifically that "silent-legal"
+ *  had only ever been proven under `ask` (where the fs-reviewer branch is structurally unreachable
+ *  — auto-policy-only), never under `auto` with the reviewer at its own DEFAULT (enabled unless
+ *  explicitly turned off). This variant of `writeSettingsFile` deliberately OMITS the `reviewer`
+ *  key entirely (rather than setting `enabled: false`, the default `writeSettingsFile` above
+ *  bakes in) — `reviewerEnabled?.(cwd) !== false` then reads `undefined !== false` = true, the real
+ *  production default. */
+function writeSettingsFileReviewerOn(home: string, overrides: Record<string, unknown> = {}): void {
+  writeFileSync(
+    join(home, "settings.json"),
+    JSON.stringify({
+      schemaVersion: 2,
+      provider: { type: "codex-oauth", model: "gpt-5.4" },
+      titles: { enabled: false },
+      toolSearch: { enabled: false },
+      ...overrides,
+    }, null, 2) + "\n",
+  );
+}
+
 /** A provider driven by the USER's own message rather than a fixed script — `driveTurn` sends
  *  `JSON.stringify({callId, name, argsJson})`, replayed here as a single tool_call. Needed because
  *  every one of this file's targets is `outdirPath(home, sessionId)`, and `sessionId` is minted
@@ -243,6 +264,69 @@ describe("outdir blessing — real engine turn (working-directories T4)", () => 
     // silent-legal, both ways: no approval card, and no fs-reviewer flag for the `.norma`
     // dot-directory segment (Norma-owned space, unlike a user dotfile) — under `ask` policy the fs
     // reviewer branch never even runs (auto-policy-only), so this also structurally proves it.
+    expect(c.hasEventType("approval_requested")).toBe(false);
+    expect(c.hasEventType("tool_review")).toBe(false);
+    c.close();
+  });
+
+  // working-directories T4 fix round 1 (review IMP-1): "silent-legal" had only ever been proven
+  // under `ask`, where the fs-reviewer branch (engine.ts) is structurally unreachable
+  // (auto-policy-only) — so the claim held vacuously, not because the outdir was actually exempt
+  // from the reviewer's "outside primary cwd" flag. This pins the SAME claim under `auto`, with the
+  // reviewer at its real default (enabled — writeSettingsFileReviewerOn omits the key entirely
+  // rather than setting `enabled: false`), which is the one policy where that branch actually runs.
+  test("[fix round 1] a write into the session's OWN outputs dir is silent-legal under AUTO too, reviewer enabled at default — no tool_review, no card, lands on disk (spec §2: Norma-owned spaces are always silent)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-outdir-e2e-auto-"));
+    writeSettingsFileReviewerOn(home);
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    const cwd = mkdtempSync(join(tmpdir(), "norma-outdir-e2e-auto-cwd-"));
+    const provider = new ScriptedToolProvider();
+
+    daemon = await startDaemon({ home, secrets, agentProvider: { provider, model: "fake-1" } });
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(daemon.tokens.harness, "outdir-e2e-auto");
+    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
+    const sessionId = created.sessionId as string;
+    await c.request(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+
+    const target = join(outdirPath(home, sessionId), "deliverable.txt");
+    await driveTurn(c, sessionId, scriptWrite("w1", target, "final output"));
+
+    const result = c.toolResult("w1");
+    expect(result?.isError).toBe(false);
+    expect(existsSync(target)).toBe(true);
+    expect(readFileSync(target, "utf8")).toBe("final output");
+    expect(c.hasEventType("approval_requested")).toBe(false);
+    // This is the reviewer's own probe shape: BEFORE the fix, this event existed (a real
+    // tool_review fired for the outside-primary-cwd outputs-dir target). It must not exist now.
+    expect(c.hasEventType("tool_review")).toBe(false);
+    c.close();
+  });
+
+  // Same claim, MEMDIR — spec §2 names it alongside $OUTDIR/$TMPDIR, and the fix round's exemption
+  // (engine.ts's `alwaysSilentDirs`) covers all three through the SAME mechanism (`cfg.memDirOf`),
+  // so this is the same pin for the sibling Norma-owned space, on the same real daemon/turn.
+  test("[fix round 1] a write into the session's MEMDIR is silent-legal under AUTO too, reviewer enabled at default — no tool_review, no card, lands on disk", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-outdir-e2e-memdir-auto-"));
+    writeSettingsFileReviewerOn(home);
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    const cwd = mkdtempSync(join(tmpdir(), "norma-outdir-e2e-memdir-auto-cwd-"));
+    const provider = new ScriptedToolProvider();
+
+    daemon = await startDaemon({ home, secrets, agentProvider: { provider, model: "fake-1" } });
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(daemon.tokens.harness, "outdir-e2e-memdir-auto");
+    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
+    const sessionId = created.sessionId as string;
+    await c.request(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+
+    const target = join(memoryDirFor(cwd, { normaHome: home }), "note.md");
+    await driveTurn(c, sessionId, scriptWrite("w1", target, "a fact"));
+
+    const result = c.toolResult("w1");
+    expect(result?.isError).toBe(false);
+    expect(existsSync(target)).toBe(true);
+    expect(readFileSync(target, "utf8")).toBe("a fact");
     expect(c.hasEventType("approval_requested")).toBe(false);
     expect(c.hasEventType("tool_review")).toBe(false);
     c.close();

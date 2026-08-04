@@ -1141,6 +1141,12 @@ export async function startDaemon(opts: {
       // working-directories T4: bash's $OUTDIR splice + explicit seatbelt-writable union
       // (tools/bash.ts) — see `outDirOf`'s own local doc comment above.
       outDirOf,
+      // working-directories T4 fix round 1: the SAME memoryDirOf/memoryEnabledHot closures
+      // `sessionDirs` above already uses to fold the MEMDIR into the session's write roots —
+      // exposed to the fs-reviewer's `fsWriteIsUnusual` call (engine.ts) so it treats the MEMDIR
+      // as always-silent (spec §2) without re-deriving the path a second way. `undefined` when
+      // memory is disabled, matching `sessionDirs`'s own gate exactly.
+      memDirOf: (cwd: string) => (memoryEnabledHot() ? memoryDirOf(cwd) : undefined),
       // task-30 (push-notification track): the real osascript-shelling implementation — the
       // engine's `notify` bridge only calls this when hub.attachedCount(sessionId) === 0 at
       // emission time (see engine.ts's executeCall). Boot-constant (no settings gate — v1 keeps
