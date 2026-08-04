@@ -2242,7 +2242,7 @@ export class AgentEngine {
     // `let`, not `const`: the enter/exit_worktree bridge below reassigns this SAME-TURN so a
     // follow-up tool call later in this turn's dispatch loop resolves into (or back out of) the
     // worktree without waiting for the next turn's store.meta() re-read.
-    let cwd = this.primaryDir(sessionId, meta) ?? sessionTmpDir(sessionId);
+    let cwd = this.primaryDir(sessionId) ?? sessionTmpDir(sessionId);
     // Trust-gated project .mcp.json bring-up, BEFORE the turn_started emit: this can spawn
     // subprocesses (slow), and a project server that's already started/recorded is a no-op, so
     // doing it here (rather than after turn_started) keeps the -p watchdog from tripping on a
@@ -4458,13 +4458,17 @@ export class AgentEngine {
           // `cfg.outDirOf`/`cfg.memDirOf` absent (a test harness predating this fix) simply drops
           // out of the array; `fsTmpDir` is always present.
           //
-          // T5 (wd-m14, T4 re-review's open question): `memDirOf` takes the session's PRIMARY, not
-          // this thread's live `cwd`. They differ whenever `enter_worktree` has moved the turn's
-          // cwd — and the MEMDIR that is actually FOLDED INTO THE FENCE (daemon.ts's roots closure)
-          // is keyed off the session's primary, so passing `cwd` named a memdir that isn't in the
-          // roots at all (vacuously exempt) while leaving the real one reviewable. Same
-          // `meta.cwd ?? dirs[0]` precedence the closure itself uses — one answer, two layers.
-          const memAnchor = this.primaryDir(sessionId, meta);
+          // T5 (wd-m14, the T4 re-review's open question): `memDirOf` takes the session's PRIMARY,
+          // read FRESH — not this thread's per-call `cwd`. The MEMDIR that is actually folded into
+          // the fence is daemon.ts's `memoryDirOf(primary)`, recomputed on every roots() read, so
+          // the exemption must name THAT directory or it is exempting one the session cannot write
+          // to while leaving the one it can reviewable. The two inputs diverge in both directions:
+          // a worktree-ISOLATED child's `cwd` is its worktree while the session's memdir belongs to
+          // the parent (vacuous — an isolated child's fence excludes the memdir entirely), and a
+          // SAME-TURN `enter_worktree` moves the cwd column under a turn-scoped `meta` (real — the
+          // fold follows the move immediately, a captured `meta` does not). Same `cwd ?? dirs[0]`
+          // precedence as the closure: one answer, two layers.
+          const memAnchor = this.primaryDir(sessionId);
           const alwaysSilentDirs = [fsTmpDir, this.cfg.outDirOf?.(sessionId), memAnchor ? this.cfg.memDirOf?.(memAnchor) : undefined];
           // T5 (spec §2): classify against the session's OWN working directories — the row — not
           // the full fence roots (which also carry Edit-rule dirs, project-local permission dirs
@@ -5142,10 +5146,19 @@ export class AgentEngine {
    *  `enter_worktree`/`session.setCwd` move, and every turn already runs there), the row's
    *  `dirs[0]` second (a workdir-less session that has ADOPTED a primary has no cwd column yet;
    *  T3 populates `SessionSummary.cwd` from `dirs[0]` for exactly this reason). `undefined` only
-   *  for a workdir-less session that has never adopted anything. */
-  private primaryDir(sessionId: string, meta: { cwd: string | null }): string | undefined {
-    if (meta.cwd) return meta.cwd;
-    try { return this.cfg.store.dirs(sessionId)[0]?.path; } catch { return undefined; }
+   *  for a workdir-less session that has never adopted anything.
+   *
+   *  Deliberately reads the store FRESH rather than taking the turn's already-loaded `meta`: that
+   *  object is turn-scoped, and `enter_worktree` moves the `cwd` column MID-TURN (`store.setCwd`,
+   *  the same-turn bridge), so a captured `meta` goes stale exactly where this matters — the
+   *  MEMDIR anchor below must agree with what daemon.ts's roots closure is folding into the fence
+   *  AT THIS MOMENT, and that closure re-reads the store on every call. One indexed lookup. */
+  private primaryDir(sessionId: string): string | undefined {
+    try {
+      const m = this.cfg.store.meta(sessionId);
+      if (m.cwd) return m.cwd;
+      return this.cfg.store.dirs(sessionId)[0]?.path;
+    } catch { return undefined; }
   }
 
   /** working-directories T5 (spec §1, the first-write lock — "a directory locks the moment Norma

@@ -24,6 +24,7 @@ import type { BashReviewer, ReviewInput } from "../../src/agent/reviewer";
 import { sessionTmpDir } from "../../src/agent/session-tmp";
 import { ensureOutdir } from "../../src/sessions/outdir";
 import { setSessionDirs, lockDir, type SetDirsDeps } from "../../src/sessions/set-dirs";
+import { memoryDirFor } from "../../src/agent/memory-dir";
 
 /**
  * working-directories T5 — the generalized write fence, driven through REAL engine turns.
@@ -52,10 +53,10 @@ afterAll(() => {
 });
 
 /** MIRRORS daemon.ts's real `sessionDirs` baseDirs closure (T5 shape): the session's own row
- *  supplies the user directories, and the two Norma-owned folds the daemon adds — the MEMDIR (not
- *  wired here: no memory dir in this harness) and the session's OUTDIR — are appended after them.
+ *  supplies the user directories, and the two Norma-owned folds the daemon adds — the MEMDIR
+ *  (keyed off the PRIMARY, mkdir'd on read) and the session's OUTDIR — are appended after them.
  *  The `primary` precedence (`meta.cwd ?? dirs[0]?.path`) is the SAME one the engine uses. */
-function daemonLikeDirs(store: SessionStore, home: string): SessionDirectories {
+function daemonLikeDirs(store: SessionStore, home: string, memDirOf: (cwd: string) => string): SessionDirectories {
   return new SessionDirectories((sid) => {
     const meta = store.meta(sid);
     const row = store.dirs(sid);
@@ -63,6 +64,11 @@ function daemonLikeDirs(store: SessionStore, home: string): SessionDirectories {
     const roots: string[] = [];
     if (primary) roots.push(primary);
     for (const d of row) roots.push(d.path);
+    if (primary) {
+      const memDir = memDirOf(primary);
+      mkdirSync(memDir, { recursive: true });
+      roots.push(memDir);
+    }
     roots.push(ensureOutdir(home, sid));
     return roots;
   });
@@ -101,6 +107,10 @@ function setup(script: ProviderEvent[][], opts?: {
   reviewer?: { verdict: "safe" | "unsafe"; reason: string };
   /** false → the session is created with NO cwd (workdir-less). */
   withCwd?: boolean;
+  /** true → the LEGACY roots closure (`() => [cwd]`, the pre-T5 shape every older engine test
+   *  harness uses): knows nothing about the `dirs` row. Proves the row-derivation is the ENGINE's
+   *  own behavior rather than something daemon.ts's wiring supplies. */
+  legacyRoots?: boolean;
 }) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-home-")));
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-cwd-")));
@@ -120,7 +130,8 @@ function setup(script: ProviderEvent[][], opts?: {
     run({ command }, ctx) { bashCalls.push(command); bashCwds.push(ctx.cwd); return `ran: ${command}`; },
   });
   const provider = new FakeProvider(script);
-  const dirs = daemonLikeDirs(store, home);
+  const memDirOf = (c: string) => memoryDirFor(c, { normaHome: home });
+  const dirs = opts?.legacyRoots ? new SessionDirectories(() => [cwd]) : daemonLikeDirs(store, home, memDirOf);
   const broker = new ApprovalBroker();
   const skillsHome = mkdtempSync(join(tmpdir(), "norma-dirs-fence-skills-"));
   const skills = new SkillStore({ normaHome: skillsHome, trust: new TrustStore(join(skillsHome, "trust.json")) });
@@ -137,6 +148,7 @@ function setup(script: ProviderEvent[][], opts?: {
     // The daemon's own wiring: the outputs dir is a blessed Norma-owned space, and `home` (this
     // harness's NORMA_HOME) is the grant denylist exactly as daemon.ts passes `[normaHome]`.
     outDirOf: (sid) => ensureOutdir(home, sid),
+    memDirOf,
     grantDeniedPrefixes: [home],
   });
   const sessionId = store.createSession("global", {
@@ -146,7 +158,7 @@ function setup(script: ProviderEvent[][], opts?: {
   const events: SessionEvent[] = [];
   hub.attach({ clientName: "test-observer", deliver: (e) => { events.push(e); return true; } }, sessionId, 0);
   const setDirsDeps: SetDirsDeps = { store, grantDenied: () => false };
-  return { engine, store, hub, broker, sessionId, cwd, home, dirs, events, registry, bashCalls, bashCwds, setDirsDeps };
+  return { engine, store, hub, broker, sessionId, cwd, home, dirs, events, registry, bashCalls, bashCwds, setDirsDeps, memDirOf };
 }
 
 /** Establishes an UNLOCKED primary in the row — what T6 will make `session.create` itself do.
@@ -197,6 +209,26 @@ describe("working-directories T5: the generalized write fence", () => {
     expect(readFileSync(target, "utf8")).toBe("unlocked-added");
   });
 
+  test("the fence widens from the ROW even when the roots closure knows nothing about it — row-derivation is the ENGINE's behavior, not the daemon's wiring", async () => {
+    const added = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-legacy-")));
+    const target = join(added, "note.txt");
+    // `legacyRoots`: the pre-T5 closure shape, `() => [cwd]`. The added dir reaches the fence ONLY
+    // through `writableRoots`'s union with `store.dirs`. Under `ask`, an out-of-root write would
+    // raise a grant card (denied here) — so a landed write with NO card is the proof.
+    const { engine, store, hub, broker, sessionId, setDirsDeps } = setup(writeTurn(target, "row-derived"), {
+      policy: "ask", legacyRoots: true,
+    });
+    expect(setSessionDirs(setDirsDeps, sessionId, "add", added).ok).toBe(true);
+    hub.attach({
+      clientName: "auto-denier",
+      deliver(e) { if (e.type === "approval_requested") broker.resolve(sessionId, e.callId, false, "auto-denier"); return true; },
+    }, sessionId, 0);
+
+    await engine.runTurn(sessionId);
+    expect(store.read(sessionId).some((e) => e.type === "approval_requested")).toBe(false);
+    expect(readFileSync(target, "utf8")).toBe("row-derived");
+  });
+
   test("a DOTTED path inside an added directory still gets the safety review — the dot rule is anchored per-dir, not only at the primary", async () => {
     const added = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-added-dotted-")));
     const target = join(added, ".ssh", "config");
@@ -232,6 +264,43 @@ describe("working-directories T5: the generalized write fence", () => {
     expect(card).toBeDefined();
     expect(card.summary).toContain(outside);
     expect(existsSync(target)).toBe(false); // denied → nothing written
+  });
+});
+
+// ── the MEMDIR anchor (wd-m14) ─────────────────────────────────────────────────────────────────
+
+describe("working-directories T5: the always-silent MEMDIR is the one the fence actually folds (wd-m14)", () => {
+  // The DISCRIMINATING case, deliberately chosen: the anchor must be the session's primary read
+  // FRESH, not the dispatch loop's per-call `cwd`. A workdir-less session that ADOPTS a directory
+  // mid-turn is where those two visibly disagree — the loop's `cwd` stays the session tmp dir for
+  // the rest of the turn, while the roots closure immediately starts folding
+  // `memoryDirOf(adopted)`. (The other divergence the T4 re-review named — a worktree-isolated
+  // child — is vacuous: `rootsOverride` excludes the memdir from that child's fence entirely, so
+  // no memdir write of its can even reach this classification.)
+  test("a workdir-less session that adopted a primary mid-turn writes into THAT primary's MEMDIR silently — the anchor is the fresh primary, not the turn's tmp-dir cwd", async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-memanchor-")));
+    const script: ProviderEvent[][] = [];
+    const { engine, store, sessionId, memDirOf } = setup(script, {
+      withCwd: false, policy: "auto", // auto: the grant is silent AND the fs reviewer is live
+      reviewer: { verdict: "unsafe", reason: "would have blocked if consulted" },
+    });
+    // c1 adopts `outside` as the primary (the silent auto pre-grant) and is itself reviewed — it
+    // was out-of-root when it ran. c2 then writes a memory file into the MEMDIR that adoption just
+    // folded into the fence; that one must be silent.
+    script.push(
+      [{ type: "tool_call", callId: "c1", name: "write", argsJson: JSON.stringify({ path: join(outside, "first.txt"), content: "adopted" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "tool_call", callId: "c2", name: "write", argsJson: JSON.stringify({ path: join(memDirOf(outside), "notes.md"), content: "remembered" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    );
+
+    await engine.runTurn(sessionId);
+    const reviews = store.read(sessionId).filter((e) => e.type === "tool_review") as any[];
+    expect(store.dirs(sessionId)).toEqual([{ path: outside, locked: true }]); // adoption happened
+    // EXACTLY one review — c1's. A second one means the MEMDIR exemption named the wrong directory
+    // (the turn's tmp-dir cwd instead of the freshly-adopted primary), which is wd-m14 itself.
+    expect(reviews.length).toBe(1);
+    expect(reviews[0].summary).toContain(join(outside, "first.txt"));
+    expect(readFileSync(join(memDirOf(outside), "notes.md"), "utf8")).toBe("remembered");
   });
 });
 
@@ -326,7 +395,24 @@ describe("working-directories T5: first-write locks", () => {
     ]);
   });
 
-  test("a FAILED write locks nothing (the lock records a fact — a write that never landed is not one)", async () => {
+  test("a write that FAILS INSIDE THE TOOL locks nothing — the lock records a fact, and a write that didn't land is not one", async () => {
+    const script: ProviderEvent[][] = [];
+    const { engine, store, sessionId, cwd } = setup(script, { policy: "auto" });
+    // In-root (no card, no grant) and it reaches the tool — which then fails: `edit` of a file
+    // that doesn't exist. This is the call shape that actually exercises the `!result.isError`
+    // gate; a DENIED call (the test below) never reaches executeCall at all.
+    script.push([
+      { type: "tool_call", callId: "c1", name: "edit", argsJson: JSON.stringify({ path: join(cwd, "missing.txt"), old_string: "a", new_string: "b" }) },
+      { type: "done", stopReason: "tool_calls" },
+    ], [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }]);
+    establishUnlockedPrimary(store, sessionId, cwd);
+
+    await engine.runTurn(sessionId);
+    expect((store.read(sessionId).find((e) => e.type === "tool_result") as any).isError).toBe(true);
+    expect(store.dirs(sessionId)).toEqual([{ path: cwd, locked: false }]);
+  });
+
+  test("a DENIED write locks nothing (it never reaches the tool at all)", async () => {
     const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-lock-fail-")));
     const { engine, store, sessionId, cwd, setDirsDeps } = setup(
       // `plan` policy denies every mutating call — the tool_result is an error, nothing is written.
