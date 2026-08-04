@@ -380,50 +380,73 @@ describe("working-directories T5: the always-silent MEMDIR is the one the fence 
   });
 });
 
-// ── adopt-on-grant (spec §1: "a dirGrant-adopted directory is born locked") ─────────────────────
+// ── the adoption matrix (fix round 1, controller ruling 2026-08-04) ────────────────────────────
+//
+// ADOPTION ⇔ ESTABLISHING A PRIMARY ON AN EMPTY SET, uniform across policies:
+//   - workdir-less session (dirs = []): every door adopts — the silent auto/accept-edits/bypass
+//     pre-grant AND the ask card — because the workdir-less arc REQUIRES exiting the mode, and the
+//     granting write is the dir's first write, so it is born locked.
+//   - with-dirs session: NO door adopts today. The silent pre-grant keeps its pre-branch shape (a
+//     process-local grant; every write into it stays reviewable under auto — task-24 review F1),
+//     and the ask card stays one-shot (SP-policies Task 9). Widening a session that already has
+//     working directories must be a deliberate HUMAN act, which is the 4th-card-option follow-up.
 
-describe("working-directories T5: the dirGrant approval adopts into the row", () => {
-  test("auto-policy grant lands the directory in the ROW, born LOCKED — and a second write there is then silent-plain", async () => {
-    const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-adopt-")));
+describe("working-directories T5: the adoption matrix", () => {
+  test("WITH-DIRS + auto: the silent pre-grant adopts NOTHING — the row is unchanged and EVERY write into the granted dir stays reviewable (task-24 review F1)", async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-withdirs-auto-")));
     const target1 = join(outside, "one.txt");
     const target2 = join(outside, "two.txt");
     const { engine, store, sessionId, cwd } = setup([
       [{ type: "tool_call", callId: "c1", name: "write", argsJson: JSON.stringify({ path: target1, content: "one" }) }, { type: "done", stopReason: "tool_calls" }],
       [{ type: "tool_call", callId: "c2", name: "write", argsJson: JSON.stringify({ path: target2, content: "two" }) }, { type: "done", stopReason: "tool_calls" }],
       [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ], { policy: "auto" });
-
-    await engine.runTurn(sessionId);
-
-    // THE assertion this task exists for: the grant is durable state on the session row, not an
-    // in-memory SessionDirectories entry that dies with the daemon.
-    const row = store.dirs(sessionId);
-    expect(row.map((d) => d.path)).toEqual([cwd, outside]);
-    expect(row[1]).toMatchObject({ path: outside, locked: true }); // BORN locked — the approved write is its first write
-    expect(readFileSync(target1, "utf8")).toBe("one");
-    expect(readFileSync(target2, "utf8")).toBe("two");
-    // The dir joined the set once; the second write rode it as an ordinary session dir.
-    const events = store.read(sessionId);
-    expect(events.filter((e) => e.type === "directory_added").length).toBe(1);
-    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
-  });
-
-  test("the GRANTING write still rides the fs reviewer (task-24 F1 invariant); only the NEXT write into the now-adopted dir is silent", async () => {
-    const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-grantfirst-")));
-    const { engine, store, sessionId } = setup([
-      [{ type: "tool_call", callId: "c1", name: "write", argsJson: JSON.stringify({ path: join(outside, "one.txt"), content: "one" }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "tool_call", callId: "c2", name: "write", argsJson: JSON.stringify({ path: join(outside, "two.txt"), content: "two" }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
     ], { policy: "auto", reviewer: { verdict: "safe", reason: "fine" } });
 
     await engine.runTurn(sessionId);
-    const reviews = store.read(sessionId).filter((e) => e.type === "tool_review") as any[];
-    // EXACTLY one: c1 (out-of-root at the moment it ran — a dir adopted BY a call must not
-    // retroactively make that same call ordinary, or `auto`'s only out-of-root safety net is gone);
-    // c2 rode the row and was silent.
-    expect(reviews.length).toBe(1);
-    expect(reviews[0].summary).toContain(join(outside, "one.txt"));
-    expect(readFileSync(join(outside, "two.txt"), "utf8")).toBe("two");
+    const events = store.read(sessionId);
+    // The grant still WORKS (both writes land, silently, no card) — it is just not durable state.
+    expect(readFileSync(target1, "utf8")).toBe("one");
+    expect(readFileSync(target2, "utf8")).toBe("two");
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+    expect(events.filter((e) => e.type === "directory_added").length).toBe(1); // granted once, process-local
+    // THE ruling: the row is untouched, so the user is never left with a widening no human
+    // authorized (and, born-locked, could never have removed).
+    expect(store.dirs(sessionId).map((d) => d.path)).toEqual([cwd]);
+    // …and BOTH writes rode the fs reviewer — under auto it is the only out-of-root safety net
+    // there is, and a silent grant must never be able to switch it off for the rest of the session.
+    const reviews = events.filter((e) => e.type === "tool_review") as any[];
+    expect(reviews.length).toBe(2);
+    expect(reviews[0].summary).toContain(target1);
+    expect(reviews[1].summary).toContain(target2);
+  });
+
+  test("WITH-DIRS + ask: an APPROVED grant card adopts nothing either — one-shot stays one-shot (SP-policies Task 9)", async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-withdirs-ask-")));
+    const target = join(outside, "approved.txt");
+    const { engine, store, hub, broker, sessionId, cwd } = setup(writeTurn(target, "approved"), { policy: "ask" });
+    hub.attach({
+      clientName: "auto-approver",
+      deliver(e) { if (e.type === "approval_requested") broker.resolve(sessionId, e.callId, true, "auto-approver"); return true; },
+    }, sessionId, 0);
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+    expect(events.some((e) => e.type === "approval_requested")).toBe(true);
+    expect(readFileSync(target, "utf8")).toBe("approved");   // the one-shot write lands
+    expect(store.dirs(sessionId).map((d) => d.path)).toEqual([cwd]); // and adopts nothing
+    expect(events.some((e) => e.type === "directory_added")).toBe(false);
+  });
+
+  test("WORKDIR-LESS + auto: the SILENT pre-grant DOES adopt — as the primary, born locked, exiting the mode (the empty-set rule)", async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-wdless-auto-")));
+    const target = join(outside, "adopted.txt");
+    const { engine, store, sessionId } = setup(writeTurn(target, "adopted"), { withCwd: false, policy: "auto" });
+    expect(store.dirs(sessionId)).toEqual([]);
+
+    await engine.runTurn(sessionId);
+    expect(readFileSync(target, "utf8")).toBe("adopted");
+    expect(store.dirs(sessionId)).toEqual([{ path: outside, locked: true }]);
+    expect(store.read(sessionId).some((e) => e.type === "approval_requested")).toBe(false); // silent, per policy
   });
 
   test("a grant-denied directory is never adopted — hard error, nothing in the row (the denylist is one predicate for both doors)", async () => {

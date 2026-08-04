@@ -473,13 +473,25 @@ function resolveFsReviewTarget(path: string, roots: string[], tmpDir: string): s
  *      overlaps.
  *   3. Outside every session directory: unusual (review).
  *
- *  `sessionDirs` is the ROW's dirs (`store.dirs(sessionId)`, canonicalized) — NOT the full fence
- *  `roots` array. That distinction is the whole point: an `Edit(<path>)` rule dir, a worktree-
- *  entered dir, an `session.addDir`-style transient root and the project-local permission dirs are
- *  all writable but are NOT the user's declared working directories, so a write into one stays
- *  reviewable under auto exactly as it is today (task-24 review F1's pinned case). A worktree-
- *  ISOLATED child passes its `rootsOverride` here instead — that fixed confinement IS its whole
- *  world, and classifying it against the parent session's row would review every write it makes.
+ *  `sessionDirs` is the session's own working directories — the live primary followed by the ROW's
+ *  dirs (`classificationDirs`) — NOT the full fence `roots` array. That distinction is the whole
+ *  point, and it is what keeps task-24 review F1's invariant alive: the things that are WRITABLE
+ *  but are not the user's declared working directories stay REVIEWABLE under auto. Concretely:
+ *   - an out-of-root dir the model got via the silent auto/accept-edits/bypass pre-grant. Adoption
+ *     is scoped to the empty set (the T5 fix-round-1 ruling — see `applyDirGrant`), so for a
+ *     session that has a workspace such a grant is process-local and EVERY write into it is
+ *     reviewed, exactly as pre-branch. (For a WORKDIR-LESS session the grant establishes the
+ *     primary, and writes there are then ordinary in-workspace writes — which is the point of
+ *     exiting the mode.)
+ *   - an `Edit(<path>)` rule dir (`writableRoots`'s union) and the project-local permission dirs.
+ *   - a worktree dir added by the `enter_worktree` bridge. (A NON-isolated stint's own cwd is a
+ *     different matter: it becomes the LIVE primary, and F2b puts it at the head of this list on
+ *     purpose — see `classificationDirs`.)
+ *  What IS in the row, and therefore silent: whatever a human put there — the picker, `/dirs`,
+ *  `session.setDirs`, and `session.addDir` (a thin alias over the same setter since T5, so its
+ *  dirs are genuine working directories now rather than an invisible process-local root).
+ *  A worktree-ISOLATED child passes its `rootsOverride` here instead — that fixed confinement IS
+ *  its whole world, and classifying it against the parent session's row would review every write.
  *
  *  Each entry is realpathed here (like the old `primaryCwd` was): `resolved` is canonical, so a
  *  non-canonical dir would make relative() emit spurious ".." segments — a false-positive review,
@@ -4028,7 +4040,11 @@ export class AgentEngine {
         // executeCall, silent).
         let grantFailure: string | null = null;
         if (dirGrant && !dirGrantDenied && (meta.approvalPolicy === "auto" || meta.approvalPolicy === "accept-edits" || meta.approvalPolicy === "bypass")) {
-          grantFailure = this.applyDirGrant(sessionId, threadId, dirGrant.dir);
+          // T5 fix round 1: the adoption ruling — adopt ONLY when this session has no working
+          // directory at all (the empty-set rule). `preCallSessionDirs` is the snapshot taken
+          // above; see applyDirGrant's own comment for the full ruling and why a with-dirs session
+          // must not be widened durably by a silent policy.
+          grantFailure = this.applyDirGrant(sessionId, threadId, dirGrant.dir, preCallSessionDirs.length === 0);
           if (!grantFailure) dirGrant = null;
         }
         // SP-approvals Task 3: the whole point of `ask` policy is a human in the loop, but without
@@ -4271,14 +4287,12 @@ export class AgentEngine {
             if (failure) return { output: failure, isError: true };
             // working-directories T5 (spec §2, workdir-less mode: "any user-fs write raises the
             // same dirGrant card; approval adopts the dir and exits the mode. One card, no special
-            // cases"). ONLY for a session with an EMPTY dirs set: such a session has no project for
-            // this write to be "outside" of, so the card IS its folder picker and one-shot would
-            // leave it permanently unable to work anywhere. A session that already HAS working
-            // directories keeps the shipped one-shot semantics unchanged (SP-policies Task 9:
-            // approving an out-of-project edit does not widen the session; durable coverage is the
-            // card's own "Always allow edits in <dir>" rule) — the spec's broader "approve = adopt"
-            // for that case is a deliberate open question, recorded in the T5 report rather than
-            // decided here by flipping three shipped pins.
+            // cases") — the SAME empty-set rule the silent pre-grant above now follows, so the two
+            // doors cannot disagree about what an approval means. See applyDirGrant's comment for
+            // the ruling in full: adoption ⇔ establishing a primary on an empty set. A session that
+            // already HAS working directories keeps the shipped one-shot semantics (SP-policies
+            // Task 9); durable widening for that case is a deliberate human act and belongs to the
+            // 4th-card-option follow-up, not to any silent or side-effect path.
             if (preCallSessionDirs.length === 0) this.adoptGrantedDir(sessionId, grant.dir);
             return this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, oneShot, visionCapable, excludeTools, allowTools);
           }, pins, rootsOverride, visionCapable, excludeTools, allowTools);
@@ -5036,19 +5050,33 @@ export class AgentEngine {
    *  an error message instead of throwing (mkdir can fail: EACCES/EROFS/a FILE already at that
    *  path) — on failure NOTHING is granted and no event is emitted. Both grant sites (the auto
    *  pre-grant and the ask card's onApprove) share this ONE definition. */
-  private applyDirGrant(sessionId: string, threadId: string, dir: string): string | null {
+  private applyDirGrant(sessionId: string, threadId: string, dir: string, adopt: boolean): string | null {
     try {
       mkdirSync(dir, { recursive: true });
     } catch (err) {
       return `could not create ${dir}: ${err instanceof Error ? err.message : String(err)}`;
     }
-    this.adoptGrantedDir(sessionId, dir);
-    // The in-process mirror, KEPT alongside the row: `SessionDirectories.roots()` is read DIRECTLY
-    // (not through this engine's row-union) by the background-task registry's spawnCtx and the lsp
-    // tool's `rootsOf` (daemon.ts), and by every engine test harness whose baseDirs closure is a
-    // fixed literal. In the real daemon it is redundant — that closure is itself row-derived now —
-    // but it costs a Set insert and keeps "granted" true for every consumer in this process, not
-    // just the ones that go through `writableRoots`. The ROW is the durable truth; this is a cache.
+    // working-directories T5 fix round 1 — THE ADOPTION RULING (controller, 2026-08-04):
+    // **adoption ⇔ establishing a primary on an EMPTY set, uniform across policies.**
+    //   - A WORKDIR-LESS session (`dirs = []`) adopts through every door — this silent pre-grant
+    //     included — because spec §2's arc requires the approval to EXIT the mode, and the granting
+    //     write is the directory's first write, so it is born locked.
+    //   - A session that ALREADY has working directories adopts through NO door today. This grant
+    //     keeps its pre-branch shape: a process-local root (below), nothing durable. Two reasons,
+    //     both load-bearing: (1) an adopted dir is a session dir, and `fsWriteIsUnusual` is silent
+    //     inside those — so adopting here would switch OFF the fs reviewer for every later write
+    //     into a directory nothing but the model ever chose, and under `auto` that reviewer is the
+    //     only out-of-root safety net there is (task-24 review F1); (2) born-locked means the user
+    //     could never REMOVE a widening no human authorized. Widening a session that has a
+    //     workspace must be a deliberate human act — the 4th-card-option follow-up task's job, not
+    //     a silent policy's side effect. `adopt` is computed by the caller from the SAME pre-call
+    //     snapshot the classification uses, so "is this session workdir-less" is answered once.
+    if (adopt) this.adoptGrantedDir(sessionId, dir);
+    // The process-local grant — the pre-branch mechanism, and for a with-dirs session now the ONLY
+    // thing that happens here. Also kept alongside the row in the adopting case:
+    // `SessionDirectories.roots()` is read DIRECTLY (not through this engine's row-union) by the
+    // background-task registry's spawnCtx and the lsp tool's `rootsOf` (daemon.ts), and by every
+    // engine test harness whose baseDirs closure is a fixed literal.
     this.cfg.dirs.add(sessionId, dir);
     this.emit(sessionId, { type: "directory_added", sessionId, threadId, path: dir, persisted: false });
     return null;
