@@ -1,10 +1,11 @@
 import { Database } from "bun:sqlite";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { SessionEvent, SESSION_TITLE_MAX_CHARS, type NewSessionEvent } from "@norma/protocol";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import type { SessionDirs } from "./dirs";
+import { outdirPath } from "./outdir";
 
 // Keep in sync with SessionCreateParams scope regex (packages/protocol/src/methods.ts).
 const SCOPE_RE = /^[a-z0-9]([a-z0-9-]{0,39}[a-z0-9])?$/;
@@ -744,7 +745,17 @@ export class SessionStore {
    *  forgets to check first. Throws on an unknown session — the `setApprovalPolicy`/`setModel`
    *  precedent: a caller deleting a session that doesn't exist is a bug, not a silent no-op. A
    *  missing log file (already gone, somehow) is tolerated — the index row is still the correct
-   *  thing to remove. */
+   *  thing to remove.
+   *
+   *  working-directories T4: AFTER the row + JSONL are gone, best-effort `rm -rf` of the session's
+   *  outputs dir (`sessions/outdir.ts`'s `outdirPath`) — the SAME "delete first, log second, never
+   *  undo or retry" audit-order precedent `reapEmptySessions` (reaper.ts) already applies to its own
+   *  best-effort audit-log append: the row/log deletion above is the part that must never be
+   *  compromised by a filesystem hiccup on the outputs dir, so a failure here is caught and logged,
+   *  never thrown. A session that never wrote anything into its outputs dir (the common
+   *  empty-session-reaper case) has no such directory at all — `rmSync(..., { force: true })`
+   *  tolerates a missing path exactly like `unlinkSync`'s own `existsSync` guard above does for the
+   *  log file, so the reaper's sweep stays vacuous-safe for it. */
   deleteSession(sessionId: string): void {
     const row = this.db.query("SELECT scope, mode FROM sessions WHERE session_id = ?").get(sessionId) as
       | { scope: string; mode: string | null } | null;
@@ -753,6 +764,11 @@ export class SessionStore {
     const path = this.logPath(row.scope, sessionId);
     if (existsSync(path)) unlinkSync(path);
     this.db.run("DELETE FROM sessions WHERE session_id = ?", [sessionId]);
+    try {
+      rmSync(outdirPath(this.homeDir, sessionId), { recursive: true, force: true });
+    } catch (err) {
+      console.error(`[store] failed to remove outputs dir for ${sessionId}:`, err);
+    }
   }
 
   // -----------------------------------------------------------------------------------------

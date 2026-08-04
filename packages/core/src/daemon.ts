@@ -8,6 +8,7 @@ import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
 import { reapEmptySessions } from "./sessions/reaper";
+import { ensureOutdir } from "./sessions/outdir";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
 import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom } from "./settings";
@@ -403,6 +404,14 @@ export async function startDaemon(opts: {
       mkdirSync(memDir, { recursive: true });
       roots.push(memDir);
     }
+    // working-directories T4: the session's own delivery folder — `<normaHome>/outputs/<sid>` —
+    // joins the SAME write-fence roots the MEMDIR just above does, and by the identical mechanism:
+    // one more entry in this session-scoped list, no new fencing/grant machinery. Unlike the MEMDIR
+    // this is NOT gated on a settings flag — the outputs dir is a core primitive, always available.
+    // Keyed by `sid` (this closure's own parameter, never a bare `~/.norma/outputs/` prefix), which
+    // is exactly what keeps ANOTHER session's outputs dir OUT of this list — `grantDeniedPrefixes:
+    // [normaHome]` (below) still refuses it for every session but this one.
+    roots.push(ensureOutdir(normaHome, sid));
     return roots;
   });
 
@@ -830,6 +839,10 @@ export async function startDaemon(opts: {
     const cwdOf = (sid: string) => store.meta(sid).cwd ?? undefined;
     const rootsOf = (sid: string) => sessionDirs.roots(sid);
     const tmpDirOf = (sid: string) => sessionTmpDir(sid);
+    // working-directories T4: engine.ts's `EngineConfig.outDirOf` — read fresh per tool call
+    // alongside `tmpDir` (executeCall), independent of `sessionDirs`/`rootsOverride` (see that
+    // field's own doc comment for why: mirrors `tmpDir`'s own rootsOverride-independence).
+    const outDirOf = (sid: string) => ensureOutdir(normaHome, sid);
     if (lspCfg?.enabled !== false) {
       lspManager = new LspManager({ idleShutdownMs: lspCfg?.idleShutdownMs });
       registerLspTools(registry, { lsp: lspManager, cwdOf, rootsOf, tmpDirOf });
@@ -1125,6 +1138,9 @@ export async function startDaemon(opts: {
       // whatever else this session's tools already write there (web_fetch's saved pages, bg-task
       // output), inside the SAME sandbox-readable root.
       tmpDirOf,
+      // working-directories T4: bash's $OUTDIR splice + explicit seatbelt-writable union
+      // (tools/bash.ts) — see `outDirOf`'s own local doc comment above.
+      outDirOf,
       // task-30 (push-notification track): the real osascript-shelling implementation — the
       // engine's `notify` bridge only calls this when hub.attachedCount(sessionId) === 0 at
       // emission time (see engine.ts's executeCall). Boot-constant (no settings gate — v1 keeps

@@ -428,8 +428,12 @@ function sanitizeReviewText(s: string, maxLen: number): string {
 
 /** phase 5e T3 (fs coverage): resolves a write/edit call's target against the review-time fence —
  *  the session's roots (primary cwd first) PLUS the session tmp dir, mirroring bash's OS-level
- *  sandbox-writable set (sandbox.ts's `writable`: cwd + roots + tmpDir), which is BROADER than
- *  fs-write.ts's own application-level fence (`roots` only, no tmpDir). Reuses resolveWithinAny
+ *  sandbox-writable set (tools/bash.ts's `writable`: cwd + roots + tmpDir + outDir, working-
+ *  directories T4), which is BROADER than fs-write.ts's own application-level fence (`roots` only,
+ *  no tmpDir). The outputs dir needs no THIRD mention here — it reaches `roots` itself the same way
+ *  the MEMDIR does (daemon.ts's `sessionDirs`, the blessing mechanism), so this fence already covers
+ *  it without change; only bash's independently-assembled writable set needed the explicit add.
+ *  Reuses resolveWithinAny
  *  (paths.ts) — the fence's own resolution logic — rather than reimplementing containment. A path
  *  outside even this broader set is a guaranteed fence violation the tool will reject on its own
  *  (fs-write.ts's own resolveWithinAny throws first) — reviewing a call that can never execute
@@ -826,6 +830,14 @@ export interface EngineConfig {
   // filesystem — every surface that would show a path (bg spawn tool_result, task_notification,
   // the sync trailer, agent_output) simply omits it, byte-identical to before this feature.
   tmpDirOf?: (sessionId: string) => string | undefined;
+  // working-directories T4: the session's delivery folder — `sessions/outdir.ts`'s `ensureOutdir`,
+  // daemon.ts-wired as `(sid) => ensureOutdir(normaHome, sid)`. Read fresh in `executeCall` (below,
+  // alongside `tmpDir`) and threaded onto `ctx.outDir`, independent of `rootsOverride` — the SAME
+  // independence `tmpDir` itself has, so a worktree-isolated child still gets a working $OUTDIR even
+  // though its FIXED roots never include the outputs dir. Optional/absent (a test harness that
+  // never wires it) → `ctx.outDir` stays undefined and bash's env/writable-set additions are
+  // skipped entirely — byte-identical to before this feature.
+  outDirOf?: (sessionId: string) => string;
   // Auto-diagnostics after edit (lsp-consolidation T3, design doc `2026-07-15-lsp-consolidation-
   // design.md` §2) — CC parity: "after each file edit, it automatically reports type errors and
   // warnings so Claude can fix issues without a separate build step." Both getters, same hot-
@@ -5468,6 +5480,9 @@ export class AgentEngine {
     // this method has no access to the loop's already-hoisted `projectRoot`.
     const roots = this.writableRoots(sessionId, cwd ? repoRootFor(cwd) : null, rootsOverride);
     const tmpDir = sessionTmpDir(sessionId);
+    // working-directories T4: read fresh per call (mirrors `tmpDir` just above) — independent of
+    // `rootsOverride` on purpose, see `outDirOf`'s own doc comment on EngineConfig.
+    const outDir = this.cfg.outDirOf?.(sessionId);
     const markSkillLoaded = (n: string) => {
       let set = this.loadedSkills.get(sessionId);
       if (!set) { set = new Set(); this.loadedSkills.set(sessionId, set); }
@@ -5565,7 +5580,7 @@ export class AgentEngine {
         }
       : undefined;
     const result = await this.cfg.registry.execute(call.name, args, {
-      cwd, roots, tmpDir, sessionId, signal, markSkillLoaded,
+      cwd, roots, tmpDir, outDir, sessionId, signal, markSkillLoaded,
       markToolLoaded,
       loadedTools: effectiveLoaded,
       deferThreshold: this.toolSearchThreshold(cwd),
