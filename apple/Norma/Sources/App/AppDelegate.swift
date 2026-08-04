@@ -911,7 +911,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             onOpenDetached: { [weak self] sid in self?.openSessionInNewDetachedWindow(sid) },
             onNewSession: { [weak model] in Task { await model?.startFreshSessionAfterDetach() } },
-            rowFilter: AppDelegate.isOrbSidebarRow
+            rowFilter: AppDelegate.isOrbSidebarRow,
+            // App shell T1 (summon path): the ORB's door to the one app window. Wired HERE, on the
+            // bundle this method already builds, so the orb gains a summon affordance with zero
+            // changes to `OrbWindowController` — its internals are untouched by this plan (Global
+            // Constraints) and it only passes this wiring through to `WindowContentView`.
+            // Opt-in: `SidebarWiring.onSummonApp` defaults to nil, so the two detached-window
+            // construction sites (which never pass it) render exactly as they did before.
+            onSummonApp: { [weak self] in self?.summonAppWindow() }
         )
 
         let sticky = StickinessEngine(onTarget: { [weak orb] target in

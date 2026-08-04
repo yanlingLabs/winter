@@ -22,6 +22,13 @@ import SwiftUI
 /// behavior for every pre-existing caller (both detached-window construction sites), and
 /// `AppDelegate.boot()`'s own `orb.sidebars` is the one caller that overrides it
 /// (`AppDelegate.isOrbSidebarRow`).
+///
+/// `onSummonApp` (app shell T1): the ORB's summon door to the one app window. Opt-in and default
+/// `nil` — the two detached-window construction sites never pass it, so their sidebars render
+/// exactly as before (the compatibility bar this whole struct is built around). It lives here, on
+/// the wiring `AppDelegate.boot()` already builds, precisely so the orb gains a summon affordance
+/// with NO change to `OrbWindowController` — its internals are untouched by this plan (Global
+/// Constraints), and the orb only ever passes this bundle through to `WindowContentView`.
 struct SidebarWiring {
     let directory: SessionDirectory
     let currentSessionId: () -> String?
@@ -29,6 +36,7 @@ struct SidebarWiring {
     let onOpenDetached: (String) -> Void
     let onNewSession: () -> Void
     var rowFilter: (SessionSummary) -> Bool = { _ in true }
+    var onSummonApp: (() -> Void)? = nil
 }
 
 /// Pure placement decision behind the relocation gates: the tasks/subagents "work" content is

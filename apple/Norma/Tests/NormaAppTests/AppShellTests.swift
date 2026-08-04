@@ -378,6 +378,39 @@ final class AppShellTests: XCTestCase {
         delegate.appWindow?.hide()
     }
 
+    // MARK: - The orb's summon door (NO OrbWindowController change — Global Constraints)
+
+    /// The orb's sidebar carries a summon door, and firing it summons the singleton. Wired on the
+    /// `SidebarWiring` bundle `boot()` already builds for the orb, so `OrbWindowController` itself
+    /// is untouched (`git diff` on that file must stay empty for this whole plan).
+    func testOrbSidebarWiringCarriesTheSummonDoor() {
+        let delegate = AppDelegate()
+        XCTAssertTrue(delegate.boot())
+        guard let summon = delegate.orbController?.sidebars?.onSummonApp else {
+            return XCTFail("boot() must wire the orb's summon door")
+        }
+        XCTAssertNil(delegate.appWindow, "nothing summoned yet")
+
+        summon()
+
+        XCTAssertNotNil(delegate.appWindow, "the orb's door must summon the one app window")
+        XCTAssertTrue(delegate.appWindow?.isVisible ?? false)
+        delegate.appWindow?.hide()
+    }
+
+    /// The compatibility bar: the door is OPT-IN. Both detached-window construction sites build a
+    /// `SidebarWiring` without it, so their sidebars render exactly as before this task.
+    func testSidebarWiringSummonDoorDefaultsToNilForEveryOtherSurface() {
+        let wiring = SidebarWiring(
+            directory: SessionDirectory(lister: { [] }),
+            currentSessionId: { nil },
+            onSelect: { _ in },
+            onOpenDetached: { _ in },
+            onNewSession: {}
+        )
+        XCTAssertNil(wiring.onSummonApp, "a wiring that doesn't ask for the door must not get one")
+    }
+
     /// The menu bar's "Open Norma App" entry summons the singleton — fired through the REAL menu
     /// item's target/action, exactly like a click (the `MenuBarEntryPointsTests` idiom).
     func testOpenNormaAppMenuItemSummonsTheShell() {

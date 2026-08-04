@@ -245,7 +245,8 @@ struct WindowContentView<Accessory: View>: View {
             onSelect: sidebars.onSelect,
             onOpenDetached: sidebars.onOpenDetached,
             onNewSession: sidebars.onNewSession,
-            rowFilter: sidebars.rowFilter
+            rowFilter: sidebars.rowFilter,
+            onSummonApp: sidebars.onSummonApp
         )
         .padding(.top, topInset)
     }
