@@ -52,6 +52,16 @@ describe("makeDaemonRoutineRunner — runHeadless", () => {
     expect(listed?.title).toBe("routine/r1");
     expect(listed?.origin).toBe("routine/r1");
     expect(listed?.cwd).toBe("/tmp/proj");
+
+    // working-directories T6: the spawn dir lands as an UNLOCKED primary at birth — createSession's
+    // own INSERT, not the pre-branch lazy migration (which would have derived it LOCKED). This
+    // engine stub already ran a fake "turn" above (an assistant_message + turn_completed, no actual
+    // write/bash call), so staying unlocked here also proves the row isn't locked just by a turn
+    // running — only a real successful write/bash call (T5's first-write-locks path) would flip it,
+    // and the real engine turn a routine actually runs writes almost immediately (its whole point is
+    // doing something in `cwd`), so in production this locks fast — correct and free, same as a
+    // dispatch child (dispatch-children.test.ts's own T6 pin).
+    expect(store.dirs(sawSessionId!)).toEqual([{ path: "/tmp/proj", locked: false }]);
   });
 
   test("quota error: an agent_error whose message starts with HTTP 429 maps to quotaLimited", async () => {

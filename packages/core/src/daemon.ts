@@ -397,11 +397,28 @@ export async function startDaemon(opts: {
     const roots: string[] = [];
     if (primary) roots.push(primary);
     for (const d of row) roots.push(d.path); // SessionDirectories.roots() dedupes by canonical form
-    // Everything below is keyed off the PRIMARY: the project-local permission dirs and the MEMDIR
-    // are project-scoped, so a session with no primary at all (workdir-less) simply has none of
-    // them. The outputs dir (further down) is NOT project-scoped and is folded in regardless —
-    // that is what keeps a workdir-less session writable in its own delivery folder.
-    if (!primary) return [...roots, ensureOutdir(normaHome, sid)];
+    // Everything below is keyed off the PRIMARY: the project-local permission dirs are
+    // project-scoped, so a session with no primary at all (workdir-less) simply has none of them.
+    // The outputs dir (further down) is NOT project-scoped and is folded in regardless — that is
+    // what keeps a workdir-less session writable in its own delivery folder. The MEMDIR is ALSO
+    // folded in for a workdir-less session (working-directories T6, spec §2: "MEMDIR for
+    // workdir-less sessions: the shared `_assistant` bucket") — `assistantMemoryDirFor` is the ONE
+    // spelling of that path (the ContextAssembler's own assistant-mode branch and the Dreamer share
+    // it), gated on the SAME `memoryEnabledHot()` the with-dirs branch below reads.
+    //
+    // Ordering is deliberately OUTDIR-FIRST here, the reverse of the with-dirs branch further down
+    // (MEMDIR then OUTDIR): T5 pinned `$OUTDIR` as `roots[0]` for a primary-less session (a
+    // workdir-less relative fs-tool path resolves there — engine.test.ts's own "never the daemon's
+    // cwd" pin) BEFORE this MEMDIR fold existed, and that pin must survive memory being enabled.
+    if (!primary) {
+      roots.push(ensureOutdir(normaHome, sid));
+      if (memoryEnabledHot()) {
+        const memDir = assistantMemoryDirFor({ normaHome });
+        mkdirSync(memDir, { recursive: true });
+        roots.push(memDir);
+      }
+      return roots;
+    }
     roots.push(...loadPermissionDirs(normaHome, primary, trustStore.isTrusted(primary)));
     // T1 write-root join (design doc: "the tmpDir pattern" — a plain, ungated, auto-provisioned
     // root, mirroring how `sessionTmpDir` needs no user approval either): whenever file-based
@@ -1175,6 +1192,10 @@ export async function startDaemon(opts: {
       // as always-silent (spec §2) without re-deriving the path a second way. `undefined` when
       // memory is disabled, matching `sessionDirs`'s own gate exactly.
       memDirOf: (cwd: string) => (memoryEnabledHot() ? memoryDirOf(cwd) : undefined),
+      // working-directories T6: the SAME exemption for a workdir-less session, which has no `cwd`
+      // to key `memDirOf` off — mirrors `sessionDirs`'s own `!primary` branch above (the
+      // `assistantMemoryDirFor`/`memoryEnabledHot()` pair), not a second computation.
+      assistantMemDirOf: () => (memoryEnabledHot() ? assistantMemoryDirFor({ normaHome }) : undefined),
       // task-30 (push-notification track): the real osascript-shelling implementation — the
       // engine's `notify` bridge only calls this when hub.attachedCount(sessionId) === 0 at
       // emission time (see engine.ts's executeCall). Boot-constant (no settings gate — v1 keeps

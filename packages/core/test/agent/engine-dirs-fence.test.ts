@@ -24,7 +24,7 @@ import type { BashReviewer, ReviewInput } from "../../src/agent/reviewer";
 import { sessionTmpDir } from "../../src/agent/session-tmp";
 import { ensureOutdir } from "../../src/sessions/outdir";
 import { setSessionDirs, lockDir, type SetDirsDeps } from "../../src/sessions/set-dirs";
-import { memoryDirFor } from "../../src/agent/memory-dir";
+import { memoryDirFor, assistantMemoryDirFor } from "../../src/agent/memory-dir";
 import { registerWorktreeTools } from "../../src/agent/tools/worktree";
 import { WorktreeManager } from "../../src/agent/worktree";
 import { repo } from "./engine-worktree.test";
@@ -55,11 +55,17 @@ afterAll(() => {
   else process.env[REVIEW_TIMEOUT_ENV] = prevReviewTimeout;
 });
 
-/** MIRRORS daemon.ts's real `sessionDirs` baseDirs closure (T5 shape): the session's own row
- *  supplies the user directories, and the two Norma-owned folds the daemon adds — the MEMDIR
+/** MIRRORS daemon.ts's real `sessionDirs` baseDirs closure (T5 shape, T6-extended): the session's
+ *  own row supplies the user directories, and the Norma-owned folds the daemon adds — the MEMDIR
  *  (keyed off the PRIMARY, mkdir'd on read) and the session's OUTDIR — are appended after them.
- *  The `primary` precedence (`meta.cwd ?? dirs[0]?.path`) is the SAME one the engine uses. */
-function daemonLikeDirs(store: SessionStore, home: string, memDirOf: (cwd: string) => string): SessionDirectories {
+ *  The `primary` precedence (`meta.cwd ?? dirs[0]?.path`) is the SAME one the engine uses.
+ *
+ *  working-directories T6: a workdir-less session (`!primary`) now ALSO gets a MEMDIR folded in —
+ *  the shared `_assistant` bucket (`assistantMemDirOf`) rather than a project-keyed one, since
+ *  there is no project to key off. OUTDIR-first there, the reverse of the with-dirs ordering below
+ *  — mirrors daemon.ts's own real closure: T5 pinned `$OUTDIR` as `roots[0]` for a primary-less
+ *  session BEFORE this fold existed, and that pin must survive the fold. */
+function daemonLikeDirs(store: SessionStore, home: string, memDirOf: (cwd: string) => string, assistantMemDirOf: () => string): SessionDirectories {
   return new SessionDirectories((sid) => {
     const meta = store.meta(sid);
     const row = store.dirs(sid);
@@ -67,11 +73,16 @@ function daemonLikeDirs(store: SessionStore, home: string, memDirOf: (cwd: strin
     const roots: string[] = [];
     if (primary) roots.push(primary);
     for (const d of row) roots.push(d.path);
-    if (primary) {
-      const memDir = memDirOf(primary);
+    if (!primary) {
+      roots.push(ensureOutdir(home, sid));
+      const memDir = assistantMemDirOf();
       mkdirSync(memDir, { recursive: true });
       roots.push(memDir);
+      return roots;
     }
+    const memDir = memDirOf(primary);
+    mkdirSync(memDir, { recursive: true });
+    roots.push(memDir);
     roots.push(ensureOutdir(home, sid));
     return roots;
   });
@@ -134,7 +145,8 @@ function setup(script: ProviderEvent[][], opts?: {
   });
   const provider = new FakeProvider(script);
   const memDirOf = (c: string) => memoryDirFor(c, { normaHome: home });
-  const dirs = opts?.legacyRoots ? new SessionDirectories(() => [cwd]) : daemonLikeDirs(store, home, memDirOf);
+  const assistantMemDirOf = () => assistantMemoryDirFor({ normaHome: home });
+  const dirs = opts?.legacyRoots ? new SessionDirectories(() => [cwd]) : daemonLikeDirs(store, home, memDirOf, assistantMemDirOf);
   const broker = new ApprovalBroker();
   const skillsHome = mkdtempSync(join(tmpdir(), "norma-dirs-fence-skills-"));
   const skills = new SkillStore({ normaHome: skillsHome, trust: new TrustStore(join(skillsHome, "trust.json")) });
@@ -152,6 +164,7 @@ function setup(script: ProviderEvent[][], opts?: {
     // harness's NORMA_HOME) is the grant denylist exactly as daemon.ts passes `[normaHome]`.
     outDirOf: (sid) => ensureOutdir(home, sid),
     memDirOf,
+    assistantMemDirOf,
     grantDeniedPrefixes: [home],
   });
   const sessionId = store.createSession("global", {
@@ -161,14 +174,20 @@ function setup(script: ProviderEvent[][], opts?: {
   const events: SessionEvent[] = [];
   hub.attach({ clientName: "test-observer", deliver: (e) => { events.push(e); return true; } }, sessionId, 0);
   const setDirsDeps: SetDirsDeps = { store, grantDenied: () => false };
-  return { engine, store, hub, broker, sessionId, cwd, home, dirs, events, registry, bashCalls, bashCwds, setDirsDeps, memDirOf };
+  return { engine, store, hub, broker, sessionId, cwd, home, dirs, events, registry, bashCalls, bashCwds, setDirsDeps, memDirOf, assistantMemDirOf };
 }
 
-/** Establishes an UNLOCKED primary in the row — what T6 will make `session.create` itself do.
- *  Until then a session created with a cwd has NO `dirs` column, so T1's lazy migration derives its
- *  primary as grandfathered-LOCKED, and the T2 setter (correctly) refuses to `setPrimary` over a
- *  locked entry. `setDirsRaw` is the low-level column write for exactly this kind of fixture
- *  (T1/T2's own tests use it the same way); no production code outside `set-dirs.ts` calls it. */
+/** Establishes an UNLOCKED primary in the row. Pre-T6 this was load-bearing: a session created
+ *  with a cwd had NO `dirs` column, so T1's lazy migration derived its primary as
+ *  grandfathered-LOCKED, and the T2 setter (correctly) refused to `setPrimary` over a locked
+ *  entry — this helper was the only way to get an unlocked fixture out of `store.createSession`.
+ *  T6 made `createSession` itself write an unlocked primary directly, so every call below is now
+ *  an idempotent no-op for a session created WITH a cwd (this file's `setup()` default) — kept
+ *  rather than stripped out, both because it stays load-bearing for the `withCwd: false` +
+ *  `setDirsRaw`-only shapes elsewhere in this file and because a no-op re-assertion of the exact
+ *  state under test costs nothing and keeps every call site below self-explanatory without having
+ *  to know T6 shipped. `setDirsRaw` is the low-level column write this exercises directly (T1/T2's
+ *  own tests use it the same way); no production code outside `set-dirs.ts` calls it. */
 function establishUnlockedPrimary(store: SessionStore, sessionId: string, path: string): void {
   store.setDirsRaw(sessionId, [{ path, locked: false }]);
 }
@@ -185,7 +204,7 @@ function setupWorktree(script: ProviderEvent[][]) {
   const registry = new ToolRegistry();
   registerWriteTools(registry);
   registerWorktreeTools(registry);
-  const dirs = daemonLikeDirs(store, home, (c) => memoryDirFor(c, { normaHome: home }));
+  const dirs = daemonLikeDirs(store, home, (c) => memoryDirFor(c, { normaHome: home }), () => assistantMemoryDirFor({ normaHome: home }));
   const provider = new FakeProvider(script);
   const skillsHome = mkdtempSync(join(tmpdir(), "norma-dirs-fence-wt-skills-"));
   const trust = new TrustStore(join(skillsHome, "trust.json"));
@@ -595,6 +614,29 @@ describe("working-directories T5: workdir-less sessions", () => {
     expect(events.some((e) => e.type === "directory_added")).toBe(false);
     expect(readFileSync(target, "utf8")).toBe("for the user");
     expect(store.dirs(sessionId)).toEqual([]); // still workdir-less: the outdir is never a session dir
+  });
+
+  // working-directories T6 (spec §2: "MEMDIR for workdir-less sessions: the shared `_assistant`
+  // bucket") — the SAME pin shape as the $OUTDIR test just above, for the OTHER Norma-owned space a
+  // workdir-less session now has: writable, silent (no card, no review, no adoption), and never a
+  // session dir of its own.
+  test("a dirs=[] session writes into its shared _assistant MEMDIR silently — no card, no review, no adoption", async () => {
+    const script: ProviderEvent[][] = [];
+    const { engine, store, sessionId, assistantMemDirOf } = setup(script, {
+      withCwd: false, policy: "auto",
+      reviewer: { verdict: "unsafe", reason: "would have blocked if consulted" },
+    });
+    mkdirSync(assistantMemDirOf(), { recursive: true }); // realpath-consistent, mirroring ensureOutdir's own contract
+    const target = join(assistantMemDirOf(), "notes.md");
+    script.push(...writeTurn(target, "remembered"));
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+    expect(events.some((e) => e.type === "tool_review")).toBe(false);
+    expect(events.some((e) => e.type === "directory_added")).toBe(false);
+    expect(readFileSync(target, "utf8")).toBe("remembered");
+    expect(store.dirs(sessionId)).toEqual([]); // still workdir-less: the MEMDIR is never a session dir
   });
 
   test("the whole arc: a user-fs write CARDS, approving ADOPTS it as the primary (born locked), and the mode is exited — the next turn's relative paths resolve there", async () => {

@@ -11,19 +11,38 @@ function makeStore(): { store: SessionStore; dir: string } {
   return { store: new SessionStore(dir), dir };
 }
 
+/** working-directories T6: `createSession` now writes the `dirs` column DIRECTLY at INSERT time
+ *  (see its own doc comment), so a row it produces is never NULL to begin with — the lazy
+ *  migration `SessionStore.dirs()` implements is reachable only by a row that predates T6 (or one
+ *  a full index.db rebuild reset). This forces that shape by hand: a second sqlite connection to
+ *  the SAME index.db, NULLing the column back out. Mirrors this file's own malformed-JSON pin
+ *  below (raw sqlite UPDATE) and store.test.ts's plugin-token test (a second connection alongside
+ *  a still-open store, safe for a synchronous, non-concurrent write like this one). */
+function forcePreBranchRow(dir: string, sessionId: string): void {
+  const raw = new Database(join(dir, "sessions", "index.db"));
+  raw.run("UPDATE sessions SET dirs = NULL WHERE session_id = ?", [sessionId]);
+  raw.close();
+}
+
 // -----------------------------------------------------------------------------------------
-// working-directories T1: the `dirs` column + lazy migration inside the getter.
+// working-directories T1: the `dirs` column + lazy migration inside the getter. T6 (below) makes
+// `createSession` write this column directly, so every test in THIS describe block now forces a
+// genuinely pre-branch row by hand (`forcePreBranchRow`) rather than relying on a plain
+// `createSession` call to leave it NULL — see the pinned create-time behavior in the T6 describe
+// block further down for the shape a FRESH row actually gets.
 // -----------------------------------------------------------------------------------------
-describe("SessionStore.dirs — lazy migration", () => {
+describe("SessionStore.dirs — lazy migration (pre-branch rows only, post-T6)", () => {
   test("cwd-bearing pre-branch row: dirs() derives a single GRANDFATHERED LOCKED primary", () => {
-    const { store } = makeStore();
+    const { store, dir } = makeStore();
     const id = store.createSession("global", { cwd: "/tmp/proj" });
+    forcePreBranchRow(dir, id);
     expect(store.dirs(id)).toEqual([{ path: "/tmp/proj", locked: true }]);
   });
 
   test("cwd-less pre-branch row: dirs() derives an empty (workdir-less) set", () => {
-    const { store } = makeStore();
+    const { store, dir } = makeStore();
     const id = store.createSession("global");
+    forcePreBranchRow(dir, id);
     expect(store.dirs(id)).toEqual([]);
   });
 
@@ -62,6 +81,33 @@ describe("SessionStore.dirs — lazy migration", () => {
   test("dirs() throws on an unknown session (the setModel/setApprovalPolicy precedent)", () => {
     const { store } = makeStore();
     expect(() => store.dirs("s_nope")).toThrow("unknown session");
+  });
+});
+
+// -----------------------------------------------------------------------------------------
+// working-directories T6 (spec §1/§4, "the create doors write the column at birth"): every row
+// `createSession` produces from here on has a non-null `dirs` column from its very first INSERT —
+// no lazy migration involved, this is the ACTUAL create-time write, pinned directly.
+// -----------------------------------------------------------------------------------------
+describe("SessionStore.createSession — writes dirs directly at birth (T6)", () => {
+  test("a cwd becomes an UNLOCKED primary — deliberately NOT the migration's grandfathered-LOCKED shape", () => {
+    const { store } = makeStore();
+    const id = store.createSession("global", { cwd: "/tmp/proj" });
+    expect(store.dirs(id)).toEqual([{ path: "/tmp/proj", locked: false }]);
+  });
+
+  test("no cwd becomes [] explicitly — the same value the lazy migration would have derived, written up front instead of deferred", () => {
+    const { store } = makeStore();
+    const id = store.createSession("global");
+    expect(store.dirs(id)).toEqual([]);
+  });
+
+  test("cwd is stored VERBATIM in dirs[0], matching the cwd column exactly — alias parity (T3) holds by construction, no second canonicalization pass", () => {
+    const { store } = makeStore();
+    const id = store.createSession("global", { cwd: "~/not-canonicalized" });
+    expect(store.dirs(id)).toEqual([{ path: "~/not-canonicalized", locked: false }]);
+    expect(store.meta(id).cwd).toBe("~/not-canonicalized");
+    expect(store.dirs(id)[0]?.path).toBe(store.meta(id).cwd ?? undefined);
   });
 });
 

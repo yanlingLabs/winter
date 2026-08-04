@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -89,7 +90,7 @@ describe("session.setDirs (working-directories T3)", () => {
    *  without a real engine. `engine` is entirely OMITTED when the caller wants the no-engine
    *  permissive-default path (mirrors session-set-activity.test.ts's "no injected hub" test). */
   async function boot(opts: { noEngine?: boolean } = {}): Promise<{
-    store: SessionStore; socketPath: string; harnessToken: string; remoteToken: string; denied: Set<string>;
+    store: SessionStore; home: string; socketPath: string; harnessToken: string; remoteToken: string; denied: Set<string>;
   }> {
     const home = mkdtempSync(join(tmpdir(), "norma-set-dirs-rpc-"));
     const store = new SessionStore(home);
@@ -114,7 +115,7 @@ describe("session.setDirs (working-directories T3)", () => {
       ...(opts.noEngine ? {} : { engine }),
     });
     stop = () => { server.stop(); store.close(); };
-    return { store, socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote, denied };
+    return { store, home, socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote, denied };
   }
 
   function fixtureBase(): string {
@@ -517,23 +518,55 @@ describe("session.setDirs (working-directories T3)", () => {
   });
 
   // T1's lazy migration: a session with a stored `cwd` but a `dirs` column that was NEVER written
-  // (the shape a pre-branch row, or any row `session.setDirs` has never touched, actually has).
-  // `store.dirs()` derives `[{path: cwd, locked:true}]` straight from that column, so `session.list`'s
-  // populate-time alias yields `cwd === dirs[0]?.path` BY CONSTRUCTION — not because anything
-  // re-synced the two columns.
-  test("a migrated (dirs-column-null) row: dirs[0] equals the stored cwd, by construction", async () => {
-    const { store, socketPath, harnessToken } = await boot();
+  // (the shape a genuinely PRE-BRANCH row has). `store.dirs()` derives `[{path: cwd, locked:true}]`
+  // straight from that column, so `session.list`'s populate-time alias yields `cwd === dirs[0]?.path`
+  // BY CONSTRUCTION — not because anything re-synced the two columns.
+  //
+  // working-directories T6: `store.createSession` itself now writes the `dirs` column DIRECTLY at
+  // INSERT time (unlocked — see its own doc comment), so a row this method produces is never NULL
+  // to begin with; the migration this test pins is reachable only by a row that predates T6. There
+  // is no such row in a fresh test store, so this test forces one by hand — a second sqlite
+  // connection to the SAME index.db, NULLing the column back out (the malformed-JSON pin in
+  // sessions/dirs.test.ts sets the same kind of precedent; store.test.ts's plugin-token test shows
+  // a second connection alongside a still-open store is safe for a synchronous, non-concurrent
+  // write like this one).
+  test("a genuinely pre-branch (dirs-column-null) row: dirs[0] equals the stored cwd, GRANDFATHERED LOCKED, by construction", async () => {
+    const { store, home, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "dirs-setter");
     const cwd = fixtureDir(fixtureBase(), "legacy-cwd");
     const sessionId = store.createSession("global", { cwd });
-    // Never touched by setDirsRaw — the dirs column is still NULL, exactly the "migrated" shape.
+    const raw = new Database(join(home, "sessions", "index.db"));
+    raw.run("UPDATE sessions SET dirs = NULL WHERE session_id = ?", [sessionId]);
+    raw.close();
 
     const listed = await c.request(METHODS.sessionList, {});
     const row = listed.result.sessions.find((s: any) => s.sessionId === sessionId);
     expect(row.dirs).toEqual([{ path: cwd, locked: true }]);
     expect(row.cwd).toBe(cwd);
     expect(row.cwd).toBe(row.dirs[0].path);
+  });
+
+  test("working-directories T6: a FRESH row (createSession with a cwd) writes dirs DIRECTLY — unlocked, no migration involved", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "dirs-setter");
+    const cwd = fixtureDir(fixtureBase(), "fresh-cwd");
+    const sessionId = store.createSession("global", { cwd });
+
+    // No lazy-migration involved: the column is non-null from the INSERT itself.
+    expect(store.dirs(sessionId)).toEqual([{ path: cwd, locked: false }]);
+
+    const listed = await c.request(METHODS.sessionList, {});
+    const row = listed.result.sessions.find((s: any) => s.sessionId === sessionId);
+    expect(row.dirs).toEqual([{ path: cwd, locked: false }]);
+    expect(row.cwd).toBe(cwd);
+  });
+
+  test("working-directories T6: createSession with NO cwd writes dirs = [] directly (same value the lazy migration would have derived, written up front)", async () => {
+    const { store } = await boot();
+    const sessionId = store.createSession("global");
+    expect(store.dirs(sessionId)).toEqual([]);
   });
 
   // -------------------------------------------------------------------------------------------

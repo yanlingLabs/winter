@@ -893,6 +893,15 @@ export interface EngineConfig {
   // `memoryDirFor` is itself a pure function of `cwd` (memory-dir.ts), and the fs-reviewer call
   // site already has this thread's `cwd` in scope, so no extra session-store read is needed.
   memDirOf?: (cwd: string) => string | undefined;
+  // working-directories T6: the SAME exemption, for the ONE case `memDirOf` structurally can't
+  // answer — a workdir-less session has no primary to key `memDirOf(cwd)` off, but its MEMDIR is
+  // the shared `_assistant` bucket (daemon.ts's `sessionDirs` closure folds it into the fence the
+  // identical way), so the fs-reviewer call site below reads THIS getter instead whenever
+  // `primaryDir` comes back empty. `assistantMemoryDirFor` is the ONE spelling of that path —
+  // ContextAssembler's own assistant-mode branch and the Dreamer already key off it; this getter
+  // wires the SAME closure, not a second computation. Absent/undefined (memory disabled, or a test
+  // harness predating this task) drops out of `alwaysSilentDirs` exactly like `memDirOf`.
+  assistantMemDirOf?: () => string | undefined;
   // Auto-diagnostics after edit (lsp-consolidation T3, design doc `2026-07-15-lsp-consolidation-
   // design.md` §2) — CC parity: "after each file edit, it automatically reports type errors and
   // warnings so Claude can fix issues without a separate build step." Both getters, same hot-
@@ -2251,10 +2260,16 @@ export class AgentEngine {
     // session that has since ADOPTED a directory (the grant card, the picker, `/dirs`) runs there
     // from its next turn on — that is what "approval exits the mode" means in practice.
     //
+    // working-directories T6: captured BEFORE the `?? sessionTmpDir(...)` fallback below — this is
+    // the SAME "live primary absent" anchor `classificationDirs`/`primaryDir` itself define, read
+    // once here (not re-derived a second way) so `instructions`' own workdir-less signal can never
+    // disagree with the fence's. `undefined` here is exactly "workdir-less" for a code session;
+    // for dispatch/chat it's inert (their `basePromptOverride` skips the block that reads it).
+    const primary = this.primaryDir(sessionId);
     // `let`, not `const`: the enter/exit_worktree bridge below reassigns this SAME-TURN so a
     // follow-up tool call later in this turn's dispatch loop resolves into (or back out of) the
     // worktree without waiting for the next turn's store.meta() re-read.
-    let cwd = this.primaryDir(sessionId) ?? sessionTmpDir(sessionId);
+    let cwd = primary ?? sessionTmpDir(sessionId);
     // Trust-gated project .mcp.json bring-up, BEFORE the turn_started emit: this can spawn
     // subprocesses (slow), and a project server that's already started/recorded is a no-op, so
     // doing it here (rather than after turn_started) keeps the -p watchdog from tripping on a
@@ -2284,6 +2299,11 @@ export class AgentEngine {
       // two fields, and the wire half of the SAME resolution is the `max` this turn will send.
       ultraDelegation: sel.ultra,
       skillToolOffered,
+      // working-directories T6 (spec §2): the standing workspace block's inputs. `outDirOf` absent
+      // (a test harness predating T4) simply omits the whole block, matching every other optional
+      // EngineConfig getter's "off means untouched" precedent.
+      outDir: this.cfg.outDirOf?.(sessionId),
+      workdirLess: primary === undefined,
     });
     // NOTE (correctness-critical): `loaded` MUST be THE ONE LIVE SET for this session — never a
     // snapshot/copy. It's read here to build specs()/deferredIndex() for round 0, and the SAME
@@ -4503,7 +4523,12 @@ export class AgentEngine {
           // fold follows the move immediately, a captured `meta` does not). Same `cwd ?? dirs[0]`
           // precedence as the closure: one answer, two layers.
           const memAnchor = this.primaryDir(sessionId);
-          const alwaysSilentDirs = [fsTmpDir, this.cfg.outDirOf?.(sessionId), memAnchor ? this.cfg.memDirOf?.(memAnchor) : undefined];
+          // working-directories T6: a workdir-less session (no `memAnchor`) has no `cwd` to key
+          // `memDirOf` off, but daemon.ts's `sessionDirs` closure still folds a MEMDIR into its
+          // fence — the shared `_assistant` bucket, via `assistantMemDirOf` — so the exemption
+          // reads THAT getter instead, mirroring the closure's own branch exactly.
+          const memDir = memAnchor ? this.cfg.memDirOf?.(memAnchor) : this.cfg.assistantMemDirOf?.();
+          const alwaysSilentDirs = [fsTmpDir, this.cfg.outDirOf?.(sessionId), memDir];
           // T5 (spec §2): classify against the session's OWN working directories — the row — not
           // the full fence roots (which also carry Edit-rule dirs, project-local permission dirs
           // and the Norma-owned folds). `preCallSessionDirs` is the pre-grant snapshot taken above

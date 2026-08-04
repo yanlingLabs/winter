@@ -115,6 +115,29 @@ function memoryProtocol(memDir: string): string {
   ].join("\n");
 }
 
+/** working-directories T6 (spec §2): the standing workspace block — ALWAYS present for a code/
+ *  cowork turn (never dispatch/chat, which swap the base slot entirely via `basePromptOverride`
+ *  and so never reach this call — see `assemble()`'s gate). Names `$OUTDIR` BOTH ways a tool needs
+ *  it: the env var bash's own splice exports (`tools/bash.ts`) and the literal absolute path
+ *  write/edit need (those tools take real paths, never env-var text — telling the model only the
+ *  env var name would leave every non-bash tool unable to use it). Workdir-less sessions get two
+ *  more lines, verbatim from spec §2's own wording: deliverables still go to `$OUTDIR`, scratch
+ *  goes to `$TMPDIR` (bash already starts there — T5's session-tmp-dir arc), and the model should
+ *  not ask to write elsewhere unless the task genuinely needs it — the whole point of the
+ *  workdir-less arc is useful work with no permission round trip for every scratch file. */
+function workspaceRules(outDir: string, workdirLess: boolean): string {
+  const lines = [
+    "## Workspace",
+    `Your delivery folder for this session is \`$OUTDIR\` in bash, or the literal path \`${outDir}\` for the write/edit tools (and any other tool that takes a real path, never an env var) — anything you're handing the user goes there.`,
+  ];
+  if (workdirLess) {
+    lines.push(
+      "This session has no project directory. Deliverables still go to $OUTDIR; use $TMPDIR for scratch work (bash already starts there). Do not ask to write elsewhere unless the task genuinely needs it.",
+    );
+  }
+  return lines.join("\n");
+}
+
 /** Hot getters over a live settings holder, mirroring engine.ts's `EngineConfig` getter
  *  convention (e.g. `reviewerEnabled: () => settings?.reviewer?.enabled`) — daemon.ts supplies
  *  these as closures over its own `let settings` so a `memory.enabled`/`memory.directory` edit
@@ -180,6 +203,22 @@ export class ContextAssembler {
     // never by `session.setEffort`) resolves to `max` on the wire and injects nothing here. That is
     // the second of the two enforcements: refused at the door, inert at the slot.
     ultraDelegation?: boolean;
+    // working-directories T6 (spec §2): the session's $OUTDIR — powers the ALWAYS-present workspace
+    // block below. Absent (a test harness that never wires `EngineConfig.outDirOf`, or a dispatch/
+    // chat caller whose `basePromptOverride` already skips this block) omits it entirely — the SAME
+    // "optional dependency, absent means untouched" precedent `outDirOf`'s own doc comment sets, so
+    // every pre-T6 caller/test stays byte-identical.
+    outDir?: string;
+    // working-directories T6 (spec §2, "MEMDIR for workdir-less sessions: the shared `_assistant`
+    // bucket"): true for a code session with an EMPTY dirs row (no primary) — the caller computes
+    // this from the SAME "live primary absent" anchor engine.ts's primaryDir/classificationDirs
+    // already use (`primary === undefined`), not a second cwd-null check. Two effects, both below:
+    // the workspace block gains its workdir-less lines, and the "project" memory branch resolves
+    // its directory via `this.memory.assistantDir()` instead of `this.memory.dirFor(cwd)` — the
+    // SAME bucket chat/dispatch's `memoryBucket: "assistant"` branch already keys off (one
+    // spelling), just reached with write instructions since a workdir-less CODE session (unlike
+    // chat/dispatch) actually has write tools. Absent/false (every pre-T6 caller) is byte-identical.
+    workdirLess?: boolean;
   }): string {
     const cwd = input.cwd;
     const trusted = cwd ? this.trust.isTrusted(cwd) : false;
@@ -202,6 +241,16 @@ export class ContextAssembler {
       }
     }
     const sections: string[] = [baseSlot, ...styleAppend];
+    // working-directories T6 (spec §2): the standing workspace block — ADDITIVE and, like
+    // `ultraDelegation` below, deliberately NOT part of the base-slot resolution above (a style is
+    // about which persona is speaking; this is about where files go, orthogonal to persona). Gated
+    // on `basePromptOverride === undefined` alone — the SAME half of the style gate above, but
+    // WITHOUT `!input.skipOutputStyle`: a dispatch CHILD (mode:"code", skipOutputStyle:true) still
+    // has a real $OUTDIR and working directories, it just doesn't get the user's active style.
+    // Skipped when `outDir` is absent (see its own doc comment) — nothing to name.
+    if (input.basePromptOverride === undefined && input.outDir) {
+      sections.push(workspaceRules(input.outDir, input.workdirLess === true));
+    }
     // provider-correctness T5: ADDITIVE, and deliberately NOT part of the base-slot resolution
     // above. A style — even one that REPLACES the base (`keepCodingInstructions:false`) — is about
     // which persona is speaking; the tier is about how hard the user asked it to work. The two are
@@ -274,7 +323,13 @@ export class ContextAssembler {
         sections.push(`<system-reminder>\nAssistant memory index (auto-loaded from ${indexPath}; capped at the first ${MEMDIR_INDEX_MAX_LINES} lines / ${Math.round(MEMDIR_INDEX_MAX_BYTES / 1024)}KB):\n${neutralizeReminderTags(idx)}\n</system-reminder>`);
       }
     } else if (this.memory && cwd && this.memory.enabled()) {
-      const memDir = this.memory.dirFor(cwd);
+      // working-directories T6 (spec §2): a workdir-less CODE session has no project to key a
+      // MEMDIR off, but — unlike dispatch/chat above — it DOES have write tools, so it gets the
+      // full protocol block same as any project session, just pointed at the shared `_assistant`
+      // bucket via the SAME `assistantDir()` closure the branch above reads (one spelling, not a
+      // second path computation). A with-dirs session (`workdirLess` absent/false, every
+      // pre-existing caller) takes `dirFor(cwd)` exactly as before — byte-identical.
+      const memDir = input.workdirLess ? this.memory.assistantDir() : this.memory.dirFor(cwd);
       sections.push(memoryProtocol(memDir));
       const idx = readMemory(join(memDir, "MEMORY.md"), MEMDIR_INDEX_MAX_LINES, MEMDIR_INDEX_MAX_BYTES);
       // Absent MEMORY.md (a fresh project, or one with no saved facts yet) → skip this section

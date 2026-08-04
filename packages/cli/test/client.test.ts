@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -417,22 +418,27 @@ describe("NormaClient", () => {
   // populating `dirs`; a daemon-only test would pass the day the schema stopped declaring it. Only
   // a LIVE round trip through a real daemon + the real client proves the value survives both ends.
   //
-  // Also pins the `cwd` alias (`cwd === dirs[0]?.path`) two ways: (1) a freshly created session with
-  // an explicit `cwd` and no `session.setDirs` write ever made — the "migrated pre-branch row"
-  // shape (T1's lazy migration: the `dirs` column is NULL, `store.dirs()` derives `[{path: cwd,
-  // locked: true}]` straight from the stored `cwd` column) — and (2) after a REAL `session.setDirs`
+  // Also pins the `cwd` alias (`cwd === dirs[0]?.path`) two ways: (1) a GENUINELY pre-branch row —
+  // `cwd` set at create time, `dirs` column forced back to NULL by hand (working-directories T6:
+  // `session.create` now writes `dirs` DIRECTLY at INSERT time — unlocked — so the lazy migration
+  // this pins is reachable only by a row that predates T6; there is no such row in a fresh test
+  // daemon, so this test fakes one via a second sqlite connection to the daemon's own index.db,
+  // mirroring `session-set-dirs.test.ts`'s identical T6 fix) — and (2) after a REAL `session.setDirs`
   // write, which changes `dirs[0].path` without ever touching the stored `cwd` column
   // (`setDirsRaw`'s own contract) — proving `session.list`'s `cwd` is populated FROM `dirs` at read
   // time, not trusted from that now-stale column.
   test("session.list round-trips `dirs` through the client's schema validation, cwd kept an alias (working-directories T3)", async () => {
-    await boot();
+    const home = await boot();
     const client = await NormaClient.connect({
       socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli-dirs", onEvent: () => {},
     });
 
-    // (1) A migrated pre-branch-style row: `cwd` set at create time, `dirs` column never written.
+    // (1) A genuinely pre-branch-style row: `cwd` set at create time, `dirs` column forced NULL.
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-cli-listdirs-")));
     const { sessionId } = await client.createSession("global", { cwd });
+    const raw = new Database(join(home, "sessions", "index.db"));
+    raw.run("UPDATE sessions SET dirs = NULL WHERE session_id = ?", [sessionId]);
+    raw.close();
     const migrated = (await client.listSessions()).sessions.find((s: { sessionId: string }) => s.sessionId === sessionId);
     expect(migrated!.dirs).toEqual([{ path: cwd, locked: true }]);
     expect(migrated!.cwd).toBe(cwd);
