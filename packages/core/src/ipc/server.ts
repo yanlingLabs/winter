@@ -1391,7 +1391,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             }
           }
         }
-        return opts.broker?.resolve(p.sessionId, p.callId, p.approved, socket.data.clientName) ?? { ok: true, alreadyResolved: true };
+        // working-directories Task 6.5: `p.optionId` is forwarded into `resolve()` (previously only
+        // consulted above for rule persistence) so an `onApprove` closure with more than one
+        // meaningfully-different approved outcome — the with-dirs dirGrant card's `allow_add_dir`
+        // beside `allow_once` — can learn WHICH one was chosen. Purely a plumbing forward: this
+        // handler still has no per-id knowledge of what any option DOES (that stays engine-side).
+        return opts.broker?.resolve(p.sessionId, p.callId, p.approved, socket.data.clientName, p.optionId) ?? { ok: true, alreadyResolved: true };
       }
       case METHODS.approvalList: {
         // SP3 T4b: queryable pending-approval state (remote-allowlisted so a phone can render live

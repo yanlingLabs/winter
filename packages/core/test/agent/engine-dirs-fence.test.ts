@@ -439,12 +439,14 @@ describe("working-directories T5: the adoption matrix", () => {
     expect(reviews[1].summary).toContain(target2);
   });
 
-  test("WITH-DIRS + ask: an APPROVED grant card adopts nothing either — one-shot stays one-shot (SP-policies Task 9)", async () => {
+  test("WITH-DIRS + ask: an APPROVED grant card adopts nothing either — one-shot stays one-shot (SP-policies Task 9; Task 6.5: still true beside the new 4th option)", async () => {
     const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-withdirs-ask-")));
     const target = join(outside, "approved.txt");
     const { engine, store, hub, broker, sessionId, cwd } = setup(writeTurn(target, "approved"), { policy: "ask" });
     hub.attach({
       clientName: "auto-approver",
+      // No optionId — mirrors a plain "y"/default approve, and (per the with-dirs card's own
+      // options below) is exactly what choosing the FIRST option, `allow_once`, means too.
       deliver(e) { if (e.type === "approval_requested") broker.resolve(sessionId, e.callId, true, "auto-approver"); return true; },
     }, sessionId, 0);
 
@@ -463,7 +465,44 @@ describe("working-directories T5: the adoption matrix", () => {
     expect(card.summary).toContain("does not add a working directory");
     expect(card.summary).not.toMatch(/adds it as a working directory/i); // no adoption language
     expect(card.summary).not.toMatch(/permanent/i);
-    expect(card.options?.[0]).toEqual({ id: "allow_once", label: "Allow once" });
+    // Task 6.5: the light-touch summary edit mentions the choice exists, and the card now carries a
+    // 4th option — `allow_add_dir`, the explicit human act — beside the unchanged three (same ids,
+    // same labels, same order: `allow_once` first, the safe default stays primary).
+    expect(card.summary).toContain("unless you choose to add it below");
+    expect(card.options).toEqual([
+      { id: "allow_once", label: "Allow once" },
+      { id: "allow_add_dir", label: "Allow and add as working directory" },
+      { id: "allow_project", label: `Always allow edits in ${outside}`, rule: `Edit(${outside})`, scope: "project" },
+      { id: "deny", label: "Deny" },
+    ]);
+  });
+
+  test("WITH-DIRS + ask: choosing `allow_add_dir` DOES adopt — as an ADDITIONAL working directory, born locked (Task 6.5: the explicit human act the T5 controller ruling carved out)", async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-withdirs-adddir-")));
+    const target = join(outside, "approved.txt");
+    const { engine, store, hub, broker, sessionId, cwd } = setup(writeTurn(target, "approved"), { policy: "ask" });
+    hub.attach({
+      clientName: "auto-approver",
+      deliver(e) { if (e.type === "approval_requested") broker.resolve(sessionId, e.callId, true, "auto-approver", "allow_add_dir"); return true; },
+    }, sessionId, 0);
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+    const card = events.find((e) => e.type === "approval_requested") as any;
+    expect(card).toBeDefined();
+    expect(readFileSync(target, "utf8")).toBe("approved"); // the write lands, same as allow_once
+    // The ROW gains the granted dir, BORN LOCKED (the approved write is its first write into it) —
+    // the SAME `adoptGrantedDir` pathway T5 uses for the empty-set case, now reached by an explicit
+    // human choice on a with-dirs card instead. The existing primary is untouched (still unlocked —
+    // nothing was ever written there in this test).
+    expect(store.dirs(sessionId)).toEqual([
+      { path: cwd, locked: false },
+      { path: outside, locked: true },
+    ]);
+    // A wording assertion that the CHOSEN option's label matches what choosing it just did — the
+    // same "card said so" discipline as the sibling `allow_once` test above.
+    const addDirOption = card.options?.find((o: any) => o.id === "allow_add_dir");
+    expect(addDirOption).toEqual({ id: "allow_add_dir", label: "Allow and add as working directory" });
   });
 
   test("WORKDIR-LESS + auto: the SILENT pre-grant DOES adopt — as the primary, born locked, exiting the mode (the empty-set rule)", async () => {

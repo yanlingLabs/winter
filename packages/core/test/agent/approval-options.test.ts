@@ -198,14 +198,18 @@ describe("approvalOptionsFor via the real dispatch loop (engine.ts's private hel
   });
 });
 
-describe("requestApproval call sites: reviewer-escalation + worktree pass NO options; the out-of-project grant card carries its OWN (SP-policies Task 9)", () => {
+describe("requestApproval call sites: reviewer-escalation + worktree pass NO options; the out-of-project grant card carries its OWN (SP-policies Task 9, +Task 6.5's 4th option)", () => {
   // SP-policies Task 9 retitled this: the out-of-project grant card USED to be a fourth "no options"
-  // site, but it now carries three edit options of its own (Allow once / Always allow edits in <dir>
-  // = Edit(<dir>) scope project / Deny) — a DIFFERENT shape from approvalOptionsFor's bash options
-  // (that helper is never even consulted for the grant card, which builds its options inline). The
-  // full behavior (one-shot write, rule persistence, silence-on-repeat) lives in
-  // policy-out-of-project-edit.test.ts; here we just pin the card's option SHAPE at this seam.
-  test("an out-of-project write's grant-flavored card carries the three edit options (not approvalOptionsFor's bash shape, not the old no-options card)", async () => {
+  // site, but it now carries edit options of its own (Allow once / Allow and add as working
+  // directory / Always allow edits in <dir> = Edit(<dir>) scope project / Deny) — a DIFFERENT shape
+  // from approvalOptionsFor's bash options (that helper is never even consulted for the grant card,
+  // which builds its options inline). working-directories Task 6.5 added `allow_add_dir` as a THIRD
+  // choice beside the honest one-shot default (`allow_once`), additive and in-place — the other
+  // three ids/labels/order are byte-identical to before. The full behavior (one-shot write, rule
+  // persistence, silence-on-repeat, `allow_add_dir` adoption) lives in
+  // policy-out-of-project-edit.test.ts / engine-dirs-fence.test.ts; here we just pin the card's
+  // option SHAPE at this seam.
+  test("an out-of-project write's grant-flavored card carries the four with-dirs options, in order (not approvalOptionsFor's bash shape, not the old no-options card)", async () => {
     const outsideDir = tmpDir("norma-approval-opts-oor-");
     const target = join(outsideDir, "f.txt");
     const provider = new FakeProvider(writeTurn(target, "x"));
@@ -218,6 +222,7 @@ describe("requestApproval call sites: reviewer-escalation + worktree pass NO opt
     expect(requested.summary).toContain("outside your project"); // proves this rode the grant seam, not the plain-ask one
     expect(requested.options).toEqual([
       { id: "allow_once", label: "Allow once" },
+      { id: "allow_add_dir", label: "Allow and add as working directory" },
       { id: "allow_project", label: `Always allow edits in ${outsideDir}`, rule: `Edit(${outsideDir})`, scope: "project" },
       { id: "deny", label: "Deny" },
     ]);

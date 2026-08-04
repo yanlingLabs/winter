@@ -4304,25 +4304,44 @@ export class AgentEngine {
           // retained in the with-dirs line (three shipped tests read it as the marker that a card
           // rode the grant seam rather than the plain-ask one) and deliberately absent from the
           // workdir-less line — such a session has no project for anything to be outside of.
-          // The persistent-rule option is untouched in both. When the 4th option lands (the
-          // with-dirs adoption follow-up), it ADDS a choice beside this honest default rather than
-          // redefining what approving already means.
+          // The persistent-rule option is untouched in both.
+          //
+          // Task 6.5 (post-T5 review, the controller ruling: adoption ⇔ empty-set OR an explicit
+          // human act): the with-dirs card gains a 4th option, `allow_add_dir` — "Allow and add
+          // as working directory" — beside the honest one-shot `allow_once` default. It is
+          // ADDITIVE only: `allow_once`/`allow_project`/`deny` keep their ids, labels and order
+          // (`allow_once` first — the safe default stays primary); a client that only understands
+          // the old three-option shape still renders/behaves correctly, it just never offers the
+          // new choice. The workdir-less card is untouched — it already adopts on its own
+          // `allow_once` (the empty-set rule), so a 4th option there would just be a second way to
+          // ask for the same outcome.
           const adoptOnApprove = preCallSessionDirs.length === 0;
           outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
             timeoutMs: this.approvalTimeoutFor(meta),
             summary: adoptOnApprove
               ? `${call.name} ${grant.path} — allow writes in ${grant.dir}? Adds it as a working directory for this session (permanent once written).`
-              : `${call.name} ${grant.path} — outside your project; allow writes in ${grant.dir} for this request? It does not add a working directory.`,
+              : `${call.name} ${grant.path} — outside your project; allow writes in ${grant.dir} for this request? It does not add a working directory unless you choose to add it below.`,
             // no denialMessage → the helper defaults to `denied by ${res.by}` (unchanged behavior)
-            options: [
-              // Same id (approval.respond's routing is keyed by id, never by label) — only the
-              // LABEL tells the truth of the branch: "once" would misdescribe an adoption just as
-              // badly as the summary would.
-              { id: "allow_once", label: adoptOnApprove ? "Allow and add as working directory" : "Allow once" },
-              { id: "allow_project", label: `Always allow edits in ${grant.dir}`, rule: `Edit(${grant.dir})`, scope: "project" },
-              { id: "deny", label: "Deny" },
-            ],
-          }, loaded, async () => {
+            options: adoptOnApprove
+              ? [
+                  // Same id (approval.respond's routing is keyed by id, never by label) — only the
+                  // LABEL tells the truth of the branch: "once" would misdescribe an adoption just
+                  // as badly as the summary would.
+                  { id: "allow_once", label: "Allow and add as working directory" },
+                  { id: "allow_project", label: `Always allow edits in ${grant.dir}`, rule: `Edit(${grant.dir})`, scope: "project" },
+                  { id: "deny", label: "Deny" },
+                ]
+              : [
+                  { id: "allow_once", label: "Allow once" },
+                  // Task 6.5's new option: same one-shot mkdir+write as `allow_once`, PLUS
+                  // `adoptGrantedDir` (born-locked) — see the onApprove closure below for the
+                  // branch. No `rule`/`scope`: this persists a session-dirs row, not a permission
+                  // rule, so it deliberately does NOT go through server.ts's rule-append path.
+                  { id: "allow_add_dir", label: "Allow and add as working directory" },
+                  { id: "allow_project", label: `Always allow edits in ${grant.dir}`, rule: `Edit(${grant.dir})`, scope: "project" },
+                  { id: "deny", label: "Deny" },
+                ],
+          }, loaded, async (optionId) => {
             const failure = this.mkdirForOneShotGrant(grant.dir);
             if (failure) return { output: failure, isError: true };
             // working-directories T5 (spec §2, workdir-less mode: "any user-fs write raises the
@@ -4331,9 +4350,10 @@ export class AgentEngine {
             // doors cannot disagree about what an approval means. See applyDirGrant's comment for
             // the ruling in full: adoption ⇔ establishing a primary on an empty set. A session that
             // already HAS working directories keeps the shipped one-shot semantics (SP-policies
-            // Task 9); durable widening for that case is a deliberate human act and belongs to the
-            // 4th-card-option follow-up, not to any silent or side-effect path.
-            if (preCallSessionDirs.length === 0) this.adoptGrantedDir(sessionId, grant.dir);
+            // Task 9) UNLESS the human explicitly chose `allow_add_dir` (Task 6.5) — the deliberate
+            // human act the T5 controller ruling carved out as the with-dirs card's OWN door to
+            // adoption, beside the empty-set rule.
+            if (preCallSessionDirs.length === 0 || optionId === "allow_add_dir") this.adoptGrantedDir(sessionId, grant.dir);
             return this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, oneShot, visionCapable, excludeTools, allowTools);
           }, pins, rootsOverride, visionCapable, excludeTools, allowTools);
         } else if (call.name === "bash" && bashEscalation.dangerouslyDisableSandbox && !unsandboxedRuleAllowed && meta.approvalPolicy !== "bypass") {
@@ -5481,7 +5501,14 @@ export class AgentEngine {
       options?: ApprovalOption[];
     },
     loaded: Set<string>,
-    onApprove?: () => Promise<{ output: string; isError: boolean }>,
+    // working-directories Task 6.5: `optionId` — the chosen `ApprovalOption.id`, threaded from the
+    // broker's resolved outcome below — is passed to `onApprove` so a card offering more than one
+    // meaningfully-different approved choice (the with-dirs dirGrant card's `allow_add_dir` beside
+    // `allow_once`) can branch on which one was picked. Every OTHER onApprove closure in this file
+    // (worktree/workflow bridges, the plain executeCall default) still declares zero params — TS
+    // structurally allows a narrower function where a wider one is expected, so none of them need
+    // to change; only a closure that actually cares about the choice reads the argument.
+    onApprove?: (optionId?: string) => Promise<{ output: string; isError: boolean }>,
     pins: Set<string> = new Set(),
     rootsOverride?: string[],
     // Computer use (Phase 5 CU): forwarded to the default onApprove's executeCall so an approved
@@ -5515,7 +5542,7 @@ export class AgentEngine {
     const res = await waiting;
     this.emit(sessionId, { type: "approval_resolved", sessionId, threadId, callId: call.callId, approved: res.approved, by: res.by });
     if (res.approved) {
-      return await (onApprove ? onApprove() : this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, excludeTools, allowTools));
+      return await (onApprove ? onApprove(res.optionId) : this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, excludeTools, allowTools));
     }
     // An EXPLICIT human denial (any `by` other than the broker's "timeout") ends the turn and
     // hands control back to the user (Claude Code parity) — see the caller's `deniedByHuman`
