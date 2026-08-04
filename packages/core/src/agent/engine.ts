@@ -5133,6 +5133,67 @@ export class AgentEngine {
     try { return this.cfg.store.dirs(sessionId)[0]?.path; } catch { return undefined; }
   }
 
+  /** working-directories T5 (spec §1, the first-write lock — "a directory locks the moment Norma
+   *  successfully writes inside it, per-directory, permanently for the session's lifetime; reading
+   *  never locks"). Called from `executeCall` for a SUCCEEDED call only.
+   *
+   *  The ATTRIBUTION rule (plan decision):
+   *   - `write`/`edit`/`notebook_edit` lock the session dir CONTAINING the file they wrote. That
+   *     is the only honest answer for a tool that names its own absolute target.
+   *   - `bash` locks the session dir containing the directory it RAN IN (`cwd`) — the primary in
+   *     every ordinary turn, which is the plan's "a successful bash locks the PRIMARY only". Using
+   *     the cwd rather than the literal `dirs[0]` is the same rule stated precisely: it keeps a
+   *     non-isolated `enter_worktree` turn (whose cwd is the worktree, a dir that is NOT in the
+   *     row) from locking a primary bash never touched. A shell command's writes are un-attributable
+   *     by construction — no path is parsed, and none could be trusted if it were — so added dirs
+   *     stay unlocked after a bash run no matter what it did.
+   *   - Every other tool (read/glob/grep/ls/…) locks nothing: they are not in this switch at all.
+   *
+   *  A worktree-ISOLATED child (`rootsOverride`) locks nothing: its confinement is a temporary
+   *  copy, not one of the session's declared directories, and the parent's dirs are not where its
+   *  writes landed.
+   *
+   *  Never throws and never affects the tool result: this is bookkeeping ABOUT a write that has
+   *  already succeeded and been reported. `lockDir` is itself idempotent (T2), and the pre-check
+   *  below skips even the store read-modify-write for the overwhelmingly common case — writing
+   *  again into a directory that locked on the session's first write. */
+  private lockWrittenDir(
+    toolName: string,
+    args: unknown,
+    sessionId: string,
+    cwd: string,
+    roots: string[],
+    tmpDir: string,
+    rootsOverride: string[] | undefined,
+  ): void {
+    if (rootsOverride) return;
+    try {
+      let probe: string | null = null;
+      if (toolName === "bash") {
+        probe = cwd;
+      } else if (AUTO_DIAG_TOOL_NAMES.has(toolName)) {
+        // Same arg shape controlPlaneFileTarget reads: `path` for write/edit, `notebook_path` for
+        // notebook_edit. Resolved through the SAME fence-resolution the reviewer's classification
+        // uses, so a relative path, a symlinked directory segment and a leaf link all agree on
+        // where the bytes actually landed.
+        const a = (args ?? {}) as { path?: unknown; notebook_path?: unknown };
+        const raw = typeof a.path === "string" ? a.path : typeof a.notebook_path === "string" ? a.notebook_path : "";
+        probe = raw ? resolveFsReviewTarget(raw, roots, tmpDir) : null;
+      }
+      if (!probe) return;
+      const row = this.cfg.store.dirs(sessionId);
+      for (const entry of row) {
+        let dir: string;
+        try { dir = canonicalizeDirPath(entry.path); } catch { continue; }
+        if (!isWithin(probe, dir)) continue;
+        if (!entry.locked) lockDir(this.dirsDeps(), sessionId, entry.path);
+        return; // first containing entry wins (primary-first order), locked or not
+      }
+    } catch (err) {
+      console.error(`[engine] could not record the first-write lock for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   /** working-directories T5: the deps `setSessionDirs`/`lockDir` take — the engine's OWN store and
    *  its OWN `grantDenied` predicate (the same instance method the dirGrant flow consults, so
    *  "what can never be granted" and "what can never be adopted" are one answer, never two
@@ -5757,6 +5818,10 @@ export class AgentEngine {
       excludeTools,
       allowTools,
     });
+    // working-directories T5 (spec §1: "a directory locks the moment Norma successfully writes
+    // inside it"). Gated on `!result.isError` for the same reason auto-diagnostics below is: a
+    // lock records a FACT, and a write that never landed is not one.
+    if (!result.isError) this.lockWrittenDir(call.name, args, sessionId, cwd, roots, tmpDir, rootsOverride);
     // Auto-diagnostics after edit (lsp-consolidation T3): ONLY a SUCCESSFUL write/edit/
     // notebook_edit ever reaches this — `result.isError` gates it BEFORE any LSP call, so a
     // failed write never triggers a diagnostics run at all (not merely "runs but is discarded").

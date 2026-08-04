@@ -148,13 +148,13 @@ function setup(script: ProviderEvent[][], opts?: {
   return { engine, store, hub, broker, sessionId, cwd, home, dirs, events, registry, bashCalls, setDirsDeps };
 }
 
-/** Establishes an UNLOCKED primary in the row (the T2 setter, the one writer). Sessions created
- *  today still derive their primary from the `cwd` column, which the T1 migration grandfathers as
- *  LOCKED — T6 makes create write the column unlocked. Tests that care about lock TRANSITIONS
- *  must therefore write the column first, through the setter. */
-function establishUnlockedPrimary(deps: SetDirsDeps, sessionId: string, path: string): void {
-  const res = setSessionDirs(deps, sessionId, "setPrimary", path);
-  if (!res.ok) throw new Error(`test setup failed: ${res.error}`);
+/** Establishes an UNLOCKED primary in the row — what T6 will make `session.create` itself do.
+ *  Until then a session created with a cwd has NO `dirs` column, so T1's lazy migration derives its
+ *  primary as grandfathered-LOCKED, and the T2 setter (correctly) refuses to `setPrimary` over a
+ *  locked entry. `setDirsRaw` is the low-level column write for exactly this kind of fixture
+ *  (T1/T2's own tests use it the same way); no production code outside `set-dirs.ts` calls it. */
+function establishUnlockedPrimary(store: SessionStore, sessionId: string, path: string): void {
+  store.setDirsRaw(sessionId, [{ path, locked: false }]);
 }
 
 // ── the fence table (spec §2) ──────────────────────────────────────────────────────────────────
@@ -291,5 +291,79 @@ describe("working-directories T5: the dirGrant approval adopts into the row", ()
     expect(result.isError).toBe(true);
     expect(result.output).toMatch(/never be granted/);
     expect(store.dirs(sessionId).map((d) => d.path)).toEqual([cwd]); // untouched
+  });
+});
+
+// ── first-write locks (spec §1) ────────────────────────────────────────────────────────────────
+
+describe("working-directories T5: first-write locks", () => {
+  test("a write locks its CONTAINING directory only — the added dir locks, the primary stays unlocked", async () => {
+    const added = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-lock-added-")));
+    const { engine, store, sessionId, cwd, setDirsDeps } = setup(writeTurn(join(added, "f.txt"), "x"), { policy: "auto" });
+    establishUnlockedPrimary(store, sessionId, cwd);
+    expect(setSessionDirs(setDirsDeps, sessionId, "add", added).ok).toBe(true);
+
+    await engine.runTurn(sessionId);
+    expect(store.dirs(sessionId)).toEqual([
+      { path: cwd, locked: false },   // never written in — untouched
+      { path: added, locked: true },  // the write landed here
+    ]);
+  });
+
+  test("a write in the PRIMARY locks the primary (and nothing else)", async () => {
+    const added = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-lock-primary-")));
+    const script: ProviderEvent[][] = [];
+    const { engine, store, sessionId, cwd, setDirsDeps } = setup(script, { policy: "auto" });
+    script.push(...writeTurn(join(cwd, "f.txt"), "x"));
+    establishUnlockedPrimary(store, sessionId, cwd);
+    expect(setSessionDirs(setDirsDeps, sessionId, "add", added).ok).toBe(true);
+
+    await engine.runTurn(sessionId);
+    expect(store.dirs(sessionId)).toEqual([
+      { path: cwd, locked: true },
+      { path: added, locked: false },
+    ]);
+  });
+
+  test("a FAILED write locks nothing (the lock records a fact — a write that never landed is not one)", async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-lock-fail-")));
+    const { engine, store, sessionId, cwd, setDirsDeps } = setup(
+      // `plan` policy denies every mutating call — the tool_result is an error, nothing is written.
+      writeTurn(join(outside, "f.txt"), "x"), { policy: "ask" },
+    );
+    establishUnlockedPrimary(store, sessionId, cwd);
+    // No approver attached → the grant card times out → denial → the write never runs.
+    await engine.runTurn(sessionId);
+    expect((store.read(sessionId).find((e) => e.type === "tool_result") as any).isError).toBe(true);
+    expect(store.dirs(sessionId)).toEqual([{ path: cwd, locked: false }]);
+  });
+
+  test("a successful bash run locks the PRIMARY only — an added dir stays unlocked after it", async () => {
+    const added = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-lock-bash-")));
+    const { engine, store, sessionId, cwd, bashCalls, setDirsDeps } = setup(bashTurn("echo hi"), { policy: "auto" });
+    establishUnlockedPrimary(store, sessionId, cwd);
+    expect(setSessionDirs(setDirsDeps, sessionId, "add", added).ok).toBe(true);
+
+    await engine.runTurn(sessionId);
+    expect(bashCalls).toEqual(["echo hi"]); // it really ran
+    expect(store.dirs(sessionId)).toEqual([
+      { path: cwd, locked: true },     // bash executes in the primary
+      { path: added, locked: false },  // bash says nothing about the added dirs
+    ]);
+  });
+
+  test("a read-only turn locks NOTHING — reading never locks (spec §1)", async () => {
+    const added = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-lock-read-")));
+    const script: ProviderEvent[][] = [];
+    const { engine, store, sessionId, cwd, setDirsDeps } = setup(script, { policy: "auto" });
+    mkdirSync(join(cwd, "sub"), { recursive: true });
+    Bun.write(join(cwd, "sub", "readme.txt"), "hello");
+    script.push(...readTurn(join(cwd, "sub", "readme.txt")));
+    establishUnlockedPrimary(store, sessionId, cwd);
+    expect(setSessionDirs(setDirsDeps, sessionId, "add", added).ok).toBe(true);
+
+    await engine.runTurn(sessionId);
+    expect((store.read(sessionId).find((e) => e.type === "tool_result") as any).isError).toBe(false);
+    expect(store.dirs(sessionId).every((d) => d.locked === false)).toBe(true);
   });
 });
