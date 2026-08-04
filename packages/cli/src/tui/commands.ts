@@ -212,6 +212,59 @@ async function runCd(ctx: CommandCtx, argText: string): Promise<void> {
   ctx.appendNote(`cwd → ${newCwd}`);
 }
 
+// working-directories T7: `/dirs` family — the read (bare `/dirs`) + write (`add`/`primary`/
+// `remove`) surface over T3's `session.setDirs`/`session.list.dirs`. No main.ts route to mirror
+// (this is TUI-only, like /background above) — instead it mirrors T3's own wire contract: `dirs[0]`
+// is the primary BY POSITION (never a flag), each entry also carries `locked`. Display convention
+// (spec: "one line per entry, `*` marks the primary, `🔒` marks locked") is this task's own —
+// bracket-parenthesized like the codebase's other "(no X)" empty-state notes (`(no sessions)`,
+// `(no bg tasks)`), and names `$OUTDIR` per the plan's "workdir-less notice naming $OUTDIR" bullet,
+// echoing context.ts's own workspace-block vocabulary for that env var.
+const DIRS_WORKDIR_LESS_NOTICE = "(no working directories — this session's deliverables go to $OUTDIR)";
+const DIRS_USAGE = "usage: /dirs [add <path> | primary <path> | remove <path>]";
+const DIRS_OP_BY_TOKEN: Record<string, "add" | "setPrimary" | "remove"> = {
+  add: "add",
+  primary: "setPrimary",
+  remove: "remove",
+};
+
+function formatDirs(dirs: { path: string; locked: boolean }[]): string {
+  if (dirs.length === 0) return DIRS_WORKDIR_LESS_NOTICE;
+  return dirs.map((d, i) => `${i === 0 ? "*" : " "} ${d.locked ? "🔒 " : "  "}${d.path}`).join("\n");
+}
+
+/** Bare `/dirs` reads the CURRENT session's row off `listSessions()` (the only surface
+ *  `SessionListResult`'s per-row `dirs` rides — there is no single-session `session.get`) and
+ *  displays it (or the workdir-less notice for an empty set). `/dirs add|primary|remove <path>`
+ *  drives `sessionSetDirs` — the typed command IS the confirm, no extra prompt — and displays the
+ *  RESULT's post-write `dirs`, not an echo of the request (same "report what the write actually
+ *  produced" contract `sessionSetActivity`'s `activity` follows, client.ts's own doc comment on
+ *  `sessionSetDirs`). A daemon refusal (unknown session, non-code/cowork mode, locked, denylisted,
+ *  remove-primary) is a thrown RpcFailure — deliberately left UNCAUGHT here, exactly like
+ *  `runSetActivity` above, so `runCommand`'s shared catch reports it verbatim (the manage_session
+ *  precedent — no re-wording; see commands.test.ts's `/archive — a daemon refusal surfaces
+ *  verbatim` for the shape this produces: `/dirs failed: <daemon message>`). */
+async function runDirs(ctx: CommandCtx, argText: string): Promise<void> {
+  const trimmed = argText.trim();
+  if (trimmed === "") {
+    const { sessions } = (await ctx.client.listSessions()) as {
+      sessions: Array<{ sessionId: string; dirs?: { path: string; locked: boolean }[] }>;
+    };
+    const row = sessions.find((s) => s.sessionId === ctx.sessionId);
+    ctx.appendNote(formatDirs(row?.dirs ?? []));
+    return;
+  }
+
+  const spaceIdx = trimmed.search(/\s/);
+  const token = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
+  const path = spaceIdx === -1 ? "" : trimmed.slice(spaceIdx + 1).trim();
+  const op = DIRS_OP_BY_TOKEN[token];
+  if (!op || path === "") { ctx.appendNote(DIRS_USAGE); return; }
+
+  const r = await ctx.client.sessionSetDirs({ sessionId: ctx.sessionId, op, path });
+  ctx.appendNote(formatDirs(r.dirs));
+}
+
 /** Mirrors main.ts `case "skills"` (~:1048): `client.listSkills(cwd)` — the route passes
  *  `process.cwd()` (the CLI process's own cwd); here that's `ctx.cwd`, the session's tracked cwd
  *  (the closest in-chat equivalent). Same "no skills installed" / per-skill line wording. */
@@ -395,6 +448,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "sessions", description: "List resumable sessions", run: (ctx) => runSessions(ctx) },
   { name: "add-dir", args: "<path> [--persist]", description: "Add a directory to the session's roots", run: (ctx, argText) => runAddDir(ctx, argText) },
   { name: "cd", args: "<path>", description: "Change the session's working directory", run: (ctx, argText) => runCd(ctx, argText) },
+  { name: "dirs", args: "[add|primary|remove <path>]", description: "Show or change this session's working directories", run: (ctx, argText) => runDirs(ctx, argText) },
   { name: "skills", description: "List installed skills", run: (ctx) => runSkills(ctx) },
   { name: "mcp", description: "List configured MCP servers", run: (ctx) => runMcp(ctx) },
   { name: "bg", args: "[list|peek|kill] [taskId]", description: "List/peek/kill background tasks", run: (ctx, argText) => runBg(ctx, argText) },

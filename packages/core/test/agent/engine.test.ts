@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import type { SessionEvent } from "@norma/protocol";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub, type HubClient } from "../../src/sessions/hub";
@@ -13,13 +14,15 @@ import { ApprovalBroker } from "../../src/agent/approvals";
 import { AgentEngine } from "../../src/agent/engine";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import { SessionDirectories } from "../../src/agent/dirs";
+import { sessionTmpDir } from "../../src/agent/session-tmp";
+import { ensureOutdir } from "../../src/sessions/outdir";
 import { ContextAssembler } from "../../src/agent/context";
 import { TrustStore } from "../../src/agent/trust";
 import { SkillStore } from "../../src/agent/skills";
 import { Compactor } from "../../src/agent/compactor";
 import type { ProviderEvent } from "../../src/providers/types";
 
-function setup(script: ProviderEvent[][], policy: "ask" | "auto" = "auto", extraRoots: string[] = [], opts: { grantDeniedPrefixes?: string[] } = {}) {
+function setup(script: ProviderEvent[][], policy: "ask" | "auto" = "auto", extraRoots: string[] = [], opts: { grantDeniedPrefixes?: string[]; workdirLess?: boolean } = {}) {
   const home = mkdtempSync(join(tmpdir(), "norma-engine-"));
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-engine-cwd-")));
   const store = new SessionStore(home);
@@ -29,7 +32,14 @@ function setup(script: ProviderEvent[][], policy: "ask" | "auto" = "auto", extra
   registerWriteTools(registry);
   const broker = new ApprovalBroker();
   const provider = new FakeProvider(script);
-  const dirs = new SessionDirectories(() => [cwd, ...extraRoots]);
+  // working-directories T5: `workdirLess` creates the session with NO cwd and wires the roots
+  // closure the way daemon.ts really does for one — row-derived (an empty `dirs` row contributes
+  // nothing) plus the session's own OUTDIR, and NOTHING else. That is the whole writable set the
+  // spec §2 workdir-less mode allows (the MEMDIR joins it in T6; $TMPDIR is bash's, not the write
+  // tools'). Every other caller keeps the literal `[cwd, ...extraRoots]` closure unchanged.
+  const dirs = opts.workdirLess
+    ? new SessionDirectories((sid) => [...store.dirs(sid).map((d) => d.path), ensureOutdir(home, sid)])
+    : new SessionDirectories(() => [cwd, ...extraRoots]);
   // Default assembler — these tests don't exercise context assembly (see engine-context.test.ts).
   const assemblerHome = mkdtempSync(join(tmpdir(), "norma-engine-actx-"));
   const assemblerTrust = new TrustStore(join(assemblerHome, "trust.json"));
@@ -45,9 +55,12 @@ function setup(script: ProviderEvent[][], policy: "ask" | "auto" = "auto", extra
     assembler,
     compactor,
     grantDeniedPrefixes: opts.grantDeniedPrefixes,
+    ...(opts.workdirLess ? { outDirOf: (sid: string) => ensureOutdir(home, sid) } : {}),
   });
-  const sessionId = store.createSession("global", { cwd, approvalPolicy: policy });
-  return { engine, store, hub, broker, sessionId, cwd, provider, dirs };
+  const sessionId = opts.workdirLess
+    ? store.createSession("global", { approvalPolicy: policy })
+    : store.createSession("global", { cwd, approvalPolicy: policy });
+  return { engine, store, hub, broker, sessionId, cwd, provider, dirs, registry, home };
 }
 
 const done = (reason: "end_turn" | "tool_calls"): ProviderEvent => ({ type: "done", stopReason: reason });
@@ -173,14 +186,66 @@ describe("AgentEngine", () => {
     expect(readFileSync(target, "utf8")).toBe("norma was here");
   });
 
-  test("a turn on a cwd-less session fails closed (no fallback to daemon cwd)", async () => {
-    const { engine, store } = setup([text("should not run")]);
-    const sessionId = store.createSession("global"); // no cwd, default policy
+  // ─────────────────────────────────────────────────────────────────────────────────────────────
+  // working-directories T5 — FLIPPED, with the controller's ruling recorded (2026-08-04).
+  //
+  // These two tests REPLACE "a turn on a cwd-less session fails closed (no fallback to daemon cwd)".
+  // That pin protected a SECURITY INVARIANT: a session must never inherit the DAEMON's own cwd as
+  // writable space. The spec §2 workdir-less arc (user-approved 2026-08-03) supersedes the
+  // fail-closed MECHANISM — a session with no working directory now RUNS, confined to Norma-owned
+  // space — while preserving that exact invariant: the fallback is the session's own tmp dir, and
+  // the writable set is the Norma-owned dirs only. This is the T4-provenance pattern: a mechanism
+  // superseded by a deliberate current ruling, the invariant intact and re-pinned below (relative
+  // paths resolve into the session's OUTDIR, never the daemon's cwd; anything outside the
+  // Norma-owned set still raises the grant card and never lands).
+  // ─────────────────────────────────────────────────────────────────────────────────────────────
+  test("a cwd-less session RUNS (workdir-less mode) — its shell starts in the session tmp dir, and nothing is silently adopted", async () => {
+    const { engine, store, sessionId, registry } = setup([
+      [{ type: "tool_call", callId: "c1", name: "bash", argsJson: JSON.stringify({ command: "echo hi" }) }, done("tool_calls")],
+      text("ran it"),
+    ], "auto", [], { workdirLess: true });
+    // A stub bash (not the sandboxed one) purely to observe the cwd the engine hands the tool.
+    let bashCwd = "";
+    registry.register({
+      name: "bash", description: "stub bash",
+      args: z.object({ command: z.string() }),
+      run({ command }, ctx) { bashCwd = ctx.cwd; return `ran: ${command}`; },
+    });
+
     await engine.runTurn(sessionId);
     const events = store.read(sessionId);
-    expect(events.some((e) => e.type === "agent_error" && (e as any).message.includes("working directory"))).toBe(true);
-    expect(events.find((e) => e.type === "turn_completed")).toMatchObject({ stopReason: "error" });
-    expect(events.some((e) => e.type === "tool_call")).toBe(false);
+    expect(events.some((e) => e.type === "agent_error")).toBe(false); // no "session has no working directory"
+    expect(events.find((e) => e.type === "turn_completed")).toMatchObject({ stopReason: "end_turn" });
+    expect(bashCwd).toBe(sessionTmpDir(sessionId)); // the session's OWN scratch — never process.cwd()
+    expect(store.dirs(sessionId)).toEqual([]);      // still workdir-less: nothing was adopted behind the user's back
+  });
+
+  test("a cwd-less session's writable set is Norma-owned space ONLY: a relative path resolves into its $OUTDIR (never the daemon's cwd), and an outside path still raises the grant card and never lands", async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-engine-cwdless-outside-")));
+    const daemonCwdEscape = join(process.cwd(), "norma-cwdless-escape-probe.txt");
+    const { engine, store, hub, broker, sessionId, home } = setup([
+      [{ type: "tool_call", callId: "c1", name: "write", argsJson: JSON.stringify({ path: "norma-cwdless-escape-probe.txt", content: "delivered" }) }, done("tool_calls")],
+      [{ type: "tool_call", callId: "c2", name: "write", argsJson: JSON.stringify({ path: join(outside, "nope.txt"), content: "x" }) }, done("tool_calls")],
+      text("done"),
+    ], "ask", [], { workdirLess: true });
+    hub.attach({
+      clientName: "auto-denier",
+      deliver(e) { if (e.type === "approval_requested") broker.resolve(sessionId, e.callId, false, "auto-denier"); return true; },
+    }, sessionId, 0);
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+    // THE preserved invariant: a relative path resolved against the session's own OUTDIR (the only
+    // root it has), NOT against whatever directory the daemon process happens to be running in.
+    expect(existsSync(daemonCwdEscape)).toBe(false);
+    expect(readFileSync(join(realpathSync(ensureOutdir(home, sessionId)), "norma-cwdless-escape-probe.txt"), "utf8")).toBe("delivered");
+    // And the rest of the filesystem is exactly as unreachable as before: one grant card, denied,
+    // nothing written.
+    const cards = events.filter((e) => e.type === "approval_requested") as any[];
+    expect(cards.length).toBe(1);
+    expect(cards[0].summary).toContain(outside);
+    expect(existsSync(join(outside, "nope.txt"))).toBe(false);
+    expect(store.dirs(sessionId)).toEqual([]); // a DENIED card adopts nothing
   });
 
   // write-permission-flow (task 24, CC parity): request_directory is DELETED — an out-of-root

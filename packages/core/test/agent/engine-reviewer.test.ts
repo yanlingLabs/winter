@@ -476,14 +476,21 @@ describe("engine + safety reviewer (auto-policy fs coverage, phase 5e T3)", () =
     expect(readFileSync(join(addedDir, "note.txt"), "utf8")).toBe("added-root content");
   });
 
-  test("session tmp write → reviewed (unusual: outside the primary cwd subtree, still fence-legal at the OS/sandbox level); the write TOOL's own (narrower) fence still rejects it on execution — orthogonal to review", async () => {
+  // working-directories T4 fix round 1 (spec §2: "Norma-owned spaces ($OUTDIR/$TMPDIR/$MEMDIR):
+  // always silent"): corrected from this suite's own PRE-spec expectation — a session-tmp write
+  // used to be reviewed here (outside-primary is otherwise "unusual"), but the spec now makes the
+  // session tmp dir one of the three always-silent Norma-owned spaces, same as $OUTDIR/$MEMDIR.
+  // The write TOOL's own (narrower, tmpDir-excluded) fence rejecting the write on execution is
+  // UNCHANGED — fsWriteIsUnusual only ever decided whether to REVIEW, never whether execution
+  // succeeds, so that half of the original test's point still holds.
+  test("session tmp write → NOT reviewed (Norma-owned space, spec §2: always silent, no tool_review); the write TOOL's own (narrower) fence still rejects it on execution — orthogonal to review", async () => {
     // sessionId (hence the tmp dir path, which is keyed by it) isn't known until setupEngine
     // returns — `script` is the SAME array FakeProvider holds internally (passed by reference,
     // not copied), so it can be filled in with the real tool call AFTER sessionId exists but
     // BEFORE runTurn ever reads it.
     const script: ProviderEvent[][] = [];
     const provider = new FakeProvider(script);
-    const reviewer = stubReviewer({ verdict: "safe", reason: "tmp write, fine" });
+    const reviewer = stubReviewer({ verdict: "unsafe", reason: "would have blocked if consulted" });
     const { engine, store, sessionId } = setupEngine(provider, { reviewer: reviewer as any });
     const tmp = sessionTmpDir(sessionId);
     script.push(...writeTurn(join(tmp, "scratch.txt"), "tmp content"));
@@ -491,12 +498,11 @@ describe("engine + safety reviewer (auto-policy fs coverage, phase 5e T3)", () =
     await engine.runTurn(sessionId);
     const events = store.read(sessionId);
 
-    const review = events.find((e) => e.type === "tool_review") as any;
-    expect(review).toMatchObject({ toolName: "write", verdict: "safe" });
+    // No review at all — an "unsafe" stub verdict proves this isn't just "reviewed and approved":
+    // if the reviewer were consulted, it would have blocked the write with a DIFFERENT error
+    // ("blocked by the safety reviewer"), not the plain fence rejection asserted below.
+    expect(events.find((e) => e.type === "tool_review")).toBeUndefined();
     const result = events.find((e) => e.type === "tool_result") as any;
-    // Reviewed (and approved) — but write.ts's OWN fence (roots only, no tmpDir) still rejects a
-    // tmp-dir target, so the write itself fails. Review decides whether to REVIEW, not whether
-    // execution succeeds.
     expect(result.isError).toBe(true);
     expect(result.output).toContain("outside the allowed directories");
   });

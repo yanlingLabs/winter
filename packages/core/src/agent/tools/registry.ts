@@ -9,6 +9,15 @@ export interface ToolContext {
   cwd: string;
   roots: string[]; // allowed roots; roots[0] MUST be the primary cwd — relative tool paths resolve against it
   tmpDir?: string; // per-session scratch dir (sandbox writable root + child TMPDIR); bash uses it, other tools ignore
+  // working-directories T4: the session's delivery-folder — `<normaHome>/outputs/<sessionId>`
+  // (sessions/outdir.ts's `ensureOutdir`). Independent of `roots`/`rootsOverride` (mirrors `tmpDir`'s
+  // own independence — see engine.ts's `executeCall`): a worktree-isolated child's FIXED roots
+  // never include it either, yet the delivery channel must stay reachable regardless. bash.ts
+  // splices it into $OUTDIR and unions it into the seatbelt's writable set explicitly (never assumed
+  // to already be covered by `roots`); other tools ignore it (the write/edit fence gets the SAME
+  // path through `SessionDirectories.roots`, the blessing mechanism — this field exists only for
+  // bash, which builds its own writable set independently of that fence).
+  outDir?: string;
   sessionId: string; // scopes ask/task/computer-use bridges below to this session; write/edit's out-of-root grant flow lives in engine.ts's dispatch loop (keyed per-session there), not here
   signal?: AbortSignal; // aborts when the turn is interrupted; long-running tools (bash) should honor it
   markSkillLoaded?: (name: string) => void; // set by the engine; the Skill tool calls it to pin a loaded skill for the session

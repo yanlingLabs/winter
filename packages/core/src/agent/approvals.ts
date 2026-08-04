@@ -1,6 +1,17 @@
 import type { ApprovalOption } from "@norma/protocol";
 
-export interface ApprovalOutcome { approved: boolean; by: string }
+export interface ApprovalOutcome {
+  approved: boolean;
+  by: string;
+  // working-directories Task 6.5: which `ApprovalOption.id` (events.ts) the caller chose, threaded
+  // from `approval.respond`'s `optionId` (server.ts) through `resolve()` so an `onApprove` closure
+  // that offers MULTIPLE meaningfully-different approved outcomes on the SAME card (the with-dirs
+  // dirGrant card's new `allow_add_dir` beside its `allow_once`) can branch on which one was picked
+  // — `approved: true` alone can't distinguish them. Optional/additive: every pre-existing caller
+  // (server.ts's other approvals, tests, the emit-failure resolve below) omits it and behaves
+  // exactly as before — `undefined` is indistinguishable from "no options were ever offered".
+  optionId?: string;
+}
 
 /** A currently-pending approval, as returned by `ApprovalBroker.list()` and the `approval.list`
  *  RPC — the queryable STATE the report's approval contract asks for (pending approvals age out of
@@ -69,13 +80,13 @@ export class ApprovalBroker {
     });
   }
 
-  resolve(sessionId: string, callId: string, approved: boolean, by: string): { ok: true; alreadyResolved: boolean } {
+  resolve(sessionId: string, callId: string, approved: boolean, by: string, optionId?: string): { ok: true; alreadyResolved: boolean } {
     const k = this.key(sessionId, callId);
     const entry = this.pending.get(k);
     if (!entry) return { ok: true, alreadyResolved: true };
     this.pending.delete(k);
     clearTimeout(entry.timer);
-    entry.resolve({ approved, by });
+    entry.resolve({ approved, by, optionId });
     return { ok: true, alreadyResolved: false };
   }
 

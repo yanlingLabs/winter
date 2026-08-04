@@ -33,15 +33,27 @@ export function registerBashTool(r: ToolRegistry, deps: { bgRegistry?: Backgroun
     // D1-T2: immediate in code (unchanged), deferred ONLY in dispatch — the coordinator has to
     // ToolSearch it first, same treatment as task_stop/computer/AskQuestion/send_message.
     deferred: ["dispatch"],
-    async run({ command, timeoutMs, runInBackground, allowNetwork, dangerouslyDisableSandbox }, { cwd, roots, tmpDir, sessionId, signal }) {
+    async run({ command, timeoutMs, runInBackground, allowNetwork, dangerouslyDisableSandbox }, { cwd, roots, tmpDir, outDir, sessionId, signal }) {
       if (runInBackground) {
         if (!deps.bgRegistry) throw new Error("background tasks are not available in this context");
         const taskId = deps.bgRegistry.start(sessionId, command, { allowNetwork, dangerouslyDisableSandbox });
         const outputFile = deps.bgRegistry.outputFile(sessionId, taskId);
         return `background task ${taskId} started\noutput_file: ${outputFile}\nRead or grep that file for the full output as it accumulates — prefer it over bash_output for large output.`;
       }
-      const realCwd = realpathSync(cwd);
+      // working-directories T5 (spec §2, workdir-less mode): a session with no working directory
+      // runs its shell in the session scratch dir. The engine already resolves that (runThread's
+      // `cwd`) and the background-task registry does too (daemon.ts's spawnCtx), so this fallback
+      // is a defensive last resort for any OTHER caller that hands us a session with no directory —
+      // an empty/absent `cwd` here used to reach `realpathSync` as-is and throw an opaque ENOENT
+      // (or a TypeError on a null) rather than degrading to the scratch dir every such session has.
+      const runDir = cwd || tmpDir;
+      if (!runDir) throw new Error("bash has no directory to run in: no session working directory and no scratch dir");
+      const realCwd = realpathSync(runDir);
       const scratch = realpathSync(tmpDir ?? realCwd); // engine always supplies a session tmp; fall back to cwd
+      // working-directories T4: the session's delivery folder, realpathed the SAME way `scratch`
+      // is — undefined only for a caller that doesn't wire ctx.outDir at all (a bare
+      // registry.execute() in a test predating this feature), never for a real engine turn.
+      const outdirReal = outDir ? realpathSync(outDir) : undefined;
       const timeout = timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
       // SP-approvals Task 11 (spec §8): dangerouslyDisableSandbox skips sandbox-exec entirely — a
@@ -58,7 +70,19 @@ export function registerBashTool(r: ToolRegistry, deps: { bgRegistry?: Backgroun
         if (!sandboxAvailable()) {
           throw new Error("bash is unavailable: macOS sandbox-exec not found on this host");
         }
-        const writable = [...new Set([realCwd, ...roots.map((r) => realpathSync(r)), scratch])];
+        // working-directories T4: `outdirReal` unioned in EXPLICITLY, never assumed to already be
+        // covered by `roots` — a worktree-isolated child's roots are FIXED to just its worktree dir
+        // (rootsOverride, engine.ts), which excludes the outputs dir the same way it excludes the
+        // MEMDIR, yet $OUTDIR (below) must still point at a directory the seatbelt actually lets
+        // bash write to. The ordinary (non-override) case ALSO already carries it via `roots` (the
+        // blessing: daemon.ts's `sessionDirs` folds the outputs dir into the session's own roots the
+        // same way it does the MEMDIR) — the `Set` dedupes that overlap for free.
+        // I-2 defensive backstop (whole-branch review, optional): skip a root that fails to
+        // realpath instead of letting `.map` throw and crash the ENTIRE call over ONE bad root.
+        // The primary fix is upstream (engine.ts's sessionDirPaths, daemon.ts's roots closure) —
+        // this is belt-and-suspenders for any OTHER producer of `roots` that doesn't already guard
+        // existence (e.g. a hand-authored project-local permission dir).
+        const writable = [...new Set([realCwd, ...roots.flatMap((r) => { try { return [realpathSync(r)]; } catch { return []; } }), scratch, ...(outdirReal ? [outdirReal] : [])])];
         // SP-approvals final review: buildSeatbeltProfile now ALSO denies writing
         // "<root>/.norma/permissions.local.json" for every one of these writable roots,
         // automatically — no extra option to pass here. See that function's own doc comment
@@ -78,7 +102,12 @@ export function registerBashTool(r: ToolRegistry, deps: { bgRegistry?: Backgroun
           cwd: realCwd,
           stdio: ["ignore", "pipe", "pipe"],
           detached: true,
-          env: { ...process.env, TMPDIR: scratch },
+          // working-directories T4: `OUTDIR` spliced beside `TMPDIR` — a plain env var name (the
+          // user's explicit ruling; a script that already exports its own $OUTDIR collides, and
+          // that risk is accepted, not guarded — see the working-directories spec). Omitted
+          // entirely (not set to "") when ctx.outDir is unwired, matching how `tmpDir` itself
+          // degrades — a script checking `[ -n "$OUTDIR" ]` sees an honest absence either way.
+          env: { ...process.env, TMPDIR: scratch, ...(outdirReal ? { OUTDIR: outdirReal } : {}) },
         });
 
         let buf = "";

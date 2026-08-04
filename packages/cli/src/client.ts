@@ -8,6 +8,7 @@ import {
   PluginsListResult, AskUserRespondResult, TaskListResult, ThreadListResult,
   PlanRespondResult, SessionSetPolicyResult, type ApprovalPolicy,
   SessionSetActivityResult, type SessionActivity,
+  SessionSetDirsResult,
   DaemonStatusResult, QuotaStateResult, TrustListResult, TrustRemoveResult,
   PluginRevokeTokenResult, PluginRestartResult,
   RoutinesCreateResult, RoutinesListResult, RoutinesUpdateResult, RoutinesDeleteResult,
@@ -265,6 +266,16 @@ export class NormaClient {
    *  this value, never the value they asked for. */
   async sessionSetActivity(params: { sessionId: string; activity: "background" | "archived" | "unbackground" | null }): Promise<{ ok: true; activity?: SessionActivity }> {
     return this.validated(SessionSetActivityResult, await this.request(METHODS.sessionSetActivity, params), METHODS.sessionSetActivity);
+  }
+  /** working-directories T3: `session.setDirs` — the write half of a session's working-directory
+   *  set (`listSessions()`'s per-row `dirs`, riding `SessionListResult` directly, is the read
+   *  half). `op` is the three mutations T2's domain setter supports: `"setPrimary"` replaces
+   *  `dirs[0]`, `"add"` appends (or establishes the primary on an empty set), `"remove"` drops a
+   *  non-primary, unlocked entry. `dirs` in the result is the POST-WRITE state, not an echo of what
+   *  was sent — same "report what the write actually produced" contract as `sessionSetActivity`'s
+   *  `activity` above. */
+  async sessionSetDirs(params: { sessionId: string; op: "setPrimary" | "add" | "remove"; path: string }): Promise<{ ok: true; dirs: { path: string; locked: boolean }[] }> {
+    return this.validated(SessionSetDirsResult, await this.request(METHODS.sessionSetDirs, params), METHODS.sessionSetDirs);
   }
   /** Dashboard read methods (Phase 2f Task 6 — CLI riders over Task 3's new methods). */
   async daemonStatus(): Promise<{

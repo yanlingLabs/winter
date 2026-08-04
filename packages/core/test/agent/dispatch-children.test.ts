@@ -175,6 +175,24 @@ describe("DispatchChildren (Task 5): roster", () => {
   });
 });
 
+describe("working-directories T6: spawnChild lands the spawn dir as an unlocked primary at birth", () => {
+  test("store.dirs(childId) is [{path: dir, locked: false}] the instant spawnChild returns — createSession's own INSERT, no lazy migration needed", () => {
+    const { store, registry } = setup();
+    const dispatchId = store.createSession("global", { mode: "dispatch" });
+    const childId = registry.spawnChild({ dispatchSessionId: dispatchId, dir: "/tmp/a", prompt: "do work", title: "Task A" });
+
+    // Pinned unlocked (not the pre-branch migration's grandfathered-LOCKED shape) — a dispatch
+    // child is a brand-new, post-T6 row. In production it locks almost immediately anyway: its
+    // FIRST turn starts synchronously right after this (spawnChild's own `void runTurn(...)`
+    // below) and dispatch children run at `approvalPolicy: "auto"` with no card in the way, so the
+    // very first successful write/bash call in that turn locks this same primary via the ordinary
+    // T5 first-write-locks path — "they write immediately, so they lock fast" is correct and free,
+    // not something this unit test (which fakes runTurn and never calls the real engine) can show
+    // end to end; the fence tests (engine-dirs-fence.test.ts) are what exercise a real locking turn.
+    expect(store.dirs(childId)).toEqual([{ path: "/tmp/a", locked: false }]);
+  });
+});
+
 describe("DispatchChildren (Task 5): stopChild", () => {
   test("8) stopChild(dispatchId, childId) interrupts + returns a string; wrong caller or unknown id → undefined", () => {
     const { store, registry, interruptCalls } = setup();

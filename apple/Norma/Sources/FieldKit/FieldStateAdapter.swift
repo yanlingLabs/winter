@@ -554,6 +554,37 @@ final class FieldStateAdapter: ObservableObject {
     /// every session, chat included, with no mode filter of its own).
     @Published var isChatSession: Bool = false
 
+    // MARK: - working-directories T8: the header's working-folders chip — `session.setDirs`
+
+    /// True while a `session.setDirs` RPC is in flight — the chip's action rows disable themselves on
+    /// this. A SEPARATE flag from `modelChangeInFlight`/`effortChangeInFlight`/`policyChangeInFlight`
+    /// for the same reason those three are separate from each other: independent affordances.
+    @Published var dirsChangeInFlight: Bool = false
+
+    /// The daemon's OWN refusal sentence for the last `session.setDirs` attempt, shown VERBATIM in
+    /// the chip's menu, or `nil` when the last attempt succeeded (or none has been made).
+    ///
+    /// Verbatim is the whole point. `set-dirs.ts` writes one sentence per rule — "that directory is
+    /// locked for this session", "that directory can never be a working directory", "working
+    /// directories apply to code and cowork sessions only", and the remove-primary refusal that names
+    /// `setPrimary` as the way out. Each names the rule it enforced; a client-side "couldn't set
+    /// folder" erases exactly the sentence that teaches the rule. Set by the WIRER (never by this
+    /// adapter), same convention as `interactionErrors`.
+    @Published var dirsRefusal: String?
+
+    /// Wired to `session.setDirs` for an action on a path ALREADY KNOWN (the menu's per-entry
+    /// "Remove") — op + path. The wirer runs the RPC, refreshes the directory row on success (the
+    /// dirs set lives on `session.list`'s row, exactly like `model`, so there is no second source of
+    /// truth here to bump), and publishes any refusal into `dirsRefusal`.
+    var onSetDirs: (SessionDirsOp, String) -> Void = { _, _ in }
+
+    /// Wired to "pick a folder, confirm, then `session.setDirs`" — the menu's "Add folder…" and
+    /// "Change primary folder…" rows. A SEPARATE callback from `onSetDirs` because the panel and the
+    /// confirm alert are AppKit, which belongs to the window controller: a SwiftUI body must never
+    /// run an `NSOpenPanel`. The confirm is the user's explicit ruling — a manual add is SELECTION +
+    /// CONFIRM, never a one-click widening of what Norma may write to.
+    var onPickWorkingDir: (SessionDirsOp) -> Void = { _ in }
+
     // MARK: - provider-correctness T6: the catalogue-driven model/effort pickers
 
     /// The daemon's synced model catalogue (`sync.config`) — the pickers' ONLY source of slugs and

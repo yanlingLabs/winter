@@ -13,13 +13,17 @@ import { stubRegistry, writeTurn } from "./engine-reviewer.test";
 
 // SP-policies Task 9: the OUT-OF-PROJECT edit card. An out-of-root write/edit under `ask` no longer
 // rides the old plain approve/deny grant card whose approval added the dir to the session roots
-// FOREVER (task-24's applyDirGrant). It now offers three options — [Allow once, Always allow edits
-// in <dir> (= Edit(<dir>) scope project), Deny] — and its onApprove uses a ONE-SHOT roots override:
-// the immediate write lands (the grant dir is mkdir'd first, since the write fence SKIPS a
+// FOREVER (task-24's applyDirGrant). It now offers [Allow once, Always allow edits in <dir> (=
+// Edit(<dir>) scope project), Deny] — and its onApprove uses a ONE-SHOT roots override: the
+// immediate write lands (the grant dir is mkdir'd first, since the write fence SKIPS a
 // not-yet-existing root — see mkdirForOneShotGrant), but NOTHING is persisted to the session roots.
 // "Always allow edits in <dir>" persists the Edit(<dir>) RULE (via ipc/server.ts's approval.respond
 // handler, keyed by the chosen optionId) so FUTURE calls get <dir> in writableRoots; "Allow once"
-// persists nothing, so a repeat out-of-project write cards again.
+// persists nothing, so a repeat out-of-project write cards again. working-directories Task 6.5 adds
+// a FOURTH option, `allow_add_dir` ("Allow and add as working directory") — the one-shot grant PLUS
+// `adoptGrantedDir` (born-locked); its own behavior is pinned in engine-dirs-fence.test.ts's
+// adoption-matrix describe block, not duplicated here — this file stays SP-policies Task 9's own
+// three-option coverage, just updated for the new card SHAPE.
 //
 // Every test drives the REAL dispatch loop (setupEngine's harness — write/edit are REAL there,
 // stubRegistry only stubs bash), per this feature area's established "drive the loop, don't
@@ -41,10 +45,11 @@ function writeTurnId(path: string, content: string, callId: string): ProviderEve
 // approval.respond handler EXACTLY: look the pending options up via `pendingMeta` (a non-consuming
 // read), and if the chosen option carries a rule (and we're approving), persist it through the REAL
 // PermissionRules.append BEFORE resolving — the same option-lookup-then-append-then-resolve ordering
-// server.ts uses. broker.resolve itself takes no optionId (it only carries approved/by), so this is
-// the ONLY place an optionId can drive rule persistence in the engine harness (the daemon's IPC
-// layer isn't wired here). optionId "deny" (approved:false) persists nothing, exactly like the real
-// handler's `p.approved`-gated append.
+// server.ts uses. working-directories Task 6.5 threaded `optionId` through `broker.resolve()` itself
+// (previously it only carried approved/by) so an engine-side `onApprove` can also branch on which
+// option was chosen (the with-dirs dirGrant card's `allow_add_dir`) — forwarded here too, so this
+// helper stays an exact mirror of the real handler's call. optionId "deny" (approved:false) persists
+// nothing, exactly like the real handler's `p.approved`-gated append.
 function optionResponder(
   broker: ApprovalBroker,
   permissionRules: PermissionRules,
@@ -60,7 +65,7 @@ function optionResponder(
         const meta = broker.pendingMeta(sessionId, e.callId);
         const option = meta?.options?.find((o) => o.id === optionId);
         if (option?.rule && approved) permissionRules.append(option.rule, option.scope ?? "project", projectRoot);
-        broker.resolve(sessionId, e.callId, approved, "option-responder");
+        broker.resolve(sessionId, e.callId, approved, "option-responder", optionId);
       }
       return true;
     },
@@ -68,8 +73,9 @@ function optionResponder(
 }
 
 describe("out-of-project edit card (SP-policies Task 9)", () => {
-  // (a) card SHAPE: three options; the middle one persists Edit(<grant.dir>) at project scope.
-  test("under ask, an out-of-project edit offers [Allow once / Always allow edits in <dir> / Deny]; the rule option is Edit(<dir>) scope project", async () => {
+  // (a) card SHAPE: four options (Task 6.5 added `allow_add_dir`); the persistent-rule one is
+  // Edit(<grant.dir>) at project scope.
+  test("under ask, an out-of-project edit offers [Allow once / Allow and add as working directory / Always allow edits in <dir> / Deny]; the rule option is Edit(<dir>) scope project", async () => {
     const cwd = tmp("norma-op-cwd-");
     const foo = tmp("norma-op-foo-");
     const permissionRules = new PermissionRules({ globalAllow: () => [], normaHome: tmp("norma-op-home-") });
@@ -85,6 +91,7 @@ describe("out-of-project edit card (SP-policies Task 9)", () => {
     expect(card.summary).toContain("outside your project");
     expect(card.options).toEqual([
       { id: "allow_once", label: "Allow once" },
+      { id: "allow_add_dir", label: "Allow and add as working directory" },
       { id: "allow_project", label: `Always allow edits in ${foo}`, rule: `Edit(${foo})`, scope: "project" },
       { id: "deny", label: "Deny" },
     ]);

@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { bootstrapNormaDir, resolveNormaHome } from "./norma-dir";
 import { acquireLock, type Lock } from "./lock";
@@ -8,6 +8,7 @@ import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
 import { reapEmptySessions } from "./sessions/reaper";
+import { ensureOutdir } from "./sessions/outdir";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
 import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom } from "./settings";
@@ -381,8 +382,55 @@ export async function startDaemon(opts: {
   // setCwd handlers always have live roots to work with, even when the agent is disabled.
   const sessionDirs = new SessionDirectories((sid) => {
     const m = store.meta(sid);
-    if (!m.cwd) return [];
-    const roots = [m.cwd, ...loadPermissionDirs(normaHome, m.cwd, trustStore.isTrusted(m.cwd))];
+    // working-directories T5 (spec §1: "the engine's writableRoots derives from the row"): the
+    // session's own working directories come from the `dirs` column, not from the single `cwd`
+    // column. For every row that has never been written this is byte-identical — T1's lazy
+    // migration derives `[{path: cwd, locked: true}]` from that same column, verbatim — so this
+    // list is unchanged for every pre-branch session while picker/RPC/dirGrant-adopted dirs now
+    // reach the fence (and survive a daemon restart, which `SessionDirectories.added` never did).
+    // `primary` keeps the `cwd` column FIRST when it has one: it is what `enter_worktree`/
+    // `session.setCwd` move, and the turn already runs there. A workdir-less session that has
+    // adopted a primary has no cwd column yet, hence the `dirs[0]` fallback — the SAME precedence
+    // engine.ts's `primaryDir` uses.
+    const row = store.dirs(sid);
+    const primary = m.cwd ?? row[0]?.path ?? null;
+    const roots: string[] = [];
+    if (primary) roots.push(primary);
+    // I-2 fix (whole-branch review): realpath-or-SKIP each row entry — mirrors the SAME idiom
+    // engine.ts's `writableRoots` Edit-dirs loop already documents and uses. `SessionDirectories`'s
+    // own `canon()` falls back to the RAW path on a realpath failure rather than dropping it (that
+    // fallback is deliberate and pinned elsewhere — it's what lets `remove()` still find a since-
+    // deleted added dir), so an unguarded push here reaches bash.ts's `roots.map(realpathSync)` and
+    // ENOENT-crashes EVERY bash call in the session the moment one row entry doesn't exist yet (an
+    // RPC/TUI/`session.setDirs` door can add a path without mkdir'ing it — only the dirGrant door
+    // does). Skipping costs nothing: `roots(sid)` recomputes on every call, so a skipped entry
+    // re-enters the fence the instant the directory is actually created.
+    for (const d of row) {
+      try { roots.push(realpathSync(d.path)); } catch { /* not yet on disk — skip, never widen with a missing root */ }
+    }
+    // Everything below is keyed off the PRIMARY: the project-local permission dirs are
+    // project-scoped, so a session with no primary at all (workdir-less) simply has none of them.
+    // The outputs dir (further down) is NOT project-scoped and is folded in regardless — that is
+    // what keeps a workdir-less session writable in its own delivery folder. The MEMDIR is ALSO
+    // folded in for a workdir-less session (working-directories T6, spec §2: "MEMDIR for
+    // workdir-less sessions: the shared `_assistant` bucket") — `assistantMemoryDirFor` is the ONE
+    // spelling of that path (the ContextAssembler's own assistant-mode branch and the Dreamer share
+    // it), gated on the SAME `memoryEnabledHot()` the with-dirs branch below reads.
+    //
+    // Ordering is deliberately OUTDIR-FIRST here, the reverse of the with-dirs branch further down
+    // (MEMDIR then OUTDIR): T5 pinned `$OUTDIR` as `roots[0]` for a primary-less session (a
+    // workdir-less relative fs-tool path resolves there — engine.test.ts's own "never the daemon's
+    // cwd" pin) BEFORE this MEMDIR fold existed, and that pin must survive memory being enabled.
+    if (!primary) {
+      roots.push(ensureOutdir(normaHome, sid));
+      if (memoryEnabledHot()) {
+        const memDir = assistantMemoryDirFor({ normaHome });
+        mkdirSync(memDir, { recursive: true });
+        roots.push(memDir);
+      }
+      return roots;
+    }
+    roots.push(...loadPermissionDirs(normaHome, primary, trustStore.isTrusted(primary)));
     // T1 write-root join (design doc: "the tmpDir pattern" — a plain, ungated, auto-provisioned
     // root, mirroring how `sessionTmpDir` needs no user approval either): whenever file-based
     // memory is enabled, the session's MEMDIR joins the SAME write-fence `roots` the `write`/`edit`
@@ -399,10 +447,21 @@ export async function startDaemon(opts: {
     // `sessionTmpDir` already sets — cheap relative to the git spawn `memoryDirFor` itself already
     // memoizes.
     if (memoryEnabledHot()) {
-      const memDir = memoryDirOf(m.cwd);
+      // T5: keyed off `primary`, not `m.cwd` — identical for every session that has a cwd column,
+      // and the only sane key for one that reached its primary by adopting a dir. (Spec §2 gives a
+      // workdir-less session the shared `_assistant` bucket instead; that is T6's own task.)
+      const memDir = memoryDirOf(primary);
       mkdirSync(memDir, { recursive: true });
       roots.push(memDir);
     }
+    // working-directories T4: the session's own delivery folder — `<normaHome>/outputs/<sid>` —
+    // joins the SAME write-fence roots the MEMDIR just above does, and by the identical mechanism:
+    // one more entry in this session-scoped list, no new fencing/grant machinery. Unlike the MEMDIR
+    // this is NOT gated on a settings flag — the outputs dir is a core primitive, always available.
+    // Keyed by `sid` (this closure's own parameter, never a bare `~/.norma/outputs/` prefix), which
+    // is exactly what keeps ANOTHER session's outputs dir OUT of this list — `grantDeniedPrefixes:
+    // [normaHome]` (below) still refuses it for every session but this one.
+    roots.push(ensureOutdir(normaHome, sid));
     return roots;
   });
 
@@ -413,7 +472,13 @@ export async function startDaemon(opts: {
     emit: (sid, e) => hub.append(sid, e),
     spawnCtx: (sid) => {
       const m = store.meta(sid);
-      return { cwd: m.cwd!, roots: sessionDirs.roots(sid), tmpDir: sessionTmpDir(sid) };
+      // working-directories T5: a workdir-less session (no cwd column, empty dirs row) can now run
+      // turns — its shell starts in the session tmp dir (scratch by default; deliverables are
+      // deliberate copies into $OUTDIR), the SAME fallback the engine gives a foreground turn and
+      // `bash.ts` itself keeps as a defensive last resort. Before this, `m.cwd!` handed a `null`
+      // straight to `realpathSync` in the bash tool.
+      const dirs0 = store.dirs(sid)[0]?.path;
+      return { cwd: m.cwd ?? dirs0 ?? sessionTmpDir(sid), roots: sessionDirs.roots(sid), tmpDir: sessionTmpDir(sid) };
     },
   });
 
@@ -830,6 +895,10 @@ export async function startDaemon(opts: {
     const cwdOf = (sid: string) => store.meta(sid).cwd ?? undefined;
     const rootsOf = (sid: string) => sessionDirs.roots(sid);
     const tmpDirOf = (sid: string) => sessionTmpDir(sid);
+    // working-directories T4: engine.ts's `EngineConfig.outDirOf` — read fresh per tool call
+    // alongside `tmpDir` (executeCall), independent of `sessionDirs`/`rootsOverride` (see that
+    // field's own doc comment for why: mirrors `tmpDir`'s own rootsOverride-independence).
+    const outDirOf = (sid: string) => ensureOutdir(normaHome, sid);
     if (lspCfg?.enabled !== false) {
       lspManager = new LspManager({ idleShutdownMs: lspCfg?.idleShutdownMs });
       registerLspTools(registry, { lsp: lspManager, cwdOf, rootsOf, tmpDirOf });
@@ -1125,6 +1194,19 @@ export async function startDaemon(opts: {
       // whatever else this session's tools already write there (web_fetch's saved pages, bg-task
       // output), inside the SAME sandbox-readable root.
       tmpDirOf,
+      // working-directories T4: bash's $OUTDIR splice + explicit seatbelt-writable union
+      // (tools/bash.ts) — see `outDirOf`'s own local doc comment above.
+      outDirOf,
+      // working-directories T4 fix round 1: the SAME memoryDirOf/memoryEnabledHot closures
+      // `sessionDirs` above already uses to fold the MEMDIR into the session's write roots —
+      // exposed to the fs-reviewer's `fsWriteIsUnusual` call (engine.ts) so it treats the MEMDIR
+      // as always-silent (spec §2) without re-deriving the path a second way. `undefined` when
+      // memory is disabled, matching `sessionDirs`'s own gate exactly.
+      memDirOf: (cwd: string) => (memoryEnabledHot() ? memoryDirOf(cwd) : undefined),
+      // working-directories T6: the SAME exemption for a workdir-less session, which has no `cwd`
+      // to key `memDirOf` off — mirrors `sessionDirs`'s own `!primary` branch above (the
+      // `assistantMemoryDirFor`/`memoryEnabledHot()` pair), not a second computation.
+      assistantMemDirOf: () => (memoryEnabledHot() ? assistantMemoryDirFor({ normaHome }) : undefined),
       // task-30 (push-notification track): the real osascript-shelling implementation — the
       // engine's `notify` bridge only calls this when hub.attachedCount(sessionId) === 0 at
       // emission time (see engine.ts's executeCall). Boot-constant (no settings gate — v1 keeps

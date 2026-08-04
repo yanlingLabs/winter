@@ -1,9 +1,11 @@
 import { Database } from "bun:sqlite";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { SessionEvent, SESSION_TITLE_MAX_CHARS, type NewSessionEvent } from "@norma/protocol";
 import type { SessionApprovalPolicy } from "../agent/gate";
+import type { SessionDirs } from "./dirs";
+import { outdirPath } from "./outdir";
 
 // Keep in sync with SessionCreateParams scope regex (packages/protocol/src/methods.ts).
 const SCOPE_RE = /^[a-z0-9]([a-z0-9-]{0,39}[a-z0-9])?$/;
@@ -133,8 +135,26 @@ function fallbackTitle(firstMessage: string | null): string | undefined {
  *  NewSessionEvent (DistributedOmit over the union) so variant-specific fields type-check. */
 export type EventInput = NewSessionEvent;
 
+/** working-directories T1: runtime shape guard for a `dirs` column value freshly `JSON.parse`d
+ *  off disk. A sqlite TEXT column carries no schema, and (unlike the event log) nothing here
+ *  validates through zod, so a hand-edited db or a future writer bug must be caught before the
+ *  array is trusted — see `SessionStore.dirs()`'s malformed-JSON fallback. Kept local to the
+ *  store (not exported from `./dirs`) since it is purely this getter's own defensive-read
+ *  implementation detail, not part of the working-directories data model other tasks consume. */
+function isSessionDirs(x: unknown): x is SessionDirs {
+  return Array.isArray(x) && x.every(
+    (e) => typeof e === "object" && e !== null &&
+      typeof (e as { path?: unknown }).path === "string" &&
+      typeof (e as { locked?: unknown }).locked === "boolean",
+  );
+}
+
 export class SessionStore {
   private db: Database;
+  /** working-directories T1: session ids already warned about a malformed `dirs` column, this
+   *  store instance's lifetime — see `dirs()`'s doc comment for why this is what makes "log once"
+   *  true without a second `dirs`-column write path. */
+  private readonly warnedMalformedDirs = new Set<string>();
 
   constructor(private readonly homeDir: string) {
     mkdirSync(join(homeDir, "sessions"), { recursive: true });
@@ -185,6 +205,24 @@ export class SessionStore {
       // would be to put the stamp in the event log — a protocol change deliberately out of T7's
       // scope. See cleaner.ts for the permanence rule this column implements.
       "ALTER TABLE sessions ADD COLUMN judged INTEGER",
+      // working-directories T1 (design doc §1/§4): the ordered SessionDir[] JSON array that
+      // REPLACES the engine's own in-memory root bookkeeping (a later task) and generalizes `cwd`
+      // (`dirs[0]` is the primary, by position). Same additive index-only pattern as
+      // `backgrounded`/`archived`/`judged` above, and reset to NULL by a full index.db rebuild
+      // (`recoverAll`'s pass-2 INSERT below does not mention this column, same as it doesn't
+      // mention `cwd`). Per spec §4 that reset is FAIL-SAFE, not data loss to guard against: a
+      // rebuilt row re-derives from `cwd` (which itself resets to NULL in the same rebuild), so the
+      // reset can only ever NARROW the writable set, never widen it — and losing a LOCK is
+      // UX-permanence, not a security property.
+      //
+      // working-directories T6: NULL only for a PRE-BRANCH row (everything `createSession` wrote
+      // before this task, plus any row a rebuild reset). `createSession` itself now writes this
+      // column DIRECTLY at INSERT time (unlocked primary from `cwd`, or `[]` — see its own doc
+      // comment), so a row minted after T6 is never NULL to begin with. `setDirsRaw` (T2 onward:
+      // `session.setDirs`) remains the only writer for a row that already EXISTS. NULL is read back
+      // only by `dirs()` below, which is where the lazy cwd-migration this column exists to support
+      // actually lives — reachable now only via a pre-branch row or a post-rebuild reset.
+      "ALTER TABLE sessions ADD COLUMN dirs TEXT",
     ]) {
       try { this.db.run(ddl); }
       catch (e) {
@@ -318,9 +356,23 @@ export class SessionStore {
     if (!SCOPE_RE.test(scope)) throw new Error(`invalid scope: ${scope}`);
     const sessionId = `s_${randomBytes(6).toString("hex")}`;
     mkdirSync(join(this.homeDir, "sessions", scope), { recursive: true });
+    // working-directories T6 (spec §1/§4): the `dirs` column is written DIRECTLY here, not left
+    // NULL for `dirs()`'s lazy cwd-migration to derive later — that migration is for PRE-BRANCH
+    // rows only (every row this method has ever produced). A `cwd` becomes an UNLOCKED primary
+    // (`[{path: cwd, locked: false}]`) — deliberately NOT the migration's grandfathered-LOCKED
+    // shape, which exists only because a pre-branch row had no mechanism that could ever have
+    // changed its `cwd`; a brand-new session locks its primary the ordinary way, at its first
+    // write (T5). No `cwd` becomes `[]` (workdir-less), explicit rather than NULL-and-derived —
+    // same value `dirs()` would have derived anyway, just written up front. `opts.cwd` is stored
+    // VERBATIM (uncanonicalized), matching the `cwd` column right next to it and the lazy
+    // migration's own `deriveFromCwd` — cwd/dirs[0] alias parity (T3) holds by construction, not
+    // by a second canonicalization pass agreeing with the first. This is the row's INITIAL value,
+    // not a mutation: `setDirsRaw` (T1) remains the ONLY writer once a session exists, so this
+    // INSERT is not a second call site for that grep to catch.
+    const dirs: SessionDirs = opts.cwd ? [{ path: opts.cwd, locked: false }] : [];
     this.db.run(
-      "INSERT INTO sessions (session_id, scope, created_at, last_seq, cwd, approval_policy, origin, mode, parent_session_id, model, effort) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
-      [sessionId, scope, Date.now(), opts.cwd ?? null, opts.approvalPolicy ?? "ask", opts.origin ?? null, opts.mode ?? null, opts.parentSessionId ?? null, opts.model ?? null, opts.effort ?? null],
+      "INSERT INTO sessions (session_id, scope, created_at, last_seq, cwd, approval_policy, origin, mode, parent_session_id, model, effort, dirs) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [sessionId, scope, Date.now(), opts.cwd ?? null, opts.approvalPolicy ?? "ask", opts.origin ?? null, opts.mode ?? null, opts.parentSessionId ?? null, opts.model ?? null, opts.effort ?? null, JSON.stringify(dirs)],
     );
     this.append(sessionId, { type: "session_created", sessionId, scope, ...(opts.mode ? { mode: opts.mode } : {}) });
     return sessionId;
@@ -405,6 +457,69 @@ export class SessionStore {
 
   setCwd(sessionId: string, cwd: string): void {
     this.db.run("UPDATE sessions SET cwd = ? WHERE session_id = ?", [cwd, sessionId]);
+  }
+
+  /** working-directories T1 (design doc §1/§4): the session's ordered `SessionDir[]` set, with the
+   *  lazy migration from the legacy single `cwd` living INSIDE this getter rather than as a
+   *  separate bulk-rewrite pass (spec §4: "Derived lazily at read/first-mutation; no bulk
+   *  rewrite").
+   *
+   *  Three cases:
+   *   - `dirs` column NULL (every row created before this shipped, and any row that survived a
+   *     full index.db rebuild — see the column's own doc comment above): derive from `cwd`. A
+   *     non-null cwd becomes `[{path: cwd, locked: true}]` — GRANDFATHERED LOCKED, the spec §1
+   *     ruling: no mechanism could ever have changed cwd, so treating it as locked loses nothing
+   *     that was ever real. No cwd becomes `[]` (workdir-less).
+   *   - `dirs` column holds valid JSON matching `SessionDirs`: parsed and returned VERBATIM.
+   *   - `dirs` column holds something else (malformed JSON, or valid JSON in the wrong shape — a
+   *     hand-edited db, a future writer bug): falls back to the SAME cwd derivation as the NULL
+   *     case, and logs the fact once per session per store instance (`warnedMalformedDirs`, the
+   *     `permission-rules.ts` warn-once precedent) rather than on every call — a broken row must
+   *     degrade to "what today's cwd column would have meant" and stay quiet about it, not throw
+   *     and not spam the log every time this session is looked at.
+   *
+   *  DERIVES, DOES NOT PERSIST: a NULL or malformed column is re-derived on every call rather than
+   *  healed back into the column. Deliberate, not an oversight: persisting here would need a
+   *  second `UPDATE sessions SET dirs` call site, undermining `setDirsRaw`'s "the ONLY writer of
+   *  this column" contract (a grep for that call is how reviews catch a rogue second writer). It
+   *  is cheap either way — one indexed-by-primary-key SELECT plus a JSON.parse, never a table
+   *  scan — and the instant ANY real mutation happens (T2's setDirs, always through `setDirsRaw`)
+   *  the column stops being NULL/malformed and this function stops deriving for that row, ever
+   *  again. */
+  dirs(sessionId: string): SessionDirs {
+    const row = this.db.query("SELECT cwd, dirs FROM sessions WHERE session_id = ?").get(sessionId) as
+      | { cwd: string | null; dirs: string | null } | null;
+    if (!row) throw new Error(`unknown session: ${sessionId}`);
+    const deriveFromCwd = (): SessionDirs => (row.cwd !== null ? [{ path: row.cwd, locked: true }] : []);
+    if (row.dirs === null) return deriveFromCwd();
+    let parsed: unknown;
+    try { parsed = JSON.parse(row.dirs); } catch { parsed = undefined; }
+    if (isSessionDirs(parsed)) return parsed;
+    if (!this.warnedMalformedDirs.has(sessionId)) {
+      this.warnedMalformedDirs.add(sessionId);
+      console.error(`[sessions/store] malformed dirs column for session ${sessionId} — falling back to cwd derivation`);
+    }
+    return deriveFromCwd();
+  }
+
+  /** working-directories T1: LOW-LEVEL column write — JSON-serializes `dirs` and stores it
+   *  verbatim. Nothing else: no canonicalization, no lock check, no participation/denylist
+   *  refusal, no primary/workdir-less bookkeeping. Those all belong to the DOMAIN setter (T2's
+   *  `session.setDirs` handler), exactly as `setBackgrounded`/`setArchived` stay dumb bit-flips
+   *  and leave their own policy (e.g. the archived-immutability rule) to `setSessionActivity`
+   *  (set-activity.ts) — same split, same reason: a policy question answered twice, in two
+   *  places, is a policy that can drift.
+   *
+   *  THE ONLY PRODUCTION CALLER IS T2'S DOMAIN SETTER. A second caller bypasses every check the
+   *  domain setter enforces, silently. Reviews should grep `setDirsRaw(` and expect exactly one
+   *  call site outside tests.
+   *
+   *  Does NOT touch the `cwd` column — cwd/`dirs[0]` alias parity is a READ-side concern (T3).
+   *  Throws on an unknown session (the `setModel`/`setApprovalPolicy` precedent: a caller writing
+   *  dirs for a session that doesn't exist is a bug, not a silent no-op). */
+  setDirsRaw(sessionId: string, dirs: SessionDirs): void {
+    const res = this.db.run("UPDATE sessions SET dirs = ? WHERE session_id = ?", [JSON.stringify(dirs), sessionId]);
+    if (res.changes === 0) throw new Error(`unknown session: ${sessionId}`);
   }
 
   /** Deterministic on an unknown session: throws so the IPC server can map it to NOT_FOUND
@@ -650,7 +765,17 @@ export class SessionStore {
    *  forgets to check first. Throws on an unknown session — the `setApprovalPolicy`/`setModel`
    *  precedent: a caller deleting a session that doesn't exist is a bug, not a silent no-op. A
    *  missing log file (already gone, somehow) is tolerated — the index row is still the correct
-   *  thing to remove. */
+   *  thing to remove.
+   *
+   *  working-directories T4: AFTER the row + JSONL are gone, best-effort `rm -rf` of the session's
+   *  outputs dir (`sessions/outdir.ts`'s `outdirPath`) — the SAME "delete first, log second, never
+   *  undo or retry" audit-order precedent `reapEmptySessions` (reaper.ts) already applies to its own
+   *  best-effort audit-log append: the row/log deletion above is the part that must never be
+   *  compromised by a filesystem hiccup on the outputs dir, so a failure here is caught and logged,
+   *  never thrown. A session that never wrote anything into its outputs dir (the common
+   *  empty-session-reaper case) has no such directory at all — `rmSync(..., { force: true })`
+   *  tolerates a missing path exactly like `unlinkSync`'s own `existsSync` guard above does for the
+   *  log file, so the reaper's sweep stays vacuous-safe for it. */
   deleteSession(sessionId: string): void {
     const row = this.db.query("SELECT scope, mode FROM sessions WHERE session_id = ?").get(sessionId) as
       | { scope: string; mode: string | null } | null;
@@ -659,6 +784,11 @@ export class SessionStore {
     const path = this.logPath(row.scope, sessionId);
     if (existsSync(path)) unlinkSync(path);
     this.db.run("DELETE FROM sessions WHERE session_id = ?", [sessionId]);
+    try {
+      rmSync(outdirPath(this.homeDir, sessionId), { recursive: true, force: true });
+    } catch (err) {
+      console.error(`[store] failed to remove outputs dir for ${sessionId}:`, err);
+    }
   }
 
   // -----------------------------------------------------------------------------------------

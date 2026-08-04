@@ -294,6 +294,85 @@ describe("PendingCards — approval with options (SP-approvals T7)", () => {
   });
 });
 
+// working-directories T7 (the T6.5 carried requirement): the with-dirs dirGrant card's real shape
+// (engine.ts ~4334-4343, verbatim id/label/order per task-6.5-report.md: "allow_once, allow_add_dir,
+// allow_project, deny") carries a THIRD card line — `allow_add_dir`, "Allow and add as working
+// directory" — that is deliberately rule-LESS (it persists a session-dirs row, not a permission
+// rule). Before this task, `ruleBearingOptions()` filtered on `rule !== undefined`, so this option
+// never got a `[N]` menu line and was unreachable from the TUI at all — the fix widens the filter to
+// "every option except allow_once/deny" (now `additionalOptions`). Fixture is the daemon's real
+// shape, not a synthetic one, so this pins against the actual with-dirs card, not an idealization of
+// it.
+describe("PendingCards — a rule-less additional option (working-directories T7)", () => {
+  const dirGrantOptions = [
+    { id: "allow_once", label: "Allow once" },
+    { id: "allow_add_dir", label: "Allow and add as working directory" },
+    { id: "allow_project", label: "Always allow edits in /some/project/../outside", rule: "Edit(/some/project/../outside)", scope: "project" as const },
+    { id: "deny", label: "Deny" },
+  ];
+  const card: PendingCard = { kind: "approval", callId: "wd1", toolName: "write", summary: "/some/project/../outside/notes.md", options: dirGrantOptions };
+
+  test("(wd1) frame renders all three additional lines — [y] allow once, [1] allow_add_dir's verbatim label, [2] the rule-bearing label, [n] deny", async () => {
+    const { lastFrame } = render(<PendingCards pending={card} onApprove={() => {}} onAnswer={() => {}} onPlan={() => {}} />);
+    await wait();
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("[y] allow once");
+    expect(frame).toContain("[1] Allow and add as working directory");
+    expect(frame).toContain("[2] Always allow edits in /some/project/../outside");
+    expect(frame).toContain("[n] deny");
+  });
+
+  test("(wd2) '1\\r' -> onApprove(callId, true, 'allow_add_dir') — the previously-unreachable rule-less option, now selectable", async () => {
+    const calls: [string, boolean, string | undefined][] = [];
+    const { stdin } = render(
+      <PendingCards pending={card} onApprove={(id, yes, optionId) => calls.push([id, yes, optionId])} onAnswer={() => {}} onPlan={() => {}} />,
+    );
+    await wait();
+    stdin.write("1");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(calls).toEqual([["wd1", true, "allow_add_dir"]]);
+  });
+
+  test("(wd3) '2\\r' -> onApprove(callId, true, 'allow_project') — the rule-bearing option still works, unaffected by the widened filter", async () => {
+    const calls: [string, boolean, string | undefined][] = [];
+    const { stdin } = render(
+      <PendingCards pending={card} onApprove={(id, yes, optionId) => calls.push([id, yes, optionId])} onAnswer={() => {}} onPlan={() => {}} />,
+    );
+    await wait();
+    stdin.write("2");
+    await wait();
+    stdin.write("\r");
+    await wait();
+    expect(calls).toEqual([["wd1", true, "allow_project"]]);
+  });
+
+  test("(wd4) 'y\\r' and 'n\\r' stay on the byte-identical fixed keys, no optionId — the primary allow/deny behavior is untouched", async () => {
+    const yesCalls: [string, boolean, string | undefined][] = [];
+    const { stdin: yStdin } = render(
+      <PendingCards pending={card} onApprove={(id, yes, optionId) => yesCalls.push([id, yes, optionId])} onAnswer={() => {}} onPlan={() => {}} />,
+    );
+    await wait();
+    yStdin.write("y");
+    await wait();
+    yStdin.write("\r");
+    await wait();
+    expect(yesCalls).toEqual([["wd1", true, undefined]]);
+
+    const noCalls: [string, boolean, string | undefined][] = [];
+    const { stdin: nStdin } = render(
+      <PendingCards pending={card} onApprove={(id, yes, optionId) => noCalls.push([id, yes, optionId])} onAnswer={() => {}} onPlan={() => {}} />,
+    );
+    await wait();
+    nStdin.write("n");
+    await wait();
+    nStdin.write("\r");
+    await wait();
+    expect(noCalls).toEqual([["wd1", false, undefined]]);
+  });
+});
+
 // 5e whole-branch hardening: the newline/boundary cases the Swift twin (PendingCardsTests's four
 // capReviewerReason tests) already pins — unit-level on the exported pure helper, because the
 // exact 100/101 boundary can't be asserted through a rendered frame (Ink wraps at terminal width).

@@ -23,6 +23,21 @@ d("bash tool (sandboxed)", () => {
     expect(res.output).toContain("[exit 0]");
   });
 
+  // I-2 (whole-branch review, optional defensive backstop): a `roots` entry that doesn't exist on
+  // disk used to make `roots.map(realpathSync)` throw and crash the WHOLE call — not just a write
+  // into that one dir. Row-derived roots normally get realpath-or-skip UPSTREAM (engine.ts's
+  // sessionDirPaths, daemon.ts's roots closure) before they ever reach here, but this pins bash.ts's
+  // OWN skip as a second line of defense for any other producer of `roots` (e.g. a hand-authored
+  // project-local permission dir) that doesn't already guard existence.
+  test("a missing root in the roots array doesn't crash the call — it's silently skipped, the command still runs", async () => {
+    const cwd = proj();
+    const missing = join(cwd, "..", "norma-bash-missing-" + Date.now());
+    const res = await reg().execute("bash", { command: "echo still-runs" }, { cwd, roots: [cwd, missing], sessionId: "s1" });
+    expect(res.isError).toBe(false);
+    expect(res.output).toContain("still-runs");
+    expect(res.output).toContain("[exit 0]");
+  });
+
   test("can write inside the session cwd", async () => {
     const cwd = proj();
     const res = await reg().execute("bash", { command: "echo in-cwd > made.txt && cat made.txt" }, { cwd, roots: [cwd], sessionId: "s1" });

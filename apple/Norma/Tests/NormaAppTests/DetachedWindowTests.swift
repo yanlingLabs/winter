@@ -218,12 +218,16 @@ final class DetachedWindowTests: XCTestCase {
         await answerHandshake(t, sessionId: "S1")
         await feedWaitUntil { session.state.status != .disconnected }
 
-        controller.newSession()
+        // working-directories T8: `newSession()` now OPENS the create-time folder picker (an AppKit
+        // sheet, undrivable from a unit test); `startSession(with:)` is the half that reaches the
+        // wire and is what the sheet's completion calls with the user's choice.
+        controller.startSession(with: .folder("/tmp/proj"))
         await waitUntilSent(t, 3)
         let create = feedLineJSON(t.sent[2])
         XCTAssertEqual(create["method"] as? String, "session.create")
         let createParams = create["params"] as? [String: Any]
         XCTAssertEqual(createParams?["approvalPolicy"] as? String, "auto")
+        XCTAssertEqual(createParams?["cwd"] as? String, "/tmp/proj", "the picker's folder becomes the session's cwd")
         t.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"S2","trusted":true}}"#)
 
         await waitUntilSent(t, 4)
@@ -234,6 +238,34 @@ final class DetachedWindowTests: XCTestCase {
 
         await feedWaitUntil { controller.sessionId == "S2" }
         XCTAssertEqual(controller.sessionId, "S2")
+    }
+
+    /// working-directories T8: the "No folder (outputs only)" row sends NO `cwd` key AT ALL — not an
+    /// empty string, and emphatically not the old hardcoded `NSHomeDirectory()`. That absence is the
+    /// whole mechanism: `session.create` without a cwd is what makes the daemon write `dirs = []`
+    /// (T6), i.e. a workdir-less session confined to `$OUTDIR`/`$TMPDIR`/`$MEMDIR`. A fallback here
+    /// would silently adopt the user's entire home directory as a writable root.
+    func testNoFolderChoiceCreatesWithoutACwd() async throws {
+        let t = DetachedScriptedTransport()
+        let session = SessionModel()
+        let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
+        let controller = DetachedWindowController(
+            feed: feed, session: session,
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+        )
+        defer { controller.close() }
+        controller.show()
+
+        await answerHandshake(t, sessionId: "S1")
+        await feedWaitUntil { session.state.status != .disconnected }
+
+        controller.startSession(with: .noFolder)
+        await waitUntilSent(t, 3)
+        let create = feedLineJSON(t.sent[2])
+        XCTAssertEqual(create["method"] as? String, "session.create")
+        let createParams = create["params"] as? [String: Any]
+        XCTAssertNil(createParams?["cwd"], "outputs-only must omit the cwd key entirely")
+        XCTAssertEqual(createParams?["approvalPolicy"] as? String, "auto")
     }
 
     // MARK: - Plan-immunity (2026-07-28 design): DetachedWindowController.isChatSession(_:in:) (PURE)

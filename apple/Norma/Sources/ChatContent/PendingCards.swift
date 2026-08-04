@@ -175,6 +175,28 @@ func showsCardTitleRow(_ interaction: PendingInteraction) -> Bool {
     return !questionIsSimplified(first)
 }
 
+/// The approval card's ADDITIONAL option rows — every option the daemon sent EXCEPT the two the
+/// card's own primary Approve/Deny buttons already are (`allow_once`, `deny`). Rendered as the quiet
+/// row below those buttons.
+///
+/// working-directories T7/T8: this used to filter on `rule != nil` ("rule-bearing options only"),
+/// which was correct while every extra option WAS rule-bearing — the SP-approvals allow_project/
+/// allow_global shapes. T6.5's `allow_add_dir` ("Allow and add as working directory", third option
+/// on the with-dirs dirGrant card) carries NO rule: it adopts a directory into the session's
+/// working-directory set, which is a session fact rather than a persisted permission rule. So the
+/// old filter dropped it, and the one card option that widens a session's write fence deliberately
+/// was UNREACHABLE from this app — the same hole T7 closed on the TUI side (`additionalOptions` in
+/// `packages/cli/src/tui/pending-cards.tsx`), and closed here the same way, by EXCLUSION rather than
+/// by enumerating which shapes count.
+///
+/// Excluding by id is what keeps this correct for options nobody has written yet: a new
+/// rule-less option gets an affordance for free, while `allow_once`/`deny` stay exactly where they
+/// are (the primary row, no `optionId` — byte-identical to before). Pure and exported so
+/// `PendingCardsTests` can drive the rule directly, since `PendingApprovalBody` is a private view.
+func approvalAdditionalOptions(_ options: [SessionEvent.ApprovalOption]?) -> [SessionEvent.ApprovalOption] {
+    (options ?? []).filter { $0.id != "allow_once" && $0.id != "deny" }
+}
+
 /// Phase 5e T5: reviewer text is model-summarized input riding a NEW client-facing surface —
 /// already newline-stripped + capped at 300 on the wire (engine.ts's `sanitizeReviewText`), but
 /// treated as tainted for LAYOUT here too: a defensive second newline-strip plus a much tighter
@@ -268,10 +290,11 @@ private struct PendingApprovalBody: View {
     /// into `onApproval` so the respond routes to the child, not this card's own dispatch session.
     let childSessionId: String?
     /// SP-approvals T6: additive/optional — `PendingInteraction.approval`'s 6th associated value,
-    /// mirroring `SessionEvent.ApprovalRequested.options` (Task 5's `approvalOptionsFor`). Only the
-    /// RULE-BEARING entries feed `ruleOptions` below — a plain allow-once/deny entry is already
-    /// covered by the Approve/Deny buttons and would just duplicate them. `nil`, or an array with no
-    /// rule-bearing entries, renders this card byte-identical to before this task.
+    /// mirroring `SessionEvent.ApprovalRequested.options` (Task 5's `approvalOptionsFor`). Every
+    /// entry EXCEPT `allow_once`/`deny` feeds `additionalOptions` below (working-directories T8 —
+    /// see `approvalAdditionalOptions` for why this became an exclusion): those two are already the
+    /// primary Approve/Deny buttons and would just duplicate them. `nil`, or an array holding only
+    /// those two, renders this card byte-identical to before this task.
     let options: [SessionEvent.ApprovalOption]?
     let isInFlight: Bool
     let onApproval: (String, Bool, String?, String?) -> Void  // callId, approved, optionId, childSessionId
@@ -282,12 +305,9 @@ private struct PendingApprovalBody: View {
         summary.count > 150 || summary.filter { $0 == "\n" }.count >= 3
     }
 
-    /// `ApprovalOption.rule`/`scope` are present TOGETHER only on an option that persists a
-    /// permission rule when chosen (see that struct's own doc in NormaProtocol) — a plain
-    /// allow-once/deny option (`rule == nil`) is filtered out here since Approve/Deny already
-    /// cover it.
-    private var ruleOptions: [SessionEvent.ApprovalOption] {
-        (options ?? []).filter { $0.rule != nil }
+    /// The quiet row's options — see `approvalAdditionalOptions` (the pure, tested rule).
+    private var additionalOptions: [SessionEvent.ApprovalOption] {
+        approvalAdditionalOptions(options)
     }
 
     var body: some View {
@@ -330,13 +350,14 @@ private struct PendingApprovalBody: View {
             .controlSize(.small)
             .disabled(isInFlight)
 
-            // SP-approvals T6: one quiet button per rule-bearing option, below the primary row —
+            // SP-approvals T6: one quiet button per additional option, below the primary row —
             // `.plain` + secondary/small text, same "quiet" convention as the "Show more" toggle
-            // above, so a rule-writing choice never reads as visually equal to Approve/Deny. Labels
-            // render verbatim (the daemon already composes the exact rule string into them).
-            if !ruleOptions.isEmpty {
+            // above, so a rule-writing (or fence-widening) choice never reads as visually equal to
+            // Approve/Deny. Labels render verbatim (the daemon already composes the exact rule
+            // string — or, for `allow_add_dir`, the exact adoption wording — into them).
+            if !additionalOptions.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(ruleOptions, id: \.id) { option in
+                    ForEach(additionalOptions, id: \.id) { option in
                         Button(option.label) { onApproval(callId, true, option.id, childSessionId) }
                             .buttonStyle(.plain)
                             .font(.system(size: 11, weight: .medium))

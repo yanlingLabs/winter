@@ -12,7 +12,7 @@ import {
   SessionSteerParams, SessionInterruptParams, SessionCompactParams, SkillsListParams, McpListParams,
   SkillsReadParams, SkillsWriteParams, SkillsDeleteParams,
   PluginsListParams, AskUserRespondParams, TaskListParams, PlanRespondParams, SessionSetPolicyParams,
-  SessionSetModelParams, SessionSetEffortParams, SessionSetActivityParams,
+  SessionSetModelParams, SessionSetEffortParams, SessionSetActivityParams, SessionSetDirsParams,
   ThreadListParams, ThreadSendParams, AgentStopParams,
   PeripheralLeaseParams, PeripheralRenewParams, PeripheralReleaseParams, PeripheralAdvertiseParams,
   PeripheralRevokeParams, PeripheralRespondParams, DaemonStatusParams, EngineActivityParams, QuotaStateParams,
@@ -42,6 +42,7 @@ import { readHistoryPage } from "../sessions/history";
 import { makeActivityDeriver, participatesInActivity, type ActivityDeriver } from "../sessions/activity";
 import { createActivityEnforcement } from "../sessions/activity-enforcement";
 import { setSessionActivity, type SetActivityDeps } from "../sessions/set-activity";
+import { setSessionDirs, type SetDirsDeps } from "../sessions/set-dirs";
 import { reapEmptySessions } from "../sessions/reaper";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
@@ -393,6 +394,13 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   // ever needed them.
   METHODS.syncConfig,
   METHODS.syncMemory,
+  // working-directories T3: the phone mutates a remote-driven CODE session's working-directory set
+  // — the WRITE half of `dirs`, the `session.list` row field this task also adds. Same bare-
+  // sessionId shape as `session.setActivity` just above, so the same assertRemoteMayUseSession
+  // guard applies below (refusing dispatch/chat by MODE — cowork, the dirs-participation
+  // allowlist's other member, is Mac-local-only and never reaches this guard at all); the setter's
+  // own participation check is a SECOND, narrower gate on top of that.
+  METHODS.sessionSetDirs,
 ]);
 
 /** The session `mode`s a remote (iPhone) client may target at all — every other mode is Mac-local
@@ -607,6 +615,19 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     isRunning: (sessionId) => opts.engine?.isRunning(sessionId) ?? false,
     derive: deriveActivity,
     emit: (sessionId, activity) => hub.emitActivity(sessionId, activity),
+  };
+
+  /** working-directories T3: the deps `session.setDirs` hands to the shared write half (T2's
+   *  `setSessionDirs`). `grantDenied` is wired to the REAL predicate the engine's own dirGrant
+   *  approval flow consults (`AgentEngine.isGrantDenied`, the smallest honest public accessor onto
+   *  its private `grantDenied` — see that method's own doc comment) so a working directory can
+   *  never be set to a path this engine would refuse to grant through any other door. `?? false` on
+   *  a no-engine server (most existing tests, and a no-agentProvider daemon) — same "typed no-op,
+   *  permissive default" precedent `turnRunning`/`bgWork` above use for an absent engine: nothing to
+   *  deny when there is no engine's denylist to consult. */
+  const setDirsDeps: SetDirsDeps = {
+    store: opts.store,
+    grantDenied: (dir) => opts.engine?.isGrantDenied(dir) ?? false,
   };
 
   enforcement.start();
@@ -1115,9 +1136,22 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // returns undefined for chat/dispatch and builds no signals for those rows — which also
         // keeps the per-row `lastEventTs` stat off the chat/dispatch rows entirely.
         const now = Date.now();
+        // working-directories T3: `dirs` rides the SAME participation gate `activity` above uses
+        // (code + cowork + absent-means-code) — chat/dispatch have no writable root at all
+        // (DIRS_MODE_REFUSAL), so `dirs` stays absent on those rows, exactly like `activity`.
+        //
+        // `cwd` is OVERWRITTEN here from `dirs[0]?.path` rather than left as the raw stored `cwd`
+        // column: `session.setDirs`'s `setDirsRaw` (sessions/store.ts) deliberately never touches
+        // that column, so once a session's dirs have been written through the RPC, the stored `cwd`
+        // is stale and only this populate-time alias keeps `cwd === dirs[0]?.path` true. For a
+        // session that predates working directories (no `dirs` column write ever happened),
+        // `store.dirs()` derives its answer FROM that same `cwd` column (T1's lazy migration), so
+        // this alias is a no-op there — the value is unchanged, just re-read through the derived
+        // path instead of trusted directly.
         const sessions = opts.store.list().map((s) => {
           if (!participatesInActivity(s.mode)) return s;
-          return { ...s, activity: deriveActivity(s, s.sessionId, now) };
+          const dirs = opts.store.dirs(s.sessionId);
+          return { ...s, activity: deriveActivity(s, s.sessionId, now), dirs, cwd: dirs[0]?.path };
         });
         // Chat mode Slice C: chat sessions are now visible to remote too. A mode outside
         // REMOTE_ELIGIBLE_SESSION_MODES (Mac-local-only — e.g. a future cowork surface) stays
@@ -1357,7 +1391,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             }
           }
         }
-        return opts.broker?.resolve(p.sessionId, p.callId, p.approved, socket.data.clientName) ?? { ok: true, alreadyResolved: true };
+        // working-directories Task 6.5: `p.optionId` is forwarded into `resolve()` (previously only
+        // consulted above for rule persistence) so an `onApprove` closure with more than one
+        // meaningfully-different approved outcome — the with-dirs dirGrant card's `allow_add_dir`
+        // beside `allow_once` — can learn WHICH one was chosen. Purely a plumbing forward: this
+        // handler still has no per-id knowledge of what any option DOES (that stays engine-side).
+        return opts.broker?.resolve(p.sessionId, p.callId, p.approved, socket.data.clientName, p.optionId) ?? { ok: true, alreadyResolved: true };
       }
       case METHODS.approvalList: {
         // SP3 T4b: queryable pending-approval state (remote-allowlisted so a phone can render live
@@ -1579,6 +1618,22 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throw new RpcFailure(res.kind === "not_found" ? ERR.NOT_FOUND : ERR.INVALID_PARAMS, res.error);
         }
         return { ok: true, activity: res.activity };
+      }
+
+      // working-directories T3: the WRITE half of a session's working-directory set (`session.list`'s
+      // `dirs`, populated below, is the read half). Structurally identical to `session.setActivity`
+      // just above — `parseParams` + `assertRemoteMayUseSession` + delegate to the shared domain
+      // setter (T2's `setSessionDirs`) + kind→ERR mapping — because it is the SAME template: the RPC
+      // keeps only what is genuinely its own (wire parsing, the remote gate), and every refusal (NOT
+      // FOUND first, participation, locked, denylist, remove-primary) lives once, in `set-dirs.ts`.
+      case METHODS.sessionSetDirs: {
+        const p = parseParams(SessionSetDirsParams, params);
+        assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        const res = setSessionDirs(setDirsDeps, p.sessionId, p.op, p.path);
+        if (!res.ok) {
+          throw new RpcFailure(res.kind === "not_found" ? ERR.NOT_FOUND : ERR.INVALID_PARAMS, res.error);
+        }
+        return { ok: true, dirs: res.dirs };
       }
 
       // -----------------------------------------------------------------------------------------
@@ -1874,7 +1929,19 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
-        opts.dirs?.add(p.sessionId, p.path);
+        // working-directories T5: this legacy verb (CLI `norma add-dir`, the TUI's `/add-dir`,
+        // NormaKit's `addDir`) is now a THIN ALIAS over the one setter rather than a second writer
+        // of the fence. It used to `opts.dirs.add(...)` an in-memory root that no client could see,
+        // that no restart survived, and that no lock rule applied to; the same call now lands the
+        // directory in the `dirs` row exactly as `session.setDirs {op:"add"}` does — one writer, one
+        // state, and the `roots` echo below (unchanged, wd-m11) reflects it through the daemon's
+        // row-derived roots closure. Refusals it never had before are the setter's own and all
+        // correct for this door: a chat/dispatch target, and a path the dirGrant denylist forbids.
+        // `session.setDirs` is the verb to prefer; this one is kept for its shipped callers.
+        const added = setSessionDirs(setDirsDeps, p.sessionId, "add", p.path);
+        if (!added.ok) {
+          throw new RpcFailure(added.kind === "not_found" ? ERR.NOT_FOUND : ERR.INVALID_PARAMS, added.error);
+        }
         const persisted = p.persist && meta.cwd !== null;
         if (persisted) addLocalDir(meta.cwd!, p.path);
         hub.append(p.sessionId, { type: "directory_added", sessionId: p.sessionId, threadId: "main", path: p.path, persisted });

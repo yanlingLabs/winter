@@ -7,6 +7,7 @@ import { SessionStore, EMPTY_SESSION_GRACE_MS } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
 import { appendCleanerLog } from "../../src/sessions/cleaner-log";
 import { reapEmptySessions, type ReaperStore } from "../../src/sessions/reaper";
+import { ensureOutdir, outdirPath } from "../../src/sessions/outdir";
 import { startIpcServer } from "../../src/ipc/server";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -194,6 +195,31 @@ describe("SessionStore.deleteSession (session-activity-hygiene T6)", () => {
     expect(existsSync(join(dir, "sessions", "global", `${dispatchId}.jsonl`))).toBe(true);
     store.close();
   });
+
+  // working-directories T4: `deleteSession` also best-effort removes the session's outputs dir
+  // (`sessions/outdir.ts`) AFTER the row + JSONL are gone — same audit-order precedent as
+  // `reapEmptySessions`'s own best-effort log append (delete first, never undo/retry over a
+  // filesystem hiccup on the SECOND thing).
+  test("also removes the session's outputs dir, best-effort, once one exists", () => {
+    const dir = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const store = new SessionStore(dir);
+    const id = store.createSession("global");
+    const outDir = ensureOutdir(dir, id);
+    writeFileSync(join(outDir, "deliverable.txt"), "done");
+    expect(existsSync(outDir)).toBe(true);
+    store.deleteSession(id);
+    expect(existsSync(outDir)).toBe(false);
+    store.close();
+  });
+
+  test("a session with NO outputs dir at all deletes cleanly — vacuous, never throws (the reaper's common case: an empty session never wrote anything)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const store = new SessionStore(dir);
+    const id = store.createSession("global");
+    expect(existsSync(outdirPath(dir, id))).toBe(false); // never created
+    expect(() => store.deleteSession(id)).not.toThrow();
+    store.close();
+  });
 });
 
 describe("appendCleanerLog (session-activity-hygiene T6)", () => {
@@ -250,6 +276,30 @@ describe("reapEmptySessions (session-activity-hygiene T6)", () => {
     expect(lines).toEqual([
       { sessionId: id, title: "Untitled experiment", reason: "reaped: empty", date: new Date(nowMs).toISOString() },
     ]);
+    store.close();
+  });
+
+  // working-directories T4: the reap sweep goes through `store.deleteSession` (unchanged call
+  // shape), which now ALSO best-effort removes the candidate's outputs dir — proven here two ways
+  // in one pass: a candidate that HAS one gets it removed, and a candidate that never wrote
+  // anything there (no directory at all — the common case for a genuinely empty, never-messaged
+  // session) reaps cleanly with no error, pinning the "reaped empty session has no outdir" vacuous
+  // case end to end through the real sweep, not just through `deleteSession` in isolation.
+  test("reaping removes a candidate's outputs dir too, and a candidate with none reaps vacuous-safe", () => {
+    const home = tempHome();
+    const store = new SessionStore(home);
+    const withOutdir = store.createSession("global");
+    const withoutOutdir = store.createSession("global");
+    const outDir = ensureOutdir(home, withOutdir);
+    writeFileSync(join(outDir, "deliverable.txt"), "done");
+    expect(existsSync(outdirPath(home, withoutOutdir))).toBe(false); // never created
+
+    const nowMs = Math.max(agedNow(store, withOutdir, 1), agedNow(store, withoutOutdir, 1));
+    const reaped = reapEmptySessions({ store, attachedCount: NOBODY_ATTACHED, home, now: () => nowMs });
+
+    expect(reaped.sort()).toEqual([withOutdir, withoutOutdir].sort());
+    expect(existsSync(outDir)).toBe(false);
+    expect(existsSync(outdirPath(home, withoutOutdir))).toBe(false); // still absent, never threw
     store.close();
   });
 

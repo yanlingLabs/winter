@@ -1,4 +1,5 @@
 import Foundation
+import NormaKit
 import NormaProtocol
 
 /// 2e-iii Task 5: a live list of every session (title/createdAt/scope/cwd), backing the left
@@ -96,5 +97,15 @@ struct SessionSummary: Equatable, Identifiable {
     /// translation (`SessionListResult.effort`'s own doc comment) — so a picker matching it against
     /// the chosen model's `efforts` array alone will show no checkmark. Match against BOTH lists.
     var effort: String? = nil
+    /// working-directories T8: the session's ordered working-directory set, threaded through from
+    /// `listSessions()` — the create picker's recents (`recentWorkingDirs`) and the header chip
+    /// (`dirsMenuIsVisible`/`dirsChipLabel`) read it straight off this row, same "read fresh from the
+    /// directory" convention as `model`/`effort` above. Defaulted, same reasoning as `mode`.
+    ///
+    /// **`nil` ≠ `[]`.** `nil` = the daemon populated no set at all (chat/dispatch have no
+    /// working-directory concept — `session.list`'s own participation gate); `[]` = a real
+    /// WORKDIR-LESS session, writable only in `$OUTDIR`/`$TMPDIR`/`$MEMDIR`. `cwd` above is the
+    /// daemon's alias of `dirs[0]?.path` for a participating row, never an independent fact.
+    var dirs: [SessionDirEntry]? = nil
     var id: String { sessionId }
 }

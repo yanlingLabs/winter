@@ -98,6 +98,16 @@ export const SessionForkRef = z.object({
   atSeq: z.number().int().nonnegative(),
 });
 
+// working-directories T3 (design doc §1): one entry in a session's ordered working-directory set —
+// mirrors `SessionDir`/`SessionDirs` (core's sessions/dirs.ts) field-for-field. `dirs[0]` is the
+// PRIMARY by POSITION, not a flag. Shared by `SessionListResult`'s per-row `dirs` (the read half,
+// below) and `SessionSetDirsResult` (the write half's echo, defined further down beside
+// `session.setDirs`'s params) — one schema, so the two surfaces can never describe an entry
+// differently. Declared here (ahead of `SessionListResult`) rather than beside `SessionSetDirsParams`
+// because these are plain `const`s evaluated in file order — a forward reference would be a TDZ
+// throw at module load, not a type error.
+export const SessionDirEntry = z.object({ path: z.string(), locked: z.boolean() });
+
 export const SessionCreateParams = z.object({
   scope: z.string().regex(/^[a-z0-9]([a-z0-9-]{0,39}[a-z0-9])?$/), // slug: no leading/trailing hyphen, ≤41 chars
   cwd: AbsoluteDirPath.optional(),        // absolute path (not '/'); session working directory for tools
@@ -157,6 +167,15 @@ export const SessionListResult = z.object({
     // created without one, or one whose index was rebuilt (cwd does NOT ride the event log, so a full
     // index.db rebuild resets it, same class as `origin`/`model`/`effort`). Never fabricated.
     cwd: z.string().optional(),
+    // working-directories T3 (design doc §1): the session's ordered working-directory set — the
+    // read half of `session.setDirs` (T2's domain setter). `dirs[0]` is the PRIMARY by POSITION,
+    // and `cwd` just above is kept an ALIAS of it: the daemon populates BOTH from the same read at
+    // `session.list` time (`cwd: dirs[0]?.path`, ipc/server.ts) rather than trusting the separately
+    // stored `cwd` column to stay in sync — `setDirsRaw` (store.ts) deliberately does NOT touch that
+    // column, so once a session's dirs have been written through `session.setDirs`, only this
+    // populate-time alias keeps the two fields agreeing. Absent for chat/dispatch — those modes have
+    // no writable root at all (DIRS_MODE_REFUSAL), the same participation gate `activity` below uses.
+    dirs: z.array(SessionDirEntry).optional(),
     // Additive (phase 5 routines T3): round-trips SessionCreateParams.origin — undefined for
     // every session created before this field existed, or created without one.
     origin: z.string().optional(),
@@ -495,6 +514,22 @@ export const SessionSetActivityParams = z.object({
  *  field is present in practice — it stays optional so the two surfaces express absence identically
  *  and a future participating-mode change has one vocabulary, not two. */
 export const SessionSetActivityResult = z.object({ ok: z.literal(true), activity: SessionActivity.optional() });
+
+// working-directories T3: params for the one write door onto a session's working-directory set
+// (`setSessionDirs`, core's sessions/set-dirs.ts, T2's domain setter). `op` is the three mutations
+// the setter supports — no "clear"/"remove all" (see that module's own doc comment for why).
+// `path` is `AbsoluteDirPath`, the SAME bound `session.setCwd`'s `cwd` uses above: a relative path
+// is refused HERE with a clean INVALID_PARAMS, rather than reaching the setter's own
+// `canonicalizeDirPath` (which throws on a relative path) and surfacing as an undifferentiated
+// ERR.INTERNAL.
+export const SessionSetDirsParams = z.object({
+  sessionId: z.string().min(1),
+  op: z.enum(["setPrimary", "add", "remove"]),
+  path: AbsoluteDirPath,
+});
+/** `dirs` is the POST-WRITE state, not an echo of what was sent — mirrors
+ *  `SessionSetActivityResult.activity`'s own "report what the write actually produced" contract. */
+export const SessionSetDirsResult = z.object({ ok: z.literal(true), dirs: z.array(SessionDirEntry) });
 
 export const ThreadInfoSchema = z.object({
   threadId: z.string(), parentThreadId: z.string().optional(), agentType: z.string().optional(),
@@ -1416,6 +1451,7 @@ export const METHODS = {
   sessionSetModel: "session.setModel",
   sessionSetEffort: "session.setEffort",
   sessionSetActivity: "session.setActivity",
+  sessionSetDirs: "session.setDirs",
   threadList: "thread.list",
   threadSend: "thread.send",
   agentStop: "agent.stop",

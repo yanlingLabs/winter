@@ -5,6 +5,12 @@ import type { ApprovalOption, NewSessionEvent, Question, SessionEvent, Task } fr
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
 import { participatesInActivity } from "../sessions/activity";
+// working-directories T5: the session `dirs` row is the fence's source of truth (spec §1: "the
+// engine's writableRoots derives from the row. Engine-internal grant state is REPLACED by the
+// row"), and `setSessionDirs`/`lockDir` are the ONE writer every mutation door goes through —
+// the dirGrant adopt and the first-write lock hooks below included.
+import { canonicalizeDirPath, type SessionDirs } from "../sessions/dirs";
+import { setSessionDirs, lockDir, type SetDirsDeps } from "../sessions/set-dirs";
 import type { ModelInfo, Provider, ProviderEvent, TurnInputItem } from "../providers/types";
 import { isContextLengthError } from "../providers/errors";
 import type { ToolRegistry, Mode } from "./tools/registry";
@@ -428,8 +434,12 @@ function sanitizeReviewText(s: string, maxLen: number): string {
 
 /** phase 5e T3 (fs coverage): resolves a write/edit call's target against the review-time fence —
  *  the session's roots (primary cwd first) PLUS the session tmp dir, mirroring bash's OS-level
- *  sandbox-writable set (sandbox.ts's `writable`: cwd + roots + tmpDir), which is BROADER than
- *  fs-write.ts's own application-level fence (`roots` only, no tmpDir). Reuses resolveWithinAny
+ *  sandbox-writable set (tools/bash.ts's `writable`: cwd + roots + tmpDir + outDir, working-
+ *  directories T4), which is BROADER than fs-write.ts's own application-level fence (`roots` only,
+ *  no tmpDir). The outputs dir needs no THIRD mention here — it reaches `roots` itself the same way
+ *  the MEMDIR does (daemon.ts's `sessionDirs`, the blessing mechanism), so this fence already covers
+ *  it without change; only bash's independently-assembled writable set needed the explicit add.
+ *  Reuses resolveWithinAny
  *  (paths.ts) — the fence's own resolution logic — rather than reimplementing containment. A path
  *  outside even this broader set is a guaranteed fence violation the tool will reject on its own
  *  (fs-write.ts's own resolveWithinAny throws first) — reviewing a call that can never execute
@@ -449,19 +459,58 @@ function resolveFsReviewTarget(path: string, roots: string[], tmpDir: string): s
   }
 }
 
-/** phase 5e T3 (fs coverage): true if a fence-vetted, CANONICALIZED (resolveFsReviewTarget)
- *  write/edit target is unusual enough to review — (a) outside the PRIMARY cwd subtree (roots[0]:
- *  an added root or the session tmp dir), reusing paths.ts's own isWithin, or (b) a dotfile/
- *  dot-directory path segment anywhere inside cwd (.ssh/, .git/hooks/, a .zshrc-class file). A
- *  plain in-cwd, non-dotted write is NOT reviewed — this is the "unusual", not "every write",
- *  trigger the brief specifies. primaryCwd is realpathed here too: `resolved` is canonical, so a
- *  non-canonical root (possible via rootsOverride) would make relative() emit spurious ".."
- *  segments — a false-positive review, never a bypass, but still wrong. */
-function fsWriteIsUnusual(resolved: string, primaryCwd: string): boolean {
-  let cwd = primaryCwd;
-  try { cwd = realpathSync(primaryCwd); } catch { /* vanished root — raw comparison is all there is */ }
-  if (!isWithin(resolved, cwd)) return true;
-  return relative(cwd, resolved).split(sep).some((seg) => seg.startsWith("."));
+/** phase 5e T3 (fs coverage), GENERALIZED by working-directories T5 (spec §2, "generalized write
+ *  classification"): true if a fence-vetted, CANONICALIZED (resolveFsReviewTarget) write/edit
+ *  target is unusual enough to review.
+ *
+ *  Three rules, in order:
+ *   1. Inside one of the Norma-owned spaces (`alwaysSilentDirs` — $TMPDIR/$OUTDIR/$MEMDIR, T4):
+ *      ALWAYS silent, and the dot rule deliberately does not apply inside them (spec §2).
+ *   2. Inside ANY of the session's own working directories (`sessionDirs`): silent UNLESS the path
+ *      crosses a dot-directory/dotfile segment relative to THAT directory (.ssh/, .git/hooks/, a
+ *      .zshrc-class file) — the existing rule, now anchored per-dir instead of only at the primary.
+ *      First containing dir wins; primary-first ordering makes that the primary whenever the set
+ *      overlaps.
+ *   3. Outside every session directory: unusual (review).
+ *
+ *  `sessionDirs` is the session's own working directories — the live primary followed by the ROW's
+ *  dirs (`classificationDirs`) — NOT the full fence `roots` array. That distinction is the whole
+ *  point, and it is what keeps task-24 review F1's invariant alive: the things that are WRITABLE
+ *  but are not the user's declared working directories stay REVIEWABLE under auto. Concretely:
+ *   - an out-of-root dir the model got via the silent auto/accept-edits/bypass pre-grant. Adoption
+ *     is scoped to the empty set (the T5 fix-round-1 ruling — see `applyDirGrant`), so for a
+ *     session that has a workspace such a grant is process-local and EVERY write into it is
+ *     reviewed, exactly as pre-branch. (For a WORKDIR-LESS session the grant establishes the
+ *     primary, and writes there are then ordinary in-workspace writes — which is the point of
+ *     exiting the mode.)
+ *   - an `Edit(<path>)` rule dir (`writableRoots`'s union) and the project-local permission dirs.
+ *   - a worktree dir added by the `enter_worktree` bridge. (A NON-isolated stint's own cwd is a
+ *     different matter: it becomes the LIVE primary, and F2b puts it at the head of this list on
+ *     purpose — see `classificationDirs`.)
+ *  What IS in the row, and therefore silent: whatever a human put there — the picker, `/dirs`,
+ *  `session.setDirs`, and `session.addDir` (a thin alias over the same setter since T5, so its
+ *  dirs are genuine working directories now rather than an invisible process-local root).
+ *  A worktree-ISOLATED child passes its `rootsOverride` here instead — that fixed confinement IS
+ *  its whole world, and classifying it against the parent session's row would review every write.
+ *
+ *  Each entry is realpathed here (like the old `primaryCwd` was): `resolved` is canonical, so a
+ *  non-canonical dir would make relative() emit spurious ".." segments — a false-positive review,
+ *  never a bypass, but still wrong. Falsy `alwaysSilentDirs` entries (an unwired outDirOf/memDirOf,
+ *  or a session with memory disabled) are simply skipped — callers may pass an unfiltered array.
+ *  An EMPTY `sessionDirs` (a workdir-less session) makes every non-Norma-owned target unusual,
+ *  which is exactly right: such a session has no user directory at all, and any user-fs write it
+ *  attempts is already out-of-root and carded by the dirGrant flow before this is even consulted. */
+function fsWriteIsUnusual(resolved: string, sessionDirs: string[], alwaysSilentDirs: (string | undefined)[] = []): boolean {
+  for (const d of alwaysSilentDirs) {
+    if (d && isWithin(resolved, d)) return false;
+  }
+  for (const raw of sessionDirs) {
+    let dir = raw;
+    try { dir = realpathSync(raw); } catch { /* vanished dir — raw comparison is all there is */ }
+    if (!isWithin(resolved, dir)) continue;
+    return relative(dir, resolved).split(sep).some((seg) => seg.startsWith("."));
+  }
+  return true;
 }
 
 /** phase 5e T3 (fs coverage): the précis shown to the reviewer AND persisted as tool_review.summary
@@ -826,6 +875,33 @@ export interface EngineConfig {
   // filesystem — every surface that would show a path (bg spawn tool_result, task_notification,
   // the sync trailer, agent_output) simply omits it, byte-identical to before this feature.
   tmpDirOf?: (sessionId: string) => string | undefined;
+  // working-directories T4: the session's delivery folder — `sessions/outdir.ts`'s `ensureOutdir`,
+  // daemon.ts-wired as `(sid) => ensureOutdir(normaHome, sid)`. Read fresh in `executeCall` (below,
+  // alongside `tmpDir`) and threaded onto `ctx.outDir`, independent of `rootsOverride` — the SAME
+  // independence `tmpDir` itself has, so a worktree-isolated child still gets a working $OUTDIR even
+  // though its FIXED roots never include the outputs dir. Optional/absent (a test harness that
+  // never wires it) → `ctx.outDir` stays undefined and bash's env/writable-set additions are
+  // skipped entirely — byte-identical to before this feature.
+  outDirOf?: (sessionId: string) => string;
+  // working-directories T4 fix round 1: the session's project MEMDIR for a given `cwd` — the SAME
+  // computation daemon.ts's `sessionDirs` roots callback already folds into the session's write
+  // roots when `memory.enabled` is on (`memoryDirOf`, gated on `memoryEnabledHot()`), exposed here
+  // ONLY so the fs-reviewer call site (below) can pass it to `fsWriteIsUnusual`'s `alwaysSilentDirs`
+  // — spec §2's "MEMDIR is always silent" — without re-deriving a second, possibly-diverging
+  // computation. Absent/undefined (memory disabled, or a test harness that never wires it) simply
+  // drops out of that array; nothing else reads this getter. Takes `cwd`, not `sessionId` —
+  // `memoryDirFor` is itself a pure function of `cwd` (memory-dir.ts), and the fs-reviewer call
+  // site already has this thread's `cwd` in scope, so no extra session-store read is needed.
+  memDirOf?: (cwd: string) => string | undefined;
+  // working-directories T6: the SAME exemption, for the ONE case `memDirOf` structurally can't
+  // answer — a workdir-less session has no primary to key `memDirOf(cwd)` off, but its MEMDIR is
+  // the shared `_assistant` bucket (daemon.ts's `sessionDirs` closure folds it into the fence the
+  // identical way), so the fs-reviewer call site below reads THIS getter instead whenever
+  // `primaryDir` comes back empty. `assistantMemoryDirFor` is the ONE spelling of that path —
+  // ContextAssembler's own assistant-mode branch and the Dreamer already key off it; this getter
+  // wires the SAME closure, not a second computation. Absent/undefined (memory disabled, or a test
+  // harness predating this task) drops out of `alwaysSilentDirs` exactly like `memDirOf`.
+  assistantMemDirOf?: () => string | undefined;
   // Auto-diagnostics after edit (lsp-consolidation T3, design doc `2026-07-15-lsp-consolidation-
   // design.md` §2) — CC parity: "after each file edit, it automatically reports type errors and
   // warnings so Claude can fix issues without a separate build step." Both getters, same hot-
@@ -991,6 +1067,16 @@ export class AgentEngine {
 
   /** True while a turn is executing for the session. */
   isRunning(sessionId: string): boolean { return this.runningTurns.has(sessionId); }
+
+  /** working-directories T3: the smallest honest public accessor onto the private `grantDenied`
+   *  below — the SAME control-plane denylist predicate (`~/.norma`-class prefixes, bidirectional
+   *  containment) the out-of-root dirGrant approval flow consults, exposed so `session.setDirs`'s
+   *  RPC can refuse a directory this engine will never grant for ANY approval flow, through the
+   *  identical rule rather than a second copy that could silently diverge from it. `dir` must
+   *  already be canonicalized (realpathed) by the caller — `setSessionDirs` (sessions/set-dirs.ts)
+   *  does this before calling `grantDenied`, matching the convention `grantDenied`'s own doc comment
+   *  documents for its other caller (the dirGrant flow's `fsWriteOutOfRootDir`-computed `dir`). */
+  isGrantDenied(dir: string): boolean { return this.grantDenied(dir); }
 
   /** session-activity-hygiene T8: when the session's CURRENT top-level turn started, or `undefined`
    *  when no turn is running. The honest source for "how long has this been going" — the daemon
@@ -2164,16 +2250,26 @@ export class AgentEngine {
     // whichever of those two this picks; provider-correctness T4 adds `meta.effort` on the same
     // terms for the effort half — see resolveSel's own doc comment.
     const sel = this.resolveSel(meta);
-    if (!meta.cwd) {
-      this.emit(sessionId, { type: "turn_started", sessionId, threadId });
-      this.emit(sessionId, { type: "agent_error", sessionId, threadId, message: "session has no working directory — create the session with a cwd" });
-      this.emit(sessionId, { type: "turn_completed", sessionId, threadId, stopReason: "error", inputTokens: 0, outputTokens: 0 });
-      return;
-    }
+    // working-directories T5 (spec §2, workdir-less mode): a session with NO working directory is
+    // no longer a dead end — it USED to emit `agent_error: session has no working directory` and
+    // end the turn, because `cwd` was the only directory concept there was. It now runs in the
+    // session TMP dir: writable only in $OUTDIR/$TMPDIR/$MEMDIR (the fence derives from an empty
+    // `dirs` row, so every user-fs write raises the ordinary dirGrant card), with the shell
+    // starting in scratch — deliverables are deliberate copies into $OUTDIR, per the plan's
+    // "workdir-less bash cwd = session tmp dir". `primaryDir` prefers the live `cwd` column, so a
+    // session that has since ADOPTED a directory (the grant card, the picker, `/dirs`) runs there
+    // from its next turn on — that is what "approval exits the mode" means in practice.
+    //
+    // working-directories T6: captured BEFORE the `?? sessionTmpDir(...)` fallback below — this is
+    // the SAME "live primary absent" anchor `classificationDirs`/`primaryDir` itself define, read
+    // once here (not re-derived a second way) so `instructions`' own workdir-less signal can never
+    // disagree with the fence's. `undefined` here is exactly "workdir-less" for a code session;
+    // for dispatch/chat it's inert (their `basePromptOverride` skips the block that reads it).
+    const primary = this.primaryDir(sessionId);
     // `let`, not `const`: the enter/exit_worktree bridge below reassigns this SAME-TURN so a
     // follow-up tool call later in this turn's dispatch loop resolves into (or back out of) the
     // worktree without waiting for the next turn's store.meta() re-read.
-    let cwd = meta.cwd;
+    let cwd = primary ?? sessionTmpDir(sessionId);
     // Trust-gated project .mcp.json bring-up, BEFORE the turn_started emit: this can spawn
     // subprocesses (slow), and a project server that's already started/recorded is a no-op, so
     // doing it here (rather than after turn_started) keeps the -p watchdog from tripping on a
@@ -2203,6 +2299,11 @@ export class AgentEngine {
       // two fields, and the wire half of the SAME resolution is the `max` this turn will send.
       ultraDelegation: sel.ultra,
       skillToolOffered,
+      // working-directories T6 (spec §2): the standing workspace block's inputs. `outDirOf` absent
+      // (a test harness predating T4) simply omits the whole block, matching every other optional
+      // EngineConfig getter's "off means untouched" precedent.
+      outDir: this.cfg.outDirOf?.(sessionId),
+      workdirLess: primary === undefined,
     });
     // NOTE (correctness-critical): `loaded` MUST be THE ONE LIVE SET for this session — never a
     // snapshot/copy. It's read here to build specs()/deferredIndex() for round 0, and the SAME
@@ -3879,6 +3980,15 @@ export class AgentEngine {
         // the read tools get) is NEVER grantable, either policy, no card — checked once here, and
         // consulted by both the auto pre-grant below and the deny branch in the dispatch chain.
         const dirGrantDenied = dirGrant !== null && this.grantDenied(dirGrant.dir);
+        // working-directories T5: the session's working directories as of the START of this call —
+        // the fs safety reviewer's classification set (below), live primary first (F2b, see
+        // `classificationDirs`). Snapshotted HERE, before any adoption this call might trigger,
+        // because a dir adopted BY this call must NOT retroactively make this call ordinary:
+        // task-24 review F1's invariant is that an out-of-root write under `auto` is granted
+        // SILENTLY but still rides the fs reviewer (under auto the reviewer is the only safety net
+        // there is). It is ALSO the "is this session workdir-less?" reading the adoption ruling
+        // below keys off — one snapshot, both questions, so they can never disagree mid-call.
+        const preCallSessionDirs = this.classificationDirs(sessionId, rootsOverride);
         // SP-approvals final review (composition hole): the permission-rules store itself is NEVER
         // a valid write/edit target — checked here, unconditionally (not gated on `decision`,
         // `dirGrant`, or anything ruleAllowed-related below), so it is computed and dispatched
@@ -3950,7 +4060,11 @@ export class AgentEngine {
         // executeCall, silent).
         let grantFailure: string | null = null;
         if (dirGrant && !dirGrantDenied && (meta.approvalPolicy === "auto" || meta.approvalPolicy === "accept-edits" || meta.approvalPolicy === "bypass")) {
-          grantFailure = this.applyDirGrant(sessionId, threadId, dirGrant.dir);
+          // T5 fix round 1: the adoption ruling — adopt ONLY when this session has no working
+          // directory at all (the empty-set rule). `preCallSessionDirs` is the snapshot taken
+          // above; see applyDirGrant's own comment for the full ruling and why a with-dirs session
+          // must not be widened durably by a silent policy.
+          grantFailure = this.applyDirGrant(sessionId, threadId, dirGrant.dir, preCallSessionDirs.length === 0);
           if (!grantFailure) dirGrant = null;
         }
         // SP-approvals Task 3: the whole point of `ask` policy is a human in the loop, but without
@@ -4179,18 +4293,67 @@ export class AgentEngine {
           // requestApproval's deniedByHuman path unchanged (nothing created, nothing persisted).
           const grant = dirGrant; // narrow for the closure
           const oneShot = [...this.writableRoots(sessionId, projectRoot, rootsOverride), grant.dir];
+          // T5 fix round 1 (amendment): the card must SAY what approving it does, and after the
+          // adoption ruling that differs by session — so the WORDING branches on the SAME
+          // `preCallSessionDirs` snapshot the adoption itself branches on, one source that cannot
+          // disagree with the behavior it describes. Workdir-less: approving adopts the directory
+          // permanently (spec §3's own wording, near-verbatim). With-dirs: approving is a one-time
+          // allowance and adds NO working directory — the honest reading of SP-policies Task 9's
+          // one-shot grant, which the generic "allow this edit?" left ambiguous and which the
+          // spec's adoption wording would have made an outright lie. "outside your project" is
+          // retained in the with-dirs line (three shipped tests read it as the marker that a card
+          // rode the grant seam rather than the plain-ask one) and deliberately absent from the
+          // workdir-less line — such a session has no project for anything to be outside of.
+          // The persistent-rule option is untouched in both.
+          //
+          // Task 6.5 (post-T5 review, the controller ruling: adoption ⇔ empty-set OR an explicit
+          // human act): the with-dirs card gains a 4th option, `allow_add_dir` — "Allow and add
+          // as working directory" — beside the honest one-shot `allow_once` default. It is
+          // ADDITIVE only: `allow_once`/`allow_project`/`deny` keep their ids, labels and order
+          // (`allow_once` first — the safe default stays primary); a client that only understands
+          // the old three-option shape still renders/behaves correctly, it just never offers the
+          // new choice. The workdir-less card is untouched — it already adopts on its own
+          // `allow_once` (the empty-set rule), so a 4th option there would just be a second way to
+          // ask for the same outcome.
+          const adoptOnApprove = preCallSessionDirs.length === 0;
           outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
             timeoutMs: this.approvalTimeoutFor(meta),
-            summary: `${call.name} ${grant.path} — outside your project; allow this edit?`,
+            summary: adoptOnApprove
+              ? `${call.name} ${grant.path} — allow writes in ${grant.dir}? Adds it as a working directory for this session (permanent once written).`
+              : `${call.name} ${grant.path} — outside your project; allow writes in ${grant.dir} for this request? It does not add a working directory unless you choose to add it below.`,
             // no denialMessage → the helper defaults to `denied by ${res.by}` (unchanged behavior)
-            options: [
-              { id: "allow_once", label: "Allow once" },
-              { id: "allow_project", label: `Always allow edits in ${grant.dir}`, rule: `Edit(${grant.dir})`, scope: "project" },
-              { id: "deny", label: "Deny" },
-            ],
-          }, loaded, async () => {
+            options: adoptOnApprove
+              ? [
+                  // Same id (approval.respond's routing is keyed by id, never by label) — only the
+                  // LABEL tells the truth of the branch: "once" would misdescribe an adoption just
+                  // as badly as the summary would.
+                  { id: "allow_once", label: "Allow and add as working directory" },
+                  { id: "allow_project", label: `Always allow edits in ${grant.dir}`, rule: `Edit(${grant.dir})`, scope: "project" },
+                  { id: "deny", label: "Deny" },
+                ]
+              : [
+                  { id: "allow_once", label: "Allow once" },
+                  // Task 6.5's new option: same one-shot mkdir+write as `allow_once`, PLUS
+                  // `adoptGrantedDir` (born-locked) — see the onApprove closure below for the
+                  // branch. No `rule`/`scope`: this persists a session-dirs row, not a permission
+                  // rule, so it deliberately does NOT go through server.ts's rule-append path.
+                  { id: "allow_add_dir", label: "Allow and add as working directory" },
+                  { id: "allow_project", label: `Always allow edits in ${grant.dir}`, rule: `Edit(${grant.dir})`, scope: "project" },
+                  { id: "deny", label: "Deny" },
+                ],
+          }, loaded, async (optionId) => {
             const failure = this.mkdirForOneShotGrant(grant.dir);
             if (failure) return { output: failure, isError: true };
+            // working-directories T5 (spec §2, workdir-less mode: "any user-fs write raises the
+            // same dirGrant card; approval adopts the dir and exits the mode. One card, no special
+            // cases") — the SAME empty-set rule the silent pre-grant above now follows, so the two
+            // doors cannot disagree about what an approval means. See applyDirGrant's comment for
+            // the ruling in full: adoption ⇔ establishing a primary on an empty set. A session that
+            // already HAS working directories keeps the shipped one-shot semantics (SP-policies
+            // Task 9) UNLESS the human explicitly chose `allow_add_dir` (Task 6.5) — the deliberate
+            // human act the T5 controller ruling carved out as the with-dirs card's OWN door to
+            // adoption, beside the empty-set rule.
+            if (preCallSessionDirs.length === 0 || optionId === "allow_add_dir") this.adoptGrantedDir(sessionId, grant.dir);
             return this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, oneShot, visionCapable, excludeTools, allowTools);
           }, pins, rootsOverride, visionCapable, excludeTools, allowTools);
         } else if (call.name === "bash" && bashEscalation.dangerouslyDisableSandbox && !unsandboxedRuleAllowed && meta.approvalPolicy !== "bypass") {
@@ -4364,7 +4527,34 @@ export class AgentEngine {
           const fsRoots = this.writableRoots(sessionId, projectRoot, rootsOverride);
           const fsTmpDir = sessionTmpDir(sessionId);
           const resolved = path ? resolveFsReviewTarget(path, fsRoots, fsTmpDir) : null;
-          if (resolved && fsWriteIsUnusual(resolved, fsRoots[0]!)) {
+          // working-directories T4 fix round 1 (spec §2): the three Norma-owned dirs are always
+          // silent — never "unusual" here, regardless of the session-dir/dotfile checks.
+          // `cfg.outDirOf`/`cfg.memDirOf` absent (a test harness predating this fix) simply drops
+          // out of the array; `fsTmpDir` is always present.
+          //
+          // T5 (wd-m14, the T4 re-review's open question): `memDirOf` takes the session's PRIMARY,
+          // read FRESH — not this thread's per-call `cwd`. The MEMDIR that is actually folded into
+          // the fence is daemon.ts's `memoryDirOf(primary)`, recomputed on every roots() read, so
+          // the exemption must name THAT directory or it is exempting one the session cannot write
+          // to while leaving the one it can reviewable. The two inputs diverge in both directions:
+          // a worktree-ISOLATED child's `cwd` is its worktree while the session's memdir belongs to
+          // the parent (vacuous — an isolated child's fence excludes the memdir entirely), and a
+          // SAME-TURN `enter_worktree` moves the cwd column under a turn-scoped `meta` (real — the
+          // fold follows the move immediately, a captured `meta` does not). Same `cwd ?? dirs[0]`
+          // precedence as the closure: one answer, two layers.
+          const memAnchor = this.primaryDir(sessionId);
+          // working-directories T6: a workdir-less session (no `memAnchor`) has no `cwd` to key
+          // `memDirOf` off, but daemon.ts's `sessionDirs` closure still folds a MEMDIR into its
+          // fence — the shared `_assistant` bucket, via `assistantMemDirOf` — so the exemption
+          // reads THAT getter instead, mirroring the closure's own branch exactly.
+          const memDir = memAnchor ? this.cfg.memDirOf?.(memAnchor) : this.cfg.assistantMemDirOf?.();
+          const alwaysSilentDirs = [fsTmpDir, this.cfg.outDirOf?.(sessionId), memDir];
+          // T5 (spec §2): classify against the session's OWN working directories — the row — not
+          // the full fence roots (which also carry Edit-rule dirs, project-local permission dirs
+          // and the Norma-owned folds). `preCallSessionDirs` is the pre-grant snapshot taken above
+          // (see its own comment for why this call must not benefit from its own grant), and for a
+          // worktree-isolated child it is that child's FIXED confinement instead.
+          if (resolved && fsWriteIsUnusual(resolved, preCallSessionDirs, alwaysSilentDirs)) {
             const precis = fsWritePrecis(call, resolved);
             outcome = await this.reviewAndDispatch(
               { class: "fs", precis }, precis,
@@ -4925,15 +5115,62 @@ export class AgentEngine {
    *  an error message instead of throwing (mkdir can fail: EACCES/EROFS/a FILE already at that
    *  path) — on failure NOTHING is granted and no event is emitted. Both grant sites (the auto
    *  pre-grant and the ask card's onApprove) share this ONE definition. */
-  private applyDirGrant(sessionId: string, threadId: string, dir: string): string | null {
+  private applyDirGrant(sessionId: string, threadId: string, dir: string, adopt: boolean): string | null {
     try {
       mkdirSync(dir, { recursive: true });
     } catch (err) {
       return `could not create ${dir}: ${err instanceof Error ? err.message : String(err)}`;
     }
+    // working-directories T5 fix round 1 — THE ADOPTION RULING (controller, 2026-08-04):
+    // **adoption ⇔ establishing a primary on an EMPTY set, uniform across policies.**
+    //   - A WORKDIR-LESS session (`dirs = []`) adopts through every door — this silent pre-grant
+    //     included — because spec §2's arc requires the approval to EXIT the mode, and the granting
+    //     write is the directory's first write, so it is born locked.
+    //   - A session that ALREADY has working directories adopts through NO door today. This grant
+    //     keeps its pre-branch shape: a process-local root (below), nothing durable. Two reasons,
+    //     both load-bearing: (1) an adopted dir is a session dir, and `fsWriteIsUnusual` is silent
+    //     inside those — so adopting here would switch OFF the fs reviewer for every later write
+    //     into a directory nothing but the model ever chose, and under `auto` that reviewer is the
+    //     only out-of-root safety net there is (task-24 review F1); (2) born-locked means the user
+    //     could never REMOVE a widening no human authorized. Widening a session that has a
+    //     workspace must be a deliberate human act — the 4th-card-option follow-up task's job, not
+    //     a silent policy's side effect. `adopt` is computed by the caller from the SAME pre-call
+    //     snapshot the classification uses, so "is this session workdir-less" is answered once.
+    if (adopt) this.adoptGrantedDir(sessionId, dir);
+    // The process-local grant — the pre-branch mechanism, and for a with-dirs session now the ONLY
+    // thing that happens here. Also kept alongside the row in the adopting case:
+    // `SessionDirectories.roots()` is read DIRECTLY (not through this engine's row-union) by the
+    // background-task registry's spawnCtx and the lsp tool's `rootsOf` (daemon.ts), and by every
+    // engine test harness whose baseDirs closure is a fixed literal.
     this.cfg.dirs.add(sessionId, dir);
     this.emit(sessionId, { type: "directory_added", sessionId, threadId, path: dir, persisted: false });
     return null;
+  }
+
+  /** working-directories T5 (spec §1: "a dirGrant-adopted directory is born locked — the approved
+   *  write is its first write"): fold an approved grant dir into the session's `dirs` row through
+   *  the ONE setter, then lock it immediately. Two calls rather than an "add-locked" op because
+   *  `setSessionDirs`'s vocabulary is deliberately about what a DOOR asks for (add/remove/
+   *  setPrimary) and `lockDir` is the write-hook's own marker — the same pair a picker-added dir
+   *  goes through when its first write lands, just collapsed into one moment here.
+   *
+   *  On an EMPTY set (a workdir-less session) `add` establishes the primary and the session leaves
+   *  workdir-less mode — spec §2's "approval adopts the dir and exits the mode", with no special
+   *  case here or in the setter.
+   *
+   *  A refusal is LOGGED, never fatal: by construction it cannot happen for a grant (the denylist
+   *  was already checked as `dirGrantDenied` at the call site, the session exists and is mid-turn,
+   *  and only code/cowork sessions have write tools at all), and if some future door reaches it
+   *  anyway the approved write must still land — the in-process mirror above covers this process.
+   *  Silently swallowing it would be the thing worth catching, so it is a `console.error`. */
+  private adoptGrantedDir(sessionId: string, dir: string): void {
+    const deps = this.dirsDeps();
+    const res = setSessionDirs(deps, sessionId, "add", dir);
+    if (!res.ok) {
+      console.error(`[engine] could not adopt granted dir ${dir} for session ${sessionId}: ${res.error}`);
+      return;
+    }
+    lockDir(deps, sessionId, dir);
   }
 
   /** SP-policies Task 9: the mkdir-ONLY half of applyDirGrant — create a grant dir so an APPROVED
@@ -4970,6 +5207,158 @@ export class AgentEngine {
     return false;
   }
 
+  /** working-directories T5 (spec §1: "the engine's `writableRoots` derives from the row"): THE
+   *  session's own working directories, straight off the `dirs` column, canonicalized so they
+   *  compare and dedupe against `SessionDirectories.roots()`'s own realpathed entries.
+   *
+   *  This is what makes the fence row-derived rather than trusting engine-internal state: a dir
+   *  adopted through a dirGrant approval, the app picker, `/dirs` or the RPC is in the row, so it
+   *  is in the fence — across a daemon restart too, which the in-memory `SessionDirectories.added`
+   *  set never survived.
+   *
+   *  Byte-equivalent for a single-dir session: a row that has never been written derives
+   *  `[{path: cwd, locked: true}]` from the `cwd` column (T1's lazy migration), whose canonical
+   *  form is EXACTLY the entry `SessionDirectories.roots()` already puts at index 0 — so the
+   *  `new Set` union at the call site collapses to today's array, in today's order.
+   *
+   *  Never throws: an unknown session (a caller mid-delete) or an uncanonicalizable entry (a
+   *  relative path in a hand-edited column) drops out rather than failing the whole turn — this
+   *  function only ever WIDENS the fence, so a dropped entry fails closed. */
+  private sessionDirPaths(sessionId: string): string[] {
+    let row: SessionDirs;
+    try { row = this.cfg.store.dirs(sessionId); } catch { return []; }
+    const out: string[] = [];
+    for (const d of row) {
+      // I-2 fix (whole-branch review): realpath-or-SKIP, NOT `canonicalizeDirPath`'s ancestor-walk
+      // — that walk deliberately KEEPS a not-yet-existing leaf (the T2 setter needs that stability
+      // for its OWN dedup/lock/denylist comparisons), but this function feeds bash's writable-root
+      // set (`writableRoots`, below) via the union at its call sites, and bash.ts's
+      // `roots.map(realpathSync)` ENOENT-crashes the ENTIRE call the moment ONE root is missing —
+      // not just a write into that one dir. A row entry can be missing legitimately: an
+      // RPC/TUI/`session.setDirs` door adds a path without mkdir'ing it (only the dirGrant door
+      // does). Skipping costs nothing — this only ever WIDENS the fence, and `sessionDirPaths` is
+      // recomputed on every call, so a skipped entry re-enters the fence the instant the directory
+      // is actually created.
+      try { out.push(realpathSync(d.path)); } catch { /* not yet on disk — skip, never widen with a missing root */ }
+    }
+    return out;
+  }
+
+  /** working-directories T5: the session's PRIMARY working directory, with the precedence
+   *  daemon.ts's own roots closure uses — the live `cwd` column first (it is what
+   *  `enter_worktree`/`session.setCwd` move, and every turn already runs there), the row's
+   *  `dirs[0]` second (a workdir-less session that has ADOPTED a primary has no cwd column yet;
+   *  T3 populates `SessionSummary.cwd` from `dirs[0]` for exactly this reason). `undefined` only
+   *  for a workdir-less session that has never adopted anything.
+   *
+   *  Deliberately reads the store FRESH rather than taking the turn's already-loaded `meta`: that
+   *  object is turn-scoped, and `enter_worktree` moves the `cwd` column MID-TURN (`store.setCwd`,
+   *  the same-turn bridge), so a captured `meta` goes stale exactly where this matters — the
+   *  MEMDIR anchor below must agree with what daemon.ts's roots closure is folding into the fence
+   *  AT THIS MOMENT, and that closure re-reads the store on every call. One indexed lookup. */
+  /** working-directories T5 fix round 1 (F2b): the set `fsWriteIsUnusual` classifies against — the
+   *  session's LIVE primary first, then the row's directories, deduped. A worktree-isolated child
+   *  passes its `rootsOverride` instead (that fixed confinement IS its whole world).
+   *
+   *  Why the live primary leads rather than the row's `dirs[0]`: `enter_worktree` moves ONLY the
+   *  `cwd` column (`store.setCwd`), never the row — correctly, since a temporary worktree is not
+   *  one of the user's declared working directories. But a non-isolated worktree lives at
+   *  `<repoRoot>/.norma/worktrees/<name>`, so anchoring on the row's repo root makes
+   *  `relative(repoRoot, target)` start with `.norma` and the DOT RULE fires on every single write
+   *  of the stint — an LLM review per write under auto, where pre-branch was silent. Putting the
+   *  live primary first makes the worktree win `fsWriteIsUnusual`'s first-containing-dir race, so
+   *  the dot rule is anchored where the work is actually happening. For every ordinary session the
+   *  live primary IS `dirs[0]` and the `new Set` collapses this to the row, unchanged.
+   *
+   *  This does not widen anything: the live primary is `meta.cwd`, already a fence root by every
+   *  path (daemon.ts's closure puts it first), and this set only ever decides REVIEW vs SILENT. */
+  private classificationDirs(sessionId: string, rootsOverride: string[] | undefined): string[] {
+    if (rootsOverride) return rootsOverride;
+    const live = this.primaryDir(sessionId);
+    const head: string[] = [];
+    if (live) {
+      try { head.push(canonicalizeDirPath(live)); } catch { /* unusable spelling — the row still speaks */ }
+    }
+    return [...new Set([...head, ...this.sessionDirPaths(sessionId)])];
+  }
+
+  private primaryDir(sessionId: string): string | undefined {
+    try {
+      const m = this.cfg.store.meta(sessionId);
+      if (m.cwd) return m.cwd;
+      return this.cfg.store.dirs(sessionId)[0]?.path;
+    } catch { return undefined; }
+  }
+
+  /** working-directories T5 (spec §1, the first-write lock — "a directory locks the moment Norma
+   *  successfully writes inside it, per-directory, permanently for the session's lifetime; reading
+   *  never locks"). Called from `executeCall` for a SUCCEEDED call only.
+   *
+   *  The ATTRIBUTION rule (plan decision):
+   *   - `write`/`edit`/`notebook_edit` lock the session dir CONTAINING the file they wrote. That
+   *     is the only honest answer for a tool that names its own absolute target.
+   *   - `bash` locks the session dir containing the directory it RAN IN (`cwd`) — the primary in
+   *     every ordinary turn, which is the plan's "a successful bash locks the PRIMARY only". Using
+   *     the cwd rather than the literal `dirs[0]` is the same rule stated precisely: it keeps a
+   *     non-isolated `enter_worktree` turn (whose cwd is the worktree, a dir that is NOT in the
+   *     row) from locking a primary bash never touched. A shell command's writes are un-attributable
+   *     by construction — no path is parsed, and none could be trusted if it were — so added dirs
+   *     stay unlocked after a bash run no matter what it did.
+   *   - Every other tool (read/glob/grep/ls/…) locks nothing: they are not in this switch at all.
+   *
+   *  A worktree-ISOLATED child (`rootsOverride`) locks nothing: its confinement is a temporary
+   *  copy, not one of the session's declared directories, and the parent's dirs are not where its
+   *  writes landed.
+   *
+   *  Never throws and never affects the tool result: this is bookkeeping ABOUT a write that has
+   *  already succeeded and been reported. `lockDir` is itself idempotent (T2), and the pre-check
+   *  below skips even the store read-modify-write for the overwhelmingly common case — writing
+   *  again into a directory that locked on the session's first write. */
+  private lockWrittenDir(
+    toolName: string,
+    args: unknown,
+    sessionId: string,
+    cwd: string,
+    roots: string[],
+    tmpDir: string,
+    rootsOverride: string[] | undefined,
+  ): void {
+    if (rootsOverride) return;
+    try {
+      let probe: string | null = null;
+      if (toolName === "bash") {
+        probe = cwd;
+      } else if (AUTO_DIAG_TOOL_NAMES.has(toolName)) {
+        // Same arg shape controlPlaneFileTarget reads: `path` for write/edit, `notebook_path` for
+        // notebook_edit. Resolved through the SAME fence-resolution the reviewer's classification
+        // uses, so a relative path, a symlinked directory segment and a leaf link all agree on
+        // where the bytes actually landed.
+        const a = (args ?? {}) as { path?: unknown; notebook_path?: unknown };
+        const raw = typeof a.path === "string" ? a.path : typeof a.notebook_path === "string" ? a.notebook_path : "";
+        probe = raw ? resolveFsReviewTarget(raw, roots, tmpDir) : null;
+      }
+      if (!probe) return;
+      const row = this.cfg.store.dirs(sessionId);
+      for (const entry of row) {
+        let dir: string;
+        try { dir = canonicalizeDirPath(entry.path); } catch { continue; }
+        if (!isWithin(probe, dir)) continue;
+        if (!entry.locked) lockDir(this.dirsDeps(), sessionId, entry.path);
+        return; // first containing entry wins (primary-first order), locked or not
+      }
+    } catch (err) {
+      console.error(`[engine] could not record the first-write lock for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** working-directories T5: the deps `setSessionDirs`/`lockDir` take — the engine's OWN store and
+   *  its OWN `grantDenied` predicate (the same instance method the dirGrant flow consults, so
+   *  "what can never be granted" and "what can never be adopted" are one answer, never two
+   *  spellings). Built per call: it closes over nothing mutable and costs an object literal. */
+  private dirsDeps(): SetDirsDeps {
+    return { store: this.cfg.store, grantDenied: (dir) => this.grantDenied(dir) };
+  }
+
   /** SP-policies Task 6: the session's writable-dir set — `dirs.roots(sessionId)` (or a worktree
    *  child's FIXED `rootsOverride`) UNIONED with the absolute dirs a hand-authored `Edit(<path>)`
    *  rule declares for this project (PermissionRules.editPathRules). Consulted by BOTH the
@@ -5003,7 +5392,7 @@ export class AgentEngine {
    *  string-spelling principle), and a missing root can never reach bash's realpath/Seatbelt (which
    *  would ENOENT-crash every bash call). See the loop below. */
   private writableRoots(sessionId: string, projectRoot: string | null, rootsOverride: string[] | undefined): string[] {
-    const base = rootsOverride ?? this.cfg.dirs.roots(sessionId);
+    const base = rootsOverride ?? [...new Set([...this.cfg.dirs.roots(sessionId), ...this.sessionDirPaths(sessionId)])];
     if (rootsOverride || !this.cfg.permissionRules || projectRoot === null) return base;
     const editDirs: string[] = [];
     for (const raw of this.cfg.permissionRules.editPathRules(projectRoot)) {
@@ -5122,7 +5511,14 @@ export class AgentEngine {
       options?: ApprovalOption[];
     },
     loaded: Set<string>,
-    onApprove?: () => Promise<{ output: string; isError: boolean }>,
+    // working-directories Task 6.5: `optionId` — the chosen `ApprovalOption.id`, threaded from the
+    // broker's resolved outcome below — is passed to `onApprove` so a card offering more than one
+    // meaningfully-different approved choice (the with-dirs dirGrant card's `allow_add_dir` beside
+    // `allow_once`) can branch on which one was picked. Every OTHER onApprove closure in this file
+    // (worktree/workflow bridges, the plain executeCall default) still declares zero params — TS
+    // structurally allows a narrower function where a wider one is expected, so none of them need
+    // to change; only a closure that actually cares about the choice reads the argument.
+    onApprove?: (optionId?: string) => Promise<{ output: string; isError: boolean }>,
     pins: Set<string> = new Set(),
     rootsOverride?: string[],
     // Computer use (Phase 5 CU): forwarded to the default onApprove's executeCall so an approved
@@ -5156,7 +5552,7 @@ export class AgentEngine {
     const res = await waiting;
     this.emit(sessionId, { type: "approval_resolved", sessionId, threadId, callId: call.callId, approved: res.approved, by: res.by });
     if (res.approved) {
-      return await (onApprove ? onApprove() : this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, excludeTools, allowTools));
+      return await (onApprove ? onApprove(res.optionId) : this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, excludeTools, allowTools));
     }
     // An EXPLICIT human denial (any `by` other than the broker's "timeout") ends the turn and
     // hands control back to the user (Claude Code parity) — see the caller's `deniedByHuman`
@@ -5458,6 +5854,9 @@ export class AgentEngine {
     // this method has no access to the loop's already-hoisted `projectRoot`.
     const roots = this.writableRoots(sessionId, cwd ? repoRootFor(cwd) : null, rootsOverride);
     const tmpDir = sessionTmpDir(sessionId);
+    // working-directories T4: read fresh per call (mirrors `tmpDir` just above) — independent of
+    // `rootsOverride` on purpose, see `outDirOf`'s own doc comment on EngineConfig.
+    const outDir = this.cfg.outDirOf?.(sessionId);
     const markSkillLoaded = (n: string) => {
       let set = this.loadedSkills.get(sessionId);
       if (!set) { set = new Set(); this.loadedSkills.set(sessionId, set); }
@@ -5555,7 +5954,7 @@ export class AgentEngine {
         }
       : undefined;
     const result = await this.cfg.registry.execute(call.name, args, {
-      cwd, roots, tmpDir, sessionId, signal, markSkillLoaded,
+      cwd, roots, tmpDir, outDir, sessionId, signal, markSkillLoaded,
       markToolLoaded,
       loadedTools: effectiveLoaded,
       deferThreshold: this.toolSearchThreshold(cwd),
@@ -5583,6 +5982,10 @@ export class AgentEngine {
       excludeTools,
       allowTools,
     });
+    // working-directories T5 (spec §1: "a directory locks the moment Norma successfully writes
+    // inside it"). Gated on `!result.isError` for the same reason auto-diagnostics below is: a
+    // lock records a FACT, and a write that never landed is not one.
+    if (!result.isError) this.lockWrittenDir(call.name, args, sessionId, cwd, roots, tmpDir, rootsOverride);
     // Auto-diagnostics after edit (lsp-consolidation T3): ONLY a SUCCESSFUL write/edit/
     // notebook_edit ever reaches this — `result.isError` gates it BEFORE any LSP call, so a
     // failed write never triggers a diagnostics run at all (not merely "runs but is discarded").
