@@ -12,20 +12,27 @@ extension WindowContentView {
     /// The chip: a folder glyph + the primary's leaf name (or "No folder"), opening the menu.
     /// Slightly wider than the neighbouring plain-icon buttons on purpose — the current primary is
     /// the one piece of session state worth reading without opening anything.
+    ///
+    /// Turns RED while a refusal is outstanding. The refusal's own SENTENCE lives inside the menu
+    /// (verbatim, `dirsMenuContent`), but a refusal arrives after the popover has already closed —
+    /// the pick flow is menu → panel → confirm → RPC — so without a signal out here the user would
+    /// be told nothing at all unless they happened to reopen the menu. The colour is the pointer;
+    /// the sentence is still the daemon's.
     @ViewBuilder
     var dirsMenuButton: some View {
+        let refused = adapter.dirsRefusal != nil
         Button {
             showingDirsMenu = true
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: "folder")
+                Image(systemName: refused ? "folder.badge.questionmark" : "folder")
                     .font(.system(size: 12))
                 Text(dirsChipLabel(currentSidebarSessionSummary?.dirs))
                     .font(.system(size: 11))
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            .foregroundStyle(.secondary)
+            .foregroundStyle(refused ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
             .frame(maxWidth: 140, alignment: .trailing)
         }
         .buttonStyle(.plain)
