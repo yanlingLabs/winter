@@ -625,6 +625,141 @@ describe("runners — mirror main.ts's routes", () => {
   });
 });
 
+// working-directories T7: `/dirs` family — bare `/dirs` reads the current session's row off
+// `listSessions()` (the only surface `dirs` rides — no single-session `session.get`); the three
+// mutating sub-verbs drive `sessionSetDirs` and display its POST-WRITE `dirs`, never an echo of the
+// request (same contract `sessionSetActivity`'s `activity` follows above). Display: one line per
+// entry, `*` marks the primary (position 0), `🔒` marks locked; an empty set prints the
+// workdir-less notice naming `$OUTDIR` — never a blank note.
+describe("/dirs — the working-directories family (working-directories T7)", () => {
+  test("/dirs (bare) — prints the current session's set, * on the primary, 🔒 on locked entries", async () => {
+    const { client, calls } = makeClient({
+      listSessions: () => ({
+        sessions: [
+          { sessionId: "other", scope: "global", lastSeq: 1, createdAt: 0, dirs: [{ path: "/nope", locked: true }] },
+          {
+            sessionId: "sess-9",
+            scope: "global",
+            lastSeq: 5,
+            createdAt: 0,
+            dirs: [
+              { path: "/repo/primary", locked: true },
+              { path: "/repo/extra", locked: false },
+            ],
+          },
+        ],
+      }),
+    });
+    const { ctx, notes } = makeCtx(client, { sessionId: "sess-9" });
+    await runCommand(ctx, "/dirs");
+    expect(calls).toEqual([{ method: "listSessions", args: [] }]);
+    expect(notes).toEqual(["* 🔒 /repo/primary\n    /repo/extra"]);
+  });
+
+  test("/dirs (bare) — an empty set prints the workdir-less notice naming $OUTDIR, never a blank note", async () => {
+    const { client } = makeClient({
+      listSessions: () => ({ sessions: [{ sessionId: "sess-9", scope: "global", lastSeq: 1, createdAt: 0, dirs: [] }] }),
+    });
+    const { ctx, notes } = makeCtx(client, { sessionId: "sess-9" });
+    await runCommand(ctx, "/dirs");
+    expect(notes.length).toBe(1);
+    expect(notes[0]).not.toBe("");
+    expect(notes[0]).toContain("$OUTDIR");
+  });
+
+  test("/dirs (bare) — current session absent from the list (edge case) is treated as workdir-less, not a crash", async () => {
+    const { client } = makeClient({ listSessions: () => ({ sessions: [] }) });
+    const { ctx, notes } = makeCtx(client, { sessionId: "sess-9" });
+    await runCommand(ctx, "/dirs");
+    expect(notes[0]).toContain("$OUTDIR");
+  });
+
+  test("/dirs add <path> — drives sessionSetDirs({op:'add'}), prints the resulting set", async () => {
+    const { client, calls } = makeClient({
+      sessionSetDirs: () => ({ ok: true, dirs: [{ path: "/repo", locked: true }, { path: "/tmp/extra", locked: false }] }),
+    });
+    const { ctx, notes } = makeCtx(client, { sessionId: "sess-9" });
+    await runCommand(ctx, "/dirs add /tmp/extra");
+    expect(calls).toEqual([{ method: "sessionSetDirs", args: [{ sessionId: "sess-9", op: "add", path: "/tmp/extra" }] }]);
+    expect(notes).toEqual(["* 🔒 /repo\n    /tmp/extra"]);
+  });
+
+  test("/dirs primary <path> — drives sessionSetDirs({op:'setPrimary'})", async () => {
+    const { client, calls } = makeClient({
+      sessionSetDirs: () => ({ ok: true, dirs: [{ path: "/new/primary", locked: false }] }),
+    });
+    const { ctx, notes } = makeCtx(client, { sessionId: "sess-9" });
+    await runCommand(ctx, "/dirs primary /new/primary");
+    expect(calls).toEqual([{ method: "sessionSetDirs", args: [{ sessionId: "sess-9", op: "setPrimary", path: "/new/primary" }] }]);
+    expect(notes).toEqual(["*   /new/primary"]);
+  });
+
+  test("/dirs remove <path> — drives sessionSetDirs({op:'remove'})", async () => {
+    const { client, calls } = makeClient({
+      sessionSetDirs: () => ({ ok: true, dirs: [{ path: "/repo", locked: true }] }),
+    });
+    const { ctx, notes } = makeCtx(client, { sessionId: "sess-9" });
+    await runCommand(ctx, "/dirs remove /tmp/extra");
+    expect(calls).toEqual([{ method: "sessionSetDirs", args: [{ sessionId: "sess-9", op: "remove", path: "/tmp/extra" }] }]);
+    expect(notes).toEqual(["* 🔒 /repo"]);
+  });
+
+  test.each(["/dirs add", "/dirs primary", "/dirs remove", "/dirs bogus /some/path"])(
+    "%s — usage note, no client call",
+    async (input) => {
+      const { client, calls } = makeClient({ sessionSetDirs: () => ({ ok: true, dirs: [] }) });
+      const { ctx, notes } = makeCtx(client);
+      await runCommand(ctx, input as string);
+      expect(calls).toEqual([]);
+      expect(notes[0]).toContain("usage:");
+    },
+  );
+
+  // The manage_session precedent (see /archive above): a daemon refusal is left UNCAUGHT by the
+  // runner and surfaces through runCommand's shared catch, verbatim — never re-worded, never
+  // silently swallowed into a false success.
+  test("/dirs add <path> — a daemon refusal surfaces verbatim, not as a success note", async () => {
+    const { client } = makeClient({
+      sessionSetDirs: () => { throw new Error("that directory can never be a working directory"); },
+    });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/dirs add /etc");
+    expect(notes).toEqual(["/dirs failed: that directory can never be a working directory"]);
+  });
+
+  test("/dirs primary <path> — the locked refusal surfaces verbatim", async () => {
+    const { client } = makeClient({
+      sessionSetDirs: () => { throw new Error("that directory is locked for this session"); },
+    });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/dirs primary /repo/locked");
+    expect(notes).toEqual(["/dirs failed: that directory is locked for this session"]);
+  });
+
+  test("/dirs remove <path> — the remove-primary refusal surfaces verbatim", async () => {
+    const { client } = makeClient({
+      sessionSetDirs: () => { throw new Error("the primary directory can't be removed — use setPrimary to replace it instead"); },
+    });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/dirs remove /repo/primary");
+    expect(notes).toEqual(["/dirs failed: the primary directory can't be removed — use setPrimary to replace it instead"]);
+  });
+
+  // `session.list` (bare `/dirs`'s only RPC) never throws DIRS_MODE_REFUSAL itself — that refusal
+  // is `session.setDirs`'s own (a mode gate on the WRITE side); a non-participating row simply has
+  // no `dirs` field at all, which the bare-read branch above already treats as workdir-less. The
+  // mutating verbs are where this daemon message is actually reachable — pinned via `sessionSetDirs`
+  // like the other refusals above.
+  test("/dirs add <path> — the mode refusal (chat/dispatch target) surfaces verbatim", async () => {
+    const { client } = makeClient({
+      sessionSetDirs: () => { throw new Error("working directories apply to code and cowork sessions only"); },
+    });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/dirs add /repo");
+    expect(notes).toEqual(["/dirs failed: working directories apply to code and cowork sessions only"]);
+  });
+});
+
 describe("runCommand — saved-workflow /name dispatch (CC-parity phase 3 Track C Task C4)", () => {
   test("/<savedName> (not a registered command) runs it via client.workflowRun, reports the runId", async () => {
     const { client, calls } = makeClient({ workflowRun: () => ({ runId: "run_7", status: "running" }) });

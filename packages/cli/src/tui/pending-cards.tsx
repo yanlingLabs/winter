@@ -35,8 +35,9 @@ export interface AnswerPayload {
 
 export interface PendingCardsProps {
   pending: PendingCard;
-  // optionId (SP-approvals T7): set only when the human picked a numbered rule-bearing option
-  // (never for the "y"/Enter/"n" paths) — see ApprovalCard below.
+  // optionId (SP-approvals T7, widened by working-directories T7): set only when the human picked
+  // a numbered ADDITIONAL option (rule-bearing or not, e.g. `allow_add_dir`) — never for the
+  // "y"/Enter/"n" paths — see ApprovalCard below.
   onApprove: (callId: string, yes: boolean, optionId?: string) => void;
   onAnswer: (callId: string, payload: AnswerPayload) => void;
   onPlan: (callId: string, resp: ReturnType<typeof parsePlanResponse>) => void;
@@ -76,17 +77,24 @@ export function capReviewerReason(reason: string): string {
 
 type ApprovalCardPending = Extract<PendingCard, { kind: "approval" }>;
 
-// SP-approvals T7: of the daemon's `options` (events.ts's `ApprovalOption[]`, Task 5's
-// `approvalOptionsFor`), only the RULE-BEARING ones (a `rule` string attached — the
-// allow_project/allow_global shapes) get a numbered `[N]` menu line. `allow_once`/`deny` are the
-// CLI's own fixed `[y]`/`[n]` vocabulary regardless of the daemon's id/label for those two — same
-// division as today's plain y/N, which was never driven by a protocol-supplied label either.
-function ruleBearingOptions(options: ApprovalCardPending["options"]): NonNullable<ApprovalCardPending["options"]> {
-  return options?.filter((o) => o.rule !== undefined) ?? [];
+// SP-approvals T7 (widened by working-directories T7): of the daemon's `options` (events.ts's
+// `ApprovalOption[]`, Task 5's `approvalOptionsFor`), every option EXCEPT `allow_once`/`deny` gets
+// a numbered `[N]` menu line — `allow_once`/`deny` are the CLI's own fixed `[y]`/`[n]` vocabulary
+// regardless of the daemon's id/label for those two (every options array in engine.ts carries
+// exactly one of each — see approvals.ts/engine.ts's option-construction sites). Originally this
+// filtered on `rule !== undefined` (every extra option WAS rule-bearing at the time), but T6.5
+// added `allow_add_dir` to the with-dirs dirGrant card — a THIRD extra option beside
+// `allow_project`, deliberately rule-LESS (it persists a session-dirs row, not a permission rule,
+// so it must not go through server.ts's rule-append path) — which the rule-only filter made
+// unreachable from this shell entirely. Filtering by id instead of by `rule` presence widens the
+// affordance to any additional option the daemon sends, not just rule-bearing ones, while keeping
+// `allow_once`/`deny` on their existing byte-identical y/N keys.
+function additionalOptions(options: ApprovalCardPending["options"]): NonNullable<ApprovalCardPending["options"]> {
+  return options?.filter((o) => o.id !== "allow_once" && o.id !== "deny") ?? [];
 }
 
 function ApprovalCard({ pending, onApprove }: { pending: ApprovalCardPending; onApprove: PendingCardsProps["onApprove"] }) {
-  const ruleOptions = ruleBearingOptions(pending.options);
+  const extraOptions = additionalOptions(pending.options);
 
   const [buffer, setBuffer] = useBufferedInput((line) => {
     if (pending.options === undefined) {
@@ -101,8 +109,8 @@ function ApprovalCard({ pending, onApprove }: { pending: ApprovalCardPending; on
     // "1.0"/"1e1"/"0x1" etc. must deny, not silently coerce through `Number()`.
     const isDigits = /^\d+$/.test(trimmed);
     const asIndex = Number(trimmed);
-    if (isDigits && asIndex >= 1 && asIndex <= ruleOptions.length) {
-      onApprove(pending.callId, true, ruleOptions[asIndex - 1]!.id);
+    if (isDigits && asIndex >= 1 && asIndex <= extraOptions.length) {
+      onApprove(pending.callId, true, extraOptions[asIndex - 1]!.id);
     } else if (trimmed.toLowerCase() === "y") {
       onApprove(pending.callId, true);
     } else {
@@ -138,9 +146,10 @@ function ApprovalCard({ pending, onApprove }: { pending: ApprovalCardPending; on
     );
   }
 
-  // SP-approvals T7: options present — a numbered allow-rule menu replaces the bare [y/N]
-  // indicator, one choice per line (same convention as PlanCard's fixed menu / QuestionCard's
-  // numbered options below it in this file), buffer echoing on the final [n] line.
+  // SP-approvals T7 (widened by working-directories T7): options present — a numbered menu of
+  // every ADDITIONAL option (rule-bearing or not) replaces the bare [y/N] indicator, one choice
+  // per line (same convention as PlanCard's fixed menu / QuestionCard's numbered options below it
+  // in this file), buffer echoing on the final [n] line.
   return (
     <Box flexDirection="column">
       {pending.reviewerReason !== undefined && (
@@ -150,7 +159,7 @@ function ApprovalCard({ pending, onApprove }: { pending: ApprovalCardPending; on
         approve {pending.toolName}? <Text dimColor>{pending.summary}</Text>
       </Text>
       <Text>[y] allow once</Text>
-      {ruleOptions.map((o, i) => (
+      {extraOptions.map((o, i) => (
         <Text key={o.id}>{`[${i + 1}] ${o.label}`}</Text>
       ))}
       <Text>[n] deny {buffer}</Text>
