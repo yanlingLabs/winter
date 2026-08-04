@@ -136,12 +136,20 @@ func dirsPrimaryIsReplaceable(_ dirs: [SessionDirEntry]) -> Bool {
 /// SELECTION + CONFIRM, never a one-click widening). Names the op and the FULL path — the leaf name
 /// alone would let two same-named folders in different trees read identically at the exact moment
 /// the user is being asked to widen what Norma may write to.
+///
+/// (wd-m31): `.remove` is dead in practice — this function's only caller, `confirmWorkingDir`, is
+/// only ever reached from `pickWorkingDir`, which the menu wires to `.setPrimary`/`.add` alone; the
+/// per-row "Remove" action (`applyDirsOp`) calls `setDirs` directly, no panel, no confirm step. Given
+/// its own correct wording anyway rather than reusing `.add`'s (which would misdescribe a remove),
+/// so a future caller that DOES route `.remove` through this confirm path isn't handed a lie.
 func workingDirConfirmMessage(op: SessionDirsOp, path: String) -> String {
     switch op {
     case .setPrimary:
         return "Make \(path) this session's primary working folder?"
-    case .add, .remove:
+    case .add:
         return "Add \(path) as a working folder for this session?"
+    case .remove:
+        return "Remove \(path) as a working folder for this session?"
     }
 }
 

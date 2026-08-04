@@ -94,10 +94,12 @@ public struct SessionDirEntry: Equatable, Hashable, Sendable {
 public enum SessionDirsOp: String, Equatable, Sendable {
     /// Replace `dirs[0]` (or ESTABLISH it on an empty set, exiting workdir-less mode).
     ///
-    /// Replaces index 0 and keeps 1…n untouched, so passing a path the set ALREADY holds at a later
-    /// index produces a duplicate rather than promoting it — "make this existing entry the primary"
-    /// is not an operation this wire has. Callers offering a swap should always be picking a NEW
-    /// directory.
+    /// For a FRESH path (not already in the set), replaces index 0 and keeps 1…n untouched. For a
+    /// path the set ALREADY holds at index 0, it's an idempotent no-op — even when that entry is
+    /// locked (`setPrimary` of the current primary asks for nothing new). For a path already held
+    /// at index k>0, it PROMOTES that entry to index 0, carrying its lock state verbatim and
+    /// dropping the old primary (replace semantics, not insert) — `set-dirs.ts`'s dedupe-promote
+    /// branch, whole-branch review I-1. Never produces a duplicate entry.
     case setPrimary
     /// Append a directory (idempotent for one already in the set; establishes the primary when the
     /// set is empty, since appending to `[]` produces `dirs[0]`).

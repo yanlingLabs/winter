@@ -44,11 +44,13 @@ extension WindowContentView {
     /// The menu: every entry in the set (primary marked, locks badged), then the two doors that ADD
     /// to it, then the daemon's last refusal if there was one.
     ///
-    /// **There is no "make this existing entry the primary".** `session.setDirs {op:"setPrimary"}`
-    /// replaces `dirs[0]` and keeps `1…n` untouched, so pointing it at a path already sitting at
-    /// index 2 produces a DUPLICATE rather than a promotion (set-dirs.ts's own expression:
-    /// `[{path}, ...dirs.slice(1)]`). Promotion is not an operation this wire has, so the menu
-    /// offers what it does have: "Change primary folder…", which picks a NEW directory.
+    /// **There is no dedicated per-row "make this existing entry the primary" button.** The daemon
+    /// itself now PROMOTES correctly either way (whole-branch review I-1, `set-dirs.ts`'s dedupe-
+    /// promote branch): `session.setDirs {op:"setPrimary"}` on a path already sitting at index k>0
+    /// moves it to index 0 carrying its lock state, dropping the old primary — never a duplicate.
+    /// This menu simply has no click that sends an EXISTING row's own path through that op; "Change
+    /// primary folder…" opens the panel to pick a path, which happens to promote-not-duplicate if it
+    /// coincides with an existing secondary, but there is no one-click "promote this row" today.
     @ViewBuilder
     var dirsMenuContent: some View {
         let dirs = currentSidebarSessionSummary?.dirs ?? []
