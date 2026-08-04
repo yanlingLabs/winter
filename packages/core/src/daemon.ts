@@ -396,7 +396,18 @@ export async function startDaemon(opts: {
     const primary = m.cwd ?? row[0]?.path ?? null;
     const roots: string[] = [];
     if (primary) roots.push(primary);
-    for (const d of row) roots.push(d.path); // SessionDirectories.roots() dedupes by canonical form
+    // I-2 fix (whole-branch review): realpath-or-SKIP each row entry — mirrors the SAME idiom
+    // engine.ts's `writableRoots` Edit-dirs loop already documents and uses. `SessionDirectories`'s
+    // own `canon()` falls back to the RAW path on a realpath failure rather than dropping it (that
+    // fallback is deliberate and pinned elsewhere — it's what lets `remove()` still find a since-
+    // deleted added dir), so an unguarded push here reaches bash.ts's `roots.map(realpathSync)` and
+    // ENOENT-crashes EVERY bash call in the session the moment one row entry doesn't exist yet (an
+    // RPC/TUI/`session.setDirs` door can add a path without mkdir'ing it — only the dirGrant door
+    // does). Skipping costs nothing: `roots(sid)` recomputes on every call, so a skipped entry
+    // re-enters the fence the instant the directory is actually created.
+    for (const d of row) {
+      try { roots.push(realpathSync(d.path)); } catch { /* not yet on disk — skip, never widen with a missing root */ }
+    }
     // Everything below is keyed off the PRIMARY: the project-local permission dirs are
     // project-scoped, so a session with no primary at all (workdir-less) simply has none of them.
     // The outputs dir (further down) is NOT project-scoped and is folded in regardless — that is

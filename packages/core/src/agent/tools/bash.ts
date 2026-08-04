@@ -77,7 +77,12 @@ export function registerBashTool(r: ToolRegistry, deps: { bgRegistry?: Backgroun
         // bash write to. The ordinary (non-override) case ALSO already carries it via `roots` (the
         // blessing: daemon.ts's `sessionDirs` folds the outputs dir into the session's own roots the
         // same way it does the MEMDIR) — the `Set` dedupes that overlap for free.
-        const writable = [...new Set([realCwd, ...roots.map((r) => realpathSync(r)), scratch, ...(outdirReal ? [outdirReal] : [])])];
+        // I-2 defensive backstop (whole-branch review, optional): skip a root that fails to
+        // realpath instead of letting `.map` throw and crash the ENTIRE call over ONE bad root.
+        // The primary fix is upstream (engine.ts's sessionDirPaths, daemon.ts's roots closure) —
+        // this is belt-and-suspenders for any OTHER producer of `roots` that doesn't already guard
+        // existence (e.g. a hand-authored project-local permission dir).
+        const writable = [...new Set([realCwd, ...roots.flatMap((r) => { try { return [realpathSync(r)]; } catch { return []; } }), scratch, ...(outdirReal ? [outdirReal] : [])])];
         // SP-approvals final review: buildSeatbeltProfile now ALSO denies writing
         // "<root>/.norma/permissions.local.json" for every one of these writable roots,
         // automatically — no extra option to pass here. See that function's own doc comment

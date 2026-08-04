@@ -10,6 +10,7 @@ import { SessionHub } from "../../src/sessions/hub";
 import { ToolRegistry } from "../../src/agent/tools/registry";
 import { registerReadTools } from "../../src/agent/tools/fs-read";
 import { registerWriteTools } from "../../src/agent/tools/fs-write";
+import { registerBashTool } from "../../src/agent/tools/bash";
 import { PermissionGate } from "../../src/agent/gate";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { AgentEngine } from "../../src/agent/engine";
@@ -72,7 +73,11 @@ function daemonLikeDirs(store: SessionStore, home: string, memDirOf: (cwd: strin
     const primary = meta.cwd ?? row[0]?.path ?? null;
     const roots: string[] = [];
     if (primary) roots.push(primary);
-    for (const d of row) roots.push(d.path);
+    // I-2 fix mirror: realpath-or-SKIP, matching daemon.ts's real closure — a row entry that
+    // doesn't exist on disk yet must never reach bash's writable set.
+    for (const d of row) {
+      try { roots.push(realpathSync(d.path)); } catch { /* not yet on disk — skip */ }
+    }
     if (!primary) {
       roots.push(ensureOutdir(home, sid));
       const memDir = assistantMemDirOf();
@@ -125,6 +130,10 @@ function setup(script: ProviderEvent[][], opts?: {
    *  harness uses): knows nothing about the `dirs` row. Proves the row-derivation is the ENGINE's
    *  own behavior rather than something daemon.ts's wiring supplies. */
   legacyRoots?: boolean;
+  /** true → register the REAL sandboxed bash tool (`registerBashTool`) instead of the stub below.
+   *  Needed only when a test must prove something about bash's OWN root-realpathing (I-2) — the
+   *  stub never reaches `roots.map(realpathSync)` at all, so it is blind to that class of bug. */
+  realBash?: boolean;
 }) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-home-")));
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-cwd-")));
@@ -137,12 +146,16 @@ function setup(script: ProviderEvent[][], opts?: {
   // fires on the tool NAME, so a stub proves it without shelling out to sandbox-exec.
   const bashCalls: string[] = [];
   const bashCwds: string[] = [];
-  registry.register({
-    name: "bash",
-    description: "stub bash",
-    args: z.object({ command: z.string() }),
-    run({ command }, ctx) { bashCalls.push(command); bashCwds.push(ctx.cwd); return `ran: ${command}`; },
-  });
+  if (opts?.realBash) {
+    registerBashTool(registry);
+  } else {
+    registry.register({
+      name: "bash",
+      description: "stub bash",
+      args: z.object({ command: z.string() }),
+      run({ command }, ctx) { bashCalls.push(command); bashCwds.push(ctx.cwd); return `ran: ${command}`; },
+    });
+  }
   const provider = new FakeProvider(script);
   const memDirOf = (c: string) => memoryDirFor(c, { normaHome: home });
   const assistantMemDirOf = () => assistantMemoryDirFor({ normaHome: home });
@@ -709,5 +722,64 @@ describe("working-directories T5: workdir-less sessions", () => {
     await engine.runTurn(sessionId);
     expect(readFileSync(join(outside, "second.txt"), "utf8")).toBe("in the adopted primary");
     expect((store.read(sessionId).filter((e) => e.type === "approval_requested")).length).toBe(1); // still just the one
+  });
+});
+
+// ── I-2: a not-yet-existing row dir doesn't brick bash (whole-branch review) ──────────────────────
+
+describe("working-directories T5: I-2 — a not-yet-existing row dir doesn't brick every bash call", () => {
+  // `/dirs add /typo/path`-shaped repro: the RPC/TUI setter door doesn't mkdir (only the dirGrant
+  // approval door does), so a row entry can legitimately name a directory that doesn't exist on
+  // disk yet. Pre-fix, that entry reached bash's writable-root set via BOTH row feeds
+  // (`sessionDirPaths`, daemon.ts's roots closure) unrealpathed, and bash.ts's own
+  // `roots.map(realpathSync)` threw — ENOENT-crashing EVERY bash call in the session, not just a
+  // write into the missing dir. Real bash (`realBash: true`) is required here: the stub never
+  // reaches that `.map` at all.
+  test("a bash call still RUNS with a missing row dir present; a write INTO it still cards; approving (which mkdirs) lands the write", async () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-missing-base-")));
+    const missing = join(base, "not-yet-created"); // deliberately never mkdir'd
+    const target = join(missing, "note.txt");
+    const script: ProviderEvent[][] = [];
+    const { engine, store, hub, broker, sessionId, setDirsDeps } = setup(script, { policy: "ask", realBash: true });
+    expect(setSessionDirs(setDirsDeps, sessionId, "add", missing).ok).toBe(true);
+    expect(existsSync(missing)).toBe(false); // the setter never mkdirs — I-2's whole premise
+
+    // "echo" is in readOnlyBash's READONLY_HEADS, so it's silently allowed even under `ask` —
+    // isolating the assertion to "did bash crash on a missing root", not an unrelated approval card.
+    script.push(
+      [{ type: "tool_call", callId: "b1", name: "bash", argsJson: JSON.stringify({ command: "echo still-runs" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "tool_call", callId: "w1", name: "write", argsJson: JSON.stringify({ path: target, content: "into missing dir" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    );
+    hub.attach({
+      clientName: "auto-approver",
+      deliver(e) { if (e.type === "approval_requested") broker.resolve(sessionId, e.callId, true, "auto-approver"); return true; },
+    }, sessionId, 0);
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+
+    // The bash call ran without an ENOENT crash from the missing root.
+    const bashResult = events.find((e) => e.type === "tool_result" && (e as any).callId === "b1") as any;
+    expect(bashResult).toBeDefined();
+    expect(bashResult.isError).toBe(false);
+    expect(bashResult.output).toContain("still-runs");
+
+    // The write into the not-yet-existing dir still raises the ordinary out-of-root grant card —
+    // it is not silently allowed just because it's a session dir ON PAPER; it isn't a materialized
+    // fence root until it actually exists. (This harness wires no `permissionRules`, so the bash
+    // call ALSO cards under `ask` — readOnlyBash's silent-allow only fires when permissionRules is
+    // configured — hence matching by callId rather than taking the first approval_requested event.)
+    const card = events.find((e) => e.type === "approval_requested" && (e as any).callId === "w1") as any;
+    expect(card).toBeDefined();
+    expect(card.summary).toContain(target);
+
+    // Approving lands the write — fs-write mkdirs the missing parent as part of landing it.
+    expect(readFileSync(target, "utf8")).toBe("into missing dir");
+    expect(existsSync(missing)).toBe(true); // materialized by the approved write
+
+    // I-1's invariant holds here too: still no duplicate canonically-equal row entries.
+    const rowPaths = store.dirs(sessionId).map((d) => d.path);
+    expect(new Set(rowPaths).size).toBe(rowPaths.length);
   });
 });

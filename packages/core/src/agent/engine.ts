@@ -5229,7 +5229,17 @@ export class AgentEngine {
     try { row = this.cfg.store.dirs(sessionId); } catch { return []; }
     const out: string[] = [];
     for (const d of row) {
-      try { out.push(canonicalizeDirPath(d.path)); } catch { /* unusable entry — skip, never widen on a bad path */ }
+      // I-2 fix (whole-branch review): realpath-or-SKIP, NOT `canonicalizeDirPath`'s ancestor-walk
+      // — that walk deliberately KEEPS a not-yet-existing leaf (the T2 setter needs that stability
+      // for its OWN dedup/lock/denylist comparisons), but this function feeds bash's writable-root
+      // set (`writableRoots`, below) via the union at its call sites, and bash.ts's
+      // `roots.map(realpathSync)` ENOENT-crashes the ENTIRE call the moment ONE root is missing —
+      // not just a write into that one dir. A row entry can be missing legitimately: an
+      // RPC/TUI/`session.setDirs` door adds a path without mkdir'ing it (only the dirGrant door
+      // does). Skipping costs nothing — this only ever WIDENS the fence, and `sessionDirPaths` is
+      // recomputed on every call, so a skipped entry re-enters the fence the instant the directory
+      // is actually created.
+      try { out.push(realpathSync(d.path)); } catch { /* not yet on disk — skip, never widen with a missing root */ }
     }
     return out;
   }
