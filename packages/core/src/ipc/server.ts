@@ -1924,7 +1924,19 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
-        opts.dirs?.add(p.sessionId, p.path);
+        // working-directories T5: this legacy verb (CLI `norma add-dir`, the TUI's `/add-dir`,
+        // NormaKit's `addDir`) is now a THIN ALIAS over the one setter rather than a second writer
+        // of the fence. It used to `opts.dirs.add(...)` an in-memory root that no client could see,
+        // that no restart survived, and that no lock rule applied to; the same call now lands the
+        // directory in the `dirs` row exactly as `session.setDirs {op:"add"}` does — one writer, one
+        // state, and the `roots` echo below (unchanged, wd-m11) reflects it through the daemon's
+        // row-derived roots closure. Refusals it never had before are the setter's own and all
+        // correct for this door: a chat/dispatch target, and a path the dirGrant denylist forbids.
+        // `session.setDirs` is the verb to prefer; this one is kept for its shipped callers.
+        const added = setSessionDirs(setDirsDeps, p.sessionId, "add", p.path);
+        if (!added.ok) {
+          throw new RpcFailure(added.kind === "not_found" ? ERR.NOT_FOUND : ERR.INVALID_PARAMS, added.error);
+        }
         const persisted = p.persist && meta.cwd !== null;
         if (persisted) addLocalDir(meta.cwd!, p.path);
         hub.append(p.sessionId, { type: "directory_added", sessionId: p.sessionId, threadId: "main", path: p.path, persisted });

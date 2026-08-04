@@ -382,8 +382,27 @@ export async function startDaemon(opts: {
   // setCwd handlers always have live roots to work with, even when the agent is disabled.
   const sessionDirs = new SessionDirectories((sid) => {
     const m = store.meta(sid);
-    if (!m.cwd) return [];
-    const roots = [m.cwd, ...loadPermissionDirs(normaHome, m.cwd, trustStore.isTrusted(m.cwd))];
+    // working-directories T5 (spec §1: "the engine's writableRoots derives from the row"): the
+    // session's own working directories come from the `dirs` column, not from the single `cwd`
+    // column. For every row that has never been written this is byte-identical — T1's lazy
+    // migration derives `[{path: cwd, locked: true}]` from that same column, verbatim — so this
+    // list is unchanged for every pre-branch session while picker/RPC/dirGrant-adopted dirs now
+    // reach the fence (and survive a daemon restart, which `SessionDirectories.added` never did).
+    // `primary` keeps the `cwd` column FIRST when it has one: it is what `enter_worktree`/
+    // `session.setCwd` move, and the turn already runs there. A workdir-less session that has
+    // adopted a primary has no cwd column yet, hence the `dirs[0]` fallback — the SAME precedence
+    // engine.ts's `primaryDir` uses.
+    const row = store.dirs(sid);
+    const primary = m.cwd ?? row[0]?.path ?? null;
+    const roots: string[] = [];
+    if (primary) roots.push(primary);
+    for (const d of row) roots.push(d.path); // SessionDirectories.roots() dedupes by canonical form
+    // Everything below is keyed off the PRIMARY: the project-local permission dirs and the MEMDIR
+    // are project-scoped, so a session with no primary at all (workdir-less) simply has none of
+    // them. The outputs dir (further down) is NOT project-scoped and is folded in regardless —
+    // that is what keeps a workdir-less session writable in its own delivery folder.
+    if (!primary) return [...roots, ensureOutdir(normaHome, sid)];
+    roots.push(...loadPermissionDirs(normaHome, primary, trustStore.isTrusted(primary)));
     // T1 write-root join (design doc: "the tmpDir pattern" — a plain, ungated, auto-provisioned
     // root, mirroring how `sessionTmpDir` needs no user approval either): whenever file-based
     // memory is enabled, the session's MEMDIR joins the SAME write-fence `roots` the `write`/`edit`
@@ -400,7 +419,10 @@ export async function startDaemon(opts: {
     // `sessionTmpDir` already sets — cheap relative to the git spawn `memoryDirFor` itself already
     // memoizes.
     if (memoryEnabledHot()) {
-      const memDir = memoryDirOf(m.cwd);
+      // T5: keyed off `primary`, not `m.cwd` — identical for every session that has a cwd column,
+      // and the only sane key for one that reached its primary by adopting a dir. (Spec §2 gives a
+      // workdir-less session the shared `_assistant` bucket instead; that is T6's own task.)
+      const memDir = memoryDirOf(primary);
       mkdirSync(memDir, { recursive: true });
       roots.push(memDir);
     }
@@ -422,7 +444,13 @@ export async function startDaemon(opts: {
     emit: (sid, e) => hub.append(sid, e),
     spawnCtx: (sid) => {
       const m = store.meta(sid);
-      return { cwd: m.cwd!, roots: sessionDirs.roots(sid), tmpDir: sessionTmpDir(sid) };
+      // working-directories T5: a workdir-less session (no cwd column, empty dirs row) can now run
+      // turns — its shell starts in the session tmp dir (scratch by default; deliverables are
+      // deliberate copies into $OUTDIR), the SAME fallback the engine gives a foreground turn and
+      // `bash.ts` itself keeps as a defensive last resort. Before this, `m.cwd!` handed a `null`
+      // straight to `realpathSync` in the bash tool.
+      const dirs0 = store.dirs(sid)[0]?.path;
+      return { cwd: m.cwd ?? dirs0 ?? sessionTmpDir(sid), roots: sessionDirs.roots(sid), tmpDir: sessionTmpDir(sid) };
     },
   });
 

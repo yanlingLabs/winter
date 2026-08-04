@@ -233,3 +233,63 @@ describe("working-directories T5: the generalized write fence", () => {
     expect(existsSync(target)).toBe(false); // denied → nothing written
   });
 });
+
+// ── adopt-on-grant (spec §1: "a dirGrant-adopted directory is born locked") ─────────────────────
+
+describe("working-directories T5: the dirGrant approval adopts into the row", () => {
+  test("auto-policy grant lands the directory in the ROW, born LOCKED — and a second write there is then silent-plain", async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-adopt-")));
+    const target1 = join(outside, "one.txt");
+    const target2 = join(outside, "two.txt");
+    const { engine, store, sessionId, cwd } = setup([
+      [{ type: "tool_call", callId: "c1", name: "write", argsJson: JSON.stringify({ path: target1, content: "one" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "tool_call", callId: "c2", name: "write", argsJson: JSON.stringify({ path: target2, content: "two" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    ], { policy: "auto" });
+
+    await engine.runTurn(sessionId);
+
+    // THE assertion this task exists for: the grant is durable state on the session row, not an
+    // in-memory SessionDirectories entry that dies with the daemon.
+    const row = store.dirs(sessionId);
+    expect(row.map((d) => d.path)).toEqual([cwd, outside]);
+    expect(row[1]).toMatchObject({ path: outside, locked: true }); // BORN locked — the approved write is its first write
+    expect(readFileSync(target1, "utf8")).toBe("one");
+    expect(readFileSync(target2, "utf8")).toBe("two");
+    // The dir joined the set once; the second write rode it as an ordinary session dir.
+    const events = store.read(sessionId);
+    expect(events.filter((e) => e.type === "directory_added").length).toBe(1);
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+  });
+
+  test("the GRANTING write still rides the fs reviewer (task-24 F1 invariant); only the NEXT write into the now-adopted dir is silent", async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-grantfirst-")));
+    const { engine, store, sessionId } = setup([
+      [{ type: "tool_call", callId: "c1", name: "write", argsJson: JSON.stringify({ path: join(outside, "one.txt"), content: "one" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "tool_call", callId: "c2", name: "write", argsJson: JSON.stringify({ path: join(outside, "two.txt"), content: "two" }) }, { type: "done", stopReason: "tool_calls" }],
+      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
+    ], { policy: "auto", reviewer: { verdict: "safe", reason: "fine" } });
+
+    await engine.runTurn(sessionId);
+    const reviews = store.read(sessionId).filter((e) => e.type === "tool_review") as any[];
+    // EXACTLY one: c1 (out-of-root at the moment it ran — a dir adopted BY a call must not
+    // retroactively make that same call ordinary, or `auto`'s only out-of-root safety net is gone);
+    // c2 rode the row and was silent.
+    expect(reviews.length).toBe(1);
+    expect(reviews[0].summary).toContain(join(outside, "one.txt"));
+    expect(readFileSync(join(outside, "two.txt"), "utf8")).toBe("two");
+  });
+
+  test("a grant-denied directory is never adopted — hard error, nothing in the row (the denylist is one predicate for both doors)", async () => {
+    // The script is the SAME array FakeProvider holds (by reference), so the target — which needs
+    // `home`, minted inside setup() — can be filled in after construction, before runTurn reads it.
+    const script: ProviderEvent[][] = [];
+    const { engine, store, sessionId, home, cwd } = setup(script, { policy: "auto" });
+    script.push(...writeTurn(join(home, "sessions", "evil.txt"), "x")); // inside NORMA_HOME = grantDeniedPrefixes
+    await engine.runTurn(sessionId);
+    const result = store.read(sessionId).find((e) => e.type === "tool_result") as any;
+    expect(result.isError).toBe(true);
+    expect(result.output).toMatch(/never be granted/);
+    expect(store.dirs(sessionId).map((d) => d.path)).toEqual([cwd]); // untouched
+  });
+});

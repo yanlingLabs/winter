@@ -3944,6 +3944,15 @@ export class AgentEngine {
         // the read tools get) is NEVER grantable, either policy, no card — checked once here, and
         // consulted by both the auto pre-grant below and the deny branch in the dispatch chain.
         const dirGrantDenied = dirGrant !== null && this.grantDenied(dirGrant.dir);
+        // working-directories T5: the session's working directories as of the START of this call —
+        // the fs safety reviewer's classification set (below). Snapshotted HERE, before the auto
+        // pre-grant can adopt this very call's grant dir into the row, because a dir adopted BY
+        // this call must NOT retroactively make this call ordinary: task-24 review F1's invariant
+        // is that an out-of-root write under `auto` is granted SILENTLY but still rides the fs
+        // reviewer (under auto the reviewer is the only safety net there is). The adopted dir is a
+        // full session dir from the NEXT call on — which is exactly what "the approved write is its
+        // first write" means. A worktree-isolated child classifies against its fixed confinement.
+        const preCallSessionDirs = rootsOverride ?? this.sessionDirPaths(sessionId);
         // SP-approvals final review (composition hole): the permission-rules store itself is NEVER
         // a valid write/edit target — checked here, unconditionally (not gated on `decision`,
         // `dirGrant`, or anything ruleAllowed-related below), so it is computed and dispatched
@@ -4444,10 +4453,10 @@ export class AgentEngine {
           const alwaysSilentDirs = [fsTmpDir, this.cfg.outDirOf?.(sessionId), memAnchor ? this.cfg.memDirOf?.(memAnchor) : undefined];
           // T5 (spec §2): classify against the session's OWN working directories — the row — not
           // the full fence roots (which also carry Edit-rule dirs, project-local permission dirs
-          // and the Norma-owned folds). A worktree-isolated child classifies against its FIXED
-          // confinement instead, mirroring `writableRoots`'s own `rootsOverride ??` shape.
-          const classifyDirs = rootsOverride ?? this.sessionDirPaths(sessionId);
-          if (resolved && fsWriteIsUnusual(resolved, classifyDirs, alwaysSilentDirs)) {
+          // and the Norma-owned folds). `preCallSessionDirs` is the pre-grant snapshot taken above
+          // (see its own comment for why this call must not benefit from its own grant), and for a
+          // worktree-isolated child it is that child's FIXED confinement instead.
+          if (resolved && fsWriteIsUnusual(resolved, preCallSessionDirs, alwaysSilentDirs)) {
             const precis = fsWritePrecis(call, resolved);
             outcome = await this.reviewAndDispatch(
               { class: "fs", precis }, precis,
@@ -5014,9 +5023,42 @@ export class AgentEngine {
     } catch (err) {
       return `could not create ${dir}: ${err instanceof Error ? err.message : String(err)}`;
     }
+    this.adoptGrantedDir(sessionId, dir);
+    // The in-process mirror, KEPT alongside the row: `SessionDirectories.roots()` is read DIRECTLY
+    // (not through this engine's row-union) by the background-task registry's spawnCtx and the lsp
+    // tool's `rootsOf` (daemon.ts), and by every engine test harness whose baseDirs closure is a
+    // fixed literal. In the real daemon it is redundant — that closure is itself row-derived now —
+    // but it costs a Set insert and keeps "granted" true for every consumer in this process, not
+    // just the ones that go through `writableRoots`. The ROW is the durable truth; this is a cache.
     this.cfg.dirs.add(sessionId, dir);
     this.emit(sessionId, { type: "directory_added", sessionId, threadId, path: dir, persisted: false });
     return null;
+  }
+
+  /** working-directories T5 (spec §1: "a dirGrant-adopted directory is born locked — the approved
+   *  write is its first write"): fold an approved grant dir into the session's `dirs` row through
+   *  the ONE setter, then lock it immediately. Two calls rather than an "add-locked" op because
+   *  `setSessionDirs`'s vocabulary is deliberately about what a DOOR asks for (add/remove/
+   *  setPrimary) and `lockDir` is the write-hook's own marker — the same pair a picker-added dir
+   *  goes through when its first write lands, just collapsed into one moment here.
+   *
+   *  On an EMPTY set (a workdir-less session) `add` establishes the primary and the session leaves
+   *  workdir-less mode — spec §2's "approval adopts the dir and exits the mode", with no special
+   *  case here or in the setter.
+   *
+   *  A refusal is LOGGED, never fatal: by construction it cannot happen for a grant (the denylist
+   *  was already checked as `dirGrantDenied` at the call site, the session exists and is mid-turn,
+   *  and only code/cowork sessions have write tools at all), and if some future door reaches it
+   *  anyway the approved write must still land — the in-process mirror above covers this process.
+   *  Silently swallowing it would be the thing worth catching, so it is a `console.error`. */
+  private adoptGrantedDir(sessionId: string, dir: string): void {
+    const deps = this.dirsDeps();
+    const res = setSessionDirs(deps, sessionId, "add", dir);
+    if (!res.ok) {
+      console.error(`[engine] could not adopt granted dir ${dir} for session ${sessionId}: ${res.error}`);
+      return;
+    }
+    lockDir(deps, sessionId, dir);
   }
 
   /** SP-policies Task 9: the mkdir-ONLY half of applyDirGrant — create a grant dir so an APPROVED
