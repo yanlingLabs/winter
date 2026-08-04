@@ -5,6 +5,12 @@ import type { ApprovalOption, NewSessionEvent, Question, SessionEvent, Task } fr
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
 import { participatesInActivity } from "../sessions/activity";
+// working-directories T5: the session `dirs` row is the fence's source of truth (spec §1: "the
+// engine's writableRoots derives from the row. Engine-internal grant state is REPLACED by the
+// row"), and `setSessionDirs`/`lockDir` are the ONE writer every mutation door goes through —
+// the dirGrant adopt and the first-write lock hooks below included.
+import { canonicalizeDirPath, type SessionDirs } from "../sessions/dirs";
+import { setSessionDirs, lockDir, type SetDirsDeps } from "../sessions/set-dirs";
 import type { ModelInfo, Provider, ProviderEvent, TurnInputItem } from "../providers/types";
 import { isContextLengthError } from "../providers/errors";
 import type { ToolRegistry, Mode } from "./tools/registry";
@@ -453,33 +459,46 @@ function resolveFsReviewTarget(path: string, roots: string[], tmpDir: string): s
   }
 }
 
-/** phase 5e T3 (fs coverage): true if a fence-vetted, CANONICALIZED (resolveFsReviewTarget)
- *  write/edit target is unusual enough to review — (a) outside the PRIMARY cwd subtree (roots[0]:
- *  an added root or the session tmp dir), reusing paths.ts's own isWithin, or (b) a dotfile/
- *  dot-directory path segment anywhere inside cwd (.ssh/, .git/hooks/, a .zshrc-class file). A
- *  plain in-cwd, non-dotted write is NOT reviewed — this is the "unusual", not "every write",
- *  trigger the brief specifies. primaryCwd is realpathed here too: `resolved` is canonical, so a
- *  non-canonical root (possible via rootsOverride) would make relative() emit spurious ".."
- *  segments — a false-positive review, never a bypass, but still wrong.
+/** phase 5e T3 (fs coverage), GENERALIZED by working-directories T5 (spec §2, "generalized write
+ *  classification"): true if a fence-vetted, CANONICALIZED (resolveFsReviewTarget) write/edit
+ *  target is unusual enough to review.
  *
- *  working-directories T4 fix round 1 (spec §2: "Norma-owned spaces ($OUTDIR/$TMPDIR/$MEMDIR):
- *  always silent; the dotfile rule does not apply inside them"): `alwaysSilentDirs` — checked
- *  FIRST, before either the outside-primary or dotfile check — exempts a target inside one of
- *  them from BOTH. Deliberately NOT "any root beyond primaryCwd": an out-of-project grant/added
- *  root (task-24 review F1's own pinned case) or a worktree-entered dir must stay reviewable under
- *  auto — only these three specific Norma-owned dirs are exempt, so callers must pass exactly
- *  that short list, never the full `roots` array. This is a surgical addition, not the
- *  generalized any-session-dir classification the plan's own fence table (§2) eventually wants —
- *  T5 absorbs it into that rewrite. Falsy entries (an unwired outDirOf/memDirOf, or a session with
- *  memory disabled) are simply skipped — callers may pass an unfiltered array. */
-function fsWriteIsUnusual(resolved: string, primaryCwd: string, alwaysSilentDirs: (string | undefined)[] = []): boolean {
+ *  Three rules, in order:
+ *   1. Inside one of the Norma-owned spaces (`alwaysSilentDirs` — $TMPDIR/$OUTDIR/$MEMDIR, T4):
+ *      ALWAYS silent, and the dot rule deliberately does not apply inside them (spec §2).
+ *   2. Inside ANY of the session's own working directories (`sessionDirs`): silent UNLESS the path
+ *      crosses a dot-directory/dotfile segment relative to THAT directory (.ssh/, .git/hooks/, a
+ *      .zshrc-class file) — the existing rule, now anchored per-dir instead of only at the primary.
+ *      First containing dir wins; primary-first ordering makes that the primary whenever the set
+ *      overlaps.
+ *   3. Outside every session directory: unusual (review).
+ *
+ *  `sessionDirs` is the ROW's dirs (`store.dirs(sessionId)`, canonicalized) — NOT the full fence
+ *  `roots` array. That distinction is the whole point: an `Edit(<path>)` rule dir, a worktree-
+ *  entered dir, an `session.addDir`-style transient root and the project-local permission dirs are
+ *  all writable but are NOT the user's declared working directories, so a write into one stays
+ *  reviewable under auto exactly as it is today (task-24 review F1's pinned case). A worktree-
+ *  ISOLATED child passes its `rootsOverride` here instead — that fixed confinement IS its whole
+ *  world, and classifying it against the parent session's row would review every write it makes.
+ *
+ *  Each entry is realpathed here (like the old `primaryCwd` was): `resolved` is canonical, so a
+ *  non-canonical dir would make relative() emit spurious ".." segments — a false-positive review,
+ *  never a bypass, but still wrong. Falsy `alwaysSilentDirs` entries (an unwired outDirOf/memDirOf,
+ *  or a session with memory disabled) are simply skipped — callers may pass an unfiltered array.
+ *  An EMPTY `sessionDirs` (a workdir-less session) makes every non-Norma-owned target unusual,
+ *  which is exactly right: such a session has no user directory at all, and any user-fs write it
+ *  attempts is already out-of-root and carded by the dirGrant flow before this is even consulted. */
+function fsWriteIsUnusual(resolved: string, sessionDirs: string[], alwaysSilentDirs: (string | undefined)[] = []): boolean {
   for (const d of alwaysSilentDirs) {
     if (d && isWithin(resolved, d)) return false;
   }
-  let cwd = primaryCwd;
-  try { cwd = realpathSync(primaryCwd); } catch { /* vanished root — raw comparison is all there is */ }
-  if (!isWithin(resolved, cwd)) return true;
-  return relative(cwd, resolved).split(sep).some((seg) => seg.startsWith("."));
+  for (const raw of sessionDirs) {
+    let dir = raw;
+    try { dir = realpathSync(raw); } catch { /* vanished dir — raw comparison is all there is */ }
+    if (!isWithin(resolved, dir)) continue;
+    return relative(dir, resolved).split(sep).some((seg) => seg.startsWith("."));
+  }
+  return true;
 }
 
 /** phase 5e T3 (fs coverage): the précis shown to the reviewer AND persisted as tool_review.summary
@@ -4411,11 +4430,24 @@ export class AgentEngine {
           const fsTmpDir = sessionTmpDir(sessionId);
           const resolved = path ? resolveFsReviewTarget(path, fsRoots, fsTmpDir) : null;
           // working-directories T4 fix round 1 (spec §2): the three Norma-owned dirs are always
-          // silent — never "unusual" here, regardless of the outside-primary/dotfile checks.
+          // silent — never "unusual" here, regardless of the session-dir/dotfile checks.
           // `cfg.outDirOf`/`cfg.memDirOf` absent (a test harness predating this fix) simply drops
           // out of the array; `fsTmpDir` is always present.
-          const alwaysSilentDirs = [fsTmpDir, this.cfg.outDirOf?.(sessionId), this.cfg.memDirOf?.(cwd)];
-          if (resolved && fsWriteIsUnusual(resolved, fsRoots[0]!, alwaysSilentDirs)) {
+          //
+          // T5 (wd-m14, T4 re-review's open question): `memDirOf` takes the session's PRIMARY, not
+          // this thread's live `cwd`. They differ whenever `enter_worktree` has moved the turn's
+          // cwd — and the MEMDIR that is actually FOLDED INTO THE FENCE (daemon.ts's roots closure)
+          // is keyed off the session's primary, so passing `cwd` named a memdir that isn't in the
+          // roots at all (vacuously exempt) while leaving the real one reviewable. Same
+          // `meta.cwd ?? dirs[0]` precedence the closure itself uses — one answer, two layers.
+          const memAnchor = this.primaryDir(sessionId, meta);
+          const alwaysSilentDirs = [fsTmpDir, this.cfg.outDirOf?.(sessionId), memAnchor ? this.cfg.memDirOf?.(memAnchor) : undefined];
+          // T5 (spec §2): classify against the session's OWN working directories — the row — not
+          // the full fence roots (which also carry Edit-rule dirs, project-local permission dirs
+          // and the Norma-owned folds). A worktree-isolated child classifies against its FIXED
+          // confinement instead, mirroring `writableRoots`'s own `rootsOverride ??` shape.
+          const classifyDirs = rootsOverride ?? this.sessionDirPaths(sessionId);
+          if (resolved && fsWriteIsUnusual(resolved, classifyDirs, alwaysSilentDirs)) {
             const precis = fsWritePrecis(call, resolved);
             outcome = await this.reviewAndDispatch(
               { class: "fs", precis }, precis,
@@ -5021,6 +5053,52 @@ export class AgentEngine {
     return false;
   }
 
+  /** working-directories T5 (spec §1: "the engine's `writableRoots` derives from the row"): THE
+   *  session's own working directories, straight off the `dirs` column, canonicalized so they
+   *  compare and dedupe against `SessionDirectories.roots()`'s own realpathed entries.
+   *
+   *  This is what makes the fence row-derived rather than trusting engine-internal state: a dir
+   *  adopted through a dirGrant approval, the app picker, `/dirs` or the RPC is in the row, so it
+   *  is in the fence — across a daemon restart too, which the in-memory `SessionDirectories.added`
+   *  set never survived.
+   *
+   *  Byte-equivalent for a single-dir session: a row that has never been written derives
+   *  `[{path: cwd, locked: true}]` from the `cwd` column (T1's lazy migration), whose canonical
+   *  form is EXACTLY the entry `SessionDirectories.roots()` already puts at index 0 — so the
+   *  `new Set` union at the call site collapses to today's array, in today's order.
+   *
+   *  Never throws: an unknown session (a caller mid-delete) or an uncanonicalizable entry (a
+   *  relative path in a hand-edited column) drops out rather than failing the whole turn — this
+   *  function only ever WIDENS the fence, so a dropped entry fails closed. */
+  private sessionDirPaths(sessionId: string): string[] {
+    let row: SessionDirs;
+    try { row = this.cfg.store.dirs(sessionId); } catch { return []; }
+    const out: string[] = [];
+    for (const d of row) {
+      try { out.push(canonicalizeDirPath(d.path)); } catch { /* unusable entry — skip, never widen on a bad path */ }
+    }
+    return out;
+  }
+
+  /** working-directories T5: the session's PRIMARY working directory, with the precedence
+   *  daemon.ts's own roots closure uses — the live `cwd` column first (it is what
+   *  `enter_worktree`/`session.setCwd` move, and every turn already runs there), the row's
+   *  `dirs[0]` second (a workdir-less session that has ADOPTED a primary has no cwd column yet;
+   *  T3 populates `SessionSummary.cwd` from `dirs[0]` for exactly this reason). `undefined` only
+   *  for a workdir-less session that has never adopted anything. */
+  private primaryDir(sessionId: string, meta: { cwd: string | null }): string | undefined {
+    if (meta.cwd) return meta.cwd;
+    try { return this.cfg.store.dirs(sessionId)[0]?.path; } catch { return undefined; }
+  }
+
+  /** working-directories T5: the deps `setSessionDirs`/`lockDir` take — the engine's OWN store and
+   *  its OWN `grantDenied` predicate (the same instance method the dirGrant flow consults, so
+   *  "what can never be granted" and "what can never be adopted" are one answer, never two
+   *  spellings). Built per call: it closes over nothing mutable and costs an object literal. */
+  private dirsDeps(): SetDirsDeps {
+    return { store: this.cfg.store, grantDenied: (dir) => this.grantDenied(dir) };
+  }
+
   /** SP-policies Task 6: the session's writable-dir set — `dirs.roots(sessionId)` (or a worktree
    *  child's FIXED `rootsOverride`) UNIONED with the absolute dirs a hand-authored `Edit(<path>)`
    *  rule declares for this project (PermissionRules.editPathRules). Consulted by BOTH the
@@ -5054,7 +5132,7 @@ export class AgentEngine {
    *  string-spelling principle), and a missing root can never reach bash's realpath/Seatbelt (which
    *  would ENOENT-crash every bash call). See the loop below. */
   private writableRoots(sessionId: string, projectRoot: string | null, rootsOverride: string[] | undefined): string[] {
-    const base = rootsOverride ?? this.cfg.dirs.roots(sessionId);
+    const base = rootsOverride ?? [...new Set([...this.cfg.dirs.roots(sessionId), ...this.sessionDirPaths(sessionId)])];
     if (rootsOverride || !this.cfg.permissionRules || projectRoot === null) return base;
     const editDirs: string[] = [];
     for (const raw of this.cfg.permissionRules.editPathRules(projectRoot)) {
