@@ -198,6 +198,140 @@ describe("setSessionDirs — duplicate add is idempotent", () => {
   });
 });
 
+describe("setSessionDirs — setPrimary dedupe-promote (whole-branch review I-1)", () => {
+  test("setPrimary of the CURRENT primary (idx 0) is idempotent — ok, unchanged set, no write", () => {
+    const { store } = makeStore();
+    const id = store.createSession("global");
+    const base = fixtureBase();
+    const primary = join(base, "primary"); mkdirSync(primary);
+    const secondary = join(base, "secondary"); mkdirSync(secondary);
+    const existing: SessionDirs = [
+      { path: canonicalizeDirPath(primary), locked: false },
+      { path: canonicalizeDirPath(secondary), locked: true },
+    ];
+    store.setDirsRaw(id, existing);
+    const result = setSessionDirs(makeDeps(store), id, "setPrimary", primary);
+    expect(result).toEqual({ ok: true, dirs: existing });
+    expect(store.dirs(id)).toEqual(existing); // unchanged, no write
+  });
+
+  test("setPrimary of the CURRENT primary is idempotent-ok EVEN WHEN LOCKED (wd-m3) — no lock refusal fires", () => {
+    const { store } = makeStore();
+    const id = store.createSession("global");
+    const base = fixtureBase();
+    const primary = join(base, "primary"); mkdirSync(primary);
+    const existing: SessionDirs = [{ path: canonicalizeDirPath(primary), locked: true }];
+    store.setDirsRaw(id, existing);
+    const result = setSessionDirs(makeDeps(store), id, "setPrimary", primary);
+    expect(result).toEqual({ ok: true, dirs: existing });
+    expect(store.dirs(id)).toEqual(existing);
+  });
+
+  test("setPrimary of an unlocked entry already at idx>0 PROMOTES it to 0 — no duplicate, old primary dropped", () => {
+    const { store } = makeStore();
+    const id = store.createSession("global");
+    const base = fixtureBase();
+    const primary = join(base, "primary"); mkdirSync(primary);
+    const secondary = join(base, "secondary"); mkdirSync(secondary);
+    const third = join(base, "third"); mkdirSync(third);
+    const existing: SessionDirs = [
+      { path: canonicalizeDirPath(primary), locked: false },
+      { path: canonicalizeDirPath(secondary), locked: false },
+      { path: canonicalizeDirPath(third), locked: false },
+    ];
+    store.setDirsRaw(id, existing);
+    const result = setSessionDirs(makeDeps(store), id, "setPrimary", secondary);
+    expect(result).toEqual({
+      ok: true,
+      dirs: [
+        { path: canonicalizeDirPath(secondary), locked: false },
+        { path: canonicalizeDirPath(third), locked: false },
+      ],
+    });
+    // the invariant: no two canonically-equal entries, ever
+    const canon = result.ok ? result.dirs.map((d) => canonicalizeDirPath(d.path)) : [];
+    expect(new Set(canon).size).toBe(canon.length);
+  });
+
+  test("setPrimary of a LOCKED entry already at idx>0 PROMOTES it to 0 — the lock survives the move", () => {
+    const { store } = makeStore();
+    const id = store.createSession("global");
+    const base = fixtureBase();
+    const primary = join(base, "primary"); mkdirSync(primary);
+    const locked = join(base, "locked"); mkdirSync(locked);
+    const existing: SessionDirs = [
+      { path: canonicalizeDirPath(primary), locked: false },
+      { path: canonicalizeDirPath(locked), locked: true },
+    ];
+    store.setDirsRaw(id, existing);
+    const result = setSessionDirs(makeDeps(store), id, "setPrimary", locked);
+    expect(result).toEqual({
+      ok: true,
+      dirs: [{ path: canonicalizeDirPath(locked), locked: true }],
+    });
+    expect(store.dirs(id)).toEqual([{ path: canonicalizeDirPath(locked), locked: true }]);
+  });
+
+  test("setPrimary promote of an entry at idx>0 refuses when the CURRENT primary is locked — the displacing-call rule still fires", () => {
+    const { store } = makeStore();
+    const id = store.createSession("global");
+    const base = fixtureBase();
+    const primary = join(base, "primary"); mkdirSync(primary);
+    const secondary = join(base, "secondary"); mkdirSync(secondary);
+    const existing: SessionDirs = [
+      { path: canonicalizeDirPath(primary), locked: true },
+      { path: canonicalizeDirPath(secondary), locked: false },
+    ];
+    store.setDirsRaw(id, existing);
+    const result = setSessionDirs(makeDeps(store), id, "setPrimary", secondary);
+    expect(result).toEqual({ ok: false, kind: "invalid", error: DIR_LOCKED_REFUSAL });
+    expect(store.dirs(id)).toEqual(existing); // no write happened
+  });
+
+  test("setPrimary promote canonicalizes the incoming path (symlink spelling still finds idx>0)", () => {
+    const { store } = makeStore();
+    const id = store.createSession("global");
+    const base = fixtureBase();
+    const primary = join(base, "primary"); mkdirSync(primary);
+    const real = join(base, "real"); mkdirSync(real);
+    const link = join(base, "link"); symlinkSync(real, link);
+    const existing: SessionDirs = [
+      { path: canonicalizeDirPath(primary), locked: false },
+      { path: canonicalizeDirPath(real), locked: false },
+    ];
+    store.setDirsRaw(id, existing);
+    const result = setSessionDirs(makeDeps(store), id, "setPrimary", link);
+    expect(result).toEqual({
+      ok: true,
+      dirs: [{ path: canonicalizeDirPath(real), locked: false }],
+    });
+  });
+
+  // Cross-op invariant (the review's PLUS pin): no op in this state machine ever yields two
+  // canonically-equal entries in the set — a duplicate is how a locked "ghost" entry becomes
+  // permanently unremovable (I-1's root cause). Exercised across all three ops at once.
+  test("invariant: no op ever yields two canonically-equal entries", () => {
+    const { store } = makeStore();
+    const id = store.createSession("global");
+    const base = fixtureBase();
+    const a = join(base, "a"); mkdirSync(a);
+    const b = join(base, "b"); mkdirSync(b);
+    const c = join(base, "c"); mkdirSync(c);
+    const deps = makeDeps(store);
+    const assertNoDuplicates = () => {
+      const canon = store.dirs(id).map((d) => canonicalizeDirPath(d.path));
+      expect(new Set(canon).size).toBe(canon.length);
+    };
+    expect(setSessionDirs(deps, id, "setPrimary", a).ok).toBe(true); assertNoDuplicates();
+    expect(setSessionDirs(deps, id, "add", b).ok).toBe(true); assertNoDuplicates();
+    expect(setSessionDirs(deps, id, "add", c).ok).toBe(true); assertNoDuplicates();
+    expect(setSessionDirs(deps, id, "setPrimary", c).ok).toBe(true); assertNoDuplicates(); // promote
+    expect(setSessionDirs(deps, id, "setPrimary", c).ok).toBe(true); assertNoDuplicates(); // idx-0 idempotent
+    expect(setSessionDirs(deps, id, "add", a).ok).toBe(true); assertNoDuplicates(); // duplicate add
+    expect(setSessionDirs(deps, id, "remove", a).ok).toBe(true); assertNoDuplicates();
+  });
+});
+
 describe("setSessionDirs — locked mutations (DIR_LOCKED_REFUSAL)", () => {
   test("setPrimary over a locked primary refuses", () => {
     const { store } = makeStore();
@@ -228,7 +362,13 @@ describe("setSessionDirs — locked mutations (DIR_LOCKED_REFUSAL)", () => {
     expect(store.dirs(id)).toEqual(existing);
   });
 
-  test("symlink spelling of a locked dir refuses — canonicalizes before compare", () => {
+  // Superseded by the I-1 dedupe-promote fix (wd-m3): a symlink spelling of the locked primary
+  // canonicalizes to the SAME entry (idx 0), so this is the idempotent no-op case now, not a
+  // refusal — asking to set the primary to a path it already IS can never be a mutation the lock
+  // needs to protect against. See "setPrimary — dedupe-promote" above for the behavior pin; kept
+  // here (beside its sibling locked-mutation tests) so the "canonicalizes before compare" angle
+  // stays pinned, now against the correct (idempotent) outcome.
+  test("symlink spelling of a locked primary is recognized as the SAME entry (idx 0) — idempotent ok, not a refusal", () => {
     const { store } = makeStore();
     const id = store.createSession("global");
     const base = fixtureBase();
@@ -237,7 +377,22 @@ describe("setSessionDirs — locked mutations (DIR_LOCKED_REFUSAL)", () => {
     const existing: SessionDirs = [{ path: canonicalizeDirPath(real), locked: true }];
     store.setDirsRaw(id, existing);
     const result = setSessionDirs(makeDeps(store), id, "setPrimary", link);
+    expect(result).toEqual({ ok: true, dirs: existing });
+    expect(store.dirs(id)).toEqual(existing); // no write happened
+  });
+
+  test("symlink spelling of a DIFFERENT, not-yet-present path still refuses over a locked primary — the dedupe compare canonicalizes but finds no match, so the lock refusal still fires", () => {
+    const { store } = makeStore();
+    const id = store.createSession("global");
+    const base = fixtureBase();
+    const primary = join(base, "primary"); mkdirSync(primary);
+    const real = join(base, "real"); mkdirSync(real);
+    const link = join(base, "link"); symlinkSync(real, link);
+    const existing: SessionDirs = [{ path: canonicalizeDirPath(primary), locked: true }];
+    store.setDirsRaw(id, existing);
+    const result = setSessionDirs(makeDeps(store), id, "setPrimary", link);
     expect(result).toEqual({ ok: false, kind: "invalid", error: DIR_LOCKED_REFUSAL });
+    expect(store.dirs(id)).toEqual(existing); // no write happened
   });
 });
 

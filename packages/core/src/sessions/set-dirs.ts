@@ -112,18 +112,46 @@ export function setSessionDirs(
 
   switch (op) {
     case "setPrimary": {
-      // Locked check first: a locked `dirs[0]` refuses regardless of what the caller wants to
+      // dedupe-promote (whole-branch review I-1): resolved FIRST, before the locked-primary
+      // refusal below — a path already IN the set (at any index) is never "a fresh path to
+      // install at 0", it is either already there (idx 0) or needs to MOVE there (idx>0). Without
+      // this, setPrimary of a path already at index k≥1 would duplicate it (index 0 unlocked +
+      // index k unchanged) — `findByCanonical` then resolves to index 0 forever, and `remove` of
+      // the now-orphaned duplicate at k refuses via the PRIMARY rule, locking it permanent on the
+      // entry's first shared write.
+      const existingIdx = findByCanonical(dirs, canonical);
+      // Idempotent success, no write, no lock/denylist consultation — mirrors `add`'s own
+      // duplicate short-circuit. Deliberately fires even when `dirs[0]` is LOCKED: setPrimary of
+      // the CURRENT primary asks for nothing the session doesn't already have, so there is nothing
+      // for the lock to refuse.
+      if (existingIdx === 0) {
+        return { ok: true, dirs };
+      }
+      // Locked check next: a locked `dirs[0]` refuses regardless of what the caller wants to
       // replace it with, before the denylist is even consulted — a caller can't smuggle information
       // about the denylist's contents out of a refusal that was always going to fire on lock alone.
+      // Only reached now for a genuinely DISPLACING call (existingIdx !== 0) — the idx-0 idempotent
+      // case above already returned.
       if (dirs.length > 0 && dirs[0]!.locked) {
         return { ok: false, kind: "invalid", error: DIR_LOCKED_REFUSAL };
+      }
+      // PROMOTE: the entry already exists at idx>0 — move it to position 0 carrying its lock state
+      // VERBATIM (a locked secondary stays locked once primary), dropping the old primary exactly
+      // as a fresh path would (replace semantics, not insert). No denylist re-check: this path was
+      // already checked when the entry was first added to the set.
+      if (existingIdx > 0) {
+        const promoted = dirs[existingIdx]!;
+        const rest = dirs.filter((_, i) => i !== existingIdx && i !== 0);
+        const next: SessionDirs = [promoted, ...rest];
+        deps.store.setDirsRaw(sessionId, next);
+        return { ok: true, dirs: next };
       }
       if (deps.grantDenied(canonical)) {
         return { ok: false, kind: "invalid", error: DIR_DENIED_REFUSAL };
       }
-      // Replaces index 0, keeps 1..n untouched. On an empty set `dirs.slice(1)` is `[]`, so this one
-      // expression establishes the primary AND replaces it — the empty-set case needs no branch of
-      // its own.
+      // Fresh path (existingIdx === -1): replaces index 0, keeps 1..n untouched. On an empty set
+      // `dirs.slice(1)` is `[]`, so this one expression establishes the primary AND replaces it —
+      // the empty-set case needs no branch of its own.
       const next: SessionDirs = [{ path: canonical, locked: false }, ...dirs.slice(1)];
       deps.store.setDirsRaw(sessionId, next);
       return { ok: true, dirs: next };
