@@ -1088,6 +1088,35 @@ extension MethodWrapperTests {
         XCTAssertEqual(rows[0].dirs, [SessionDirEntry(path: "/a", locked: false)])
     }
 
+    // MARK: - app-shell Task 2: `session.list`'s `activity`
+
+    /// Same nil-vs-a-value discipline `dirs` gets its own test for above: a participating (code)
+    /// row carries one of the four lifecycle strings, a chat row carries none — and an ABSENT key
+    /// must decode to `nil`, never a guessed default like `"idle"`.
+    func testListSessionsDecodesActivityAbsentTolerantly() async throws {
+        let (client, t) = try await connected()
+        let listBody = #"{"sessions":[{"sessionId":"s_code","scope":"global","createdAt":2,"lastSeq":0,"activity":"background"},{"sessionId":"s_chat","scope":"global","createdAt":1,"lastSeq":0,"mode":"chat"}]}"#
+        let (_, rows) = try await roundTrip(t, sentIndex: 1, result: listBody) {
+            try await client.listSessions()
+        }
+        XCTAssertEqual(rows.first { $0.sessionId == "s_code" }?.activity, "background")
+        XCTAssertNil(rows.first { $0.sessionId == "s_chat" }?.activity,
+                     "a non-participating row carries no activity at all — never coerced to a value")
+    }
+
+    /// The other three lifecycle strings round-trip too — not just the one value the test above
+    /// happens to use.
+    func testListSessionsDecodesEveryActivityValue() async throws {
+        let (client, t) = try await connected()
+        let listBody = #"{"sessions":[{"sessionId":"s_active","scope":"global","createdAt":4,"lastSeq":0,"activity":"active"},{"sessionId":"s_idle","scope":"global","createdAt":3,"lastSeq":0,"activity":"idle"},{"sessionId":"s_archived","scope":"global","createdAt":2,"lastSeq":0,"activity":"archived"}]}"#
+        let (_, rows) = try await roundTrip(t, sentIndex: 1, result: listBody) {
+            try await client.listSessions()
+        }
+        XCTAssertEqual(rows.first { $0.sessionId == "s_active" }?.activity, "active")
+        XCTAssertEqual(rows.first { $0.sessionId == "s_idle" }?.activity, "idle")
+        XCTAssertEqual(rows.first { $0.sessionId == "s_archived" }?.activity, "archived")
+    }
+
     /// The write half: method + params for each of the three ops, and the POST-WRITE set decoded off
     /// the result (never an echo of what was sent — an idempotent `add` comes back unchanged).
     func testSetDirsEncodesEachOpAndDecodesThePostWriteSet() async throws {

@@ -343,12 +343,22 @@ extension NormaClient {
     /// `cwd` is the ALIAS of `dirs[0]?.path` for a participating row — the daemon overwrites it at
     /// `session.list` time from the dirs set, because `session.setDirs` deliberately never touches
     /// the stored `cwd` column. Read whichever suits, but never treat them as independent facts.
-    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?, dirs: [SessionDirEntry]?)] {
+    ///
+    /// app-shell Task 2: `activity` appended LAST, same purely-additive precedent as `dirs` above —
+    /// raw-JSON-decoded beside `cwd`/`dirs` rather than through a `Codable` row type this wrapper
+    /// doesn't have. Mirrors `SessionListResult.activity` (methods.ts) field-for-field: one of
+    /// `"active"|"background"|"idle"|"archived"` for a participating (code/cowork) row, `nil` for
+    /// every chat/dispatch row AND for a daemon predating the field — the SAME absent-is-a-real-value
+    /// discipline `dirs` documents above, decoded the identical way (`s["activity"]?.stringValue`:
+    /// `nil` for a missing key or a non-string value, never a guessed default). Kept a plain `String`
+    /// rather than a Swift enum for the same reason `SessionEvent.SessionActivity.activity` is one
+    /// (that struct's own doc comment): a newer daemon's fifth value must decode here, not throw.
+    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?, dirs: [SessionDirEntry]?, activity: String?)] {
         let r = try await request("session.list", params: nil)
         return (r["sessions"]?.arrayValue ?? []).compactMap { s in
             guard let id = s["sessionId"]?.stringValue, let scope = s["scope"]?.stringValue,
                   let created = s["createdAt"]?.intValue, let last = s["lastSeq"]?.intValue else { return nil }
-            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue, decodeSessionDirs(s["dirs"]))
+            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue, decodeSessionDirs(s["dirs"]), s["activity"]?.stringValue)
         }
     }
 
