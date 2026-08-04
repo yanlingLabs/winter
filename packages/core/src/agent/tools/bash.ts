@@ -46,7 +46,9 @@ export function registerBashTool(r: ToolRegistry, deps: { bgRegistry?: Backgroun
       // is a defensive last resort for any OTHER caller that hands us a session with no directory —
       // an empty/absent `cwd` here used to reach `realpathSync` as-is and throw an opaque ENOENT
       // (or a TypeError on a null) rather than degrading to the scratch dir every such session has.
-      const realCwd = realpathSync(cwd || tmpDir || cwd);
+      const runDir = cwd || tmpDir;
+      if (!runDir) throw new Error("bash has no directory to run in: no session working directory and no scratch dir");
+      const realCwd = realpathSync(runDir);
       const scratch = realpathSync(tmpDir ?? realCwd); // engine always supplies a session tmp; fall back to cwd
       // working-directories T4: the session's delivery folder, realpathed the SAME way `scratch`
       // is — undefined only for a caller that doesn't wire ctx.outDir at all (a bare
