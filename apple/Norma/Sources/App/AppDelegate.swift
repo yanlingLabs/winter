@@ -60,6 +60,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `registerDetachedWindow`'s `onClosed`). `openDashboard()` below is what enforces the
     /// "second invocation focuses the existing window" contract off this single stored ref.
     private(set) var dashboardWindow: DashboardWindowController?
+    /// App shell T1: the ONE app window, for the process lifetime (spec §1 / ruling R2). `nil`
+    /// until the first summon, and — UNLIKE `dashboardWindow` above — never nil'd again: the shell
+    /// hides on close rather than being destroyed, so this ref outlives every close.
+    /// `summonAppWindow(navigatingTo:)` below is the single door.
+    private(set) var appWindow: AppWindowController?
     /// SP2b T5: owns this Mac's `RemoteHost` (lazily constructed — nothing starts until either a
     /// pairing window is requested or, autostart follow-up below, this Mac already has ≥1 paired
     /// device). Constructed unconditionally in `boot()` (cheap — it does no I/O of its own; only
@@ -137,25 +142,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `NSPanel`, an accessory surface even while morphed into its own `.window` surface) and the
     /// menu bar: neither is a "real user-facing window" per the product spec, so neither may
     /// promote the dock icon.
+    /// App shell T1: the shell counts by VISIBILITY, not by existence — its controller is never
+    /// deallocated (it hides on close), so `appWindow != nil` would pin the dock icon on forever
+    /// after the first summon. `AppWindowController.onVisibilityChange` (wired in
+    /// `summonAppWindow`) is what re-runs `syncDockPresence()` when the window hides itself.
     private var hasMainWindow: Bool {
-        !detachedWindows.isEmpty || dashboardWindow != nil
+        !detachedWindows.isEmpty || dashboardWindow != nil || appWindow?.isVisible == true
     }
 
     /// Syncs the dock icon to `hasMainWindow` — called after every mutation of `detachedWindows`/
-    /// `dashboardWindow` (register, remove, open, close) so promotion/demotion never drifts out of
-    /// step with the registries that define it.
+    /// `dashboardWindow`/the shell's visibility (register, remove, open, close, summon, hide) so
+    /// promotion/demotion never drifts out of step with the registries that define it.
     private func syncDockPresence() {
         hasMainWindow ? showDockIcon() : hideDockIcon()
     }
 
-    /// Closes every open main window (detached chat windows + the Dashboard) — shared by
-    /// `applicationShouldTerminate`'s cancel branch (⌘Q/dock-quit: close windows, keep running)
+    /// Closes every open main window (detached chat windows + the Dashboard + the shell) — shared
+    /// by `applicationShouldTerminate`'s cancel branch (⌘Q/dock-quit: close windows, keep running)
     /// and `applicationWillTerminate`'s final teardown below (a real quit: same windows, harder
     /// stop — spec §5 D9, a closed window must leave nothing running, and termination is harder
     /// than that).
+    ///
+    /// App shell T1: the shell HIDES here rather than closing (spec §1 — never destroyed). ⌘Q
+    /// therefore leaves the singleton and its navigation state intact, ready for the next summon.
     private func closeMainWindows() {
         detachedWindows.forEach { $0.close() }
         dashboardWindow?.close()
+        appWindow?.hide()
     }
 
     /// Test-only seam (DEFECT FIX regression, `StandaloneWindowTests`): `boot()`'s unit-test path
@@ -421,6 +434,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let visible = NSScreen.main?.visibleFrame ?? .zero
             self.openSessionInNewDetachedWindow(sid, frame: centeredStandaloneFrame(visibleFrame: visible))
         }
+    }
+
+    /// App shell T1 — THE summon primitive (spec §1). Every path that wants the app window goes
+    /// through here: the dock icon (`applicationShouldHandleReopen`), the menu bar's "Open Norma
+    /// App" entry, and — as later tasks land them — the orb, the outputs panel, and every "open in
+    /// app" affordance. The first call constructs the ONE controller; every later call focuses that
+    /// same window (ruling R2: nothing ever spawns a second app window).
+    ///
+    /// `destination == nil` is a PLAIN refocus that preserves whatever the user was looking at —
+    /// the `openDashboard(initialPane:)` precedent below, whose own history is exactly this
+    /// distinction (retargeting unconditionally on refocus discarded the user's current pane; the
+    /// fix made "no destination requested" mean "leave it alone"). A fresh window with no
+    /// destination lands on `defaultShellDestination`, seeded by `ShellNavigationModel` itself.
+    ///
+    /// Defensive, same posture as `openDashboard`'s own guard: never booted (no `appModel`, hence
+    /// no `SessionDirectory` for the Recents list) resolves to a log + no-op, never a crash or a
+    /// half-wired window.
+    func summonAppWindow(navigatingTo destination: ShellDestination? = nil) {
+        if let appWindow {
+            appWindow.summon(navigatingTo: destination)
+            return
+        }
+        guard let model = appModel else {
+            OrbDebug.log("summonAppWindow: no appModel — summon aborted")
+            return
+        }
+        let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let controller = AppWindowController(
+            directory: model.directory,
+            frame: centeredAppWindowFrame(visibleFrame: visible)
+        )
+        // The activation-policy machinery is RETARGETED, not rebuilt: a visible shell is a main
+        // window (promote), a hidden one is not (demote). This hook is the only way that stays in
+        // step, since the shell hides itself instead of closing — there is no `onClosed` to hang
+        // it on, the way `dashboardWindow`/`detachedWindows` do.
+        controller.onVisibilityChange = { [weak self] _ in self?.syncDockPresence() }
+        appWindow = controller
+        controller.summon(navigatingTo: destination)
     }
 
     /// Task 5 (2f-ii): the menu bar's "Dashboard…" entry — singleton behavior per the brief: a
@@ -994,7 +1045,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 TriggerHub.shared.fire(from: "menu")
             },
             openCli: { [weak self] in self?.cliLauncher.openCli() },
-            openNormaApp: { [weak self] in self?.openStandaloneNormaWindow() },
+            // App shell T1 (summon path): "Open Norma App" now summons the ONE app window instead
+            // of spawning a fresh-session detached window. `openStandaloneNormaWindow()` above is
+            // left in place — Task 6 owns the rest of the menu-bar retarget (`openChat`/`newChat`/
+            // `openDashboard`/"Manage Plugins…") and deletes the spawn paths nothing still uses.
+            openNormaApp: { [weak self] in self?.summonAppWindow() },
             openNewChat: { [weak self] in self?.newChat() },
             openChat: { [weak self] in self?.openChat() },
             openDashboard: { [weak self] in self?.openDashboard() },
@@ -1123,10 +1178,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// forward (including un-minimizing) — the dock icon is already showing in that case, nothing
     /// else to promote. No main window open: open one ourselves (the same "Open Norma App"
     /// primitive the menu bar uses, which promotes the dock icon as a side effect of the window it
-    /// spawns) and return `false`, since AppKit has nothing left to do.
+    /// shows) and return `false`, since AppKit has nothing left to do.
+    ///
+    /// App shell T1 (summon path): that primitive is now `summonAppWindow()` — the dock icon
+    /// summons the ONE app window rather than spawning a fresh-session detached window.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         guard !hasMainWindow else { return true }
-        openStandaloneNormaWindow()
+        summonAppWindow()
         return false
     }
 
