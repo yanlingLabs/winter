@@ -174,6 +174,28 @@ describe("setSessionDirs — duplicate add is idempotent", () => {
     const result = setSessionDirs(makeDeps(store), id, "add", link);
     expect(result).toEqual({ ok: true, dirs: existing });
   });
+
+  // Mutation-probe follow-up (T2 review, probe 7): findByCanonical canonicalizes BOTH sides —
+  // this pins the STORED side specifically. A raw string compare (`d.path === canonical`) would
+  // stay green on every other fixture in this file because every OTHER stored entry here was
+  // itself written through canonicalizeDirPath first — so only a fixture whose STORED path is a
+  // deliberately non-canonical spelling (the "migration stores cwd VERBATIM" scenario, T1) can
+  // catch a raw-compare regression on this side.
+  test("stored-side canonicalization: a raw (non-canonical) stored spelling is recognized as a duplicate by its canonical twin", () => {
+    const { store } = makeStore();
+    const id = store.createSession("global");
+    const base = fixtureBase();
+    const real = join(base, "real"); mkdirSync(real);
+    const link = join(base, "link"); symlinkSync(real, link);
+    // Stored VERBATIM as the symlinked spelling — never itself canonicalized — mirroring how a
+    // pre-branch `cwd` column (and any other legacy writer) can leave a non-canonical path sitting
+    // in the `dirs` column for `setSessionDirs` to read back.
+    const existing: SessionDirs = [{ path: link, locked: false }];
+    store.setDirsRaw(id, existing);
+    const result = setSessionDirs(makeDeps(store), id, "add", real);
+    expect(result).toEqual({ ok: true, dirs: existing }); // recognized as the SAME entry, not appended
+    expect(store.dirs(id)).toEqual(existing);
+  });
 });
 
 describe("setSessionDirs — locked mutations (DIR_LOCKED_REFUSAL)", () => {
