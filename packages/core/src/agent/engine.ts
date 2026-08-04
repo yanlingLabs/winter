@@ -2229,16 +2229,20 @@ export class AgentEngine {
     // whichever of those two this picks; provider-correctness T4 adds `meta.effort` on the same
     // terms for the effort half — see resolveSel's own doc comment.
     const sel = this.resolveSel(meta);
-    if (!meta.cwd) {
-      this.emit(sessionId, { type: "turn_started", sessionId, threadId });
-      this.emit(sessionId, { type: "agent_error", sessionId, threadId, message: "session has no working directory — create the session with a cwd" });
-      this.emit(sessionId, { type: "turn_completed", sessionId, threadId, stopReason: "error", inputTokens: 0, outputTokens: 0 });
-      return;
-    }
+    // working-directories T5 (spec §2, workdir-less mode): a session with NO working directory is
+    // no longer a dead end — it USED to emit `agent_error: session has no working directory` and
+    // end the turn, because `cwd` was the only directory concept there was. It now runs in the
+    // session TMP dir: writable only in $OUTDIR/$TMPDIR/$MEMDIR (the fence derives from an empty
+    // `dirs` row, so every user-fs write raises the ordinary dirGrant card), with the shell
+    // starting in scratch — deliverables are deliberate copies into $OUTDIR, per the plan's
+    // "workdir-less bash cwd = session tmp dir". `primaryDir` prefers the live `cwd` column, so a
+    // session that has since ADOPTED a directory (the grant card, the picker, `/dirs`) runs there
+    // from its next turn on — that is what "approval exits the mode" means in practice.
+    //
     // `let`, not `const`: the enter/exit_worktree bridge below reassigns this SAME-TURN so a
     // follow-up tool call later in this turn's dispatch loop resolves into (or back out of) the
     // worktree without waiting for the next turn's store.meta() re-read.
-    let cwd = meta.cwd;
+    let cwd = this.primaryDir(sessionId, meta) ?? sessionTmpDir(sessionId);
     // Trust-gated project .mcp.json bring-up, BEFORE the turn_started emit: this can spawn
     // subprocesses (slow), and a project server that's already started/recorded is a no-op, so
     // doing it here (rather than after turn_started) keeps the -p watchdog from tripping on a
@@ -4265,6 +4269,17 @@ export class AgentEngine {
           }, loaded, async () => {
             const failure = this.mkdirForOneShotGrant(grant.dir);
             if (failure) return { output: failure, isError: true };
+            // working-directories T5 (spec §2, workdir-less mode: "any user-fs write raises the
+            // same dirGrant card; approval adopts the dir and exits the mode. One card, no special
+            // cases"). ONLY for a session with an EMPTY dirs set: such a session has no project for
+            // this write to be "outside" of, so the card IS its folder picker and one-shot would
+            // leave it permanently unable to work anywhere. A session that already HAS working
+            // directories keeps the shipped one-shot semantics unchanged (SP-policies Task 9:
+            // approving an out-of-project edit does not widen the session; durable coverage is the
+            // card's own "Always allow edits in <dir>" rule) — the spec's broader "approve = adopt"
+            // for that case is a deliberate open question, recorded in the T5 report rather than
+            // decided here by flipping three shipped pins.
+            if (preCallSessionDirs.length === 0) this.adoptGrantedDir(sessionId, grant.dir);
             return this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, oneShot, visionCapable, excludeTools, allowTools);
           }, pins, rootsOverride, visionCapable, excludeTools, allowTools);
         } else if (call.name === "bash" && bashEscalation.dangerouslyDisableSandbox && !unsandboxedRuleAllowed && meta.approvalPolicy !== "bypass") {

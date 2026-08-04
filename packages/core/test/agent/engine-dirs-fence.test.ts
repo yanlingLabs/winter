@@ -112,11 +112,12 @@ function setup(script: ProviderEvent[][], opts?: {
   // A stub bash (NOT the real sandboxed one) — the lock hook under test lives in executeCall and
   // fires on the tool NAME, so a stub proves it without shelling out to sandbox-exec.
   const bashCalls: string[] = [];
+  const bashCwds: string[] = [];
   registry.register({
     name: "bash",
     description: "stub bash",
     args: z.object({ command: z.string() }),
-    run({ command }) { bashCalls.push(command); return `ran: ${command}`; },
+    run({ command }, ctx) { bashCalls.push(command); bashCwds.push(ctx.cwd); return `ran: ${command}`; },
   });
   const provider = new FakeProvider(script);
   const dirs = daemonLikeDirs(store, home);
@@ -145,7 +146,7 @@ function setup(script: ProviderEvent[][], opts?: {
   const events: SessionEvent[] = [];
   hub.attach({ clientName: "test-observer", deliver: (e) => { events.push(e); return true; } }, sessionId, 0);
   const setDirsDeps: SetDirsDeps = { store, grantDenied: () => false };
-  return { engine, store, hub, broker, sessionId, cwd, home, dirs, events, registry, bashCalls, setDirsDeps };
+  return { engine, store, hub, broker, sessionId, cwd, home, dirs, events, registry, bashCalls, bashCwds, setDirsDeps };
 }
 
 /** Establishes an UNLOCKED primary in the row — what T6 will make `session.create` itself do.
@@ -365,5 +366,66 @@ describe("working-directories T5: first-write locks", () => {
     await engine.runTurn(sessionId);
     expect((store.read(sessionId).find((e) => e.type === "tool_result") as any).isError).toBe(false);
     expect(store.dirs(sessionId).every((d) => d.locked === false)).toBe(true);
+  });
+});
+
+// ── workdir-less mode (spec §2) ────────────────────────────────────────────────────────────────
+
+describe("working-directories T5: workdir-less sessions", () => {
+  test("a dirs=[] session runs turns at all — and its shell starts in the session tmp dir (scratch by default)", async () => {
+    const { engine, store, sessionId, bashCalls, bashCwds } = setup(bashTurn("echo hi"), { withCwd: false, policy: "auto" });
+    expect(store.dirs(sessionId)).toEqual([]); // workdir-less
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+    expect(events.some((e) => e.type === "agent_error")).toBe(false); // no "session has no working directory"
+    expect(bashCalls).toEqual(["echo hi"]);
+    expect(bashCwds).toEqual([sessionTmpDir(sessionId)]);
+    expect(store.dirs(sessionId)).toEqual([]); // bash in the tmp dir locks nothing — there is nothing to lock
+  });
+
+  test("a dirs=[] session writes into its $OUTDIR silently — no card, no review, no adoption (Norma-owned space is not a working directory)", async () => {
+    const script: ProviderEvent[][] = [];
+    const { engine, store, sessionId, home } = setup(script, {
+      withCwd: false, policy: "auto",
+      reviewer: { verdict: "unsafe", reason: "would have blocked if consulted" },
+    });
+    const target = join(ensureOutdir(home, sessionId), "deliverable.txt");
+    script.push(...writeTurn(target, "for the user"));
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+    expect(events.some((e) => e.type === "approval_requested")).toBe(false);
+    expect(events.some((e) => e.type === "tool_review")).toBe(false);
+    expect(events.some((e) => e.type === "directory_added")).toBe(false);
+    expect(readFileSync(target, "utf8")).toBe("for the user");
+    expect(store.dirs(sessionId)).toEqual([]); // still workdir-less: the outdir is never a session dir
+  });
+
+  test("the whole arc: a user-fs write CARDS, approving ADOPTS it as the primary (born locked), and the mode is exited — the next turn's relative paths resolve there", async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "norma-dirs-fence-adopt-primary-")));
+    const script: ProviderEvent[][] = [];
+    const { engine, store, hub, broker, sessionId } = setup(script, { withCwd: false, policy: "ask" });
+    script.push(...writeTurn(join(outside, "first.txt"), "adopted"));
+    hub.attach({
+      clientName: "auto-approver",
+      deliver(e) { if (e.type === "approval_requested") broker.resolve(sessionId, e.callId, true, "auto-approver"); return true; },
+    }, sessionId, 0);
+
+    await engine.runTurn(sessionId);
+    const events = store.read(sessionId);
+    const card = events.find((e) => e.type === "approval_requested") as any;
+    expect(card).toBeDefined();                          // ONE card, the same dirGrant card
+    expect(card.summary).toContain(join(outside, "first.txt"));
+    expect(readFileSync(join(outside, "first.txt"), "utf8")).toBe("adopted");
+    // Adopted as the PRIMARY (the empty-set rule) and BORN LOCKED (the approved write is its first).
+    expect(store.dirs(sessionId)).toEqual([{ path: outside, locked: true }]);
+
+    // Mode exited: the NEXT turn runs in the adopted directory — a relative path lands there, with
+    // no card of its own (it is now an ordinary in-primary write).
+    script.push(...writeTurn("second.txt", "in the adopted primary"));
+    await engine.runTurn(sessionId);
+    expect(readFileSync(join(outside, "second.txt"), "utf8")).toBe("in the adopted primary");
+    expect((store.read(sessionId).filter((e) => e.type === "approval_requested")).length).toBe(1); // still just the one
   });
 });

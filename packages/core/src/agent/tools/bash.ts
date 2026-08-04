@@ -40,7 +40,13 @@ export function registerBashTool(r: ToolRegistry, deps: { bgRegistry?: Backgroun
         const outputFile = deps.bgRegistry.outputFile(sessionId, taskId);
         return `background task ${taskId} started\noutput_file: ${outputFile}\nRead or grep that file for the full output as it accumulates — prefer it over bash_output for large output.`;
       }
-      const realCwd = realpathSync(cwd);
+      // working-directories T5 (spec §2, workdir-less mode): a session with no working directory
+      // runs its shell in the session scratch dir. The engine already resolves that (runThread's
+      // `cwd`) and the background-task registry does too (daemon.ts's spawnCtx), so this fallback
+      // is a defensive last resort for any OTHER caller that hands us a session with no directory —
+      // an empty/absent `cwd` here used to reach `realpathSync` as-is and throw an opaque ENOENT
+      // (or a TypeError on a null) rather than degrading to the scratch dir every such session has.
+      const realCwd = realpathSync(cwd || tmpDir || cwd);
       const scratch = realpathSync(tmpDir ?? realCwd); // engine always supplies a session tmp; fall back to cwd
       // working-directories T4: the session's delivery folder, realpathed the SAME way `scratch`
       // is — undefined only for a caller that doesn't wire ctx.outDir at all (a bare
