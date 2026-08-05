@@ -1146,6 +1146,74 @@ extension MethodWrapperTests {
         XCTAssertEqual(afterRemove, [SessionDirEntry(path: "/repo", locked: true)])
     }
 
+    // MARK: - app-shell T3: `session.setActivity` — the `/background` verb's wire door
+
+    /// The three things this wrapper has to get right, in one round trip each:
+    ///   1. the verb reaches the wire VERBATIM (`"background"`/`"unbackground"`/`"archived"`),
+    ///   2. RESUME is a literal JSON `null` under a key that is always present — the param is
+    ///      required-but-nullable, so an omitted key is a schema failure, not a resume,
+    ///   3. the answer is the POST-WRITE DERIVED state, not an echo: asking to clear a session whose
+    ///      detached bash task is still writing reads back `"background"`.
+    func testSetActivityEncodesEachVerbAndReadsBackTheDerivedState() async throws {
+        let (client, t) = try await connected()
+
+        let (bgReq, afterBg) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"activity":"background"}"#) {
+            try await client.setActivity(sessionId: "s_1", activity: "background")
+        }
+        XCTAssertEqual(bgReq["method"] as? String, "session.setActivity")
+        XCTAssertEqual((bgReq["params"] as? [String: Any])?["sessionId"] as? String, "s_1")
+        XCTAssertEqual((bgReq["params"] as? [String: Any])?["activity"] as? String, "background")
+        XCTAssertEqual(afterBg, "background")
+
+        let (unbgReq, afterUnbg) = try await roundTrip(t, sentIndex: 2, result: #"{"ok":true,"activity":"background"}"#) {
+            try await client.setActivity(sessionId: "s_1", activity: "unbackground")
+        }
+        XCTAssertEqual((unbgReq["params"] as? [String: Any])?["activity"] as? String, "unbackground")
+        XCTAssertEqual(afterUnbg, "background",
+                       "the answer is the daemon's re-derived state, never an echo of the verb sent")
+
+        let (resumeReq, afterResume) = try await roundTrip(t, sentIndex: 3, result: #"{"ok":true,"activity":"idle"}"#) {
+            try await client.setActivity(sessionId: "s_1", activity: nil)
+        }
+        let resumeParams = resumeReq["params"] as? [String: Any]
+        XCTAssertTrue(resumeParams?.keys.contains("activity") ?? false,
+                      "resume sends a LITERAL null under an always-present key — the param is nullable, not optional")
+        XCTAssertTrue(resumeParams?["activity"] is NSNull)
+        XCTAssertEqual(afterResume, "idle")
+
+        // A participating row is the only kind that can be written at all today, but the field is
+        // optional on the wire for the same reason `SessionSummary.activity` is — absence must
+        // decode as absence, never as a guessed default.
+        let (_, absent) = try await roundTrip(t, sentIndex: 4, result: #"{"ok":true}"#) {
+            try await client.setActivity(sessionId: "s_1", activity: "archived")
+        }
+        XCTAssertNil(absent)
+    }
+
+    /// Refusals carry the daemon's OWN sentence — `set-activity.ts` writes one per rule and each
+    /// names the rule it enforced, which is exactly what makes a refusal teachable. Pinned on the
+    /// exported constants (`ACTIVITY_MODE_REFUSAL`, `ARCHIVED_IMMUTABLE_REFUSAL`) and the
+    /// running-turn refusal, all of which a surface then shows verbatim.
+    func testSetActivityRefusalsSurfaceTheDaemonsWordingVerbatim() async throws {
+        for refusal in [
+            "activity states apply to code and cowork sessions only",
+            "session is archived — resume it first",
+            "stop or background it first",
+        ] {
+            let (client, t) = try await connected()
+            async let call = client.setActivity(sessionId: "s_1", activity: "background")
+            let sent = try await waitForSent(t, count: 2)
+            let req = decodeLine(sent[1])
+            t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"error":{"code":-32602,"message":"\#(refusal)"}}"#)
+            do {
+                _ = try await call
+                XCTFail("expected setActivity to throw for a refusal")
+            } catch let error as RpcError {
+                XCTAssertEqual(error.message, refusal)
+            }
+        }
+    }
+
     /// Every refusal is a thrown `RpcError` carrying the daemon's OWN sentence — the wording
     /// `set-dirs.ts` writes is the whole point of the refusal, and this wrapper must not replace it
     /// with a generic failure. Pinned on the exact constants (`DIR_LOCKED_REFUSAL` &co) a surface

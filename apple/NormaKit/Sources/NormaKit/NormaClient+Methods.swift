@@ -562,6 +562,40 @@ extension NormaClient {
         return dirs
     }
 
+    /// `session.setActivity {sessionId, activity}` (session-activity-hygiene T3) — the WRITE half of
+    /// a session's activity lifecycle, for every Mac surface that offers the `/background` verb.
+    ///
+    /// **Four values and a null, and the null is not "clear everything".** `"background"` and
+    /// `"archived"` SET their own flag, `"unbackground"` clears the background one, and a literal
+    /// `null` is RESUME, which clears the archive flag ONLY (`sessions/set-activity.ts`'s "one verb,
+    /// one flag" ruling — a background worker that gets archived and resumed comes back a background
+    /// worker). `"active"`/`"idle"` are deliberately NOT settable: they are DERIVED facts about
+    /// attachments and work, not assertions a caller may make.
+    ///
+    /// The param is required-but-nullable on the wire (`SessionSetActivityParams.activity` is
+    /// `z.enum([...]).nullable()`, not optional), so this always sends the key — `.null` for resume,
+    /// never an omitted key, the same discipline `setModel`/`setEffort` document.
+    ///
+    /// Returns the POST-WRITE DERIVED state (the daemon re-reads and re-derives rather than echoing
+    /// what was asked for — clearing a session whose detached bash task is still writing reads back
+    /// `"background"`, not `"idle"`), or `nil` for a row that does not participate at all. Same
+    /// absent-is-a-real-value discipline as `listSessions`' own `activity`, and kept a plain `String`
+    /// for the same reason: a newer daemon's fifth value must decode here, not throw.
+    ///
+    /// **Every refusal is a thrown `RpcError` carrying the daemon's own sentence, and that sentence
+    /// is meant to be SHOWN** — the `setDirs` precedent, and the same reasoning: `set-activity.ts`
+    /// writes one per rule and each names the rule it enforced ("activity states apply to code and
+    /// cowork sessions only", "session is archived — resume it first", "stop or background it
+    /// first"). A client-side "couldn't change that" erases exactly the sentence that teaches the
+    /// rule. An unknown session throws NOT_FOUND, same precedent as `setPolicy`/`setModel`.
+    public func setActivity(sessionId: String, activity: String?) async throws -> String? {
+        let r = try await request("session.setActivity", params: obj([
+            "sessionId": .string(sessionId),
+            "activity": activity.map { JSONValue.string($0) } ?? JSONValue.null,
+        ]))
+        return r["activity"]?.stringValue
+    }
+
     public func trustDir(path: String) async throws -> Bool {
         try await request("daemon.trustDir", params: obj(["path": .string(path)]))["trusted"]?.boolValue ?? false
     }

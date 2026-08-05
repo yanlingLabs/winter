@@ -103,6 +103,18 @@ func shellDestinationSystemImage(_ destination: ShellDestination) -> String {
     }
 }
 
+/// PURE: the rows a MODE's landing list shows, out of the shared directory (T2's live rows) — the
+/// per-mode session lists spec §2 puts on each landing view, as one filter every landing reuses
+/// (T3's chat landing today; T4/T5's code and dispatch landings next).
+///
+/// Filtering through `SessionMode(wire:)` rather than comparing the raw string is what makes the
+/// wire's own conventions hold in one place: the daemon OMITS `mode` for a plain code session, and
+/// an unknown future mode degrades to code — so `.code` is the mode that inherits both, and every
+/// other landing lists exactly what its own name says. Order is the directory's (newest first).
+func sessionRows(for mode: SessionMode, in rows: [SessionSummary]) -> [SessionSummary] {
+    rows.filter { SessionMode(wire: $0.mode) == mode }
+}
+
 /// PURE: Task 1's placeholder copy. Every one of these strings is replaced by a real surface later
 /// in this plan (mode landings → Tasks 3/4/5, session → Task 3, dashboard → Task 7); the shape of
 /// the window, its summon paths, the sidebar and this selection model are the parts that are final.
@@ -110,7 +122,10 @@ func shellLandingPlaceholderText(_ destination: ShellDestination) -> String {
     switch destination {
     case .mode(let mode) where !mode.isAvailable: return "Cowork isn't available yet."
     case .mode(let mode): return "The \(mode.title) surface lands later in this plan."
-    case .session: return "In-app session views land later in this plan."
+    // T3 replaced the in-app session view with a real one (`ShellSessionView`); this copy is now
+    // only reached by a shell built WITHOUT a host (`AppWindowController.host` nil — the pure
+    // window tests), so it says what is actually true of that shell rather than a stale promise.
+    case .session: return "This shell has no session host."
     case .dashboard: return "The Dashboard surface lands later in this plan."
     }
 }

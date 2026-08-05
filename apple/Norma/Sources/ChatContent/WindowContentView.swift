@@ -40,6 +40,11 @@ struct WindowContentView<Accessory: View>: View {
     /// `currentSidebarSessionSummary`/`policyPickerRow` already carry for the WorkSidebar split.
     @State var showingDirsMenu = false
 
+    /// app-shell T3: the `/background` affordance's own popover state — a FIFTH independent flag,
+    /// same reasoning as the four above. Internal (not `private`) for the same reason
+    /// `showingDirsMenu` is: `ActivityMenu.swift`'s cross-file `extension WindowContentView` binds it.
+    @State var showingActivityMenu = false
+
     /// Task 3 (2e-i): whether the "… +N completed" tail is expanded to the full completed list.
     /// Local presentational state, same convention as `showingPolicyMenu` above — resets whenever
     /// this view is recreated (e.g. a new session), which is fine: there's nothing worth
@@ -92,6 +97,13 @@ struct WindowContentView<Accessory: View>: View {
                 // since that is exactly the session that needs the adopt door.
                 if dirsMenuIsVisible(currentSidebarSessionSummary?.dirs) {
                     dirsMenuButton
+                }
+                // app-shell T3: the `/background` affordance. Gated the same way the folders chip
+                // is — on the DAEMON's own answer for this row (its derived `activity`, absent for
+                // a session with no lifecycle) — plus the wiring gate: a surface that never wired
+                // `onSetActivity` renders nothing here at all (`backgroundVerbForCurrentSession`).
+                if let verb = backgroundVerbForCurrentSession {
+                    backgroundVerbButton(verb)
                 }
                 // Task 10 (Chat Slice D): the model menu — deliberately the OPPOSITE gate from the
                 // policy button just below (`modelMenuIsVisible`'s own doc comment explains the

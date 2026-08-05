@@ -224,6 +224,9 @@ final class ShellSessionHost: ObservableObject {
         live.adapter.pendingEffort = .none
         live.adapter.selectionProbation = nil
         live.adapter.dirsRefusal = nil
+        // A refusal is about the session it was refused FOR — "session is archived — resume it
+        // first" rendered over a different session is a lie about a rule (the `dirsRefusal` lesson).
+        live.adapter.activityRefusal = nil
         Task { @MainActor in await live.feed.repin(to: sessionId) }
     }
 
@@ -362,6 +365,10 @@ final class ShellSessionHost: ObservableObject {
         adapter.onRefreshModelCatalogue = { [weak self] in self?.refreshModelCatalogue() }
         adapter.onSetDirs = { [weak self] op, path in self?.applyDirsOp(op, path: path) }
         adapter.onPickWorkingDir = { [weak self] op in self?.pickWorkingDir(op) }
+        // app-shell T3: the `/background` affordance. Wiring it is what makes it VISIBLE at all
+        // (`FieldStateAdapter.onSetActivity` is optional and nil elsewhere), so the shell is the
+        // one surface that grows the verb this task — every pre-existing window is untouched.
+        adapter.onSetActivity = { [weak self] target in self?.applyActivity(target) }
     }
 
     /// Mirrors `DetachedWindowController.submit` — steer a running turn, else send; the draft is
@@ -411,6 +418,37 @@ final class ShellSessionHost: ObservableObject {
                 adapter.dirsRefusal = "couldn't reach the daemon — try again"
             }
             adapter.dirsChangeInFlight = false
+        }
+    }
+
+    /// The `/background` affordance's RPC. `target` is the activity vocabulary VERBATIM (see
+    /// `NormaClient.setActivity`); T3's affordance sends two of its values, and the roster verbs
+    /// (T4) will send the rest through this same seam.
+    ///
+    /// A refusal is published VERBATIM (`adapter.activityRefusal`) — `set-activity.ts` writes one
+    /// sentence per rule and each names the rule it enforced; a client-side "couldn't change that"
+    /// erases exactly the sentence that teaches it. On success the refusal clears and the DIRECTORY
+    /// row is refreshed: activity lives on `session.list`'s row (T2), so there is no second source
+    /// of truth here to keep in sync — the `onSetDirs`/`onSetModel` precedent. (The daemon also
+    /// EMITS the new state to this session's attachments, which includes this harness, and T2's fold
+    /// patches the row from that; the refresh is the belt for the emit's own change-filter, which
+    /// stays silent when the write moved no bit.)
+    private func applyActivity(_ target: String?) {
+        guard let live = attachment, let sid = attachedSessionId else { return }
+        let client = live.feed.client
+        live.adapter.activityChangeInFlight = true
+        Task { @MainActor [weak self] in
+            guard let self, let adapter = self.attachment?.adapter else { return }
+            do {
+                _ = try await client.setActivity(sessionId: sid, activity: target)
+                await self.directory.refresh()
+                adapter.activityRefusal = nil
+            } catch let error as RpcError {
+                adapter.activityRefusal = error.message
+            } catch {
+                adapter.activityRefusal = "couldn't reach the daemon — try again"
+            }
+            adapter.activityChangeInFlight = false
         }
     }
 

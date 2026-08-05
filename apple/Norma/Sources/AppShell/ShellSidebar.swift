@@ -29,8 +29,8 @@ struct ShellRootView: View {
         .navigationSplitViewStyle(.balanced)
     }
 
-    /// The destination's surface. The hosted session is the first real one (T3); the rest are still
-    /// T1's placeholders, replaced surface by surface (T4/T5/T7).
+    /// The destination's surface. Two are real as of T3 — a hosted session and the chat landing —
+    /// and the rest are still T1's placeholders, replaced surface by surface (T4/T5/T7).
     @ViewBuilder
     private var detail: some View {
         switch nav.destination {
@@ -40,6 +40,8 @@ struct ShellRootView: View {
             } else {
                 ShellLandingView(destination: nav.destination)
             }
+        case .mode(.chat):
+            ChatLandingView(nav: nav, directory: directory)
         default:
             ShellLandingView(destination: nav.destination)
         }
