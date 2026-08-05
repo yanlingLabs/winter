@@ -267,6 +267,11 @@ final class ShellSessionHostTests: XCTestCase {
 
         window.close()
         await feedWaitUntil { windowTransport.closeCallCount >= 1 }
+        // as-m6 (promoted one-liner, final whole-branch review): the wait above asserted nothing
+        // of its own — if detached-close became a no-op, R4's pin below would still pass
+        // vacuously (the shell was never touching the window's own socket anyway). Pin the value
+        // the wait was actually waiting on.
+        XCTAssertGreaterThanOrEqual(windowTransport.closeCallCount, 1)
         try? await Task.sleep(nanoseconds: 120_000_000)
 
         XCTAssertEqual(host.attachedSessionId, "S1", "the shell is still attached to the session it is showing")
