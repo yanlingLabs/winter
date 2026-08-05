@@ -480,4 +480,41 @@ final class ModeLandingViewTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertEqual(transport.sent.count, sentBeforehand, "a dismiss must never reach the wire")
     }
+
+    // MARK: - cli-handoff T3: the "Move to CLI" eligibility gate (PURE)
+
+    /// The eligibility matrix (plan semantics pin 1): row exists + code mode + not archived. BOTH
+    /// affordances — the open-session toolbar action (`ShellSessionView`) and the landing row's
+    /// context-menu item (`ModeLandingView.landingRow`) — render off this SINGLE gate, so absence
+    /// on chat/cowork/dispatch/archived/unloaded rows is pinned for both surfaces at once (the
+    /// one-function discipline `landingTabOffersRosterVerbs` established for the roster verbs).
+    func testMoveToCliOfferedMatrix() {
+        func row(mode: String?, activity: String?) -> SessionSummary {
+            SessionSummary(sessionId: "s", title: nil, createdAt: 1, scope: "global", cwd: nil,
+                           mode: mode, activity: activity)
+        }
+        // Code sessions, any non-archived lifecycle state — including `activity == nil` (a daemon
+        // predating the field), which must never read as archived.
+        XCTAssertTrue(moveToCliOffered(row: row(mode: "code", activity: "active")))
+        XCTAssertTrue(moveToCliOffered(row: row(mode: "code", activity: "idle")))
+        XCTAssertTrue(moveToCliOffered(row: row(mode: "code", activity: "background")))
+        XCTAssertTrue(moveToCliOffered(row: row(mode: "code", activity: nil)))
+        // The wire OMITS `mode` for a plain code session (`SessionMode(wire:)`'s own convention).
+        XCTAssertTrue(moveToCliOffered(row: row(mode: nil, activity: "idle")))
+        // Archived: attach un-archives by design and this affordance's name doesn't say that —
+        // resume in-app first (spec §1's "Not on archived rows").
+        XCTAssertFalse(moveToCliOffered(row: row(mode: "code", activity: "archived")))
+        // Non-code modes never see it — the TUI is code-only by plan-immunity (cowork joins when
+        // spawnable, not before).
+        XCTAssertFalse(moveToCliOffered(row: row(mode: "chat", activity: nil)))
+        XCTAssertFalse(moveToCliOffered(row: row(mode: "dispatch", activity: nil)))
+        XCTAssertFalse(moveToCliOffered(row: row(mode: "cowork", activity: "active")))
+        // No row at all (not yet listed): nothing to read a wire directory from — never offered.
+        XCTAssertFalse(moveToCliOffered(row: nil))
+        // An unknown future mode degrades to code by the ONE wire convention (`SessionMode(wire:)`)
+        // — the same reading that lists such a row on the Code landing in the first place; a
+        // second, stricter convention here would render a listed "code" row with a silently dead
+        // affordance.
+        XCTAssertTrue(moveToCliOffered(row: row(mode: "teleporting", activity: "idle")))
+    }
 }

@@ -175,6 +175,15 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         // The working-folders chip's panel/confirm attach to THIS window (AppKit belongs to the
         // controller). `[weak self]` — the host is owned above this object, not below it.
         host?.presentingWindow = { [weak self] in self?.window }
+        // cli-handoff T3: the true move's navigation seam — a successful handoff of the ATTACHED
+        // session navigates to the Code landing through the SAME navigate → onDestinationChange →
+        // apply(destination:) loop wired two lines up, which is what actually detaches app-kind
+        // (`apply`'s non-session case deselects; `detachCurrent` closes the socket). `[weak
+        // navigationModel]` mirrors the `[weak host]` capture above — the controller owns both;
+        // neither owns the other.
+        host?.navigateForHandoff = { [weak navigationModel] destination in
+            navigationModel?.navigate(to: destination)
+        }
         window.contentView = NSHostingView(rootView: ShellRootView(
             nav: navigationModel, directory: directory, host: host,
             dashboardWiring: dashboardWiring, dashboardSelection: dashboardSelection,

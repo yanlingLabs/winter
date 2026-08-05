@@ -164,6 +164,21 @@ struct ModeLandingView: View {
             }
         }
         .padding(.vertical, 4)
+        // cli-handoff T3: the row's "Move to CLI" — the SAME one eligibility gate as the
+        // open-session toolbar action (`moveToCliOffered`), so archived rows (the Archived tab's,
+        // by their `activity`) and any non-code mode a future landing lists never render the item
+        // at all. A trigger here is for a session the shell is NOT attached to (a landing on
+        // screen means the host is detached), so `ShellSessionHost.moveToCli` launches without
+        // navigating — the shell is already exactly where a move would land it.
+        .contextMenu {
+            if moveToCliOffered(row: row) {
+                Button {
+                    host.moveToCli(sessionId: row.sessionId)
+                } label: {
+                    Label("Move to CLI", systemImage: "terminal")
+                }
+            }
+        }
     }
 
     /// The Background tab's per-row verbs: Stop (`session.interrupt`), the background⇄clear verb

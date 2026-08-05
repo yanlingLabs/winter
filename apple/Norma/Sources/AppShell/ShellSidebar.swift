@@ -66,7 +66,7 @@ struct ShellRootView: View {
         switch nav.destination {
         case .session:
             if let host {
-                ShellSessionView(host: host)
+                ShellSessionView(host: host, directory: directory)
             } else {
                 ShellLandingView(destination: nav.destination)
             }

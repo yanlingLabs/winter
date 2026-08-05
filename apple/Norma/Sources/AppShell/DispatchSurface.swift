@@ -90,8 +90,11 @@ struct DispatchSurface: View {
             failedState
         case .idle:
             // Resolved (or the shell is between destinations — the same fallback `ShellSessionView`
-            // already gives an unattached host, "This session isn't open").
-            ShellSessionView(host: host)
+            // already gives an unattached host, "This session isn't open"). The hosted view's
+            // "Move to CLI" toolbar action stays absent here structurally: its gate
+            // (`moveToCliOffered`, reading the live `directory` row) refuses the dispatch
+            // singleton's mode — no surface-side special case needed.
+            ShellSessionView(host: host, directory: directory)
         }
     }
 
