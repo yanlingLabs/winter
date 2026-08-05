@@ -231,14 +231,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// machinery. The morph panel has no production frame accessor, so the new window spawns
     /// centered on the main screen (the user can move it); a `nil` model or missing daemon token
     /// aborts with a log, same posture as the yellow-light and detached-side spawns.
-    /// Task 2 (2e-iv): `frame` override lets `openStandaloneNormaWindow()` below reuse this exact
-    /// body instead of duplicating it. `nil` (every pre-existing caller) keeps the original
-    /// behavior — centered on the main screen — now computed via the shared pure
-    /// `centeredStandaloneFrame` instead of the inline midX/midY math this method used before.
+    /// Task 2 (2e-iv): `frame` override lets a caller with a specific target frame (door 1's
+    /// ⌘-click, offset from the source window) override the centered-fallback default. `nil`
+    /// (every other caller) keeps the original behavior — centered on the main screen — computed
+    /// via the shared pure `centeredStandaloneFrame`. App shell T6: the ONE caller that used to
+    /// reuse this exact body for its own frame math, `openStandaloneNormaWindow()`, is retired —
+    /// its menu item now summons the app shell instead (see `AppDelegate.boot()`'s menu wiring).
     /// Chat Mode Slice A (CM-T3): `title` widened from a fixed `"Norma"` to a defaulted parameter —
     /// every PRE-EXISTING caller (orb's child-status circles, the sidebars' ⌘-click, the Dashboard
-    /// SessionsPane row click) keeps the exact same "Norma" fallback, unchanged; `openChat()` below
-    /// is the first caller to pass something else (the session's own title, or "Chat").
+    /// SessionsPane row click) keeps the exact same "Norma" fallback, unchanged. App shell T6:
+    /// `openChat()`/`createAndOpenChat()`, the pair that used to pass something else (the session's
+    /// own title, or "Chat"), are retired along with the menu entries that drove them — every
+    /// surviving caller now takes the "Norma" default again.
     ///
     /// Plan-immunity (2026-07-28 design; fix round 1): `isChat: Bool? = nil` — `nil` (every
     /// PRE-EXISTING caller: orb's child-status circles, sidebars' ⌘-click, the Dashboard SessionsPane
@@ -246,10 +250,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// uses (`isChatSession(_:in:)`), off `model.directory.rows` — AppModel's own live session list,
     /// independently refreshed by every session-lifecycle broadcast regardless of which window's
     /// sidebar the caller's `sessionId` actually came from, so it reliably has the row by the time a
-    /// user could have clicked it anywhere. `createAndOpenChat()`/`openChat()`'s reopen path pass an
-    /// EXPLICIT `true` instead of relying on this derivation — they just created/confirmed the
-    /// session themselves and know its mode with certainty the directory's own async refresh cadence
-    /// can't beat. (Fix round 1, review finding: three doors — ⌘-click open-in-new-window, the
+    /// user could have clicked it anywhere. App shell T6: `createAndOpenChat()`/`openChat()`'s reopen
+    /// path, which used to pass an EXPLICIT `true` instead of relying on this derivation (they just
+    /// created/confirmed the session themselves and knew its mode with certainty the directory's own
+    /// async refresh cadence couldn't beat), are retired with the menu entries that drove them — every
+    /// surviving caller relies on this derivation now. (Fix round 1, review finding: three doors — ⌘-click open-in-new-window, the
     /// Dashboard's SessionsPane row click, and the orb's own sidebar — showed BOTH policy pickers
     /// shown-but-broken for a chat session, since only the explicit-`true` callers were ever
     /// threaded. This auto-derivation closes the ⌘-click and Dashboard doors at this ONE shared
@@ -1075,15 +1080,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 TriggerHub.shared.fire(from: "menu")
             },
             openCli: { [weak self] in self?.cliLauncher.openCli() },
-            // App shell T1 (summon path): "Open Norma App" now summons the ONE app window instead
-            // of spawning a fresh-session detached window. `openStandaloneNormaWindow()` above is
-            // left in place — Task 6 owns the rest of the menu-bar retarget (`openChat`/`newChat`/
-            // `openDashboard`/"Manage Plugins…") and deletes the spawn paths nothing still uses.
+            // App shell T1 (summon path): "Open Norma App" summons the ONE app window instead of
+            // spawning a fresh-session detached window.
             openNormaApp: { [weak self] in self?.summonAppWindow() },
-            openNewChat: { [weak self] in self?.newChat() },
-            openChat: { [weak self] in self?.openChat() },
-            openDashboard: { [weak self] in self?.openDashboard() },
-            openPluginManager: { [weak self] in self?.openPluginManager() },
+            // App shell T6 (the menu-bar retarget): every remaining menu path now summons+navigates
+            // the SAME singleton instead of spawning its own window. "New Chat"/"Chat" both land on
+            // the chat mode's landing (`.mode(.chat)`) — the detached-window spawn trio these used
+            // to drive (`openChat()`/`newChat()`/`createAndOpenChat()`) is retired below with them.
+            // There is no create-from-landing affordance yet (T3's own report, §6.3, named this gap
+            // forward rather than inventing chrome for it), so "New Chat" no longer guarantees a
+            // FRESH session the way it used to — both items collapse onto the same summon. Disclosed
+            // in the task report, not silently dropped.
+            openNewChat: { [weak self] in self?.summonAppWindow(navigatingTo: .mode(.chat)) },
+            openChat: { [weak self] in self?.summonAppWindow(navigatingTo: .mode(.chat)) },
+            // "Dashboard…"/"Manage Plugins…" both land on `.dashboard` — the Dashboard SURFACE
+            // itself is T7's; until then this shows the T1 placeholder (fine mid-branch). Neither
+            // item constructs the real `DashboardWindowController` any more — `openPluginManager()`
+            // (a thin `openDashboard(initialPane: .pluginManager)` wrapper whose only caller was
+            // this menu item) is retired below. `openDashboard(initialPane:)` itself is NOT retired:
+            // the first-run disclosure sheet's "Set up API key" button still calls it directly
+            // (`initialPane: .provider`, wired above in this method), so the real Dashboard window
+            // stays reachable outside the menu.
+            openDashboard: { [weak self] in self?.summonAppWindow(navigatingTo: .dashboard) },
+            openPluginManager: { [weak self] in self?.summonAppWindow(navigatingTo: .dashboard) },
             openPairDevice: { [weak self] in self?.openPairDevice() },
             openPairedDevices: { [weak self] in self?.openPairedDevices() },
             loginItemController: loginItem,

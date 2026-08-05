@@ -460,4 +460,104 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(delegate.detachedWindows.isEmpty)
         delegate.appWindow?.hide()
     }
+
+    // MARK: - App shell T6: the menu-bar retarget's funeral
+
+    /// "Chat" summons the shell and lands on the chat mode's landing — same fired-through-the-real-
+    /// item posture as `testOpenNormaAppMenuItemSummonsTheShell`. `openChat()` (the detached-window
+    /// spawn it used to drive) is retired.
+    func testChatMenuItemSummonsToTheChatLanding() {
+        let delegate = AppDelegate()
+        XCTAssertTrue(delegate.boot())
+        guard let item = delegate.menuBar?.chatItem else {
+            return XCTFail("boot() must have installed the menu bar")
+        }
+
+        NSApp.sendAction(item.action!, to: item.target, from: item)
+
+        XCTAssertNotNil(delegate.appWindow, "the menu item must summon the shell, not spawn a detached window")
+        XCTAssertEqual(delegate.appWindow?.navigation.destination, .mode(.chat))
+        XCTAssertTrue(delegate.detachedWindows.isEmpty)
+        delegate.appWindow?.hide()
+    }
+
+    /// "New Chat" summons the SAME destination as "Chat" — there is no create-from-landing seam yet
+    /// (T3's own report named this gap forward), so `newChat()`'s old "always create a fresh chat
+    /// session" guarantee is gone; this pin is honest about that collapse rather than papering over
+    /// it. `newChat()`/`createAndOpenChat()` (the detached-window spawn pair it used to drive) are
+    /// retired.
+    func testNewChatMenuItemSummonsToTheChatLanding() {
+        let delegate = AppDelegate()
+        XCTAssertTrue(delegate.boot())
+        guard let item = delegate.menuBar?.newChatItem else {
+            return XCTFail("boot() must have installed the menu bar")
+        }
+
+        NSApp.sendAction(item.action!, to: item.target, from: item)
+
+        XCTAssertNotNil(delegate.appWindow, "the menu item must summon the shell, not spawn a detached window")
+        XCTAssertEqual(delegate.appWindow?.navigation.destination, .mode(.chat))
+        XCTAssertTrue(delegate.detachedWindows.isEmpty)
+        delegate.appWindow?.hide()
+    }
+
+    /// "Dashboard…" summons the shell onto `.dashboard` — the Dashboard SURFACE itself is T7's;
+    /// until then this lands on the T1 placeholder. The real `DashboardWindowController` is never
+    /// constructed by this menu item any more (it survives ONLY through the first-run disclosure
+    /// sheet's "Set up API key" button, which calls `openDashboard(initialPane:)` directly).
+    func testDashboardMenuItemSummonsToTheDashboardDestination() {
+        let delegate = AppDelegate()
+        XCTAssertTrue(delegate.boot())
+        guard let item = delegate.menuBar?.dashboardItem else {
+            return XCTFail("boot() must have installed the menu bar")
+        }
+
+        NSApp.sendAction(item.action!, to: item.target, from: item)
+
+        XCTAssertNotNil(delegate.appWindow, "the menu item must summon the shell, not spawn the Dashboard window")
+        XCTAssertEqual(delegate.appWindow?.navigation.destination, .dashboard)
+        XCTAssertNil(delegate.dashboardWindow, "the real Dashboard window must never be constructed by this menu item any more")
+        delegate.appWindow?.hide()
+    }
+
+    /// "Manage Plugins…" lands on the SAME `.dashboard` destination as "Dashboard…" for now — T7
+    /// refines it to the plugin-manager pane specifically. `openPluginManager()` (a thin
+    /// `openDashboard(initialPane: .pluginManager)` wrapper whose only caller was this menu item) is
+    /// retired.
+    func testManagePluginsMenuItemSummonsToTheDashboardDestination() {
+        let delegate = AppDelegate()
+        XCTAssertTrue(delegate.boot())
+        guard let item = delegate.menuBar?.pluginManagerItem else {
+            return XCTFail("boot() must have installed the menu bar")
+        }
+
+        NSApp.sendAction(item.action!, to: item.target, from: item)
+
+        XCTAssertNotNil(delegate.appWindow, "the menu item must summon the shell, not spawn the Dashboard window")
+        XCTAssertEqual(delegate.appWindow?.navigation.destination, .dashboard)
+        XCTAssertNil(delegate.dashboardWindow, "the real Dashboard window must never be constructed by this menu item any more")
+        delegate.appWindow?.hide()
+    }
+
+    /// The plan's grep-pin, as a live test: after this task, no menu path can construct a
+    /// `DetachedWindowController` (or the real Dashboard window) except an explicit detach action.
+    /// Fires every retargeted item plus "Open Norma App" in one pass — the funeral's actual proof,
+    /// not just each item's own destination in isolation.
+    func testNoMenuPathSpawnsADetachedWindowOrTheDashboardWindow() {
+        let delegate = AppDelegate()
+        XCTAssertTrue(delegate.boot())
+        guard let menuBar = delegate.menuBar else {
+            return XCTFail("boot() must have installed the menu bar")
+        }
+        let items = [
+            menuBar.openNormaAppItem, menuBar.newChatItem, menuBar.chatItem,
+            menuBar.dashboardItem, menuBar.pluginManagerItem,
+        ]
+        for item in items {
+            NSApp.sendAction(item.action!, to: item.target, from: item)
+        }
+        XCTAssertTrue(delegate.detachedWindows.isEmpty, "no retargeted menu item may ever spawn a detached window")
+        XCTAssertNil(delegate.dashboardWindow, "no retargeted menu item may ever spawn the real Dashboard window")
+        delegate.appWindow?.hide()
+    }
 }
