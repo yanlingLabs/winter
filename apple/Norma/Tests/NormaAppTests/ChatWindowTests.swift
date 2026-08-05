@@ -84,20 +84,113 @@ final class ChatWindowTests: XCTestCase {
         )
     }
 
-    // App shell T6 (the menu-bar retarget's funeral): the rest of this file's original chat-open
-    // half is deleted with its subject —
-    //   - `chatWindowTitle(_:)` pure tests (testChatWindowTitleFallsBackToChatWhenNilOrBlank,
-    //     …UsesTrimmedSessionTitle)
-    //   - `openChat()`/`newChat()` defensive-guard tests (testOpenChatNoOpsWithoutAppModel,
-    //     testNewChatNoOpsWithoutAppModel)
-    //   - `newChat()`'s "always creates" wiring test
-    //     (testNewChatCreatesViaSessionCreateWithChatModeAndOpensAWindow)
-    //   - `openChat()`'s open-existing/create-when-absent wiring tests
-    //     (testOpenChatOpensExistingNewestChatSessionWithoutCreating,
-    //     testOpenChatCreatesWhenNoChatSessionExists)
-    // "Chat"/"New Chat" now summon the app shell instead of spawning a detached window (see
-    // `AppShellTests.testChatMenuItemSummonsToTheChatLanding`/`testNewChatMenuItemSummonsToTheChatLanding`
-    // for their replacement pins); nothing else ever called `chatWindowTitle`/`openChat`/`newChat`.
+    // App shell T6 (the menu-bar retarget's funeral): `chatWindowTitle(_:)` pure tests
+    // (testChatWindowTitleFallsBackToChatWhenNilOrBlank, …UsesTrimmedSessionTitle),
+    // `openChat()`'s defensive-guard test (testOpenChatNoOpsWithoutAppModel) and its open-existing/
+    // create-when-absent wiring tests (testOpenChatOpensExistingNewestChatSessionWithoutCreating,
+    // testOpenChatCreatesWhenNoChatSessionExists) are deleted with their subject — "Chat" now
+    // browses the app shell's chat landing instead of spawning a detached window (see
+    // `AppShellTests.testChatMenuItemSummonsToTheChatLanding`), and nothing else ever called
+    // `chatWindowTitle`/`openChat`. `newChat()`'s tests, below, are NOT deleted — review fix:
+    // the first retarget pass wrongly collapsed "New Chat" onto the same plain summon as "Chat",
+    // silently dropping the create T3's own report assigned to this task. `newChat()` survives with
+    // new innards (create via `model.client`'s bare RPC, no `cwd`, then summon straight onto
+    // `.session(id)`) — see `AppDelegate.newChat()`'s own doc comment.
+
+    // MARK: - AppDelegate.newChat() — create via session.create(mode:"chat"), then summon (App shell T6 review fix)
+
+    /// Defensive-guard precedent (matches every other menu-path guard in this file): no `appModel`
+    /// → log + no-op, no crash, no RPC issued.
+    func testNewChatNoOpsWithoutAppModel() {
+        let delegate = AppDelegate()
+        delegate.newChat()
+        XCTAssertNil(delegate.appWindow)
+    }
+
+    /// The wire-recording pattern: `newChat()` issues `session.create` on `model.client` — the
+    /// SAME bare, already-connected socket `ShellSessionHost.createSession(with:)` uses for the
+    /// shell's own "New" button, never an attaching harness — with `mode: "chat"` and NO `cwd` (chat
+    /// sessions carry no fs tools; the daemon reads an absent `cwd` as `dirs = []`, same shape
+    /// `WorkingDirChoice.noFolder`'s own `cwdParam` produces). On success, the shell summons
+    /// straight onto `.session(id)` — the ACTUAL attach is `ShellSessionHost`'s own doing, on its
+    /// own SEPARATE harness (a second socket), never a `session.attach` on the connection the create
+    /// itself rode. Both halves pinned in one flow since they're the same sequence: create → no
+    /// self-attach → navigate.
+    func testNewChatCreatesViaSessionCreateWithChatModeNoCwdAndNoAttachOnTheCreatePath() async throws {
+        let factory = RecordingTransportFactory()
+        let model = AppModel(makeTransport: { factory.make() }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        await waitUntil { !factory.made.isEmpty }
+        let t = factory.made[0]
+
+        // hello
+        await waitUntilSent(t, 1)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(lineJSON(t.sent[0])["id"] as! Int),"result":{"ok":true}}"#)
+        // session.list: nothing to auto-focus — keeps this test's wire trace to exactly
+        // [hello, session.list, session.create] before the create response.
+        await waitUntilSent(t, 2)
+        let list = lineJSON(t.sent[1])
+        XCTAssertEqual(list["method"] as? String, "session.list")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(list["id"] as! Int),"result":{"sessions":[]}}"#)
+        await waitUntil { model.session.state.status == .idle }
+
+        let delegate = AppDelegate()
+        delegate.setAppModelForTesting(model)
+        defer { delegate.appWindow?.hide() }
+
+        delegate.newChat()
+
+        let create = await waitUntilMethod(t, "session.create")
+        let params = create["params"] as? [String: Any]
+        XCTAssertEqual(params?["mode"] as? String, "chat")
+        XCTAssertEqual(params?["scope"] as? String, "global")
+        XCTAssertEqual(params?["approvalPolicy"] as? String, "auto")
+        XCTAssertNil(params?["cwd"], "no cwd — chat sessions carry no fs tools; the original (now-deleted) createAndOpenChat() sent cwd: NSHomeDirectory() here, a stale hardcoded-HOME habit not carried forward")
+        let sentBeforeResponse = t.sent.count
+
+        t.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_new_chat","trusted":true}}"#)
+
+        await waitUntil { delegate.appWindow?.navigation.destination == .session("s_new_chat") }
+
+        let afterCreate = t.sent[sentBeforeResponse...]
+        XCTAssertFalse(
+            afterCreate.contains { lineJSON($0)["method"] as? String == "session.attach" },
+            "the create call must never self-attach on the connection it rode: \(afterCreate)"
+        )
+    }
+
+    /// A failed create must never summon — the shell stays exactly as it was (nil, in this
+    /// never-summoned-yet case), same "no half-open window" posture as every other menu-path guard.
+    func testNewChatDoesNotSummonWhenCreateFails() async throws {
+        let factory = RecordingTransportFactory()
+        let model = AppModel(makeTransport: { factory.make() }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        await waitUntil { !factory.made.isEmpty }
+        let t = factory.made[0]
+
+        await waitUntilSent(t, 1)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(lineJSON(t.sent[0])["id"] as! Int),"result":{"ok":true}}"#)
+        await waitUntilSent(t, 2)
+        let list = lineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(list["id"] as! Int),"result":{"sessions":[]}}"#)
+        await waitUntil { model.session.state.status == .idle }
+
+        let delegate = AppDelegate()
+        delegate.setAppModelForTesting(model)
+        defer { delegate.appWindow?.hide() }
+
+        delegate.newChat()
+
+        let create = await waitUntilMethod(t, "session.create")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"error":{"code":1,"message":"boom"}}"#)
+
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNil(delegate.appWindow, "a failed create must never summon the shell")
+    }
 
     // MARK: - Plan-immunity (2026-07-28 design; fix round 1, review finding "door 1"):
     // registerDetachedWindow's onOpenSessionDetached (⌘-click a row in ANY window's own left

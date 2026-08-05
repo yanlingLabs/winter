@@ -1,5 +1,14 @@
 import SwiftUI
 
+/// PURE: the empty-state subtitle — pinned directly (`ShellChatSurfaceTests`) since the wording
+/// names a specific menu entry and must track whichever one actually creates a session. App shell
+/// T6 (review fix): "New Chat" is the create door (`AppDelegate.newChat()`), not "Chat" (which only
+/// browses the landing) — this names "New Chat" precisely so the copy can't silently drift stale
+/// again the way the first retarget pass briefly left it (this SwiftUI file's own convention: bodies
+/// themselves are never unit-tested, only their pure decision helpers, per `DashboardTests`' file
+/// doc — extracting the string is what makes that possible here).
+let chatLandingEmptyStateSubtitle = "Start one from the menu bar's New Chat entry."
+
 /// app-shell T3: the Chat mode's landing — the first real landing surface, and the shape the other
 /// three follow (T4 generalizes it into `ModeLandingView`; this file is the one-mode instance that
 /// proves the pattern against a live directory rather than a sketch).
@@ -15,8 +24,8 @@ import SwiftUI
 /// GALLERY EXTENSION POINT: the phone's own chat list is a `List` of title + relative time rows
 /// (`norma-ios`'s session list), which is what this mirrors; what does not transfer is the phone's
 /// swipe actions (no macOS equivalent worth faking) and its floating compose button — creating a
-/// chat is still the menu bar's door until T6 retargets it, and a landing button that duplicated it
-/// before then would be a second create path with no owner.
+/// chat is the menu bar's door (App shell T6's `AppDelegate.newChat()`), and a landing button that
+/// duplicated it would be a second create path with no owner.
 struct ChatLandingView: View {
     @ObservedObject var nav: ShellNavigationModel
     @ObservedObject var directory: SessionDirectory
@@ -54,7 +63,7 @@ struct ChatLandingView: View {
                 .foregroundStyle(.tertiary)
             Text("No chats yet")
                 .font(.title2)
-            Text("Start one from the menu bar's Chat entry.")
+            Text(chatLandingEmptyStateSubtitle)
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }

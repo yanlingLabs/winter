@@ -334,11 +334,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // App shell T6 (the menu-bar retarget's funeral): `chatSessionToOpen(in:)`/`chatWindowTitle(_:)`
-    // and the trio they backed — `openChat()`/`newChat()`/`createAndOpenChat()` — are deleted here.
-    // "Chat"/"New Chat" now summon the app shell (`AppDelegate.boot()`'s menu wiring) instead of
-    // spawning a detached window; nothing else ever called these. `openStandaloneNormaWindow()`
-    // (T1's report named this its own funeral) is deleted with them — "Open Norma App" summons the
-    // shell too, and had no other caller once T1 retargeted the menu item and the dock's reopen path.
+    // and the detached-window trio they backed — `openChat()`/`createAndOpenChat()` — are deleted
+    // here. "Chat" now summons the app shell's chat landing (`AppDelegate.boot()`'s menu wiring)
+    // instead of spawning a detached window; nothing else ever called them. `openStandaloneNormaWindow()`
+    // (T1's report named this its own funeral) is deleted too — "Open Norma App" summons the shell,
+    // and had no other caller once T1 retargeted the menu item and the dock's reopen path. `newChat()`
+    // itself SURVIVES, below, with new innards (App shell T6 review fix) — see its own doc comment.
+
+    /// App shell T6 (review fix): the menu bar's "New Chat" entry. T3's own report named this
+    /// task as chat-create's door ("creating a chat is still the menu bar's door until T6
+    /// retargets it") — the FIRST retarget pass wrongly collapsed "New Chat" onto the same plain
+    /// summon as "Chat", silently dropping the create. This restores create, on the ESTABLISHED
+    /// bare-RPC pattern `ShellSessionHost.managementClient`/`ShellSessionHost.createSession(with:)`
+    /// already use for the shell's own "New" button: `model.client` is a plain, already-connected
+    /// socket (never an attaching harness — `makeDetachedFeed` mints those, and would be the wrong
+    /// tool here), so `session.create` rides it with no attach of its own. `cwd` is omitted
+    /// entirely (chat sessions carry no fs tools, so there is no working directory to seed) — the
+    /// daemon writes `dirs = []`, the same "no folder" shape `WorkingDirChoice.noFolder`'s own
+    /// `cwdParam` produces. (The original `createAndOpenChat()`, deleted by this same task, sent
+    /// `cwd: NSHomeDirectory()` — a stale hardcoded-HOME habit the working-dirs plan already retired
+    /// for code sessions; not carried forward here. No other live path creates a `mode:"chat"`
+    /// session to check for the same staleness — this was the only one.)
+    ///
+    /// On success, summons the shell straight onto the new session (`.session(id)`) —
+    /// `ShellSessionHost.apply(destination:)` is what actually attaches, on ITS OWN separate
+    /// harness (a SECOND socket, per that type's own doc comment), not this call. On failure, logs
+    /// and does not summon — same defensive posture as every other menu-path guard in this file;
+    /// no richer user-facing error affordance exists on any menu path today, so none is invented
+    /// here either.
+    func newChat() {
+        guard let model = appModel else {
+            OrbDebug.log("newChat: no appModel — create aborted")
+            return
+        }
+        Task { [weak self] in
+            guard let created = try? await model.client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat") else {
+                OrbDebug.log("newChat: session.create(mode: chat) failed — summon aborted")
+                return
+            }
+            self?.summonAppWindow(navigatingTo: .session(created.sessionId))
+        }
+    }
 
     /// App shell T1 — THE summon primitive (spec §1). Every path that wants the app window goes
     /// through here: the dock icon (`applicationShouldHandleReopen`), the menu bar's "Open Norma
@@ -987,14 +1023,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // spawning a fresh-session detached window.
             openNormaApp: { [weak self] in self?.summonAppWindow() },
             // App shell T6 (the menu-bar retarget): every remaining menu path now summons+navigates
-            // the SAME singleton instead of spawning its own window. "New Chat"/"Chat" both land on
-            // the chat mode's landing (`.mode(.chat)`) — the detached-window spawn trio these used
-            // to drive (`openChat()`/`newChat()`/`createAndOpenChat()`) is retired below with them.
-            // There is no create-from-landing affordance yet (T3's own report, §6.3, named this gap
-            // forward rather than inventing chrome for it), so "New Chat" no longer guarantees a
-            // FRESH session the way it used to — both items collapse onto the same summon. Disclosed
-            // in the task report, not silently dropped.
-            openNewChat: { [weak self] in self?.summonAppWindow(navigatingTo: .mode(.chat)) },
+            // the SAME singleton instead of spawning its own window. "Chat" browses the chat mode's
+            // landing (`.mode(.chat)`) — `openChat()`'s old open-newest-or-create detached-window
+            // spawn is retired below, nothing else ever called it. "New Chat" (review fix: the
+            // first retarget pass wrongly collapsed this onto the same plain summon as "Chat",
+            // silently dropping the create T3's own report assigned to this task) still CREATES —
+            // see `newChat()`'s own doc comment for the restored shape.
+            openNewChat: { [weak self] in self?.newChat() },
             openChat: { [weak self] in self?.summonAppWindow(navigatingTo: .mode(.chat)) },
             // "Dashboard…"/"Manage Plugins…" both land on `.dashboard` — the Dashboard SURFACE
             // itself is T7's; until then this shows the T1 placeholder (fine mid-branch). Neither

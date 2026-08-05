@@ -481,12 +481,15 @@ final class AppShellTests: XCTestCase {
         delegate.appWindow?.hide()
     }
 
-    /// "New Chat" summons the SAME destination as "Chat" — there is no create-from-landing seam yet
-    /// (T3's own report named this gap forward), so `newChat()`'s old "always create a fresh chat
-    /// session" guarantee is gone; this pin is honest about that collapse rather than papering over
-    /// it. `newChat()`/`createAndOpenChat()` (the detached-window spawn pair it used to drive) are
-    /// retired.
-    func testNewChatMenuItemSummonsToTheChatLanding() {
+    /// "New Chat" is fired through the real item — review fix: unlike "Chat", it still CREATES
+    /// (`AppDelegate.newChat()`'s restored innards, see its own doc comment), so a degraded
+    /// (no-token) test boot can only prove the failure half here — the create RPC has no real
+    /// daemon to land against, so nothing must summon. The success half (create shape, no
+    /// self-attach on the create path, navigate-to-created-id) needs a scripted transport and is
+    /// pinned in `ChatWindowTests.testNewChatCreatesViaSessionCreateWithChatModeNoCwdAndNoAttachOnTheCreatePath`
+    /// instead — same "guard/no-crash at the menu level, real RPC shape via `setAppModelForTesting`"
+    /// split every other AppDelegate RPC path in this codebase already uses.
+    func testNewChatMenuItemFiresAndFailsFastWithoutSummoningOnTheDegradedBoot() async throws {
         let delegate = AppDelegate()
         XCTAssertTrue(delegate.boot())
         guard let item = delegate.menuBar?.newChatItem else {
@@ -494,11 +497,10 @@ final class AppShellTests: XCTestCase {
         }
 
         NSApp.sendAction(item.action!, to: item.target, from: item)
+        try? await Task.sleep(nanoseconds: 300_000_000)
 
-        XCTAssertNotNil(delegate.appWindow, "the menu item must summon the shell, not spawn a detached window")
-        XCTAssertEqual(delegate.appWindow?.navigation.destination, .mode(.chat))
+        XCTAssertNil(delegate.appWindow, "the degraded (no-token) boot's create RPC cannot succeed — nothing should summon")
         XCTAssertTrue(delegate.detachedWindows.isEmpty)
-        delegate.appWindow?.hide()
     }
 
     /// "Dashboard…" summons the shell onto `.dashboard` — the Dashboard SURFACE itself is T7's;

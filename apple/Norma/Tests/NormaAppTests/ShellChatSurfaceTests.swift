@@ -37,6 +37,18 @@ final class ShellChatSurfaceTests: XCTestCase {
         XCTAssertTrue(sessionRows(for: .cowork, in: rows()).isEmpty)
     }
 
+    // MARK: - The empty-state copy (PURE) — App shell T6 review fix
+
+    /// The empty state must name the ACTUAL create door — "New Chat" (`AppDelegate.newChat()`),
+    /// not "Chat" (which only browses this landing since App shell T6's retarget). The first
+    /// retarget pass briefly left this copy pointed at the wrong entry; pinned directly so it can't
+    /// silently drift again.
+    func testChatLandingEmptyStateNamesTheActualCreateDoor() {
+        XCTAssertEqual(chatLandingEmptyStateSubtitle, "Start one from the menu bar's New Chat entry.")
+        XCTAssertTrue(chatLandingEmptyStateSubtitle.contains("New Chat"), "must name the entry that actually creates a session")
+        XCTAssertFalse(chatLandingEmptyStateSubtitle.contains("'s Chat entry"), "must not name the browse-only \"Chat\" entry as if it created something")
+    }
+
     // MARK: - The `/background` verb's visibility (PURE)
 
     /// The daemon's own rules, mirrored: a participating session offers the verb that moves it,
