@@ -127,17 +127,18 @@ func excludingArchived(_ rows: [SessionSummary]) -> [SessionSummary] {
     rows.filter { $0.activity != "archived" }
 }
 
-/// PURE: Task 1's placeholder copy. Every one of these strings is replaced by a real surface later
-/// in this plan (mode landings → Tasks 3/4/5, session → Task 3, dashboard → Task 7); the shape of
-/// the window, its summon paths, the sidebar and this selection model are the parts that are final.
+/// PURE: Task 1's placeholder copy, narrowed by T3/T4/T5. Every mode now has a real landing
+/// (`ChatLandingView`/`ModeLandingView`/`DispatchSurface`/`CoworkPlaceholder`); `ShellRootView.detail`
+/// wires chat and cowork UNCONDITIONALLY (neither needs a host), so `.mode(.chat)` and
+/// `.mode(.cowork)` never reach this function at all any more. `.mode(.code)`/`.mode(.dispatch)` and
+/// `.session` still fall through here, but ONLY when the shell was built WITHOUT a host
+/// (`AppWindowController.host` nil — the pure window tests) — so this says what is actually true of
+/// that shell (no session can attach without one) rather than the stale "surface lands later"
+/// promise a mode that has since shipped would be telling. `.dashboard` is the one destination that
+/// is still genuinely pending (Task 7).
 func shellLandingPlaceholderText(_ destination: ShellDestination) -> String {
     switch destination {
-    case .mode(let mode) where !mode.isAvailable: return "Cowork isn't available yet."
-    case .mode(let mode): return "The \(mode.title) surface lands later in this plan."
-    // T3 replaced the in-app session view with a real one (`ShellSessionView`); this copy is now
-    // only reached by a shell built WITHOUT a host (`AppWindowController.host` nil — the pure
-    // window tests), so it says what is actually true of that shell rather than a stale promise.
-    case .session: return "This shell has no session host."
+    case .mode, .session: return "This shell has no session host."
     case .dashboard: return "The Dashboard surface lands later in this plan."
     }
 }

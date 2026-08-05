@@ -38,9 +38,9 @@ struct ShellRootView: View {
         }
     }
 
-    /// The destination's surface. Three are real as of T4 — a hosted session, the chat landing and
-    /// the code landing — and the rest (dispatch, cowork, dashboard) are still T1's placeholders,
-    /// replaced surface by surface (T5/T7).
+    /// The destination's surface. Five are real as of T5 — a hosted session, the chat landing, the
+    /// code landing, the dispatch surface and the cowork Coming-soon — leaving only the dashboard
+    /// (T7) on T1's placeholder.
     @ViewBuilder
     private var detail: some View {
         switch nav.destination {
@@ -58,6 +58,18 @@ struct ShellRootView: View {
             } else {
                 ShellLandingView(destination: nav.destination)
             }
+        case .mode(.dispatch):
+            // T5: dispatch always shows the ONE singleton session (`ShellSessionHost.apply`'s
+            // `.mode(.dispatch)` case), the same host-required shape `.mode(.code)` has above —
+            // there is no session to attach to without one.
+            if let host {
+                DispatchSurface(nav: nav, directory: directory, host: host)
+            } else {
+                ShellLandingView(destination: nav.destination)
+            }
+        case .mode(.cowork):
+            // Needs no host — there is nothing here to attach, list, or create.
+            CoworkPlaceholder()
         default:
             ShellLandingView(destination: nav.destination)
         }

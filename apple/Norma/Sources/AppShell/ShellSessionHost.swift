@@ -287,12 +287,87 @@ final class ShellSessionHost: ObservableObject {
     /// The navigation seam: `ShellNavigationModel.onDestinationChange` routes every destination
     /// change here, so "which session is the shell showing" has exactly one source of truth (the
     /// destination) rather than two that can disagree.
+    ///
+    /// app-shell T5: `.mode(.dispatch)` is the ONE extension of that rule — the design's "the
+    /// coordinator's sit-down surface" has no landing list to show instead (`session.dispatch` is a
+    /// get-or-create of a SINGLETON, not a roster), so showing it IS showing a session, exactly like
+    /// `.session(id)`, just with the id resolved here instead of arriving pre-known. Every other mode
+    /// destination keeps the old rule (a landing, never a session).
     func apply(destination: ShellDestination) {
-        if case .session(let sessionId) = destination {
+        switch destination {
+        case .session(let sessionId):
+            dispatchResolutionToken += 1 // invalidate any dispatch resolution the shell moved on from
+            dispatchResolution = .idle
             select(sessionId)
-        } else {
+        case .mode(.dispatch):
+            selectDispatch()
+        default:
+            dispatchResolutionToken += 1
+            dispatchResolution = .idle
             deselect()
         }
+    }
+
+    // MARK: - T5: the dispatch surface's own door (`session.dispatch` — the singleton conversation)
+
+    /// `DispatchSurface`'s resolving/failed-retry treatment — mirrors iOS's own three-state dance
+    /// (`norma-ios/Norma/Code/DispatchModeView.swift`'s `idle`/`resolving`/`failed(retry)` over
+    /// `AppNavModel.dispatchState`; there is no Mac gallery page for this moment, so the mirror is
+    /// the shipped iOS BEHAVIOR, not a written page — a GALLERY EXTENSION POINT). `.idle` doubles as
+    /// "not currently resolving" and "resolved" — once resolved, `attachedSessionId`/`attachment`
+    /// are the live answer (the same "no second source of truth" posture `dispatchResolutionToken`
+    /// itself follows), so a THIRD published "resolved" case would only be able to disagree with them.
+    enum DispatchResolution: Equatable {
+        case idle, resolving, failed
+    }
+
+    @Published private(set) var dispatchResolution: DispatchResolution = .idle
+
+    /// Bumped on every entry into (or out of) dispatch resolution — an in-flight `session.dispatch`
+    /// whose token has gone stale by the time it returns (the shell navigated elsewhere while it was
+    /// in flight) must attach NOTHING and must not overwrite whatever state the shell moved on to.
+    /// The exact "two doubles bracket the untested middle" race class this plan's own memory has hit
+    /// before elsewhere in this app (T2's poll-vs-fresh-transient race is the same shape), closed here
+    /// with the same tool: a monotonic token read back after the `await`.
+    private var dispatchResolutionToken = 0
+
+    /// `session.dispatch {}` (Phase 7): get-or-create the ONE permanent dispatch session, ridden over
+    /// the bare `managementClient` — never `makeFeed`'s attaching harness (the roster verbs'/
+    /// `createSession`'s own doors, same reasoning: this is a plain RPC, not an attach). The actual
+    /// attach happens through the ordinary `select` door once the id comes back, so the existing
+    /// attachment policy (hop/detach/re-show) governs the dispatch session exactly like any other —
+    /// nothing about it is a special case past this one resolution step.
+    ///
+    /// No `managementClient` (every test that doesn't inject one) is the same silent no-op the roster
+    /// verbs give that case — never reachable in production (`AppDelegate.summonAppWindow` always
+    /// passes `model.client`, unconditionally, once the app has booted at all).
+    private func selectDispatch() {
+        dispatchResolutionToken += 1
+        let token = dispatchResolutionToken
+        guard let client = managementClient else {
+            dispatchResolution = .idle
+            deselect()
+            return
+        }
+        dispatchResolution = .resolving
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let result = try? await client.dispatchSession() else {
+                guard self.dispatchResolutionToken == token else { return } // moved on already
+                self.dispatchResolution = .failed
+                return
+            }
+            guard self.dispatchResolutionToken == token else { return } // moved on already
+            self.dispatchResolution = .idle
+            self.select(result.sessionId)
+        }
+    }
+
+    /// The failed state's retry door (`DispatchSurface`'s "Try Again"). Safe unconditionally: the
+    /// button that calls it only exists while the shell IS showing `.mode(.dispatch)` (the view
+    /// itself is the guard), so simply re-running the same resolution is exactly right.
+    func retryDispatchResolution() {
+        selectDispatch()
     }
 
     /// Called by `AppWindowController` on every CHANGE of the window's on-screen state.
