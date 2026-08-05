@@ -770,35 +770,47 @@ final class ShellSessionHost: ObservableObject {
     /// from Recents, or the very first attach of the app's life) needs its own synchronous read.
     /// Cheap (one directory enumeration) and profile-resolved via `AppProfile.normaHome`, never a
     /// literal `~/.norma` — the dev/dist profile-blindness class that shipped as a live bug once.
-    /// Gated on `outputsBoxEligible` so a chat/dispatch attach never even performs the read, let
+    /// Gated on `outputsBoxParticipates` so a chat/dispatch attach never even performs the read, let
     /// alone populates `outputFiles` — the "never a hollow box" rule holds structurally, not just at
     /// the view layer.
     private func refreshOutputFiles(for sessionId: String) {
-        guard outputsBoxEligible(mode: mode(of: sessionId)) else { outputFiles = []; return }
+        guard outputsBoxParticipates(sessionId) else { outputFiles = []; return }
         outputFiles = listOutputFiles(home: AppProfile.normaHome, sessionId: sessionId)
     }
 
     /// `outputsWatcher.onChange`'s composed handler — filters to the session THIS host is showing
     /// (the box's own half of "design the callback surface for both consumers"; T9's floating panel
-    /// filters to the opposite set). Same `outputsBoxEligible` gate as `refreshOutputFiles`, so a
+    /// filters to the opposite set). Same `outputsBoxParticipates` gate as `refreshOutputFiles`, so a
     /// stray event for a non-participating mode (unreachable in practice — the daemon never writes
     /// there for chat/dispatch — but defended anyway, the same posture `dirsMenuIsVisible` keeps
     /// against a fact it does not itself produce) can never populate the box either.
     private func applyOutputsChange(sessionId: String, files: [String]) {
-        guard sessionId == attachedSessionId, outputsBoxEligible(mode: mode(of: sessionId)) else { return }
+        guard sessionId == attachedSessionId, outputsBoxParticipates(sessionId) else { return }
         outputFiles = files.map { URL(fileURLWithPath: $0) }
     }
 
-    /// Read fresh off the shared directory — same convention `isChatSession`'s own lookup uses. A
-    /// row not yet loaded (a brand-new id the directory's own refresh hasn't caught up to) returns
-    /// `nil`, which `outputsBoxEligible` resolves to "code" — the SAME direction
-    /// `DetachedWindowController.isChatSession`'s own "false when not found" default takes (nil ⇒
-    /// not-chat there, nil ⇒ code-eligible here). Right, not a hedge, for the same reason that
-    /// default is right: the reachable "not yet loaded" call sites are either a row on its way in
-    /// from a fresh `session.list`, or a session the landing's "New" button just created — and that
-    /// button only ever creates CODE sessions (`ShellSessionHost.createSession`), never chat.
-    private func mode(of sessionId: String) -> String? {
-        directory.rows.first(where: { $0.sessionId == sessionId })?.mode
+    /// Review fix (T8): whether the box participates for `sessionId`, gated on the row actually
+    /// being LOADED. FAIL-CLOSED for a row not yet in `directory.rows` (a fresh id the directory's
+    /// own refresh hasn't caught up to) — a genuinely reachable trigger (navigate to an existing
+    /// session before its row loads), unlike the shown-once-a-session-is-actually-loaded call sites
+    /// `DetachedWindowController.isChatSession`'s own "false when not found" default gates (that
+    /// default is unreachable for the scenarios it covers; this one was not).
+    ///
+    /// This is deliberately a DIFFERENT question from `outputsBoxEligible(mode:)`'s own `nil` case,
+    /// which answers "the daemon reported this row with an ABSENT mode field" — a wire-confirmed
+    /// fact that correctly resolves to "code" (the store-wide `mode ?? "code"` convention
+    /// `participatesInActivity` also uses). Conflating "row not loaded" with "row loaded, mode
+    /// absent" made the "never a hollow box" guarantee depend on an out-of-file, untested invariant
+    /// (chat/dispatch sessions never acquiring fs tools — packages/core's tool registry) instead of
+    /// owning it here: this function now answers correctly with NO help from that fact.
+    ///
+    /// SELF-HEALING: both call sites above route through this one function, so the row's eventual
+    /// arrival (the directory's fold, or a refresh) makes the very next call — a hop, or a live
+    /// watcher tick — recompute eligibility fresh and the box appears for a genuine code/cowork
+    /// session, exactly as if the row had always been there.
+    private func outputsBoxParticipates(_ sessionId: String) -> Bool {
+        guard let row = directory.rows.first(where: { $0.sessionId == sessionId }) else { return false }
+        return outputsBoxEligible(mode: row.mode)
     }
 
     /// The box's click door — opens the third panel on `url`.

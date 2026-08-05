@@ -425,11 +425,58 @@ final class ShellSessionHostTests: XCTestCase {
         let rows = [SessionSummary(sessionId: "S_chat", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "chat")]
         let (host, _) = makeHost(rows: rows)
         defer { host.deselect() }
-        await host.directory.refresh() // load the row — an UNLOADED row would fail-open to "code"-eligible (mode(of:)'s own doc)
+        await host.directory.refresh() // load the row — an UNLOADED row is now its OWN ineligible case (fail-closed), never a guess
         host.setShellVisible(true)
         host.select("S_chat")
 
         XCTAssertEqual(host.outputFiles, [])
+    }
+
+    /// Review fix (T8): the "never a hollow box" guarantee must be OWNED here, not borrowed from the
+    /// out-of-file fact that chat/dispatch never acquire fs tools. An UNKNOWN row (not yet in
+    /// `directory.rows` — a genuinely reachable trigger: navigate to an existing session before its
+    /// row has loaded) must fail CLOSED, never default-guess "code eligible". And it must SELF-HEAL:
+    /// once the row arrives (a fold or a refresh), eligibility recomputes true for a real code
+    /// session and the box populates on the very next call through either site —
+    /// `refreshOutputFiles` (proven by the `select` below finding nothing) and `applyOutputsChange`
+    /// (proven by the watcher tick after the row loads) both route through the one gate, so this one
+    /// test covers both directions at both call sites.
+    func testOutputsBoxFailsClosedOnAnUnknownRowThenRecoversOnceItLoads() async {
+        let home = makeTempHome()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        // A REAL file already sits on disk for S1 — the only way to observe fail-OPEN vs
+        // fail-CLOSED: an empty result is meaningless (and would pass either way) unless there is
+        // something on disk the wrong answer could have picked up.
+        let file = writeOutputFile(home: home, sessionId: "S1", name: "preexisting.md")
+
+        var rows: [SessionSummary] = [] // S1's row is UNKNOWN to the directory at first
+        let directory = SessionDirectory(lister: { rows })
+        let factory = ShellTransportFactory()
+        let watcher = OutputsWatcher(home: home)
+        let host = ShellSessionHost(directory: directory, makeFeed: { sessionId in
+            let session = SessionModel()
+            let feed = SessionFeed(makeTransport: { factory.make() }, token: "tok", clientName: "orb",
+                                   mode: .pinned(sessionId: sessionId), session: session)
+            return (feed, session)
+        }, outputsWatcher: watcher)
+        defer { host.deselect() }
+        setenv("NORMA_HOME", home, 1)
+        defer { unsetenv("NORMA_HOME") }
+        host.setShellVisible(true)
+        host.select("S1")
+
+        XCTAssertEqual(host.outputFiles, [],
+                       "S1's row hasn't loaded yet — fail CLOSED; \(file.path) exists on disk, so a fail-OPEN default would have listed it")
+
+        // The row ARRIVES (a session.list fold/refresh) while still attached to S1 — no hop needed.
+        rows = [SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "code")]
+        await directory.refresh()
+
+        // The watcher's own tick re-evaluates eligibility FRESH — the self-healing path both call
+        // sites share, now that S1's row says a real code session.
+        watcher.onChange?("S1", [file.path])
+        XCTAssertEqual(host.outputFiles.map(\.path), [file.path],
+                       "the row loading recomputes eligibility true — the box recovers")
     }
 
     /// A hop re-lists for the NEW session — the old session's files never bleed into the new one.
