@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { CORE_VERSION } from "@norma/core";
 import { formatQuestionHeadlineLine, formatResumeHint, invisibleKeyCharWarning, routeCliInvocation, type CliRoute } from "../src/main";
 import { agentResumeCommand } from "../src/agents-cli";
 
@@ -91,6 +95,69 @@ describe("routeCliInvocation — resume (Finding 3)", () => {
       existingSessionId: "sess1",
     });
   });
+});
+
+// App→CLI handoff Task 2: a real `--version`/`-v` flag. Routing is the pure, cheaply-testable
+// decision (same rationale as the table above); the exact printed line + exit code are pinned by
+// the subprocess tests below (console.log/process.exit live in the dispatcher, not here).
+describe("routeCliInvocation — --version / -v (handoff Task 2)", () => {
+  test("`norma --version` / `norma -v` → version, TTY or not (scripts ask for versions)", () => {
+    expect(routeCliInvocation(["--version"], true)).toEqual<CliRoute>({ kind: "version" });
+    expect(routeCliInvocation(["-v"], true)).toEqual<CliRoute>({ kind: "version" });
+    expect(routeCliInvocation(["--version"], false)).toEqual<CliRoute>({ kind: "version" });
+    expect(routeCliInvocation(["-v"], false)).toEqual<CliRoute>({ kind: "version" });
+  });
+
+  test("no shadowing: `-p`, `resume <id>`, subcommands and policy flags route exactly as before", () => {
+    expect(routeCliInvocation(["-p", "hi"], true)).toEqual<CliRoute>({ kind: "fallthrough" });
+    expect(routeCliInvocation(["resume", "sess1"], true)).toEqual<CliRoute>({ kind: "chat", existingSessionId: "sess1" });
+    expect(routeCliInvocation(["sessions"], true)).toEqual<CliRoute>({ kind: "fallthrough" });
+    expect(routeCliInvocation(["--auto"], true)).toEqual<CliRoute>({ kind: "chat" });
+  });
+
+  test("`-v`/`--version` only match LEADING — as later argv words they are someone else's args", () => {
+    // `resume <id> -v` is prompt text for that session (the resume table's "anything else" rule).
+    expect(routeCliInvocation(["resume", "sess1", "-v"], true)).toEqual<CliRoute>({
+      kind: "resumeOneShot",
+      sessionId: "sess1",
+      text: "-v",
+    });
+  });
+});
+
+// The dispatcher half of the flag: exact bytes + exit code, via the real entry point. The
+// `--version` path never dials the daemon or reads settings, but NORMA_HOME still points at a
+// temp dir (house rule: tests never touch ~/.norma). Spawn pipes are non-TTY — which doubles as
+// proof the flag is not TTY-gated.
+describe("norma --version — printed line and exit code (handoff Task 2)", () => {
+  const cliDir = join(import.meta.dir, "..");
+  const home = mkdtempSync(join(tmpdir(), "norma-version-flag-"));
+
+  const runMain = async (...args: string[]): Promise<{ stdout: string; exitCode: number }> => {
+    const proc = Bun.spawn(["bun", "src/main.ts", ...args], {
+      cwd: cliDir,
+      env: { ...process.env, NORMA_HOME: home },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = await new Response(proc.stdout).text();
+    const exitCode = await proc.exited;
+    return { stdout, exitCode };
+  };
+
+  test("`--version` and `-v` print exactly `norma <CORE_VERSION>` + newline, exit 0", async () => {
+    for (const flag of ["--version", "-v"]) {
+      const { stdout, exitCode } = await runMain(flag);
+      expect(stdout).toBe(`norma ${CORE_VERSION}\n`);
+      expect(exitCode).toBe(0);
+    }
+  }, 30_000);
+
+  test("the usage header carries CORE_VERSION — the Phase 1b-ii-d fossil is gone", async () => {
+    const { stdout } = await runMain(); // bare, non-TTY → fallthrough → usage (Finding 4 table above)
+    expect(stdout.startsWith(`norma ${CORE_VERSION} — commands:`)).toBe(true);
+    expect(stdout).not.toContain("Phase 1b-ii-d");
+  }, 30_000);
 });
 
 describe("formatResumeHint (Phase 3c Task 5 — the dim post-exit resume hint)", () => {

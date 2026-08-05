@@ -73,6 +73,57 @@ struct HopAwayPrompt: Equatable {
     let sessionId: String
 }
 
+// MARK: - cli-handoff T3: "Move to CLI" (PURE — the eligibility gate + directory resolution)
+
+/// PURE: whether a row offers the "Move to CLI" affordance at all — row LOADED, code mode, not
+/// archived (spec §1: code only; "Not on archived rows" — attach un-archives by design and this
+/// action's name doesn't say that; resume in-app first). BOTH surfaces render off this ONE
+/// function — the open-session toolbar action (`ShellSessionView`) and the landing row's
+/// context-menu item (`ModeLandingView`) — the same one-gate discipline
+/// `landingTabOffersRosterVerbs` established, so chat/cowork/dispatch/archived rows are absent on
+/// both at once. `DispatchSurface` hosts `ShellSessionView` too; its singleton row's mode is
+/// `"dispatch"`, so the gate keeps the toolbar action structurally absent there with no
+/// surface-side special case.
+///
+/// Mode is FAIL-CLOSED on anything but nil-or-"code": this mirrors the CLI's `isCodeMode` — the
+/// RESUME TARGET's gate (`packages/cli/src/session-mode.ts`, `(mode ?? "code") === "code"`; resume
+/// refuses everything else) — NOT the sidebar's listing convention (`SessionMode(wire:)`, which
+/// degrades unknown future modes to code for DISPLAY). Fix round 1: offering on a row the Terminal
+/// will refuse is this affordance's worst failure shape — `open` exits 0 (the script's content is
+/// opaque to it), the true move fires (the app steps aside AND drops its attachment), and the
+/// resume then silently refuses: an orphaned session on a false-positive success. A `nil` row (not
+/// yet in `directory.rows`) is never offered either: there is no wire `dirs` to resolve a
+/// directory from, and a launch without one would be a guess.
+func moveToCliOffered(row: SessionSummary?) -> Bool {
+    guard let row else { return false }
+    // Mirrors the CLI's isCodeMode — the resume target's gate, not the sidebar's listing convention.
+    return (row.mode == nil || row.mode == "code") && row.activity != "archived"
+}
+
+/// PURE: the directory the handoff's Terminal opens in — the WIRE row's `dirs[0]` (the primary by
+/// position, pre-designated for exactly this — `packages/core/src/sessions/dirs.ts`), the SAME
+/// source the working-folders chip reads (`dirsChipLabel(currentSidebarSessionSummary?.dirs)`).
+/// NEVER the row's `cwd`: that field is the daemon's list-time ALIAS of `dirs[0]?.path`, an echo,
+/// not an independent fact (`SessionSummary.dirs`'s own doc). Workdir-less (`dirs == []` — a real
+/// state) and a dirs-less row both fall back to `$HOME` (spec §1's "$HOME fallback").
+func handoffDirectory(row: SessionSummary?) -> String {
+    row?.dirs?.first?.path ?? NSHomeDirectory()
+}
+
+/// PURE: the visible-failure copy per `HandoffError` case — each sentence carries its payload
+/// (the path that was missing/unwritable, `open`'s exit code), because the alert built on it can
+/// only ever be as informative as this string (honesty-of-affordance).
+func handoffFailureMessage(_ error: HandoffError) -> String {
+    switch error {
+    case .cliMissing(let path):
+        return "The bundled CLI is missing (looked in \(path)). Reinstall Norma to restore it."
+    case .scriptWriteFailed(let path):
+        return "Couldn't write the launch script at \(path)."
+    case .openFailed(let code):
+        return "Terminal wouldn't open (open exited \(code))."
+    }
+}
+
 // MARK: - The live harness behind an open session
 
 /// One live attachment: a pinned `SessionFeed` (its own `NormaClient`/socket — a full harness, the
@@ -557,6 +608,83 @@ final class ShellSessionHost: ObservableObject {
         hopAwayPrompt = nil
     }
 
+    // MARK: - cli-handoff T3: "Move to CLI" — the affordances' one verb + its three seams
+
+    /// The launch seam — `nil` = success, an error = what to SURFACE. Defaults to the real
+    /// `HandoffLauncher.moveToCli` (Task 1: profile-baked script, `open -a Terminal`); tests inject
+    /// a recorder, the house closure-seam pattern (`makeFeed`/`presentingWindow`'s own shape). The
+    /// call is synchronous by design — `open` returns fast, and a synchronous seam is what makes
+    /// the failure pin ("no navigation after an error") race-free rather than eventually-true.
+    var handoffLaunch: (String, String) -> HandoffError? = { sessionId, dir in
+        if case .failure(let error) = HandoffLauncher.moveToCli(sessionId: sessionId, dir: dir) {
+            return error
+        }
+        return nil
+    }
+
+    /// The true move's navigation seam — wired by `AppWindowController` to
+    /// `navigation.navigate(to:)`, so the move rides the SAME navigate → `onDestinationChange` →
+    /// `apply(destination:)` loop every other navigation takes (this host never mutates its own
+    /// selection out-of-band; the destination stays the one source of truth). `nil` (tests that
+    /// don't pin the move, and any host built without a window controller) simply moves nothing.
+    var navigateForHandoff: ((ShellDestination) -> Void)?
+
+    /// The visible-failure seam — a handoff failure is NEVER log-only (the honesty-of-affordance
+    /// rule; a "Move to CLI" click that silently does nothing teaches the user the button is
+    /// decorative). Defaults to an alert on the shell window (`runHandoffFailureAlert`); tests
+    /// inject a recorder and pin that presentation happened. The roster-refusal path
+    /// (`rosterRefusals`) deliberately does NOT carry this: that dictionary is read only by the
+    /// Background tab's own rows (the exact silent-clear trap `hopAwayShouldPromptBackground`'s doc
+    /// records), and a handoff can fail from the toolbar or an All-tab row where nothing renders it.
+    lazy var presentHandoffFailure: (HandoffError) -> Void = { [weak self] error in
+        self?.runHandoffFailureAlert(error)
+    }
+
+    /// The verb behind BOTH affordances (spec §1): resolve the row, gate, launch, and — for the
+    /// currently-attached session only — the TRUE MOVE (ruling R1: after Terminal opens, the shell
+    /// navigates to the Code landing; the attachment drops app-kind through the normal apply path's
+    /// deselect→detach, auto-backgrounding a mid-turn session, never aborting it — the CLI seat
+    /// attaches when the Terminal spawns). A landing-row trigger for a NON-attached session
+    /// launches only: the shell is already exactly where a move would land it, and navigating away
+    /// from whatever else it IS showing would be the move stealing an unrelated surface.
+    ///
+    /// On failure: present and STOP — the app must not step aside from a session the Terminal
+    /// never got. The wire is untouched either way: a handoff is never an attach, a detach, an
+    /// interrupt or an activity write from this side (the daemon's own attach/detach semantics do
+    /// all the lifecycle work once the CLI seat arrives).
+    func moveToCli(sessionId: String) {
+        let row = directory.rows.first(where: { $0.sessionId == sessionId })
+        guard moveToCliOffered(row: row) else {
+            // Unreachable from the UI — both affordances render off the same gate. Defense in
+            // depth for any future caller; a refusal is not a launch failure, so nothing presents.
+            OrbDebug.log("ShellSessionHost.moveToCli: \(sessionId.prefix(10)) is not handoff-eligible — refusing")
+            return
+        }
+        if let error = handoffLaunch(sessionId, handoffDirectory(row: row)) {
+            presentHandoffFailure(error)
+            return
+        }
+        if attachedSessionId == sessionId {
+            navigateForHandoff?(.mode(.code))
+        }
+    }
+
+    /// `presentHandoffFailure`'s default: an alert ON the shell window (a sheet when the window is
+    /// there to hang it on, app-modal otherwise — still visible, never a log line). Copy comes from
+    /// the pure `handoffFailureMessage`, which the tests pin per-case.
+    private func runHandoffFailureAlert(_ error: HandoffError) {
+        OrbDebug.log("ShellSessionHost.moveToCli failed: \(error)")
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Couldn't move this session to the CLI"
+        alert.informativeText = handoffFailureMessage(error)
+        if let window = presentingWindow?() {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
+    }
+
     /// One implementation of "is this session chat", deliberately shared with the detached window's
     /// own in-place switch rather than re-written here — including its documented "false when the
     /// row isn't loaded yet" default.
@@ -886,6 +1014,11 @@ final class ShellSessionHost: ObservableObject {
 /// split view's detail column already sits correctly under the window's unified toolbar.
 struct ShellSessionView: View {
     @ObservedObject var host: ShellSessionHost
+    /// cli-handoff T3: the shared directory, observed HERE (not through `host`, whose reference to
+    /// it is a plain `let` no view re-renders on) so the toolbar action's eligibility gate re-reads
+    /// the live wire row — a row that archives out from under an open session drops the affordance
+    /// the moment the fold lands, not on the next unrelated republish.
+    @ObservedObject var directory: SessionDirectory
 
     var body: some View {
         if let attachment = host.attachment {
@@ -921,6 +1054,28 @@ struct ShellSessionView: View {
                 if let openFile = host.openOutputFile {
                     Divider()
                     FileViewer(url: openFile, onClose: { host.closeOutputFile() })
+                }
+            }
+            // cli-handoff T3: the open-session "Move to CLI" action — SHELL-OWNED chrome. It lives
+            // on THIS view, never inside the shared `WindowContentView` (the orb's morph window and
+            // every detached window host that view too, and they gain NOTHING here — the plan's
+            // shell-owned-placement constraint), so the window toolbar grows the action only while
+            // the shell itself is showing an eligible session. Gated on the ATTACHED session's live
+            // wire row through the same ONE function as the landing rows' context-menu item
+            // (`moveToCliOffered`) — which is also what keeps it absent on `DispatchSurface`'s
+            // hosting of this view (the dispatch singleton's row is mode "dispatch").
+            .toolbar {
+                if let sessionId = host.attachedSessionId,
+                   moveToCliOffered(row: directory.rows.first(where: { $0.sessionId == sessionId })) {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            host.moveToCli(sessionId: sessionId)
+                        } label: {
+                            Label("Move to CLI", systemImage: "terminal")
+                        }
+                        .help("Open Terminal in this session's folder, attached to this session")
+                        .accessibilityLabel("Move to CLI")
+                    }
                 }
             }
         } else {

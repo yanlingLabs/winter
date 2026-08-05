@@ -633,4 +633,201 @@ final class ShellSessionHostTests: XCTestCase {
 
         XCTAssertTrue(previousHandlerFired, "the handler present BEFORE construction must still run")
     }
+
+    // MARK: - cli-handoff T3: "Move to CLI" — the host verb + the true move
+
+    /// The full production wiring loop for the handoff pins: a REAL `ShellNavigationModel` wired
+    /// both directions exactly as `AppWindowController.init` wires it (destination changes reach
+    /// `apply(destination:)`; the host's true move navigates through `navigate(to:)`) — so "the
+    /// normal apply path" in these tests is the same loop production takes, not a shortcut.
+    private func makeNavigatedHost(rows: [SessionSummary]) -> (host: ShellSessionHost, factory: ShellTransportFactory, nav: ShellNavigationModel) {
+        let (host, factory) = makeHost(rows: rows)
+        let nav = ShellNavigationModel()
+        nav.onDestinationChange = { [weak host] destination in host?.apply(destination: destination) }
+        host.navigateForHandoff = { [weak nav] destination in nav?.navigate(to: destination) }
+        return (host, factory, nav)
+    }
+
+    /// The handoff's directory is the WIRE row's `dirs[0]` — the pre-designated primary
+    /// (`packages/core/src/sessions/dirs.ts`), the SAME source the working-folders chip reads
+    /// (`dirsChipLabel(currentSidebarSessionSummary?.dirs)`) — with `NSHomeDirectory()` as the
+    /// workdir-less fallback. NEVER the `cwd` alias: the daemon overwrites `cwd` from the dirs set
+    /// at list time, so reading it would be a second, echo-shaped source for the same fact.
+    func testHandoffDirectoryResolvesDirsFirstWithHomeFallback() {
+        let full = SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global",
+                                  cwd: "/Users/u/proj", mode: "code",
+                                  dirs: [SessionDirEntry(path: "/Users/u/proj", locked: true),
+                                         SessionDirEntry(path: "/Users/u/extra", locked: false)])
+        XCTAssertEqual(handoffDirectory(row: full), "/Users/u/proj", "dirs[0] — the primary by position")
+
+        // Workdir-less (`dirs == []` is a REAL state, never conflated with nil) falls back to
+        // $HOME — and a stale-looking `cwd` must not be consulted on the way down.
+        let workdirLess = SessionSummary(sessionId: "S2", title: nil, createdAt: 1, scope: "global",
+                                         cwd: "/stale/alias", mode: "code", dirs: [])
+        XCTAssertEqual(handoffDirectory(row: workdirLess), NSHomeDirectory())
+
+        // `dirs == nil` (a daemon predating the field) and a missing row both fall back too — a
+        // total function, never a guess at a wire fact that isn't there.
+        let nilDirs = SessionSummary(sessionId: "S3", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "code")
+        XCTAssertEqual(handoffDirectory(row: nilDirs), NSHomeDirectory())
+        XCTAssertEqual(handoffDirectory(row: nil), NSHomeDirectory())
+    }
+
+    /// Failure copy: every `HandoffError` case renders a sentence carrying its payload — the
+    /// honesty-of-affordance floor (the alert can only be as informative as this string).
+    func testHandoffFailureMessagesCarryTheirPayloads() {
+        XCTAssertTrue(handoffFailureMessage(.cliMissing("/x/Resources")).contains("/x/Resources"))
+        XCTAssertTrue(handoffFailureMessage(.scriptWriteFailed("/y/script.sh")).contains("/y/script.sh"))
+        XCTAssertTrue(handoffFailureMessage(.openFailed(3)).contains("3"))
+    }
+
+    /// The TRUE MOVE (spec §1, ruling R1): a successful launch for the CURRENTLY-ATTACHED session
+    /// navigates the shell to the Code landing through the normal apply path — which detaches
+    /// app-kind (the daemon auto-backgrounds if mid-turn, never aborts). The wire pins are the
+    /// app's half of that contract: the move is a launch + a socket close and NOTHING else — no
+    /// setActivity, no interrupt, no extra attach.
+    func testMoveToCliOnTheAttachedSessionLaunchesThenNavigatesToTheCodeLanding() async {
+        let rows = [SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global",
+                                   cwd: "/Users/u/proj", mode: "code",
+                                   dirs: [SessionDirEntry(path: "/Users/u/proj", locked: true)], activity: "idle")]
+        let (host, factory, nav) = makeNavigatedHost(rows: rows)
+        defer { host.deselect() }
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        nav.navigate(to: .session("S1"))
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "S1")
+
+        var launched: [(sessionId: String, dir: String)] = []
+        host.handoffLaunch = { launched.append(($0, $1)); return nil }
+
+        host.moveToCli(sessionId: "S1")
+
+        XCTAssertEqual(launched.count, 1)
+        XCTAssertEqual(launched.first?.sessionId, "S1")
+        XCTAssertEqual(launched.first?.dir, "/Users/u/proj", "the WIRE row's dirs[0], the chip's own source")
+        XCTAssertEqual(nav.destination, .mode(.code), "the true move: the shell steps aside to the Code landing")
+        XCTAssertNil(host.selection)
+        XCTAssertNil(host.attachedSessionId, "the attachment drops (app-kind — hop-away semantics, never an abort)")
+        await feedWaitUntil { t.closeCallCount >= 1 }
+        XCTAssertGreaterThanOrEqual(t.closeCallCount, 1, "the detach IS the socket closing")
+        XCTAssertEqual(factory.made.count, 1, "no extra harness is ever minted for a move")
+        for aborting in ["session.interrupt", "agent.stop", "session.setActivity"] {
+            XCTAssertFalse(t.methods.contains(aborting), "a move must never send \(aborting): \(t.methods)")
+        }
+        XCTAssertEqual(t.attachmentMethods, ["protocol.hello", "session.attach"],
+                       "the move's whole wire story is the one attach it already had: \(t.methods)")
+    }
+
+    /// A LANDING-ROW trigger for a session the shell is NOT attached to launches only — no
+    /// navigation (the shell is already exactly where a move would land it), and no attach is ever
+    /// minted for it (the same "a roster action must never attach" discipline the roster verbs pin:
+    /// an attach here would silently un-archive nothing today, but it would be a second door onto
+    /// the trap).
+    func testMoveToCliFromALandingRowLaunchesWithoutNavigatingOrAttaching() async {
+        let rows = [SessionSummary(sessionId: "S2", title: nil, createdAt: 1, scope: "global",
+                                   cwd: nil, mode: "code",
+                                   dirs: [SessionDirEntry(path: "/Users/u/proj2", locked: false)], activity: "idle")]
+        let (host, factory) = makeHost(rows: rows)
+        await host.directory.refresh()
+        host.setShellVisible(true) // showing the code LANDING: visible, no session selected, detached
+
+        var launched: [(sessionId: String, dir: String)] = []
+        var navigations: [ShellDestination] = []
+        host.handoffLaunch = { launched.append(($0, $1)); return nil }
+        host.navigateForHandoff = { navigations.append($0) }
+
+        host.moveToCli(sessionId: "S2")
+
+        XCTAssertEqual(launched.count, 1)
+        XCTAssertEqual(launched.first?.dir, "/Users/u/proj2")
+        XCTAssertTrue(navigations.isEmpty, "launch only — a non-attached session moves nothing")
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertTrue(factory.made.isEmpty, "the handoff must NEVER mint an attaching harness")
+        XCTAssertNil(host.attachedSessionId)
+    }
+
+    /// FAILURE (the honesty-of-affordance pin): a launch error presents visibly through the seam
+    /// and the app does NOT step aside — the session the Terminal never got stays exactly where it
+    /// was: same selection, same attachment, socket open, wire untouched.
+    func testMoveToCliFailureNeverNavigatesAndPresentsTheErrorVisibly() async {
+        let rows = [SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global",
+                                   cwd: "/Users/u/proj", mode: "code",
+                                   dirs: [SessionDirEntry(path: "/Users/u/proj", locked: true)], activity: "idle")]
+        let (host, factory, nav) = makeNavigatedHost(rows: rows)
+        defer { host.deselect() }
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        nav.navigate(to: .session("S1"))
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "S1")
+
+        var presented: [HandoffError] = []
+        host.handoffLaunch = { _, _ in .openFailed(3) }
+        host.presentHandoffFailure = { presented.append($0) }
+
+        host.moveToCli(sessionId: "S1")
+
+        XCTAssertEqual(presented, [.openFailed(3)], "the failure is PRESENTED via the seam, never log-only")
+        XCTAssertEqual(nav.destination, .session("S1"),
+                       "no navigation — the app must not step aside from a session the Terminal never got")
+        XCTAssertEqual(host.attachedSessionId, "S1")
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertEqual(t.closeCallCount, 0, "the attachment's socket stays open")
+        XCTAssertEqual(t.attachmentMethods, ["protocol.hello", "session.attach"], "the wire is untouched: \(t.methods)")
+        XCTAssertEqual(factory.made.count, 1)
+    }
+
+    /// Defense-in-depth behind the affordance gate: the host verb re-checks eligibility and
+    /// launches NOTHING for a row the affordance should never have rendered on — archived, a
+    /// non-code mode, or a row not loaded at all (no row = no wire dirs to read; a launch would be
+    /// guessing). The affordances' ABSENCE itself is pinned by `testMoveToCliOfferedMatrix` in
+    /// ModeLandingViewTests — both surfaces render off that one gate.
+    func testMoveToCliRefusesIneligibleRowsWithoutLaunching() async {
+        let rows = [
+            SessionSummary(sessionId: "s_archived", title: nil, createdAt: 2, scope: "global", cwd: "/repo",
+                           mode: "code", dirs: [SessionDirEntry(path: "/repo", locked: true)], activity: "archived"),
+            SessionSummary(sessionId: "s_chat", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "chat"),
+        ]
+        let (host, factory) = makeHost(rows: rows)
+        await host.directory.refresh()
+        host.setShellVisible(true)
+
+        var launched = 0
+        var presented = 0
+        var navigations = 0
+        host.handoffLaunch = { _, _ in launched += 1; return nil }
+        host.presentHandoffFailure = { _ in presented += 1 }
+        host.navigateForHandoff = { _ in navigations += 1 }
+
+        host.moveToCli(sessionId: "s_archived")
+        host.moveToCli(sessionId: "s_chat")
+        host.moveToCli(sessionId: "s_unknown") // no row at all
+
+        XCTAssertEqual(launched, 0)
+        XCTAssertEqual(presented, 0, "a refusal is not a launch failure — nothing to present")
+        XCTAssertEqual(navigations, 0)
+        XCTAssertTrue(factory.made.isEmpty)
+    }
+
+    /// The workdir-less fallback THROUGH the verb: `dirs == []` (a real state — writable only in
+    /// $OUTDIR/$TMPDIR/$MEMDIR) hands Terminal $HOME, never the row's `cwd` alias and never a
+    /// refusal (spec §1: "$HOME fallback for workdir-less").
+    func testMoveToCliFallsBackToHomeForAWorkdirLessSession() async {
+        let rows = [SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global",
+                                   cwd: "/stale/alias", mode: "code", dirs: [], activity: "idle")]
+        let (host, _) = makeHost(rows: rows)
+        await host.directory.refresh()
+        host.setShellVisible(true)
+
+        var launched: [(sessionId: String, dir: String)] = []
+        host.handoffLaunch = { launched.append(($0, $1)); return nil }
+
+        host.moveToCli(sessionId: "S1")
+
+        XCTAssertEqual(launched.count, 1)
+        XCTAssertEqual(launched.first?.dir, NSHomeDirectory())
+    }
 }
