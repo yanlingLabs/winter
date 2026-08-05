@@ -1,4 +1,5 @@
 import XCTest
+import NormaProtocol
 import NormaKit
 @testable import Norma
 
@@ -259,5 +260,156 @@ final class ModeLandingViewTests: XCTestCase {
         host.startNewSession { _ in XCTFail("must never fire without a window to present on") }
         try? await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertEqual(transport.sent.count, sentBeforehand, "nothing new reaches the wire without a presenting window")
+    }
+
+    // MARK: - The hop-away "keep working?" moment (T3 review as-m9, carried into T4)
+
+    /// The trigger matrix, verbatim: hop-away-with-turn-running shows it, without doesn't.
+    func testHopAwayTriggerMatrix() {
+        XCTAssertTrue(hopAwayShouldPromptBackground(turnWasRunning: true))
+        XCTAssertFalse(hopAwayShouldPromptBackground(turnWasRunning: false))
+    }
+
+    private func turnStartedEvent() -> SessionEvent {
+        try! JSONDecoder().decode(SessionEvent.self, from: Data(#"{"type":"turn_started","seq":1,"sessionId":"s","ts":0,"threadId":"main"}"#.utf8))
+    }
+
+    /// Hopping away from a session whose turn is RUNNING surfaces the prompt, naming the session
+    /// that was just left (not the one just hopped onto).
+    func testHopAwayWithTurnRunningSurfacesThePrompt() async {
+        let rows = [
+            SessionSummary(sessionId: "S1", title: "One", createdAt: 1, scope: "global", cwd: "/repo", mode: "code"),
+            SessionSummary(sessionId: "S2", title: "Two", createdAt: 2, scope: "global", cwd: "/repo", mode: "code"),
+        ]
+        let (host, factory) = makeHost(rows: rows)
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await feedWaitUntil { !factory.made.isEmpty }
+        let t = factory.made[0]
+        await feedWaitUntil { t.sent.count >= 1 }
+        let hello = feedLineJSON(t.sent[0])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(hello["id"] as! Int),"result":{"ok":true}}"#)
+        await feedWaitUntil { t.sent.count >= 2 }
+        let attach = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+
+        host.attachment?.session.apply(turnStartedEvent())
+        XCTAssertTrue(host.attachment?.session.state.turnRunning ?? false)
+
+        host.select("S2") // the hop
+        XCTAssertEqual(host.hopAwayPrompt, HopAwayPrompt(sessionId: "S1"), "names the DEPARTED session, not the destination")
+    }
+
+    /// Hopping away from an IDLE session shows nothing — there is nothing to make sticky.
+    func testHopAwayWithoutARunningTurnShowsNoPrompt() async {
+        let rows = [
+            SessionSummary(sessionId: "S1", title: "One", createdAt: 1, scope: "global", cwd: "/repo", mode: "code"),
+            SessionSummary(sessionId: "S2", title: "Two", createdAt: 2, scope: "global", cwd: "/repo", mode: "code"),
+        ]
+        let (host, factory) = makeHost(rows: rows)
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await feedWaitUntil { !factory.made.isEmpty }
+        let t = factory.made[0]
+        await feedWaitUntil { t.sent.count >= 1 }
+        let hello = feedLineJSON(t.sent[0])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(hello["id"] as! Int),"result":{"ok":true}}"#)
+        await feedWaitUntil { t.sent.count >= 2 }
+        let attach = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+
+        host.select("S2") // idle S1, hopped away
+        XCTAssertNil(host.hopAwayPrompt)
+    }
+
+    /// Hiding the shell (or navigating to a non-session destination) is a departure too — same
+    /// trigger, `detachCurrent()`'s half.
+    func testHidingWithATurnRunningSurfacesThePrompt() async {
+        let rows = [SessionSummary(sessionId: "S1", title: "One", createdAt: 1, scope: "global", cwd: "/repo", mode: "code")]
+        let (host, factory) = makeHost(rows: rows)
+        host.setShellVisible(true)
+        host.select("S1")
+        await feedWaitUntil { !factory.made.isEmpty }
+        let t = factory.made[0]
+        await feedWaitUntil { t.sent.count >= 1 }
+        let hello = feedLineJSON(t.sent[0])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(hello["id"] as! Int),"result":{"ok":true}}"#)
+        await feedWaitUntil { t.sent.count >= 2 }
+        let attach = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+
+        host.attachment?.session.apply(turnStartedEvent())
+        host.setShellVisible(false) // hide
+
+        XCTAssertEqual(host.hopAwayPrompt, HopAwayPrompt(sessionId: "S1"))
+    }
+
+    /// "Keep working in background" makes the daemon's already-in-effect protection STICKY —
+    /// `session.setActivity(S1, "background")` over the bare management connection, and the prompt
+    /// clears immediately (not gated on the RPC's round trip).
+    func testConfirmHopAwaySendsBackgroundVerbatimAndClearsThePrompt() async {
+        let (client, transport) = await connectedManagementClient()
+        let rows = [
+            SessionSummary(sessionId: "S1", title: "One", createdAt: 1, scope: "global", cwd: "/repo", mode: "code"),
+            SessionSummary(sessionId: "S2", title: "Two", createdAt: 2, scope: "global", cwd: "/repo", mode: "code"),
+        ]
+        let (host, factory) = makeHost(rows: rows, managementClient: client)
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await feedWaitUntil { !factory.made.isEmpty }
+        let t = factory.made[0]
+        await feedWaitUntil { t.sent.count >= 1 }
+        let hello = feedLineJSON(t.sent[0])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(hello["id"] as! Int),"result":{"ok":true}}"#)
+        await feedWaitUntil { t.sent.count >= 2 }
+        let attach = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        host.attachment?.session.apply(turnStartedEvent())
+        host.select("S2")
+        XCTAssertNotNil(host.hopAwayPrompt)
+
+        host.confirmHopAwayBackground()
+        XCTAssertNil(host.hopAwayPrompt, "clears immediately, not gated on the RPC")
+
+        await feedWaitUntil { transport.methods.contains("session.setActivity") }
+        guard let call = transport.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.setActivity" }) else {
+            return XCTFail("session.setActivity never reached the wire: \(transport.methods)")
+        }
+        XCTAssertEqual((call["params"] as? [String: Any])?["sessionId"] as? String, "S1", "the DEPARTED session, not the destination")
+        XCTAssertEqual((call["params"] as? [String: Any])?["activity"] as? String, "background")
+    }
+
+    /// Dismissing sends nothing at all — the turn keeps running either way (the daemon's own
+    /// auto-background already protects it); this only declines to make it sticky.
+    func testDismissHopAwayPromptSendsNothing() async {
+        let (client, transport) = await connectedManagementClient()
+        let rows = [
+            SessionSummary(sessionId: "S1", title: "One", createdAt: 1, scope: "global", cwd: "/repo", mode: "code"),
+            SessionSummary(sessionId: "S2", title: "Two", createdAt: 2, scope: "global", cwd: "/repo", mode: "code"),
+        ]
+        let (host, factory) = makeHost(rows: rows, managementClient: client)
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await feedWaitUntil { !factory.made.isEmpty }
+        let t = factory.made[0]
+        await feedWaitUntil { t.sent.count >= 1 }
+        let hello = feedLineJSON(t.sent[0])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(hello["id"] as! Int),"result":{"ok":true}}"#)
+        await feedWaitUntil { t.sent.count >= 2 }
+        let attach = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        host.attachment?.session.apply(turnStartedEvent())
+        host.select("S2")
+        XCTAssertNotNil(host.hopAwayPrompt)
+
+        let sentBeforehand = transport.sent.count
+        host.dismissHopAwayPrompt()
+        XCTAssertNil(host.hopAwayPrompt)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(transport.sent.count, sentBeforehand, "a dismiss must never reach the wire")
     }
 }

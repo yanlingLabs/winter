@@ -43,6 +43,23 @@ func shellAttachmentAction(selection: String?, attached: String?, shellVisible: 
     return attached == selection ? .none : .hop(selection)
 }
 
+// MARK: - T4: the hop-away "keep working?" moment (spec §1, T3 review as-m9)
+
+/// PURE: the hop-away trigger matrix. Hopping to another session, or hiding/navigating away from
+/// one entirely, while its turn was genuinely RUNNING is the one case that surfaces the prompt — an
+/// idle departure has nothing to make sticky (the daemon's app-kind auto-background already
+/// protects an actually-running turn either way; this is purely about whether there is anything for
+/// the prompt to offer making STICKY).
+func hopAwayShouldPromptBackground(turnWasRunning: Bool) -> Bool {
+    turnWasRunning
+}
+
+/// What the prompt is about — just the departed session's id; the view looks its title up from the
+/// shared directory (same "read fresh" convention as everywhere else in this file).
+struct HopAwayPrompt: Equatable {
+    let sessionId: String
+}
+
 // MARK: - The live harness behind an open session
 
 /// One live attachment: a pinned `SessionFeed` (its own `NormaClient`/socket — a full harness, the
@@ -150,6 +167,13 @@ final class ShellSessionHost: ObservableObject {
     /// implementation of the sheet-retain-and-complete dance. Held for its lifetime, dropped in its
     /// own completion — nothing else retains a sheet controller.
     private var dirPickerSheet: WorkingDirPickerSheetController?
+
+    /// app-shell T4: the hop-away "keep working?" prompt (spec §1's moment, T3 review as-m9) — set
+    /// by `hop(to:)`/`detachCurrent()` the instant they leave a session whose turn was running
+    /// (`hopAwayShouldPromptBackground`), read by `ShellRootView` so it renders regardless of which
+    /// destination the shell is now showing. A NEW departure simply replaces whatever prompt was
+    /// already up — there is only ever one "session I just left" worth asking about.
+    @Published private(set) var hopAwayPrompt: HopAwayPrompt?
 
     init(directory: SessionDirectory, makeFeed: @escaping FeedFactory, managementClient: NormaClient? = nil) {
         self.directory = directory
@@ -323,6 +347,12 @@ final class ShellSessionHost: ObservableObject {
     /// documents, in the second place it now applies.
     private func hop(to sessionId: String) {
         guard let live = attachment else { return attachFresh(to: sessionId) }
+        // T4, spec §1's "keep working?" moment: capture the DEPARTING session's running state
+        // before anything about it changes below — `hopAwayShouldPromptBackground` is the trigger
+        // matrix (hop-away-with-turn-running shows it, an idle departure doesn't).
+        if let departing = attachedSessionId, hopAwayShouldPromptBackground(turnWasRunning: live.session.state.turnRunning) {
+            hopAwayPrompt = HopAwayPrompt(sessionId: departing)
+        }
         attachedSessionId = sessionId
         // Everything the OLD session's identity decided has to be re-derived or dropped, exactly as
         // an in-place switch does elsewhere: a different session means a different mode, a different
@@ -348,11 +378,34 @@ final class ShellSessionHost: ObservableObject {
             attachedSessionId = nil
             return
         }
+        // Same hop-away moment as `hop(to:)` above — hiding the shell or navigating to a non-session
+        // destination is "leaving" a session exactly as much as hopping onto another one is.
+        if let departing = attachedSessionId, hopAwayShouldPromptBackground(turnWasRunning: live.session.state.turnRunning) {
+            hopAwayPrompt = HopAwayPrompt(sessionId: departing)
+        }
         live.feedTask?.cancel()
         live.feedTask = nil
         live.feed.stop()
         attachment = nil
         attachedSessionId = nil
+    }
+
+    // MARK: - T4: the hop-away prompt's two doors
+
+    /// "Keep working in background" — makes the daemon's already-in-effect app-kind auto-background
+    /// STICKY (a stored flag) rather than merely derived from this session no longer being attached
+    /// anywhere. Rides the bare `setActivityFromRoster` seam (never `makeFeed`'s attaching harness):
+    /// by the time this fires the shell is no longer attached to the departed session at all.
+    func confirmHopAwayBackground() {
+        guard let prompt = hopAwayPrompt else { return }
+        setActivityFromRoster(prompt.sessionId, target: "background")
+        hopAwayPrompt = nil
+    }
+
+    /// Dismiss without acting — the turn keeps running either way (the daemon's own auto-background
+    /// already protects it); this only declines to make that STICKY.
+    func dismissHopAwayPrompt() {
+        hopAwayPrompt = nil
     }
 
     /// One implementation of "is this session chat", deliberately shared with the detached window's
@@ -627,5 +680,71 @@ struct ShellSessionUnavailableView: View {
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - T4: the hop-away "keep working?" banner
+
+/// Renders `host.hopAwayPrompt` as a dismissible inline bar, independent of whatever the shell is
+/// showing NOW — the whole point is that it survives the navigation that triggered it. A plain
+/// wrapper `View` (rather than reading `host` straight off `ShellRootView`) because
+/// `@ObservedObject` cannot wrap an OPTIONAL `ShellSessionHost?` directly; this is the same
+/// "observe through a non-optional child" shape `ShellRootView.detail`'s own `if let host { … }`
+/// branches already use for `ShellSessionView`.
+struct HopAwayBannerHost: View {
+    @ObservedObject var host: ShellSessionHost
+    @ObservedObject var directory: SessionDirectory
+
+    var body: some View {
+        if let prompt = host.hopAwayPrompt {
+            HopAwayBackgroundBar(
+                title: sessionDisplayTitle(directory.rows.first(where: { $0.sessionId == prompt.sessionId })?.title),
+                onKeepWorking: { host.confirmHopAwayBackground() },
+                onDismiss: { host.dismissHopAwayPrompt() }
+            )
+            .padding(.bottom, 20)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .animation(.easeOut(duration: 0.18), value: prompt)
+        }
+    }
+}
+
+/// The bar itself — GALLERY EXTENSION POINT: no first-party pattern exists for this moment
+/// (`ActivityMenu.swift`'s own doc: the phone's activity surface is still on its debt list), and a
+/// DISMISSIBLE INLINE BAR was chosen over an auto-timed toast deliberately — it needs no clock seam
+/// to test (its whole behavior is two callbacks), and "the daemon already protects the turn" (T3's
+/// header verb, the auto-background semantics) means there is no urgency a timer would need to
+/// convey; the user loses nothing by dismissing it, or by never seeing it at all.
+struct HopAwayBackgroundBar: View {
+    let title: String
+    let onKeepWorking: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "moon.stars")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(title) is still running")
+                    .font(.system(size: 12, weight: .medium))
+                Text("Keep it going unattended?")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 12)
+            Button("Keep working in background", action: onKeepWorking)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .shadow(radius: 8)
+        .padding(.horizontal, 24)
     }
 }

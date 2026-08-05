@@ -27,6 +27,15 @@ struct ShellRootView: View {
             detail
         }
         .navigationSplitViewStyle(.balanced)
+        // app-shell T4: the hop-away "keep working?" banner (spec §1, T3 review as-m9) — an
+        // OVERLAY on the whole split view, not inside `detail`, so it survives the very
+        // navigation that triggered it (the user has already moved on to a different surface by
+        // the time this appears).
+        .overlay(alignment: .bottom) {
+            if let host {
+                HopAwayBannerHost(host: host, directory: directory)
+            }
+        }
     }
 
     /// The destination's surface. Three are real as of T4 — a hosted session, the chat landing and
