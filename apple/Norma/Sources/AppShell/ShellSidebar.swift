@@ -15,15 +15,34 @@ import SwiftUI
 struct ShellRootView: View {
     @ObservedObject var nav: ShellNavigationModel
     @ObservedObject var directory: SessionDirectory
+    /// app-shell T3: the session host. `nil` for a shell built without one (see
+    /// `AppWindowController.host`), which simply renders the landing placeholders it always did.
+    var host: ShellSessionHost?
 
     var body: some View {
         NavigationSplitView {
             ShellSidebar(nav: nav, directory: directory)
                 .navigationSplitViewColumnWidth(min: 208, ideal: 240, max: 320)
         } detail: {
-            ShellLandingView(destination: nav.destination)
+            detail
         }
         .navigationSplitViewStyle(.balanced)
+    }
+
+    /// The destination's surface. The hosted session is the first real one (T3); the rest are still
+    /// T1's placeholders, replaced surface by surface (T4/T5/T7).
+    @ViewBuilder
+    private var detail: some View {
+        switch nav.destination {
+        case .session:
+            if let host {
+                ShellSessionView(host: host)
+            } else {
+                ShellLandingView(destination: nav.destination)
+            }
+        default:
+            ShellLandingView(destination: nav.destination)
+        }
     }
 }
 

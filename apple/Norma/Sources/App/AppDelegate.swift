@@ -461,8 +461,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        // Task 3: the session host — spec §1's attachment policy. Its harnesses come from
+        // `makeDetachedFeed`, so the shell shares this AppModel's transport factory and token (one
+        // Keychain read) on its OWN socket: the orb's feed is `followFocus` and dispatch-only, and
+        // the shell shows code and chat sessions too. A separate socket is also what makes the
+        // policy's last row true — the shell's attachment is its own, so a detached window closing
+        // is never the last detach for a session the shell is showing.
+        let host = ShellSessionHost(
+            directory: model.directory,
+            makeFeed: { [weak model] sessionId in model?.makeDetachedFeed(sessionId: sessionId) }
+        )
         let controller = AppWindowController(
             directory: model.directory,
+            host: host,
             frame: centeredAppWindowFrame(visibleFrame: visible)
         )
         // The activation-policy machinery is RETARGETED, not rebuilt: a visible shell is a main

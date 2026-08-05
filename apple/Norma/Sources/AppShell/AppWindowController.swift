@@ -83,6 +83,12 @@ final class AppWindowController: NSObject, NSWindowDelegate {
     /// `DashboardSelectionModel` lesson).
     let navigation: ShellNavigationModel
 
+    /// app-shell T3: the session host — spec §1's attachment policy in one object. Optional (and
+    /// defaulted `nil` in `init`) because it needs an `AppModel` to mint harnesses from, which the
+    /// pure window/geometry tests have no business booting; a host-less shell simply renders no
+    /// session surface. `AppDelegate.summonAppWindow` is the one production caller that passes one.
+    let host: ShellSessionHost?
+
     /// Hidden-window hygiene: `false` whenever the window is ordered out OR fully occluded. Views
     /// read `navigation.renderingActive` (the published mirror); non-view consumers (Task 2's
     /// `session.list` poll — "hidden = no polling") take `onRenderingActiveChange` below.
@@ -112,7 +118,7 @@ final class AppWindowController: NSObject, NSWindowDelegate {
     /// expression is checked as a nonisolated context regardless of the enclosing initializer's
     /// own isolation — the exact trap `DashboardWindowController.init`'s `session:` parameter
     /// documents. The fallback is constructed in this (`@MainActor`) body instead.
-    init(directory: SessionDirectory, navigation: ShellNavigationModel? = nil, frame: NSRect) {
+    init(directory: SessionDirectory, host: ShellSessionHost? = nil, navigation: ShellNavigationModel? = nil, frame: NSRect) {
         let window = NSWindow(
             contentRect: frame,
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -135,11 +141,21 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         let navigationModel = navigation ?? ShellNavigationModel()
         self.window = window
         self.navigation = navigationModel
+        self.host = host
 
         super.init()
 
         window.delegate = self
-        window.contentView = NSHostingView(rootView: ShellRootView(nav: navigationModel, directory: directory))
+        // app-shell T3: the destination is the ONE source of truth for what the shell is showing,
+        // so the host learns of a session selection from the navigation itself rather than from a
+        // parallel call at each navigation site (the sidebar's recents rows, a landing list's row,
+        // `summon(navigatingTo:)`, a future deep link — all of them go through `navigate`).
+        navigationModel.onDestinationChange = { [weak host] destination in host?.apply(destination: destination) }
+        host?.apply(destination: navigationModel.destination)
+        // The working-folders chip's panel/confirm attach to THIS window (AppKit belongs to the
+        // controller). `[weak self]` — the host is owned above this object, not below it.
+        host?.presentingWindow = { [weak self] in self?.window }
+        window.contentView = NSHostingView(rootView: ShellRootView(nav: navigationModel, directory: directory, host: host))
         window.setFrame(frame, display: true)
     }
 
@@ -197,6 +213,11 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         let visible = window.isVisible
         if visible != lastVisible {
             lastVisible = visible
+            // app-shell T3, spec §1's attachment table: HIDDEN (not merely occluded) is the row that
+            // detaches — see `shellAttachmentAction`'s own doc for why the attachment tracks
+            // visibility while the poll tracks `isRenderingActive`. Driven here rather than through
+            // `onVisibilityChange` so the policy holds regardless of who else wires that hook.
+            host?.setShellVisible(visible)
             onVisibilityChange?(visible)
         }
         let active = shellRenderingActive(isWindowVisible: visible, occlusionVisible: occlusionVisible)

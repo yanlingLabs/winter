@@ -129,6 +129,13 @@ final class ShellNavigationModel: ObservableObject {
     /// Published here rather than read off the controller so a SwiftUI body observes the change.
     @Published private(set) var renderingActive = false
 
+    /// app-shell T3: fires on every destination CHANGE (never on a redundant re-navigation), so the
+    /// session host learns what the shell is showing from ONE source of truth — the destination —
+    /// instead of a second selection variable that can drift out of step with it. Wired by
+    /// `AppWindowController` to `ShellSessionHost.apply(destination:)`; `nil` for a shell built
+    /// without a host (every pre-existing construction site, and every T1 test).
+    var onDestinationChange: ((ShellDestination) -> Void)?
+
     init(destination: ShellDestination = defaultShellDestination) {
         self.destination = destination
     }
@@ -136,6 +143,7 @@ final class ShellNavigationModel: ObservableObject {
     func navigate(to destination: ShellDestination) {
         guard self.destination != destination else { return }
         self.destination = destination
+        onDestinationChange?(destination)
     }
 
     /// Called only by `AppWindowController` (visibility/occlusion changes) — never by a view.
