@@ -192,6 +192,86 @@ final class ChatWindowTests: XCTestCase {
         XCTAssertNil(delegate.appWindow, "a failed create must never summon the shell")
     }
 
+    /// IMP-1 fix (final whole-branch review, "the fourth door"): the restored New-Chat pin. Before
+    /// App shell T6 retargeted "New Chat" onto the shell summon, this door's own spawned
+    /// `DetachedWindowController` carried a pin asserting `adapterForTesting.isChatSession == true`
+    /// — T6's retarget dropped it with nothing replacing it, and the race it guarded against is
+    /// real: `newChat()` creates the session then immediately summons `.session(id)` — the fresh
+    /// row hasn't loaded into `model.directory` yet (the `session_created` broadcast's own refresh
+    /// round trip always loses that race), so `ShellSessionHost.attachFresh`'s one-shot derivation
+    /// reads `false` and the policy picker (gated `!adapter.isChatSession`,
+    /// `WindowContentView.swift`) shows for a chat session whose every tap the daemon refuses.
+    ///
+    /// Answers every `session.list` call it sees (rather than a fixed occurrence index) because
+    /// `newChat()` summons a REAL window here (`ShellSidebar`'s own `.task { await
+    /// directory.refresh() }` can fire an untracked extra relist the instant the shell's sidebar
+    /// mounts) — a fixed index would risk answering the wrong one.
+    func testNewChatSelfHealsIsChatSessionOnceTheFreshRowLands() async throws {
+        let factory = RecordingTransportFactory()
+        let model = AppModel(makeTransport: { factory.make() }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        await waitUntil { !factory.made.isEmpty }
+        let t = factory.made[0]
+
+        await waitUntilSent(t, 1)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(lineJSON(t.sent[0])["id"] as! Int),"result":{"ok":true}}"#)
+        await waitUntilSent(t, 2)
+        let list = lineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(list["id"] as! Int),"result":{"sessions":[]}}"#)
+        await waitUntil { model.session.state.status == .idle }
+
+        let delegate = AppDelegate()
+        delegate.setAppModelForTesting(model)
+        defer { delegate.appWindow?.hide() }
+
+        delegate.newChat()
+
+        let create = await waitUntilMethod(t, "session.create")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_new_chat","trusted":true}}"#)
+        await waitUntil { delegate.appWindow?.navigation.destination == .session("s_new_chat") }
+
+        // The shell's own pinned harness — a SEPARATE connection (`AppModel.makeDetachedFeed`),
+        // never the one `session.create` rode.
+        await waitUntil { factory.made.count >= 2 }
+        let shellT = factory.made[1]
+        await waitUntilSent(shellT, 1)
+        shellT.feed(#"{"jsonrpc":"2.0","id":\#(lineJSON(shellT.sent[0])["id"] as! Int),"result":{"ok":true}}"#)
+        await waitUntilSent(shellT, 2)
+        let attach = lineJSON(shellT.sent[1])
+        XCTAssertEqual(attach["method"] as? String, "session.attach")
+        shellT.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+
+        await waitUntil { delegate.appWindow?.host?.attachment != nil }
+        XCTAssertFalse(
+            delegate.appWindow?.host?.attachment?.adapter.isChatSession ?? true,
+            "the fresh row hasn't loaded at attach time — derives false, same as before this fix"
+        )
+
+        // The daemon's session_created broadcast lands on model's OWN connection (the create rode
+        // it) — the real race this fix closes. `directory.refresh()`'s own `session.list` may
+        // arrive more than once (the real window's sidebar can relist on its own) — answer every
+        // one seen with the real row until the picker self-heals.
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session_created","seq":1,"sessionId":"s_new_chat","ts":5,"scope":"global","mode":"chat"}}"#)
+        var answered = Set<Int>()
+        let deadline = Date().addingTimeInterval(3)
+        while delegate.appWindow?.host?.attachment?.adapter.isChatSession != true && Date() < deadline {
+            for call in t.sent.map(lineJSON) where call["method"] as? String == "session.list" {
+                if let id = call["id"] as? Int, !answered.contains(id) {
+                    answered.insert(id)
+                    t.feed(#"{"jsonrpc":"2.0","id":\#(id),"result":{"sessions":[{"sessionId":"s_new_chat","scope":"global","createdAt":5,"lastSeq":0,"mode":"chat"}]}}"#)
+                }
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        XCTAssertTrue(
+            delegate.appWindow?.host?.attachment?.adapter.isChatSession ?? false,
+            "New Chat's fresh row landing must self-heal isChatSession — the restored pin"
+        )
+    }
+
     // MARK: - Plan-immunity (2026-07-28 design; fix round 1, review finding "door 1"):
     // registerDetachedWindow's onOpenSessionDetached (⌘-click a row in ANY window's own left
     // sidebar) now routes through openSessionInNewDetachedWindow instead of calling

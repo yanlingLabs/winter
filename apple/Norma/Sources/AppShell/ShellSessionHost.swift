@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import NormaKit
 import SwiftUI
 
@@ -208,6 +209,11 @@ final class ShellSessionHost: ObservableObject {
     /// own doc comment for why a second consumer (T9) must do the same.
     private let outputsWatcher: OutputsWatcher?
 
+    /// IMP-1 fix (final whole-branch review, "the fourth door"): backs the `directory.$rows`
+    /// subscription below — the ONE Combine wire this host holds, so its lifetime is this host's
+    /// own (no separate teardown needed; `AnyCancellable.cancel()` fires on deinit).
+    private var cancellables = Set<AnyCancellable>()
+
     init(directory: SessionDirectory, makeFeed: @escaping FeedFactory, managementClient: NormaClient? = nil,
          outputsWatcher: OutputsWatcher? = nil) {
         self.directory = directory
@@ -219,6 +225,12 @@ final class ShellSessionHost: ObservableObject {
             previousOnChange?(sessionId, files)
             self?.applyOutputsChange(sessionId: sessionId, files: files)
         }
+        // IMP-1 fix: see `reconcileIsChatSession`'s own doc comment for the race this closes.
+        // Fires once synchronously on subscribe (Combine's `@Published` replays the current
+        // value) — a harmless no-op call, since `attachment` is always nil this early in `init`.
+        directory.$rows
+            .sink { [weak self] rows in self?.reconcileIsChatSession(rows: rows) }
+            .store(in: &cancellables)
     }
 
     // MARK: - T4: the landing's roster verbs (bare RPCs — see `managementClient`'s doc for why these
@@ -424,6 +436,11 @@ final class ShellSessionHost: ObservableObject {
             return
         }
         let adapter = FieldStateAdapter(session: made.session)
+        // A ONE-SHOT read of whatever `directory.rows` holds right now — for a session attached
+        // before its own row has loaded (the New-Chat race: create, then summon `.session(id)`
+        // immediately, always losing the `session_created` broadcast's own refresh round trip)
+        // this reads `false` and the row isn't found. `reconcileIsChatSession` (wired in `init`)
+        // is what makes that transient, not permanent — see its own doc comment.
         adapter.isChatSession = Self.isChatSession(sessionId, in: directory.rows)
         // Forward this harness's session events to the SHARED directory — the same side-observer
         // composition `DetachedWindowController` uses, and `false` for the same reason: the pinned
@@ -545,6 +562,40 @@ final class ShellSessionHost: ObservableObject {
     /// row isn't loaded yet" default.
     private static func isChatSession(_ sessionId: String, in rows: [SessionSummary]) -> Bool {
         DetachedWindowController.isChatSession(sessionId, in: rows)
+    }
+
+    /// IMP-1 fix (final whole-branch review, "the fourth door" — plan-immunity's own class,
+    /// reaching a FOURTH door): `attachFresh` derives `adapter.isChatSession` exactly ONCE, off
+    /// whatever `directory.rows` holds at the instant of attach; `hop(to:)` re-derives it too, but
+    /// only on ITS OWN transition. Neither ever re-runs merely because the row LANDS — so a
+    /// session attached before its row loaded (the New-Chat race is the one this closes, but the
+    /// general shape recurs for ANY caller that attaches before `directory`'s refresh round trip
+    /// lands, e.g. a phone-created session opened instantly) shows a policy picker whose every tap
+    /// fires a `setPolicy` the daemon silently refuses, for the WHOLE attachment's lifetime — the
+    /// row's eventual arrival changes `directory.rows` but nothing ever reads it again.
+    ///
+    /// The general cure, chosen over patching the one call site (`AppDelegate.newChat()` could
+    /// instead `await model.directory.refresh()` before summoning): this subscribes to
+    /// `directory.$rows` — the ONE source of truth, no second copy of a row's mode cached
+    /// anywhere — and re-derives for whichever session is CURRENTLY attached every time the
+    /// directory's rows change, so the row's eventual fold self-heals the picker the moment it
+    /// lands, regardless of which door attached ahead of it. Exactly the "recompute fresh off the
+    /// live source, the very next external trigger" posture `outputsBoxParticipates`'s own doc
+    /// comment documents for the outputs box's twin self-healing shape — except THIS trigger is
+    /// the directory's own publisher, not "whatever the next hop/watcher-tick happens to be",
+    /// because a picker rendered wrong must heal the instant the fact arrives, not whenever the
+    /// user next does something unrelated.
+    ///
+    /// No-op while detached (`attachment == nil`) or for a rows change that doesn't concern the
+    /// attached session — `Self.isChatSession` reads only the one matching row, and the equality
+    /// guard below means a change to some OTHER session's row never republishes this one for no
+    /// reason.
+    private func reconcileIsChatSession(rows: [SessionSummary]) {
+        guard let live = attachment, let sid = attachedSessionId else { return }
+        let derived = Self.isChatSession(sid, in: rows)
+        if live.adapter.isChatSession != derived {
+            live.adapter.isChatSession = derived
+        }
     }
 
     // MARK: - The hosted view's wiring

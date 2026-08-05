@@ -348,6 +348,48 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertFalse(host.attachment?.adapter.isChatSession ?? true, "…and back off again")
     }
 
+    /// IMP-1 fix (final whole-branch review, "the fourth door"): the restored New-Chat pin, at the
+    /// GENERAL mechanism `reconcileIsChatSession` implements — `attachFresh` derives `isChatSession`
+    /// exactly ONCE, off whatever `directory.rows` holds at attach time. A session attached before
+    /// its own row has loaded (the New-Chat race: `AppDelegate.newChat()` creates then immediately
+    /// summons `.session(id)`, always losing the `session_created` broadcast's own refresh round
+    /// trip) reads `false` there — this proves the row's LATER arrival, with no further navigation
+    /// at all (no hop, no re-select), self-heals it: a plain `directory.refresh()`, exactly what
+    /// the daemon's broadcast triggers in production, must flip the ALREADY-attached session's
+    /// picker gate back on.
+    func testAttachFreshSelfHealsIsChatSessionWhenTheRowLandsAfterAttach() async {
+        let lister = StubSessionLister()
+        let factory = ShellTransportFactory()
+        let directory = SessionDirectory(lister: lister.list)
+        let host = ShellSessionHost(directory: directory, makeFeed: { sessionId in
+            let session = SessionModel()
+            let feed = SessionFeed(makeTransport: { factory.make() }, token: "tok", clientName: "orb",
+                                   mode: .pinned(sessionId: sessionId), session: session)
+            return (feed, session)
+        })
+        defer { host.deselect() }
+
+        host.setShellVisible(true)
+        host.select("s_new_chat") // lister.rows is still empty — the fresh row hasn't loaded yet
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "s_new_chat")
+
+        XCTAssertFalse(
+            host.attachment?.adapter.isChatSession ?? true,
+            "the row hasn't loaded at attach time — derives false, same as before this fix"
+        )
+
+        // The row lands — no hop, no re-selection, just the directory's own refresh (what the
+        // daemon's session_created broadcast triggers in production).
+        lister.rows = [SessionSummary(sessionId: "s_new_chat", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "chat")]
+        await directory.refresh()
+
+        XCTAssertTrue(
+            host.attachment?.adapter.isChatSession ?? false,
+            "the fresh row landing on an ALREADY-attached session must self-heal isChatSession — the restored New-Chat pin"
+        )
+    }
+
     // MARK: - AppDelegate wiring (no socket: the shell is hidden throughout)
 
     /// The shell's host is real, shares the app's ONE `SessionDirectory` (so every surface reads the
