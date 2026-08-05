@@ -378,6 +378,25 @@ final class AppShellTests: XCTestCase {
         delegate.appWindow?.hide()
     }
 
+    /// app-shell Task 2: the END-TO-END wiring for the `session.list` poll — not just
+    /// `SessionDirectory.setPolling`'s own unit tests (`SessionDirectoryTests`), but the actual
+    /// `AppWindowController.onRenderingActiveChange` hook `summonAppWindow` wires it through. Proves
+    /// `model.directory` (the SAME instance `AppWindowController` renders and every app-shell
+    /// surface reads) starts polling the instant the shell becomes visible, and stops the instant
+    /// it hides — mirroring `testShellPromotesTheDockIconAndHidingDemotes`'s wiring-level posture
+    /// for `onVisibilityChange` just above.
+    func testSummonAppWindowStartsPollingAndHidingItStopsThePoll() {
+        let delegate = AppDelegate()
+        XCTAssertTrue(delegate.boot())
+        XCTAssertFalse(delegate.appModel?.directory.isPollingForTesting ?? true, "no polling before the shell is ever summoned")
+
+        delegate.summonAppWindow()
+        XCTAssertTrue(delegate.appModel?.directory.isPollingForTesting ?? false, "a visible, unoccluded shell starts the poll")
+
+        delegate.appWindow?.hide()
+        XCTAssertFalse(delegate.appModel?.directory.isPollingForTesting ?? true, "hiding the shell stops the poll")
+    }
+
     // MARK: - The orb's summon door (NO OrbWindowController change — Global Constraints)
 
     /// The orb's sidebar carries a summon door, and firing it summons the singleton. Wired on the

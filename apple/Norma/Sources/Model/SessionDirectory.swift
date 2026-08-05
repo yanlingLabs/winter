@@ -28,6 +28,12 @@ final class SessionDirectory: ObservableObject {
         self.sleepTick = sleepTick
     }
 
+    /// Test-only inspection hook (internal, reachable via `@testable import`), same convention as
+    /// `PairingSheetModel.isStoppedForTesting` — lets an `AppDelegate`-level wiring test
+    /// (`AppShellTests`) prove `summonAppWindow`/`hide()` actually start and stop the poll through
+    /// `AppWindowController.onRenderingActiveChange`, without reaching into `pollTask` itself.
+    var isPollingForTesting: Bool { pollTask != nil }
+
     /// Full re-list, newest-first. Defensive: a thrown/failed `lister` call (daemon hiccup, RPC
     /// timeout) leaves `rows` exactly as they were — a transient failure must never blank the
     /// sidebar out from under the user.
