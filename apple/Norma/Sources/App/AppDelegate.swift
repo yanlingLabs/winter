@@ -79,6 +79,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `peripheralProvider` above. Handed to `ShellSessionHost` at `summonAppWindow()`; T9's floating
     /// corner panel gets the same instance.
     private(set) var outputsWatcher: OutputsWatcher?
+    /// app-shell T9: the floating corner panel's DECISION half (spec §3) — constructed unconditionally
+    /// in `boot()` alongside `outputsWatcher`, wired onto its `onChange` (compose, never replace — see
+    /// `OutputsPanelController.init`'s own doc comment). `isShellShowing`/`isDetachedShowing` close
+    /// over `appWindow`/`detachedWindows` directly, so both read the app's CURRENT display state even
+    /// though this object is constructed before `appWindow` exists (every navigation happens later).
+    private(set) var outputsPanel: OutputsPanelController?
+    /// app-shell T9: the panel's AppKit half — a real `NSPanel`, constructed unconditionally (same
+    /// posture as `OrbWindowController`'s own construction: an un-ordered `NSPanel` touches nothing
+    /// real). Held only so it isn't deallocated; every mutation happens through `outputsPanel`.
+    private var outputsPanelWindow: OutputsPanelWindowController?
     /// BYOK T2: the one-time first-run disclosure window (spec §3) — `nil` until (at most once,
     /// ever, per install) `boot()`'s real-launch path presents it; nil'd again via `onClosed` (same
     /// one-shot-latch/registry-removal convention as `detachedWindows` above).
@@ -452,6 +462,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.summon(navigatingTo: destination)
     }
 
+    /// app-shell T9: the floating panel's click-through door — the exact call shape
+    /// `OutputsPanelClickThroughTests` pins. `summonAppWindow(navigatingTo:)` is the SAME summon
+    /// primitive every other "open in app" affordance uses (its own doc comment now names this as
+    /// one of them); `appWindow?.host?.showOutputFile` is T8's own click door, reused rather than
+    /// re-derived. Read `appWindow?.host` AFTER the summon call, never before — the FIRST summon of
+    /// the app's life constructs `appWindow` synchronously inside `summonAppWindow` itself (a value
+    /// captured before that call would still be `nil`). `summonAppWindow`'s own no-appModel guard
+    /// (never reachable once `boot()` has run — the same posture every other summon door already
+    /// carries) is the only way `appWindow` stays `nil` after this call.
+    func openOutputFileFromPanel(sessionId: String, path: String) {
+        summonAppWindow(navigatingTo: .session(sessionId))
+        appWindow?.host?.showOutputFile(URL(fileURLWithPath: path))
+    }
+
     /// Task 7: builds the Dashboard's `DashboardWiring` — the one place that closes over the real
     /// `NormaClient` and every controller a Mac-group pane surfaces, discharging
     /// `DashboardWindowController.init`'s old role (deleted this task) at the shell's own
@@ -651,6 +675,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !Self.isRunningUnitTests {
             outputs.start()
         }
+
+        // app-shell T9: the floating corner panel — composes onto `outputs.onChange` (T8's own
+        // "compose, never replace" seam). `isShellShowing`/`isDetachedShowing` are exactly the two
+        // T3-established display-state sources the spec names (`appWindow?.host?.attachedSessionId`,
+        // `detachedWindows`) — no daemon signal. `titleForSession` reads the SAME `SessionDirectory`
+        // every other app-shell surface reads (`model.directory`, assigned to `appModel` just above).
+        // `onOpenFile` is the click-through door — `openOutputFileFromPanel(sessionId:path:)` below,
+        // wired the same "AppDelegate exposes the real side effect" posture as `onOpenChild`/
+        // `onSetPolicy` et al (`OrbWindowController`'s own callback convention).
+        let panel = OutputsPanelController(outputsWatcher: outputs)
+        panel.isShellShowing = { [weak self] sessionId in self?.appWindow?.host?.attachedSessionId == sessionId }
+        panel.isDetachedShowing = { [weak self] sessionId in self?.detachedWindows.contains { $0.sessionId == sessionId } ?? false }
+        panel.titleForSession = { [weak self] sessionId in self?.appModel?.directory.rows.first(where: { $0.sessionId == sessionId })?.title }
+        panel.onOpenFile = { [weak self] sessionId, path in self?.openOutputFileFromPanel(sessionId: sessionId, path: path) }
+        outputsPanel = panel
+        outputsPanelWindow = OutputsPanelWindowController(controller: panel)
 
         // Task 4 (2f): the peripheral provider — constructed against `model.client`, the app's
         // MAIN feed client/socket (NOT a detached window's own client — the daemon rule pins THE
