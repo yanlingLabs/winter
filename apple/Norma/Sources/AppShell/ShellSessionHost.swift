@@ -187,10 +187,38 @@ final class ShellSessionHost: ObservableObject {
     /// already up — there is only ever one "session I just left" worth asking about.
     @Published private(set) var hopAwayPrompt: HopAwayPrompt?
 
-    init(directory: SessionDirectory, makeFeed: @escaping FeedFactory, managementClient: NormaClient? = nil) {
+    /// app-shell T8: the ATTACHED session's current output files (`$OUTDIR`'s convention, spec §3 —
+    /// read directly, never via RPC). Refreshed SYNCHRONOUSLY on every attach/hop (`refreshOutputFiles`,
+    /// no round trip needed — it's a local directory read) and kept live thereafter by
+    /// `outputsWatcher`'s `onChange` for AS LONG AS this exact session stays attached. Empty for a
+    /// chat/dispatch session by construction (`outputsBoxEligible` gates `refreshOutputFiles`/
+    /// `applyOutputsChange` both) — `ShellSessionView` needs no mode check of its own, only
+    /// `!outputFiles.isEmpty` (the pinned "collapsed when empty, never a hollow box" rule).
+    @Published private(set) var outputFiles: [URL] = []
+
+    /// app-shell T8: which output file the third panel (`FileViewer`) is showing, or `nil` when it's
+    /// closed. WINDOW-OWNED (one shell, one viewer at a time) rather than per-attachment — cleared on
+    /// every attach/hop/detach, the same "about the session it was about" discipline `hop(to:)`
+    /// already keeps for `dirsRefusal`/`activityRefusal` below.
+    @Published private(set) var openOutputFile: URL?
+
+    /// app-shell T8: the app-lifetime FSEvents watcher (`AppDelegate.boot()`'s one instance,
+    /// injected — `nil` in every test that doesn't drive a live-update pin). `init` COMPOSES onto
+    /// whatever `onChange` already holds rather than replacing it — see `OutputsWatcher.onChange`'s
+    /// own doc comment for why a second consumer (T9) must do the same.
+    private let outputsWatcher: OutputsWatcher?
+
+    init(directory: SessionDirectory, makeFeed: @escaping FeedFactory, managementClient: NormaClient? = nil,
+         outputsWatcher: OutputsWatcher? = nil) {
         self.directory = directory
         self.makeFeed = makeFeed
         self.managementClient = managementClient
+        self.outputsWatcher = outputsWatcher
+        let previousOnChange = outputsWatcher?.onChange
+        outputsWatcher?.onChange = { [weak self] sessionId, files in
+            previousOnChange?(sessionId, files)
+            self?.applyOutputsChange(sessionId: sessionId, files: files)
+        }
     }
 
     // MARK: - T4: the landing's roster verbs (bare RPCs — see `managementClient`'s doc for why these
@@ -417,6 +445,8 @@ final class ShellSessionHost: ObservableObject {
         let live = ShellSessionAttachment(feed: made.feed, session: made.session, adapter: adapter)
         attachment = live
         attachedSessionId = sessionId
+        refreshOutputFiles(for: sessionId)
+        openOutputFile = nil
         wire(adapter: adapter, feed: made.feed)
         live.feedTask = Task { await made.feed.start() }
     }
@@ -447,6 +477,8 @@ final class ShellSessionHost: ObservableObject {
             hopAwayPrompt = HopAwayPrompt(sessionId: departing)
         }
         attachedSessionId = sessionId
+        refreshOutputFiles(for: sessionId)
+        openOutputFile = nil
         // Everything the OLD session's identity decided has to be re-derived or dropped, exactly as
         // an in-place switch does elsewhere: a different session means a different mode, a different
         // pinned model/effort, and refusals that were about the session the user just left.
@@ -486,6 +518,8 @@ final class ShellSessionHost: ObservableObject {
         live.feed.stop()
         attachment = nil
         attachedSessionId = nil
+        outputFiles = []
+        openOutputFile = nil
     }
 
     // MARK: - T4: the hop-away prompt's two doors
@@ -728,6 +762,54 @@ final class ShellSessionHost: ObservableObject {
             }
         }
     }
+
+    // MARK: - app-shell T8: the outputs box + the third panel's own doors
+
+    /// The box's INITIAL listing on attach/hop — `outputsWatcher.onChange` only fires on a LATER
+    /// filesystem change, so a session whose outputs already existed before this attach (reopened
+    /// from Recents, or the very first attach of the app's life) needs its own synchronous read.
+    /// Cheap (one directory enumeration) and profile-resolved via `AppProfile.normaHome`, never a
+    /// literal `~/.norma` — the dev/dist profile-blindness class that shipped as a live bug once.
+    /// Gated on `outputsBoxEligible` so a chat/dispatch attach never even performs the read, let
+    /// alone populates `outputFiles` — the "never a hollow box" rule holds structurally, not just at
+    /// the view layer.
+    private func refreshOutputFiles(for sessionId: String) {
+        guard outputsBoxEligible(mode: mode(of: sessionId)) else { outputFiles = []; return }
+        outputFiles = listOutputFiles(home: AppProfile.normaHome, sessionId: sessionId)
+    }
+
+    /// `outputsWatcher.onChange`'s composed handler — filters to the session THIS host is showing
+    /// (the box's own half of "design the callback surface for both consumers"; T9's floating panel
+    /// filters to the opposite set). Same `outputsBoxEligible` gate as `refreshOutputFiles`, so a
+    /// stray event for a non-participating mode (unreachable in practice — the daemon never writes
+    /// there for chat/dispatch — but defended anyway, the same posture `dirsMenuIsVisible` keeps
+    /// against a fact it does not itself produce) can never populate the box either.
+    private func applyOutputsChange(sessionId: String, files: [String]) {
+        guard sessionId == attachedSessionId, outputsBoxEligible(mode: mode(of: sessionId)) else { return }
+        outputFiles = files.map { URL(fileURLWithPath: $0) }
+    }
+
+    /// Read fresh off the shared directory — same convention `isChatSession`'s own lookup uses. A
+    /// row not yet loaded (a brand-new id the directory's own refresh hasn't caught up to) returns
+    /// `nil`, which `outputsBoxEligible` resolves to "code" — the SAME direction
+    /// `DetachedWindowController.isChatSession`'s own "false when not found" default takes (nil ⇒
+    /// not-chat there, nil ⇒ code-eligible here). Right, not a hedge, for the same reason that
+    /// default is right: the reachable "not yet loaded" call sites are either a row on its way in
+    /// from a fresh `session.list`, or a session the landing's "New" button just created — and that
+    /// button only ever creates CODE sessions (`ShellSessionHost.createSession`), never chat.
+    private func mode(of sessionId: String) -> String? {
+        directory.rows.first(where: { $0.sessionId == sessionId })?.mode
+    }
+
+    /// The box's click door — opens the third panel on `url`.
+    func showOutputFile(_ url: URL) {
+        openOutputFile = url
+    }
+
+    /// The panel's own close button.
+    func closeOutputFile() {
+        openOutputFile = nil
+    }
 }
 
 // MARK: - The hosted surface
@@ -744,16 +826,39 @@ struct ShellSessionView: View {
 
     var body: some View {
         if let attachment = host.attachment {
-            WindowContentView(
-                adapter: attachment.adapter,
-                tint: Color(red: 0.45, green: 0.75, blue: 1.0),
-                // The detail column is already inset below the toolbar (unlike a detached window,
-                // which bleeds under its own hidden titlebar and pays 52pt for it) — this is the
-                // plain breathing room above the header row. Tune-at-gate constant.
-                topInset: 8,
-                sidebars: host.sidebarWiring
-            ) {
-                EmptyView()
+            // app-shell T8: the third panel — a genuine `HStack` sibling of the whole hosted
+            // column, beside the transcript, never inside `WindowContentView` itself (that view is
+            // shared with every morph/detached window, and this panel is Mac-app-shell-only — spec
+            // §3's "Gallery has ZERO viewer coverage"). One at a time, closable, window-owned
+            // (`host.openOutputFile`).
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    WindowContentView(
+                        adapter: attachment.adapter,
+                        tint: Color(red: 0.45, green: 0.75, blue: 1.0),
+                        // The detail column is already inset below the toolbar (unlike a detached
+                        // window, which bleeds under its own hidden titlebar and pays 52pt for it) —
+                        // this is the plain breathing room above the header row. Tune-at-gate constant.
+                        topInset: 8,
+                        sidebars: host.sidebarWiring
+                    ) {
+                        EmptyView()
+                    }
+                    // The outputs box — COLLAPSED/ABSENT when empty (the pinned "never a hollow
+                    // box" rule). `host.outputFiles` is already mode-gated at the source
+                    // (`ShellSessionHost.refreshOutputFiles`/`applyOutputsChange`), so the only
+                    // check needed here is emptiness, exactly like `WindowContentView`'s own
+                    // `pinnedTasksSection`/`subagentSection` callers.
+                    if !host.outputFiles.isEmpty {
+                        OutputsBox(files: host.outputFiles, onSelect: { host.showOutputFile($0) })
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 12)
+                    }
+                }
+                if let openFile = host.openOutputFile {
+                    Divider()
+                    FileViewer(url: openFile, onClose: { host.closeOutputFile() })
+                }
             }
         } else {
             // Detached: the shell is hidden (nothing renders anyway), or no harness could be

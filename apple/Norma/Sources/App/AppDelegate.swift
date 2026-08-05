@@ -73,6 +73,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// device). Constructed unconditionally in `boot()` (cheap — it does no I/O of its own; only
     /// touching its `RemoteHost` does), same posture as `peripheralProvider`/`helperClient`.
     private(set) var remoteAccessCoordinator: RemoteAccessCoordinator?
+    /// app-shell T8: the ONE app-lifetime FSEvents watcher on `<normaHome>/outputs/` (spec §3's
+    /// post-review YAGNI ruling) — constructed unconditionally in `boot()` (cheap: it stores a path
+    /// and touches nothing until `start()`), same posture as `remoteAccessCoordinator`/
+    /// `peripheralProvider` above. Handed to `ShellSessionHost` at `summonAppWindow()`; T9's floating
+    /// corner panel gets the same instance.
+    private(set) var outputsWatcher: OutputsWatcher?
     /// BYOK T2: the one-time first-run disclosure window (spec §3) — `nil` until (at most once,
     /// ever, per install) `boot()`'s real-launch path presents it; nil'd again via `onClosed` (same
     /// one-shot-latch/registry-removal convention as `detachedWindows` above).
@@ -414,10 +420,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // app-shell T4: the landing's roster verbs (stop/background/archive) and "New" button ride
         // this SAME always-connected client — see `ShellSessionHost.managementClient`'s doc for why
         // that must be a bare, non-attaching connection rather than another `makeFeed` harness.
+        // app-shell T8: the outputs box's live-update source — the app's ONE watcher instance,
+        // composed onto (never replacing) whatever else already listens (`OutputsWatcher.onChange`'s
+        // own doc comment).
         let host = ShellSessionHost(
             directory: model.directory,
             makeFeed: { [weak model] sessionId in model?.makeDetachedFeed(sessionId: sessionId) },
-            managementClient: model.client
+            managementClient: model.client,
+            outputsWatcher: outputsWatcher
         )
         let controller = AppWindowController(
             directory: model.directory,
@@ -629,6 +639,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let tokenMissing = production == nil
         appModel = model
         OrbDebug.log("boot: axTrusted=\(axTrusted) tokenMissing=\(tokenMissing)")
+
+        // app-shell T8: the outputs watcher — profile-resolved through `AppProfile.normaHome`
+        // (never a literal `~/.norma`, the dev/dist profile-blindness class that shipped as a live
+        // bug once). Construction alone touches nothing real; the OS-level `start()` registration
+        // is gated `!isRunningUnitTests` below, same posture as the daemon supervisor's real spawn
+        // and Sparkle's updater construction — a bare `boot()` call from the dozens of existing
+        // tests must register no real FSEventStream.
+        let outputs = OutputsWatcher(home: AppProfile.normaHome)
+        outputsWatcher = outputs
+        if !Self.isRunningUnitTests {
+            outputs.start()
+        }
 
         // Task 4 (2f): the peripheral provider — constructed against `model.client`, the app's
         // MAIN feed client/socket (NOT a detached window's own client — the daemon rule pins THE
@@ -1057,6 +1079,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // it the best (still not guaranteed) chance to reach the daemon before the connection dies.
         peripheralProvider?.terminate()
         appModel?.stop()
+        outputsWatcher?.stop()
         closeMainWindows()
     }
 

@@ -63,7 +63,7 @@ final class ShellTransportFactory: @unchecked Sendable {
 final class ShellSessionHostTests: XCTestCase {
     // MARK: - Harness
 
-    private func makeHost(rows: [SessionSummary] = []) -> (host: ShellSessionHost, factory: ShellTransportFactory) {
+    private func makeHost(rows: [SessionSummary] = [], outputsWatcher: OutputsWatcher? = nil) -> (host: ShellSessionHost, factory: ShellTransportFactory) {
         let factory = ShellTransportFactory()
         let directory = SessionDirectory(lister: { rows })
         let host = ShellSessionHost(directory: directory, makeFeed: { sessionId in
@@ -71,7 +71,7 @@ final class ShellSessionHostTests: XCTestCase {
             let feed = SessionFeed(makeTransport: { factory.make() }, token: "tok", clientName: "orb",
                                    mode: .pinned(sessionId: sessionId), session: session)
             return (feed, session)
-        })
+        }, outputsWatcher: outputsWatcher)
         return (host, factory)
     }
 
@@ -363,5 +363,180 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(host.selection, "s_never_attached")
         XCTAssertNil(host.attachedSessionId, "a hidden shell never attaches — not even for a fresh navigation")
         XCTAssertNil(host.attachment)
+    }
+
+    // MARK: - app-shell T8: the outputs box (temp-dir fixtures throughout — never ~/.norma)
+
+    /// `realpath(3)` AFTER creating the directory: `/tmp`/`/var` are themselves symlinks
+    /// (`/private/tmp`, `/private/var`), and `FileManager.enumerator(at:)` (`listOutputFiles`)
+    /// reports the fully-resolved form — a fixture root that stayed un-resolved would never
+    /// string-equal what the production code reports, for a reason that has nothing to do with the
+    /// behavior under test. Foundation's OWN symlink resolvers (`URL.resolvingSymlinksInPath()`,
+    /// `NSString.resolvingSymlinksInPath`) both special-case `/var`/`/tmp` and leave them
+    /// un-resolved (verified empirically) — the raw POSIX call is the only one that matches.
+    private func makeTempHome() -> String {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ShellSessionHostOutputsTests-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var buf = [Int8](repeating: 0, count: Int(PATH_MAX))
+        guard realpath(dir.path, &buf) != nil else { return dir.path }
+        return String(cString: buf)
+    }
+
+    private func writeOutputFile(home: String, sessionId: String, name: String) -> URL {
+        let dir = URL(fileURLWithPath: outputsSessionPath(home: home, sessionId: sessionId))
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent(name)
+        try! Data(name.utf8).write(to: file)
+        return file
+    }
+
+    /// Profile-resolution pin at the HOST level (spec §3 / the dev-dist-blindness class):
+    /// `refreshOutputFiles` reads `AppProfile.normaHome`, so a dev-profile `NORMA_HOME` override
+    /// must be exactly what a code session's box lists from — never a literal `~/.norma`.
+    /// `OutputsBoxTests` pins the same chain at the pure-helper level; this closes the loop through
+    /// the real host.
+    func testSelectingACodeSessionListsExistingOutputFilesFromTheProfileResolvedHome() async {
+        let home = makeTempHome()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        setenv("NORMA_HOME", home, 1)
+        defer { unsetenv("NORMA_HOME") }
+        let file = writeOutputFile(home: home, sessionId: "S1", name: "report.md")
+
+        let rows = [SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "code")]
+        let (host, _) = makeHost(rows: rows)
+        defer { host.deselect() }
+        await host.directory.refresh() // load the row so `mode(of:)` reads the REAL "code", not the not-yet-loaded default
+        host.setShellVisible(true)
+        host.select("S1")
+
+        XCTAssertEqual(host.outputFiles.map(\.path), [file.path])
+    }
+
+    /// The structural "never a hollow box" gate: a chat session's box stays empty even when files
+    /// happen to exist on disk under its sessionId — chat/dispatch never populate `outputFiles` at
+    /// all, not merely "the view chooses to hide a non-empty list."
+    func testChatSessionNeverPopulatesOutputFilesEvenWhenFilesExistOnDisk() async {
+        let home = makeTempHome()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        setenv("NORMA_HOME", home, 1)
+        defer { unsetenv("NORMA_HOME") }
+        _ = writeOutputFile(home: home, sessionId: "S_chat", name: "stray.txt")
+
+        let rows = [SessionSummary(sessionId: "S_chat", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "chat")]
+        let (host, _) = makeHost(rows: rows)
+        defer { host.deselect() }
+        await host.directory.refresh() // load the row — an UNLOADED row would fail-open to "code"-eligible (mode(of:)'s own doc)
+        host.setShellVisible(true)
+        host.select("S_chat")
+
+        XCTAssertEqual(host.outputFiles, [])
+    }
+
+    /// A hop re-lists for the NEW session — the old session's files never bleed into the new one.
+    func testHopRelistsOutputFilesForTheNewSession() async {
+        let home = makeTempHome()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        setenv("NORMA_HOME", home, 1)
+        defer { unsetenv("NORMA_HOME") }
+        let file1 = writeOutputFile(home: home, sessionId: "S1", name: "one.md")
+        let file2 = writeOutputFile(home: home, sessionId: "S2", name: "two.md")
+
+        let rows = [
+            SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "code"),
+            SessionSummary(sessionId: "S2", title: nil, createdAt: 2, scope: "global", cwd: nil, mode: "code"),
+        ]
+        let (host, _) = makeHost(rows: rows)
+        defer { host.deselect() }
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        XCTAssertEqual(host.outputFiles.map(\.path), [file1.path])
+
+        host.select("S2")
+        XCTAssertEqual(host.outputFiles.map(\.path), [file2.path], "the hop must not keep S1's files around")
+    }
+
+    /// Detaching (hide, or navigate off the session) clears both the box and any open viewer —
+    /// there is nothing left to show for a session the shell isn't attached to.
+    func testDetachClearsOutputFilesAndClosesTheViewer() async {
+        let home = makeTempHome()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        setenv("NORMA_HOME", home, 1)
+        defer { unsetenv("NORMA_HOME") }
+        let file = writeOutputFile(home: home, sessionId: "S1", name: "one.md")
+        let rows = [SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "code")]
+        let (host, _) = makeHost(rows: rows)
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        XCTAssertEqual(host.outputFiles.map(\.path), [file.path])
+        host.showOutputFile(file)
+        XCTAssertEqual(host.openOutputFile, file)
+
+        host.setShellVisible(false)
+
+        XCTAssertEqual(host.outputFiles, [])
+        XCTAssertNil(host.openOutputFile)
+    }
+
+    /// The box's own click door: opens the third panel on the clicked file; the panel's close button
+    /// clears it again. This is the state transition the view's `onSelect`/`onClose` closures ride —
+    /// the SwiftUI wiring itself is presence-only (AppKit/QuickLook-backed, not unit-testable, same
+    /// posture `WorkingDirsTests`/`FileViewerTests` document).
+    func testShowAndCloseOutputFile() {
+        let (host, _) = makeHost()
+        XCTAssertNil(host.openOutputFile)
+        let file = URL(fileURLWithPath: "/tmp/dd/report.md")
+        host.showOutputFile(file)
+        XCTAssertEqual(host.openOutputFile, file)
+        host.closeOutputFile()
+        XCTAssertNil(host.openOutputFile)
+    }
+
+    // MARK: - The watcher wiring: the box filters to the SHOWN session; a second consumer composes
+
+    /// The core contract behind "design the callback surface for both consumers": a live change for
+    /// the session the shell is currently attached to updates the box; a change for any OTHER
+    /// session must not touch it — the box only ever shows what it's showing.
+    func testWatcherOnChangeUpdatesOnlyTheShownSession() async {
+        let home = makeTempHome()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let rows = [
+            SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "code"),
+            SessionSummary(sessionId: "S2", title: nil, createdAt: 2, scope: "global", cwd: nil, mode: "code"),
+        ]
+        let watcher = OutputsWatcher(home: home)
+        let (host, _) = makeHost(rows: rows, outputsWatcher: watcher)
+        defer { host.deselect() }
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        XCTAssertEqual(host.outputFiles, [], "nothing on disk yet")
+
+        watcher.onChange?("S2", ["/tmp/somewhere/S2/ignored.txt"])
+        XCTAssertEqual(host.outputFiles, [], "a change for a session the shell ISN'T showing must not touch the box")
+
+        watcher.onChange?("S1", ["/tmp/somewhere/S1/new.txt"])
+        XCTAssertEqual(host.outputFiles, [URL(fileURLWithPath: "/tmp/somewhere/S1/new.txt")])
+    }
+
+    /// COMPOSE, NEVER REPLACE (`OutputsWatcher.onChange`'s own doc comment — the seam T9's floating
+    /// panel must also respect): a pre-existing `onChange` handler set BEFORE `ShellSessionHost` is
+    /// constructed must still fire after the host wires its own — proving `init` composed onto it
+    /// rather than clobbering it.
+    func testHostComposesOntoAPreExistingOnChangeHandlerRatherThanReplacingIt() async {
+        let watcher = OutputsWatcher(home: makeTempHome())
+        var previousHandlerFired = false
+        watcher.onChange = { _, _ in previousHandlerFired = true }
+
+        let rows = [SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "code")]
+        let (host, _) = makeHost(rows: rows, outputsWatcher: watcher)
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+
+        watcher.onChange?("S1", [])
+
+        XCTAssertTrue(previousHandlerFired, "the handler present BEFORE construction must still run")
     }
 }
