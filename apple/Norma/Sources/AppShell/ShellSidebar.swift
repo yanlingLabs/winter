@@ -29,8 +29,9 @@ struct ShellRootView: View {
         .navigationSplitViewStyle(.balanced)
     }
 
-    /// The destination's surface. Two are real as of T3 — a hosted session and the chat landing —
-    /// and the rest are still T1's placeholders, replaced surface by surface (T4/T5/T7).
+    /// The destination's surface. Three are real as of T4 — a hosted session, the chat landing and
+    /// the code landing — and the rest (dispatch, cowork, dashboard) are still T1's placeholders,
+    /// replaced surface by surface (T5/T7).
     @ViewBuilder
     private var detail: some View {
         switch nav.destination {
@@ -42,6 +43,12 @@ struct ShellRootView: View {
             }
         case .mode(.chat):
             ChatLandingView(nav: nav, directory: directory)
+        case .mode(.code):
+            if let host {
+                ModeLandingView(mode: .code, nav: nav, directory: directory, host: host)
+            } else {
+                ShellLandingView(destination: nav.destination)
+            }
         default:
             ShellLandingView(destination: nav.destination)
         }
@@ -85,13 +92,21 @@ struct ShellSidebar: View {
                     modeRow(mode).tag(ShellDestination.mode(mode))
                 }
             }
+            // app-shell T4: Recents FILTERS OUT archived rows (`excludingArchived` — the
+            // hidden-by-default ruling, T3 review as-m10). An ordinary Recents click just navigates
+            // to `.session(id)`, and the shell resumes-by-attaching whatever it's given
+            // (`ShellSessionHost`/`session.attach` clears the archive flag daemon-side) — so an
+            // archived row sitting in this flat, mode-agnostic list would make an idle click
+            // silently un-archive it. Archived sessions are reachable only through the Archived tab
+            // (`ModeLandingView`), where resume is the stated, deliberate action.
             Section("Recents") {
-                if directory.rows.isEmpty {
+                let recents = excludingArchived(directory.rows)
+                if recents.isEmpty {
                     Text("No sessions yet")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(directory.rows) { row in
+                    ForEach(recents) { row in
                         Text(sessionDisplayTitle(row.title))
                             .lineLimit(1)
                             .truncationMode(.middle)

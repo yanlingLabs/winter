@@ -115,6 +115,18 @@ func sessionRows(for mode: SessionMode, in rows: [SessionSummary]) -> [SessionSu
     rows.filter { SessionMode(wire: $0.mode) == mode }
 }
 
+/// PURE: rows with an `"archived"` activity removed — the hidden-by-default ruling (design doc §2:
+/// "Archived tab: hidden-by-default listing"), shared by the sidebar's flat Recents list
+/// (`ShellSidebar`) and the landing's "All" tab (`ModeLandingView`, T4) rather than re-derived twice.
+///
+/// T3's review carried this decision forward explicitly (as-m10): `session.attach` clears the
+/// archive flag (T3's finding — "attaching IS the resume"), so an ORDINARY click on a Recents row or
+/// an "All" row must never reach an archived session at all, or it would silently un-archive it. The
+/// Archived tab's resume (T4) is the one place that click is meant to do exactly that.
+func excludingArchived(_ rows: [SessionSummary]) -> [SessionSummary] {
+    rows.filter { $0.activity != "archived" }
+}
+
 /// PURE: Task 1's placeholder copy. Every one of these strings is replaced by a real surface later
 /// in this plan (mode landings → Tasks 3/4/5, session → Task 3, dashboard → Task 7); the shape of
 /// the window, its summon paths, the sidebar and this selection model are the parts that are final.

@@ -121,9 +121,117 @@ final class ShellSessionHost: ObservableObject {
     /// its own window.
     var presentingWindow: (() -> NSWindow?)?
 
-    init(directory: SessionDirectory, makeFeed: @escaping FeedFactory) {
+    /// app-shell T4: the landing's ROSTER client — `AppModel.client`, production (the app's own
+    /// ALWAYS-CONNECTED "orb" harness), reused rather than minted per action. `session.interrupt`/
+    /// `session.setActivity`/`session.create` are all bare-sessionId (or session-less) RPCs that
+    /// never require attaching — unlike `makeFeed` above, which mints a PINNED, ATTACHING harness.
+    /// That distinction is load-bearing here, not stylistic: a landing row acts on sessions the
+    /// shell is NOT showing, and routing a roster verb through an attach would (for an archived row)
+    /// trigger the exact un-archive-by-attaching T3's carried ruling forbids ("the Archived tab's
+    /// click resumes BY ATTACH... do NOT also write setActivity(nil) — a double write"). Riding the
+    /// same always-open connection the orb's own focus-follow feed uses is safe because these RPCs
+    /// never touch that connection's OWN attachment state (only `session.attach`/`NormaClient.close`
+    /// do) — multiplexed over one socket like every other request the client already sends.
+    /// `nil` (additive, defaulted) in every test that doesn't drive a roster verb or the create flow.
+    private let managementClient: NormaClient?
+
+    /// app-shell T4: per-session in-flight/refusal bookkeeping for roster verbs issued from a
+    /// LANDING list — keyed by sessionId, unlike `attachment.adapter`'s single-session fields
+    /// (`activityChangeInFlight`/`activityRefusal`), because a landing can have several rows'
+    /// actions outstanding at once. Read by `ModeLandingView`; written only by the two methods below.
+    @Published private(set) var rosterActionInFlight: Set<String> = []
+    /// A refusal is published VERBATIM (`set-activity.ts` writes one sentence per rule) — the exact
+    /// same discipline `ShellSessionHost.applyActivity`/`WindowContentView`'s header affordance keep,
+    /// just keyed per-row instead of per-attachment.
+    @Published private(set) var rosterRefusals: [String: String] = [:]
+
+    /// working-directories T8's create-time folder sheet, hoisted here so the landing's "New" button
+    /// gets the SAME picker `DetachedWindowController.newSession()` opens rather than a second
+    /// implementation of the sheet-retain-and-complete dance. Held for its lifetime, dropped in its
+    /// own completion — nothing else retains a sheet controller.
+    private var dirPickerSheet: WorkingDirPickerSheetController?
+
+    init(directory: SessionDirectory, makeFeed: @escaping FeedFactory, managementClient: NormaClient? = nil) {
         self.directory = directory
         self.makeFeed = makeFeed
+        self.managementClient = managementClient
+    }
+
+    // MARK: - T4: the landing's roster verbs (bare RPCs — see `managementClient`'s doc for why these
+    // never go through `makeFeed`'s attaching harness)
+
+    /// Roster "Stop" — `session.interrupt`, verbatim the kit's own wrapper. No refusal vocabulary of
+    /// its own (the daemon just answers `wasRunning`), so only in-flight is tracked; a successful
+    /// call refreshes the directory since interrupting a running turn changes its derived activity.
+    func interruptFromRoster(_ sessionId: String) {
+        guard let client = managementClient else { return }
+        rosterActionInFlight.insert(sessionId)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            _ = try? await client.interrupt(sessionId: sessionId)
+            await self.directory.refresh()
+            self.rosterActionInFlight.remove(sessionId)
+        }
+    }
+
+    /// Roster background⇄clear/archive — `session.setActivity` for a row this shell is not
+    /// necessarily attached to. `target` is the wire vocabulary verbatim (`"background"` /
+    /// `"unbackground"` / `"archived"`), same contract as `ShellSessionHost.applyActivity`'s
+    /// single-session twin. A refusal (e.g. "stop or background it first" for an Archive attempt on
+    /// a still-running background session) is published VERBATIM, keyed to this row only — it never
+    /// touches another row's state.
+    func setActivityFromRoster(_ sessionId: String, target: String?) {
+        guard let client = managementClient else { return }
+        rosterActionInFlight.insert(sessionId)
+        rosterRefusals[sessionId] = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await client.setActivity(sessionId: sessionId, activity: target)
+                await self.directory.refresh()
+            } catch let error as RpcError {
+                self.rosterRefusals[sessionId] = error.message
+            } catch {
+                self.rosterRefusals[sessionId] = "couldn't reach the daemon — try again"
+            }
+            self.rosterActionInFlight.remove(sessionId)
+        }
+    }
+
+    // MARK: - T4: the landing's "New" button — the T8-wd create-time picker, reused
+
+    /// AppKit half: opens the SAME `WorkingDirPickerSheetController` `DetachedWindowController.
+    /// newSession()` does, on the shell's own window (`presentingWindow`). Undrivable from a unit
+    /// test (a real sheet) — `createSession(with:onCreated:)` below is the TESTABLE seam its
+    /// completion feeds, same split that file's own doc documents.
+    ///
+    /// `onCreated` — NOT a stored callback: this host has no single pinned session to re-target the
+    /// way a detached window's `selectSession` does, so the CALLER (the landing) decides what
+    /// "created" means. Every landing passes the same thing: navigate the shell onto the fresh id,
+    /// which is what actually attaches it (`select`'s job, via `ShellNavigationModel.navigate`) —
+    /// this method never attaches anything itself.
+    func startNewSession(onCreated: @escaping (String) -> Void) {
+        guard dirPickerSheet == nil, let window = presentingWindow?() else { return }
+        let sheet = WorkingDirPickerSheetController(
+            recents: recentWorkingDirs(directory.rows), host: window
+        ) { [weak self] choice in
+            self?.dirPickerSheet = nil
+            guard let choice else { return } // cancelled: create nothing
+            self?.createSession(with: choice, onCreated: onCreated)
+        }
+        dirPickerSheet = sheet
+        sheet.present()
+    }
+
+    /// The wire half — `session.create` over `managementClient` (bare, no attach), same params
+    /// `DetachedWindowController.startSession(with:)` sends (`scope: "global"`, `approvalPolicy:
+    /// "auto"`, `cwd` omitted entirely for `.noFolder`).
+    func createSession(with choice: WorkingDirChoice, onCreated: @escaping (String) -> Void) {
+        guard let client = managementClient else { return }
+        Task { @MainActor in
+            guard let created = try? await client.createSession(scope: "global", cwd: choice.cwdParam, approvalPolicy: "auto") else { return }
+            onCreated(created.sessionId)
+        }
     }
 
     // MARK: - The three doors into the policy

@@ -467,9 +467,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the shell shows code and chat sessions too. A separate socket is also what makes the
         // policy's last row true — the shell's attachment is its own, so a detached window closing
         // is never the last detach for a session the shell is showing.
+        // app-shell T4: the landing's roster verbs (stop/background/archive) and "New" button ride
+        // this SAME always-connected client — see `ShellSessionHost.managementClient`'s doc for why
+        // that must be a bare, non-attaching connection rather than another `makeFeed` harness.
         let host = ShellSessionHost(
             directory: model.directory,
-            makeFeed: { [weak model] sessionId in model?.makeDetachedFeed(sessionId: sessionId) }
+            makeFeed: { [weak model] sessionId in model?.makeDetachedFeed(sessionId: sessionId) },
+            managementClient: model.client
         )
         let controller = AppWindowController(
             directory: model.directory,
