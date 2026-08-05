@@ -172,9 +172,10 @@ final class AppModel: ObservableObject {
     /// below used to be the ONLY entry point, and a caller needing to know "did this actually
     /// succeed" had no choice but to infer it from `focusedSessionId` afterward — which silently
     /// stays whatever it already was (a STALE pre-existing focus, if one existed) when the create
-    /// RPC fails, since nothing here ever clears it on failure. `openStandaloneNormaWindow()` used
-    /// to read `focusedSessionId` that way and could spawn its standalone window on a stale prior
-    /// session when the create failed. Returning the id makes success/failure the return value's
+    /// RPC fails, since nothing here ever clears it on failure. `AppDelegate`'s now-retired
+    /// `openStandaloneNormaWindow()` (App shell T6) used to read `focusedSessionId` that way and
+    /// could spawn its standalone window on a stale prior session when the create failed. Returning
+    /// the id makes success/failure the return value's
     /// job instead: `nil` unambiguously means "nothing was created," regardless of whatever
     /// `focusedSessionId` happened to be already — the caller no longer needs (or is tempted) to
     /// re-derive that from focus state.

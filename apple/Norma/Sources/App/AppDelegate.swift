@@ -321,125 +321,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    /// Chat Mode Slice A (CM-T3): pure decision helper for the "Chat" menu entry — the newest
-    /// `mode == "chat"` row's id, or `nil` meaning "create one". Same shape as `AppModel.
-    /// focusNewestSession()`'s own dispatch-only filter (`sessions.filter { $0.mode == "dispatch" }
-    /// .max(by: createdAt)`), scoped to chat instead — deliberately free of any client/MainActor
-    /// dependency (a plain `[SessionSummary]` in, `String?` out) so it's directly unit-testable
-    /// without a scripted transport.
-    nonisolated static func chatSessionToOpen(in rows: [SessionSummary]) -> String? {
-        rows.filter { $0.mode == "chat" }.max(by: { $0.createdAt < $1.createdAt })?.sessionId
-    }
-
     /// Plan-immunity Task 2 (mode×surface matrix): the orb's OWN sidebar row filter
     /// (`orb.sidebars`'s `rowFilter`, wired in `boot()` below) — dispatch is the ONLY mode the orb
     /// may ever show or focus (`AppModel.refocus`'s own gate is the model-level half of this;
     /// this is the UI half, so a non-dispatch row is never even rendered as clickable there in the
-    /// first place). Positive match, same shape as `chatSessionToOpen(in:)`'s own mode filter —
-    /// deliberately free of any view/MainActor dependency so it's directly unit-testable without
-    /// rendering `SessionSidebar` (this codebase's convention: SwiftUI bodies themselves are never
-    /// unit-tested, only their pure decision helpers — see `DashboardTests`' own file doc).
+    /// first place). Positive match — deliberately free of any view/MainActor dependency so it's
+    /// directly unit-testable without rendering `SessionSidebar` (this codebase's convention:
+    /// SwiftUI bodies themselves are never unit-tested, only their pure decision helpers — see
+    /// `DashboardTests`' own file doc).
     nonisolated static func isOrbSidebarRow(_ row: SessionSummary) -> Bool {
         row.mode == "dispatch"
     }
 
-    /// Chat Mode Slice A (CM-T3): the detached chat window's title — the session's own title,
-    /// trimmed, falling back to "Chat" for a session with none yet (a freshly created one, or an
-    /// existing one the daemon hasn't titled). Same trim-and-fallback shape as `SessionsPane.
-    /// sessionDisplayTitle`, just chat's own fallback text instead of "New session" — kept
-    /// separate rather than reused since the two callers want different defaults.
-    nonisolated static func chatWindowTitle(_ title: String?) -> String {
-        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? "Chat" : trimmed
-    }
-
-    /// Chat Mode Slice A (CM-T3): the menu bar's "Chat" entry. Lists sessions FRESH via `client.
-    /// listSessions()` rather than trusting `model.directory.rows` — that directory only refreshes
-    /// on a session-lifecycle broadcast or a SwiftUI sidebar's own `.task { await directory.
-    /// refresh() }` (`SessionSidebar`/`SessionsPane`), neither of which this plain AppKit menu
-    /// click can rely on having happened (e.g. right after a fresh launch, before any window has
-    /// ever been opened, `rows` is still empty). Opens the newest existing chat session
-    /// (`chatSessionToOpen`'s pure decision) via the same detached-window machinery as every other
-    /// spawn path, or creates one when none exists yet.
-    func openChat() {
-        guard let model = appModel else {
-            OrbDebug.log("openChat: no appModel — spawn aborted")
-            return
-        }
-        Task { [weak self] in
-            guard let self else { return }
-            let rows = (try? await model.client.listSessions())?.map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity)
-            } ?? []
-            if let sid = Self.chatSessionToOpen(in: rows) {
-                let title = rows.first { $0.sessionId == sid }?.title
-                self.openSessionInNewDetachedWindow(sid, title: Self.chatWindowTitle(title), isChat: true)
-                return
-            }
-            await self.createAndOpenChat()
-        }
-    }
-
-    /// Chat Mode Slice A (CM-T3): the menu bar's "New Chat" entry — ALWAYS creates a fresh chat
-    /// session via `session.create({mode:"chat"})`, regardless of any existing chat session
-    /// (unlike "Chat" above, which opens the newest one when one exists). Chat sessions are never
-    /// the dispatch singleton — `session.create`, never `session.dispatch`.
-    func newChat() {
-        guard appModel != nil else {
-            OrbDebug.log("newChat: no appModel — spawn aborted")
-            return
-        }
-        Task { [weak self] in await self?.createAndOpenChat() }
-    }
-
-    /// Shared create+open body for `newChat()` and `openChat()`'s "no chat session exists yet"
-    /// path. Same `scope`/`cwd`/`approvalPolicy` as the sidebars' own "+ New session"
-    /// (`DetachedWindowController.newSession()`) — a plain, trusted-home-directory session — plus
-    /// `mode: "chat"`. A freshly created session never has a title yet, so `chatWindowTitle(nil)`
-    /// resolves straight to the "Chat" fallback.
-    private func createAndOpenChat() async {
-        guard let model = appModel,
-              let created = try? await model.client.createSession(scope: "global", cwd: NSHomeDirectory(), approvalPolicy: "auto", mode: "chat") else {
-            OrbDebug.log("createAndOpenChat: session.create(mode: chat) failed — spawn aborted")
-            return
-        }
-        openSessionInNewDetachedWindow(created.sessionId, title: Self.chatWindowTitle(nil), isChat: true)
-    }
-
-    /// Task 2 (2e-iv): the menu bar's "Open Norma App" entry (`NSMenuItem` wiring is Task 3) — a
-    /// brand-new session via the SAME create+focus primitive the detach choreography and sidebar's
-    /// "+ New session" already reuse (`AppModel.startFreshSession`). Its orb-focus side effect
-    /// isn't separable from the create here, and is harmless: the orb's next summon simply lands on
-    /// this same fresh session too. Then a detached window on that id, centered on the main screen
-    /// via `centeredStandaloneFrame` — unlike the other two spawn paths (yellow-light detach,
-    /// sidebar's ⌘-click), this one is never offset from an existing window/orb frame.
-    ///
-    /// Defensive, same posture as `openSessionInNewDetachedWindow`'s own guard (line 58 precedent):
-    /// no `appModel`, `startFreshSession` returning `nil` (RPC failure), or `makeDetachedFeed` nil
-    /// (missing token, checked inside `openSessionInNewDetachedWindow`) all resolve to
-    /// `OrbDebug.log` + no-op, never a crash or a half-open window.
-    ///
-    /// DEFECT FIX (reviewed defect): this used to await the void `startFreshSessionAfterDetach()`
-    /// and then read `model.focusedSessionId` — which, on a `createSession` RPC failure, silently
-    /// stayed whatever it already was (a STALE PRIOR session, in the orb's normal running state),
-    /// so the guard below wrongly passed and spawned the standalone window on that stale session
-    /// instead of no-op-ing. Reading `startFreshSession()`'s RETURN VALUE instead — never
-    /// `focusedSessionId` — closes that: `nil` on failure is unambiguous regardless of any prior
-    /// focus, so a failed create can no longer be mistaken for a fresh one.
-    func openStandaloneNormaWindow() {
-        guard let model = appModel else {
-            OrbDebug.log("openStandaloneNormaWindow: no appModel — spawn aborted")
-            return
-        }
-        Task { @MainActor [weak self] in
-            guard let self, let sid = await model.startFreshSession() else {
-                OrbDebug.log("openStandaloneNormaWindow: startFreshSession produced no session (RPC failure) — spawn aborted")
-                return
-            }
-            let visible = NSScreen.main?.visibleFrame ?? .zero
-            self.openSessionInNewDetachedWindow(sid, frame: centeredStandaloneFrame(visibleFrame: visible))
-        }
-    }
+    // App shell T6 (the menu-bar retarget's funeral): `chatSessionToOpen(in:)`/`chatWindowTitle(_:)`
+    // and the trio they backed — `openChat()`/`newChat()`/`createAndOpenChat()` — are deleted here.
+    // "Chat"/"New Chat" now summon the app shell (`AppDelegate.boot()`'s menu wiring) instead of
+    // spawning a detached window; nothing else ever called these. `openStandaloneNormaWindow()`
+    // (T1's report named this its own funeral) is deleted with them — "Open Norma App" summons the
+    // shell too, and had no other caller once T1 retargeted the menu item and the dock's reopen path.
 
     /// App shell T1 — THE summon primitive (spec §1). Every path that wants the app window goes
     /// through here: the dock icon (`applicationShouldHandleReopen`), the menu bar's "Open Norma
@@ -508,22 +407,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// constructing a second `DashboardWindowController`. Defensive, same posture as
     /// `openSessionInNewDetachedWindow`'s guard: no `appModel`/`peripheralProvider` (never booted)
     /// resolves to a log + no-op, never a crash or a half-wired window.
-    /// Phase 4d-iii Task 2: `initialPane` lets `openPluginManager()` below reuse this exact body
-    /// (same "shared spawn body" posture as `openSessionInNewDetachedWindow`'s own `frame`
-    /// override) instead of duplicating the guard/construction.
+    /// Phase 4d-iii Task 2: `initialPane` let `openPluginManager()` reuse this exact body (same
+    /// "shared spawn body" posture as `openSessionInNewDetachedWindow`'s own `frame` override)
+    /// instead of duplicating the guard/construction. App shell T6: that wrapper is retired — its
+    /// only caller, the "Manage Plugins…" menu item, now summons the app shell instead (see
+    /// `AppDelegate.boot()`'s menu wiring) — but the PARAMETER stays: the first-run disclosure
+    /// sheet's "Set up API key" button (wired in `boot()`, `initialPane: .provider`) is now the
+    /// one production caller that reuses this same targeted-open body, and every test that calls
+    /// this method directly still exercises both branches.
     /// Phase 4d-cleanup Task 3 fix 1: a second invocation while one is already open retargets the
     /// pane (`DashboardWindowController.selectPane(_:)`, below) before refocusing via `show()` —
     /// previously this only refocused the window without ever switching panes, so "Manage
     /// Plugins…" fired against an already-open Dashboard silently did nothing pane-wise.
     /// Phase 4d-cleanup Task 3 fix wave 1: that fix over-corrected — retargeting UNCONDITIONALLY
-    /// on refocus meant the plain "Dashboard…" entry (`initialPane` omitted, `AppDelegate.swift`'s
-    /// `openDashboard: { ... }` wiring below) snapped an already-open window back to the default
-    /// pane too, discarding whatever pane the user had navigated to. `initialPane` is now
-    /// `DashboardPane?`: `nil` means "no pane requested" — a plain refocus that preserves whatever
-    /// is currently showing (the selection model already starts at `defaultDashboardPane` on first
-    /// open, so a fresh window still lands correctly). Non-`nil` means "targeted" — callers like
-    /// `openPluginManager()` below that must land on a specific pane whether the window is opening
-    /// fresh or already open.
+    /// on refocus meant the plain "Dashboard…" entry (`initialPane` omitted — historically
+    /// `AppDelegate.swift`'s `openDashboard: { ... }` menu wiring; App shell T6 retargeted that
+    /// wiring to summon the app shell instead, so today the no-arg form is reached only directly,
+    /// e.g. by tests) snapped an already-open window back to the default pane too, discarding
+    /// whatever pane the user had navigated to. `initialPane` is now `DashboardPane?`: `nil` means
+    /// "no pane requested" — a plain refocus that preserves whatever is currently showing (the
+    /// selection model already starts at `defaultDashboardPane` on first open, so a fresh window
+    /// still lands correctly). Non-`nil` means "targeted" — callers like the first-run disclosure
+    /// sheet's "Set up API key" button (`initialPane: .provider`, wired in `boot()`) that must land
+    /// on a specific pane whether the window is opening fresh or already open.
     func openDashboard(initialPane: DashboardPane? = nil) {
         if let dashboardWindow {
             // Only a TARGETED open (non-nil `initialPane`) retargets the pane before refocusing —
@@ -573,13 +479,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.show()
     }
 
-    /// Phase 4d-iii Task 2: the menu bar's "Manage Plugins…" entry — opens the SAME singleton
-    /// Dashboard window `openDashboard()` owns, landed on `.pluginManager` whether the window is
-    /// spawned fresh or already open (a targeted `initialPane` retargets an open window; only the
-    /// plain nil-pane "Dashboard…" path preserves the user's current pane — 4d-cleanup T3).
-    func openPluginManager() {
-        openDashboard(initialPane: .pluginManager)
-    }
+    // App shell T6 (the menu-bar retarget's funeral): `openPluginManager()` — a thin
+    // `openDashboard(initialPane: .pluginManager)` wrapper for the "Manage Plugins…" menu item — is
+    // deleted here. That item now summons the app shell onto `.dashboard` instead (see
+    // `AppDelegate.boot()`'s menu wiring); this wrapper had no other caller.
 
     /// SP2b T5: the menu bar's "Pair a Device…" entry. A second invocation while the sheet is
     /// already open just refocuses it (same posture as `openDashboard`'s own guard). Building the

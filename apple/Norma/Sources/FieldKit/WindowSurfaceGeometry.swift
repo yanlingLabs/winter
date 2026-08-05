@@ -213,9 +213,11 @@ func fenceAnchorForWindowCollapse(
 
 /// `chatWindowDefaultSize` CENTERED in `visibleFrame`. PURE (no `NSScreen` dependency, unlike
 /// `openSessionInNewDetachedWindow`'s inline main-screen computation which this now backs) so the
-/// centering math is unit-tested directly. `AppDelegate.openStandaloneNormaWindow()` feeds it
-/// `NSScreen.main?.visibleFrame` — same type as `NSRect` (a plain `CGRect` typealias), kept as
-/// `CGRect` here to match this AppKit-free file's existing convention.
+/// centering math is unit-tested directly. `AppDelegate.openSessionInNewDetachedWindow`'s
+/// frame-less callers (its own default fallback) feed it `NSScreen.main?.visibleFrame` — same type
+/// as `NSRect` (a plain `CGRect` typealias), kept as `CGRect` here to match this AppKit-free file's
+/// existing convention. App shell T6: `openStandaloneNormaWindow()`, the original motivating
+/// caller, is retired — its menu item now summons the app shell instead.
 func centeredStandaloneFrame(visibleFrame: CGRect) -> CGRect {
     let size = chatWindowDefaultSize
     return CGRect(

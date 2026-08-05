@@ -288,11 +288,11 @@ final class AppLifecycleTests: XCTestCase {
     }
 
     func testApplicationShouldHandleReopenAttemptsToOpenAWindowWhenNoneExistsAndReturnsFalse() {
-        let delegate = AppDelegate() // never booted — openStandaloneNormaWindow no-ops (no appModel)
+        let delegate = AppDelegate() // never booted — summonAppWindow no-ops (no appModel)
 
         let handled = delegate.applicationShouldHandleReopen(NSApp, hasVisibleWindows: false)
 
         XCTAssertFalse(handled, "no main window existed — this call must have attempted to open one itself, leaving nothing for AppKit's default handling")
-        XCTAssertTrue(delegate.detachedWindows.isEmpty, "no appModel to open against — the attempt no-ops safely (same guard as openStandaloneNormaWindow's other callers)")
+        XCTAssertTrue(delegate.detachedWindows.isEmpty, "no appModel to open against — the attempt no-ops safely (same guard as summonAppWindow's other callers)")
     }
 }

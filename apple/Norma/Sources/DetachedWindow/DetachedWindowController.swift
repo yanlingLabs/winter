@@ -86,8 +86,10 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     ///     Dock-minimize label a native titled window shows).
     ///   - isChat: Plan-immunity (2026-07-28 design) — true only for a session pinned at
     ///     `mode:"chat"`. Defaulted `false` so every PRE-EXISTING caller (sidebar +New, ⌘-click
-    ///     detach, "Open Norma App") is unaffected; `AppDelegate.createAndOpenChat()`/`openChat()`'s
-    ///     reopen path are the only callers that ever pass `true`. Seeds `adapter.isChatSession`
+    ///     detach, "Open Norma App") is unaffected; `AppDelegate.openSessionInNewDetachedWindow`'s
+    ///     auto-derivation (`isChatSession(_:in:)`) and `handleWindowDetach`'s own derived value are
+    ///     what pass `true` today — App shell T6 retired `createAndOpenChat()`/`openChat()`'s reopen
+    ///     path, the pair that used to pass an explicit `true` here. Seeds `adapter.isChatSession`
     ///     (see that property's own doc comment for what it gates).
     init(feed: SessionFeed, session: SessionModel, frame: NSRect, title: String, isChat: Bool = false) {
         self.feed = feed
@@ -378,7 +380,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// id unreachable rather than merely tolerated. Flipping the default to `true` would fix that
     /// unreachable case at the cost of breaking the reachable one (every "+ New session" would
     /// briefly show its picker hidden, since the fresh id isn't loaded either). `nonisolated
-    /// static`, no `self`/MainActor dependency, mirrors `AppDelegate.chatSessionToOpen(in:)`'s own
+    /// static`, no `self`/MainActor dependency, mirrors `AppDelegate.isOrbSidebarRow(_:)`'s own
     /// "pure decision helper, directly unit-testable" shape.
     nonisolated static func isChatSession(_ sessionId: String, in rows: [SessionSummary]) -> Bool {
         rows.first(where: { $0.sessionId == sessionId })?.mode == "chat"
