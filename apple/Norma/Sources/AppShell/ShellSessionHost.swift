@@ -85,15 +85,19 @@ struct HopAwayPrompt: Equatable {
 /// `"dispatch"`, so the gate keeps the toolbar action structurally absent there with no
 /// surface-side special case.
 ///
-/// Mode reads through `SessionMode(wire:)` — the ONE wire convention (`nil` = a plain code
-/// session, unknown future modes degrade to code) — deliberately the same reading that lists a row
-/// on the Code landing in the first place (`sessionRows(for:in:)`); a second, stricter convention
-/// here would render a listed "code" row with a silently dead affordance. A `nil` row (not yet in
-/// `directory.rows`) is never offered: there is no wire `dirs` to resolve a directory from, and a
-/// launch without one would be a guess.
+/// Mode is FAIL-CLOSED on anything but nil-or-"code": this mirrors the CLI's `isCodeMode` — the
+/// RESUME TARGET's gate (`packages/cli/src/session-mode.ts`, `(mode ?? "code") === "code"`; resume
+/// refuses everything else) — NOT the sidebar's listing convention (`SessionMode(wire:)`, which
+/// degrades unknown future modes to code for DISPLAY). Fix round 1: offering on a row the Terminal
+/// will refuse is this affordance's worst failure shape — `open` exits 0 (the script's content is
+/// opaque to it), the true move fires (the app steps aside AND drops its attachment), and the
+/// resume then silently refuses: an orphaned session on a false-positive success. A `nil` row (not
+/// yet in `directory.rows`) is never offered either: there is no wire `dirs` to resolve a
+/// directory from, and a launch without one would be a guess.
 func moveToCliOffered(row: SessionSummary?) -> Bool {
     guard let row else { return false }
-    return SessionMode(wire: row.mode) == .code && row.activity != "archived"
+    // Mirrors the CLI's isCodeMode — the resume target's gate, not the sidebar's listing convention.
+    return (row.mode == nil || row.mode == "code") && row.activity != "archived"
 }
 
 /// PURE: the directory the handoff's Terminal opens in — the WIRE row's `dirs[0]` (the primary by

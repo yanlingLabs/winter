@@ -511,10 +511,13 @@ final class ModeLandingViewTests: XCTestCase {
         XCTAssertFalse(moveToCliOffered(row: row(mode: "cowork", activity: "active")))
         // No row at all (not yet listed): nothing to read a wire directory from — never offered.
         XCTAssertFalse(moveToCliOffered(row: nil))
-        // An unknown future mode degrades to code by the ONE wire convention (`SessionMode(wire:)`)
-        // — the same reading that lists such a row on the Code landing in the first place; a
-        // second, stricter convention here would render a listed "code" row with a silently dead
-        // affordance.
-        XCTAssertTrue(moveToCliOffered(row: row(mode: "teleporting", activity: "idle")))
+        // An unknown future mode is NOT offered — fail-closed (fix round 1). The gate mirrors the
+        // RESUME TARGET's own gate, the CLI's `isCodeMode` (`packages/cli/src/session-mode.ts`:
+        // `(mode ?? "code") === "code"`, and `resume` refuses everything else) — not the sidebar's
+        // display convention (`SessionMode(wire:)`, unknown→code). Offering here on a row the
+        // Terminal will refuse is the worst failure shape this affordance has: `open` exits 0, the
+        // TRUE MOVE fires (the app steps aside AND drops its attachment), and the resume then
+        // silently refuses — an orphaned session on a false-positive success.
+        XCTAssertFalse(moveToCliOffered(row: row(mode: "teleporting", activity: "idle")))
     }
 }
