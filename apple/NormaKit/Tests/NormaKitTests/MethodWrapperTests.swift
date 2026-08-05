@@ -1088,6 +1088,35 @@ extension MethodWrapperTests {
         XCTAssertEqual(rows[0].dirs, [SessionDirEntry(path: "/a", locked: false)])
     }
 
+    // MARK: - app-shell Task 2: `session.list`'s `activity`
+
+    /// Same nil-vs-a-value discipline `dirs` gets its own test for above: a participating (code)
+    /// row carries one of the four lifecycle strings, a chat row carries none — and an ABSENT key
+    /// must decode to `nil`, never a guessed default like `"idle"`.
+    func testListSessionsDecodesActivityAbsentTolerantly() async throws {
+        let (client, t) = try await connected()
+        let listBody = #"{"sessions":[{"sessionId":"s_code","scope":"global","createdAt":2,"lastSeq":0,"activity":"background"},{"sessionId":"s_chat","scope":"global","createdAt":1,"lastSeq":0,"mode":"chat"}]}"#
+        let (_, rows) = try await roundTrip(t, sentIndex: 1, result: listBody) {
+            try await client.listSessions()
+        }
+        XCTAssertEqual(rows.first { $0.sessionId == "s_code" }?.activity, "background")
+        XCTAssertNil(rows.first { $0.sessionId == "s_chat" }?.activity,
+                     "a non-participating row carries no activity at all — never coerced to a value")
+    }
+
+    /// The other three lifecycle strings round-trip too — not just the one value the test above
+    /// happens to use.
+    func testListSessionsDecodesEveryActivityValue() async throws {
+        let (client, t) = try await connected()
+        let listBody = #"{"sessions":[{"sessionId":"s_active","scope":"global","createdAt":4,"lastSeq":0,"activity":"active"},{"sessionId":"s_idle","scope":"global","createdAt":3,"lastSeq":0,"activity":"idle"},{"sessionId":"s_archived","scope":"global","createdAt":2,"lastSeq":0,"activity":"archived"}]}"#
+        let (_, rows) = try await roundTrip(t, sentIndex: 1, result: listBody) {
+            try await client.listSessions()
+        }
+        XCTAssertEqual(rows.first { $0.sessionId == "s_active" }?.activity, "active")
+        XCTAssertEqual(rows.first { $0.sessionId == "s_idle" }?.activity, "idle")
+        XCTAssertEqual(rows.first { $0.sessionId == "s_archived" }?.activity, "archived")
+    }
+
     /// The write half: method + params for each of the three ops, and the POST-WRITE set decoded off
     /// the result (never an echo of what was sent — an idempotent `add` comes back unchanged).
     func testSetDirsEncodesEachOpAndDecodesThePostWriteSet() async throws {
@@ -1115,6 +1144,74 @@ extension MethodWrapperTests {
         ) { try await client.setDirs(sessionId: "s_1", op: .remove, path: "/tmp/x") }
         XCTAssertEqual((removeReq["params"] as? [String: Any])?["op"] as? String, "remove")
         XCTAssertEqual(afterRemove, [SessionDirEntry(path: "/repo", locked: true)])
+    }
+
+    // MARK: - app-shell T3: `session.setActivity` — the `/background` verb's wire door
+
+    /// The three things this wrapper has to get right, in one round trip each:
+    ///   1. the verb reaches the wire VERBATIM (`"background"`/`"unbackground"`/`"archived"`),
+    ///   2. RESUME is a literal JSON `null` under a key that is always present — the param is
+    ///      required-but-nullable, so an omitted key is a schema failure, not a resume,
+    ///   3. the answer is the POST-WRITE DERIVED state, not an echo: asking to clear a session whose
+    ///      detached bash task is still writing reads back `"background"`.
+    func testSetActivityEncodesEachVerbAndReadsBackTheDerivedState() async throws {
+        let (client, t) = try await connected()
+
+        let (bgReq, afterBg) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"activity":"background"}"#) {
+            try await client.setActivity(sessionId: "s_1", activity: "background")
+        }
+        XCTAssertEqual(bgReq["method"] as? String, "session.setActivity")
+        XCTAssertEqual((bgReq["params"] as? [String: Any])?["sessionId"] as? String, "s_1")
+        XCTAssertEqual((bgReq["params"] as? [String: Any])?["activity"] as? String, "background")
+        XCTAssertEqual(afterBg, "background")
+
+        let (unbgReq, afterUnbg) = try await roundTrip(t, sentIndex: 2, result: #"{"ok":true,"activity":"background"}"#) {
+            try await client.setActivity(sessionId: "s_1", activity: "unbackground")
+        }
+        XCTAssertEqual((unbgReq["params"] as? [String: Any])?["activity"] as? String, "unbackground")
+        XCTAssertEqual(afterUnbg, "background",
+                       "the answer is the daemon's re-derived state, never an echo of the verb sent")
+
+        let (resumeReq, afterResume) = try await roundTrip(t, sentIndex: 3, result: #"{"ok":true,"activity":"idle"}"#) {
+            try await client.setActivity(sessionId: "s_1", activity: nil)
+        }
+        let resumeParams = resumeReq["params"] as? [String: Any]
+        XCTAssertTrue(resumeParams?.keys.contains("activity") ?? false,
+                      "resume sends a LITERAL null under an always-present key — the param is nullable, not optional")
+        XCTAssertTrue(resumeParams?["activity"] is NSNull)
+        XCTAssertEqual(afterResume, "idle")
+
+        // A participating row is the only kind that can be written at all today, but the field is
+        // optional on the wire for the same reason `SessionSummary.activity` is — absence must
+        // decode as absence, never as a guessed default.
+        let (_, absent) = try await roundTrip(t, sentIndex: 4, result: #"{"ok":true}"#) {
+            try await client.setActivity(sessionId: "s_1", activity: "archived")
+        }
+        XCTAssertNil(absent)
+    }
+
+    /// Refusals carry the daemon's OWN sentence — `set-activity.ts` writes one per rule and each
+    /// names the rule it enforced, which is exactly what makes a refusal teachable. Pinned on the
+    /// exported constants (`ACTIVITY_MODE_REFUSAL`, `ARCHIVED_IMMUTABLE_REFUSAL`) and the
+    /// running-turn refusal, all of which a surface then shows verbatim.
+    func testSetActivityRefusalsSurfaceTheDaemonsWordingVerbatim() async throws {
+        for refusal in [
+            "activity states apply to code and cowork sessions only",
+            "session is archived — resume it first",
+            "stop or background it first",
+        ] {
+            let (client, t) = try await connected()
+            async let call = client.setActivity(sessionId: "s_1", activity: "background")
+            let sent = try await waitForSent(t, count: 2)
+            let req = decodeLine(sent[1])
+            t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"error":{"code":-32602,"message":"\#(refusal)"}}"#)
+            do {
+                _ = try await call
+                XCTFail("expected setActivity to throw for a refusal")
+            } catch let error as RpcError {
+                XCTAssertEqual(error.message, refusal)
+            }
+        }
     }
 
     /// Every refusal is a thrown `RpcError` carrying the daemon's OWN sentence — the wording

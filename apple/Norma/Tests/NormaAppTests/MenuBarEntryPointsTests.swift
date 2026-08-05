@@ -3,7 +3,8 @@ import AppKit
 @testable import Norma
 
 /// Task 3 (2e-iv): the menu bar's two new entry points — "Open CLI" (`CliLauncher.openCli`, Task 1)
-/// and "Open Norma App" (`AppDelegate.openStandaloneNormaWindow`, Task 2). No prior MenuBarController
+/// and "Open Norma App" (`AppDelegate.summonAppWindow`, App shell T1 — retargeted from the original
+/// `openStandaloneNormaWindow`, since retired by App shell T6). No prior MenuBarController
 /// test file existed (grepped Tests/ — only `ScaffoldTests.testBootInstallsMenuBar`, which just
 /// asserts `menuBar` is non-nil after `boot()`), so this is a new file.
 ///

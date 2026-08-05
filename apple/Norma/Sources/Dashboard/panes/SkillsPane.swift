@@ -46,8 +46,10 @@ func skillsGroupedBySource(_ skills: [SkillMeta]) -> [(source: String, skills: [
 // -----------------------------------------------------------------------------------------------
 // SkillsPaneModel — the pane's live view-model (`@MainActor`/`ObservableObject`). Modeled directly
 // on `MemoryPaneModel` (Phase 5b Task 5, freshest reviewed precedent): owns the skill list + the
-// selected skill's detail/edit state, constructed fresh per dashboard window
-// (`DashboardWindowController.init`) around the raw `NormaClient`.
+// selected skill's detail/edit state, constructed around the raw `NormaClient`. App shell T7:
+// built once, for the process lifetime, by `AppDelegate.makeDashboardWiring` — replacing
+// `DashboardWindowController.init`'s old "fresh per dashboard window-open" role; harmless, since
+// `SkillsPane.task` already re-seeds it on appearance.
 //
 // Unlike Memory, there is no scope/cwd param to choose here: `skills.list`/`skills.read` resolve
 // against the connection's own cwd-less view (the dashboard has none), and `skills.write`/

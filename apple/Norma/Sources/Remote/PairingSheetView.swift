@@ -22,28 +22,103 @@ func renderPairingQRCode(_ string: String) -> NSImage? {
     return image
 }
 
-/// Holds the (async, relay-homing) pairing sheet's model once it exists. The window is presented
-/// the instant the user picks "Pair a Device…", BEFORE the pairing stack is up — `model` is `nil`
-/// until `RemoteHost.openPairingWindow()`'s cold-start homing completes (seconds on a hotspot),
-/// which is what `PairingSheetContainerView` shows a "Preparing…" spinner for. App-side glue only
-/// (no unit tests, per the SP2b T5 constraint); the tested state machine stays in `PairingSheetModel`.
+/// Task 7 (spec §1 windows disposition: "`PairingSheetWindow` → becomes a sheet on the shell"):
+/// owns the pairing sheet's PRESENTATION state for `AppWindowController` — whether it's showing at
+/// all (`isPresented`, for SwiftUI's `.sheet(isPresented:)`), and (once the async, relay-homing
+/// stack is up) the live `PairingSheetModel` it's presenting. Built ONCE per `AppWindowController`
+/// (alongside `dashboardSelection`, `DashboardSurface.swift`), replacing `PairingSheetWindowController`
+/// (deleted this task) — which used to own its own `NSPanel` and a one-shot `onClosed` hook.
+///
+/// `isPresented` is a SEPARATE bool from `model != nil` deliberately: the sheet must open the
+/// instant `present(beginPairing:onClosed:)` is called — the exact same "show the 'Preparing…'
+/// panel immediately, before awaiting the cold-start relay homing" reasoning
+/// `PairingSheetWindowController.init`/`AppDelegate.openPairDevice()` used to build a window for —
+/// while `model` only arrives once `RemoteHost.openPairingWindow()` resolves, seconds later on a
+/// hotspot. App-side glue only (no unit tests, per the SP2b T5 constraint carried into this task);
+/// the tested state machine stays in `PairingSheetModel`.
 @MainActor
-final class PairingSheetContainer: ObservableObject {
-    @Published var model: PairingSheetModel?
-    init() {}
+final class PairingSheetPresentationModel: ObservableObject {
+    @Published private(set) var isPresented = false
+    @Published private(set) var model: PairingSheetModel?
+
+    private var onClosed: (() -> Void)?
+
+    /// A second invocation while already presented just no-ops — same guard
+    /// `AppDelegate.openPairDevice()` used to make against a live `pairingSheetWindow` before
+    /// re-showing a window; the sheet itself IS the refocus, there's no second window to show.
+    func present(beginPairing: @escaping () async throws -> PairingSheetModel, onClosed: @escaping () -> Void) {
+        guard !isPresented else { return }
+        self.onClosed = onClosed
+        isPresented = true
+        model = nil
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let built = try await beginPairing()
+                // The user may have dismissed the sheet while homing was in flight — don't
+                // resurrect it; just stop the freshly-built model so its manager/offer doesn't
+                // linger (mirrors `AppDelegate.openPairDevice`'s old "Preparing…-panel-closed-mid-
+                // homing" race guard).
+                guard self.isPresented else {
+                    built.stop()
+                    return
+                }
+                self.model = built
+            } catch {
+                OrbDebug.log("PairingSheetPresentationModel.present: couldn't start the pairing stack: \(error)")
+                self.dismiss()
+            }
+        }
+    }
+
+    /// Fired by the SwiftUI sheet's own dismiss (the system close affordance, or a completed
+    /// ceremony's own "Done") — same teardown ORDER `PairingSheetWindowController.onClosed` used to
+    /// run: stop the model first (cancels its event/countdown background tasks — nothing else
+    /// would, since the tasks retain the model for the duration of their in-flight calls), THEN the
+    /// caller's own `onClosed` (which ends the manager's live offer and lets the stack tear itself
+    /// down if idle).
+    func dismiss() {
+        guard isPresented else { return }
+        isPresented = false
+        model?.stop()
+        model = nil
+        let closed = onClosed
+        onClosed = nil
+        closed?()
+    }
 }
 
-/// What the pairing panel actually hosts: a "Preparing…" placeholder until the pairing stack is up,
-/// then the real `PairingSheetView`. Presenting this immediately (instead of awaiting the homing
-/// first) is what makes the panel appear the instant the menu item is clicked — so the user never
+/// What the sheet actually hosts: a "Preparing…" placeholder until the pairing stack is up, then
+/// the real `PairingSheetView`. Presenting this immediately (instead of awaiting the homing first)
+/// is what makes the sheet appear the instant "Pair a Device…" is clicked — so the user never
 /// stares at nothing and re-clicks. Deliberately mirrors `showingQRContent`'s structure — headline,
 /// 220pt box, and TWO secondary lines — so swapping the spinner for the QR doesn't reflow/recenter
-/// the panel's contents.
+/// the sheet's contents.
 struct PairingSheetContainerView: View {
-    @ObservedObject var container: PairingSheetContainer
+    @ObservedObject var presentation: PairingSheetPresentationModel
 
     var body: some View {
-        if let model = container.model {
+        content
+            // Task 7: a sheet has no titlebar/red-traffic-light of its own (the window this
+            // replaces had one) — an explicit close affordance is this content's own to provide.
+            // Top-trailing, same corner every other closable panel in this app's gallery uses.
+            .overlay(alignment: .topTrailing) {
+                Button {
+                    presentation.dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .padding(10)
+                .accessibilityLabel("Close")
+            }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let model = presentation.model {
             PairingSheetView(model: model)
         } else {
             VStack(spacing: 12) {
@@ -66,8 +141,9 @@ struct PairingSheetContainerView: View {
 
 /// The Mac's pairing sheet (SP2b Task 5): a dumb SwiftUI presentation over `PairingSheetModel`
 /// (NormaKit, pure) — this view owns no state of its own beyond the label `TextField`'s live
-/// text, and never touches `RemoteHost`/`PairingManager` directly. Hosted in an `NSPanel` by
-/// `PairingSheetWindowController` (inside a `PairingSheetContainerView`).
+/// text, and never touches `RemoteHost`/`PairingManager` directly. Task 7: hosted as a SwiftUI
+/// `.sheet` on the shell (`ShellRootView`, via `PairingSheetContainerView`) — no longer an `NSPanel`
+/// (`PairingSheetWindowController`, deleted this task).
 struct PairingSheetView: View {
     @ObservedObject var model: PairingSheetModel
     @State private var label: String = ""

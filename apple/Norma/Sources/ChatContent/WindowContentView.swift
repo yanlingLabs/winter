@@ -40,6 +40,11 @@ struct WindowContentView<Accessory: View>: View {
     /// `currentSidebarSessionSummary`/`policyPickerRow` already carry for the WorkSidebar split.
     @State var showingDirsMenu = false
 
+    /// app-shell T3: the `/background` affordance's own popover state — a FIFTH independent flag,
+    /// same reasoning as the four above. Internal (not `private`) for the same reason
+    /// `showingDirsMenu` is: `ActivityMenu.swift`'s cross-file `extension WindowContentView` binds it.
+    @State var showingActivityMenu = false
+
     /// Task 3 (2e-i): whether the "… +N completed" tail is expanded to the full completed list.
     /// Local presentational state, same convention as `showingPolicyMenu` above — resets whenever
     /// this view is recreated (e.g. a new session), which is fine: there's nothing worth
@@ -92,6 +97,13 @@ struct WindowContentView<Accessory: View>: View {
                 // since that is exactly the session that needs the adopt door.
                 if dirsMenuIsVisible(currentSidebarSessionSummary?.dirs) {
                     dirsMenuButton
+                }
+                // app-shell T3: the `/background` affordance. Gated the same way the folders chip
+                // is — on the DAEMON's own answer for this row (its derived `activity`, absent for
+                // a session with no lifecycle) — plus the wiring gate: a surface that never wired
+                // `onSetActivity` renders nothing here at all (`backgroundVerbForCurrentSession`).
+                if let verb = backgroundVerbForCurrentSession {
+                    backgroundVerbButton(verb)
                 }
                 // Task 10 (Chat Slice D): the model menu — deliberately the OPPOSITE gate from the
                 // policy button just below (`modelMenuIsVisible`'s own doc comment explains the
@@ -170,10 +182,16 @@ struct WindowContentView<Accessory: View>: View {
     /// visible so a stale zero never flashes the right overlay open.
     @ViewBuilder
     private func sidebarLayout(_ sidebars: SidebarWiring) -> some View {
+        // app-shell T3: the surface's configuration is applied to the RAW flags first — a right-only
+        // surface (the shell, which brings its own outer session switcher) hands the engine
+        // `leftExpanded: false`, so the left column can resolve neither inline nor as an overlay at
+        // any width. The default configuration is the identity (`sidebarStateForConfiguration`), so
+        // the two pre-existing surfaces feed `resolveSidebars` byte-identical inputs.
+        let state = sidebarStateForConfiguration(sidebar, showsSessionSwitcher: sidebars.showsSessionSwitcher)
         let resolved = measuredWidth > 0
             ? resolveSidebars(width: measuredWidth,
-                              leftExpanded: sidebar.leftExpanded, rightExpanded: sidebar.rightExpanded,
-                              leftOverlayOpen: sidebar.leftOverlayOpen, rightOverlayOpen: sidebar.rightOverlayOpen)
+                              leftExpanded: state.leftExpanded, rightExpanded: state.rightExpanded,
+                              leftOverlayOpen: state.leftOverlayOpen, rightOverlayOpen: state.rightOverlayOpen)
             : EffectiveSidebars(leftVisible: false, rightVisible: false, leftOverlay: false, rightOverlay: false)
         ZStack {
             HStack(spacing: 0) {
@@ -191,7 +209,10 @@ struct WindowContentView<Accessory: View>: View {
             // Edge chevron affordances for the sides that are NOT effectively visible. Tapping one
             // FORCE-OPENS its side in a single tap (CARRIED ITEM 1 — see `openLeftViaChevron`).
             HStack(spacing: 0) {
-                if !resolved.leftVisible {
+                // The left chevron is the one affordance that renders when the side is NOT visible,
+                // so it needs the configuration gate explicitly: a right-only surface has no left
+                // column to open, and an edge chevron that opens nothing is worse than no chevron.
+                if !resolved.leftVisible && sidebars.showsSessionSwitcher {
                     sidebarChevron("chevron.right") {
                         sidebar = openLeftViaChevron(sidebar, width: measuredWidth)
                     }
@@ -245,7 +266,8 @@ struct WindowContentView<Accessory: View>: View {
             onSelect: sidebars.onSelect,
             onOpenDetached: sidebars.onOpenDetached,
             onNewSession: sidebars.onNewSession,
-            rowFilter: sidebars.rowFilter
+            rowFilter: sidebars.rowFilter,
+            onSummonApp: sidebars.onSummonApp
         )
         .padding(.top, topInset)
     }

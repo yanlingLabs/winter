@@ -309,8 +309,9 @@ final class DetachedWindowTests: XCTestCase {
         XCTAssertFalse(controller.adapterForTesting.isChatSession)
     }
 
-    /// `isChat: true` (the shape `AppDelegate.createAndOpenChat()`/`openChat()`'s reopen path pass)
-    /// seeds `adapter.isChatSession` true at construction.
+    /// `isChat: true` (the shape a caller passes to seed a chat window's policy-picker-hidden
+    /// state — today `AppDelegate.openSessionInNewDetachedWindow`'s auto-derivation and
+    /// `handleWindowDetach`'s own derived value) seeds `adapter.isChatSession` true at construction.
     func testIsChatTrueSeedsAdapterIsChatSession() {
         let t = DetachedScriptedTransport()
         let session = SessionModel()

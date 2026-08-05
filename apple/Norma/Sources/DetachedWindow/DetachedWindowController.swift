@@ -86,8 +86,10 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     ///     Dock-minimize label a native titled window shows).
     ///   - isChat: Plan-immunity (2026-07-28 design) — true only for a session pinned at
     ///     `mode:"chat"`. Defaulted `false` so every PRE-EXISTING caller (sidebar +New, ⌘-click
-    ///     detach, "Open Norma App") is unaffected; `AppDelegate.createAndOpenChat()`/`openChat()`'s
-    ///     reopen path are the only callers that ever pass `true`. Seeds `adapter.isChatSession`
+    ///     detach, "Open Norma App") is unaffected; `AppDelegate.openSessionInNewDetachedWindow`'s
+    ///     auto-derivation (`isChatSession(_:in:)`) and `handleWindowDetach`'s own derived value are
+    ///     what pass `true` today — App shell T6 retired `createAndOpenChat()`/`openChat()`'s reopen
+    ///     path, the pair that used to pass an explicit `true` here. Seeds `adapter.isChatSession`
     ///     (see that property's own doc comment for what it gates).
     init(feed: SessionFeed, session: SessionModel, frame: NSRect, title: String, isChat: Bool = false) {
         self.feed = feed
@@ -101,7 +103,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         let feedClient = feed.client
         let sessionDirectory = SessionDirectory(lister: {
             try await feedClient.listSessions().map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs)
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity)
             }
         })
         directory = sessionDirectory
@@ -378,7 +380,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// id unreachable rather than merely tolerated. Flipping the default to `true` would fix that
     /// unreachable case at the cost of breaking the reachable one (every "+ New session" would
     /// briefly show its picker hidden, since the fresh id isn't loaded either). `nonisolated
-    /// static`, no `self`/MainActor dependency, mirrors `AppDelegate.chatSessionToOpen(in:)`'s own
+    /// static`, no `self`/MainActor dependency, mirrors `AppDelegate.isOrbSidebarRow(_:)`'s own
     /// "pure decision helper, directly unit-testable" shape.
     nonisolated static func isChatSession(_ sessionId: String, in rows: [SessionSummary]) -> Bool {
         rows.first(where: { $0.sessionId == sessionId })?.mode == "chat"
@@ -392,9 +394,13 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     ///
     /// working-directories T8: THE app's one code-session create path, and so the one place the
     /// create-time folder picker mounts (the other two create paths are `AppModel.startFreshSession`,
-    /// which resolves the DISPATCH singleton, and `AppDelegate.createAndOpenChat`, `mode:"chat"` —
-    /// neither participates in working directories at all). It no longer hardcodes
-    /// `cwd: NSHomeDirectory()`: the sheet's answer decides, and **"No folder (outputs only)" creates
+    /// which resolves the DISPATCH singleton, and `AppDelegate.newChat`, `mode:"chat"` — neither
+    /// participates in working directories: dispatch has its own home, and chat sessions carry no
+    /// fs tools at all, which is why `newChat()` sends no `cwd` rather than a folder choice). App
+    /// shell T6 (review fix): the original `AppDelegate.createAndOpenChat` this comment used to name
+    /// is retired — "New Chat" still creates, on `newChat()`'s own restored (and cwd-corrected)
+    /// innards; "Chat" browses the app shell's chat landing without creating anything. It no longer
+    /// hardcodes `cwd: NSHomeDirectory()`: the sheet's answer decides, and **"No folder (outputs only)" creates
     /// with NO cwd at all**, which is what makes the daemon write `dirs = []` (T6) rather than
     /// silently adopting the home directory as a writable root. Cancelling the sheet creates nothing.
     func newSession() {

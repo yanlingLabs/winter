@@ -13,10 +13,26 @@ final class SessionDirectory: ObservableObject {
     @Published private(set) var rows: [SessionSummary] = []
 
     private let lister: () async throws -> [SessionSummary]
+    /// app-shell Task 2: the poll's tick, injectable so a test drives it deterministically instead
+    /// of waiting on a real 5s sleep — the same seam shape as `PairingSheetModel`'s `sleepTick`
+    /// (NormaKit), just defaulted to a real `Task.sleep` here since this type has no `now()` clock
+    /// of its own to pair it with.
+    private let sleepTick: @Sendable () async -> Void
+    private var pollTask: Task<Void, Never>?
 
-    init(lister: @escaping () async throws -> [SessionSummary]) {
+    init(
+        lister: @escaping () async throws -> [SessionSummary],
+        sleepTick: @escaping @Sendable () async -> Void = { try? await Task.sleep(for: .seconds(5)) }
+    ) {
         self.lister = lister
+        self.sleepTick = sleepTick
     }
+
+    /// Test-only inspection hook (internal, reachable via `@testable import`), same convention as
+    /// `PairingSheetModel.isStoppedForTesting` — lets an `AppDelegate`-level wiring test
+    /// (`AppShellTests`) prove `summonAppWindow`/`hide()` actually start and stop the poll through
+    /// `AppWindowController.onRenderingActiveChange`, without reaching into `pollTask` itself.
+    var isPollingForTesting: Bool { pollTask != nil }
 
     /// Full re-list, newest-first. Defensive: a thrown/failed `lister` call (daemon hiccup, RPC
     /// timeout) leaves `rows` exactly as they were — a transient failure must never blank the
@@ -41,6 +57,33 @@ final class SessionDirectory: ObservableObject {
         Task { await refresh() }
     }
 
+    /// app-shell Task 2: the visible-gated `session.list` poll — the belt to `handle`'s suspenders
+    /// below. Broadcasts cover every ADDITION (`session_created`) and most in-place edits
+    /// (`session_titled`, `session_activity`), but nothing ever announces a DELETION, so a row
+    /// pruned by the daemon (never happens today, but `refresh()`'s full-replacement fold already
+    /// handles it for free — see that method's own doc) only leaves this directory once something
+    /// re-lists. That something is this poll.
+    ///
+    /// Driven by `AppWindowController.onRenderingActiveChange` (T1's visibility signal): `true`
+    /// while the shell window is visible AND unoccluded (re)starts a loop that waits one
+    /// `sleepTick` then `refresh()`es, repeating for as long as it stays active; `false` cancels any
+    /// outstanding loop outright — no ticks, no `session.list` calls, while the window is hidden.
+    /// Same cancel-then-maybe-restart shape as `PairingSheetModel.startFreshOffer`'s countdown-task
+    /// replacement: a redundant `true` while already active resets the loop rather than stacking a
+    /// second one.
+    func setPolling(active: Bool) {
+        pollTask?.cancel()
+        pollTask = nil
+        guard active else { return }
+        pollTask = Task { [weak self] in
+            while let self, !Task.isCancelled {
+                await self.sleepTick()
+                if Task.isCancelled { return }
+                await self.refresh()
+            }
+        }
+    }
+
     /// Session-lifecycle events broadcast to every authed harness (`session_created`,
     /// `session_titled` — see the daemon's fan-out, spec'd in Task 1/2/3 of this phase). Both kick
     /// a full `refresh()` so the row list itself (new row appearing; sort order) stays correct; a
@@ -61,6 +104,28 @@ final class SessionDirectory: ObservableObject {
             // picks up its row (mode/parentSessionId, already threaded through `lister`'s mapping)
             // and status changes, same cadence as `sessionCreated` above.
             Task { await refresh() }
+        case .sessionActivity(let v):
+            // app-shell Task 2, THE dedupe trap (CLAUDE.md's iOS-streaming lesson, hand-copied
+            // here on purpose): this event is TRANSIENT — stamped with the store's `lastSeq`, never
+            // persisted, and NormaKit's own `route()` already exempts it from seq dedupe before it
+            // ever reaches `feed.onEvent`/this method. Gating this patch on `v.seq` (e.g. dropping
+            // it when `v.seq <= someCursor`) would therefore drop EVERY one of these, forever,
+            // silently — a transient routinely arrives AT or BELOW a caught-up client's cursor. So:
+            // DERIVE, patching the matching row directly off the payload, exactly like the titled
+            // patch above — never compare `v.seq` against anything.
+            //
+            // No `Task { await refresh() }` follow-up (unlike every other case here): activity is
+            // the daemon's own DERIVED read-time state, and `session.list` would answer the exact
+            // same string this event already carries — a refresh here buys nothing but an extra
+            // round trip on top of every attach/detach/backgrounding churn.
+            //
+            // An id this directory doesn't know about yet (arrived before the initial `refresh()`
+            // populated `rows`, or for a session this window never listed) is silently ignored —
+            // never a crash, and never a synthesized row from a payload that carries only
+            // `sessionId`/`activity`, missing every other field `SessionSummary` needs.
+            if let idx = rows.firstIndex(where: { $0.sessionId == v.sessionId }) {
+                rows[idx].activity = v.activity
+            }
         default:
             break // every other event type is irrelevant to the session list itself
         }
@@ -107,5 +172,14 @@ struct SessionSummary: Equatable, Identifiable {
     /// WORKDIR-LESS session, writable only in `$OUTDIR`/`$TMPDIR`/`$MEMDIR`. `cwd` above is the
     /// daemon's alias of `dirs[0]?.path` for a participating row, never an independent fact.
     var dirs: [SessionDirEntry]? = nil
+    /// app-shell Task 2: threaded through from `listSessions()` (NormaKit's own `activity` decode)
+    /// AND kept live by `handle`'s `.sessionActivity` case above — every later app-shell surface
+    /// (chips, tabs, roster, panel) reads this field, never `listSessions()` directly. Defaulted,
+    /// same reasoning as `mode`/`dirs` above.
+    ///
+    /// One of `"active"|"background"|"idle"|"archived"` for a participating (code/cowork) row,
+    /// `nil` for a chat/dispatch row or a daemon predating the field — the SAME absent-is-a-real-
+    /// value discipline `dirs` documents above. Never coerce absence to a displayed value.
+    var activity: String? = nil
     var id: String { sessionId }
 }

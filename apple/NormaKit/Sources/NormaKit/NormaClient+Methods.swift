@@ -343,12 +343,22 @@ extension NormaClient {
     /// `cwd` is the ALIAS of `dirs[0]?.path` for a participating row — the daemon overwrites it at
     /// `session.list` time from the dirs set, because `session.setDirs` deliberately never touches
     /// the stored `cwd` column. Read whichever suits, but never treat them as independent facts.
-    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?, dirs: [SessionDirEntry]?)] {
+    ///
+    /// app-shell Task 2: `activity` appended LAST, same purely-additive precedent as `dirs` above —
+    /// raw-JSON-decoded beside `cwd`/`dirs` rather than through a `Codable` row type this wrapper
+    /// doesn't have. Mirrors `SessionListResult.activity` (methods.ts) field-for-field: one of
+    /// `"active"|"background"|"idle"|"archived"` for a participating (code/cowork) row, `nil` for
+    /// every chat/dispatch row AND for a daemon predating the field — the SAME absent-is-a-real-value
+    /// discipline `dirs` documents above, decoded the identical way (`s["activity"]?.stringValue`:
+    /// `nil` for a missing key or a non-string value, never a guessed default). Kept a plain `String`
+    /// rather than a Swift enum for the same reason `SessionEvent.SessionActivity.activity` is one
+    /// (that struct's own doc comment): a newer daemon's fifth value must decode here, not throw.
+    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?, dirs: [SessionDirEntry]?, activity: String?)] {
         let r = try await request("session.list", params: nil)
         return (r["sessions"]?.arrayValue ?? []).compactMap { s in
             guard let id = s["sessionId"]?.stringValue, let scope = s["scope"]?.stringValue,
                   let created = s["createdAt"]?.intValue, let last = s["lastSeq"]?.intValue else { return nil }
-            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue, decodeSessionDirs(s["dirs"]))
+            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue, decodeSessionDirs(s["dirs"]), s["activity"]?.stringValue)
         }
     }
 
@@ -550,6 +560,40 @@ extension NormaClient {
             throw RpcError(code: -3, message: "invalid result from server for session.setDirs")
         }
         return dirs
+    }
+
+    /// `session.setActivity {sessionId, activity}` (session-activity-hygiene T3) — the WRITE half of
+    /// a session's activity lifecycle, for every Mac surface that offers the `/background` verb.
+    ///
+    /// **Four values and a null, and the null is not "clear everything".** `"background"` and
+    /// `"archived"` SET their own flag, `"unbackground"` clears the background one, and a literal
+    /// `null` is RESUME, which clears the archive flag ONLY (`sessions/set-activity.ts`'s "one verb,
+    /// one flag" ruling — a background worker that gets archived and resumed comes back a background
+    /// worker). `"active"`/`"idle"` are deliberately NOT settable: they are DERIVED facts about
+    /// attachments and work, not assertions a caller may make.
+    ///
+    /// The param is required-but-nullable on the wire (`SessionSetActivityParams.activity` is
+    /// `z.enum([...]).nullable()`, not optional), so this always sends the key — `.null` for resume,
+    /// never an omitted key, the same discipline `setModel`/`setEffort` document.
+    ///
+    /// Returns the POST-WRITE DERIVED state (the daemon re-reads and re-derives rather than echoing
+    /// what was asked for — clearing a session whose detached bash task is still writing reads back
+    /// `"background"`, not `"idle"`), or `nil` for a row that does not participate at all. Same
+    /// absent-is-a-real-value discipline as `listSessions`' own `activity`, and kept a plain `String`
+    /// for the same reason: a newer daemon's fifth value must decode here, not throw.
+    ///
+    /// **Every refusal is a thrown `RpcError` carrying the daemon's own sentence, and that sentence
+    /// is meant to be SHOWN** — the `setDirs` precedent, and the same reasoning: `set-activity.ts`
+    /// writes one per rule and each names the rule it enforced ("activity states apply to code and
+    /// cowork sessions only", "session is archived — resume it first", "stop or background it
+    /// first"). A client-side "couldn't change that" erases exactly the sentence that teaches the
+    /// rule. An unknown session throws NOT_FOUND, same precedent as `setPolicy`/`setModel`.
+    public func setActivity(sessionId: String, activity: String?) async throws -> String? {
+        let r = try await request("session.setActivity", params: obj([
+            "sessionId": .string(sessionId),
+            "activity": activity.map { JSONValue.string($0) } ?? JSONValue.null,
+        ]))
+        return r["activity"]?.stringValue
     }
 
     public func trustDir(path: String) async throws -> Bool {

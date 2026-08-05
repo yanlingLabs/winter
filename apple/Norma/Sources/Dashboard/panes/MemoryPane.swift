@@ -24,9 +24,11 @@ func memoryTypeBadge(_ type: String) -> String {
 // -----------------------------------------------------------------------------------------------
 // MemoryPaneModel — the pane's live view-model (`@MainActor`/`ObservableObject`), same posture as
 // `PluginManagerModel`: owns the fact list + the selected fact's detail/edit state + the audit
-// tail, constructed fresh per dashboard window (`DashboardWindowController.init`) around the raw
-// `NormaClient` — never closures, mirroring how `PluginManagerModel`/`TilesStripModel`/
-// `ShortcutBindingEditorModel` are wired into `DashboardWiring`.
+// tail, constructed around the raw `NormaClient` — never closures, mirroring how
+// `PluginManagerModel`/`TilesStripModel`/`ShortcutBindingEditorModel` are wired into
+// `DashboardWiring`. App shell T7: built once, for the process lifetime, by
+// `AppDelegate.makeDashboardWiring` — replacing `DashboardWindowController.init`'s old "fresh per
+// dashboard window-open" role; harmless, since `MemoryPane.task` already re-seeds it on appearance.
 //
 // Pane v1 scope (design doc / brief): USER scope only — the dashboard has no cwd context to
 // source a project scope from, so every call below hardcodes `scope: "user"`, `cwd: nil`. Create

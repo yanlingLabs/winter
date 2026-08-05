@@ -585,6 +585,33 @@ final class FieldStateAdapter: ObservableObject {
     /// CONFIRM, never a one-click widening of what Norma may write to.
     var onPickWorkingDir: (SessionDirsOp) -> Void = { _ in }
 
+    // MARK: - app-shell T3: the header's `/background` affordance — `session.setActivity`
+
+    /// Wired to `session.setActivity` by whichever surface can service it — the ACTIVITY TARGET
+    /// verbatim (`"background"`, `"unbackground"`, `"archived"`, or `nil` for resume; see
+    /// `NormaClient.setActivity`). The whole vocabulary, not just the one verb T3 offers, so the
+    /// roster verbs landing on the mode landings (T4) reach the same seam rather than a second one.
+    ///
+    /// **OPTIONAL, defaulting `nil`, and that is the visibility gate** — the same opt-in shape
+    /// `SidebarWiring.onSummonApp` uses, for the same reason. Every PRE-EXISTING surface (the orb's
+    /// morph window, every detached window) leaves it nil and therefore renders no affordance, so
+    /// nothing about those windows changes; the shell's host wires it. A non-optional closure with a
+    /// no-op default would instead have grown a button on every surface whose every click did
+    /// nothing — the shown-but-broken shape this codebase keeps closing.
+    var onSetActivity: ((String?) -> Void)?
+
+    /// True while a `session.setActivity` RPC is in flight — the affordance's rows disable on it.
+    /// A SEPARATE flag from the other four for the same reason those are separate from each other.
+    @Published var activityChangeInFlight: Bool = false
+
+    /// The daemon's OWN refusal sentence for the last `session.setActivity` attempt, shown VERBATIM,
+    /// or `nil` when the last attempt succeeded (or none has been made). Same reasoning as
+    /// `dirsRefusal` above, on a state machine with the same discipline: `set-activity.ts` writes one
+    /// sentence per rule ("activity states apply to code and cowork sessions only", "session is
+    /// archived — resume it first", "stop or background it first") and each names the rule it
+    /// enforced. Set by the WIRER, never by this adapter.
+    @Published var activityRefusal: String?
+
     // MARK: - provider-correctness T6: the catalogue-driven model/effort pickers
 
     /// The daemon's synced model catalogue (`sync.config`) — the pickers' ONLY source of slugs and

@@ -152,4 +152,62 @@ final class SidebarLayoutTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(sidebarChevronTopOffset, 12)
         XCTAssertLessThanOrEqual(sidebarChevronTopOffset, 16)
     }
+
+    // MARK: - app-shell T3: the RIGHT-ONLY configuration (`SidebarWiring.showsSessionSwitcher`)
+
+    /// THE COMPATIBILITY BAR, as an identity: the default configuration (`showsSessionSwitcher:
+    /// true` — the orb's morph window and every detached window, neither of which passes the flag)
+    /// hands `resolveSidebars` the state UNCHANGED. Byte-identical inputs ⇒ byte-identical layout;
+    /// nothing about those two surfaces can move because the shell needed a third shape.
+    func testDefaultConfigurationIsTheIdentity() {
+        let states = [
+            SidebarState(leftExpanded: true, rightExpanded: true, leftOverlayOpen: false, rightOverlayOpen: false),
+            SidebarState(leftExpanded: false, rightExpanded: false, leftOverlayOpen: false, rightOverlayOpen: false),
+            SidebarState(leftExpanded: true, rightExpanded: false, leftOverlayOpen: true, rightOverlayOpen: false),
+            SidebarState(leftExpanded: false, rightExpanded: true, leftOverlayOpen: false, rightOverlayOpen: true),
+        ]
+        for state in states {
+            XCTAssertEqual(sidebarStateForConfiguration(state, showsSessionSwitcher: true), state,
+                           "the default configuration must be a no-op on \(state)")
+        }
+    }
+
+    /// The shell's configuration: its own outer nav IS the session switcher, so the inner left
+    /// column is masked off at EVERY width — never inline, never an overlay, at no threshold.
+    func testRightOnlyConfigurationMasksTheLeftAtEveryWidth() {
+        let both = SidebarState(leftExpanded: true, rightExpanded: true, leftOverlayOpen: true, rightOverlayOpen: false)
+        let masked = sidebarStateForConfiguration(both, showsSessionSwitcher: false)
+        XCTAssertFalse(masked.leftExpanded)
+        XCTAssertFalse(masked.leftOverlayOpen)
+        for width: CGFloat in [1400, 1000, 999, 900, 800, 780, 779, 700, 560, 300, 0] {
+            let r = resolveSidebars(width: width,
+                                    leftExpanded: masked.leftExpanded, rightExpanded: masked.rightExpanded,
+                                    leftOverlayOpen: masked.leftOverlayOpen, rightOverlayOpen: masked.rightOverlayOpen)
+            XCTAssertFalse(r.leftVisible, "the left column must never render at width \(width)")
+            XCTAssertFalse(r.leftOverlay, "the left column must never overlay at width \(width)")
+        }
+    }
+
+    /// …and the RIGHT work column keeps its OWN threshold (content 520 + right 260 = 780), rather
+    /// than inheriting the both-fit width it would need if the left were still in the layout. The
+    /// shell's window is 1100 wide by default, so this is the case that actually ships — but the
+    /// 780 boundary is what makes a narrowed shell behave like every other surface.
+    func testRightOnlyConfigurationKeepsTheRightAtItsOwnThreshold() {
+        let masked = sidebarStateForConfiguration(
+            SidebarState(leftExpanded: true, rightExpanded: true, leftOverlayOpen: false, rightOverlayOpen: false),
+            showsSessionSwitcher: false)
+        let atThreshold = resolveSidebars(width: 780,
+                                          leftExpanded: masked.leftExpanded, rightExpanded: masked.rightExpanded,
+                                          leftOverlayOpen: masked.leftOverlayOpen, rightOverlayOpen: masked.rightOverlayOpen)
+        XCTAssertTrue(atThreshold.rightVisible, "the work column fits inline at content+right, with no left to share with")
+        XCTAssertFalse(atThreshold.rightOverlay)
+        // Below it the right is a chevron (never an auto-overlay) and a tap-open still overlays.
+        let below = resolveSidebars(width: 779,
+                                    leftExpanded: masked.leftExpanded, rightExpanded: masked.rightExpanded,
+                                    leftOverlayOpen: masked.leftOverlayOpen, rightOverlayOpen: masked.rightOverlayOpen)
+        XCTAssertFalse(below.rightVisible)
+        XCTAssertTrue(resolveSidebars(width: 779,
+                                      leftExpanded: masked.leftExpanded, rightExpanded: masked.rightExpanded,
+                                      leftOverlayOpen: masked.leftOverlayOpen, rightOverlayOpen: true).rightOverlay)
+    }
 }

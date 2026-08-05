@@ -23,10 +23,17 @@ struct SessionSidebar: View {
     /// struct's own doc comment. Default `{ _ in true }` reproduces every pre-existing behavior
     /// (nothing filtered) for any direct construction that doesn't pass one.
     var rowFilter: (SessionSummary) -> Bool = { _ in true }
+    /// App shell T1: `SidebarWiring.onSummonApp` threaded straight through — see that struct's own
+    /// doc comment. Default `nil` (every detached window) renders NO extra row, so those sidebars
+    /// are unchanged; only the orb's own wiring passes it.
+    var onSummonApp: (() -> Void)? = nil
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 2) {
+                if let onSummonApp {
+                    summonAppRow(onSummonApp)
+                }
                 newSessionRow
                 ForEach(directory.rows.filter(rowFilter)) { row in
                     SessionSidebarRow(
@@ -47,6 +54,25 @@ struct SessionSidebar: View {
         // practice), so opening the sidebar always freshens the list regardless of how the earlier
         // construction-time kick landed.
         .task { await directory.refresh() }
+    }
+
+    /// App shell T1: the orb's door to the one app window (spec §1 — the orb summons the shell).
+    /// Same row anatomy/typography as `newSessionRow` below, sitting above it.
+    private func summonAppRow(_ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "macwindow")
+                    .font(.system(size: 12))
+                Text("Open Norma")
+                    .font(.system(size: 12))
+                Spacer()
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var newSessionRow: some View {

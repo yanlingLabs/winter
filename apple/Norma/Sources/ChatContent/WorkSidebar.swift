@@ -22,6 +22,25 @@ import SwiftUI
 /// behavior for every pre-existing caller (both detached-window construction sites), and
 /// `AppDelegate.boot()`'s own `orb.sidebars` is the one caller that overrides it
 /// (`AppDelegate.isOrbSidebarRow`).
+///
+/// `onSummonApp` (app shell T1): the ORB's summon door to the one app window. Opt-in and default
+/// `nil` — the two detached-window construction sites never pass it, so their sidebars render
+/// exactly as before (the compatibility bar this whole struct is built around). It lives here, on
+/// the wiring `AppDelegate.boot()` already builds, precisely so the orb gains a summon affordance
+/// with NO change to `OrbWindowController` — its internals are untouched by this plan (Global
+/// Constraints), and the orb only ever passes this bundle through to `WindowContentView`.
+/// `showsSessionSwitcher` (app-shell T3): whether this surface wants the LEFT column at all. The
+/// app shell hosts the very same `WindowContentView` inside its own `NavigationSplitView`, whose
+/// sidebar already IS a session switcher — rendering the inner one too would put a second session
+/// list inside the first. Opting out is the RIGHT-ONLY configuration: the work column, its chevron
+/// and its overlay behave exactly as they do everywhere else (at their own content+right threshold,
+/// see `SidebarLayoutTests`), and the left column simply has no existence in the layout.
+///
+/// Default `true`, and the default is the compatibility bar: neither detached-window construction
+/// site nor the orb's passes the flag, so `sidebarStateForConfiguration` is a no-op for them
+/// (`SidebarLayoutTests.testDefaultConfigurationIsTheIdentity` pins that identity) and their
+/// sidebars resolve from byte-identical inputs. Same opt-in shape as `onSummonApp` just above, for
+/// the same reason.
 struct SidebarWiring {
     let directory: SessionDirectory
     let currentSessionId: () -> String?
@@ -29,6 +48,8 @@ struct SidebarWiring {
     let onOpenDetached: (String) -> Void
     let onNewSession: () -> Void
     var rowFilter: (SessionSummary) -> Bool = { _ in true }
+    var onSummonApp: (() -> Void)? = nil
+    var showsSessionSwitcher: Bool = true
 }
 
 /// Pure placement decision behind the relocation gates: the tasks/subagents "work" content is

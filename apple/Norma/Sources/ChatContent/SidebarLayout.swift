@@ -90,6 +90,28 @@ func resolveSidebars(width: CGFloat,
     )
 }
 
+/// app-shell T3: the raw flags a SURFACE's configuration is allowed to express, applied before
+/// `resolveSidebars` ever sees them. Today there is exactly one axis — whether this surface hosts
+/// the LEFT session switcher at all (`SidebarWiring.showsSessionSwitcher`) — and exactly two
+/// configurations: the pre-existing both-sidebars one, and the shell's right-only one.
+///
+/// A MASK rather than a second width engine, deliberately. The right column's own thresholds,
+/// mutual exclusion, tie-breaking and tap-only overlays are all `resolveSidebars`' rules, and a
+/// right-only surface must obey exactly the same ones — feeding it `leftExpanded: false` is what
+/// makes that true by construction instead of by a parallel implementation that drifts. With the
+/// left flags cleared, `resolveSidebars`' below-both-fit branch reduces to "the right shows inline
+/// whenever content+right fits", which is precisely the right-only layout.
+///
+/// `showsSessionSwitcher: true` returns the state UNCHANGED — the identity every pre-existing
+/// surface gets (see `SidebarWiring`'s own doc comment), pinned by `SidebarLayoutTests`.
+func sidebarStateForConfiguration(_ state: SidebarState, showsSessionSwitcher: Bool) -> SidebarState {
+    guard !showsSessionSwitcher else { return state }
+    var out = state
+    out.leftExpanded = false
+    out.leftOverlayOpen = false
+    return out
+}
+
 /// Chevron tap semantics: below both-fit, EXPANDING one side collapses the other (never two);
 /// collapsing a side never force-opens the other. At both-fit widths the sides are independent.
 func toggleLeftSidebar(leftExpanded: Bool, rightExpanded: Bool, width: CGFloat) -> (left: Bool, right: Bool) {
