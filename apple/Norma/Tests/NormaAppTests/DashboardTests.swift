@@ -16,19 +16,25 @@ import NormaKit
 final class DashboardTests: XCTestCase {
     // MARK: - dashboardPaneOrder / defaultDashboardPane (PURE)
 
-    func testDashboardPaneOrderContainsAllTenPanesInSpecOrder() {
+    /// Task 7: `.sessions` is GONE (spec §4 — the funeral; see `AppShellTests.swift`'s own note).
+    /// The remaining nine keep their pre-T7 relative order — this task only REMOVED a pane here,
+    /// never reordered the survivors. `DashboardSurfaceTests.swift` (App shell T7) takes over this
+    /// pane-catalogue coverage once the Mac-group/Devices-group additions land.
+    func testDashboardPaneOrderContainsAllNinePanesInSpecOrder() {
         // Phase 4d-iii Task 2: `.pluginManager` appended at the END, every pre-existing pane keeps
         // its position (see `dashboardPaneOrder`'s own doc comment). Phase 5b Task 5: `.memory`
         // appended the same way. Phase 5c Task 4: `.skills` appended the same way again. BYOK T2:
         // `.provider` appended the same way again. CC-parity phase 3 (Workflows, Track D Task D3):
         // `.workflows` appended the same way again.
-        XCTAssertEqual(dashboardPaneOrder, [.sessions, .daemonStatus, .quota, .trust, .peripheral, .pluginManager, .memory, .skills, .provider, .workflows])
+        XCTAssertEqual(dashboardPaneOrder, [.daemonStatus, .quota, .trust, .peripheral, .pluginManager, .memory, .skills, .provider, .workflows])
         XCTAssertEqual(Set(dashboardPaneOrder), Set(DashboardPane.allCases), "every case must appear exactly once")
     }
 
+    /// Task 7: the default pane follows `.sessions`' death — `.daemonStatus` (the new first entry)
+    /// is now `dashboardPaneOrder.first`, computed exactly as before (never hardcoded).
     func testDefaultDashboardPaneIsFirstInOrder() {
         XCTAssertEqual(defaultDashboardPane, dashboardPaneOrder.first)
-        XCTAssertEqual(defaultDashboardPane, .sessions)
+        XCTAssertEqual(defaultDashboardPane, .daemonStatus)
     }
 
     func testEveryPaneHasATitleAndSystemImage() {
@@ -57,78 +63,10 @@ final class DashboardTests: XCTestCase {
         XCTAssertEqual(f.midY, 600, accuracy: 1)
     }
 
-    // MARK: - sessionDisplayTitle (PURE, SessionsPane.swift)
-
-    func testSessionDisplayTitleFallsBackToNewSessionForNilEmptyOrWhitespace() {
-        XCTAssertEqual(sessionDisplayTitle(nil), "New session")
-        XCTAssertEqual(sessionDisplayTitle(""), "New session")
-        XCTAssertEqual(sessionDisplayTitle("   \n  "), "New session")
-    }
-
-    func testSessionDisplayTitleTrimsAndKeepsARealTitle() {
-        XCTAssertEqual(sessionDisplayTitle("  Fix the parser  "), "Fix the parser")
-        XCTAssertEqual(sessionDisplayTitle("Already trimmed"), "Already trimmed")
-    }
-
-    // MARK: - groupedSessionRows (PURE, SessionsPane.swift — Dispatch Phase 7, task-7 review fix)
-
-    private func row(_ id: String, createdAt: Int, mode: String? = nil, parent: String? = nil) -> SessionSummary {
-        SessionSummary(sessionId: id, title: nil, createdAt: createdAt, scope: "global", cwd: nil, mode: mode, parentSessionId: parent)
-    }
-
-    /// (a) Two parentless sessions keep the directory's newest-first relative order — the naive
-    /// `(parentSessionId ?? sessionId, ...)` sort this replaces ordered them by opaque random hex
-    /// ids instead (the reviewed defect).
-    func testGroupedSessionRowsPreservesNewestFirstForParentlessRows() {
-        // Ids chosen so lexicographic order ("a..." < "z...") CONTRADICTS newest-first — the old
-        // sort-by-id bug would emit ["a_old", "z_new"] here.
-        let rows = [row("z_new", createdAt: 30), row("m_mid", createdAt: 20), row("a_old", createdAt: 10)]
-        XCTAssertEqual(groupedSessionRows(rows).map(\.sessionId), ["z_new", "m_mid", "a_old"])
-    }
-
-    /// (b) A child renders immediately after its parent even when a NEWER unrelated session sits
-    /// between them in the directory's own newest-first order; the unrelated rows keep theirs.
-    func testGroupedSessionRowsLiftsChildDirectlyUnderItsParent() {
-        let rows = [
-            row("newest_unrelated", createdAt: 40),
-            row("child", createdAt: 30, parent: "dispatch"),
-            row("other", createdAt: 20),
-            row("dispatch", createdAt: 10, mode: "dispatch"),
-        ]
-        XCTAssertEqual(groupedSessionRows(rows).map(\.sessionId),
-                       ["newest_unrelated", "other", "dispatch", "child"])
-    }
-
-    /// Siblings keep the directory's own relative order under their shared parent.
-    func testGroupedSessionRowsKeepsSiblingOrder() {
-        let rows = [
-            row("child_new", createdAt: 40, parent: "dispatch"),
-            row("child_old", createdAt: 20, parent: "dispatch"),
-            row("dispatch", createdAt: 10, mode: "dispatch"),
-        ]
-        XCTAssertEqual(groupedSessionRows(rows).map(\.sessionId),
-                       ["dispatch", "child_new", "child_old"])
-    }
-
-    /// An ORPHAN child (parentSessionId set, but that parent isn't in the list) keeps its natural
-    /// directory position — never dropped, never floated to the top or bottom.
-    func testGroupedSessionRowsKeepsOrphanChildAtNaturalPosition() {
-        let rows = [
-            row("newest", createdAt: 30),
-            row("orphan", createdAt: 20, parent: "gone"),
-            row("oldest", createdAt: 10),
-        ]
-        XCTAssertEqual(groupedSessionRows(rows).map(\.sessionId), ["newest", "orphan", "oldest"])
-    }
-
-    /// Defensive: no row may ever be dropped, whatever the parent topology (incl. a malformed
-    /// parent cycle) — the pane's regroup degrades to natural order, never to missing rows.
-    func testGroupedSessionRowsNeverDropsRowsEvenOnParentCycle() {
-        let rows = [row("a", createdAt: 30, parent: "b"), row("b", createdAt: 20, parent: "a"), row("c", createdAt: 10)]
-        let grouped = groupedSessionRows(rows)
-        XCTAssertEqual(Set(grouped.map(\.sessionId)), ["a", "b", "c"])
-        XCTAssertEqual(grouped.count, 3)
-    }
+    // Task 7: the `sessionDisplayTitle`/`groupedSessionRows` tests that used to live here moved
+    // (and, for `groupedSessionRows`, died) with `SessionsPane.swift` — see `AppShellTests.swift`'s
+    // "SessionsPane funeral" section for the arithmetic and `sessionDisplayTitle`'s two surviving
+    // tests' new home.
 
     // MARK: - formatDaemonStatus (PURE, DaemonStatusPane.swift)
 

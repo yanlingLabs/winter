@@ -6,7 +6,11 @@ import SwiftUI
 /// future pane — Phase 4's `PluginManagerView`, per spec §B's "the same mountable-pane contract"
 /// — is a plain new case, never a renumbering of existing ones.
 enum DashboardPane: String, CaseIterable, Identifiable, Equatable {
-    case sessions, daemonStatus, quota, trust, peripheral, pluginManager, memory, skills, provider, workflows
+    // Task 7: `.sessions` DIED here (spec §4 — "redundant with the shell's own lists") — the
+    // Dashboard's Sessions pane and its file (`Dashboard/panes/SessionsPane.swift`) are deleted
+    // outright; `groupedSessionRows` died with it (no other consumer), `sessionDisplayTitle`
+    // survived (moved to `AppShell/ShellNavigation.swift` — see that file's own doc comment).
+    case daemonStatus, quota, trust, peripheral, pluginManager, memory, skills, provider, workflows
     var id: String { rawValue }
 }
 
@@ -18,16 +22,15 @@ enum DashboardPane: String, CaseIterable, Identifiable, Equatable {
 /// END the same way. Phase 5c Task 4: `.skills` appended at the END the same way again. BYOK T2:
 /// `.provider` appended at the END the same way again. CC-parity phase 3 (Workflows, Track D Task
 /// D3): `.workflows` appended at the END the same way again.
-let dashboardPaneOrder: [DashboardPane] = [.sessions, .daemonStatus, .quota, .trust, .peripheral, .pluginManager, .memory, .skills, .provider, .workflows]
+let dashboardPaneOrder: [DashboardPane] = [.daemonStatus, .quota, .trust, .peripheral, .pluginManager, .memory, .skills, .provider, .workflows]
 
 /// The window's default/initial selection — always the FIRST pane in `dashboardPaneOrder`, so a
 /// pane appended to the end of that list never silently becomes the landing pane just by being
 /// added.
-let defaultDashboardPane: DashboardPane = dashboardPaneOrder.first ?? .sessions
+let defaultDashboardPane: DashboardPane = dashboardPaneOrder.first ?? .daemonStatus
 
 func dashboardPaneTitle(_ pane: DashboardPane) -> String {
     switch pane {
-    case .sessions: return "Sessions"
     case .daemonStatus: return "Daemon Status"
     case .quota: return "Quota"
     case .trust: return "Trust"
@@ -42,7 +45,6 @@ func dashboardPaneTitle(_ pane: DashboardPane) -> String {
 
 func dashboardPaneSystemImage(_ pane: DashboardPane) -> String {
     switch pane {
-    case .sessions: return "bubble.left.and.bubble.right"
     case .daemonStatus: return "server.rack"
     case .quota: return "gauge.with.needle"
     case .trust: return "checkmark.shield"
@@ -189,8 +191,6 @@ struct DashboardView: View {
     @ViewBuilder
     private var detailView: some View {
         switch selectionModel.selection {
-        case .sessions:
-            SessionsPane(directory: wiring.directory, onOpenSessionDetached: wiring.onOpenSessionDetached)
         case .daemonStatus:
             DaemonStatusPane(fetch: wiring.daemonStatus)
         case .quota:

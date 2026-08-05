@@ -1031,16 +1031,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // see `newChat()`'s own doc comment for the restored shape.
             openNewChat: { [weak self] in self?.newChat() },
             openChat: { [weak self] in self?.summonAppWindow(navigatingTo: .mode(.chat)) },
-            // "Dashboard…"/"Manage Plugins…" both land on `.dashboard` — the Dashboard SURFACE
-            // itself is T7's; until then this shows the T1 placeholder (fine mid-branch). Neither
-            // item constructs the real `DashboardWindowController` any more — `openPluginManager()`
-            // (a thin `openDashboard(initialPane: .pluginManager)` wrapper whose only caller was
-            // this menu item) is retired below. `openDashboard(initialPane:)` itself is NOT retired:
-            // the first-run disclosure sheet's "Set up API key" button still calls it directly
-            // (`initialPane: .provider`, wired above in this method), so the real Dashboard window
-            // stays reachable outside the menu.
-            openDashboard: { [weak self] in self?.summonAppWindow(navigatingTo: .dashboard) },
-            openPluginManager: { [weak self] in self?.summonAppWindow(navigatingTo: .dashboard) },
+            // App shell T7: "Dashboard…" and "Manage Plugins…" now DIFFER — the real
+            // `DashboardSurface` ships this task, and `ShellDestination.dashboard` gained an
+            // optional pane payload (`ShellNavigation.swift`) specifically so these two entries can
+            // be told apart, which T6 could not yet do. "Dashboard…" is a PLAIN open (`pane: nil` —
+            // preserves whatever pane the surface is already showing); "Manage Plugins…" is a
+            // TARGETED deep link straight to `.pluginManager` — the direct descendant of
+            // `openPluginManager()`'s old `openDashboard(initialPane: .pluginManager)` wrapper,
+            // which this task retires along with `DashboardWindowController` itself.
+            openDashboard: { [weak self] in self?.summonAppWindow(navigatingTo: .dashboard(pane: nil)) },
+            openPluginManager: { [weak self] in self?.summonAppWindow(navigatingTo: .dashboard(pane: .pluginManager)) },
             openPairDevice: { [weak self] in self?.openPairDevice() },
             openPairedDevices: { [weak self] in self?.openPairedDevices() },
             loginItemController: loginItem,

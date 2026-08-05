@@ -66,10 +66,27 @@ enum SessionMode: String, CaseIterable, Identifiable, Sendable {
 /// - `.dashboard` — the gear affordance's surface (Task 7)
 ///
 /// `Hashable` because the sidebar's `List(selection:)` tags its rows with these values.
+///
+/// Task 7: `.dashboard` carries an OPTIONAL `DashboardPane` payload — additive to T1's original
+/// bare `case dashboard`. `nil` is a PLAIN navigation (preserve whatever pane the surface is
+/// already showing — the `AppWindowController.summon(navigatingTo:)`-owned "targeted vs plain"
+/// distinction this mirrors is the exact `openDashboard(initialPane:)` lesson the old
+/// `DashboardWindowController` learned the hard way: retargeting unconditionally on a plain
+/// refocus discarded the user's current pane). A non-nil pane is a DEEP LINK — "Manage Plugins…"
+/// is the one production example (`.dashboard(pane: .pluginManager)`), differentiating it from
+/// the plain "Dashboard…" entry (`.dashboard(pane: nil)`) for the first time; T6 shipped both
+/// landing on the same bare `.dashboard` because this payload didn't exist yet.
+///
+/// Every PRE-EXISTING producer of the old bare `.dashboard` becomes `.dashboard(pane: nil)` —
+/// mechanically additive, never a behavior change for those call sites (the sidebar's gear button,
+/// `AppShellTests`' pure-destination fixtures). `case .dashboard:` (no binding) still compiles
+/// and matches regardless of payload — Swift's associated-value wildcard — so every switch that
+/// only needed the CASE (title/glyph lookups) needed no change at all; only equality/array-literal
+/// call sites (which need a concrete value, not a pattern) needed the explicit `(pane: nil)`.
 enum ShellDestination: Hashable, Sendable {
     case mode(SessionMode)
     case session(String)
-    case dashboard
+    case dashboard(pane: DashboardPane?)
 }
 
 /// Where a freshly opened shell lands — the FIRST row in `SessionMode.sidebarOrder`, computed
@@ -134,13 +151,28 @@ func excludingArchived(_ rows: [SessionSummary]) -> [SessionSummary] {
 /// `.session` still fall through here, but ONLY when the shell was built WITHOUT a host
 /// (`AppWindowController.host` nil — the pure window tests) — so this says what is actually true of
 /// that shell (no session can attach without one) rather than the stale "surface lands later"
-/// promise a mode that has since shipped would be telling. `.dashboard` is the one destination that
-/// is still genuinely pending (Task 7).
+/// promise a mode that has since shipped would be telling. Task 7: `.dashboard` now ships too
+/// (`DashboardSurface`, wired unconditionally in `ShellRootView.detail` — it needs no host, only
+/// `AppWindowController.dashboardWiring`), so its own case here is reached ONLY by a shell built
+/// WITHOUT that wiring (the same pure-construction test posture as the host-less `.mode`/`.session`
+/// cases above it) — never in production.
 func shellLandingPlaceholderText(_ destination: ShellDestination) -> String {
     switch destination {
     case .mode, .session: return "This shell has no session host."
-    case .dashboard: return "The Dashboard surface lands later in this plan."
+    case .dashboard: return "The Dashboard surface has no wiring."
     }
+}
+
+/// "" / whitespace-only / nil → "New session" (the placeholder the daemon hasn't titled yet
+/// exists as); otherwise the trimmed title verbatim. Task 7: moved here from the now-deleted
+/// `SessionsPane.swift` (the Dashboard's Sessions pane died — redundant with the shell's own
+/// lists, spec §4) — this helper itself stayed alive and widely used (`ShellSidebar`'s Recents
+/// list, `ChatLandingView`/`ModeLandingView`'s rows, `ShellSessionHost`'s hop-away banner), so it
+/// moved to the shared pure-helpers home every one of those files already reads (`excludingArchived`
+/// above), rather than dying with its old host view.
+func sessionDisplayTitle(_ title: String?) -> String {
+    let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return trimmed.isEmpty ? "New session" : trimmed
 }
 
 /// The shell's navigation state — ONE instance per `AppWindowController`, for the process

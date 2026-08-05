@@ -54,23 +54,33 @@ final class AppShellTests: XCTestCase {
 
     func testNavigateRetargetsTheDestination() {
         let nav = ShellNavigationModel()
-        nav.navigate(to: .dashboard)
-        XCTAssertEqual(nav.destination, .dashboard)
+        nav.navigate(to: .dashboard(pane: nil))
+        XCTAssertEqual(nav.destination, .dashboard(pane: nil))
         nav.navigate(to: .session("s_1"))
         XCTAssertEqual(nav.destination, .session("s_1"))
     }
 
+    /// Task 7: a `.dashboard` destination carrying a PANE payload is still a `.dashboard` for
+    /// every purpose that doesn't care which pane — but it is NOT equal to `.dashboard(pane: nil)`,
+    /// which is exactly the mechanism the deep-link differentiation (`.pluginManager` vs a plain
+    /// open) relies on.
+    func testDashboardDestinationEqualityIsPaneSensitive() {
+        XCTAssertNotEqual(ShellDestination.dashboard(pane: nil), .dashboard(pane: .pluginManager))
+        XCTAssertEqual(ShellDestination.dashboard(pane: .pluginManager), .dashboard(pane: .pluginManager))
+    }
+
     /// The sidebar highlights a MODE row only for a mode destination — a recents entry or the
     /// Dashboard leaves all four rows unhighlighted (iOS's own nav: the gear is not a fifth
-    /// session-like row).
+    /// session-like row). Holds for EVERY pane payload, not just the plain (`nil`) case.
     func testSelectedSidebarModeIsNilForSessionAndDashboardDestinations() {
         XCTAssertEqual(selectedSidebarMode(for: .mode(.dispatch)), .dispatch)
         XCTAssertNil(selectedSidebarMode(for: .session("s_1")))
-        XCTAssertNil(selectedSidebarMode(for: .dashboard))
+        XCTAssertNil(selectedSidebarMode(for: .dashboard(pane: nil)))
+        XCTAssertNil(selectedSidebarMode(for: .dashboard(pane: .pluginManager)))
     }
 
     func testEveryDestinationHasATitleAndSystemImage() {
-        let destinations: [ShellDestination] = SessionMode.sidebarOrder.map { .mode($0) } + [.session("s_1"), .dashboard]
+        let destinations: [ShellDestination] = SessionMode.sidebarOrder.map { .mode($0) } + [.session("s_1"), .dashboard(pane: nil), .dashboard(pane: .pluginManager)]
         for destination in destinations {
             XCTAssertFalse(shellDestinationTitle(destination).isEmpty, "\(destination) needs a non-empty title")
             XCTAssertFalse(shellDestinationSystemImage(destination).isEmpty, "\(destination) needs a non-empty SF Symbol name")
@@ -123,6 +133,26 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(f.width, 1440, accuracy: 1)
         XCTAssertEqual(f.height, 900, accuracy: 1)
         XCTAssertTrue(target.contains(f), "a clamped frame must sit entirely inside the target display")
+    }
+
+    // MARK: - sessionDisplayTitle (PURE, moved from `Dashboard/panes/SessionsPane.swift` — Task 7's
+    // SessionsPane funeral. The pane VIEW died (spec §4: redundant with the shell's own lists) but
+    // this helper stayed alive — `ShellSidebar`'s Recents list, `ChatLandingView`/`ModeLandingView`'s
+    // rows, and `ShellSessionHost`'s hop-away banner all still call it — so it moved to
+    // `AppShell/ShellNavigation.swift` (the shared pure-helpers home those files already read) and
+    // its tests moved here, unchanged in substance (fixture-mechanics only). `groupedSessionRows`,
+    // `SessionsPane.swift`'s OTHER pure helper, had no other consumer and died with the pane — its
+    // five tests are gone, not moved (the funeral, not a move).
+
+    func testSessionDisplayTitleFallsBackToNewSessionForNilEmptyOrWhitespace() {
+        XCTAssertEqual(sessionDisplayTitle(nil), "New session")
+        XCTAssertEqual(sessionDisplayTitle(""), "New session")
+        XCTAssertEqual(sessionDisplayTitle("   \n  "), "New session")
+    }
+
+    func testSessionDisplayTitleTrimsAndKeepsARealTitle() {
+        XCTAssertEqual(sessionDisplayTitle("  Fix the parser  "), "Fix the parser")
+        XCTAssertEqual(sessionDisplayTitle("Already trimmed"), "Already trimmed")
     }
 
     // MARK: - shellRenderingActive (PURE) — hidden-window hygiene
@@ -219,11 +249,11 @@ final class AppShellTests: XCTestCase {
         controller.summon()
         XCTAssertEqual(controller.navigation.destination, defaultShellDestination)
 
-        controller.summon(navigatingTo: .dashboard)
-        XCTAssertEqual(controller.navigation.destination, .dashboard)
+        controller.summon(navigatingTo: .dashboard(pane: nil))
+        XCTAssertEqual(controller.navigation.destination, .dashboard(pane: nil))
 
         controller.summon()
-        XCTAssertEqual(controller.navigation.destination, .dashboard, "a plain re-summon must preserve the user's current destination")
+        XCTAssertEqual(controller.navigation.destination, .dashboard(pane: nil), "a plain re-summon must preserve the user's current destination")
     }
 
     // MARK: - Hidden-window hygiene (wiring)
@@ -306,7 +336,7 @@ final class AppShellTests: XCTestCase {
     func testHidingTheShellKeepsTheSingletonRefAndItsState() {
         let delegate = AppDelegate()
         XCTAssertTrue(delegate.boot())
-        delegate.summonAppWindow(navigatingTo: .dashboard)
+        delegate.summonAppWindow(navigatingTo: .dashboard(pane: nil))
         guard let first = delegate.appWindow else {
             return XCTFail("summonAppWindow() must construct a controller when booted")
         }
@@ -316,7 +346,7 @@ final class AppShellTests: XCTestCase {
 
         delegate.summonAppWindow()
         XCTAssertTrue(delegate.appWindow === first)
-        XCTAssertEqual(first.navigation.destination, .dashboard)
+        XCTAssertEqual(first.navigation.destination, .dashboard(pane: nil))
         delegate.appWindow?.hide()
     }
 
@@ -503,11 +533,11 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(delegate.detachedWindows.isEmpty)
     }
 
-    /// "Dashboard…" summons the shell onto `.dashboard` — the Dashboard SURFACE itself is T7's;
-    /// until then this lands on the T1 placeholder. The real `DashboardWindowController` is never
-    /// constructed by this menu item any more (it survives ONLY through the first-run disclosure
-    /// sheet's "Set up API key" button, which calls `openDashboard(initialPane:)` directly).
-    func testDashboardMenuItemSummonsToTheDashboardDestination() {
+    /// "Dashboard…" summons the shell onto a PLAIN `.dashboard(pane: nil)` — App shell T7: the real
+    /// `DashboardSurface` ships this task; a plain open preserves whatever pane is already showing
+    /// (or lands on `defaultDashboardPane` when freshly opened). The real `DashboardWindowController`
+    /// is gone (T7's funeral) — this menu item never constructed it once T6 retargeted it anyway.
+    func testDashboardMenuItemSummonsToThePlainDashboardDestination() {
         let delegate = AppDelegate()
         XCTAssertTrue(delegate.boot())
         guard let item = delegate.menuBar?.dashboardItem else {
@@ -516,17 +546,17 @@ final class AppShellTests: XCTestCase {
 
         NSApp.sendAction(item.action!, to: item.target, from: item)
 
-        XCTAssertNotNil(delegate.appWindow, "the menu item must summon the shell, not spawn the Dashboard window")
-        XCTAssertEqual(delegate.appWindow?.navigation.destination, .dashboard)
-        XCTAssertNil(delegate.dashboardWindow, "the real Dashboard window must never be constructed by this menu item any more")
+        XCTAssertNotNil(delegate.appWindow, "the menu item must summon the shell, not spawn a Dashboard window")
+        XCTAssertEqual(delegate.appWindow?.navigation.destination, .dashboard(pane: nil))
         delegate.appWindow?.hide()
     }
 
-    /// "Manage Plugins…" lands on the SAME `.dashboard` destination as "Dashboard…" for now — T7
-    /// refines it to the plugin-manager pane specifically. `openPluginManager()` (a thin
-    /// `openDashboard(initialPane: .pluginManager)` wrapper whose only caller was this menu item) is
-    /// retired.
-    func testManagePluginsMenuItemSummonsToTheDashboardDestination() {
+    /// "Manage Plugins…" is now a TARGETED deep link to `.pluginManager` specifically — T7
+    /// differentiates it from the plain "Dashboard…" entry for the first time (T6 shipped both
+    /// landing on the same bare `.dashboard`, before the pane payload existed).
+    /// `openPluginManager()` (T6's thin `openDashboard(initialPane: .pluginManager)` wrapper) is
+    /// long gone; this item now goes straight through `summonAppWindow(navigatingTo:)`.
+    func testManagePluginsMenuItemSummonsToThePluginManagerPane() {
         let delegate = AppDelegate()
         XCTAssertTrue(delegate.boot())
         guard let item = delegate.menuBar?.pluginManagerItem else {
@@ -535,9 +565,8 @@ final class AppShellTests: XCTestCase {
 
         NSApp.sendAction(item.action!, to: item.target, from: item)
 
-        XCTAssertNotNil(delegate.appWindow, "the menu item must summon the shell, not spawn the Dashboard window")
-        XCTAssertEqual(delegate.appWindow?.navigation.destination, .dashboard)
-        XCTAssertNil(delegate.dashboardWindow, "the real Dashboard window must never be constructed by this menu item any more")
+        XCTAssertNotNil(delegate.appWindow, "the menu item must summon the shell, not spawn a Dashboard window")
+        XCTAssertEqual(delegate.appWindow?.navigation.destination, .dashboard(pane: .pluginManager))
         delegate.appWindow?.hide()
     }
 

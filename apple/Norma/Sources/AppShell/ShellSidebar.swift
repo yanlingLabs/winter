@@ -106,6 +106,16 @@ struct ShellSidebar: View {
         )
     }
 
+    /// Task 7: the gear's own highlight — true for ANY `.dashboard` destination regardless of
+    /// which pane's payload it carries (`case .dashboard:` matches every payload, the associated-
+    /// value wildcard), so drilling into a specific pane (a deep link, or a click inside
+    /// `DashboardSurface`'s own sidebar) keeps the gear lit exactly like the plain "Dashboard…"
+    /// entry does.
+    private var isDashboardDestination: Bool {
+        if case .dashboard = nav.destination { return true }
+        return false
+    }
+
     var body: some View {
         List(selection: selection) {
             Section {
@@ -185,7 +195,13 @@ struct ShellSidebar: View {
             Divider()
             HStack(spacing: 6) {
                 Button {
-                    nav.navigate(to: .dashboard)
+                    // Task 7: a PLAIN navigation (`pane: nil`) — preserves whichever pane
+                    // `DashboardSurface`'s own `DashboardSelectionModel` is already showing (that
+                    // model is the one persistent source of truth for "current pane"; it is never
+                    // touched by a nil-payload navigation — see `AppWindowController.summon`'s own
+                    // doc comment). A fresh app window still lands on `defaultDashboardPane` (the
+                    // selection model's own init default).
+                    nav.navigate(to: .dashboard(pane: nil))
                 } label: {
                     Image(systemName: "gearshape")
                         .font(.body)
@@ -193,7 +209,7 @@ struct ShellSidebar: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(nav.destination == .dashboard ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                .foregroundStyle(isDashboardDestination ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                 .help("Dashboard")
                 .accessibilityLabel("Dashboard")
                 Spacer(minLength: 0)
