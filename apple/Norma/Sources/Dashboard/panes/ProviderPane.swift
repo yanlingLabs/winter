@@ -36,9 +36,11 @@ Mac's Keychain — Norma keeps no copy.
 // -----------------------------------------------------------------------------------------------
 // ProviderPaneModel — the pane's live view-model (`@MainActor`/`ObservableObject`), modeled
 // directly on `MemoryPaneModel` (freshest reviewed precedent): owns the current-provider status
-// read + the BYO-key form's save flow, constructed fresh per dashboard window
-// (`DashboardWindowController.init`) around the raw `NormaClient` — never closures for the RPCs
-// themselves (mirrors `MemoryPaneModel`/`SkillsPaneModel`).
+// read + the BYO-key form's save flow, constructed around the raw `NormaClient` — never closures
+// for the RPCs themselves (mirrors `MemoryPaneModel`/`SkillsPaneModel`). App shell T7: built once,
+// for the process lifetime, by `AppDelegate.makeDashboardWiring` (alongside `ShellSessionHost`,
+// `summonAppWindow`'s construction) — replacing `DashboardWindowController.init`'s old "fresh per
+// dashboard window-open" role; harmless, since this model already re-seeds itself on `.task`.
 //
 // `onConfigured` is the ONE closure this model takes beyond `client` (same "extra closure baked in
 // at construction" posture as `ShortcutBindingEditorModel`'s `shortcutRegistry`) — fired after a

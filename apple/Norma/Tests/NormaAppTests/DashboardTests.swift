@@ -3,70 +3,29 @@ import AppKit
 import NormaKit
 @testable import Norma
 
-/// Task 5 (2f-ii): the Dashboard window's PURE pieces — pane order/default selection, window
-/// centering geometry, and every pane's formatting helper (daemon status, quota, trust sort,
-/// peripheral holder/age, session title fallback). SwiftUI bodies (`DashboardView`/`*Pane`) are
-/// deliberately NOT exercised here, per this codebase's convention (see `SessionSidebar`/
-/// `WorkSidebar` — never unit-tested, only their pure helpers are).
-///
-/// A `DashboardWindowController`/`AppDelegate.openDashboard()` construction+singleton smoke test
-/// closes out the file, mirroring `DetachedWindowTests`/`StandaloneWindowTests`'s own wiring-level
-/// coverage for the other window-spawn paths.
+/// Task 5 (2f-ii): originally the Dashboard WINDOW's pure pieces + a construction/singleton smoke
+/// test. Task 7: the window is gone (`DashboardWindowController`/`Dashboard/DashboardView.swift`
+/// deleted — the Dashboard is a shell destination now, `AppShell/DashboardSurface.swift`) — this
+/// file's remaining job is narrower: every individual PANE's formatting helper (daemon status,
+/// quota, trust sort, peripheral holder/age, memory/skill/provider/workflow badges). SwiftUI
+/// bodies (`*Pane`) are deliberately NOT exercised here, per this codebase's convention (see
+/// `SessionSidebar`/`WorkSidebar` — never unit-tested, only their pure helpers are). The
+/// pane-CATALOGUE coverage (order, groups, selection, deep links) moved to
+/// `DashboardSurfaceTests.swift` alongside its new subject file.
 @MainActor
 final class DashboardTests: XCTestCase {
-    // MARK: - dashboardPaneOrder / defaultDashboardPane (PURE)
-
-    /// Task 7: `.sessions` is GONE (spec §4 — the funeral; see `AppShellTests.swift`'s own note).
-    /// The remaining nine keep their pre-T7 relative order — this task only REMOVED a pane here,
-    /// never reordered the survivors. `DashboardSurfaceTests.swift` (App shell T7) takes over this
-    /// pane-catalogue coverage once the Mac-group/Devices-group additions land.
-    func testDashboardPaneOrderContainsAllNinePanesInSpecOrder() {
-        // Phase 4d-iii Task 2: `.pluginManager` appended at the END, every pre-existing pane keeps
-        // its position (see `dashboardPaneOrder`'s own doc comment). Phase 5b Task 5: `.memory`
-        // appended the same way. Phase 5c Task 4: `.skills` appended the same way again. BYOK T2:
-        // `.provider` appended the same way again. CC-parity phase 3 (Workflows, Track D Task D3):
-        // `.workflows` appended the same way again.
-        XCTAssertEqual(dashboardPaneOrder, [.daemonStatus, .quota, .trust, .peripheral, .pluginManager, .memory, .skills, .provider, .workflows])
-        XCTAssertEqual(Set(dashboardPaneOrder), Set(DashboardPane.allCases), "every case must appear exactly once")
-    }
-
-    /// Task 7: the default pane follows `.sessions`' death — `.daemonStatus` (the new first entry)
-    /// is now `dashboardPaneOrder.first`, computed exactly as before (never hardcoded).
-    func testDefaultDashboardPaneIsFirstInOrder() {
-        XCTAssertEqual(defaultDashboardPane, dashboardPaneOrder.first)
-        XCTAssertEqual(defaultDashboardPane, .daemonStatus)
-    }
-
-    func testEveryPaneHasATitleAndSystemImage() {
-        for pane in dashboardPaneOrder {
-            XCTAssertFalse(dashboardPaneTitle(pane).isEmpty, "\(pane) needs a non-empty title")
-            XCTAssertFalse(dashboardPaneSystemImage(pane).isEmpty, "\(pane) needs a non-empty SF Symbol name")
-        }
-    }
-
-    // MARK: - centeredDashboardFrame (PURE)
-
-    func testCenteredDashboardFrame() {
-        let f = centeredDashboardFrame(visibleFrame: NSRect(x: 0, y: 0, width: 2000, height: 1200))
-        XCTAssertEqual(f.size, dashboardDefaultSize)
-        XCTAssertEqual(f.midX, 1000, accuracy: 1)
-        XCTAssertEqual(f.midY, 600, accuracy: 1)
-    }
-
-    /// A non-origin visible frame (secondary monitor / menu-bar inset) must still center correctly
-    /// — proves the math uses midX/midY of the given rect, not a bare width/height halving from
-    /// (0, 0). Mirrors `StandaloneWindowTests.testCenteredStandaloneFrameOffsetVisibleFrame`.
-    func testCenteredDashboardFrameOffsetVisibleFrame() {
-        let f = centeredDashboardFrame(visibleFrame: NSRect(x: 500, y: 100, width: 1600, height: 1000))
-        XCTAssertEqual(f.size, dashboardDefaultSize)
-        XCTAssertEqual(f.midX, 1300, accuracy: 1)
-        XCTAssertEqual(f.midY, 600, accuracy: 1)
-    }
-
-    // Task 7: the `sessionDisplayTitle`/`groupedSessionRows` tests that used to live here moved
-    // (and, for `groupedSessionRows`, died) with `SessionsPane.swift` — see `AppShellTests.swift`'s
-    // "SessionsPane funeral" section for the arithmetic and `sessionDisplayTitle`'s two surviving
-    // tests' new home.
+    // Task 7: `dashboardPaneOrder`/`defaultDashboardPane`/`dashboardPaneTitle`/
+    // `dashboardPaneSystemImage`/`DashboardSelectionModel` and their tests all MOVED to
+    // `DashboardSurfaceTests.swift` — their subject file (`Dashboard/DashboardView.swift`) was
+    // deleted outright, replaced by `AppShell/DashboardSurface.swift`. `centeredDashboardFrame`/
+    // `dashboardDefaultSize` and their two tests DIED (not moved) along with
+    // `Dashboard/DashboardWindowController.swift` — there is no more Dashboard WINDOW to center;
+    // `AppWindowController`'s own `centeredAppWindowFrame` (already tested in `AppShellTests.swift`)
+    // covers the shell the Dashboard now lives inside. `SessionsPane.swift`'s
+    // `sessionDisplayTitle`/`groupedSessionRows` tests left this file in Task 7's first commit — see
+    // `AppShellTests.swift`'s own note. `DashboardWindowController` construction +
+    // `AppDelegate.openDashboard()` singleton wiring — nine tests total — died with the controller
+    // itself (funeral arithmetic in the task report).
 
     // MARK: - formatDaemonStatus (PURE, DaemonStatusPane.swift)
 
@@ -296,170 +255,6 @@ final class DashboardTests: XCTestCase {
         XCTAssertTrue(mergeWorkflowRuns(snapshot: [], live: [:]).isEmpty)
     }
 
-    // MARK: - DashboardSelectionModel (PURE — Phase 4d-cleanup Task 3 fix 1)
-
-    func testDashboardSelectionModelDefaultsToDefaultDashboardPane() {
-        let model = DashboardSelectionModel()
-        XCTAssertEqual(model.selection, defaultDashboardPane)
-    }
-
-    func testDashboardSelectionModelInitialPaneOverridesTheDefault() {
-        let model = DashboardSelectionModel(initialPane: .pluginManager)
-        XCTAssertEqual(model.selection, .pluginManager)
-    }
-
-    func testDashboardSelectionModelSelectionIsSettable() {
-        let model = DashboardSelectionModel()
-        model.selection = .trust
-        XCTAssertEqual(model.selection, .trust)
-    }
-
-    // MARK: - DashboardWindowController construction (wiring smoke test)
-
-    func testShowCreatesNativeChromeWindowAtFrame() {
-        let client = NormaClientTestFactory.make()
-        let directory = SessionDirectory(lister: { [] })
-        let peripheral = PeripheralProvider(client: client)
-        let helperClient = HelperClient()
-        let frame = NSRect(x: 100, y: 80, width: 800, height: 560)
-        let controller = DashboardWindowController(client: client, directory: directory, peripheral: peripheral, helperClient: helperClient, onOpenSessionDetached: { _ in }, frame: frame)
-        defer { controller.close() }
-
-        controller.show()
-
-        guard let window = controller.windowForTesting else {
-            XCTFail("DashboardWindowController must construct a real window")
-            return
-        }
-        XCTAssertTrue(window.styleMask.contains(.titled))
-        XCTAssertTrue(window.styleMask.contains(.miniaturizable))
-        XCTAssertTrue(window.styleMask.contains(.resizable))
-        XCTAssertTrue(window.styleMask.contains(.closable))
-        XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
-        XCTAssertEqual(window.frame, frame)
-        XCTAssertEqual(window.title, "Dashboard")
-    }
-
-    /// `selectPane(_:)` retargets the controller's `DashboardSelectionModel` — the mechanism the
-    /// refocus-branch fix below relies on.
-    func testSelectPaneUpdatesTheControllersSelectionModel() {
-        let client = NormaClientTestFactory.make()
-        let directory = SessionDirectory(lister: { [] })
-        let peripheral = PeripheralProvider(client: client)
-        let helperClient = HelperClient()
-        let frame = NSRect(x: 100, y: 80, width: 800, height: 560)
-        let controller = DashboardWindowController(client: client, directory: directory, peripheral: peripheral, helperClient: helperClient, onOpenSessionDetached: { _ in }, frame: frame)
-        defer { controller.close() }
-
-        XCTAssertEqual(controller.selectionForTesting, defaultDashboardPane)
-        controller.selectPane(.pluginManager)
-        XCTAssertEqual(controller.selectionForTesting, .pluginManager)
-    }
-
-    /// A fresh window still seeds its selection model with `initialPane` at construction (the
-    /// non-refocus half of the fix — unchanged behavior, kept as regression coverage).
-    func testFreshWindowSeedsSelectionModelWithInitialPane() {
-        let client = NormaClientTestFactory.make()
-        let directory = SessionDirectory(lister: { [] })
-        let peripheral = PeripheralProvider(client: client)
-        let helperClient = HelperClient()
-        let frame = NSRect(x: 100, y: 80, width: 800, height: 560)
-        let controller = DashboardWindowController(client: client, directory: directory, peripheral: peripheral, helperClient: helperClient, onOpenSessionDetached: { _ in }, frame: frame, initialPane: .pluginManager)
-        defer { controller.close() }
-
-        XCTAssertEqual(controller.selectionForTesting, .pluginManager)
-    }
-
-    // MARK: - AppDelegate.openDashboard() singleton wiring
-
-    /// Defensive-guard precedent (matches `openSessionInNewDetachedWindow`'s own guard): never
-    /// booted → no `appModel`/`peripheralProvider` → log + no-op, no crash, no window.
-    func testOpenDashboardNoOpsWithoutAppModel() {
-        let delegate = AppDelegate()
-        delegate.openDashboard()
-        XCTAssertNil(delegate.dashboardWindow)
-    }
-
-    /// A second "Dashboard…" invocation must refocus the SAME controller, never construct another.
-    func testOpenDashboardTwiceReusesTheSameController() {
-        let delegate = AppDelegate()
-        XCTAssertTrue(delegate.boot())
-        delegate.openDashboard()
-        guard let first = delegate.dashboardWindow else {
-            XCTFail("openDashboard() must construct a controller when booted")
-            return
-        }
-        delegate.openDashboard()
-        XCTAssertTrue(delegate.dashboardWindow === first, "a second invocation must reuse the existing controller")
-        delegate.dashboardWindow?.close()
-    }
-
-    /// The regression this fix targets: a TARGETED entry ("Manage Plugins…" →
-    /// `openDashboard(initialPane: .pluginManager)`) fired while the Dashboard is ALREADY open
-    /// must switch the already-open window to that pane, not just refocus it while leaving
-    /// whatever pane was showing untouched.
-    func testOpenDashboardRefocusSwitchesPaneOnAnAlreadyOpenWindow() {
-        let delegate = AppDelegate()
-        XCTAssertTrue(delegate.boot())
-        delegate.openDashboard()
-        guard let first = delegate.dashboardWindow else {
-            XCTFail("openDashboard() must construct a controller when booted")
-            return
-        }
-        XCTAssertEqual(first.selectionForTesting, defaultDashboardPane)
-
-        delegate.openDashboard(initialPane: .pluginManager)
-
-        XCTAssertTrue(delegate.dashboardWindow === first, "a second invocation must reuse the existing controller")
-        XCTAssertEqual(delegate.dashboardWindow?.selectionForTesting, .pluginManager, "a targeted open must retarget the pane")
-        delegate.dashboardWindow?.close()
-    }
-
-    /// Phase 4d-cleanup Task 3 fix wave 1 (the over-correction this wave fixes): a PLAIN
-    /// "Dashboard…" refocus — `openDashboard()` with no `initialPane` — must PRESERVE whatever
-    /// pane the user had already navigated to. `testOpenDashboardRefocusSwitchesPaneOnAnAlreadyOpenWindow`
-    /// above proves the TARGETED path still retargets; this proves the untargeted path no longer
-    /// does, closing the regression where the plain menu entry silently snapped an already-open
-    /// window back to the default pane on every refocus.
-    func testOpenDashboardPlainRefocusPreservesTheCurrentPane() {
-        let delegate = AppDelegate()
-        XCTAssertTrue(delegate.boot())
-        delegate.openDashboard()
-        guard let first = delegate.dashboardWindow else {
-            XCTFail("openDashboard() must construct a controller when booted")
-            return
-        }
-        // Simulate the user having navigated away from the default pane before refocusing.
-        first.selectPane(.trust)
-        XCTAssertEqual(first.selectionForTesting, .trust)
-
-        delegate.openDashboard() // plain refocus — no pane requested
-
-        XCTAssertTrue(delegate.dashboardWindow === first, "a second invocation must reuse the existing controller")
-        XCTAssertEqual(delegate.dashboardWindow?.selectionForTesting, .trust, "a plain refocus must preserve the current pane")
-        delegate.dashboardWindow?.close()
-    }
-
-    /// A FRESH open via the plain "Dashboard…" entry (no window yet, no `initialPane` requested)
-    /// still lands on the default pane — unaffected by this fix, since the selection model itself
-    /// seeds to `defaultDashboardPane` regardless of whether `openDashboard` passes it explicitly.
-    func testOpenDashboardPlainFreshOpenLandsOnDefaultPane() {
-        let delegate = AppDelegate()
-        XCTAssertTrue(delegate.boot())
-        delegate.openDashboard()
-        XCTAssertEqual(delegate.dashboardWindow?.selectionForTesting, defaultDashboardPane)
-        delegate.dashboardWindow?.close()
-    }
-
-    /// The window's `onClosed` hook nils the registry ref out — a THIRD `openDashboard()` after a
-    /// close constructs a fresh controller rather than reusing the (now-closed) old one.
-    func testClosingDashboardWindowClearsTheSingletonRef() {
-        let delegate = AppDelegate()
-        XCTAssertTrue(delegate.boot())
-        delegate.openDashboard()
-        delegate.dashboardWindow?.close()
-        XCTAssertNil(delegate.dashboardWindow, "windowWillClose must clear the singleton ref")
-    }
 }
 
 /// A minimal `NormaClient` for tests that only need a real instance to satisfy a type signature

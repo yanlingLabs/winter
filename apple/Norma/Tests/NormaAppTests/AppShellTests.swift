@@ -256,6 +256,30 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(controller.navigation.destination, .dashboard(pane: nil), "a plain re-summon must preserve the user's current destination")
     }
 
+    /// Task 7: a TARGETED `.dashboard(pane:)` summon ALSO retargets `dashboardSelection` — pure
+    /// window-level mechanics, provable with no `dashboardWiring` at all (`makeController()` never
+    /// passes one). A plain `.dashboard(pane: nil)` summon, or navigating away to a different
+    /// destination entirely, must never touch the pane memory — the direct descendant of
+    /// `openDashboard(initialPane:)`'s old "nil never resets" contract
+    /// (`DashboardWindowController`, deleted this task).
+    func testTargetedDashboardSummonRetargetsSelectionPlainSummonPreservesIt() {
+        let controller = makeController()
+        defer { controller.hide() }
+        XCTAssertEqual(controller.dashboardSelection.selection, defaultDashboardPane)
+
+        controller.summon(navigatingTo: .dashboard(pane: .trust))
+        XCTAssertEqual(controller.dashboardSelection.selection, .trust)
+
+        controller.summon(navigatingTo: .dashboard(pane: nil))
+        XCTAssertEqual(controller.dashboardSelection.selection, .trust, "a plain dashboard summon must preserve the current pane")
+
+        controller.summon(navigatingTo: .mode(.chat))
+        XCTAssertEqual(controller.dashboardSelection.selection, .trust, "navigating away from the dashboard must not reset the pane memory")
+
+        controller.summon(navigatingTo: .dashboard(pane: .pluginManager))
+        XCTAssertEqual(controller.dashboardSelection.selection, .pluginManager, "a second targeted summon retargets even after leaving and returning to the dashboard")
+    }
+
     // MARK: - Hidden-window hygiene (wiring)
 
     func testHidingSuspendsRenderingAndSummonResumesIt() {
@@ -571,10 +595,14 @@ final class AppShellTests: XCTestCase {
     }
 
     /// The plan's grep-pin, as a live test: after this task, no menu path can construct a
-    /// `DetachedWindowController` (or the real Dashboard window) except an explicit detach action.
-    /// Fires every retargeted item plus "Open Norma App" in one pass — the funeral's actual proof,
-    /// not just each item's own destination in isolation.
-    func testNoMenuPathSpawnsADetachedWindowOrTheDashboardWindow() {
+    /// `DetachedWindowController` except an explicit detach action — the real Dashboard WINDOW this
+    /// pin originally also checked for (`AppDelegate.dashboardWindow`) is gone as a TYPE, Task 7
+    /// (`DashboardWindowController` deleted), so there is nothing left of that half to assert;
+    /// structurally impossible now, not merely untrue. Fires every retargeted item plus "Open Norma
+    /// App" in one pass — the funeral's actual proof, not just each item's own destination in
+    /// isolation — and additionally proves the ROUTING actually reaches the surface: the last item
+    /// fired, "Manage Plugins…", must leave the shell on its targeted pane.
+    func testNoMenuPathSpawnsADetachedWindowAndRoutingReachesTheSurface() {
         let delegate = AppDelegate()
         XCTAssertTrue(delegate.boot())
         guard let menuBar = delegate.menuBar else {
@@ -588,7 +616,7 @@ final class AppShellTests: XCTestCase {
             NSApp.sendAction(item.action!, to: item.target, from: item)
         }
         XCTAssertTrue(delegate.detachedWindows.isEmpty, "no retargeted menu item may ever spawn a detached window")
-        XCTAssertNil(delegate.dashboardWindow, "no retargeted menu item may ever spawn the real Dashboard window")
+        XCTAssertEqual(delegate.appWindow?.navigation.destination, .dashboard(pane: .pluginManager), "the last-fired item's deep link must have actually landed")
         delegate.appWindow?.hide()
     }
 }

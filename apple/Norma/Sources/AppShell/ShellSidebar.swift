@@ -18,6 +18,15 @@ struct ShellRootView: View {
     /// app-shell T3: the session host. `nil` for a shell built without one (see
     /// `AppWindowController.host`), which simply renders the landing placeholders it always did.
     var host: ShellSessionHost?
+    /// Task 7: the Dashboard's injected data/closures — `nil` for a shell built without one (see
+    /// `AppWindowController.dashboardWiring`), same host-less-fallback posture as `host` above.
+    var dashboardWiring: DashboardWiring?
+    /// Task 7: the Dashboard's current-pane memory — UNCONDITIONAL (see
+    /// `AppWindowController.dashboardSelection`'s own doc comment for why it's never optional).
+    @ObservedObject var dashboardSelection: DashboardSelectionModel
+    /// Task 7 (spec §1 windows disposition): the pairing sheet's presentation state, attached below
+    /// as a SwiftUI `.sheet` — replaces `PairingSheetWindowController` (deleted this task).
+    @ObservedObject var pairingPresentation: PairingSheetPresentationModel
 
     var body: some View {
         NavigationSplitView {
@@ -36,11 +45,22 @@ struct ShellRootView: View {
                 HopAwayBannerHost(host: host, directory: directory)
             }
         }
+        // Task 7: the pairing ceremony rides ON the shell now, not its own `NSPanel` window —
+        // `isPresented` and `onDismiss` both go through `pairingPresentation.dismiss()` so the
+        // system's own close gesture (and this view's explicit close button,
+        // `PairingSheetContainerView`'s overlay) run the SAME teardown.
+        .sheet(isPresented: Binding(
+            get: { pairingPresentation.isPresented },
+            set: { if !$0 { pairingPresentation.dismiss() } }
+        )) {
+            PairingSheetContainerView(presentation: pairingPresentation)
+        }
     }
 
-    /// The destination's surface. Five are real as of T5 — a hosted session, the chat landing, the
-    /// code landing, the dispatch surface and the cowork Coming-soon — leaving only the dashboard
-    /// (T7) on T1's placeholder.
+    /// The destination's surface. Six are real as of T7 — a hosted session, the chat landing, the
+    /// code landing, the dispatch surface, the cowork Coming-soon, and the Dashboard surface —
+    /// leaving no destination on T1's placeholder in production (it's reached only by a shell built
+    /// without the relevant wiring, e.g. the pure geometry tests).
     @ViewBuilder
     private var detail: some View {
         switch nav.destination {
@@ -70,8 +90,17 @@ struct ShellRootView: View {
         case .mode(.cowork):
             // Needs no host — there is nothing here to attach, list, or create.
             CoworkPlaceholder()
-        default:
-            ShellLandingView(destination: nav.destination)
+        case .dashboard:
+            // Task 7: needs no host either — `DashboardSurface` attaches to nothing, it only reads
+            // `dashboardWiring`'s injected closures (mirrors `.mode(.cowork)`'s own "no host"
+            // shape). The SPECIFIC pane shown is `dashboardSelection.selection`, not read from
+            // `nav.destination`'s own payload here — see `AppWindowController.summon`'s doc comment
+            // for how a non-nil payload reaches that model.
+            if let dashboardWiring {
+                DashboardSurface(wiring: dashboardWiring, selection: dashboardSelection)
+            } else {
+                ShellLandingView(destination: nav.destination)
+            }
         }
     }
 }

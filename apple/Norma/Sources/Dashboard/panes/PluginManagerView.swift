@@ -515,8 +515,9 @@ final class PluginManagerModel: ObservableObject {
 
 struct PluginManagerView: View {
     @ObservedObject var model: PluginManagerModel
-    /// Task 4 (4d-iii): the live tiles strip's own view-model — same "constructed fresh per
-    /// dashboard window, injected here" posture as `model` above (`DashboardWindowController.init`).
+    /// Task 4 (4d-iii): the live tiles strip's own view-model — same "constructed once, injected
+    /// here" posture as `model` above (App shell T7: `AppDelegate.makeDashboardWiring`, replacing
+    /// `DashboardWindowController.init`'s old per-window-open construction).
     @ObservedObject var tilesModel: TilesStripModel
     /// Task 4 (4d-iii): the shortcut binding editor's own view-model — same posture as `tilesModel`.
     @ObservedObject var shortcutsModel: ShortcutBindingEditorModel

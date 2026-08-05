@@ -1,22 +1,5 @@
-import AppKit
 import NormaKit
 import SwiftUI
-
-/// SP2b Task 5: the Paired Devices window's approved content size — same "small utility panel,
-/// not a main window" posture as `pairingSheetDefaultSize` (`PairingSheetWindow.swift`).
-let pairedDevicesDefaultSize = CGSize(width: 420, height: 360)
-
-/// `pairedDevicesDefaultSize` CENTERED in `visibleFrame`. PURE, same posture as
-/// `centeredPairingSheetFrame`/`centeredDashboardFrame`.
-func centeredPairedDevicesFrame(visibleFrame: CGRect) -> CGRect {
-    let size = pairedDevicesDefaultSize
-    return CGRect(
-        x: visibleFrame.midX - size.width / 2,
-        y: visibleFrame.midY - size.height / 2,
-        width: size.width,
-        height: size.height
-    )
-}
 
 /// A `Date`'s relative-to-now description ("2 minutes ago", "yesterday", ...) — pulled out as a
 /// free function purely so it reads the same way `sortedTrustPaths` (`TrustPane.swift`) does: a
@@ -26,15 +9,21 @@ func relativeLastSeen(epochSeconds: Int) -> String {
     return RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date())
 }
 
-/// The Mac's Paired Devices window (SP2b Task 5) — lists `RemoteHost`'s allowlist (label,
-/// relative last-seen, pairing epoch) with a per-row Revoke button behind a confirm alert. Dumb
-/// view, same posture as `TrustPane`: `list`/`revoke` are injected closures
-/// (`RemoteAccessCoordinator.pairedDevices()`/`revoke(phoneEndpointID:)`) — this view never
-/// touches `RemoteHost` directly, and `revoke`'s failure is surfaced (never swallowed), per the
-/// brief's own instruction that `RemoteHost.revoke` propagates store failures.
+/// Task 7 (spec §4 — "Remote windows (PairedDevices) → becomes a pane, Devices group"): the
+/// Dashboard's Devices pane. Lists `RemoteHost`'s allowlist (label, relative last-seen, pairing
+/// epoch) with a per-row Revoke button behind a confirm alert, exactly as `PairedDevicesWindowController`
+/// (deleted this task) used to — `list`/`revoke` are still injected closures
+/// (`RemoteAccessCoordinator.pairedDevices()`/`revoke(phoneEndpointID:)`), this view still never
+/// touches `RemoteHost` directly, and `revoke`'s failure is still surfaced (never swallowed).
+///
+/// `onPairDevice` is NEW (Task 7): the Devices group's own door to the pairing ceremony — the menu
+/// bar's "Pair a Device…" item used to be the ONLY way in; this pane offers the same action
+/// (`AppDelegate.openPairDevice()`, which now presents `PairingSheetView` as a SHEET on the shell —
+/// spec §1 windows disposition — instead of spawning `PairingSheetWindowController`, also deleted).
 struct PairedDevicesView: View {
     let list: () async -> [PairRecord]
     let revoke: (String) async throws -> Void
+    let onPairDevice: () -> Void
 
     @State private var records: [PairRecord] = []
     @State private var errorText: String?
@@ -71,7 +60,7 @@ struct PairedDevicesView: View {
                 .listStyle(.inset)
             }
         }
-        .frame(width: pairedDevicesDefaultSize.width, height: pairedDevicesDefaultSize.height)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task { await load() }
         .alert(
             "Revoke \(confirmingRevoke?.label ?? "")?",
@@ -93,6 +82,7 @@ struct PairedDevicesView: View {
         HStack {
             Text("Paired Devices").font(.headline)
             Spacer()
+            Button("Pair a Device…") { onPairDevice() }
             Button("Refresh") { Task { await load() } }
                 .disabled(loading)
         }
@@ -133,52 +123,5 @@ struct PairedDevicesView: View {
         } catch {
             errorText = "couldn't revoke — try again"
         }
-    }
-}
-
-/// Hosts `PairedDevicesView` in an `NSPanel` — same construction idiom as
-/// `PairingSheetWindowController` (`PairingSheetWindow.swift`): delegate-driven one-shot
-/// `onClosed`, `isReleasedWhenClosed = false`, this controller owns the window's whole lifetime.
-@MainActor
-final class PairedDevicesWindowController: NSObject, NSWindowDelegate {
-    private let window: NSWindow
-    private var didClose = false
-
-    var onClosed: ((PairedDevicesWindowController) -> Void)?
-    var windowForTesting: NSWindow? { window }
-
-    init(
-        list: @escaping () async -> [PairRecord],
-        revoke: @escaping (String) async throws -> Void,
-        frame: NSRect
-    ) {
-        let window = NSPanel(
-            contentRect: frame,
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
-            backing: .buffered, defer: false
-        )
-        window.title = "Paired Devices"
-        window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 320, height: 240)
-        self.window = window
-        super.init()
-        window.delegate = self
-        window.contentView = NSHostingView(rootView: PairedDevicesView(list: list, revoke: revoke))
-        window.setFrame(frame, display: true)
-    }
-
-    func show() {
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    func close() {
-        window.close()
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        guard !didClose else { return }
-        didClose = true
-        onClosed?(self)
     }
 }

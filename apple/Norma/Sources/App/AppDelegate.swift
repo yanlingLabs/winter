@@ -55,29 +55,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// launchctl bootout/plist-remove never runs from a test process; a test overrides this with an
     /// ordering/call-count spy instead — see `AppLifecycleTests.testMigrationRunsBeforeSupervisorSocketProbe`.
     var launchdMigrationOverride: (() -> Void)?
-    /// Task 5 (2f-ii): the Dashboard's singleton window controller — `nil` until first opened,
-    /// nil'd again via `onClosed` (same one-shot-latch/registry-removal convention as
-    /// `registerDetachedWindow`'s `onClosed`). `openDashboard()` below is what enforces the
-    /// "second invocation focuses the existing window" contract off this single stored ref.
-    private(set) var dashboardWindow: DashboardWindowController?
     /// App shell T1: the ONE app window, for the process lifetime (spec §1 / ruling R2). `nil`
-    /// until the first summon, and — UNLIKE `dashboardWindow` above — never nil'd again: the shell
-    /// hides on close rather than being destroyed, so this ref outlives every close.
-    /// `summonAppWindow(navigatingTo:)` below is the single door.
+    /// until the first summon, and never nil'd again: the shell hides on close rather than being
+    /// destroyed, so this ref outlives every close. `summonAppWindow(navigatingTo:)` below is the
+    /// single door.
+    ///
+    /// Task 7: the Dashboard's own singleton window controller (`DashboardWindowController`,
+    /// `openDashboard(initialPane:)`) is GONE — the Dashboard is a destination on THIS window now
+    /// (`ShellDestination.dashboard(pane:)`), not a second window. Same for the pairing sheet's
+    /// window controller (`PairingSheetWindowController`) — see `openPairDevice()` below, which now
+    /// drives `appWindow.pairingPresentation` — and the Paired Devices window
+    /// (`PairedDevicesWindowController`) — see `openPairedDevices()`, now a plain
+    /// `summonAppWindow(navigatingTo: .dashboard(pane: .pairedDevices))`.
     private(set) var appWindow: AppWindowController?
     /// SP2b T5: owns this Mac's `RemoteHost` (lazily constructed — nothing starts until either a
     /// pairing window is requested or, autostart follow-up below, this Mac already has ≥1 paired
     /// device). Constructed unconditionally in `boot()` (cheap — it does no I/O of its own; only
     /// touching its `RemoteHost` does), same posture as `peripheralProvider`/`helperClient`.
     private(set) var remoteAccessCoordinator: RemoteAccessCoordinator?
-    /// The pairing sheet's singleton window controller — same one-shot-latch/registry-removal
-    /// convention as `dashboardWindow`: nil until first opened, nil'd again via `onClosed`.
-    private(set) var pairingSheetWindow: PairingSheetWindowController?
-    /// The Paired Devices window's singleton controller — same convention as `pairingSheetWindow`.
-    private(set) var pairedDevicesWindow: PairedDevicesWindowController?
     /// BYOK T2: the one-time first-run disclosure window (spec §3) — `nil` until (at most once,
     /// ever, per install) `boot()`'s real-launch path presents it; nil'd again via `onClosed` (same
-    /// one-shot-latch/registry-removal convention as `dashboardWindow`/`detachedWindows` above).
+    /// one-shot-latch/registry-removal convention as `detachedWindows` above).
     private(set) var firstRunDisclosureWindow: FirstRunDisclosureWindowController?
     /// Phase 4d-iii Task 1: the plugin-shortcut multi-hotkey registry — additive to
     /// `HotkeyTrigger.shared` (Hyper+Space summon) and `peripheralProvider`'s panic hotkey, never
@@ -147,27 +145,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// after the first summon. `AppWindowController.onVisibilityChange` (wired in
     /// `summonAppWindow`) is what re-runs `syncDockPresence()` when the window hides itself.
     private var hasMainWindow: Bool {
-        !detachedWindows.isEmpty || dashboardWindow != nil || appWindow?.isVisible == true
+        !detachedWindows.isEmpty || appWindow?.isVisible == true
     }
 
     /// Syncs the dock icon to `hasMainWindow` — called after every mutation of `detachedWindows`/
-    /// `dashboardWindow`/the shell's visibility (register, remove, open, close, summon, hide) so
-    /// promotion/demotion never drifts out of step with the registries that define it.
+    /// the shell's visibility (register, remove, open, close, summon, hide) so promotion/demotion
+    /// never drifts out of step with the registries that define it. Task 7: the Dashboard is no
+    /// longer its own window/registry — it's a shell destination, already covered by `appWindow`'s
+    /// own visibility.
     private func syncDockPresence() {
         hasMainWindow ? showDockIcon() : hideDockIcon()
     }
 
-    /// Closes every open main window (detached chat windows + the Dashboard + the shell) — shared
-    /// by `applicationShouldTerminate`'s cancel branch (⌘Q/dock-quit: close windows, keep running)
-    /// and `applicationWillTerminate`'s final teardown below (a real quit: same windows, harder
-    /// stop — spec §5 D9, a closed window must leave nothing running, and termination is harder
-    /// than that).
+    /// Closes every open main window (detached chat windows + the shell) — shared by
+    /// `applicationShouldTerminate`'s cancel branch (⌘Q/dock-quit: close windows, keep running) and
+    /// `applicationWillTerminate`'s final teardown below (a real quit: same windows, harder stop —
+    /// spec §5 D9, a closed window must leave nothing running, and termination is harder than
+    /// that).
     ///
     /// App shell T1: the shell HIDES here rather than closing (spec §1 — never destroyed). ⌘Q
     /// therefore leaves the singleton and its navigation state intact, ready for the next summon.
+    /// Task 7: the Dashboard window/close call this used to also make is gone — hiding the shell
+    /// already takes the Dashboard destination (and the pairing sheet, a SwiftUI `.sheet` on the
+    /// same window) with it.
     private func closeMainWindows() {
         detachedWindows.forEach { $0.close() }
-        dashboardWindow?.close()
         appWindow?.hide()
     }
 
@@ -238,29 +240,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// reuse this exact body for its own frame math, `openStandaloneNormaWindow()`, is retired —
     /// its menu item now summons the app shell instead (see `AppDelegate.boot()`'s menu wiring).
     /// Chat Mode Slice A (CM-T3): `title` widened from a fixed `"Norma"` to a defaulted parameter —
-    /// every PRE-EXISTING caller (orb's child-status circles, the sidebars' ⌘-click, the Dashboard
+    /// every PRE-EXISTING caller (orb's child-status circles, the sidebars' ⌘-click, and — until
+    /// App shell T7 deleted that door along with the rest of `SessionsPane.swift` — the Dashboard's
     /// SessionsPane row click) keeps the exact same "Norma" fallback, unchanged. App shell T6:
     /// `openChat()`/`createAndOpenChat()`, the pair that used to pass something else (the session's
     /// own title, or "Chat"), are retired along with the menu entries that drove them — every
     /// surviving caller now takes the "Norma" default again.
     ///
     /// Plan-immunity (2026-07-28 design; fix round 1): `isChat: Bool? = nil` — `nil` (every
-    /// PRE-EXISTING caller: orb's child-status circles, sidebars' ⌘-click, the Dashboard SessionsPane
-    /// row click) means "derive it", via the SAME pure helper `DetachedWindowController.selectSession`
-    /// uses (`isChatSession(_:in:)`), off `model.directory.rows` — AppModel's own live session list,
-    /// independently refreshed by every session-lifecycle broadcast regardless of which window's
-    /// sidebar the caller's `sessionId` actually came from, so it reliably has the row by the time a
-    /// user could have clicked it anywhere. App shell T6: `createAndOpenChat()`/`openChat()`'s reopen
-    /// path, which used to pass an EXPLICIT `true` instead of relying on this derivation (they just
-    /// created/confirmed the session themselves and knew its mode with certainty the directory's own
-    /// async refresh cadence couldn't beat), are retired with the menu entries that drove them — every
-    /// surviving caller relies on this derivation now. (Fix round 1, review finding: three doors — ⌘-click open-in-new-window, the
-    /// Dashboard's SessionsPane row click, and the orb's own sidebar — showed BOTH policy pickers
-    /// shown-but-broken for a chat session, since only the explicit-`true` callers were ever
-    /// threaded. This auto-derivation closes the ⌘-click and Dashboard doors at this ONE shared
-    /// choke point; the orb's OWN `WindowContentView` instance renders a SEPARATE adapter
-    /// [`OrbWindowController.fieldAdapter`], fixed at its sidebar's own `onSelect` wiring instead —
-    /// see that closure's own doc comment.)
+    /// PRE-EXISTING caller: orb's child-status circles, sidebars' ⌘-click, and — until App shell
+    /// T7 — the Dashboard's SessionsPane row click) means "derive it", via the SAME pure helper
+    /// `DetachedWindowController.selectSession` uses (`isChatSession(_:in:)`), off
+    /// `model.directory.rows` — AppModel's own live session list, independently refreshed by every
+    /// session-lifecycle broadcast regardless of which window's sidebar the caller's `sessionId`
+    /// actually came from, so it reliably has the row by the time a user could have clicked it
+    /// anywhere. App shell T6: `createAndOpenChat()`/`openChat()`'s reopen path, which used to pass
+    /// an EXPLICIT `true` instead of relying on this derivation (they just created/confirmed the
+    /// session themselves and knew its mode with certainty the directory's own async refresh
+    /// cadence couldn't beat), are retired with the menu entries that drove them — every surviving
+    /// caller relies on this derivation now. (Fix round 1, review finding: three doors — ⌘-click
+    /// open-in-new-window, the Dashboard's SessionsPane row click [gone since App shell T7], and
+    /// the orb's own sidebar — showed BOTH policy pickers shown-but-broken for a chat session,
+    /// since only the explicit-`true` callers were ever threaded. This auto-derivation closes the
+    /// ⌘-click and Dashboard doors at this ONE shared choke point; the orb's OWN `WindowContentView`
+    /// instance renders a SEPARATE adapter [`OrbWindowController.fieldAdapter`], fixed at its
+    /// sidebar's own `onSelect` wiring instead — see that closure's own doc comment.)
     ///
     /// Fix round 1 re-review (Minor, closed here): `sourceRows` — the SOURCE window's own rows,
     /// when the caller has a source window (door 1's ⌘-click; empty for every other caller, which
@@ -379,18 +383,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// App shell T1 — THE summon primitive (spec §1). Every path that wants the app window goes
     /// through here: the dock icon (`applicationShouldHandleReopen`), the menu bar's "Open Norma
     /// App" entry, and — as later tasks land them — the orb, the outputs panel, and every "open in
-    /// app" affordance. The first call constructs the ONE controller; every later call focuses that
-    /// same window (ruling R2: nothing ever spawns a second app window).
+    /// app" affordance. The first call constructs the ONE controller (and, Task 7, the Dashboard's
+    /// wiring alongside it); every later call focuses that same window (ruling R2: nothing ever
+    /// spawns a second app window).
     ///
-    /// `destination == nil` is a PLAIN refocus that preserves whatever the user was looking at —
-    /// the `openDashboard(initialPane:)` precedent below, whose own history is exactly this
-    /// distinction (retargeting unconditionally on refocus discarded the user's current pane; the
-    /// fix made "no destination requested" mean "leave it alone"). A fresh window with no
-    /// destination lands on `defaultShellDestination`, seeded by `ShellNavigationModel` itself.
+    /// `destination == nil` is a PLAIN refocus that preserves whatever the user was looking at — a
+    /// fresh window with no destination lands on `defaultShellDestination`, seeded by
+    /// `ShellNavigationModel` itself. (This distinction predates Task 7's `.dashboard(pane:)`
+    /// payload by name only — `openDashboard(initialPane:)`, the method that coined it, is gone;
+    /// `AppWindowController.summon(navigatingTo:)` carries the same reasoning forward now.)
     ///
-    /// Defensive, same posture as `openDashboard`'s own guard: never booted (no `appModel`, hence
-    /// no `SessionDirectory` for the Recents list) resolves to a log + no-op, never a crash or a
-    /// half-wired window.
+    /// Defensive: never booted (no `appModel`, hence no `SessionDirectory` for the Recents list)
+    /// resolves to a log + no-op, never a crash or a half-wired window.
     func summonAppWindow(navigatingTo destination: ShellDestination? = nil) {
         if let appWindow {
             appWindow.summon(navigatingTo: destination)
@@ -418,12 +422,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = AppWindowController(
             directory: model.directory,
             host: host,
+            dashboardWiring: makeDashboardWiring(model: model),
             frame: centeredAppWindowFrame(visibleFrame: visible)
         )
         // The activation-policy machinery is RETARGETED, not rebuilt: a visible shell is a main
         // window (promote), a hidden one is not (demote). This hook is the only way that stays in
         // step, since the shell hides itself instead of closing — there is no `onClosed` to hang
-        // it on, the way `dashboardWindow`/`detachedWindows` do.
+        // it on, the way `detachedWindows` does.
         controller.onVisibilityChange = { [weak self] _ in self?.syncDockPresence() }
         // Task 2: the `session.list` poll cadence — visible AND unoccluded starts it, everything
         // else (hidden, occluded, ⌘Q's closeMainWindows()) stops it. `model.directory` is the SAME
@@ -437,173 +442,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.summon(navigatingTo: destination)
     }
 
-    /// Task 5 (2f-ii): the menu bar's "Dashboard…" entry — singleton behavior per the brief: a
-    /// second invocation while the window is already open just refocuses it (`show()` is
-    /// idempotent — `makeKeyAndOrderFront` on an already-front window is a no-op), never
-    /// constructing a second `DashboardWindowController`. Defensive, same posture as
-    /// `openSessionInNewDetachedWindow`'s guard: no `appModel`/`peripheralProvider` (never booted)
-    /// resolves to a log + no-op, never a crash or a half-wired window.
-    /// Phase 4d-iii Task 2: `initialPane` let `openPluginManager()` reuse this exact body (same
-    /// "shared spawn body" posture as `openSessionInNewDetachedWindow`'s own `frame` override)
-    /// instead of duplicating the guard/construction. App shell T6: that wrapper is retired — its
-    /// only caller, the "Manage Plugins…" menu item, now summons the app shell instead (see
-    /// `AppDelegate.boot()`'s menu wiring) — but the PARAMETER stays: the first-run disclosure
-    /// sheet's "Set up API key" button (wired in `boot()`, `initialPane: .provider`) is now the
-    /// one production caller that reuses this same targeted-open body, and every test that calls
-    /// this method directly still exercises both branches.
-    /// Phase 4d-cleanup Task 3 fix 1: a second invocation while one is already open retargets the
-    /// pane (`DashboardWindowController.selectPane(_:)`, below) before refocusing via `show()` —
-    /// previously this only refocused the window without ever switching panes, so "Manage
-    /// Plugins…" fired against an already-open Dashboard silently did nothing pane-wise.
-    /// Phase 4d-cleanup Task 3 fix wave 1: that fix over-corrected — retargeting UNCONDITIONALLY
-    /// on refocus meant the plain "Dashboard…" entry (`initialPane` omitted — historically
-    /// `AppDelegate.swift`'s `openDashboard: { ... }` menu wiring; App shell T6 retargeted that
-    /// wiring to summon the app shell instead, so today the no-arg form is reached only directly,
-    /// e.g. by tests) snapped an already-open window back to the default pane too, discarding
-    /// whatever pane the user had navigated to. `initialPane` is now `DashboardPane?`: `nil` means
-    /// "no pane requested" — a plain refocus that preserves whatever is currently showing (the
-    /// selection model already starts at `defaultDashboardPane` on first open, so a fresh window
-    /// still lands correctly). Non-`nil` means "targeted" — callers like the first-run disclosure
-    /// sheet's "Set up API key" button (`initialPane: .provider`, wired in `boot()`) that must land
-    /// on a specific pane whether the window is opening fresh or already open.
-    func openDashboard(initialPane: DashboardPane? = nil) {
-        if let dashboardWindow {
-            // Only a TARGETED open (non-nil `initialPane`) retargets the pane before refocusing —
-            // a plain refocus (`initialPane == nil`) leaves the current pane untouched.
-            if let initialPane {
-                dashboardWindow.selectPane(initialPane)
-            }
-            dashboardWindow.show()
-            return
+    /// Task 7: builds the Dashboard's `DashboardWiring` — the one place that closes over the real
+    /// `NormaClient` and every controller a Mac-group pane surfaces, discharging
+    /// `DashboardWindowController.init`'s old role (deleted this task) at the shell's own
+    /// construction instead of a per-window-open one (see `DashboardWiring`'s own doc comment for
+    /// why that lifetime shift is harmless). `peripheralProvider`/`helperClient` are the only two
+    /// dependencies `boot()` doesn't construct unconditionally-and-permanently — same guard
+    /// `openDashboard(initialPane:)` used to make, now degrading to "no Dashboard surface" (`nil`
+    /// wiring, `.dashboard` falls back to `ShellLandingView`) rather than aborting the WHOLE summon,
+    /// since the shell has four other destinations that don't need either.
+    private func makeDashboardWiring(model: AppModel) -> DashboardWiring? {
+        guard let peripheral = peripheralProvider, let helper = helperClient else {
+            OrbDebug.log("makeDashboardWiring: no peripheralProvider/helperClient — Dashboard surface degraded to nil")
+            return nil
         }
-        guard let model = appModel, let peripheral = peripheralProvider, let helper = helperClient else {
-            OrbDebug.log("openDashboard: no appModel/peripheralProvider/helperClient — spawn aborted")
-            return
-        }
-        let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let controller = DashboardWindowController(
-            client: model.client,
-            directory: model.directory,
+        let client = model.client
+        return DashboardWiring(
+            daemonStatus: { try await client.daemonStatus() },
+            quotaState: { try await client.quotaState() },
+            trustList: { try await client.trustList() },
+            trustRemove: { try await client.trustRemove(path: $0) },
             peripheral: peripheral,
             helperClient: helper,
-            shortcutRegistry: shortcutRegistry,
-            onOpenSessionDetached: { [weak self] sid in self?.openSessionInNewDetachedWindow(sid) },
-            frame: centeredDashboardFrame(visibleFrame: visible),
-            initialPane: initialPane ?? defaultDashboardPane,
+            pluginManager: PluginManagerModel(client: client),
+            tilesModel: TilesStripModel(client: client),
+            shortcutsModel: ShortcutBindingEditorModel(client: client, shortcutRegistry: shortcutRegistry),
+            memoryModel: MemoryPaneModel(client: client),
+            skillsModel: SkillsPaneModel(client: client),
             // BYOK T2 (T1 report's "Concerns for T2"): a provider-TYPE change only takes effect on
             // the NEXT daemon boot (`providers/manager.ts`'s `createProvider` fixes `providerType`
             // at boot) — `provider.configure` itself only persists the secret + settings. The
             // Provider pane's model has no `AppDelegate` reference of its own; this is the one
             // place that closes the loop, same "AppDelegate wires the real side effect, the pane
             // only fires an injected closure" posture as every other real-side-effect hook in this
-            // file (`onRestartDaemon` on the menu bar, just below in this same method's sibling).
-            onConfigured: { [weak self] in self?.daemonSupervisor?.restart() },
+            // file (`onRestartDaemon` on the menu bar).
+            providerModel: ProviderPaneModel(client: client, onConfigured: { [weak self] in self?.daemonSupervisor?.restart() }),
             // CC-parity phase 3 (Workflows, Track D Task D3): the Workflows pane runs/lists/stops
             // against whichever session is CURRENTLY focused (`model.session` already mirrors
             // exactly that — `AppModel.handle(_:)`'s own `guard e.sessionId == focusedSessionId`
-            // gate) — a closure, not a snapshot id, since focus can change while this window stays
+            // gate) — a closure, not a snapshot id, since focus can change while the shell stays
             // open (`DashboardWiring`'s own "data OR a closure" convention).
-            session: model.session,
-            currentSessionId: { model.focusedSessionId }
+            workflowsModel: WorkflowsPaneModel(client: client, session: model.session, currentSessionId: { [weak model] in model?.focusedSessionId }),
+            isDevProfile: AppProfile.isDev,
+            cliInstallState: { CliInstaller.currentPlan() },
+            installCli: { CliInstaller.install() },
+            openDevCli: { [weak self] in self?.cliLauncher.openCli() },
+            appVersion: { (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "—" },
+            updateChannel: { UpdaterCoordinator.readChannelFromSettings() },
+            checkForUpdates: { [weak self] in self?.updaterController?.checkForUpdates(nil) },
+            loginItemEnabled: { [weak self] in self?.loginItemController?.isEnabled ?? false },
+            setLoginItemEnabled: { [weak self] enabled in self?.loginItemController?.setEnabled(enabled) },
+            pairedDevicesList: { [weak self] in await self?.remoteAccessCoordinator?.pairedDevices() ?? [] },
+            pairedDevicesRevoke: { [weak self] peer in try await self?.remoteAccessCoordinator?.revoke(phoneEndpointID: peer) },
+            presentPairingSheet: { [weak self] in self?.openPairDevice() }
         )
-        controller.onClosed = { [weak self] _ in
-            self?.dashboardWindow = nil
-            self?.syncDockPresence() // Lifecycle T3: demote once the LAST main window closes
-        }
-        dashboardWindow = controller
-        syncDockPresence() // Lifecycle T3: the Dashboard is a real main window — promote
-        controller.show()
     }
 
-    // App shell T6 (the menu-bar retarget's funeral): `openPluginManager()` — a thin
-    // `openDashboard(initialPane: .pluginManager)` wrapper for the "Manage Plugins…" menu item — is
-    // deleted here. That item now summons the app shell onto `.dashboard` instead (see
-    // `AppDelegate.boot()`'s menu wiring); this wrapper had no other caller.
-
-    /// SP2b T5: the menu bar's "Pair a Device…" entry. A second invocation while the sheet is
-    /// already open just refocuses it (same posture as `openDashboard`'s own guard). Building the
-    /// model requires an `await` (`RemoteHost.openPairingWindow()` may need to bind a fresh iroh
-    /// listener) — the re-check of `pairingSheetWindow` right after that await guards against a
-    /// double-click racing two overlapping builds into two separate windows/ceremonies.
+    /// SP2b T5: the menu bar's "Pair a Device…" entry, and (Task 7) the Devices pane's own
+    /// "Pair a Device…" button. Task 7 (spec §1 windows disposition — "`PairingSheetWindow` →
+    /// becomes a sheet on the shell"): summons the shell onto the Devices pane (a coherent backdrop
+    /// for the sheet, rather than appearing over whatever the user was last looking at) and drives
+    /// `AppWindowController.pairingPresentation` — `PairingSheetPresentationModel.present(...)`
+    /// itself is what guards a second invocation while already presented (the sheet IS the
+    /// refocus), the direct descendant of this method's old `pairingSheetWindow` guard.
     func openPairDevice() {
-        if let pairingSheetWindow {
-            pairingSheetWindow.show()
-            return
-        }
         guard let coordinator = remoteAccessCoordinator else {
             OrbDebug.log("openPairDevice: no remoteAccessCoordinator — spawn aborted")
             return
         }
-        // Present the panel IMMEDIATELY (in its "Preparing…" state) before awaiting the pairing
-        // stack: `RemoteHost.openPairingWindow()` cold-starts an iroh listener and homes it to a
-        // relay, which takes seconds on a hotspot — awaiting that first would leave the user
-        // staring at nothing and re-clicking the menu item. Creating + registering the window
-        // synchronously here also makes any such second click a harmless refocus (the guard above),
-        // instead of racing a second overlapping ceremony into a second window.
-        let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let controller = PairingSheetWindowController(frame: centeredPairingSheetFrame(visibleFrame: visible))
-        controller.onClosed = { [weak self] closed in
-            self?.pairingSheetWindow = nil
-            // Teardown order matters (T5 review, Important): stop the model FIRST — cancels its
-            // event/countdown background tasks, without which a closed sheet's countdown would keep
-            // ticking (and auto-`beginPairing()`-ing against a manager the coordinator may be
-            // tearing down) forever; the tasks retain the model for the duration of their in-flight
-            // calls, so nothing about window/model deallocation would stop them. `closed.model` is
-            // nil if the panel was closed while still "Preparing…" (no model yet) — the build task
-            // below stops that late-arriving model itself. THEN `pairingSheetClosed()` (whose
-            // `closePairingWindow()` also ends the manager's live offer via `endPairing()`) lets the
-            // whole stack tear itself down if idle.
-            closed.model?.stop()
-            Task { await coordinator.pairingSheetClosed() }
-        }
-        self.pairingSheetWindow = controller
-        controller.show()
-
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                let model = try await coordinator.makePairingSheetModel()
-                // The user may have closed the "Preparing…" panel while homing was in flight — its
-                // `onClosed` already ran and tore the stack down. Don't resurrect it; just stop the
-                // freshly-built model so its manager/offer doesn't linger.
-                guard self.pairingSheetWindow === controller else {
-                    model.stop()
-                    return
-                }
-                controller.attach(model: model)
-            } catch {
-                OrbDebug.log("openPairDevice: couldn't start the pairing stack: \(error)")
-                // Homing/bind failed — the panel is stuck "Preparing…". Close it so the normal
-                // teardown runs (its `onClosed` → `pairingSheetClosed()` → `stopIfIdle()`); a
-                // no-op if the user already closed it (the controller's one-shot `didClose` guard).
-                if self.pairingSheetWindow === controller {
-                    controller.close()
-                }
-            }
-        }
+        summonAppWindow(navigatingTo: .dashboard(pane: .pairedDevices))
+        appWindow?.pairingPresentation.present(
+            beginPairing: { try await coordinator.makePairingSheetModel() },
+            onClosed: { Task { await coordinator.pairingSheetClosed() } }
+        )
     }
 
-    /// SP2b T5: the menu bar's "Paired Devices…" entry. `PairedDevicesView` does its own async
-    /// listing (`.task`) once presented, so — unlike `openPairDevice` — the window is constructed
-    /// synchronously; there is no pairing-window/iroh-listener to force-start just to see the list.
+    /// SP2b T5: the menu bar's "Paired Devices…" entry. Task 7 (spec §4 — "Remote windows
+    /// (PairedDevices) → becomes a pane, Devices group"): a plain targeted summon now — the pane's
+    /// own `PairedDevicesView.task` does the async listing, same as it always did; there is no
+    /// window of its own left to construct.
     func openPairedDevices() {
-        if let pairedDevicesWindow {
-            pairedDevicesWindow.show()
-            return
-        }
-        guard let coordinator = remoteAccessCoordinator else {
-            OrbDebug.log("openPairedDevices: no remoteAccessCoordinator — spawn aborted")
-            return
-        }
-        let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let controller = PairedDevicesWindowController(
-            list: { await coordinator.pairedDevices() },
-            revoke: { peer in try await coordinator.revoke(phoneEndpointID: peer) },
-            frame: centeredPairedDevicesFrame(visibleFrame: visible)
-        )
-        controller.onClosed = { [weak self] _ in self?.pairedDevicesWindow = nil }
-        pairedDevicesWindow = controller
-        controller.show()
+        summonAppWindow(navigatingTo: .dashboard(pane: .pairedDevices))
     }
 
     @discardableResult
@@ -823,8 +742,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Dispatch (Phase 7), Task 8: the field's child-status circles — tapping one opens that
-        // child session in a detached window via the SAME path the Dashboard's SessionsPane / the
-        // sidebar's ⌘-click already use (`openSessionInNewDetachedWindow`, defined below).
+        // child session in a detached window via the SAME path the sidebar's ⌘-click already uses
+        // (`openSessionInNewDetachedWindow`, defined below) — App shell T7: no longer also the
+        // Dashboard's SessionsPane row click, which died along with that pane this task.
         orb.onOpenChild = { [weak self] sessionId in
             self?.openSessionInNewDetachedWindow(sessionId)
         }
@@ -972,7 +892,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if shouldShowFirstRunDisclosure(defaults: .standard) {
                 markFirstRunDisclosureShown(defaults: .standard)
                 let firstRun = FirstRunDisclosureWindowController(
-                    onSetupApiKey: { [weak self] in self?.openDashboard(initialPane: .provider) },
+                    // Task 7 (T6's own verified finding, carried into this task's brief): this WAS
+                    // the caller keeping `openDashboard(initialPane:)`/`DashboardWindowController`
+                    // alive after T6 retargeted every menu path — retargeted here, BEFORE that
+                    // controller dies later in this same task, to the shell's own deep-link
+                    // destination instead.
+                    onSetupApiKey: { [weak self] in self?.summonAppWindow(navigatingTo: .dashboard(pane: .provider)) },
                     onSignInWithChatGPT: {}
                 )
                 firstRun.onClosed = { [weak self] _ in self?.firstRunDisclosureWindow = nil }

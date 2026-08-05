@@ -12,8 +12,9 @@ import NormaKit
 /// These tests flip the REAL `NSApp.activationPolicy()` of the xctest host — safe here because the
 /// host launches `.accessory` (see `ScaffoldTests.testActivationPolicyIsAccessory`) and every test
 /// below closes whatever window(s) it opened, so production's own demotion path
-/// (`registerDetachedWindow`'s/`openDashboard`'s `onClosed` → `syncDockPresence`) always restores
-/// `.accessory` by the time the test returns — nothing leaks into a later test.
+/// (`registerDetachedWindow`'s `onClosed` → `syncDockPresence`, or the shell's own
+/// `onVisibilityChange`) always restores `.accessory` by the time the test returns — nothing leaks
+/// into a later test.
 @MainActor
 final class AppLifecycleTests: XCTestCase {
     // MARK: - terminateDecision (PURE — no NSApp/AppleEvent reference)
@@ -106,36 +107,18 @@ final class AppLifecycleTests: XCTestCase {
         XCTAssertEqual(NSApp.activationPolicy(), .accessory, "the last main window just closed — demote")
     }
 
-    // MARK: - openDashboard: promotion / demotion
-
-    func testOpeningDashboardPromotesAndClosingItDemotes() {
-        let delegate = AppDelegate()
-        XCTAssertTrue(delegate.boot())
-
-        delegate.openDashboard()
-        XCTAssertEqual(NSApp.activationPolicy(), .regular, "the Dashboard is a real main window — must show the dock icon")
-
-        delegate.dashboardWindow?.close()
-        XCTAssertEqual(NSApp.activationPolicy(), .accessory, "closing the Dashboard with no other main window open must hide the dock icon")
-    }
-
-    /// Mixed registries: the dock icon only demotes once BOTH a detached window and the Dashboard
-    /// have closed — proves `hasMainWindow`/`syncDockPresence` OR the two registries together
-    /// rather than either one alone.
-    func testDetachedWindowAndDashboardTogetherOnlyDemoteAfterBothClose() {
-        let delegate = AppDelegate()
-        XCTAssertTrue(delegate.boot())
-        let window = makeDetachedWindow()
-        delegate.registerDetachedWindow(window)
-        delegate.openDashboard()
-        XCTAssertEqual(NSApp.activationPolicy(), .regular)
-
-        delegate.dashboardWindow?.close()
-        XCTAssertEqual(NSApp.activationPolicy(), .regular, "the detached window is still open — the dock icon must stay")
-
-        window.close()
-        XCTAssertEqual(NSApp.activationPolicy(), .accessory, "both main windows are now closed — demote")
-    }
+    // Task 7: `testOpeningDashboardPromotesAndClosingItDemotes` and
+    // `testDetachedWindowAndDashboardTogetherOnlyDemoteAfterBothClose` DIED here — their subject
+    // (a SEPARATE `dashboardWindow` registry, OR'd with `detachedWindows`/`appWindow` in
+    // `hasMainWindow`) no longer exists: the Dashboard is a shell DESTINATION now
+    // (`ShellDestination.dashboard(pane:)`), not a second window with its own dock-promotion
+    // registry. `hasMainWindow`'s remaining OR (`detachedWindows` vs `appWindow?.isVisible`) is
+    // already covered — the detached-window half by
+    // `testClosingOneOfTwoDetachedWindowsKeepsTheDockIconUntilTheOtherAlsoCloses` above, the
+    // shell half by `AppShellTests.testShellPromotesTheDockIconAndHidingDemotes` — and dock
+    // promotion has never distinguished WHICH destination the shell is showing, only whether it's
+    // visible at all, so a Dashboard-specific promotion test would only re-prove the same fact a
+    // third way.
 
     // MARK: - applicationShouldTerminate: source-aware quit gate
 

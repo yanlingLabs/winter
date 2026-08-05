@@ -29,7 +29,8 @@ func isReconcileTick(_ tick: Int, every: Int = 10) -> Bool {
 /// currently-registered tile per plugin on open, then kept current by POLLING the actor-isolated
 /// `client.tiles` snapshot (NOT a second `for await client.events` consumer). `client.events` is a
 /// single-consumer `AsyncStream` and the Dashboard's `NormaClient` is the app's shared MAIN client
-/// (see `DashboardWindowController`'s own doc comment) — its `events` stream is already being
+/// (`AppDelegate.makeDashboardWiring`'s `client = model.client` — App shell T7's re-host of
+/// `DashboardWindowController.init`'s same claim) — its `events` stream is already being
 /// drained by `AppModel`/`SessionFeed`'s own `for await` pump. A second reader on the same stream
 /// would SPLIT delivery (each event goes to whichever waiter happens to receive it), silently
 /// stealing roughly half the orb's events whenever the dashboard is open. `client.tiles` has no

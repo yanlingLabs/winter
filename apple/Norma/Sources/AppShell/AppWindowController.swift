@@ -89,6 +89,25 @@ final class AppWindowController: NSObject, NSWindowDelegate {
     /// session surface. `AppDelegate.summonAppWindow` is the one production caller that passes one.
     let host: ShellSessionHost?
 
+    /// Task 7: the Dashboard's injected data/closures — `nil` for a shell built without one (same
+    /// "pure window tests don't boot an `AppModel`" posture as `host` above); `.dashboard` then
+    /// falls back to `ShellLandingView`. `AppDelegate.summonAppWindow` builds the real one, ONCE,
+    /// alongside `host`.
+    let dashboardWiring: DashboardWiring?
+
+    /// Task 7: the Dashboard's current-pane memory — UNCONDITIONALLY constructed (unlike
+    /// `dashboardWiring`): it has no `AppModel` dependency of its own, and a host-less/wiring-less
+    /// shell still benefits from a real object here rather than an extra layer of optionality. See
+    /// `DashboardSelectionModel`'s own doc comment (`DashboardSurface.swift`) for the "why a
+    /// separate object from `navigation`" reasoning.
+    let dashboardSelection = DashboardSelectionModel()
+
+    /// Task 7 (spec §1 windows disposition): the pairing sheet's presentation state — see
+    /// `PairingSheetPresentationModel`'s own doc comment (`Remote/PairingSheetView.swift`).
+    /// Unconditional for the same reason `dashboardSelection` is: no `AppModel` dependency, cheap to
+    /// always have a real (idle) instance.
+    let pairingPresentation = PairingSheetPresentationModel()
+
     /// Hidden-window hygiene: `false` whenever the window is ordered out OR fully occluded. Views
     /// read `navigation.renderingActive` (the published mirror); non-view consumers (Task 2's
     /// `session.list` poll — "hidden = no polling") take `onRenderingActiveChange` below.
@@ -118,7 +137,7 @@ final class AppWindowController: NSObject, NSWindowDelegate {
     /// expression is checked as a nonisolated context regardless of the enclosing initializer's
     /// own isolation — the exact trap `DashboardWindowController.init`'s `session:` parameter
     /// documents. The fallback is constructed in this (`@MainActor`) body instead.
-    init(directory: SessionDirectory, host: ShellSessionHost? = nil, navigation: ShellNavigationModel? = nil, frame: NSRect) {
+    init(directory: SessionDirectory, host: ShellSessionHost? = nil, dashboardWiring: DashboardWiring? = nil, navigation: ShellNavigationModel? = nil, frame: NSRect) {
         let window = NSWindow(
             contentRect: frame,
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -142,6 +161,7 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         self.window = window
         self.navigation = navigationModel
         self.host = host
+        self.dashboardWiring = dashboardWiring
 
         super.init()
 
@@ -155,7 +175,11 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         // The working-folders chip's panel/confirm attach to THIS window (AppKit belongs to the
         // controller). `[weak self]` — the host is owned above this object, not below it.
         host?.presentingWindow = { [weak self] in self?.window }
-        window.contentView = NSHostingView(rootView: ShellRootView(nav: navigationModel, directory: directory, host: host))
+        window.contentView = NSHostingView(rootView: ShellRootView(
+            nav: navigationModel, directory: directory, host: host,
+            dashboardWiring: dashboardWiring, dashboardSelection: dashboardSelection,
+            pairingPresentation: pairingPresentation
+        ))
         window.setFrame(frame, display: true)
     }
 
@@ -166,8 +190,25 @@ final class AppWindowController: NSObject, NSWindowDelegate {
     /// exactly like `openDashboard()`'s untargeted branch (whose over-correcting fix — retargeting
     /// unconditionally — is the recorded bug this mirrors the shape of). A non-nil destination
     /// retargets, whether the window is being shown for the first time or already open.
+    ///
+    /// Task 7: a `.dashboard(pane: let pane)` destination with a NON-nil `pane` ALSO retargets
+    /// `dashboardSelection` — the direct descendant of `openDashboard(initialPane:)`'s old "a
+    /// targeted open retargets the pane before refocusing" branch (`DashboardWindowController`,
+    /// deleted this task). `pane == nil` (a plain "Dashboard…" open) never touches it, preserving
+    /// whatever pane `DashboardSurface` is already showing — same "nil never resets" contract that
+    /// method's own fix-wave-1 regression test pinned. This runs unconditionally whenever the
+    /// payload is non-nil, even if `navigation.navigate` itself was a no-op (the destination was
+    /// already exactly this pane) — a redundant re-selection is harmless, and it's what makes a
+    /// SECOND "Manage Plugins…" while already on a DIFFERENT pane retarget correctly (the destination
+    /// values differ — `.dashboard(pane: .trust) != .dashboard(pane: .pluginManager)` — so
+    /// `navigate` proceeds regardless).
     func summon(navigatingTo destination: ShellDestination? = nil) {
-        if let destination { navigation.navigate(to: destination) }
+        if let destination {
+            navigation.navigate(to: destination)
+            if case .dashboard(let pane) = destination, let pane {
+                dashboardSelection.selection = pane
+            }
+        }
         // The display with keyboard focus: `NSScreen.main` is documented as "the screen containing
         // the window with keyboard focus", NOT the hardware's primary display.
         if let visible = NSScreen.main?.visibleFrame {
