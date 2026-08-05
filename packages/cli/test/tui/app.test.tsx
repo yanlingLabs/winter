@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanup, render } from "ink-testing-library";
 import { METHODS } from "@norma/protocol";
+import { CORE_VERSION } from "@norma/core";
 import { App, bottomBarRows } from "../../src/tui/app";
 import { makeEventBridge } from "../../src/tui/event-bridge";
 import type { AgentRow } from "../../src/tui/state";
@@ -1113,7 +1114,9 @@ describe("App — headless sanity (Phase 3d T4)", () => {
       stderr: "pipe",
     });
     expect(proc.exitCode).toBe(0);
-    expect(proc.stdout.toString()).toContain("norma (Phase 1b-ii-d) — commands:");
+    // Handoff Task 2: the header is now version-bearing (the Phase 1b-ii-d fossil is gone) —
+    // main.test.ts pins the exact form; this test's job stays exit-0 + usage-not-hang.
+    expect(proc.stdout.toString()).toContain(`norma ${CORE_VERSION} — commands:`);
   });
 });
 
