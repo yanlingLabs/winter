@@ -170,10 +170,16 @@ struct WindowContentView<Accessory: View>: View {
     /// visible so a stale zero never flashes the right overlay open.
     @ViewBuilder
     private func sidebarLayout(_ sidebars: SidebarWiring) -> some View {
+        // app-shell T3: the surface's configuration is applied to the RAW flags first — a right-only
+        // surface (the shell, which brings its own outer session switcher) hands the engine
+        // `leftExpanded: false`, so the left column can resolve neither inline nor as an overlay at
+        // any width. The default configuration is the identity (`sidebarStateForConfiguration`), so
+        // the two pre-existing surfaces feed `resolveSidebars` byte-identical inputs.
+        let state = sidebarStateForConfiguration(sidebar, showsSessionSwitcher: sidebars.showsSessionSwitcher)
         let resolved = measuredWidth > 0
             ? resolveSidebars(width: measuredWidth,
-                              leftExpanded: sidebar.leftExpanded, rightExpanded: sidebar.rightExpanded,
-                              leftOverlayOpen: sidebar.leftOverlayOpen, rightOverlayOpen: sidebar.rightOverlayOpen)
+                              leftExpanded: state.leftExpanded, rightExpanded: state.rightExpanded,
+                              leftOverlayOpen: state.leftOverlayOpen, rightOverlayOpen: state.rightOverlayOpen)
             : EffectiveSidebars(leftVisible: false, rightVisible: false, leftOverlay: false, rightOverlay: false)
         ZStack {
             HStack(spacing: 0) {
@@ -191,7 +197,10 @@ struct WindowContentView<Accessory: View>: View {
             // Edge chevron affordances for the sides that are NOT effectively visible. Tapping one
             // FORCE-OPENS its side in a single tap (CARRIED ITEM 1 — see `openLeftViaChevron`).
             HStack(spacing: 0) {
-                if !resolved.leftVisible {
+                // The left chevron is the one affordance that renders when the side is NOT visible,
+                // so it needs the configuration gate explicitly: a right-only surface has no left
+                // column to open, and an edge chevron that opens nothing is worse than no chevron.
+                if !resolved.leftVisible && sidebars.showsSessionSwitcher {
                     sidebarChevron("chevron.right") {
                         sidebar = openLeftViaChevron(sidebar, width: measuredWidth)
                     }

@@ -430,6 +430,21 @@ final class AppShellTests: XCTestCase {
         XCTAssertNil(wiring.onSummonApp, "a wiring that doesn't ask for the door must not get one")
     }
 
+    /// app-shell T3, the same compatibility bar one field over: the left session switcher is
+    /// OPT-OUT. Both detached-window construction sites (and the orb's) build a `SidebarWiring`
+    /// without the flag, so they keep both sidebars exactly as before; only the shell — which
+    /// provides its own outer nav — asks for the right-only configuration.
+    func testSidebarWiringShowsTheSessionSwitcherByDefault() {
+        let wiring = SidebarWiring(
+            directory: SessionDirectory(lister: { [] }),
+            currentSessionId: { nil },
+            onSelect: { _ in },
+            onOpenDetached: { _ in },
+            onNewSession: {}
+        )
+        XCTAssertTrue(wiring.showsSessionSwitcher, "a wiring that doesn't opt out must keep its left column")
+    }
+
     /// The menu bar's "Open Norma App" entry summons the singleton — fired through the REAL menu
     /// item's target/action, exactly like a click (the `MenuBarEntryPointsTests` idiom).
     func testOpenNormaAppMenuItemSummonsTheShell() {
