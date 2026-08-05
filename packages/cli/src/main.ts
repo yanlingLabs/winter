@@ -974,6 +974,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
 export type CliRoute =
   | { kind: "chat"; existingSessionId?: string }
   | { kind: "resumeOneShot"; sessionId: string; text: string }
+  | { kind: "version" }
   | { kind: "fallthrough" };
 
 const isPolicyFlag = (s: string | undefined): boolean => s === "--auto" || s === "--plan";
@@ -983,6 +984,10 @@ export function routeCliInvocation(argv: string[], isTTY: boolean): CliRoute {
   if (cmd === undefined || isPolicyFlag(cmd)) {
     return isTTY ? { kind: "chat" } : { kind: "fallthrough" };
   }
+  // App→CLI handoff Task 2: a real version flag. LEADING position only — as a later argv word
+  // (`resume <id> -v`) it's someone else's argument, unchanged. Deliberately NOT gated on isTTY:
+  // scripts are exactly who asks for --version. The matching `switch (cmdKey)` case prints/exits.
+  if (cmd === "--version" || cmd === "-v") return { kind: "version" };
   if (cmd === "resume" && sub !== undefined) {
     const text = rest.join(" ");
     if (text === "" || isPolicyFlag(text)) return { kind: "chat", existingSessionId: sub };
@@ -1096,6 +1101,13 @@ if (import.meta.main) {
   const cmdKey = cmd === "daemon" ? `daemon ${sub ?? ""}`.trim() : (cmd ?? "");
 
   switch (cmdKey) {
+  case "--version":
+  case "-v": {
+    // Handoff Task 2: thin dispatcher for routeCliInvocation's {kind:"version"} (the pure, tested
+    // decision — both spellings land here because cmdKey is just argv[0] for non-daemon commands).
+    console.log(`norma ${CORE_VERSION}`);
+    process.exit(0);
+  }
   case "daemon run": {
     // Whole-branch review: register the shutdown handlers HERE, not (only) in daemon.ts. daemon.ts's
     // SIGTERM/SIGINT handlers live under `if (import.meta.main)`, which is FALSE for the compiled
@@ -1936,7 +1948,7 @@ if (import.meta.main) {
     process.exit(text.length > 0 ? 0 : 1);
   }
   default:
-    console.log(`norma (Phase 1b-ii-d) — commands:
+    console.log(`norma ${CORE_VERSION} — commands:
   daemon run | daemon install | daemon uninstall | daemon status
   ping | sessions | status | quota | send <sessionId|new> <text> | watch <sessionId> | add-dir <sessionId> <path> [--persist] | cd <sessionId> <path>
   steer <sessionId> <text> | interrupt <sessionId> | compact <sessionId>
