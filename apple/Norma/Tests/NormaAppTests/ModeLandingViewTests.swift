@@ -264,10 +264,21 @@ final class ModeLandingViewTests: XCTestCase {
 
     // MARK: - The hop-away "keep working?" moment (T3 review as-m9, carried into T4)
 
-    /// The trigger matrix, verbatim: hop-away-with-turn-running shows it, without doesn't.
+    /// The trigger matrix: hop-away-with-turn-running AND lifecycle-participating shows it — never
+    /// on activity `nil` (chat/dispatch — the fix for the review's Important finding: a mid-turn
+    /// CHAT hop used to surface this prompt, and "Keep working in background" would then be refused
+    /// by the daemon with no visible sign, since the refusal lands in `rosterRefusals`, which only
+    /// the Background tab's own rows read), never on `"archived"` (immutable except through
+    /// resume), and never on an unrecognized value — fail-quiet toward NOT prompting, mirroring
+    /// `backgroundVerbOffered`'s own domain rather than re-deriving a mode list.
     func testHopAwayTriggerMatrix() {
-        XCTAssertTrue(hopAwayShouldPromptBackground(turnWasRunning: true))
-        XCTAssertFalse(hopAwayShouldPromptBackground(turnWasRunning: false))
+        XCTAssertTrue(hopAwayShouldPromptBackground(turnWasRunning: true, activity: "active"))
+        XCTAssertTrue(hopAwayShouldPromptBackground(turnWasRunning: true, activity: "idle"))
+        XCTAssertTrue(hopAwayShouldPromptBackground(turnWasRunning: true, activity: "background"))
+        XCTAssertFalse(hopAwayShouldPromptBackground(turnWasRunning: false, activity: "active"), "idle departure: nothing to make sticky")
+        XCTAssertFalse(hopAwayShouldPromptBackground(turnWasRunning: true, activity: nil), "chat/dispatch — no lifecycle at all")
+        XCTAssertFalse(hopAwayShouldPromptBackground(turnWasRunning: true, activity: "archived"), "archived is immutable except through resume")
+        XCTAssertFalse(hopAwayShouldPromptBackground(turnWasRunning: true, activity: "teleporting"), "an unknown future value is not a licence to guess")
     }
 
     private func turnStartedEvent() -> SessionEvent {
@@ -278,10 +289,11 @@ final class ModeLandingViewTests: XCTestCase {
     /// that was just left (not the one just hopped onto).
     func testHopAwayWithTurnRunningSurfacesThePrompt() async {
         let rows = [
-            SessionSummary(sessionId: "S1", title: "One", createdAt: 1, scope: "global", cwd: "/repo", mode: "code"),
-            SessionSummary(sessionId: "S2", title: "Two", createdAt: 2, scope: "global", cwd: "/repo", mode: "code"),
+            SessionSummary(sessionId: "S1", title: "One", createdAt: 1, scope: "global", cwd: "/repo", mode: "code", activity: "active"),
+            SessionSummary(sessionId: "S2", title: "Two", createdAt: 2, scope: "global", cwd: "/repo", mode: "code", activity: "active"),
         ]
         let (host, factory) = makeHost(rows: rows)
+        await host.directory.refresh() // the gate reads the departing row's `activity` off THIS
         defer { host.deselect() }
         host.setShellVisible(true)
         host.select("S1")
@@ -327,8 +339,9 @@ final class ModeLandingViewTests: XCTestCase {
     /// Hiding the shell (or navigating to a non-session destination) is a departure too — same
     /// trigger, `detachCurrent()`'s half.
     func testHidingWithATurnRunningSurfacesThePrompt() async {
-        let rows = [SessionSummary(sessionId: "S1", title: "One", createdAt: 1, scope: "global", cwd: "/repo", mode: "code")]
+        let rows = [SessionSummary(sessionId: "S1", title: "One", createdAt: 1, scope: "global", cwd: "/repo", mode: "code", activity: "active")]
         let (host, factory) = makeHost(rows: rows)
+        await host.directory.refresh()
         host.setShellVisible(true)
         host.select("S1")
         await feedWaitUntil { !factory.made.isEmpty }
@@ -346,16 +359,70 @@ final class ModeLandingViewTests: XCTestCase {
         XCTAssertEqual(host.hopAwayPrompt, HopAwayPrompt(sessionId: "S1"))
     }
 
+    /// THE FIX (review Important finding): a mid-turn CHAT session hopped away from must NOT
+    /// surface the prompt. Chat has no activity lifecycle at all (`activity` is `nil` on its row,
+    /// same as every chat row), so `session.setActivity` refuses "Keep working in background"
+    /// outright (`ACTIVITY_MODE_REFUSAL`) — and that refusal used to land in `rosterRefusals`,
+    /// which only the Background tab's own rows ever read, so the banner just cleared silently.
+    func testHopAwayFromAChatSessionShowsNoPromptEvenWithATurnRunning() async {
+        let rows = [
+            SessionSummary(sessionId: "S1", title: "A chat", createdAt: 1, scope: "global", cwd: nil, mode: "chat"),
+            SessionSummary(sessionId: "S2", title: "Two", createdAt: 2, scope: "global", cwd: "/repo", mode: "code", activity: "active"),
+        ]
+        let (host, factory) = makeHost(rows: rows)
+        await host.directory.refresh() // populates S1's row — `mode: "chat"`, `activity` absent
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await feedWaitUntil { !factory.made.isEmpty }
+        let t = factory.made[0]
+        await feedWaitUntil { t.sent.count >= 1 }
+        let hello = feedLineJSON(t.sent[0])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(hello["id"] as! Int),"result":{"ok":true}}"#)
+        await feedWaitUntil { t.sent.count >= 2 }
+        let attach = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+
+        host.attachment?.session.apply(turnStartedEvent())
+        XCTAssertTrue(host.attachment?.session.state.turnRunning ?? false)
+
+        host.select("S2") // hop away from the RUNNING chat session
+        XCTAssertNil(host.hopAwayPrompt, "chat has no activity lifecycle — the prompt must never imply a click could succeed")
+    }
+
+    /// Same gate, the `detachCurrent()` half — hiding a mid-turn chat session must not prompt either.
+    func testHidingAChatSessionWithATurnRunningShowsNoPrompt() async {
+        let rows = [SessionSummary(sessionId: "S1", title: "A chat", createdAt: 1, scope: "global", cwd: nil, mode: "chat")]
+        let (host, factory) = makeHost(rows: rows)
+        await host.directory.refresh()
+        host.setShellVisible(true)
+        host.select("S1")
+        await feedWaitUntil { !factory.made.isEmpty }
+        let t = factory.made[0]
+        await feedWaitUntil { t.sent.count >= 1 }
+        let hello = feedLineJSON(t.sent[0])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(hello["id"] as! Int),"result":{"ok":true}}"#)
+        await feedWaitUntil { t.sent.count >= 2 }
+        let attach = feedLineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+
+        host.attachment?.session.apply(turnStartedEvent())
+        host.setShellVisible(false) // hide a mid-turn chat session
+
+        XCTAssertNil(host.hopAwayPrompt)
+    }
+
     /// "Keep working in background" makes the daemon's already-in-effect protection STICKY —
     /// `session.setActivity(S1, "background")` over the bare management connection, and the prompt
     /// clears immediately (not gated on the RPC's round trip).
     func testConfirmHopAwaySendsBackgroundVerbatimAndClearsThePrompt() async {
         let (client, transport) = await connectedManagementClient()
         let rows = [
-            SessionSummary(sessionId: "S1", title: "One", createdAt: 1, scope: "global", cwd: "/repo", mode: "code"),
-            SessionSummary(sessionId: "S2", title: "Two", createdAt: 2, scope: "global", cwd: "/repo", mode: "code"),
+            SessionSummary(sessionId: "S1", title: "One", createdAt: 1, scope: "global", cwd: "/repo", mode: "code", activity: "active"),
+            SessionSummary(sessionId: "S2", title: "Two", createdAt: 2, scope: "global", cwd: "/repo", mode: "code", activity: "active"),
         ]
         let (host, factory) = makeHost(rows: rows, managementClient: client)
+        await host.directory.refresh()
         defer { host.deselect() }
         host.setShellVisible(true)
         host.select("S1")
@@ -387,10 +454,11 @@ final class ModeLandingViewTests: XCTestCase {
     func testDismissHopAwayPromptSendsNothing() async {
         let (client, transport) = await connectedManagementClient()
         let rows = [
-            SessionSummary(sessionId: "S1", title: "One", createdAt: 1, scope: "global", cwd: "/repo", mode: "code"),
-            SessionSummary(sessionId: "S2", title: "Two", createdAt: 2, scope: "global", cwd: "/repo", mode: "code"),
+            SessionSummary(sessionId: "S1", title: "One", createdAt: 1, scope: "global", cwd: "/repo", mode: "code", activity: "active"),
+            SessionSummary(sessionId: "S2", title: "Two", createdAt: 2, scope: "global", cwd: "/repo", mode: "code", activity: "active"),
         ]
         let (host, factory) = makeHost(rows: rows, managementClient: client)
+        await host.directory.refresh()
         defer { host.deselect() }
         host.setShellVisible(true)
         host.select("S1")

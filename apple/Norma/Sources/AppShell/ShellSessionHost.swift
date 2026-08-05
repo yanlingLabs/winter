@@ -46,12 +46,24 @@ func shellAttachmentAction(selection: String?, attached: String?, shellVisible: 
 // MARK: - T4: the hop-away "keep working?" moment (spec §1, T3 review as-m9)
 
 /// PURE: the hop-away trigger matrix. Hopping to another session, or hiding/navigating away from
-/// one entirely, while its turn was genuinely RUNNING is the one case that surfaces the prompt — an
-/// idle departure has nothing to make sticky (the daemon's app-kind auto-background already
-/// protects an actually-running turn either way; this is purely about whether there is anything for
-/// the prompt to offer making STICKY).
-func hopAwayShouldPromptBackground(turnWasRunning: Bool) -> Bool {
-    turnWasRunning
+/// one entirely, while its turn was genuinely RUNNING **and the session actually participates in
+/// the activity lifecycle** is the one case that surfaces the prompt.
+///
+/// The participation gate mirrors `backgroundVerbOffered`'s own domain (T3's `ActivityMenu`
+/// precedent, and the chip-visibility precedent — `ActivityChip`) rather than re-deriving a mode
+/// list: `activity` is the daemon's own answer, relayed off the row, never guessed at client-side.
+/// Fail-quiet toward NOT prompting on anything `backgroundVerbOffered` would refuse — chat/dispatch
+/// (no lifecycle at all), archived (immutable except through resume), or an unrecognized future
+/// value. This closes a real silent-failure path: a mid-turn CHAT session hopped away from used to
+/// surface the SAME banner, and "Keep working in background" would then call
+/// `setActivityFromRoster` against a session `session.setActivity` refuses outright
+/// (`ACTIVITY_MODE_REFUSAL`) — a refusal that landed in `rosterRefusals`, a dictionary only the
+/// Background tab's OWN rows ever read, so the banner just cleared as if the click had worked. An
+/// idle or non-participating departure has nothing to make sticky either way — the daemon's
+/// auto-background (where it applies) already protects a genuinely running turn regardless of
+/// whether this banner ever shows.
+func hopAwayShouldPromptBackground(turnWasRunning: Bool, activity: String?) -> Bool {
+    turnWasRunning && backgroundVerbOffered(activity: activity) != nil
 }
 
 /// What the prompt is about — just the departed session's id; the view looks its title up from the
@@ -349,8 +361,14 @@ final class ShellSessionHost: ObservableObject {
         guard let live = attachment else { return attachFresh(to: sessionId) }
         // T4, spec §1's "keep working?" moment: capture the DEPARTING session's running state
         // before anything about it changes below — `hopAwayShouldPromptBackground` is the trigger
-        // matrix (hop-away-with-turn-running shows it, an idle departure doesn't).
-        if let departing = attachedSessionId, hopAwayShouldPromptBackground(turnWasRunning: live.session.state.turnRunning) {
+        // matrix (hop-away-with-turn-running AND lifecycle-participating shows it; the departing
+        // row's OWN `activity` field is the participation answer, read fresh off the directory —
+        // never a client-side mode guess, same as `backgroundVerbOffered`'s own callers).
+        if let departing = attachedSessionId,
+           hopAwayShouldPromptBackground(
+               turnWasRunning: live.session.state.turnRunning,
+               activity: directory.rows.first(where: { $0.sessionId == departing })?.activity
+           ) {
             hopAwayPrompt = HopAwayPrompt(sessionId: departing)
         }
         attachedSessionId = sessionId
@@ -379,8 +397,13 @@ final class ShellSessionHost: ObservableObject {
             return
         }
         // Same hop-away moment as `hop(to:)` above — hiding the shell or navigating to a non-session
-        // destination is "leaving" a session exactly as much as hopping onto another one is.
-        if let departing = attachedSessionId, hopAwayShouldPromptBackground(turnWasRunning: live.session.state.turnRunning) {
+        // destination is "leaving" a session exactly as much as hopping onto another one is, and the
+        // same participation gate applies (a mid-turn CHAT session must never get this prompt).
+        if let departing = attachedSessionId,
+           hopAwayShouldPromptBackground(
+               turnWasRunning: live.session.state.turnRunning,
+               activity: directory.rows.first(where: { $0.sessionId == departing })?.activity
+           ) {
             hopAwayPrompt = HopAwayPrompt(sessionId: departing)
         }
         live.feedTask?.cancel()
