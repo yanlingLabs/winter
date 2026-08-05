@@ -393,9 +393,13 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
     /// is the only way this controller ever re-targets itself).
     ///
     /// working-directories T8: THE app's one code-session create path, and so the one place the
-    /// create-time folder picker mounts (the other two create paths are `AppModel.startFreshSession`,
-    /// which resolves the DISPATCH singleton, and `AppDelegate.createAndOpenChat`, `mode:"chat"` —
-    /// neither participates in working directories at all). It no longer hardcodes
+    /// create-time folder picker mounts (the other create path is `AppModel.startFreshSession`,
+    /// which resolves the DISPATCH singleton — it doesn't participate in working directories
+    /// either). App shell T6: the third create path this comment used to name,
+    /// `AppDelegate.createAndOpenChat` (`mode:"chat"`, for the "Chat"/"New Chat" menu items), is
+    /// retired — those items summon the app shell's chat landing now, and there is currently no
+    /// `session.create(mode:"chat")` call anywhere in the Mac app (a disclosed gap, not an
+    /// oversight — see App shell Task 6's report). It no longer hardcodes
     /// `cwd: NSHomeDirectory()`: the sheet's answer decides, and **"No folder (outputs only)" creates
     /// with NO cwd at all**, which is what makes the daemon write `dirs = []` (T6) rather than
     /// silently adopting the home directory as a writable root. Cancelling the sheet creates nothing.

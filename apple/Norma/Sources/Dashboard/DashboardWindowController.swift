@@ -61,8 +61,12 @@ final class DashboardWindowController: NSObject, NSWindowDelegate {
     var windowForTesting: NSWindow? { window }
 
     /// Phase 4d-iii Task 2: `initialPane` defaults to `defaultDashboardPane` so the pre-existing
-    /// "Dashboard…" call site (`AppDelegate.openDashboard`) is unaffected; the new "Manage
-    /// Plugins…" entry point passes `.pluginManager` instead — see `AppDelegate.openPluginManager`.
+    /// "Dashboard…" call site (`AppDelegate.openDashboard`) is unaffected; a `.pluginManager`
+    /// targeted open was originally driven by the "Manage Plugins…" menu item via
+    /// `AppDelegate.openPluginManager()` — App shell T6 retired that wrapper (the menu item summons
+    /// the app shell now); `openDashboard(initialPane:)` itself, and its `.pluginManager` case,
+    /// are unaffected — the first-run disclosure sheet's `.provider` call is today's live example
+    /// of a targeted open.
     /// Phase 4d-iii Task 4: `shortcutRegistry` defaults to `nil` — under unit tests
     /// (`testShowCreatesNativeChromeWindowAtFrame`, `DashboardTests.swift`) `AppDelegate` never
     /// constructs a real `ShortcutRegistry` (it's built only outside `!isRunningUnitTests`, same
