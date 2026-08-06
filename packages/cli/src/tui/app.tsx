@@ -15,8 +15,12 @@
  *                                    lean on Yoga overflow), plus the `↓ N newer lines` indicator
  *                                    while scrolled back. Its root Box `flexGrow`s to push the bar
  *                                    to the bottom when the log is shorter than the viewport.
- *    <Box flexShrink={0}>          — the pinned bottom bar, top-to-bottom:
- *      activeTurn (tail-sliced)     — the in-flight streaming turn, JS tail-capped at ⌈rows/3⌉ lines.
+ *                                    While a turn streams, the in-flight assistant text + tool heads
+ *                                    are the line log's LAST row-group (TUI renderer T3 — streaming
+ *                                    lives inside the transcript; `makeStreamRenderer`), so the page
+ *                                    scrolls instead of a pinned block self-scrolling, and turn-end
+ *                                    swaps streamed rows for the committed block byte-identically.
+ *    <Box flexShrink={0}>          — the pinned bottom bar (chrome only now), top-to-bottom:
  *      [TaskList]                   — when tasks exist AND `tasksVisible` (DEFAULT TRUE; ctrl+t toggles).
  *      Spinner                      — animated in-progress indicator (only while a turn runs).
  *      PendingCards | Composer      — a card takes over input when `state.pending` is set.
@@ -83,7 +87,7 @@ import wrapAnsi from "wrap-ansi";
 import { METHODS, type ApprovalPolicy, type SessionEvent } from "@norma/protocol";
 import { POLICY_ORDER } from "./policy-order";
 import { initialState, reduce, type AgentRow, type Block, type LocalEvent, type PendingCard, type TuiState } from "./state";
-import { activeTurnLines, makeFlattenCache } from "./flatten-blocks";
+import { makeFlattenCache, makeStreamRenderer } from "./flatten-blocks";
 import { applyWheel, followBottom, onContentGrown, scrollToTop, type ScrollState } from "./scroll-model";
 import { TranscriptViewport } from "./transcript";
 import { collapseCompleted, sortTasksForDisplay, type TaskRow } from "../task-display";
@@ -246,7 +250,6 @@ export function bottomBarRows(input: {
   agents: AgentRow[];
   running: boolean;
   pending: PendingCard | null;
-  activeTurnRows: number;
   /** Terminal width — feeds the composer's wrap-aware row count (or is simply unused when a card
    *  replaces the composer). */
   columns: number;
@@ -263,8 +266,11 @@ export function bottomBarRows(input: {
    *  the composer (and its menu) isn't even mounted then. */
   menuRows: number;
 }): number {
-  const { tasksVisible, tasks, agents, running, pending, activeTurnRows, columns, composerText, composerCursor, resuming, menuRows } = input;
-  let n = activeTurnRows; // in-flight active turn (already tail-capped at ⌈rows/3⌉)
+  const { tasksVisible, tasks, agents, running, pending, columns, composerText, composerCursor, resuming, menuRows } = input;
+  // TUI renderer T3: the in-flight streaming turn no longer lives in this bar — it renders inside
+  // the transcript's line log (`makeStreamRenderer` rows appended to `lineLog` in App below), so
+  // this model counts only chrome: tasks · spinner · resuming · card|composer+menu · agents · footer.
+  let n = 0;
   if (tasks.length > 0 && tasksVisible) n += taskListRows(tasks);
   if (running) n += 1; // Spinner
   if (resuming) n += 1; // "Resuming conversation…"
@@ -467,6 +473,10 @@ export function App({
   // columns/verbose changes are handled by the cache's own internal invalidation.
   const cache = useMemo(() => makeFlattenCache(), [highlight]);
 
+  // TUI renderer T3: the in-flight turn's row source — one stateful renderer per mount (it owns the
+  // incremental streaming-markdown boundary; highlight changes reset it internally, so no dep here).
+  const streamRenderer = useMemo(() => makeStreamRenderer(), []);
+
   // --- derived per render -------------------------------------------------------------------------
   const welcome = useMemo(() => welcomeLines(version, model, cwd), [version, model, cwd]);
   const bodyLines = cache.lines(state.committed, { columns, verbose, highlight });
@@ -484,16 +494,23 @@ export function App({
     () => (childBlocksArr === null ? null : makeFlattenCache().lines(childBlocksArr, { columns, verbose, highlight })),
     [childBlocksArr, columns, verbose, highlight],
   );
-  const lineLog = childLines ?? welcome.concat(bodyLines);
 
-  const activeCap = Math.ceil(rows / 3);
+  // TUI renderer T3 — streaming lives INSIDE the transcript (mechanism report Q7 cures 1-2): the
+  // in-flight turn's rows are the line log's LAST row-group, so streamed complete lines join the
+  // scrollable flow the moment they exist (scroll back mid-stream and read them — growth rides the
+  // SAME onContentGrown path as committed content, and the `↓ N newer lines` indicator counts them
+  // honestly), and turn-end's reducer swap (committed+block / activeAssistant="" in ONE update)
+  // replaces these rows with the committed block's byte-identical rows — no glue frame. The child
+  // view deliberately excludes MAIN's stream rows (it shows the child's own blocks; MAIN keeps
+  // streaming into its own log for the return). dimToolDot only flips row CONTENT (1 row), never
+  // row count, so the 500ms blink never triggers growth compensation.
   const dimToolDot = Math.floor(nowMs / 500) % 2 === 0;
-  const atAll = activeTurnLines(state.activeAssistant, state.activeTools, { columns, highlight, dimToolDot });
-  const atVisible = atAll.slice(-activeCap); // JS tail-slice (HARD CONSTRAINT 2)
+  const streamRows = streamRenderer.lines(state.activeAssistant, state.activeTools, { columns, highlight, dimToolDot });
+  const lineLog = childLines ?? welcome.concat(bodyLines, streamRows);
 
   const barRows = bottomBarRows({
     tasksVisible, tasks: state.tasks, agents: visibleAgents,
-    running: state.turnRunning, pending: state.pending, activeTurnRows: atVisible.length,
+    running: state.turnRunning, pending: state.pending,
     columns, composerText: composerState.text, composerCursor: composerState.cursor, resuming,
     menuRows,
   });
@@ -775,9 +792,6 @@ export function App({
       {childOpen ? <Text>{childHeaderLine(childRow!, columns)}</Text> : null}
       <TranscriptViewport lines={lineLog} scroll={scrollForRender} viewportRows={viewH} />
       <Box flexDirection="column" flexShrink={0}>
-        {atVisible.map((line, i) => (
-          <Text key={`at${i}`}>{line.length > 0 ? line : " "}</Text>
-        ))}
         {state.tasks.length > 0 && tasksVisible ? <TaskList tasks={state.tasks} nowMs={nowMs} /> : null}
         <Spinner
           running={state.turnRunning}

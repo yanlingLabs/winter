@@ -1214,7 +1214,7 @@ describe("bottomBarRows (pinned-bar line-count model)", () => {
   // unchanged; only the NEW "small columns" describe block below exercises actual wrapping.
   type Base = Parameters<typeof bottomBarRows>[0];
   const base = (overrides: Partial<Base>): Base => ({
-    tasksVisible: true, tasks: [], agents: [], running: false, pending: null, activeTurnRows: 0,
+    tasksVisible: true, tasks: [], agents: [], running: false, pending: null,
     columns: 80, composerText: "", composerCursor: 0, resuming: false, menuRows: 0,
     ...overrides,
   });
@@ -1237,8 +1237,7 @@ describe("bottomBarRows (pinned-bar line-count model)", () => {
     expect(bottomBarRows(base({ agents: [agent("x"), agent("y")] }))).toBe(4 + 4);
   });
 
-  test("active-turn tail rows and a pending card both count; the card replaces the composer's 3", () => {
-    expect(bottomBarRows(base({ activeTurnRows: 5 }))).toBe(9); // 5 + composer 3 + footer 1
+  test("a pending card replaces the composer's 3 (TUI renderer T3: the streaming turn no longer counts here — it lives in the transcript)", () => {
     const withCard = bottomBarRows(base({
       pending: { kind: "approval", callId: "c", toolName: "bash", summary: "x" },
     }));
@@ -1292,5 +1291,96 @@ describe("bottomBarRows (pinned-bar line-count model)", () => {
       }));
       expect(rows).toBe(1 + 1); // approval card (1) + footer (1) — menuRows never added
     });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// TUI renderer T3 — streaming inside the transcript, pinned PURE (no Ink): these compose the
+// exact per-render derivation App runs — reduce → makeFlattenCache.lines(committed) ++
+// makeStreamRenderer.lines(activeAssistant, activeTools) — so they hold in any environment,
+// unlike the TTY-classed frame tests above.
+// ---------------------------------------------------------------------------------------------
+
+import { initialState, reduce } from "../../src/tui/state";
+import { makeFlattenCache, makeStreamRenderer } from "../../src/tui/flatten-blocks";
+import { applyWheel, followBottom, onContentGrown, visibleSlice } from "../../src/tui/scroll-model";
+
+describe("T3 — the turn-end swap renders byte-identical rows (the no-glue pin)", () => {
+  const FULL = "Streaming **works** now.\n\nSecond para with `code`.\n\n- item a\n- item b\n\nAll done here.";
+
+  function streamedState(chunk: number) {
+    let s = initialState();
+    s = reduce(s, ev({ type: "turn_started", threadId: "main" }), 0);
+    for (let i = chunk; i < FULL.length + chunk; i += chunk) {
+      const upto = Math.min(i, FULL.length);
+      const from = upto - Math.min(chunk, upto - (i - chunk));
+      s = reduce(s, ev({ type: "assistant_delta", threadId: "main", delta: FULL.slice(i - chunk, upto), from }), 0);
+    }
+    return s;
+  }
+
+  test("lineLog before assistant_message === lineLog after, element-wise (arbitrary delta chunking)", () => {
+    for (const chunk of [1, 5, FULL.length]) {
+      const flatten = makeFlattenCache();
+      const stream = makeStreamRenderer();
+      const fopts = { columns: 80, verbose: false };
+      const sopts = { columns: 80, dimToolDot: false };
+
+      const s = streamedState(chunk);
+      expect(s.activeAssistant).toBe(FULL); // wire property: deltas concat to the final text
+      const before = [...flatten.lines(s.committed, fopts), ...stream.lines(s.activeAssistant, s.activeTools, sopts)];
+
+      const s2 = reduce(s, ev({ type: "assistant_message", threadId: "main", text: FULL }), 0);
+      // ONE state update: the block commits AND the stream clears in the same reduce.
+      expect(s2.activeAssistant).toBe("");
+      expect(s2.committed.length).toBe(s.committed.length + 1);
+      const after = [...flatten.lines(s2.committed, fopts), ...stream.lines(s2.activeAssistant, s2.activeTools, sopts)];
+
+      expect(after).toEqual(before); // byte-identical rows ⇒ the swap repaints nothing
+    }
+  });
+
+  test("swap parity also holds when in-flight tool heads trail the streamed text", () => {
+    const flatten = makeFlattenCache();
+    const stream = makeStreamRenderer();
+    const fopts = { columns: 80, verbose: false };
+    const sopts = { columns: 80, dimToolDot: false };
+
+    let s = streamedState(7);
+    s = reduce(s, ev({ type: "tool_call", threadId: "main", name: "bash", argsJson: '{"command":"ls"}' }), 0);
+    const before = [...flatten.lines(s.committed, fopts), ...stream.lines(s.activeAssistant, s.activeTools, sopts)];
+    const s2 = reduce(s, ev({ type: "assistant_message", threadId: "main", text: FULL }), 0);
+    const after = [...flatten.lines(s2.committed, fopts), ...stream.lines(s2.activeAssistant, s2.activeTools, sopts)];
+    expect(after).toEqual(before); // tool head rows stay put after the assistant rows either way
+  });
+});
+
+describe("T3 — streamed complete lines are scrollable transcript content mid-stream", () => {
+  test("scroll back during a stream: streamed lines are readable, and further growth holds the view", () => {
+    const stream = makeStreamRenderer();
+    const sopts = { columns: 80, dimToolDot: false };
+    const viewH = 5;
+
+    // A stream tall enough to scroll: 12 complete plain lines + an open tail.
+    const lines = Array.from({ length: 12 }, (_, i) => `streamed line ${i}`);
+    const buf1 = lines.join("\n") + "\nopen tail";
+    const log1 = stream.lines(buf1, [], sopts);
+    expect(log1.length).toBeGreaterThan(viewH);
+
+    // Wheel back far enough that the window sits over early streamed lines.
+    let scroll = followBottom();
+    scroll = applyWheel(scroll, { kind: "wheelUp", lines: 8 }, viewH, log1.length);
+    const w1 = visibleSlice(log1, scroll, viewH, 0);
+    const visible1 = log1.slice(w1.start, w1.end);
+    expect(visible1.join("\n")).toContain("streamed line 2"); // an EARLY complete line, readable mid-stream
+
+    // The stream grows (more complete lines land): compensation keeps the SAME rows in view.
+    const buf2 = buf1 + " grows\nmore 1\nmore 2\nmore 3\n";
+    const log2 = stream.lines(buf2, [], sopts);
+    const grownBy = log2.length - log1.length;
+    expect(grownBy).toBeGreaterThan(0);
+    scroll = onContentGrown(scroll, grownBy);
+    const w2 = visibleSlice(log2, scroll, viewH, 0);
+    expect(log2.slice(w2.start, w2.end)).toEqual(visible1); // growth never moves a reader
   });
 });
