@@ -980,6 +980,86 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(empty.newChatCreate, .idle, "an empty submit is a no-op, not a failure")
     }
 
+    /// T2 fix round 1 — the reviewer's exact scenario (the single-slot overwrite, proved
+    /// PLAUSIBLE: `.creating` lifts at create-ack before delivery, the page shows no in-flight
+    /// feedback, so a slow attach invites navigate-away → re-enter → re-send): send A → navigate
+    /// away → re-enter → send B ⇒ TWO creates, TWO sessions, EACH message delivered to ITS OWN
+    /// session on ITS OWN attach (wire-verified), and ONLY the current page's create navigates —
+    /// the departed create delivers QUIETLY (its session sits in Recents; no yank). Late delivery
+    /// is a commitment: message A lands when s_first's attach eventually happens — here via the
+    /// HOP path (the shell is on s_second when the user opens s_first from Recents), which is the
+    /// natural Recents click and the delivery path a naive onConnected-only wiring misses.
+    func testDepartedCreatesMessageStillDeliversAndOnlyTheCurrentPagesCreateNavigates() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        var navigations: [String] = []
+        // Send A from the page, then leave BEFORE the create acks (the slow-create beat).
+        host.sendFirstChatMessage("message A") { navigations.append($0) }
+        host.apply(destination: .mode(.chat))
+
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let createA = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("send A must create: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(createA["id"] as! Int),"result":{"sessionId":"s_first","trusted":true}}"#)
+
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(navigations, [], "a DEPARTED page's create delivers quietly — it must never yank navigation")
+
+        // Re-enter the page (a NEW page instance), send B — the current-instance create.
+        host.apply(destination: .newChat)
+        host.sendFirstChatMessage("message B") { [weak host] id in
+            navigations.append(id)
+            host?.apply(destination: .session(id))
+        }
+        await feedWaitUntil { mgmt.methods.filter { $0 == "session.create" }.count == 2 }
+        guard let createB = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("send B must create its OWN session: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(createB["id"] as! Int),"result":{"sessionId":"s_second","trusted":true}}"#)
+
+        await feedWaitUntil { !navigations.isEmpty }
+        XCTAssertEqual(navigations, ["s_second"], "ONLY the current page instance's create navigates")
+        XCTAssertEqual(mgmt.methods.filter { $0 == "session.create" }.count, 2, "two sends, two sessions — no lost create")
+
+        // B delivers on ITS OWN attach (the navigation just selected s_second).
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "s_second")
+        await feedWaitUntil { t.methods.contains("session.send") }
+        guard let sendB = t.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.send" }) else {
+            return XCTFail("message B must deliver on s_second's attach: \(t.methods)")
+        }
+        XCTAssertEqual((sendB["params"] as? [String: Any])?["sessionId"] as? String, "s_second")
+        XCTAssertEqual((sendB["params"] as? [String: Any])?["text"] as? String, "message B")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(sendB["id"] as! Int),"result":{"seq":1}}"#)
+
+        // A delivers LATE, on s_first's OWN attach — the user opens it from Recents while the
+        // shell is attached to s_second: a HOP (one session.attach on the SAME connection).
+        host.apply(destination: .session("s_first"))
+        await feedWaitUntil { t.methods.filter { $0 == "session.attach" }.count == 2 }
+        guard let attachA = t.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.attach" }) else {
+            return XCTFail("the hop must re-attach on the same connection: \(t.methods)")
+        }
+        XCTAssertEqual((attachA["params"] as? [String: Any])?["sessionId"] as? String, "s_first")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attachA["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+
+        await feedWaitUntil { t.methods.filter { $0 == "session.send" }.count == 2 }
+        guard let sendA = t.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.send" }) else {
+            return XCTFail("message A must STILL deliver, on s_first's own attach — the commitment; the slot must not have been overwritten by B: \(t.methods)")
+        }
+        XCTAssertEqual((sendA["params"] as? [String: Any])?["sessionId"] as? String, "s_first",
+                       "A delivers into ITS session — never cross-delivered")
+        XCTAssertEqual((sendA["params"] as? [String: Any])?["text"] as? String, "message A",
+                       "the departed first message is a commitment — never silently dropped (the single-slot overwrite bug)")
+        // The wire order on the hop: A's send comes strictly AFTER s_first's attach.
+        let hopTrace = t.attachmentMethods
+        XCTAssertTrue(hopTrace.lastIndex(of: "session.attach")! < hopTrace.lastIndex(of: "session.send")!,
+                      "attach-before-send holds on the late/hop delivery too: \(hopTrace)")
+    }
+
     /// Navigating to the page detaches whatever was attached (spec §2: NO session on the page)
     /// and issues no RPCs of its own; a stale create failure clears on entry so the page always
     /// starts clean.

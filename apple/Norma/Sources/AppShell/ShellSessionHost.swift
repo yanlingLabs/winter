@@ -374,15 +374,33 @@ final class ShellSessionHost: ObservableObject {
 
     @Published private(set) var newChatCreate: NewChatCreateState = .idle
 
-    /// The typed first message, parked between the create's success and its delivery on the
-    /// created session's OWN attach (`deliverPendingFirstMessage`, composed onto the pinned
-    /// feed's post-attach `onConnected` — `SessionFeed.start()`'s pinned branch awaits the attach
-    /// ack BEFORE firing it, which is what makes create → attach → send hold in wire order with
-    /// no sequencing on this side). Keyed by sessionId so it can only ever deliver into the
-    /// session it was typed for. Single-slot by construction: a second new-chat flow cannot start
-    /// while one is in flight (`sendFirstChatMessage`'s `.creating` block), and delivery consumes
-    /// the slot on the very attach the create's own navigation triggers.
-    private var pendingFirstMessage: (sessionId: String, text: String)?
+    /// The typed first messages, parked between each create's success and delivery on the created
+    /// session's OWN attach (`deliverPendingFirstMessage` — fired from the pinned feed's
+    /// post-attach `onConnected` on a fresh attach, and after `repin`'s attach on a hop;
+    /// `SessionFeed.start()`'s pinned branch awaits the attach ack BEFORE firing `onConnected`,
+    /// which is what makes create → attach → send hold in wire order with no sequencing here).
+    ///
+    /// T2 fix round 1 (review Important — the single-slot overwrite): a MAP keyed by sessionId,
+    /// never a shared slot. Each `sendFirstChatMessage` invocation binds its payload to ITS OWN
+    /// create's session identity end-to-end, so a later create can never touch an earlier
+    /// payload. The old `.creating` block only spans the create round-trip — it lifts at the
+    /// create ACK, before delivery (which waits for the attach on a second transport), so
+    /// navigate-away → re-enter → re-send inside that beat is a PLAUSIBLE flow (the page shows no
+    /// in-flight feedback yet — T3/T4 minor), and under the slot it silently dropped message A
+    /// and orphaned its session empty. **Late delivery is a commitment**: a departed create's
+    /// message delivers when THAT session's attach eventually lands — fresh attach or hop,
+    /// whenever that is — never timeout-dropped.
+    private var pendingFirstMessages: [String: String] = [:]
+
+    /// T2 fix round 1: the page-instance epoch — bumped on EVERY `apply(destination:)` (each
+    /// navigation is a new instance boundary; re-entering the page is a NEW instance).
+    /// `sendFirstChatMessage` captures it at submit; a create whose epoch has gone stale by ack
+    /// time belongs to a DEPARTED page instance: its message still parks (the commitment above)
+    /// but `onCreated` — navigation — never fires. The departed session appears in Recents via
+    /// the ordinary `session_created` → directory-refresh path and delivers quietly on its own
+    /// eventual attach; only the CURRENT page instance's create yanks the shell onto the session.
+    /// The same monotonic-token shape as `dispatchResolutionToken`, for the same race class.
+    private var newChatPageEpoch = 0
 
     /// chatgpt-ui T2 (spec §2): the create-on-send flow — THE one `mode:"chat"` create site in
     /// the app (`AppDelegate.newChat()`'s eager create MOVED here; every New-chat door now only
@@ -412,16 +430,23 @@ final class ShellSessionHost: ObservableObject {
             return
         }
         newChatCreate = .creating
+        let epoch = newChatPageEpoch // T2 fix round 1: which page instance this send belongs to
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 let created = try await client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat")
                 // Parked BEFORE `onCreated`: the navigate inside it drives apply → select →
                 // attachFresh SYNCHRONOUSLY, and attachFresh must already see the pending text
-                // to seed the adapter's composer. Do not reorder.
-                self.pendingFirstMessage = (created.sessionId, trimmed)
+                // to seed the adapter's composer. Do not reorder. Keyed to THIS create's session
+                // — a later create writes its own entry, never this one (fix round 1).
+                self.pendingFirstMessages[created.sessionId] = trimmed
                 self.newChatCreate = .idle
-                onCreated(created.sessionId)
+                // Navigation fires only for the CURRENT page instance's create (fix round 1):
+                // a departed create delivers quietly — its session sits in Recents, its message
+                // lands on that session's own eventual attach, and nothing yanks the user.
+                if epoch == self.newChatPageEpoch {
+                    onCreated(created.sessionId)
+                }
             } catch let error as RpcError {
                 self.newChatCreate = .failed(error.message)
             } catch {
@@ -430,23 +455,26 @@ final class ShellSessionHost: ObservableObject {
         }
     }
 
-    /// The delivery half: fires on the pinned feed's post-attach `onConnected` (see
-    /// `pendingFirstMessage`'s doc for the ordering guarantee). Sends over the ATTACHED harness —
-    /// the daemon refuses `session.send` on a connection that hasn't attached (`ipc/server.ts`:
-    /// "no send path around it"), which is exactly why this cannot ride the management client.
-    /// On success the seeded composer clears — but only if it still holds the pending text
+    /// The delivery half: fires on the pinned feed's post-attach `onConnected` for a FRESH
+    /// attach, and after `repin`'s attach for a HOP (fix round 1 — a departed create's session is
+    /// usually opened from Recents while the shell is attached elsewhere, which is a hop; an
+    /// onConnected-only wiring would leave that message parked forever, breaking the late-delivery
+    /// commitment). Sends over the ATTACHED harness — the daemon refuses `session.send` on a
+    /// connection that hasn't attached (`ipc/server.ts`: "no send path around it"), which is
+    /// exactly why this cannot ride the management client. Consumes ONLY this session's own map
+    /// entry. On success the seeded composer clears — but only if it still holds the pending text
     /// verbatim, so a user already typing their SECOND message never has it eaten. On failure the
     /// draft stays: the text is visible in the composer, one Enter away from a retry — the same
     /// clear-only-on-success contract `submit` keeps.
     private func deliverPendingFirstMessage(for sessionId: String) {
-        guard let pending = pendingFirstMessage, pending.sessionId == sessionId,
+        guard let text = pendingFirstMessages[sessionId],
               attachedSessionId == sessionId, let live = attachment else { return }
-        pendingFirstMessage = nil
+        pendingFirstMessages[sessionId] = nil
         let client = live.feed.client
         Task { @MainActor [weak self] in
-            let ok = (try? await client.send(sessionId: sessionId, text: pending.text)) != nil
+            let ok = (try? await client.send(sessionId: sessionId, text: text)) != nil
             guard ok, let self, self.attachedSessionId == sessionId,
-                  let adapter = self.attachment?.adapter, adapter.composerDraft == pending.text else { return }
+                  let adapter = self.attachment?.adapter, adapter.composerDraft == text else { return }
             adapter.composerDraft = ""
         }
     }
@@ -475,6 +503,7 @@ final class ShellSessionHost: ObservableObject {
     /// `.session(id)`, just with the id resolved here instead of arriving pre-known. Every other mode
     /// destination keeps the old rule (a landing, never a session).
     func apply(destination: ShellDestination) {
+        newChatPageEpoch += 1 // T2 fix round 1: every navigation is a page-instance boundary
         switch destination {
         case .session(let sessionId):
             dispatchResolutionToken += 1 // invalidate any dispatch resolution the shell moved on from
@@ -598,8 +627,8 @@ final class ShellSessionHost: ObservableObject {
         // and clears only when the send actually lands (`deliverPendingFirstMessage`) — so the
         // hop from the new-chat page never shows an empty beat, and a failed send leaves the
         // text exactly where the user can retry it.
-        if let pending = pendingFirstMessage, pending.sessionId == sessionId {
-            adapter.composerDraft = pending.text
+        if let pending = pendingFirstMessages[sessionId] {
+            adapter.composerDraft = pending
         }
         // Forward this harness's session events to the SHARED directory — the same side-observer
         // composition `DetachedWindowController` uses, and `false` for the same reason: the pinned
@@ -672,7 +701,19 @@ final class ShellSessionHost: ObservableObject {
         // A refusal is about the session it was refused FOR — "session is archived — resume it
         // first" rendered over a different session is a lie about a rule (the `dirsRefusal` lesson).
         live.adapter.activityRefusal = nil
-        Task { @MainActor in await live.feed.repin(to: sessionId) }
+        // T2 fix round 1: the first-message carry on the HOP path too — a departed new-chat
+        // session opened from Recents while the shell shows another session arrives HERE, not
+        // through `attachFresh`; the seed and the post-attach delivery must ride along or the
+        // late-delivery commitment silently breaks on the most natural reopen path.
+        if let pending = pendingFirstMessages[sessionId] {
+            live.adapter.composerDraft = pending
+        }
+        Task { @MainActor [weak self] in
+            await live.feed.repin(to: sessionId)
+            // After the repin's attach ack — same attach-before-send guarantee as `onConnected`'s
+            // fresh-attach ordering (`repin` awaits `client.attach` before returning).
+            self?.deliverPendingFirstMessage(for: sessionId)
+        }
     }
 
     /// Detach = close the socket. There is no `session.detach` RPC (the protocol has never had one);
