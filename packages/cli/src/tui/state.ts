@@ -603,7 +603,14 @@ export function reduce(s: TuiState, e: WireEvent, nowMs: number): TuiState {
 // terminal row by construction, so app.tsx's `bottomBarLayout` counts `lines.length` and the
 // height model never lies). THE PIN: one line; two when running work exists; never more —
 // `lines.length <= 2` is structural (a work line + a status line are the only two products), and
-// many tasks collapse into the truncated `"N tasks: a, b, +K"` summary instead of more rows.
+// many work items collapse into the truncated `"N running: a, b, +K"` summary instead of more rows.
+//
+// T6 (r-m11): the work line and the roster pill each STATE THEIR OWN SCOPE — the work line counts
+// RUNNING work only (live agents + bg shells: `"N running: …"`), the pill counts roster ROWS
+// (`"N agents · ctrl+a"`, done-awaiting-prune included, because it captions what ctrl+a opens).
+// The two can legitimately diverge (a done agent leaves the work count but not the roster yet);
+// self-labeling makes the divergence read as two truths, not one contradiction. "running" also
+// un-collides the label from the ctrl+t task LIST (todo subjects), which "N tasks" clashed with.
 //
 // FLICKER DISCIPLINE (T4 frame-diff): the status line reads NO clock — idle chrome is byte-stable
 // across ticks, so the damage-diffed writer emits zero ops for it. Only the work line's spinner
@@ -647,7 +654,7 @@ export interface StatusChromeInput {
 
 /** Label budget for one work item on the running-work line. */
 const WORK_LABEL_MAX = 20;
-/** Labels spelled out before the `+K` overflow summary (the plan's `"3 tasks: a, b, +1"` shape). */
+/** Labels spelled out before the `+K` overflow summary (the `"3 running: a, b, +1"` shape). */
 const WORK_LABELS_SHOWN = 2;
 
 const shortLabel = (s: string): string => (s.length > WORK_LABEL_MAX ? `${s.slice(0, WORK_LABEL_MAX - 1)}…` : s);
@@ -680,7 +687,9 @@ export function statusChromeModel(input: StatusChromeInput): { lines: StatusLine
   if (labels.length > 0) {
     const shown = labels.slice(0, WORK_LABELS_SHOWN);
     const extra = labels.length - shown.length;
-    const body = `${labels.length} task${labels.length === 1 ? "" : "s"}: ${shown.join(", ")}${extra > 0 ? `, +${extra}` : ""}`;
+    // T6 (r-m11): "running" — the line's self-labeled scope (see the module doc above); the count
+    // is invariant-worded, so no singular/plural fork.
+    const body = `${labels.length} running: ${shown.join(", ")}${extra > 0 ? `, +${extra}` : ""}`;
     lines.push({
       key: "work",
       sep: " ",

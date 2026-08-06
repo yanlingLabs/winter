@@ -827,17 +827,17 @@ describe("statusChromeModel — the pin: one line; two when tasks run; never mor
     expect(lines[1]!.key).toBe("status");
   });
 
-  test("MANY tasks -> still two lines, truncated summary '5 tasks: a, b, +3' — never a third line", () => {
+  test("MANY work items -> still two lines, truncated summary '5 running: a, b, +3' — never a third line", () => {
     const agents = [chromeAgent("t1", { label: "a" }), chromeAgent("t2", { label: "b" }), chromeAgent("t3", { label: "c" })];
     const bgTasks = [{ taskId: "bg1", command: "bun test" }, { taskId: "bg2", command: "sleep 9" }];
     const { lines } = statusChromeModel(chromeBase({ agents, bgTasks }));
     expect(lines.length).toBe(2);
-    expect(lineText(lines[0]!)).toContain("5 tasks: a, b, +3");
+    expect(lineText(lines[0]!)).toContain("5 running: a, b, +3");
   });
 
-  test("one task is singular: '1 task: scout'", () => {
+  test("one work item: '1 running: scout' (invariant label — no singular/plural fork)", () => {
     const { lines } = statusChromeModel(chromeBase({ agents: [chromeAgent("a")] }));
-    expect(lineText(lines[0]!)).toContain("1 task: scout");
+    expect(lineText(lines[0]!)).toContain("1 running: scout");
   });
 
   test("agents count by liveness: done rows are NOT running work; queued rows are", () => {
@@ -845,7 +845,7 @@ describe("statusChromeModel — the pin: one line; two when tasks run; never mor
       agents: [chromeAgent("d", { status: "done", finish: "done" }), chromeAgent("q", { status: "queued", label: "waiter" })],
     }));
     expect(lines.length).toBe(2);
-    expect(lineText(lines[0]!)).toContain("1 task: waiter");
+    expect(lineText(lines[0]!)).toContain("1 running: waiter");
   });
 
   test("an agent's re-task `name` outranks its description label; bg tasks use their command", () => {
@@ -853,14 +853,14 @@ describe("statusChromeModel — the pin: one line; two when tasks run; never mor
       agents: [chromeAgent("a", { name: "fixer", label: "long description label" })],
       bgTasks: [{ taskId: "bg1", command: "bun test --watch" }],
     }));
-    expect(lineText(lines[0]!)).toContain("2 tasks: fixer, bun test --watch");
+    expect(lineText(lines[0]!)).toContain("2 running: fixer, bun test --watch");
   });
 
   test("long labels are shortened to 20 chars with an ellipsis", () => {
     const { lines } = statusChromeModel(chromeBase({
       bgTasks: [{ taskId: "bg1", command: "x".repeat(40) }],
     }));
-    expect(lineText(lines[0]!)).toContain(`1 task: ${"x".repeat(19)}…`);
+    expect(lineText(lines[0]!)).toContain(`1 running: ${"x".repeat(19)}…`);
   });
 
   test("the work line's spinner glyph comes from the shared cycle and animates with nowMs", () => {

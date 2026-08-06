@@ -1552,15 +1552,15 @@ describe("App — T5 status chrome end-to-end (live sources, zero daemon changes
     const client = fakeClient();
     const { lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
     await wait();
-    expect(lastFrame() ?? "").not.toContain("1 task:");
+    expect(lastFrame() ?? "").not.toContain("1 running:");
 
     bridge.push(ev({ type: "bg_task_started", threadId: "main", taskId: "bg1", command: "bun test" }));
     await wait();
-    expect(lastFrame() ?? "").toContain("1 task: bun test");
+    expect(lastFrame() ?? "").toContain("1 running: bun test");
 
     bridge.push(ev({ type: "bg_task_exited", threadId: "main", taskId: "bg1", exitCode: 0, killed: false }));
     await wait();
-    expect(lastFrame() ?? "").not.toContain("1 task:");
+    expect(lastFrame() ?? "").not.toContain("1 running:");
   });
 
   test("(sc2) a session_activity transient flips the chip on and off", async () => {
@@ -1620,7 +1620,7 @@ describe("App — T5 status chrome end-to-end (live sources, zero daemon changes
     await wait();
 
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("1 task: scout run"); // the work line
+    expect(frame).toContain("1 running: scout run"); // the work line
     expect(frame).toContain("1 agent · ctrl+a"); // the roster pill stays (the ctrl+a affordance)
     // The frame is still exactly rows-1 = 23 lines tall — the chrome row was paid for by the
     // viewport via bottomBarLayout, not stacked on top of the frame.

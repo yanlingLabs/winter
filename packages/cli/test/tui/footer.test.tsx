@@ -150,7 +150,7 @@ describe("Footer — T5 status chrome: model/effort, activity chip, the work lin
     const frame = lastFrame() ?? "";
     const rows = frame.split("\n");
     expect(rows.length).toBe(2); // the two-line shape — never more (the model caps it)
-    expect(rows[0]).toContain("1 task: scout");
+    expect(rows[0]).toContain("1 running: scout");
     expect(rows[1]).toContain("gpt-5.6-luna");
   });
 
