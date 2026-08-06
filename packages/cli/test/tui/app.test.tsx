@@ -1479,3 +1479,37 @@ describe("bottomBarLayout — the composer+chrome slot never exceeds 50% of term
     expect(layout.rows).toBe(4);
   });
 });
+
+// TUI renderer T4 — delta coalescing wired into App's bridge subscription (event-bridge.ts's
+// makeDeltaCoalescer; strict window semantics live in delta-coalescer.test.ts on injected fake
+// time). This is the WIRING pin, render-counted mechanism-appropriately: ink-testing-library's
+// `frames` records one entry per Ink render, so counting the DISTINCT partial fold states that
+// ever rendered counts the renders the burst caused (the ticking clock re-renders the SAME fold
+// state, so it can't inflate the count; only a delta dispatch can mint a NEW state).
+describe("App — delta coalescing (TUI renderer T4)", () => {
+  test("a rapid delta burst folds to a handful of rendered states — never one render per delta", async () => {
+    const bridge = makeEventBridge();
+    const client = fakeClient();
+    const { frames, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+    await wait(); // subscribe effect
+    bridge.push(ev({ type: "user_message", threadId: "main", text: "go" }));
+    bridge.push(ev({ type: "turn_started", threadId: "main" }));
+    await wait();
+    const N = 12;
+    for (let i = 0; i < N; i++) {
+      bridge.push(ev({ type: "assistant_delta", threadId: "main", delta: `«${i}»` }));
+      await wait(1); // macrotask spacing — each delta arrives as its own task, like the wire
+    }
+    await wait(40); // let the trailing-edge window(s) flush
+    expect(lastFrame() ?? "").toContain(`«${N - 1}»`); // the full burst landed — nothing dropped
+    // For each frame: the highest «i» visible = which fold state that render showed.
+    const states = new Set<number>();
+    for (const f of frames) {
+      for (let i = N - 1; i >= 0; i--) {
+        if (f.includes(`«${i}»`)) { states.add(i); break; }
+      }
+    }
+    expect(states.size).toBeGreaterThan(0);
+    expect(states.size).toBeLessThanOrEqual(3); // 12 deltas ⇒ ≤3 rendered fold states (≈1-2 windows)
+  });
+});

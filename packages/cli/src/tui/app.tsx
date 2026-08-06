@@ -101,7 +101,7 @@ import { PendingCards, type AnswerPayload } from "./pending-cards";
 import { theme } from "./theme";
 import { loadSafeHighlighter } from "./highlight-guard";
 import type { Highlighter } from "./markdown";
-import type { EventBridge } from "./event-bridge";
+import { makeDeltaCoalescer, type EventBridge } from "./event-bridge";
 import type { parsePlanResponse } from "../plan-response";
 import { runCommand, type CommandCtx } from "./commands";
 import { buildFileIndex } from "./file-index";
@@ -537,10 +537,22 @@ export function App({
   // also clears `resuming` once the replay reaches `resumeTargetSeq` — every `SessionEvent` carries a
   // `seq` (protocol/events.ts's `Base`), so this needs no per-type special-casing (a `task_notification`
   // still reduces to a no-op in state.ts, replaying invisibly, but its `seq` still counts here).
-  useEffect(() => bridge.subscribe((e) => {
-    dispatch(e);
-    if (resumeTargetSeq !== undefined && e.seq >= resumeTargetSeq) setResuming(false);
-  }), [bridge, resumeTargetSeq]);
+  //
+  // TUI renderer T4 — the coalescer sits between the bridge and `dispatch`: `assistant_delta`
+  // bursts fold into ONE merged dispatch per ~16ms window (per thread), so streaming costs one
+  // React commit per window instead of one per delta; every other event type flushes ahead of
+  // itself and passes through untouched (wire order preserved — see makeDeltaCoalescer's doc).
+  // The `resuming` check stays at ARRIVAL (not flush): it reads only `e.seq`, and clearing the
+  // banner a window early is strictly more honest than a window late. Cleanup disposes the
+  // coalescer (flushes, cancels the timer) BEFORE unsubscribing replaces the handler.
+  useEffect(() => {
+    const coalescer = makeDeltaCoalescer(dispatch);
+    const unsubscribe = bridge.subscribe((e) => {
+      coalescer.push(e);
+      if (resumeTargetSeq !== undefined && e.seq >= resumeTargetSeq) setResuming(false);
+    });
+    return () => { unsubscribe(); coalescer.dispose(); };
+  }, [bridge, resumeTargetSeq]);
 
   // Ticking clock so elapsed/spinner chrome advances between real events (legacy 120ms tick twin).
   useEffect(() => {
