@@ -43,7 +43,7 @@ import { Chalk } from "chalk";
 import wrapAnsi from "wrap-ansi";
 import type { Block } from "./state";
 import { theme } from "./theme";
-import { renderMarkdown, splitStableBoundary, type Highlighter } from "./markdown";
+import { createStreamingMarkdown, renderMarkdown, splitStableBoundary, type Highlighter } from "./markdown";
 import { pickVerb, TURN_VERBS } from "./spinner-verbs";
 import { formatElapsed, formatTokens } from "../task-display";
 import { groupBlocks } from "./group-blocks";
@@ -197,6 +197,51 @@ export function activeTurnLines(
     out.push(...gutterRows(2, `${dot} `, "  ", headText.split("\n"), columns));
   }
   return out;
+}
+
+/** TUI renderer T3 — the in-flight turn rendered as TRANSCRIPT rows (the streaming block is the
+ *  line log's last row-group now, not a pinned-bar slice — mechanism report Q2/Q7 cures 1-2).
+ *  Supersedes `activeTurnLines` for the production path. A stateful factory (one per App mount,
+ *  same lifecycle idiom as `makeFlattenCache`) because it owns a `createStreamingMarkdown`
+ *  instance — the monotonic stable-boundary cache that keeps per-delta work bounded to the open
+ *  markdown segment (markdown.ts's T3 pin).
+ *
+ *  SWAP PARITY (the no-glue guarantee's pure half, pinned by flatten-blocks.test.ts): the
+ *  assistant rows are built through the IDENTICAL `gutterRows` call `flattenBlock`'s assistant
+ *  case uses — same glyph, same gutter widths, same wrap — over `createStreamingMarkdown`'s
+ *  output, which is itself pinned byte-equal to `renderMarkdown(text)` at every prefix. So when
+ *  `assistant_message` commits the streamed text (the reducer swaps `activeAssistant` → a
+ *  committed block in ONE state update), the committed block's flattened rows are byte-identical
+ *  to the streamed rows of the same text: the swap repaints nothing.
+ *
+ *  In-flight tool rows keep `activeTurnLines`' exact shape (blinking dot via `dimToolDot`, bold
+ *  name + argsHead) and render AFTER the assistant rows — the same order their committed
+ *  counterparts take in the transcript, so a tool_result landing mid-turn also swaps in place. */
+export function makeStreamRenderer(): {
+  lines(
+    assistant: string,
+    tools: { name: string; argsJson: string }[],
+    opts: { columns: number; highlight?: Highlighter; dimToolDot: boolean },
+  ): string[];
+} {
+  const streamingMd = createStreamingMarkdown();
+  return {
+    lines(assistant, tools, opts) {
+      const { columns, highlight, dimToolDot } = opts;
+      const out: string[] = [];
+      if (assistant) {
+        const rendered = streamingMd.render(assistant, highlight);
+        out.push(...gutterRows(2, `${ansi.hex(theme.text)("⏺")} `, "  ", rendered.split("\n"), columns));
+      }
+      for (const t of tools) {
+        const argsHead = formatArgsHead(t.argsJson);
+        const headText = `${ansi.bold(t.name)}${argsHead ? `(${argsHead})` : ""}`;
+        const dot = dimToolDot ? ansi.dim("⏺") : "⏺";
+        out.push(...gutterRows(2, `${dot} `, "  ", headText.split("\n"), columns));
+      }
+      return out;
+    },
+  };
 }
 
 /** Memoizing wrapper over `flattenBlock` (+ the collapsed-run summary) across an APPEND-ONLY
