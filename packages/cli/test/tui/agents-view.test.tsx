@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { render } from "ink-testing-library";
-import { AgentsView, mountAgentsFullscreen } from "../../src/tui/agents-view";
+import { AgentsApp, AgentsView, mountAgentsFullscreen } from "../../src/tui/agents-view";
 import {
   AGENTS_EMPTY_STATE, AGENTS_KEY_HINT, applyActivityEvent, applySessionList, emptyAgentsState,
   moveSelection, withNotice, AgentsStore,
@@ -158,6 +158,37 @@ describe("<AgentsView> fullscreen (frameRows)", () => {
     expect(lines.length).toBe(12);
     expect(lines.at(-2)!).toContain("norma resume s_bg"); // the dismissible hand-off line
     expect(lines.at(-1)!).toContain("q quit");
+  });
+});
+
+// -------------------------------------------------------------------------------------------
+// B3 — <AgentsApp> input mechanics, driven through ink-testing-library's real stdin (the
+// app.test.tsx idiom): keys route through the pure keymap; mouse reports are decoded AT THE INPUT
+// LAYER (the main TUI's emitter-patch mechanism) — a wheel notch becomes the arrows' own move
+// action and the report's printable remnant never falls into the letter keymap as text.
+// -------------------------------------------------------------------------------------------
+
+const wait = (ms = 20) => new Promise((r) => setTimeout(r, ms));
+
+describe("<AgentsApp> — input mechanics", () => {
+  test("keys route through the keymap: q is a quit action", async () => {
+    const actions: unknown[] = [];
+    const { stdin } = render(<AgentsApp store={new AgentsStore()} onAction={(a) => actions.push(a)} />);
+    await wait();
+    stdin.write("q");
+    await wait();
+    expect(actions).toEqual([{ kind: "quit" }]);
+  });
+
+  test("wheel-at-input: SGR wheel reports become move actions, one row per notch, and never leak as keys", async () => {
+    const actions: unknown[] = [];
+    const { stdin } = render(<AgentsApp store={new AgentsStore()} onAction={(a) => actions.push(a)} />);
+    await wait();
+    stdin.write("\x1b[<64;10;5M"); // wheel up
+    await wait();
+    stdin.write("\x1b[<65;10;5M"); // wheel down
+    await wait();
+    expect(actions).toEqual([{ kind: "move", delta: -1 }, { kind: "move", delta: 1 }]);
   });
 });
 
