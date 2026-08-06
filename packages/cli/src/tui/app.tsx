@@ -25,7 +25,10 @@
  *      Spinner                      — animated in-progress indicator (only while a turn runs).
  *      PendingCards | Composer      — a card takes over input when `state.pending` is set.
  *      [AgentList]                  — the subagent tree, only while any agent is live.
- *      Footer                       — policy/interrupt/agents hint line.
+ *      Footer                       — the T5 status chrome (statusChromeModel, state.ts): one line
+ *                                     (policy · hints · agents pill · activity chip · model+effort),
+ *                                     two while running work exists (spinner + task summary) — never
+ *                                     more; its row count feeds bottomBarLayout's accounting.
  *
  *  KEY ROUTING — TWO `useInput` hooks, deliberately split (Phase 3c Task 5 review finding: a single
  *  `isActive: !state.pending` hook made ctrl+C dead the instant a pending card took over input, and
@@ -84,9 +87,9 @@ import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } 
 import { Box, Text, useInput, useStdin } from "ink";
 import { Chalk } from "chalk";
 import wrapAnsi from "wrap-ansi";
-import { METHODS, type ApprovalPolicy, type SessionEvent } from "@norma/protocol";
+import { METHODS, type ApprovalPolicy, type SessionActivity, type SessionEvent } from "@norma/protocol";
 import { POLICY_ORDER } from "./policy-order";
-import { initialState, reduce, type AgentRow, type Block, type LocalEvent, type PendingCard, type TuiState } from "./state";
+import { initialState, reduce, statusChromeModel, type AgentRow, type Block, type LocalEvent, type PendingCard, type TuiState } from "./state";
 import { makeFlattenCache, makeStreamRenderer } from "./flatten-blocks";
 import { applyWheel, followBottom, onContentGrown, scrollToTop, type ScrollState } from "./scroll-model";
 import { TranscriptViewport } from "./transcript";
@@ -138,9 +141,27 @@ export interface AppProps {
   sessionId: string;
   cwd: string;
   initialPolicy: ApprovalPolicy;
-  /** Welcome-banner data (main.ts threads these through mountTui). */
+  /** Welcome-banner data (main.ts threads these through mountTui). `model` doubles as the status
+   *  chrome's GLOBAL model seed (TUI renderer T5) — the settings.json value read at mount. */
   version: string;
   model: string;
+  /** T5 status chrome: the global reasoning effort at mount (settings.provider.reasoningEffort),
+   *  read alongside `model` in main.ts. Optional — absent renders the bare model slug. */
+  effort?: string;
+  /** T5 status chrome, resume route only: the session's PER-SESSION model/effort overrides off the
+   *  resume path's existing `session.list` read (`SessionRow.model`/`.effort`, set via the phone's
+   *  `session.setModel`/`.setEffort` — the daemon resolves `meta.model || global`, engine.ts's
+   *  `resolveSel`). When set, the chrome shows the override and `/model`'s GLOBAL switch does NOT
+   *  move it (the daemon wouldn't either — truth over recency). Each axis is independent, exactly
+   *  like the daemon's own resolution. No wire event announces a later `session.setModel`, so a
+   *  mid-session override change from another client stays invisible until re-resume (disclosed
+   *  T5 limitation; polling for it would be a new wire read). */
+  sessionModelOverride?: string;
+  sessionEffortOverride?: string;
+  /** T5 status chrome, resume route only: the session's activity off that same `session.list` row —
+   *  seeds the chip until the first live `session_activity` transient arrives (a resumed
+   *  backgrounded session emits none on attach: its derived state didn't change). */
+  initialActivity?: SessionActivity;
   /** Injectable clock (tests). Defaults to Date.now — the ONLY place Date.now enters; passed to
    *  `reduce` strictly as the injected `nowMs`, keeping the reducer pure. Also times the T5
    *  double-press exit window (never `Date.now` directly). */
@@ -298,13 +319,18 @@ export function bottomBarLayout(input: {
    *  `composerCursor` already use above). Irrelevant while `pending` is set for the same reason:
    *  the composer (and its menu) isn't even mounted then. */
   menuRows: number;
+  /** TUI renderer T5: the status chrome's rendered row count — `statusChromeModel(...).lines.length`
+   *  (1, or 2 while running work exists; the selector caps it there). ESSENTIAL rows, never shed —
+   *  counted so the 50% cap sheds OTHER content when the work line appears. Optional, defaulting
+   *  to the pre-T5 footer's flat 1, so every legacy call site is byte-identical. */
+  chromeRows?: number;
 }, totalRows: number = Number.POSITIVE_INFINITY): BottomBarLayout {
-  const { tasksVisible, tasks, agents, running, pending, columns, composerText, composerCursor, resuming, menuRows } = input;
+  const { tasksVisible, tasks, agents, running, pending, columns, composerText, composerCursor, resuming, menuRows, chromeRows = 1 } = input;
   // TUI renderer T3: the in-flight streaming turn no longer lives in this bar — it renders inside
   // the transcript's line log (`makeStreamRenderer` rows appended to `lineLog` in App below), so
-  // this model counts only chrome: tasks · spinner · resuming · card|composer+menu · agents · footer.
+  // this model counts only chrome: tasks · spinner · resuming · card|composer+menu · agents · chrome.
   const cap = Math.floor(totalRows * BAR_MAX_FRACTION);
-  let used = 1 + (running ? 1 : 0) + (resuming ? 1 : 0); // Footer + Spinner + "Resuming conversation…"
+  let used = chromeRows + (running ? 1 : 0) + (resuming ? 1 : 0); // status chrome + Spinner + "Resuming conversation…"
 
   // --- input slot (essential; its CONTENT is the first grant above the floor) ---
   let composerContentRows = 0;
@@ -369,6 +395,7 @@ export function agentWindowStart(total: number, shown: number, selIdx: number | 
 
 export function App({
   client, bridge, sessionId, cwd, initialPolicy, version, model,
+  effort, sessionModelOverride, sessionEffortOverride, initialActivity,
   now = Date.now, onExitRequest, resumeTargetSeq,
 }: AppProps) {
   const [state, dispatch] = useReducer(
@@ -412,6 +439,15 @@ export function App({
   // `ctx.cwd`.
   const appendNote = useCallback((text: string) => dispatch({ type: "local_note", text }), []);
   const cwdRef = useRef(cwd);
+
+  // TUI renderer T5 — the status chrome's LIVE GLOBAL model/effort: seeded from the mount-time
+  // settings read (props), flipped by `/model`'s post-write `onModelChanged` callback (commands.ts)
+  // — the truthful live source, since /model is the only in-TUI writer and no wire event announces
+  // a global model change. Per-session overrides (resume-route props) are applied at display time
+  // below, per axis, mirroring the daemon's own `meta.model || global` resolution.
+  const [liveGlobal, setLiveGlobal] = useState<{ model: string; effort?: string }>({ model, effort });
+  const onModelChanged = useCallback((m: string, e?: string) => setLiveGlobal({ model: m, effort: e }), []);
+
   const onRunCommand = useCallback((text: string) => {
     const ctx: CommandCtx = {
       client: client as unknown as NormaClient,
@@ -419,9 +455,10 @@ export function App({
       cwd: cwdRef.current,
       appendNote,
       onCwdChanged: (newCwd: string) => { cwdRef.current = newCwd; },
+      onModelChanged,
     };
     void runCommand(ctx, text);
-  }, [client, sessionId, appendNote]);
+  }, [client, sessionId, appendNote, onModelChanged]);
 
   // Phase 3d T3: the "@"-file mention index (file-index.ts) — App owns the ONE lazy build for the
   // composer's whole lifetime, per the brief ("keep it simple: one build per session, no refresh in
@@ -607,14 +644,35 @@ export function App({
   const streamRows = streamRenderer.lines(state.activeAssistant, state.activeTools, { columns, highlight, dimToolDot });
   const lineLog = childLines ?? welcome.concat(bodyLines, streamRows);
 
+  // TUI renderer T5 — the bottom status chrome's content, from the ONE pure selector
+  // (`statusChromeModel`, state.ts): policy + esc-hint + agents pill + activity chip + live
+  // model/effort on the status line, plus the running-work line (subagents + bg tasks) while any
+  // work runs. Display model/effort resolve per axis: session override (resume route) wins over
+  // the live global, mirroring the daemon's `meta.model || base.model`. `nowMs` only moves the
+  // work line's spinner glyph — idle chrome is byte-stable across ticks (the T4 flicker pin).
+  const chrome = statusChromeModel({
+    policy,
+    running: state.turnRunning,
+    agents: visibleAgents,
+    bgTasks: state.bgTasks,
+    model: sessionModelOverride ?? liveGlobal.model,
+    effort: sessionEffortOverride ?? liveGlobal.effort,
+    activity: state.activity ?? initialActivity,
+    exitArmed: exitArmedKey,
+    nowMs,
+  });
+
   // TUI renderer T3: the capped layout model — the bar's allotments AND its height come from the
   // one pure computation (`bottomBarLayout`, ≤ 50% of terminal rows), and the JSX below draws
   // exactly what it granted (JS-windowing, HARD CONSTRAINT 2) so the height model never lies.
+  // T5: the chrome's rendered row count feeds the accounting — the selector's output IS the
+  // rendered height (one truncate-capped row per line), so model and render can't disagree.
   const layout = bottomBarLayout({
     tasksVisible, tasks: state.tasks, agents: visibleAgents,
     running: state.turnRunning, pending: state.pending,
     columns, composerText: composerState.text, composerCursor: composerState.cursor, resuming,
     menuRows,
+    chromeRows: chrome.lines.length,
   }, rows);
   const barRows = layout.rows;
   // The agents window (layout.agentsShown rows of the roster) slides only to keep select mode's
@@ -947,7 +1005,7 @@ export function App({
         {layout.agentOverflow > 0 && layout.agentsShown > 0 ? (
           <Text dimColor>{`… +${layout.agentOverflow} more agent${layout.agentOverflow === 1 ? "" : "s"} (ctrl+a)`}</Text>
         ) : null}
-        <Footer policy={policy} running={state.turnRunning} agents={visibleAgents} exitArmed={exitArmedKey} />
+        <Footer lines={chrome.lines} />
       </Box>
     </Box>
   );

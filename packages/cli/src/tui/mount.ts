@@ -30,7 +30,7 @@ import { makeSyncStdout } from "./sync-stdout";
 import { makeDiffingStdout } from "./frame-diff";
 import { enterAltScreen, leaveAltScreen, enableMouseTracking, disableMouseTracking } from "./alt-screen";
 import type { EventBridge } from "./event-bridge";
-import type { ApprovalPolicy } from "@norma/protocol";
+import type { ApprovalPolicy, SessionActivity } from "@norma/protocol";
 
 export interface MountOpts {
   client: AppClient;
@@ -39,7 +39,14 @@ export interface MountOpts {
   cwd: string;
   initialPolicy: ApprovalPolicy;
   version: string; // CLI version — welcome banner (packages/cli/package.json)
-  model: string; // resolved provider model — welcome banner (settings.provider.model)
+  model: string; // resolved provider model — welcome banner + status chrome (settings.provider.model)
+  /** TUI renderer T5 (status chrome) — all four passed straight through to `<App>` (see AppProps'
+   *  own doc comments): the mount-time GLOBAL effort, the resume route's per-session model/effort
+   *  overrides, and the resume row's activity seed. */
+  effort?: string;
+  sessionModelOverride?: string;
+  sessionEffortOverride?: string;
+  initialActivity?: SessionActivity;
   /** Task 5 resume replay — see the module doc comment. Passed straight through to `<App>`. */
   resumeTargetSeq?: number;
 }
@@ -109,6 +116,10 @@ export function mountTui(
       initialPolicy: opts.initialPolicy,
       version: opts.version,
       model: opts.model,
+      effort: opts.effort,
+      sessionModelOverride: opts.sessionModelOverride,
+      sessionEffortOverride: opts.sessionEffortOverride,
+      initialActivity: opts.initialActivity,
       onExitRequest,
       resumeTargetSeq: opts.resumeTargetSeq,
     }),

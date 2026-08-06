@@ -31,6 +31,13 @@ export interface CommandCtx {
    *  to LATER commands in the same session (`/skills`, `/mcp`). Optional: callers that don't track
    *  a live cwd (tests, one-shot contexts) simply don't wire it. */
   onCwdChanged?(newCwd: string): void;
+  /** TUI renderer T5 (status chrome): `/model` calls this AFTER a successful settings write with
+   *  the new resolved GLOBAL model + effort (both axes always, whichever the switch touched), so
+   *  the App's footer flips the moment the command lands — the truthful live source, since /model
+   *  is the only in-TUI writer and no wire event announces a global model change. Never fired on
+   *  show/validation-error/usage-error (nothing changed). Same optional-callback discipline as
+   *  `onCwdChanged` above. */
+  onModelChanged?(model: string, effort?: string): void;
 }
 
 export interface SlashCommand {
@@ -97,6 +104,9 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
     next = setReasoningEffort(next, action.effort as NonNullable<Settings["provider"]["reasoningEffort"]>);
   }
   saveSettings(settingsPath, next);
+  // T5 status chrome: report the post-write resolved globals (both axes — the footer tracks each
+  // independently; see `CommandCtx.onModelChanged`).
+  ctx.onModelChanged?.(next.provider.model, next.provider.reasoningEffort);
   const changed = [
     action.kind === "setModel" || action.kind === "setModelAndEffort" ? `model ${next.provider.model}` : null,
     action.kind === "setEffort" || action.kind === "setModelAndEffort" ? `effort ${next.provider.reasoningEffort}` : null,

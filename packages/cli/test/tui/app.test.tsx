@@ -1513,3 +1513,117 @@ describe("App — delta coalescing (TUI renderer T4)", () => {
     expect(states.size).toBeLessThanOrEqual(3); // 12 deltas ⇒ ≤3 rendered fold states (≈1-2 windows)
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// TUI renderer T5 — the bottom status chrome wired into the App: the chrome rows feed
+// `bottomBarLayout`'s accounting (the 50% cap counts them), and the live sources flow end-to-end
+// (bg_task events → work line; session_activity → chip; /model → the model segment).
+// ---------------------------------------------------------------------------------------------
+
+describe("bottomBarLayout — T5: the chrome rows are counted (the cap can't be lied to)", () => {
+  type LayoutBase = Parameters<typeof bottomBarLayout>[0];
+  const base = (overrides: Partial<LayoutBase>): LayoutBase => ({
+    tasksVisible: true, tasks: [], agents: [], running: false, pending: null,
+    columns: 80, composerText: "", composerCursor: 0, resuming: false, menuRows: 0,
+    ...overrides,
+  });
+
+  test("chromeRows defaults to 1 (every pre-T5 expectation unchanged: empty = 4)", () => {
+    expect(bottomBarLayout(base({})).rows).toBe(4);
+  });
+
+  test("the second chrome line adds exactly one row", () => {
+    expect(bottomBarLayout(base({ chromeRows: 2 })).rows).toBe(5);
+  });
+
+  test("PIN: adding the second line doesn't break the 50% cap — content sheds instead", () => {
+    const text = "x".repeat(200); // a fat wrapped composer that alone would fill the cap
+    const one = bottomBarLayout(base({ columns: 20, composerText: text, composerCursor: text.length, chromeRows: 1 }), 24);
+    const two = bottomBarLayout(base({ columns: 20, composerText: text, composerCursor: text.length, chromeRows: 2 }), 24);
+    expect(one.rows).toBeLessThanOrEqual(12);
+    expect(two.rows).toBeLessThanOrEqual(12); // the cap holds WITH the extra chrome row counted
+    expect(two.composerContentRows).toBe(one.composerContentRows - 1); // the row came out of content
+  });
+});
+
+describe("App — T5 status chrome end-to-end (live sources, zero daemon changes)", () => {
+  test("(sc1) a bg_task_started shows the work line; its bg_task_exited clears it", async () => {
+    const bridge = makeEventBridge();
+    const client = fakeClient();
+    const { lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+    await wait();
+    expect(lastFrame() ?? "").not.toContain("1 task:");
+
+    bridge.push(ev({ type: "bg_task_started", threadId: "main", taskId: "bg1", command: "bun test" }));
+    await wait();
+    expect(lastFrame() ?? "").toContain("1 task: bun test");
+
+    bridge.push(ev({ type: "bg_task_exited", threadId: "main", taskId: "bg1", exitCode: 0, killed: false }));
+    await wait();
+    expect(lastFrame() ?? "").not.toContain("1 task:");
+  });
+
+  test("(sc2) a session_activity transient flips the chip on and off", async () => {
+    const bridge = makeEventBridge();
+    const client = fakeClient();
+    const { lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+    await wait();
+    expect(lastFrame() ?? "").not.toContain("● backgrounded");
+
+    bridge.push(ev({ type: "session_activity", activity: "background" }));
+    await wait();
+    expect(lastFrame() ?? "").toContain("● backgrounded");
+
+    bridge.push(ev({ type: "session_activity", activity: "active" }));
+    await wait();
+    expect(lastFrame() ?? "").not.toContain("● backgrounded");
+  });
+
+  test("(sc3) the footer shows the mount model; /model switches it IMMEDIATELY (live through the CommandCtx callback)", async () => {
+    // Same temp-NORMA_HOME discipline as commands.test.ts's /model suite — never ~/.norma.
+    const home = mkdtempSync(join(tmpdir(), "norma-tui-t5-model-"));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }));
+    const prevHome = process.env.NORMA_HOME;
+    process.env.NORMA_HOME = home;
+    try {
+      const bridge = makeEventBridge();
+      const client = fakeClient();
+      const { stdin, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+      await wait();
+      // The mount-time model rides the footer's status line from the first frame (baseProps.model).
+      expect(lastFrame() ?? "").toContain("gpt-5-codex");
+
+      stdin.write("/model gpt-5.6-luna --effort high");
+      await wait();
+      stdin.write("\r");
+      await wait();
+
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("model gpt-5.6-luna, effort high"); // the committed note (unchanged wording)
+      expect(frame).toContain("gpt-5.6-luna (high)"); // THE PIN: the footer segment flipped, same frame
+      expect(client.calls).toEqual([]); // /model never touches the client (settings.json route)
+    } finally {
+      if (prevHome === undefined) delete process.env.NORMA_HOME;
+      else process.env.NORMA_HOME = prevHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("(sc4) the work line ALSO counts live agents — and the viewport gives up the row (layout honesty)", async () => {
+    const bridge = makeEventBridge();
+    const client = fakeClient();
+    const { lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+    await wait();
+
+    bridge.push(ev({ type: "thread_started", threadId: "th_1", agentType: "general-purpose", description: "scout run", ts: 500 }));
+    bridge.push(ev({ type: "turn_started", threadId: "th_1", ts: 1000 }));
+    await wait();
+
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("1 task: scout run"); // the work line
+    expect(frame).toContain("1 agent · ctrl+a"); // the roster pill stays (the ctrl+a affordance)
+    // The frame is still exactly rows-1 = 23 lines tall — the chrome row was paid for by the
+    // viewport via bottomBarLayout, not stacked on top of the frame.
+    expect((frame.split("\n").length)).toBeLessThanOrEqual(23);
+  });
+});
