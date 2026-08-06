@@ -645,7 +645,10 @@ export function App({
   // streaming into its own log for the return). dimToolDot only flips row CONTENT (1 row), never
   // row count, so the 500ms blink never triggers growth compensation.
   const dimToolDot = Math.floor(nowMs / 500) % 2 === 0;
-  const streamRows = streamRenderer.lines(state.activeAssistant, state.activeTools, { columns, highlight, dimToolDot });
+  // T6 spacing rhythm: `precededByContent` tells the stream renderer whether committed rows sit
+  // above it — its assistant rows then open with the same single blank a committed assistant block
+  // gets from the flatten cache, so the turn-end swap stays byte-identical spacer-and-all.
+  const streamRows = streamRenderer.lines(state.activeAssistant, state.activeTools, { columns, highlight, dimToolDot, precededByContent: bodyLines.length > 0 });
   const lineLog = childLines ?? welcome.concat(bodyLines, streamRows);
 
   // TUI renderer T5 — the bottom status chrome's content, from the ONE pure selector

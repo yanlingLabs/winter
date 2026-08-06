@@ -165,6 +165,23 @@ function flattenCollapsedSummary(summary: string, columns: number): string[] {
   return gutterRows(2, `${ansi.dim("⏺")} `, "  ", [ansi.dim(`${summary} (ctrl+o to expand)`)], columns);
 }
 
+/** T6 CC-parity SPACING RHYTHM — which block kinds open a new "conversation beat" and therefore
+ *  get ONE blank line above them (the CC reference gives every message group a top margin; adapted
+ *  here as a leading spacer emitted at ASSEMBLY time, never baked into the cached per-item lines,
+ *  since "am I first in the log?" is positional, not content):
+ *   - `user` and `assistant` — the conversation's beats. A blank line lands between a turn's end
+ *     and the next prompt, and between a tool cluster and the assistant text that follows it.
+ *   - Everything else stays TIGHT: tool cards/collapsed runs cluster under their assistant lead-in
+ *     (deliberate house deviation from CC's per-tool-card margin — REQUIRED by the T3 no-glue pin:
+ *     an in-flight tool head streams with no way to know the committed log precedes it, so a
+ *     committed-side-only gap would make the turn-end swap non-byte-identical; tight on both sides
+ *     keeps the swap exact), notes/skill lines are system meta, `turn-summary` is the turn's own
+ *     footer, and `interrupted` is a ⎿ continuation of the turn it ends.
+ *  The streamed twin: `makeStreamRenderer` emits the SAME leading blank above its assistant rows
+ *  when the caller says committed content precedes (`precededByContent`), so the swap parity the
+ *  T3 pins enforce holds row-for-row with the spacer included. */
+const BEAT_KINDS: ReadonlySet<Block["kind"]> = new Set(["user", "assistant"]);
+
 /** TUI renderer T3 — the in-flight turn rendered as TRANSCRIPT rows (the streaming block is the
  *  line log's last row-group now, not a pinned-bar slice — mechanism report Q2/Q7 cures 1-2).
  *  Supersedes the deleted `activeTurnLines`/`<ActiveTurn>` pair (absorbed here, T3). A stateful factory (one per App mount,
@@ -194,7 +211,18 @@ export function makeStreamRenderer(): {
   lines(
     assistant: string,
     tools: { name: string; argsJson: string }[],
-    opts: { columns: number; highlight?: Highlighter; dimToolDot: boolean },
+    opts: {
+      columns: number;
+      highlight?: Highlighter;
+      dimToolDot: boolean;
+      /** T6 spacing rhythm: true when the committed line log is non-empty (App passes
+       *  `bodyLines.length > 0`) — the streamed assistant rows then carry the SAME single leading
+       *  blank a committed assistant block gets from `makeFlattenCache` (see BEAT_KINDS above), so
+       *  the turn-end swap stays byte-identical spacer-and-all. Tool heads never gap (tight on
+       *  both sides by design). Defaults false: a stream with nothing above it opens no gap —
+       *  exactly the committed first-block shape. */
+      precededByContent?: boolean;
+    },
   ): string[];
 } {
   const streamingMd = createStreamingMarkdown();
@@ -203,6 +231,7 @@ export function makeStreamRenderer(): {
       const { columns, highlight, dimToolDot } = opts;
       const out: string[] = [];
       if (assistant) {
+        if (opts.precededByContent) out.push("");
         const rendered = streamingMd.render(assistant, highlight);
         out.push(...gutterRows(2, `${ansi.hex(theme.text)("⏺")} `, "  ", rendered.split("\n"), columns));
       }
@@ -272,6 +301,7 @@ export function makeFlattenCache(
             cached = flatten(blocks[i]!, opts);
             blockCache.set(i, cached);
           }
+          if (out.length > 0 && BEAT_KINDS.has(blocks[i]!.kind)) out.push(""); // T6 spacing rhythm (assembly-time, never cached)
           out.push(...cached);
         }
         return out;
@@ -311,6 +341,7 @@ export function makeFlattenCache(
             cached = flatten(item.block, opts);
             spanCache.set(key, cached);
           }
+          if (out.length > 0 && BEAT_KINDS.has(item.block.kind)) out.push(""); // T6 spacing rhythm (assembly-time, never cached)
           out.push(...cached);
         }
       }
