@@ -7,12 +7,14 @@
  *  FULLSCREEN LAYOUT (Task 4), inside a root `<Box flexDirection="column" height={rows-1}>` (HARD
  *  CONSTRAINT 1: an explicit numeric height keeps Ink's `outputHeight < stdout.rows` unconditionally,
  *  so Ink never emits the scrollback-erasing clearTerminal):
- *    <Box flexGrow={1}>            — the transcript viewport: EXACTLY the visible lines of the flattened
- *                                    line log (welcome header ++ `makeFlattenCache().lines(committed)`),
- *                                    sliced by `viewport.ts` to `viewH` = (rows-1) − bottomBarRows, ONE
+ *    <TranscriptViewport>          — the transcript viewport (transcript.tsx, TUI renderer T2):
+ *                                    EXACTLY the visible lines of the flattened line log (welcome
+ *                                    header ++ `makeFlattenCache().lines(committed)`), sliced by
+ *                                    `scroll-model.ts` to `viewH` = (rows-1) − bottomBarRows, ONE
  *                                    <Text> per line (HARD CONSTRAINT 2: JS-window everything; never
- *                                    lean on Yoga overflow). `flexGrow` pushes the bar to the bottom
- *                                    when the log is shorter than the viewport.
+ *                                    lean on Yoga overflow), plus the `↓ N newer lines` indicator
+ *                                    while scrolled back. Its root Box `flexGrow`s to push the bar
+ *                                    to the bottom when the log is shorter than the viewport.
  *    <Box flexShrink={0}>          — the pinned bottom bar, top-to-bottom:
  *      activeTurn (tail-sliced)     — the in-flight streaming turn, JS tail-capped at ⌈rows/3⌉ lines.
  *      [TaskList]                   — when tasks exist AND `tasksVisible` (DEFAULT TRUE; ctrl+t toggles).
@@ -42,7 +44,7 @@
  *       shows the exact key-specific "Press Ctrl-C|Ctrl-D again to exit" hint (below).
  *  Home/End when the composer is EMPTY jump the transcript to its top/bottom (spec §5) — routed
  *  through the composer's T3 raw side-channel (the single consumer of those byte sequences), which
- *  calls back into this App's `scrollToTop`/`scrollToBottom` viewport updates instead of running its
+ *  calls back into this App's `scrollToTop`/`followBottom` scroll updates instead of running its
  *  cursor ops; with text in the buffer they keep their cursor semantics and never scroll.
  *  Mouse reports (SGR or legacy X10; wheel + any button/motion) are intercepted at the shared stdin
  *  input emitter and swallowed BEFORE any `useInput` consumer (either hook here, the composer's, or
@@ -82,7 +84,8 @@ import { METHODS, type ApprovalPolicy, type SessionEvent } from "@norma/protocol
 import { POLICY_ORDER } from "./policy-order";
 import { initialState, reduce, type AgentRow, type Block, type LocalEvent, type PendingCard, type TuiState } from "./state";
 import { activeTurnLines, makeFlattenCache } from "./flatten-blocks";
-import { scrollBy, scrollToBottom, scrollToTop, viewportSlice, type ViewportState } from "./viewport";
+import { applyWheel, followBottom, onContentGrown, scrollToTop, type ScrollState } from "./scroll-model";
+import { TranscriptViewport } from "./transcript";
 import { collapseCompleted, sortTasksForDisplay, type TaskRow } from "../task-display";
 import { createMouseFilter, isMouseArtifact, renderWithCursor, type InputState } from "./input-model";
 import { Spinner } from "./spinner";
@@ -368,8 +371,9 @@ export function App({
     return () => { process.stdout.off("resize", onResize); };
   }, []);
 
-  // Scroll state for the windowed transcript (viewport.ts). Starts stuck to the bottom (auto-follow).
-  const [vp, setVp] = useState<ViewportState>(() => scrollToBottom());
+  // Scroll state for the virtualized transcript (scroll-model.ts, TUI renderer T2). Bottom-anchored:
+  // `offset` counts rows above the log's bottom, `follow` is stick-to-bottom. Starts followed.
+  const [scroll, setScroll] = useState<ScrollState>(followBottom);
 
   // ---- Live child-transcript view (child-transcript-view T3) -----------------------------------
   // `agentSel` — roster select mode's highlight index into `visibleAgents` (null = off; toggled by
@@ -388,8 +392,9 @@ export function App({
   );
 
   // Roster-shrink bookkeeping: select mode exits when nothing is left to select; an out-of-range
-  // highlight (a row above it vanished) folds back to the last row — same "fold a clamp back into
-  // state" convention as the viewport's own clampedVp effect below.
+  // highlight (a row above it vanished) folds back to the last row — the app's "fold a clamp back
+  // into state" convention (the scroll model, by contrast, render-time-clamps in visibleSlice and
+  // needs no fold-back).
   useEffect(() => {
     if (agentSel === null) return;
     if (visibleAgents.length === 0) setAgentSel(null);
@@ -409,10 +414,11 @@ export function App({
     });
   }, [state.agents, childViewId]);
 
-  // Opening/closing a child view re-sticks the viewport to the bottom — a fresh view starts at its
-  // own tail, and returning to main resumes auto-follow (never a stale scroll offset from the
-  // OTHER view's line log).
-  useEffect(() => { setVp(scrollToBottom()); }, [childViewId]);
+  // Opening/closing a child view re-follows the bottom — a fresh view starts at its own tail, and
+  // returning to main resumes auto-follow (never a stale scroll offset from the OTHER view's line
+  // log). Ordering vs the growth-sync effect below is a non-issue: whichever lands last, a
+  // compensation updater over a followed state is a no-op, and this absolute reset wins either way.
+  useEffect(() => { setScroll(followBottom()); }, [childViewId]);
 
   // The child view is "open" only while its roster row still exists — the row is the header/status
   // source, and the auto-close effect above resets `childViewId` on the next tick anyway; gating
@@ -428,10 +434,11 @@ export function App({
   // Whole-branch review item 2 (spec §5, previously dead): Home/End with an EMPTY composer jump the
   // transcript to its top/bottom. The composer's T3 raw side-channel is the single consumer of those
   // byte sequences, so it calls back through these instead of its cursor ops when its text is empty
-  // (see composer.tsx). `scrollToTop` unsticks (nothing below the top to follow); `scrollToBottom`
-  // re-sticks so the tail auto-follows again.
-  const onComposerScrollTop = useCallback(() => setVp((cur) => scrollToTop(cur)), []);
-  const onComposerScrollBottom = useCallback(() => setVp(() => scrollToBottom()), []);
+  // (see composer.tsx). `scrollToTop` unfollows onto the concrete max offset (nothing below the top
+  // to follow; growth compensation then HOLDS the top); `followBottom` re-follows the tail. Both
+  // read the live geometry refs at event time (declared below, initialized long before any event).
+  const onComposerScrollTop = useCallback(() => setScroll(() => scrollToTop(viewHRef.current, lineCountRef.current)), []);
+  const onComposerScrollBottom = useCallback(() => setScroll(followBottom()), []);
 
   // Subscribe to the bridge; flush its pre-subscribe (attach-replay) backlog then forward live. T5:
   // also clears `resuming` once the replay reaches `resumeTargetSeq` — every `SessionEvent` carries a
@@ -494,7 +501,24 @@ export function App({
   // log and the bottom bar — subtract its one row here so the frame stays exactly rows-1 tall.
   const viewH = Math.max(1, (rows - 1) - barRows - (childOpen ? 1 : 0));
 
-  const { visible, vp: clampedVp } = viewportSlice(lineLog, vp, viewH);
+  // Growth compensation (scroll-model.ts, TUI renderer T2): the scroll offset is BOTTOM-anchored,
+  // so a log that grew while the user is scrolled back would slide the view toward newer rows
+  // unless the offset grows by the same amount. THIS render derives the compensated state (the view
+  // must hold on the very frame the growth lands — an effect alone would paint one shifted frame
+  // first), and the effect below folds it into stored state via the UPDATER form, never the derived
+  // value: a value-form setScroll could clobber a wheel step queued between commit and effect
+  // flush, whereas relative updaters compose in dispatch order. `prevLenRef` syncs ONLY in the
+  // effect, so each growth interval is counted exactly once however renders interleave; a shrink or
+  // a wholesale log swap (verbose retoggle, child-view open/close) just re-syncs — shrink clamping
+  // is visibleSlice's render-time job, and the child-view effect above re-follows anyway.
+  const prevLenRef = useRef(lineLog.length);
+  const grownBy = lineLog.length - prevLenRef.current;
+  const scrollForRender = grownBy > 0 ? onContentGrown(scroll, grownBy) : scroll;
+  useEffect(() => {
+    const grown = lineLog.length - prevLenRef.current;
+    prevLenRef.current = lineLog.length;
+    if (grown > 0) setScroll((cur) => onContentGrown(cur, grown));
+  }, [lineLog.length]);
 
   // Keep `len`/`viewH` current for the input handlers + the mouse emitter patch (both may run from a
   // closure created on an earlier render); refs updated during render, read at event time.
@@ -508,12 +532,6 @@ export function App({
   const pendingRef = useRef<PendingCard | null>(state.pending);
   visibleAgentCountRef.current = visibleAgents.length;
   pendingRef.current = state.pending;
-
-  // Fold back a clamp (e.g. verbose toggle shrank the log under a stored scrollTop) so state stays
-  // consistent — no-op when viewportSlice returned the same reference.
-  useEffect(() => {
-    if (clampedVp !== vp) setVp(clampedVp);
-  }, [clampedVp, vp]);
 
   // --- mouse + ctrl+a: intercept at the shared stdin input emitter, BEFORE any useInput consumer
   // (this App's or the composer's) sees them. Ink emits the RAW chunk (ESC intact) on
@@ -540,8 +558,9 @@ export function App({
         const chunk = String(args[0]);
         const { text, wheel } = consumeMouseReports(chunk);
         for (const w of wheel) {
-          const delta = w.kind === "wheelUp" ? -w.lines : w.lines;
-          setVp((cur) => scrollBy(cur, delta, lineCountRef.current, viewHRef.current));
+          // T1's first-class WheelEvent feeds the scroll model whole — no sign/step re-derivation
+          // here; geometry refs are read when the updater RUNS, so batched notches see live values.
+          setScroll((cur) => applyWheel(cur, w, viewHRef.current, lineCountRef.current));
         }
         if (text !== chunk) {
           // The chunk contained mouse-report bytes (fully, or a now-resolved/still-pending
@@ -685,11 +704,13 @@ export function App({
         if (key.escape) { setAgentSel(null); return; }
       }
 
+      // Scroll keys ride the SAME wheel-shaped channel as mouse notches (wheel is a first-class
+      // key, the T1/T2 shape) — one model, one clamp/follow rule set, no parallel scroll math.
       const len = lineCountRef.current;
       const vh = viewHRef.current;
-      if (key.pageUp) { setVp((cur) => scrollBy(cur, -(vh - 1), len, vh)); return; }
-      if (key.pageDown) { setVp((cur) => scrollBy(cur, vh - 1, len, vh)); return; }
-      if (key.ctrl && input === "u") { setVp((cur) => scrollBy(cur, -Math.ceil(vh / 2), len, vh)); return; }
+      if (key.pageUp) { setScroll((cur) => applyWheel(cur, { kind: "wheelUp", lines: vh - 1 }, vh, len)); return; }
+      if (key.pageDown) { setScroll((cur) => applyWheel(cur, { kind: "wheelDown", lines: vh - 1 }, vh, len)); return; }
+      if (key.ctrl && input === "u") { setScroll((cur) => applyWheel(cur, { kind: "wheelUp", lines: Math.ceil(vh / 2) }, vh, len)); return; }
       if (key.ctrl && input === "o") { setVerbose((v) => !v); return; }
       if (key.ctrl && input === "t") { setTasksVisible((v) => !v); return; }
       // ctrl+C AND ctrl+D are deliberately NOT handled here — both belong solely to the dedicated
@@ -739,11 +760,7 @@ export function App({
           rendered OUTSIDE the scrolling viewport (always visible, unlike the welcome banner which
           scrolls off) and pre-counted in viewH's math above. */}
       {childOpen ? <Text>{childHeaderLine(childRow!, columns)}</Text> : null}
-      <Box flexGrow={1} flexDirection="column" overflow="hidden">
-        {visible.map((line, i) => (
-          <Text key={i}>{line.length > 0 ? line : " "}</Text>
-        ))}
-      </Box>
+      <TranscriptViewport lines={lineLog} scroll={scrollForRender} viewportRows={viewH} />
       <Box flexDirection="column" flexShrink={0}>
         {atVisible.map((line, i) => (
           <Text key={`at${i}`}>{line.length > 0 ? line : " "}</Text>

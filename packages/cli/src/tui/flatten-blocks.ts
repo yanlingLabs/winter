@@ -1,6 +1,6 @@
 /** `flatten-blocks.ts` (Phase 3c Task 2) — renders committed `Block`s (see `state.ts`) to
- *  pre-wrapped ANSI STRINGS: the unit the windowed transcript viewport (`viewport.ts`, Task 4)
- *  scrolls through. This SUPERSEDES `pager.tsx`'s `pagerLines` (deleted in Task 4) and re-expresses
+ *  pre-wrapped ANSI STRINGS: the unit the virtualized transcript viewport (`scroll-model.ts` +
+ *  `<TranscriptViewport>`, TUI renderer T2 — superseding Task 4's `viewport.ts`) scrolls through. This SUPERSEDES `pager.tsx`'s `pagerLines` (deleted in Task 4) and re-expresses
  *  3b's `transcript.tsx` per-block Ink renderers as string builders, so the VISIBLE text (glyphs,
  *  spacing, caps, wording) matches those components exactly — see per-kind notes below. An exact
  *  byte-for-byte ANSI match with `transcript.tsx` is NOT required (Ink owns its own layout/props;

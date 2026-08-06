@@ -305,6 +305,51 @@ describe("App (fullscreen shell)", () => {
     expect(client.calls).toEqual([]);
   });
 
+  // TUI renderer T2 — the scrolled-back honesty indicator. Geometry as (k2): viewH 19, 40 pushed
+  // notes + 3 welcome lines = 43 log lines. PgUp scrolls wheel-shaped by viewH-1 = 18 → offset 18;
+  // the indicator replaces the viewport's BOTTOM row (the top edge — where the user is reading —
+  // stays put), so 18 content rows show and the count includes the displaced row: 43 - 24 = 19.
+  test("(k4) scrolled back: a '↓ N newer lines' indicator discloses hidden content with a truthful count that tracks growth; re-sticking clears it", async () => {
+    const bridge = makeEventBridge();
+    for (let i = 0; i < 40; i++) bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: `IND-${i}` }));
+    const { stdin, lastFrame } = render(<App client={fakeClient()} bridge={bridge} {...baseProps} />);
+    await wait();
+    expect(lastFrame() ?? "").not.toContain("newer line"); // followed bottom: nothing hidden, no indicator
+
+    stdin.write("\x1b[5~"); // PgUp -> offset 18, unfollowed
+    await wait();
+    expect(lastFrame() ?? "").toContain("↓ 19 newer lines");
+
+    // Growth while scrolled back: the view holds (see k5) and the count grows with the hidden tail.
+    bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: "IND-NEW" }));
+    await wait();
+    expect(lastFrame() ?? "").toContain("↓ 20 newer lines");
+
+    stdin.write("\x1b[F"); // End (empty composer) -> re-follow the bottom
+    await wait();
+    const frame = lastFrame() ?? "";
+    expect(frame).not.toContain("newer line"); // indicator gone
+    expect(frame).toContain("IND-NEW"); // and the tail is visible again
+  });
+
+  test("(k5) growth while scrolled back does NOT move the view: the viewport's top line is byte-identical across appends", async () => {
+    const bridge = makeEventBridge();
+    for (let i = 0; i < 40; i++) bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: `G-${i}` }));
+    const { stdin, lastFrame } = render(<App client={fakeClient()} bridge={bridge} {...baseProps} />);
+    await wait();
+
+    stdin.write("\x1b[5~"); // PgUp — scroll back
+    await wait();
+    const before = (lastFrame() ?? "").split("\n");
+
+    for (let i = 0; i < 3; i++) bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: `G-LATE-${i}` }));
+    await wait();
+    const after = (lastFrame() ?? "").split("\n");
+
+    expect(after[0]).toBe(before[0]!); // top edge pinned — growth compensated, the reader never moves
+    expect(after.join("\n")).not.toContain("G-LATE-0"); // the new content stayed below the window
+  });
+
   test("(l) resize: the frame re-renders to the new terminal height", async () => {
     const prev = (process.stdout as unknown as { rows?: number }).rows;
     const { lastFrame } = render(<App client={fakeClient()} bridge={makeEventBridge()} {...baseProps} />);
