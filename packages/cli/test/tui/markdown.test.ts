@@ -179,3 +179,118 @@ describe("markdown.ts — loadHighlighter", () => {
     expect(highlight(code, "not-a-real-language-xyz")).toBe(code);
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// TUI renderer T3 — createStreamingMarkdown: the incremental streaming renderer (mechanism report
+// Q2's StreamingMarkdown shape, adapted). THE contract is byte-equality with `renderMarkdown` at
+// every observed prefix — that equality is what makes the turn-end swap (streamed rows → committed
+// assistant block, both rendered through this module) a visual no-op.
+// ---------------------------------------------------------------------------------------------
+
+import { createStreamingMarkdown } from "../../src/tui/markdown";
+
+/** Feed `text` cumulatively in `chunk`-sized deltas, asserting EVERY intermediate render equals a
+ *  fresh `renderMarkdown` of the same prefix (the streamed frame is always the frame a cold render
+ *  would produce — the no-glue guarantee's pure half). Returns the final render. */
+function streamInChunks(text: string, chunk: number, highlight?: (code: string, lang?: string) => string): string {
+  const sm = createStreamingMarkdown();
+  let out = "";
+  for (let i = chunk; i < text.length + chunk; i += chunk) {
+    const prefix = text.slice(0, Math.min(i, text.length));
+    out = sm.render(prefix, highlight);
+    expect(out).toBe(renderMarkdown(prefix, highlight));
+  }
+  return out;
+}
+
+const STREAM_CORPUS: string[] = [
+  "hello world",
+  "plain para\n\nwith blank\n\n\nruns and no indicators at all",
+  "# Heading\n\nA **bold** para with `code`.\n",
+  "para one\n\npara two\n\n- item 1\n- item 2\n  - nested\n\n> quote line\n\n---\n",
+  "Intro\n\n```js\nconst x = 1;\nconst y = 2;\n```\n\nAfter",
+  "Open fence, never closed:\n\n```python\nfor i in range(3):\n    print(i)",
+  "| a | b |\n|---|---|\n| 1 | 2 |\n",
+  "start **bold\nacross** end",
+  "~approx~ tilde text stays literal",
+  "para\n# head\n",
+  "Title\n===\nbody after a setext heading",
+];
+
+describe("markdown.ts — createStreamingMarkdown equals renderMarkdown at every prefix (T3)", () => {
+  test("corpus × chunk sizes: every intermediate and final render is byte-equal to a cold renderMarkdown", () => {
+    for (const text of STREAM_CORPUS) {
+      for (const chunk of [1, 3, 7, text.length || 1]) {
+        expect(streamInChunks(text, chunk)).toBe(renderMarkdown(text));
+      }
+    }
+  });
+
+  test("with a highlighter: fenced code goes through it identically to renderMarkdown", () => {
+    const marker = (code: string, lang?: string) => `«${lang ?? "?"}:${code}»`;
+    const text = "Intro\n\n```js\nconst x = 1;\n```\n\ndone";
+    expect(streamInChunks(text, 5, marker)).toBe(renderMarkdown(text, marker));
+  });
+});
+
+describe("markdown.ts — streaming open-fence styling (T3: the line-boundary-spanning construct)", () => {
+  test("a fence opened in complete lines styles the still-open tail line as code", () => {
+    const marker = (code: string, lang?: string) => `«${lang ?? "?"}:${code}»`;
+    const sm = createStreamingMarkdown();
+    sm.render("```js\ncode1\n", marker);
+    const out = sm.render("```js\ncode1\ncod", marker);
+    // The partial tail line "cod" is INSIDE the highlighted code payload — never literal text.
+    expect(out).toContain("«js:code1\ncod»");
+  });
+});
+
+describe("markdown.ts — createStreamingMarkdown boundary discipline (T3)", () => {
+  test("the stable boundary is monotonic and never advances into an unclosed fence", () => {
+    // Indicator-bearing text (`**`) so the renderer leaves the verbatim fast path — plain
+    // indicator-free text correctly keeps boundary 0 forever (it never lexes at all).
+    const sm = createStreamingMarkdown();
+    sm.render("para **one**\n\npara two\n\n");
+    const afterParas = sm.boundary();
+    expect(afterParas).toBeGreaterThan(0);
+    sm.render("para **one**\n\npara two\n\n```js\nline1\n");
+    const inFence = sm.boundary();
+    expect(inFence).toBeGreaterThanOrEqual(afterParas);
+    sm.render("para **one**\n\npara two\n\n```js\nline1\nline2\nline3\n");
+    // The unclosed fence is one provisional token — the boundary must not move past its opener.
+    expect(sm.boundary()).toBe(inFence);
+    expect(sm.boundary()).toBeLessThanOrEqual("para **one**\n\npara two\n\n".length);
+  });
+
+  test("a tail-only delta (no newline arrived) never moves the boundary", () => {
+    const sm = createStreamingMarkdown();
+    sm.render("done `block`\n\nnext para\n\nopen para grows");
+    const b = sm.boundary();
+    expect(b).toBeGreaterThan(0); // not the fast path — the boundary genuinely advanced
+    sm.render("done `block`\n\nnext para\n\nopen para grows and grows");
+    expect(sm.boundary()).toBe(b);
+  });
+
+  test("a non-append transition (new stream segment) self-heals to the fresh text", () => {
+    const sm = createStreamingMarkdown();
+    sm.render("first segment **bold**\n\nmore\n\ntail");
+    const fresh = "a brand new segment with `code`";
+    expect(sm.render(fresh)).toBe(renderMarkdown(fresh));
+  });
+
+  test("a highlighter change resets and re-renders correctly", () => {
+    const marker = (code: string) => `[hl]${code}[/hl]`;
+    const text = "```js\nx\n```\n";
+    const sm = createStreamingMarkdown();
+    expect(sm.render(text)).toBe(renderMarkdown(text));
+    expect(sm.render(text, marker)).toBe(renderMarkdown(text, marker));
+  });
+});
+
+describe("markdown.ts — createStreamingMarkdown CRLF fallback (T3)", () => {
+  test("a buffer containing \\r renders byte-equal to renderMarkdown (full, non-incremental path)", () => {
+    const text = "line one\r\nline two\r\n\r\n**bold**";
+    const sm = createStreamingMarkdown();
+    sm.render("line one\r\n");
+    expect(sm.render(text)).toBe(renderMarkdown(text));
+  });
+});

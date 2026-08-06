@@ -18,6 +18,7 @@
 import { Chalk } from "chalk";
 import { Marked, type Token, type Tokens } from "marked";
 import { theme } from "./theme";
+import { cutCompleteLines } from "./stream-cut";
 
 const ansi = new Chalk({ level: 3 });
 
@@ -316,6 +317,108 @@ export function splitStableBoundary(text: string): { stable: string; tail: strin
   const stableTokens = tokens.slice(0, -1);
   const stableLength = stableTokens.reduce((sum, t) => sum + t.raw.length, 0);
   return { stable: text.slice(0, stableLength), tail: text.slice(stableLength) };
+}
+
+/**
+ * TUI renderer T3 — the incremental STREAMING renderer (mechanism report Q2's
+ * `StreamingMarkdown` shape, adapted): a stateful factory whose `render(text)`
+ * is pinned byte-equal to `renderMarkdown(text)` at every observed prefix
+ * (test/tui/markdown.test.ts's corpus × chunk-size property). That equality is
+ * the turn-end no-glue guarantee's pure half — the streamed frame is always
+ * the frame a cold render of the same text would produce, so swapping the
+ * streamed block for the committed one re-renders identical bytes.
+ *
+ * Cost shape (the T3 pin: "complete is lexed once and cached, only the open
+ * segment re-renders per delta"):
+ *  - the SETTLED prefix (every top-level token before the last) is formatted
+ *    once at boundary-advance time and never re-lexed — `blocks` accumulates
+ *    its rendered strings, `raw` its exact source extent;
+ *  - the boundary can only advance when a source LINE completes (marked's
+ *    block boundaries live at newlines), so the advance scan is gated on
+ *    `cutCompleteLines`' complete-half growing — a tail-only delta skips it;
+ *  - per delta, only the OPEN segment (`text` past the boundary: the last,
+ *    still-growing top-level token plus the partial tail line) is re-lexed and
+ *    re-formatted. An unclosed fence is ONE provisional token to marked, so
+ *    the boundary never advances into it — which is also what styles a tail
+ *    line inside an open fence as code rather than literal text (the
+ *    line-boundary-spanning construct the plan calls out).
+ *
+ * Fidelity guards, each mirroring a `renderMarkdown` behavior exactly:
+ *  - the no-indicator fast path returns `text` verbatim (blank-line runs and
+ *    all) until the first indicator char arrives, then flips to token mode
+ *    permanently (append-only input can't un-match the indicator regex);
+ *  - a buffer containing `\r` falls back to `renderMarkdown(text)` wholesale:
+ *    marked normalizes `\r\n`/`\r` to `\n` during lexing, so token `raw`
+ *    offsets would misalign against the un-normalized source — correctness
+ *    over amortization for that (rare) input, and still byte-equal by
+ *    construction since it IS renderMarkdown;
+ *  - a non-append transition (a new stream segment after `assistant_message`
+ *    cleared the buffer, or a highlighter swap) resets the instance — no
+ *    caller-side lifecycle needed beyond holding the instance.
+ *
+ * `boundary()` is test observability only: the settled prefix's source length.
+ */
+export function createStreamingMarkdown(): {
+  render(text: string, highlight?: Highlighter): string;
+  boundary(): number;
+} {
+  let raw = ""; // settled source prefix (concat of settled token raws)
+  let blocks: string[] = []; // rendered non-space settled blocks, in order
+  let lastCompleteLen = -1; // cutCompleteLines(text).complete.length at the last advance scan
+  let lastHighlight: Highlighter | undefined;
+  let tokenMode = false; // false = still on renderMarkdown's verbatim fast path
+
+  function reset(): void {
+    raw = "";
+    blocks = [];
+    lastCompleteLen = -1;
+    tokenMode = false;
+  }
+
+  return {
+    boundary(): number {
+      return raw.length;
+    },
+    render(text: string, highlight?: Highlighter): string {
+      if (highlight !== lastHighlight) {
+        lastHighlight = highlight;
+        reset();
+      }
+      if (!text.startsWith(raw)) reset(); // new segment / rewritten buffer — self-heal
+      if (text.length === 0) return "";
+      // CRLF fallback (see header): marked's \r-normalization breaks raw-offset math.
+      if (text.includes("\r")) return renderMarkdown(text, highlight);
+      if (!tokenMode) {
+        if (!looksLikeMarkdown(text)) return text; // renderMarkdown's exact fast path
+        tokenMode = true;
+        lastCompleteLen = -1; // force a full advance scan against the whole buffer
+      }
+      const { complete } = cutCompleteLines(text);
+      if (complete.length !== lastCompleteLen) {
+        // A line completed (or this is the first token-mode scan): the boundary may advance.
+        // The provisional region is the last NON-SPACE token plus everything after it — stricter
+        // than splitStableBoundary's "all but the last token", and necessarily so: a block token
+        // followed only by whitespace can STILL be extended by later bytes (a loose list re-opens
+        // across a blank line — `- a\n\n` + `- b` is ONE list token in a cold lex), so trailing
+        // space glues to its predecessor rather than promoting it to "settled". Unclosed fences
+        // are one provisional token to marked, so the boundary never enters them. Settled block
+        // tokens always end at a newline, so they lie within `complete` by construction.
+        const tokens = md.lexer(text.slice(raw.length)) as Token[];
+        let core = tokens.length - 1;
+        while (core >= 0 && tokens[core]!.type === "space") core--;
+        for (let i = 0; i < core; i++) {
+          const t = tokens[i]!;
+          raw += t.raw;
+          if (t.type !== "space") blocks.push(formatBlock(t, 0, highlight));
+        }
+        lastCompleteLen = complete.length;
+      }
+      const openRaw = text.slice(raw.length);
+      const openTokens = openRaw.length > 0 ? (md.lexer(openRaw) as Token[]) : [];
+      const openBlocks = openTokens.filter((t) => t.type !== "space").map((t) => formatBlock(t, 0, highlight));
+      return [...blocks, ...openBlocks].join("\n\n");
+    },
+  };
 }
 
 /**
