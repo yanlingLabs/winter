@@ -42,11 +42,12 @@
  *  PURE: `nowMs` is the caller's injected clock (App.tsx will tick it); `reduce` itself never calls
  *  `Date.now()`. ZERO Ink/React import — unit-testable in isolation (state.test.ts). */
 
-import type { ApprovalOption, Task } from "@norma/protocol";
+import type { ApprovalOption, ApprovalPolicy, SessionActivity, Task } from "@norma/protocol";
 import { updateSubagents, type CliSubagent } from "../subagent-state";
 import { subagentTokens } from "../subagent-display";
 import { upsertTask } from "../task-block";
 import { formatElapsed, type TaskRow } from "../task-display";
+import { spinnerFrame } from "./spinner-verbs";
 
 export type Block =
   | { kind: "user"; text: string }
@@ -114,6 +115,22 @@ export interface TuiState {
   // matching tool_result can build a complete `{kind:"tool",...}` Block; not part of T3's primary
   // read surface, but exposed on TuiState since `reduce` is pure (no cross-call closures).
   childPendingTool: Record<string, { name: string; argsJson: string }>;
+  // TUI renderer T5: LIVE background shell tasks — the `bg list` data folded off the events already
+  // on the stream (`bg_task_started` appends, `bg_task_exited` removes; the committed one-line
+  // notes for both are untouched). Feeds the status chrome's running-work line. Bounded by the
+  // daemon's own bg-task lifecycle; a replay from seq 0 nets started/exited pairs back out.
+  bgTasks: BgTaskRow[];
+  // TUI renderer T5: the session's lifecycle state off the `session_activity` transient
+  // (session-activity-hygiene T4 — advisory-and-current, never persisted/replayed). Absent until
+  // the first event arrives; App may seed an initial value from the resume route's session.list
+  // row instead. Drives the chrome's "backgrounded"/"archived" chip.
+  activity?: SessionActivity;
+}
+
+/** One live background shell task (TUI renderer T5) — the two fields the running-work line needs. */
+export interface BgTaskRow {
+  taskId: string;
+  command: string;
 }
 
 const MAIN = "main";
@@ -136,6 +153,9 @@ export function initialState(): TuiState {
     pending: null,
     childBlocks: {},
     childPendingTool: {},
+    bgTasks: [],
+    // `activity` deliberately ABSENT (not `undefined`-set): absence means "nothing known yet" —
+    // the same spread-omit discipline PendingCard's optional fields use.
   };
 }
 
@@ -487,7 +507,13 @@ export function reduce(s: TuiState, e: WireEvent, nowMs: number): TuiState {
 
     case "bg_task_started": {
       const text = `▶ bg ${str(e.taskId)} started: ${str(e.command).slice(0, 80)}`;
-      return { ...s, committed: [...s.committed, { kind: "note", text }] };
+      // T5: ALSO fold the liveness row (dedupe on taskId — an attach replay can re-deliver the
+      // event). The committed note above is byte-identical to before.
+      const taskId = str(e.taskId);
+      const bgTasks = s.bgTasks.some((t) => t.taskId === taskId)
+        ? s.bgTasks
+        : [...s.bgTasks, { taskId, command: str(e.command) }];
+      return { ...s, bgTasks, committed: [...s.committed, { kind: "note", text }] };
     }
 
     case "bg_task_output":
@@ -498,7 +524,22 @@ export function reduce(s: TuiState, e: WireEvent, nowMs: number): TuiState {
       // (killed:false, no exit code available) stringifying to "exit null" — no `num()` fallback
       // here, since that would silently turn a real "exit null" into a misleading "exit 0".
       const text = `■ bg ${str(e.taskId)} exited (${e.killed ? "killed" : `exit ${e.exitCode}`})`;
-      return { ...s, committed: [...s.committed, { kind: "note", text }] };
+      // T5: drop the liveness row; the list keeps its reference when the id was never tracked
+      // (this file's "same reference on no change" convention, e.g. feedAgents).
+      const taskId = str(e.taskId);
+      const bgTasks = s.bgTasks.some((t) => t.taskId === taskId)
+        ? s.bgTasks.filter((t) => t.taskId !== taskId)
+        : s.bgTasks;
+      return { ...s, bgTasks, committed: [...s.committed, { kind: "note", text }] };
+    }
+
+    // TUI renderer T5: the session-lifecycle transient (session-activity-hygiene T4) — advisory-
+    // and-current, so it folds into ONE field and commits nothing. Referential no-op on a
+    // re-broadcast of the same state so idle chrome never repaints for it.
+    case "session_activity": {
+      const activity = str(e.activity) as SessionActivity;
+      if (!activity || activity === s.activity) return s;
+      return { ...s, activity };
     }
 
     case "worktree_entered": {
@@ -552,4 +593,133 @@ export function reduce(s: TuiState, e: WireEvent, nowMs: number): TuiState {
     default:
       return s; // unknown/unhandled event types are no-ops (both CLI/app already skip unknowns)
   }
+}
+
+// ================================================================================================
+// TUI renderer T5 — the bottom status chrome's PURE model (spec §3; mechanism report Q4 adapted).
+//
+// `statusChromeModel` is the ONE place the chrome's content is decided; footer.tsx renders its
+// output verbatim (one `<Text wrap="truncate">` row per StatusLine — each line is exactly one
+// terminal row by construction, so app.tsx's `bottomBarLayout` counts `lines.length` and the
+// height model never lies). THE PIN: one line; two when running work exists; never more —
+// `lines.length <= 2` is structural (a work line + a status line are the only two products), and
+// many tasks collapse into the truncated `"N tasks: a, b, +K"` summary instead of more rows.
+//
+// FLICKER DISCIPLINE (T4 frame-diff): the status line reads NO clock — idle chrome is byte-stable
+// across ticks, so the damage-diffed writer emits zero ops for it. Only the work line's spinner
+// glyph advances (a 120ms bucket of `nowMs`), repainting exactly one row while work runs.
+// ================================================================================================
+
+/** Tones the footer maps onto theme colors ("dim" inherits the footer's dim base). */
+export type StatusTone = "dim" | "planMode" | "warning" | "autoAccept" | "dangerMode" | "accent";
+
+export interface StatusSegment {
+  text: string;
+  tone: StatusTone;
+}
+
+/** One rendered chrome row: segments joined by `sep` (the status line keeps the footer's
+ *  established `" · "`; the work line joins glyph+body with a plain space). */
+export interface StatusLine {
+  key: "work" | "status" | "exit";
+  sep: string;
+  segments: StatusSegment[];
+}
+
+/** Everything the chrome reads — all EXISTING wire/session state (zero daemon changes): the
+ *  roster + bgTasks liveness folds above, the App-held policy/model/effort (live through
+ *  `/model`'s CommandCtx callback), the `session_activity` fold, and the exit-armed flag. */
+export interface StatusChromeInput {
+  policy: ApprovalPolicy;
+  running: boolean;
+  /** The roster as the App renders it (visibleAgents — dismissed rows excluded). */
+  agents: AgentRow[];
+  bgTasks: BgTaskRow[];
+  /** The session's LIVE model slug (`""` = unknown → segment omitted, the pre-T5 footer shape). */
+  model: string;
+  effort?: string;
+  activity?: SessionActivity;
+  /** Which key armed the double-press exit window (footer.tsx's `ExitKey`, structurally). */
+  exitArmed?: "ctrl-c" | "ctrl-d";
+  /** Injected clock — read ONLY by the work line's spinner glyph; the status line never sees it. */
+  nowMs: number;
+}
+
+/** Label budget for one work item on the running-work line. */
+const WORK_LABEL_MAX = 20;
+/** Labels spelled out before the `+K` overflow summary (the plan's `"3 tasks: a, b, +1"` shape). */
+const WORK_LABELS_SHOWN = 2;
+
+const shortLabel = (s: string): string => (s.length > WORK_LABEL_MAX ? `${s.slice(0, WORK_LABEL_MAX - 1)}…` : s);
+
+/** The running-work labels, in roster-then-bg order: live (non-terminal) subagents by their
+ *  re-task `name` (falling back to the display label), then live bg shell tasks by command.
+ *  Exported so app.tsx's layout accounting and this selector can never disagree about whether
+ *  the second chrome line exists. */
+export function runningWorkLabels(agents: AgentRow[], bgTasks: BgTaskRow[]): string[] {
+  return [
+    ...agents.filter((a) => a.status !== "done").map((a) => shortLabel(a.name ?? a.label)),
+    ...bgTasks.map((t) => shortLabel(t.command)),
+  ];
+}
+
+export function statusChromeModel(input: StatusChromeInput): { lines: StatusLine[] } {
+  const { policy, running, agents, bgTasks, model, effort, activity, exitArmed, nowMs } = input;
+
+  // Exit-armed replaces the WHOLE chrome with the one key-specific hint (the pre-T5 footer's
+  // contract, kept: nothing else renders alongside, so the line reads unambiguously).
+  if (exitArmed) {
+    const text = exitArmed === "ctrl-d" ? "Press Ctrl-D again to exit" : "Press Ctrl-C again to exit";
+    return { lines: [{ key: "exit", sep: " · ", segments: [{ text, tone: "dim" }] }] };
+  }
+
+  const lines: StatusLine[] = [];
+
+  // --- the work line (only while running work exists — the second line, capped at ONE row) ------
+  const labels = runningWorkLabels(agents, bgTasks);
+  if (labels.length > 0) {
+    const shown = labels.slice(0, WORK_LABELS_SHOWN);
+    const extra = labels.length - shown.length;
+    const body = `${labels.length} task${labels.length === 1 ? "" : "s"}: ${shown.join(", ")}${extra > 0 ? `, +${extra}` : ""}`;
+    lines.push({
+      key: "work",
+      sep: " ",
+      segments: [
+        { text: spinnerFrame(nowMs), tone: "accent" },
+        { text: body, tone: "dim" },
+      ],
+    });
+  }
+
+  // --- the status line (always; wording byte-compatible with the pre-T5 footer) ----------------
+  const segments: StatusSegment[] = [];
+  if (policy === "plan") segments.push({ text: "⏸ plan mode on (shift+tab to cycle)", tone: "planMode" });
+  else if (policy === "dont-ask") segments.push({ text: "✕ dont-ask — auto-declines prompts (shift+tab to cycle)", tone: "warning" });
+  else if (policy === "accept-edits") segments.push({ text: "✎ accept edits (shift+tab to cycle)", tone: "autoAccept" });
+  else if (policy === "auto") segments.push({ text: "⏵⏵ auto mode on (shift+tab to cycle)", tone: "autoAccept" });
+  else if (policy === "bypass") segments.push({ text: "⚠ bypass — all actions auto-approved (shift+tab to cycle)", tone: "dangerMode" });
+
+  if (running) segments.push({ text: "esc to interrupt", tone: "dim" });
+
+  if (agents.length > 0) {
+    segments.push({ text: `${agents.length} agent${agents.length === 1 ? "" : "s"} · ctrl+a`, tone: "dim" });
+  }
+
+  // The empty-state hint keeps its pre-T5 role: it fills in when NO keybinding-bearing segment
+  // rendered — the passive info segments below (chip, model) don't suppress it.
+  if (segments.length === 0) {
+    segments.push({ text: "? for shortcuts · shift+tab to cycle modes", tone: "dim" });
+  }
+
+  // The activity chip, when notable (spec §3): the session runs unattended (backgrounded) or is
+  // archived. `active`/`idle`/absent are the unremarkable states — no chip.
+  if (activity === "background") segments.push({ text: "● backgrounded", tone: "warning" });
+  else if (activity === "archived") segments.push({ text: "● archived", tone: "warning" });
+
+  // The session's live model + effort — last, the CC status-line position adapted (model reads as
+  // the line's right edge). Unknown model (`""`) omits the segment: never show a guess.
+  if (model) segments.push({ text: effort ? `${model} (${effort})` : model, tone: "dim" });
+
+  lines.push({ key: "status", sep: " · ", segments });
+  return { lines };
 }
