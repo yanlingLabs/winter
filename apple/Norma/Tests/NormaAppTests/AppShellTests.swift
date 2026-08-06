@@ -12,11 +12,14 @@ import AppKit
 final class AppShellTests: XCTestCase {
     // MARK: - SessionMode: the iOS nav mirror (PURE)
 
-    /// The sidebar's four rows, in the phone's own `sidebarOrder` — pinned on iOS by
-    /// `SessionModeTests` (`norma-ios/NormaTests/SessionModeTests.swift`) with this exact literal.
-    /// Two lists that must move together; this is the Mac half of that pin.
-    func testSidebarOrderMirrorsThePhonesFourRows() {
-        XCTAssertEqual(SessionMode.sidebarOrder, [.code, .dispatch, .cowork, .chat])
+    /// RETRUED (chatgpt-ui T1, spec R1): the mode rows are now Chats-first — the ChatGPT-desktop
+    /// sidebar order (New chat sits above these as an ACTION row, `shellSidebarTopRows`). This pin
+    /// used to assert the phone's own `[.code, .dispatch, .cowork, .chat]` literal ("two lists that
+    /// must move together"); the 2026-08-06 spec supersedes the iOS-mirror ruling FOR THE MAC ONLY
+    /// (spec "Why" #3 — the phone keeps the Liquid Glass gallery and its own order, pinned there by
+    /// `SessionModeTests`; the two lists deliberately no longer move together).
+    func testSidebarModeRowOrderIsChatsFirstPerTheChatGPTShape() {
+        XCTAssertEqual(SessionMode.sidebarOrder, [.chat, .code, .dispatch, .cowork])
         XCTAssertEqual(Set(SessionMode.sidebarOrder), Set(SessionMode.allCases), "every mode appears exactly once")
     }
 
@@ -618,6 +621,123 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(delegate.detachedWindows.isEmpty, "no retargeted menu item may ever spawn a detached window")
         XCTAssertEqual(delegate.appWindow?.navigation.destination, .dashboard(pane: .pluginManager), "the last-fired item's deep link must have actually landed")
         delegate.appWindow?.hide()
+    }
+
+    // MARK: - chatgpt-ui T1: the sidebar's row table (PURE — spec §1's exact structure)
+
+    /// THE row-order pin, spec §1 top-to-bottom: New chat (an ACTION row — the one row that fires
+    /// a door instead of setting selection), then Chats, then Code/Dispatch/Cowork. The search
+    /// field, Recents, and the account row sit below these and are pinned separately
+    /// (`filteredRecents`, `shellSidebarAccountRowDestination`).
+    func testShellSidebarTopRowsAreNewChatThenChatsThenTheModeRows() {
+        XCTAssertEqual(shellSidebarTopRows, [
+            .newChat, .mode(.chat), .mode(.code), .mode(.dispatch), .mode(.cowork),
+        ])
+    }
+
+    /// The destination table: every mode row navigates to its `.mode(...)` landing UNCHANGED; New
+    /// chat is `nil` — an action row, never a selection (until T2 it fires the existing `newChat()`
+    /// door; T2 retargets it to the new-chat page).
+    func testShellSidebarRowDestinationsModeRowsNavigateNewChatIsAnAction() {
+        XCTAssertNil(shellSidebarRowDestination(.newChat), "New chat is an action row — never a selection destination")
+        XCTAssertEqual(shellSidebarRowDestination(.mode(.chat)), .mode(.chat))
+        XCTAssertEqual(shellSidebarRowDestination(.mode(.code)), .mode(.code))
+        XCTAssertEqual(shellSidebarRowDestination(.mode(.dispatch)), .mode(.dispatch))
+        XCTAssertEqual(shellSidebarRowDestination(.mode(.cowork)), .mode(.cowork))
+    }
+
+    /// Row labels: "New chat" (sentence case — the ChatGPT reference's own register) and "Chats"
+    /// (PLURAL — the row lists chat sessions; the MODE's title stays "Chat" everywhere else:
+    /// `ChatLandingView`'s navigation title, `shellDestinationTitle`). Code/Dispatch/Cowork read
+    /// their mode titles verbatim.
+    func testShellSidebarRowTitles() {
+        XCTAssertEqual(shellSidebarRowTitle(.newChat), "New chat")
+        XCTAssertEqual(shellSidebarRowTitle(.mode(.chat)), "Chats")
+        XCTAssertEqual(shellSidebarRowTitle(.mode(.code)), "Code")
+        XCTAssertEqual(shellSidebarRowTitle(.mode(.dispatch)), "Dispatch")
+        XCTAssertEqual(shellSidebarRowTitle(.mode(.cowork)), "Cowork")
+        XCTAssertEqual(SessionMode.chat.title, "Chat", "the MODE title is untouched — only the sidebar row pluralizes")
+    }
+
+    /// Glyphs: the pencil-square on New chat (spec §1's named glyph); mode rows keep their own
+    /// `systemImage` (the phone's glyph set, unchanged by the reskin).
+    func testShellSidebarRowGlyphs() {
+        XCTAssertEqual(shellSidebarRowSystemImage(.newChat), "square.and.pencil")
+        for mode in SessionMode.sidebarOrder {
+            XCTAssertEqual(shellSidebarRowSystemImage(.mode(mode)), mode.systemImage)
+        }
+    }
+
+    /// The bottom account-style row REPLACES the gear and inherits its exact navigation: a PLAIN
+    /// `.dashboard(pane: nil)` — pane memory preserved (`summon`'s "nil never resets" contract),
+    /// never a targeted deep link.
+    func testShellSidebarAccountRowNavigatesToThePlainDashboard() {
+        XCTAssertEqual(shellSidebarAccountRowDestination, .dashboard(pane: nil))
+    }
+
+    // MARK: - chatgpt-ui T1: the Recents search filter (PURE — the exhaustive matrix)
+
+    private func searchRows() -> [SessionSummary] {
+        [
+            SessionSummary(sessionId: "s_parser", title: "Fix the Parser", createdAt: 5, scope: "global", cwd: "/repo", mode: "code", activity: "idle"),
+            SessionSummary(sessionId: "s_untitled", title: nil, createdAt: 4, scope: "global", cwd: nil, mode: "chat", activity: nil),
+            SessionSummary(sessionId: "s_release", title: "release notes", createdAt: 3, scope: "global", cwd: "/repo", mode: "code", activity: "active"),
+            SessionSummary(sessionId: "s_ws", title: "   ", createdAt: 2, scope: "global", cwd: nil, mode: "chat", activity: nil),
+        ]
+    }
+
+    /// Empty and whitespace-only queries filter NOTHING — the field at rest shows the full list.
+    func testFilteredRecentsEmptyAndWhitespaceQueriesReturnAllRowsInOrder() {
+        let rows = searchRows()
+        XCTAssertEqual(filteredRecents(rows, query: "").map(\.sessionId), rows.map(\.sessionId))
+        XCTAssertEqual(filteredRecents(rows, query: "   \n ").map(\.sessionId), rows.map(\.sessionId))
+    }
+
+    /// Case-insensitive SUBSTRING match, anywhere in the title — never prefix-only, never
+    /// case-sensitive, and the directory's order (newest first) is preserved, never re-sorted.
+    func testFilteredRecentsMatchesCaseInsensitiveSubstringsPreservingOrder() {
+        let rows = searchRows()
+        XCTAssertEqual(filteredRecents(rows, query: "parser").map(\.sessionId), ["s_parser"])
+        XCTAssertEqual(filteredRecents(rows, query: "PARSER").map(\.sessionId), ["s_parser"])
+        XCTAssertEqual(filteredRecents(rows, query: "RELEASE").map(\.sessionId), ["s_release"])
+        XCTAssertEqual(filteredRecents(rows, query: "e").map(\.sessionId), ["s_parser", "s_untitled", "s_release", "s_ws"],
+                       "a one-letter query matches every title containing it — display order intact")
+        XCTAssertEqual(filteredRecents(rows, query: "ix the p").map(\.sessionId), ["s_parser"], "substrings span word boundaries")
+    }
+
+    /// The filter matches what the USER SEES: an untitled (nil or whitespace) row displays — and
+    /// therefore matches — "New session" (`sessionDisplayTitle`'s fallback), never the raw title.
+    func testFilteredRecentsMatchesUntitledRowsByTheirDisplayedFallbackTitle() {
+        let rows = searchRows()
+        XCTAssertEqual(filteredRecents(rows, query: "new session").map(\.sessionId), ["s_untitled", "s_ws"])
+        XCTAssertEqual(filteredRecents(rows, query: "SESS").map(\.sessionId), ["s_untitled", "s_ws"])
+    }
+
+    /// No match → empty, with surrounding whitespace trimmed before matching (a trailing space
+    /// must not turn a hit into a miss).
+    func testFilteredRecentsNoMatchIsEmptyAndQueryWhitespaceIsTrimmed() {
+        let rows = searchRows()
+        XCTAssertEqual(filteredRecents(rows, query: "zebra").map(\.sessionId), [])
+        XCTAssertEqual(filteredRecents(rows, query: "  parser  ").map(\.sessionId), ["s_parser"])
+        XCTAssertEqual(filteredRecents([], query: "anything").map(\.sessionId), [], "an empty directory filters to empty, never crashes")
+    }
+
+    // MARK: - chatgpt-ui T1: the Recents activity dot (PURE — the deglassed chip's compact form)
+
+    /// Spec §1: Recents shows activity as a SUBTLE dot — only for the two states that mean
+    /// "something is happening" (active/background, the chip colors' own live states). Idle is the
+    /// resting state (a dot on every row says nothing); `nil` is a non-participating mode
+    /// (chat/dispatch — `ACTIVITY_MODES`); archived never reaches Recents (`excludingArchived`,
+    /// pinned upstream) but reads quiet here too rather than guessing; an unknown future value is
+    /// NOT a licence to guess (`moveToCliOffered`'s own fail-quiet posture) — the mode landings'
+    /// full chip still shows it verbatim, so nothing is silently lost.
+    func testRecentsActivityDotOnlyForActiveAndBackground() {
+        XCTAssertEqual(recentsActivityDotStyle("active"), .active)
+        XCTAssertEqual(recentsActivityDotStyle("background"), .background)
+        XCTAssertNil(recentsActivityDotStyle("idle"), "idle is the resting state — no dot")
+        XCTAssertNil(recentsActivityDotStyle(nil), "chat/dispatch rows carry no activity at all")
+        XCTAssertNil(recentsActivityDotStyle("archived"), "archived never reaches Recents anyway — quiet, not guessed")
+        XCTAssertNil(recentsActivityDotStyle("teleporting"), "an unknown future value is not a licence to guess")
     }
 
     // MARK: - Bugfix pass B4: the chat landing's own "New Chat" door (injected — never a second create path)
