@@ -187,15 +187,19 @@ const readRows = (): number => (typeof process.stdout.rows === "number" ? proces
 const readCols = (): number => (typeof process.stdout.columns === "number" ? process.stdout.columns : 80);
 
 /** The welcome header — the FIRST lines of the transcript line log (prepended once; they scroll off
- *  the top as the transcript grows, exactly like any other scrollback line). Bold-accent `Norma` +
- *  dim version, then a dim `model · cwd` line, then a blank spacer. A fixed-level Chalk instance
- *  (same reason as flatten-blocks.ts / markdown.ts: the ambient default downgrades to level 0 under
- *  a non-TTY and would strip these codes). */
+ *  the top as the transcript grows, exactly like any other scrollback line). T6 CC-parity polish:
+ *  an accent `✻` identity mark (the CC reference leads its banner with a brand glyph beside a text
+ *  column — adapted to Norma's spark, the glyph the spinner/notes already own) + bold-accent
+ *  `Norma` + dim version, then the dim `model · cwd` context line indented 2 columns so it sits
+ *  under the wordmark exactly like the transcript's own gutter content column. Still exactly 3
+ *  lines — the banner's row count is load-bearing for the scroll tests' geometry. A fixed-level
+ *  Chalk instance (same reason as flatten-blocks.ts / markdown.ts: the ambient default downgrades
+ *  to level 0 under a non-TTY and would strip these codes). */
 function welcomeLines(version: string, model: string, cwd: string): string[] {
   const ansi = new Chalk({ level: 3 });
   return [
-    `${ansi.hex(theme.accent).bold("Norma")}${ansi.dim(` v${version}`)}`,
-    ansi.dim(`${model} · ${cwd}`),
+    `${ansi.hex(theme.accent)("✻")} ${ansi.hex(theme.accent).bold("Norma")}${ansi.dim(` v${version}`)}`,
+    `  ${ansi.dim(`${model} · ${cwd}`)}`,
     "",
   ];
 }
