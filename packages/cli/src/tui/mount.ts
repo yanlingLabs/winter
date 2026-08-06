@@ -10,7 +10,9 @@
  *  exact byte order without touching a real terminal):
  *    enterAltScreen → enableMouseTracking → render(<App>) …  (interactive)
  *    … on exit request: disableMouseTracking → instance.unmount() → await waitUntilExit() → leaveAltScreen
- *  The App is rendered onto a BSU/ESU synchronized-update stdout proxy (`makeSyncStdout`) with
+ *  The App is rendered onto a damage-diffing stdout proxy (`makeDiffingStdout`, TUI renderer T4 —
+ *  BSU/ESU-synchronized writes of only the CHANGED rows per frame; `NORMA_TUI_DIFF=0` kill-switch
+ *  falls back to the 3c-era full-frame `makeSyncStdout` write-through) with
  *  `exitOnCtrlC: false` — the App itself owns quitting (Task 5's double-ctrl+C/ctrl+D flow calls
  *  `onExitRequest`, wired below to the teardown; main.ts prints the dim "resume this session with…"
  *  hint itself, AFTER `waitUntilExit()` resolves — i.e. after `leaveAltScreen` above has already run,
@@ -25,6 +27,7 @@ import React from "react";
 import { render as inkRender } from "ink";
 import { App, type AppClient } from "./app";
 import { makeSyncStdout } from "./sync-stdout";
+import { makeDiffingStdout } from "./frame-diff";
 import { enterAltScreen, leaveAltScreen, enableMouseTracking, disableMouseTracking } from "./alt-screen";
 import type { EventBridge } from "./event-bridge";
 import type { ApprovalPolicy } from "@norma/protocol";
@@ -55,6 +58,7 @@ export function mountTui(
   opts: MountOpts,
   renderImpl: RenderLike = inkRender as unknown as RenderLike,
   write: (s: string) => void = (s) => { process.stdout.write(s); },
+  stdoutStream: NodeJS.WriteStream = process.stdout,
 ): TuiHandle {
   if (!process.stdout.isTTY) {
     // Non-TTY: never render, never write an escape — hand back an already-resolved handle so the
@@ -64,6 +68,28 @@ export function mountTui(
 
   enterAltScreen(write);
   enableMouseTracking(write);
+
+  // TUI renderer T4 — the damage-diffed writer under Ink (mechanism report Q5/Q7 cure 4): Ink
+  // still renders full frames, but the stdout it writes them to diffs each against the previous
+  // one and emits only the changed rows (frame-diff.ts), so repaint cost is bounded by damage,
+  // never transcript/viewport size. `NORMA_TUI_DIFF=0` is THE KILL-SWITCH: it bypasses the differ
+  // entirely for the 3c-era BSU/ESU write-through proxy — a live rendering artifact bisects to
+  // renderer-vs-writer in one relaunch. On the stream's 'resize' (SIGWINCH — columns OR rows) the
+  // differ resets, so the next frame is a full repaint against the new geometry (its previous-frame
+  // record is meaningless across a resize); the hook is removed at teardown. A fresh writer per
+  // mount means any future alt-screen RE-entry path that remounts starts on a full repaint by
+  // construction. `stdoutStream` is injected for tests; production is always process.stdout.
+  const diffEnabled = process.env.NORMA_TUI_DIFF !== "0";
+  let inkStdout: NodeJS.WriteStream;
+  let onResize: (() => void) | undefined;
+  if (diffEnabled) {
+    const diffing = makeDiffingStdout(stdoutStream);
+    inkStdout = diffing.stream;
+    onResize = () => diffing.reset();
+    stdoutStream.on("resize", onResize);
+  } else {
+    inkStdout = makeSyncStdout(stdoutStream);
+  }
 
   let instance: RenderInstance;
   let requested = false;
@@ -86,7 +112,7 @@ export function mountTui(
       onExitRequest,
       resumeTargetSeq: opts.resumeTargetSeq,
     }),
-    { stdout: makeSyncStdout(process.stdout), exitOnCtrlC: false },
+    { stdout: inkStdout, exitOnCtrlC: false },
   );
 
   return {
@@ -96,6 +122,7 @@ export function mountTui(
       // waitUntilExit → leaveAltScreen. If Ink unmounted by a path that didn't go through
       // onExitRequest, mouse tracking hasn't been disabled yet, so do it here first.
       await instance.waitUntilExit();
+      if (onResize) stdoutStream.off("resize", onResize); // T4: the differ's resize hook dies with the mount
       if (!requested) disableMouseTracking(write);
       leaveAltScreen(write);
     },
