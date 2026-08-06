@@ -272,6 +272,61 @@ describe("mountTui — the diffing writer under Ink (TUI renderer T4)", () => {
     }));
   });
 
+  // Bugfix pass B1 (released 0.2.010: `norma` launches to a BLANK alt-screen until one ctrl+C).
+  // Mechanism (pty byte capture, b1-capture-before.txt): Ink paints the full first frame, then
+  // ink's <App>.componentDidMount calls cliCursor.hide(this.props.stdout) — a bare "\x1b[?25l"
+  // chunk through the diffing proxy ~1ms later. The writer treated that 6-byte escape as a FRAME:
+  // diffed against the 39-row first paint it cleared every row (the escape itself renders zero
+  // glyphs) and poisoned prev, and since Ink dedupes identical output nothing repainted until the
+  // first state change — ctrl+C's exit hint — re-damaged every row. This pins the cure at the
+  // mount seam: control chunks pass through raw and never touch the diff state.
+  test("B1: Ink's mount-time cliCursor.hide chunk is control, not a frame — the first paint survives it", () => {
+    withTty(() => withDiffEnv(undefined, () => {
+      const m = mountWithFakes();
+      m.inkStdout.write("a\nb\n"); // Ink's first frame (render phase)
+      expect(m.writes.length).toBe(1);
+      expect(m.writes[0]).toContain(ERASE_SCREEN); // full first paint
+      m.inkStdout.write("\x1b[?25l"); // React commit: App.componentDidMount → cliCursor.hide(stdout)
+      expect(m.writes.length).toBe(2);
+      expect(m.writes[1]).toBe("\x1b[?25l"); // verbatim pass-through — NOT a row-op envelope wiping the screen
+      m.inkStdout.write("\x1b[2K\x1b[1A\x1b[2K\x1b[G" + "a\nb\n"); // Ink rerenders the identical frame
+      expect(m.writes.length).toBe(2); // zero damage — prev still records the painted frame, screen intact
+    }));
+  });
+
+  // B1 companion pin — the mount write ORDER on one unified sink: the alt-screen switch (escape
+  // sink) strictly precedes the first frame bytes (writer path), so frame 1 always lands INSIDE
+  // the alt screen. Pre-fix this ordering was already correct (the capture proved the blanking was
+  // the control-chunk wipe above, not an enter/first-frame race) — pinned so it stays that way.
+  test("B1: alt-screen enter bytes precede the first frame bytes through the real writer path", () => {
+    withTty(() => withDiffEnv(undefined, () => {
+      const all: string[] = [];
+      const stream = (() => {
+        const em = new EventEmitter() as unknown as Record<string, unknown>;
+        em.rows = 24;
+        em.columns = 80;
+        em.isTTY = true;
+        em.write = (chunk: unknown) => { all.push(String(chunk)); return true; };
+        return em as unknown as NodeJS.WriteStream;
+      })();
+      let inkStdout: NodeJS.WriteStream | undefined;
+      mountTui(
+        mountOpts(),
+        (_node, o) => {
+          inkStdout = (o as { stdout: NodeJS.WriteStream }).stdout;
+          return { unmount() {}, waitUntilExit: () => new Promise<void>(() => {}) };
+        },
+        (s) => all.push(s), // the escape sink and the writer land on the SAME ordered log
+        stream,
+      );
+      inkStdout!.write("a\nb\n"); // Ink's first frame
+      const enterAt = all.findIndex((s) => s.includes("\x1b[?1049h"));
+      const frameAt = all.findIndex((s) => s.includes("a\x1b[K"));
+      expect(enterAt).toBeGreaterThanOrEqual(0);
+      expect(frameAt).toBeGreaterThan(enterAt);
+    }));
+  });
+
   test("THE KILL-SWITCH: NORMA_TUI_DIFF=0 bypasses the differ entirely — BSU/ESU write-through, byte-identical chunks", () => {
     withTty(() => withDiffEnv("0", () => {
       const m = mountWithFakes();

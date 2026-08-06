@@ -117,6 +117,17 @@ export function makeDiffingWriter(out: NodeJS.WriteStream): DiffingWriter {
  *  (interior/frame escapes such as SGR styling never match at index 0 once the run ends). */
 const INK_PRELUDE = /^(?:\x1b\[2K|\x1b\[1A|\x1b\[G|\x1b\[2J|\x1b\[3J|\x1b\[H|\x1b\[0f)+/;
 
+/** Cursor-visibility toggles Ink writes RAW through its stdout: ink's `<App>` calls
+ *  `cliCursor.hide(this.props.stdout)` in componentDidMount and `.show(...)` in
+ *  componentWillUnmount (ink/build/components/App.js) — so a bare `\x1b[?25l` chunk lands on this
+ *  proxy in React's commit phase, ~1ms AFTER the first frame's render-phase write. These are
+ *  terminal MODE toggles, not frame content — treating the 6-byte hide as a frame diffed the
+ *  whole first paint away (row 1 ← the zero-glyph escape, every other row ← cleared) and poisoned
+ *  `prev`, and since Ink dedupes identical output the alt screen stayed BLANK until the first
+ *  state change (the user's ctrl+C): the released 0.2.010 launch bug (bugfix pass B1). Full-match
+ *  only — a real frame never consists solely of cursor-visibility tokens. */
+const CURSOR_VISIBILITY_ONLY = /^(?:\x1b\[\?25[lh])+$/;
+
 /** Bare frame text out of an Ink stdout chunk: leading prelude stripped, ONE trailing `\n`
  *  (log-update's own append) stripped. A prelude-only chunk (log-update `clear()`) → `""`. */
 export function extractInkFrame(chunk: string): string {
@@ -130,7 +141,8 @@ export type DiffingStdout = { stream: NodeJS.WriteStream; reset(): void };
  *  string chunks through extract→diff→damage; everything else forwards to the real stream, live
  *  (Ink reads `columns`/`rows` fresh per layout and subscribes 'resize' on this object). `reset`
  *  exposes the writer's full-repaint trigger for mount.ts's resize/re-entry hooks. Non-string
- *  chunks pass through untouched (Ink only ever writes strings — same posture as sync-stdout). */
+ *  chunks pass through untouched (Ink only ever writes strings — same posture as sync-stdout),
+ *  and so do bare cursor-visibility toggles (CURSOR_VISIBILITY_ONLY — the B1 blank-launch cure). */
 export function makeDiffingStdout(real: NodeJS.WriteStream): DiffingStdout {
   const writer = makeDiffingWriter(real);
   const wrappedWrite = (
@@ -139,6 +151,11 @@ export function makeDiffingStdout(real: NodeJS.WriteStream): DiffingStdout {
     callback?: unknown,
   ): boolean => {
     if (typeof chunk !== "string") {
+      return (real.write as (...a: unknown[]) => boolean)(chunk, encodingOrCallback, callback);
+    }
+    if (CURSOR_VISIBILITY_ONLY.test(chunk)) {
+      // Control pass-through (B1): hand the toggle to the real terminal verbatim and leave the
+      // differ's previous-frame record untouched — it still describes what's painted on screen.
       return (real.write as (...a: unknown[]) => boolean)(chunk, encodingOrCallback, callback);
     }
     if (chunk !== "") writer.write(extractInkFrame(chunk));

@@ -314,6 +314,25 @@ describe("makeDiffingStdout — the Ink-facing proxy", () => {
     expect(writes[0]).toStartWith("<buf:");
   });
 
+  // Bugfix pass B1 (released 0.2.010 blank-screen-on-launch): ink's <App> calls
+  // cliCursor.hide(stdout) in componentDidMount — a bare "\x1b[?25l" chunk through THIS proxy,
+  // ~1ms AFTER the first frame. Treating it as a frame diffed the whole first paint away (row 1
+  // ← the invisible escape, every other row ← cleared) and poisoned prev, so the blank screen
+  // held until the next state change (the user's ctrl+C). Cursor-visibility chunks are terminal
+  // MODE toggles, not frame content: verbatim pass-through, diff state untouched.
+  test("B1: cursor-visibility chunks (cliCursor.hide/show via Ink's App) pass through verbatim and leave the diff state untouched", () => {
+    const { real, writes } = fakeRealStream();
+    const { stream } = makeDiffingStdout(real);
+    stream.write("hi\nthere\n"); // Ink's first frame — full repaint
+    stream.write("\x1b[?25l"); // App.componentDidMount → cliCursor.hide(stdout)
+    expect(writes[1]).toBe("\x1b[?25l"); // forwarded raw — no BSU, no row ops, no erase
+    stream.write(eraseLines(3) + "hi\nthere\n"); // Ink rerenders the identical frame
+    expect(writes.length).toBe(2); // zero damage — prev still records the painted frame
+    stream.write("\x1b[?25h"); // App.componentWillUnmount → cliCursor.show(stdout)
+    expect(writes[2]).toBe("\x1b[?25h");
+    expect(writes.length).toBe(3);
+  });
+
   test("the Writable callback contract is honored on string writes", () => {
     const { real } = fakeRealStream();
     const { stream } = makeDiffingStdout(real);
