@@ -104,6 +104,7 @@ Tool design deliberately tracks Claude Code's shape (see `norma-vs-cc-tools.md` 
 ## Hard rules
 
 - **Never kill or restart a running Norma.app or the user's live daemon.** Tests must never touch `~/.norma` — always point at a temp `NORMA_HOME`.
+- **Never launch the dist app (`/Applications/Norma.app`, bundle `com.norma.app`, `~/.norma`) during development — dev work uses ONLY the dev app** ("Norma Dev", `com.norma.app.dev`, `~/.norma-dev`, Debug build with explicit `-derivedDataPath`). The dist copy is the user's daily driver, updated by Sparkle/brew; a Claude-launched dist instance is indistinguishable from it in the menu bar and defeats the entire dev/dist split. Same rule for local Release builds (`out/release/...`): build them, never launch them — a Release build under the same bundle id shadows the /Applications copy.
 - Secrets live in the macOS Keychain (`Bun.secrets`, service `com.norma.core`) — never on disk, never in fixtures.
 - `packages/core/src/providers/codex-config.ts` self-identifies as `originator: "norma"` — a deliberate ToS decision; do not revert to a first-party value.
 - Version strings are generated; edit only `VERSION` via the bump/sync scripts.
