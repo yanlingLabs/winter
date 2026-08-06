@@ -7,13 +7,14 @@
  *  per test so it never touches the real `~/.norma`). */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   COMMANDS, filterCommands, helpText, parseSlashInput, runCommand,
   type CommandCtx,
 } from "../../src/tui/commands";
+import type { ChoiceRequest } from "../../src/tui/choice-menu";
 import { formatRoutineLine } from "../../src/routines-cli";
 import { formatMemoryList } from "../../src/memory-cli";
 import type { NormaClient } from "../../src/client";
@@ -894,5 +895,156 @@ describe("/model — mirrors `case \"model\"` (direct settings.json I/O under NO
     await runCommand(ctx, "/model not-a-real-model");
     await runCommand(ctx, "/model --effort");
     expect(changes).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Bugfix-pass B2 — choice-shaped no-arg replies open the BOTTOM PICKER (`CommandCtx.openChoice`)
+// instead of dumping the list into the transcript (the user-reported `/model` bug). The optional-
+// callback discipline mirrors `onCwdChanged`/`onModelChanged`: a ctx WITHOUT `openChoice` (headless,
+// every pre-B2 test above) keeps the historical transcript note byte-identical — those suites stay
+// green untouched, which is itself the fallback pin.
+// ---------------------------------------------------------------------------------------------
+
+describe("B2 — /model (no args) opens the model picker when openChoice is wired", () => {
+  let home: string;
+  let prevHome: string | undefined;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "norma-cli-cmd-choice-"));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }));
+    prevHome = process.env.NORMA_HOME;
+    process.env.NORMA_HOME = home;
+  });
+
+  afterEach(() => {
+    if (prevHome === undefined) delete process.env.NORMA_HOME;
+    else process.env.NORMA_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("opens ONE picker over the codex catalogue (current marked), appends NO note, never touches the client", async () => {
+    const { client, calls } = makeClient({});
+    const requests: ChoiceRequest[] = [];
+    const { ctx, notes } = makeCtx(client, { openChoice: (r) => requests.push(r) });
+    await runCommand(ctx, "/model");
+    expect(calls).toEqual([]);
+    expect(notes).toEqual([]); // the bug: this used to be the transcript dump
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.title).toContain("model");
+    expect(requests[0]!.options.map((o) => o.value)).toEqual(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
+    expect(requests[0]!.options.filter((o) => o.current).map((o) => o.value)).toEqual(["gpt-5.6-sol"]);
+  });
+
+  test("the effort knob stays direct-form-only — the picker title discloses it", async () => {
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: "high" } }));
+    const { client } = makeClient({});
+    const requests: ChoiceRequest[] = [];
+    const { ctx } = makeCtx(client, { openChoice: (r) => requests.push(r) });
+    await runCommand(ctx, "/model");
+    expect(requests[0]!.title).toContain("effort: high");
+    expect(requests[0]!.title).toContain("--effort");
+  });
+
+  test("onPick takes the SAME write path as `/model <slug>`: settings write + onModelChanged + the identical note", async () => {
+    const { client } = makeClient({});
+    const requests: ChoiceRequest[] = [];
+    const changes: Array<[string, string | undefined]> = [];
+    const { ctx, notes } = makeCtx(client, {
+      openChoice: (r) => requests.push(r),
+      onModelChanged: (m, e) => changes.push([m, e]),
+    });
+    await runCommand(ctx, "/model");
+    await requests[0]!.onPick("gpt-5.6-luna");
+    expect(changes).toEqual([["gpt-5.6-luna", undefined]]);
+    expect(notes).toEqual(["updated (model gpt-5.6-luna) — takes effect next turn, no daemon restart needed"]);
+    // The write really landed: a re-show marks luna as current.
+    const requests2: ChoiceRequest[] = [];
+    const { ctx: ctx2 } = makeCtx(client, { openChoice: (r) => requests2.push(r) });
+    await runCommand(ctx2, "/model");
+    expect(requests2[0]!.options.filter((o) => o.current).map((o) => o.value)).toEqual(["gpt-5.6-luna"]);
+  });
+
+  test("`/model <slug>` and `/model --effort <level>` (direct forms) NEVER open the picker", async () => {
+    const { client } = makeClient({});
+    const requests: ChoiceRequest[] = [];
+    const { ctx, notes } = makeCtx(client, { openChoice: (r) => requests.push(r) });
+    await runCommand(ctx, "/model gpt-5.6-terra");
+    await runCommand(ctx, "/model --effort medium");
+    expect(requests).toEqual([]);
+    expect(notes[0]).toContain("model gpt-5.6-terra");
+    expect(notes[1]).toContain("effort medium");
+  });
+
+  test("a non-codex provider has no catalogue to pick from — falls back to the note even with openChoice wired", async () => {
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "openai-compatible", model: "local-model", baseUrl: "http://localhost:1234/v1" } }));
+    const { client } = makeClient({});
+    const requests: ChoiceRequest[] = [];
+    const { ctx, notes } = makeCtx(client, { openChoice: (r) => requests.push(r) });
+    await runCommand(ctx, "/model");
+    expect(requests).toEqual([]);
+    expect(notes).toEqual(["local-model"]);
+  });
+});
+
+describe("B2 — /output-style (no args) opens the style picker when openChoice is wired", () => {
+  let home: string;
+  let prevHome: string | undefined;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "norma-cli-cmd-style-choice-"));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }));
+    prevHome = process.env.NORMA_HOME;
+    process.env.NORMA_HOME = home;
+  });
+
+  afterEach(() => {
+    if (prevHome === undefined) delete process.env.NORMA_HOME;
+    else process.env.NORMA_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("opens ONE picker over the resolvable styles (built-ins; current marked; descriptions as hints), no note", async () => {
+    const { client, calls } = makeClient({});
+    const requests: ChoiceRequest[] = [];
+    const { ctx, notes } = makeCtx(client, { openChoice: (r) => requests.push(r) });
+    await runCommand(ctx, "/output-style");
+    expect(calls).toEqual([]);
+    expect(notes).toEqual([]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.title).toContain("output style");
+    const byValue = new Map(requests[0]!.options.map((o) => [o.value, o]));
+    for (const name of ["default", "proactive", "explanatory", "learning"]) expect(byValue.has(name)).toBe(true);
+    expect(requests[0]!.options.filter((o) => o.current).map((o) => o.value)).toEqual(["default"]);
+    expect(byValue.get("proactive")!.hint).toBeTruthy(); // the description rides as the hint
+  });
+
+  test("onPick takes the SAME write path as `/output-style <name>`: settings.outputStyle set + the identical note", async () => {
+    const { client } = makeClient({});
+    const requests: ChoiceRequest[] = [];
+    const { ctx, notes } = makeCtx(client, { openChoice: (r) => requests.push(r) });
+    await runCommand(ctx, "/output-style");
+    await requests[0]!.onPick("explanatory");
+    expect(notes).toEqual(["Output style set to: explanatory"]);
+    const settings = JSON.parse(readFileSync(join(home, "settings.json"), "utf8")) as { outputStyle?: string };
+    expect(settings.outputStyle).toBe("explanatory");
+  });
+
+  test("`/output-style <name>` (direct form) NEVER opens the picker", async () => {
+    const { client } = makeClient({});
+    const requests: ChoiceRequest[] = [];
+    const { ctx, notes } = makeCtx(client, { openChoice: (r) => requests.push(r) });
+    await runCommand(ctx, "/output-style learning");
+    expect(requests).toEqual([]);
+    expect(notes).toEqual(["Output style set to: learning"]);
+  });
+
+  test("without openChoice the historical transcript list note is byte-identical (headless fallback)", async () => {
+    const { client } = makeClient({});
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/output-style");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain("* default");
+    expect(notes[0]).toContain("proactive");
   });
 });
