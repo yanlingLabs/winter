@@ -44,10 +44,11 @@
  *  through the composer's T3 raw side-channel (the single consumer of those byte sequences), which
  *  calls back into this App's `scrollToTop`/`scrollToBottom` viewport updates instead of running its
  *  cursor ops; with text in the buffer they keep their cursor semantics and never scroll.
- *  Mouse SGR reports (wheel + any button/motion) are intercepted at the shared stdin input emitter
- *  and swallowed BEFORE any `useInput` consumer (either hook here, the composer's, or a pending
- *  card's) sees them — wheel scrolls ±3, every other mouse report is dropped (so no mouse bytes ever
- *  land in the composer buffer). Neither that emitter patch nor the composer's own T3 raw side-
+ *  Mouse reports (SGR or legacy X10; wheel + any button/motion) are intercepted at the shared stdin
+ *  input emitter and swallowed BEFORE any `useInput` consumer (either hook here, the composer's, or
+ *  a pending card's) sees them — wheel arrives as a first-class `WheelEvent` (input-model.ts, TUI
+ *  renderer T1) scrolling by its `lines`, every other mouse report is dropped (so no mouse bytes
+ *  ever land in the composer buffer). Neither that emitter patch nor the composer's own T3 raw side-
  *  channel ever matches \x03/\x04, so neither interferes with the exit hook.
  *
  *  CHILD-TRANSCRIPT VIEW (child-transcript-view T3, CC sub-agents parity): ctrl+a (intercepted at
@@ -83,14 +84,13 @@ import { initialState, reduce, type AgentRow, type Block, type LocalEvent, type 
 import { activeTurnLines, makeFlattenCache } from "./flatten-blocks";
 import { scrollBy, scrollToBottom, scrollToTop, viewportSlice, type ViewportState } from "./viewport";
 import { collapseCompleted, sortTasksForDisplay, type TaskRow } from "../task-display";
-import { renderWithCursor, type InputState } from "./input-model";
+import { createMouseFilter, isMouseArtifact, renderWithCursor, type InputState } from "./input-model";
 import { Spinner } from "./spinner";
 import { TaskList } from "./task-list";
 import { AgentList, FINISH_LABEL } from "./agent-list";
 import { Footer, type ExitKey } from "./footer";
 import { Composer } from "./composer";
 import { PendingCards, type AnswerPayload } from "./pending-cards";
-import { parseMouseInput, createMouseReportFilter } from "./alt-screen";
 import { theme } from "./theme";
 import { loadSafeHighlighter } from "./highlight-guard";
 import type { Highlighter } from "./markdown";
@@ -518,17 +518,18 @@ export function App({
   // --- mouse + ctrl+a: intercept at the shared stdin input emitter, BEFORE any useInput consumer
   // (this App's or the composer's) sees them. Ink emits the RAW chunk (ESC intact) on
   // internal_eventEmitter 'input' (its App.js) — one chunk per `stdin.read()`, which is NOT the
-  // same as one chunk per SGR report: rapid trackpad scroll batches many reports into a single
-  // read, and a report can just as easily be split across two reads at a buffer boundary. A single
-  // stateful `createMouseReportFilter()` (tui-mouse fix) handles both: it loop-consumes every
-  // complete report in the chunk (a wheel report scrolls ±3 each; every mouse report, wheel or
-  // button/motion, is dropped so no mouse bytes ever reach the composer buffer) and carries a
-  // trailing partial report across chunks in its own closure — one instance per mount, held in a
-  // ref so its buffer survives across effect re-runs. ctrl+a (\x01) toggles roster select mode
-  // while agents exist (child-transcript-view T3 — see the branch's own comment inside). Restored
-  // on unmount. ---
+  // same as one chunk per mouse report: rapid trackpad scroll batches many reports into a single
+  // read, and a report can just as easily be split across two reads at a buffer boundary — at ANY
+  // byte, including inside the 3-byte "\x1b[<" prefix. A single stateful `createMouseFilter()`
+  // (input-model.ts, TUI renderer T1) owns all of it at this input layer: complete/batched/split
+  // reports (SGR and legacy X10) are consumed here, wheel notches arrive as first-class
+  // `WheelEvent`s (scrolled below — the same channel ctrl+a rides), every other mouse report is
+  // dropped, and dead partial mouse CSI is swallowed rather than flushed — so no mouse bytes ever
+  // reach the composer buffer. One instance per mount, held in a ref so its carried tail survives
+  // across effect re-runs. ctrl+a (\x01) toggles roster select mode while agents exist
+  // (child-transcript-view T3 — see the branch's own comment inside). Restored on unmount. ---
   const { internal_eventEmitter: inputEmitter } = useStdin();
-  const mouseFilterRef = useRef(createMouseReportFilter());
+  const mouseFilterRef = useRef(createMouseFilter());
   useEffect(() => {
     const em = inputEmitter;
     if (!em) return;
@@ -537,17 +538,17 @@ export function App({
     const patched = (event: string, ...args: unknown[]): boolean => {
       if (event === "input") {
         const chunk = String(args[0]);
-        const { literal, wheelEvents } = consumeMouseReports(chunk);
-        for (const wheel of wheelEvents) {
-          const delta = wheel.dir === "up" ? -3 : 3;
+        const { text, wheel } = consumeMouseReports(chunk);
+        for (const w of wheel) {
+          const delta = w.kind === "wheelUp" ? -w.lines : w.lines;
           setVp((cur) => scrollBy(cur, delta, lineCountRef.current, viewHRef.current));
         }
-        if (literal !== chunk) {
+        if (text !== chunk) {
           // The chunk contained mouse-report bytes (fully, or a now-resolved/still-pending
           // partial) — never forward the ORIGINAL raw chunk (that's the tui-mouse leak). Forward
           // only whatever genuine text is left over, if any; nothing left means fully swallowed.
-          if (literal === "") return true;
-          return orig(event, literal);
+          if (text === "") return true;
+          return orig(event, text);
         }
         // Untouched fast path — chunk had no mouse-report bytes at all (the overwhelmingly common
         // case): preserve the exact original ctrl+a-then-passthrough behavior byte-for-byte.
@@ -650,11 +651,10 @@ export function App({
 
   useInput(
     (input, key) => {
-      // Mouse defense-in-depth: the emitter patch above already swallows SGR reports before this
+      // Mouse defense-in-depth: the emitter patch above already swallows mouse reports before this
       // handler, but if any mouse-shaped input slips through (Ink strips the leading ESC), swallow it
       // here too so it never triggers a key branch below. Scrolling is handled by the patch, not here.
-      const m = parseMouseInput(input.startsWith("\x1b") ? input : `\x1b${input}`);
-      if (m.isMouse) return;
+      if (isMouseArtifact(input)) return;
 
       // child-transcript-view T3 — roster select mode owns ↑/↓/Enter/x/Esc while active. The
       // composer is DISABLED for select mode's whole duration (see its `disabled` prop below), so
