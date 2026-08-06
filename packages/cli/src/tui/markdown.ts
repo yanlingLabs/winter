@@ -358,7 +358,44 @@ export function splitStableBoundary(text: string): { stable: string; tail: strin
  *
  * `boundary()` is test observability only: the settled prefix's source length.
  */
-export function createStreamingMarkdown(): {
+/** T3 fix round 1 — the DEGRADATION threshold: the open segment length past which per-delta
+ *  markdown formatting stops (option B, plain-tail degradation). 4KB, sized off the reviewer's
+ *  measured shape: a ~2-3KB open list cost ~1ms per lex+format pass, so 4KB keeps the worst
+ *  normal-path pass around 1-2ms — an order under Ink's 16ms coalescing frame, leaving room for
+ *  wrap + diff work downstream. Lists/fences under this stream fully styled (the common case for
+ *  short answers); past it the overflow renders plain until recovery. */
+export const STREAM_OPEN_SEGMENT_MAX = 4096;
+
+/** T3 fix round 1 — the RECOVERY-PROBE ceiling: a close-probe (the one full re-lex that can settle
+ *  a finished token and exit degradation) is allowed only while the open segment is at most this
+ *  long. This is what makes the boundedness pin STRICT — per-render formatted source is ≤ this
+ *  constant, never message length: probes back off geometrically (so a never-closing token sees
+ *  O(log) of them) and stop entirely past the ceiling (a >16KB open token stays degraded until the
+ *  turn-end swap restyles it — disclosed). */
+export const STREAM_PROBE_MAX = STREAM_OPEN_SEGMENT_MAX * 4;
+
+/** A line that can close an open fence (` ``` `/`~~~`, ≤3 leading spaces) — the cheap trigger for
+ *  an immediate recovery probe, so a long code block regains styling the moment it closes instead
+ *  of waiting for the size-doubling probe schedule. */
+const FENCE_CLOSER_RE = /^ {0,3}(?:`{3,}|~{3,})[ \t]*$/m;
+
+/** Is this token a CLOSED fenced code block? A closed fence is the one last-position token that is
+ *  provably inextensible (appending bytes after its closer starts a NEW token), so `advance` may
+ *  settle it even though it is the last non-space token — which is exactly what lets a recovery
+ *  probe settle a just-closed long fence and exit degradation. Indented code (no fence opener) is
+ *  extendable and never qualifies; an unclosed fence's raw has no closer line AT OR ABOVE the
+ *  opener's length (marked would have closed it there), which is what the length-aware closer
+ *  regex checks against the raw PAST the opener. */
+function isClosedFence(t: Token): boolean {
+  if (t.type !== "code") return false;
+  const open = /^ {0,3}(`{3,}|~{3,})/.exec(t.raw);
+  if (!open) return false;
+  const fenceChar = open[1]![0] === "`" ? "`" : "~";
+  const closer = new RegExp(`(?:^|\\n) {0,3}\\${fenceChar}{${open[1]!.length},}[ \\t]*\\n?[ \\t]*$`);
+  return closer.test(t.raw.slice(open[0].length));
+}
+
+export function createStreamingMarkdown(instrument?: { onFormat?: (sourceLen: number) => void }): {
   render(text: string, highlight?: Highlighter): string;
   boundary(): number;
 } {
@@ -367,12 +404,67 @@ export function createStreamingMarkdown(): {
   let lastCompleteLen = -1; // cutCompleteLines(text).complete.length at the last advance scan
   let lastHighlight: Highlighter | undefined;
   let tokenMode = false; // false = still on renderMarkdown's verbatim fast path
+  // Degradation state (T3 fix round 1, option B): while `degraded`, the open segment's frozen head
+  // keeps its one-time markdown render and everything after it renders plain — no per-delta lexing.
+  let degraded = false;
+  let frozenLen = 0; // source length (within the open segment) of the frozen, formatted-once head
+  let frozenBlocks: string[] = []; // that head's rendered blocks
+  let probeFloor = 0; // next size-doubling probe fires when openRaw reaches this length
+  let closerArmed = true; // a fence-closer line may trigger an immediate probe; disarmed on failure
 
   function reset(): void {
     raw = "";
     blocks = [];
     lastCompleteLen = -1;
     tokenMode = false;
+    degraded = false;
+    frozenLen = 0;
+    frozenBlocks = [];
+    probeFloor = 0;
+    closerArmed = true;
+  }
+
+  /** The ONE chokepoint every md.lexer call goes through — `instrument.onFormat` (test
+   *  observability, the boundedness pin's mechanical hook) sees each call's source length. */
+  function lex(source: string): Token[] {
+    instrument?.onFormat?.(source.length);
+    return md.lexer(source) as Token[];
+  }
+
+  /** The normal-path advance scan: settle every token strictly before the last NON-SPACE token —
+   *  stricter than splitStableBoundary's "all but the last", and necessarily so: a block token
+   *  followed only by whitespace can STILL be extended by later bytes (a loose list re-opens
+   *  across a blank line — `- a\n\n` + `- b` is ONE list token in a cold lex), so trailing space
+   *  glues to its predecessor rather than promoting it to "settled". Unclosed fences are one
+   *  provisional token to marked, so the boundary never enters them. Settled block tokens always
+   *  end at a newline, so they lie within the complete half by construction. Returns whether
+   *  anything settled. */
+  function advance(text: string, highlight?: Highlighter): boolean {
+    const tokens = lex(text.slice(raw.length));
+    let core = tokens.length - 1;
+    while (core >= 0 && tokens[core]!.type === "space") core--;
+    // A CLOSED fence in last-non-space position is inextensible — settle THROUGH it (see
+    // isClosedFence). Everything else keeps the strict hold-back rule.
+    const settleEnd = core >= 0 && isClosedFence(tokens[core]!) ? core + 1 : core;
+    for (let i = 0; i < settleEnd; i++) {
+      const t = tokens[i]!;
+      raw += t.raw;
+      if (t.type !== "space") blocks.push(formatBlock(t, 0, highlight));
+    }
+    return settleEnd > 0;
+  }
+
+  /** Enter (or re-enter, after a probe advanced the boundary under a still-huge remainder)
+   *  degradation: format ONCE the open segment's head — up to the last complete line within the
+   *  threshold window — and freeze it; everything past it renders plain until recovery. A head
+   *  with no newline inside the window freezes nothing (the whole segment renders plain). */
+  function freeze(openRaw: string, highlight?: Highlighter): void {
+    const head = cutCompleteLines(openRaw.slice(0, STREAM_OPEN_SEGMENT_MAX)).complete;
+    frozenLen = head.length;
+    frozenBlocks = head.length > 0 ? lex(head).filter((t) => t.type !== "space").map((t) => formatBlock(t, 0, highlight)) : [];
+    degraded = true;
+    probeFloor = openRaw.length * 2;
+    closerArmed = true;
   }
 
   return {
@@ -386,7 +478,8 @@ export function createStreamingMarkdown(): {
       }
       if (!text.startsWith(raw)) reset(); // new segment / rewritten buffer — self-heal
       if (text.length === 0) return "";
-      // CRLF fallback (see header): marked's \r-normalization breaks raw-offset math.
+      // CRLF fallback (see header): marked's \r-normalization breaks raw-offset math. NOTE this
+      // path is O(text) per delta (no degradation) — the rare-input trade disclosed in the header.
       if (text.includes("\r")) return renderMarkdown(text, highlight);
       if (!tokenMode) {
         if (!looksLikeMarkdown(text)) return text; // renderMarkdown's exact fast path
@@ -394,29 +487,58 @@ export function createStreamingMarkdown(): {
         lastCompleteLen = -1; // force a full advance scan against the whole buffer
       }
       const { complete } = cutCompleteLines(text);
-      if (complete.length !== lastCompleteLen) {
+      const completeGrew = complete.length !== lastCompleteLen;
+      const newlyCompleted = completeGrew && lastCompleteLen > 0 ? complete.slice(lastCompleteLen) : complete;
+      lastCompleteLen = complete.length;
+
+      if (!degraded) {
         // A line completed (or this is the first token-mode scan): the boundary may advance.
-        // The provisional region is the last NON-SPACE token plus everything after it — stricter
-        // than splitStableBoundary's "all but the last token", and necessarily so: a block token
-        // followed only by whitespace can STILL be extended by later bytes (a loose list re-opens
-        // across a blank line — `- a\n\n` + `- b` is ONE list token in a cold lex), so trailing
-        // space glues to its predecessor rather than promoting it to "settled". Unclosed fences
-        // are one provisional token to marked, so the boundary never enters them. Settled block
-        // tokens always end at a newline, so they lie within `complete` by construction.
-        const tokens = md.lexer(text.slice(raw.length)) as Token[];
-        let core = tokens.length - 1;
-        while (core >= 0 && tokens[core]!.type === "space") core--;
-        for (let i = 0; i < core; i++) {
-          const t = tokens[i]!;
-          raw += t.raw;
-          if (t.type !== "space") blocks.push(formatBlock(t, 0, highlight));
+        if (completeGrew) advance(text, highlight);
+        const openRaw = text.slice(raw.length);
+        if (openRaw.length > STREAM_OPEN_SEGMENT_MAX) freeze(openRaw, highlight);
+        else {
+          const openTokens = openRaw.length > 0 ? lex(openRaw) : [];
+          const openBlocks = openTokens.filter((t) => t.type !== "space").map((t) => formatBlock(t, 0, highlight));
+          return [...blocks, ...openBlocks].join("\n\n");
         }
-        lastCompleteLen = complete.length;
       }
-      const openRaw = text.slice(raw.length);
-      const openTokens = openRaw.length > 0 ? (md.lexer(openRaw) as Token[]) : [];
-      const openBlocks = openTokens.filter((t) => t.type !== "space").map((t) => formatBlock(t, 0, highlight));
-      return [...blocks, ...openBlocks].join("\n\n");
+
+      // --- degraded render: settled blocks + the frozen head + a PLAIN dim overflow tail. -------
+      // Recovery probes (each ONE bounded advance scan): a fence-closer line while armed, or the
+      // open segment doubling (`probeFloor`) — the latter is what recovers a closed-list→prose
+      // transition (the scan settles the finished list and the remainder is small again). A failed
+      // probe (token still open) disarms the closer trigger and doubles the floor, so a
+      // never-closing token sees O(log) probes; past STREAM_PROBE_MAX probing stops entirely and
+      // the turn-end swap is the recovery (renderMarkdown replaces everything, restyling the tail).
+      let openRaw = text.slice(raw.length);
+      if (completeGrew && openRaw.length <= STREAM_PROBE_MAX) {
+        if (openRaw.length >= probeFloor) closerArmed = true; // doubled since the last failure — re-arm
+        const closerSeen = closerArmed && FENCE_CLOSER_RE.test(newlyCompleted);
+        if (closerSeen || openRaw.length >= probeFloor) {
+          const settledAny = advance(text, highlight);
+          openRaw = text.slice(raw.length);
+          if (openRaw.length <= STREAM_OPEN_SEGMENT_MAX) {
+            // Recovered: the open segment is normal-sized again — leave degradation entirely.
+            degraded = false;
+            frozenLen = 0;
+            frozenBlocks = [];
+            probeFloor = 0;
+            closerArmed = true;
+            const openTokens = openRaw.length > 0 ? lex(openRaw) : [];
+            const openBlocks = openTokens.filter((t) => t.type !== "space").map((t) => formatBlock(t, 0, highlight));
+            return [...blocks, ...openBlocks].join("\n\n");
+          }
+          if (settledAny) freeze(openRaw, highlight); // boundary moved under a still-huge remainder — re-freeze
+          else {
+            probeFloor = openRaw.length * 2;
+            closerArmed = false;
+          }
+        }
+      }
+      const styled = [...blocks, ...frozenBlocks].join("\n\n");
+      const overflow = openRaw.slice(frozenLen);
+      if (overflow.length === 0) return styled;
+      return styled.length > 0 ? `${styled}\n${ansi.dim(overflow)}` : ansi.dim(overflow);
     },
   };
 }

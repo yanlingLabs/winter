@@ -180,6 +180,13 @@ function flattenCollapsedSummary(summary: string, columns: number): string[] {
  *  committed block in ONE state update), the committed block's flattened rows are byte-identical
  *  to the streamed rows of the same text: the swap repaints nothing.
  *
+ *  BOUNDED EXCEPTIONS to that parity (disclosed at the code, T3 fix round 1): (1) a mid-stream
+ *  attach/resume holds only a suffix of the deltas (transients are never persisted) — the swap
+ *  then shows the full text, a real content change, not glue; (2) a reference-link definition
+ *  settled before its use streams renders literal until the swap resolves it (lex-composition,
+ *  one row); (3) past `STREAM_OPEN_SEGMENT_MAX` the streaming markdown DEGRADES to a plain dim
+ *  tail (markdown.ts, option B) — the swap's full render restyles it by design.
+ *
  *  In-flight tool rows keep the pinned-bar era's exact shape (blinking dot via `dimToolDot`, bold
  *  name + argsHead) and render AFTER the assistant rows — the same order their committed
  *  counterparts take in the transcript, so a tool_result landing mid-turn also swaps in place. */

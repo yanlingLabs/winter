@@ -1305,6 +1305,18 @@ import { initialState, reduce } from "../../src/tui/state";
 import { makeFlattenCache, makeStreamRenderer } from "../../src/tui/flatten-blocks";
 import { applyWheel, followBottom, onContentGrown, visibleSlice } from "../../src/tui/scroll-model";
 
+// BOUNDED EXCEPTIONS to this pin, disclosed here AT the pin (T3 fix round 1, reviewer item):
+//  1. Mid-stream attach/resume: a client that missed earlier deltas (transients are never
+//     persisted) holds only a SUFFIX of the text — the swap then renders the full committed text,
+//     a real content difference (one honest reflow), not a glue artifact. This pin streams the
+//     whole text, the only case where byte-equality is even claimable.
+//  2. Cross-boundary reference-link definitions (`[ref]: url` settled before `[text][ref]`
+//     streams): the settled prefix was lexed without the later definition, so the streamed frame
+//     can show the literal form where the cold render resolves it — a one-row difference at the
+//     swap, self-correcting. Same lex-composition assumption CC's monotonic boundary makes.
+//  3. Degradation (createStreamingMarkdown's plain-tail mode past STREAM_OPEN_SEGMENT_MAX): the
+//     dim plain overflow is deliberately NOT the cold render — the swap restyles it (pinned in
+//     markdown.test.ts's degradation suite). This pin's texts stay under the threshold.
 describe("T3 — the turn-end swap renders byte-identical rows (the no-glue pin)", () => {
   const FULL = "Streaming **works** now.\n\nSecond para with `code`.\n\n- item a\n- item b\n\nAll done here.";
 

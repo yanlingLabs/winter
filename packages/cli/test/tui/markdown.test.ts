@@ -294,3 +294,83 @@ describe("markdown.ts — createStreamingMarkdown CRLF fallback (T3)", () => {
     expect(sm.render(text)).toBe(renderMarkdown(text));
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// T3 fix round 1 — BOUNDEDNESS (reviewer Important): per-delta formatting work must be bounded by
+// the named threshold constants, never by message length. The reviewer's measured shape — a
+// growing single list token whose open segment IS the whole message — is reproduced here with a
+// mechanical counting hook on the lex/format chokepoint (`instrument.onFormat`).
+// ---------------------------------------------------------------------------------------------
+
+import { createStreamingMarkdown as createSM, STREAM_OPEN_SEGMENT_MAX, STREAM_PROBE_MAX } from "../../src/tui/markdown";
+
+describe("createStreamingMarkdown — degradation bounds per-delta work (T3 fix round 1, option B)", () => {
+  test("a 1000-item streamed list (the reviewer's shape): every lex call ≤ STREAM_PROBE_MAX + slack; fully-degraded tail lexes ZERO", () => {
+    let maxCall = 0;
+    let cumulative = 0;
+    const sm = createSM({ onFormat: (n) => { maxCall = Math.max(maxCall, n); cumulative += n; } });
+    let text = "";
+    const tailLex: number[] = []; // per-render lexed bytes once the open segment passed the probe ceiling
+    for (let k = 0; k < 1000; k++) {
+      text += `- item ${k} **bold${k}**\n`;
+      const before = cumulative;
+      sm.render(text);
+      if (text.length > STREAM_PROBE_MAX) tailLex.push(cumulative - before);
+    }
+    // The strict mechanical bound: no single lex call ever sees more than the probe ceiling
+    // (+ slack for the delta that crossed the threshold) — never message length (~22KB here).
+    expect(maxCall).toBeLessThanOrEqual(STREAM_PROBE_MAX + 256);
+    // And once the open segment is past the probe ceiling, per-delta formatting work is ZERO —
+    // "bounded by the threshold" means independent of message length, mechanically.
+    expect(tailLex.length).toBeGreaterThan(100);
+    expect(Math.max(...tailLex)).toBe(0);
+    // Cumulative sanity: the under-threshold phase costs ≤ ~2 lex passes/line × 4KB for the ~190
+    // lines before degradation (~745KB measured), then zero — an anti-regression backstop at 1MB.
+    // Measured pre-fix on this exact stream: maxLexCall 22,780B (= message length) and 31.3s wall
+    // vs 0.3s fixed (fix-round report) — the O(n²) the reviewer flagged.
+    expect(cumulative).toBeLessThan(1024 * 1024);
+  });
+
+  test("the degraded tail still renders — plain (dim), never dropped — and diverges from the cold render only past the frozen head", () => {
+    const sm = createSM();
+    let text = "";
+    for (let k = 0; k < 400; k++) text += `- item ${k} **bold${k}**\n`;
+    const out = sm.render(text);
+    // The newest content is visible even while degraded…
+    expect(out).toContain("item 399");
+    // …as PLAIN text: the literal ** survives in the un-formatted overflow (a cold render styles it),
+    expect(out).toContain("**bold399**");
+    // wrapped in dim codes (the visual "this part isn't styled yet" signal),
+    expect(out).toContain("\x1b[2m");
+    // and the frozen head DID get its one-time markdown render (early items styled, ** consumed).
+    expect(out).toContain(ansi.bold("bold0"));
+    expect(out).not.toContain("**bold0**");
+    // Self-correction at swap: the committed block renders via renderMarkdown, which styles it all.
+    expect(renderMarkdown(text)).not.toContain("**bold399**");
+  });
+
+  test("a long fence that closes recovers styling mid-turn (the closer-line probe)", () => {
+    const marker = (code: string, lang?: string) => `«${lang ?? "?"}:${code}»`;
+    const sm = createSM();
+    let text = "```js\n";
+    // Push the fence well past the threshold (~90 bytes/line × 60 ≈ 5.4KB).
+    for (let k = 0; k < 60; k++) text += `const value_${k} = "${"x".repeat(70)}";\n`;
+    let out = sm.render(text, marker);
+    expect(out).toContain("\x1b[2m"); // degraded mid-fence: plain dim tail
+    text += "```\n";
+    out = sm.render(text, marker); // the closer line triggers the recovery probe
+    text += "\nAfter the fence, **prose** again.\n";
+    out = sm.render(text, marker);
+    expect(out).toBe(renderMarkdown(text, marker)); // fully recovered — byte-equal again
+    expect(sm.boundary()).toBeGreaterThan(0);
+  });
+
+  test("equality with renderMarkdown is untouched below the threshold (the existing corpus regime)", () => {
+    const sm = createSM();
+    const text = "# Small\n\nA **normal** sized reply with `code`.\n\n- a\n- b\n";
+    expect(text.length).toBeLessThan(STREAM_OPEN_SEGMENT_MAX);
+    let out = "";
+    for (let i = 3; i < text.length + 3; i += 3) out = sm.render(text.slice(0, Math.min(i, text.length)));
+    expect(out).toBe(renderMarkdown(text));
+  });
+});
