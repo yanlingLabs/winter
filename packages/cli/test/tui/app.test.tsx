@@ -1365,6 +1365,52 @@ describe("T3 — the turn-end swap renders byte-identical rows (the no-glue pin)
     const after = [...flatten.lines(s2.committed, fopts), ...stream.lines(s2.activeAssistant, s2.activeTools, sopts)];
     expect(after).toEqual(before); // tool head rows stay put after the assistant rows either way
   });
+
+  // T6 spacing rhythm — the MID-CONVERSATION half of the pin (review gap): the two tests above
+  // fold from an EMPTY committed log, so the streamed spacer branch (`precededByContent: true`)
+  // never fires there. This one seeds a REAL completed first exchange through the reducer, so the
+  // second turn streams over non-empty committed content — the committed cache's beat-gap
+  // (`out.length > 0 && BEAT_KINDS`) and the stream renderer's `precededByContent` spacer are BOTH
+  // live, and any drift between those two computations breaks the array-equality here (verified
+  // RED by mutation: a stream renderer that ignores the flag fails this test's `toEqual`).
+  test("mid-conversation swap parity: a second turn streamed over a committed first exchange stays byte-identical (precededByContent=true live)", () => {
+    const flatten = makeFlattenCache();
+    const stream = makeStreamRenderer();
+    const fopts = { columns: 80, verbose: false };
+    // App's exact per-render derivation (app.tsx), spacer flag included: the stream renderer is
+    // told committed rows precede it exactly when the flattened committed log is non-empty.
+    const compose = (st: ReturnType<typeof initialState>) => {
+      const body = flatten.lines(st.committed, fopts);
+      return {
+        body,
+        log: [...body, ...stream.lines(st.activeAssistant, st.activeTools, { columns: 80, dimToolDot: false, precededByContent: body.length > 0 })],
+      };
+    };
+
+    // A full first exchange, folded through the real reducer: user → turn → answer → summary.
+    let s = initialState();
+    s = reduce(s, ev({ type: "user_message", threadId: "main", text: "first question" }), 0);
+    s = reduce(s, ev({ type: "turn_started", threadId: "main" }), 0);
+    s = reduce(s, ev({ type: "assistant_message", threadId: "main", text: "First answer, committed." }), 0);
+    s = reduce(s, ev({ type: "turn_completed", threadId: "main", stopReason: "end", inputTokens: 10, outputTokens: 5 }), 100);
+    s = reduce(s, ev({ type: "user_message", threadId: "main", text: "second question" }), 200);
+    s = reduce(s, ev({ type: "turn_started", threadId: "main" }), 200);
+    const SECOND = "Second **answer** streams now.\n\n- over a list\n- of items";
+    for (let i = 0; i < SECOND.length; i += 5) {
+      s = reduce(s, ev({ type: "assistant_delta", threadId: "main", delta: SECOND.slice(i, i + 5), from: i }), 200);
+    }
+    expect(s.committed.length).toBeGreaterThan(0); // the seed worked — this is NOT the first beat
+    expect(s.activeAssistant).toBe(SECOND);
+
+    const before = compose(s);
+    // The spacer is genuinely LIVE in this scenario: the streamed rows open with the beat gap.
+    expect(before.log[before.body.length]).toBe("");
+
+    const s2 = reduce(s, ev({ type: "assistant_message", threadId: "main", text: SECOND }), 200);
+    expect(s2.activeAssistant).toBe("");
+    const after = compose(s2);
+    expect(after.log).toEqual(before.log); // byte-identical spacer-and-all ⇒ the swap repaints nothing
+  });
 });
 
 describe("T3 — streamed complete lines are scrollable transcript content mid-stream", () => {
