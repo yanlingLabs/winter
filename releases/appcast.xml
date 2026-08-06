@@ -52,5 +52,12 @@
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/yanlingLabs/norma/releases/download/v0.2.008/Norma-0.2.008.zip" sparkle:edSignature="G1PgBX1JDN9XwFCcuWx5ZXqqgOmXVtcq1nPVviIyxKnNAlJgg/wx59JQqJ43vPbW7bmkWkJdgj+5DTfkGfE7Dg==" length="33935938" type="application/octet-stream"/>
     </item>
+      <item>
+      <title>0.2.009</title>
+      <sparkle:version>0.2.009</sparkle:version>
+      <sparkle:shortVersionString>0.2.009</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/norma/releases/download/v0.2.009/Norma-0.2.009.zip" sparkle:edSignature="UwiW5D/fZmXbzaUwFCw/8as4ivemfVN/Cod+NinjnM5EJjxQk54OKn6VBe7QZqwDiS9UuwIGDhZHHce4EgczCg==" length="34201321" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
