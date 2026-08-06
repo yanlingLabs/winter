@@ -467,7 +467,11 @@ export async function runAgentsCommand(deps: RunAgentsDeps): Promise<void> {
   let handle: AgentsMountHandle | undefined;
   /** The last `open` hand-off, re-printed after the tree comes down: a command you asked for in
    *  order to copy it is worthless if it dies with the frame it was rendered in (the
-   *  `formatResumeHint`-after-unmount discipline main.ts already follows). */
+   *  `formatResumeHint`-after-unmount discipline main.ts already follows). Since B3 the mount is a
+   *  fullscreen ALT SCREEN whose frame is erased on exit by design, so this re-print is no longer a
+   *  belt-and-braces double — it is the sole way the command survives: `mount.waitUntilExit()`
+   *  writes the alt-screen LEAVE escape before resolving, so this line lands in the NORMAL buffer
+   *  (the exact structural order main.ts's resume hint rides). */
   let lastOpen: string | undefined;
 
   const onAction = (action: AgentsAction): void => {

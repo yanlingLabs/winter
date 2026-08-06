@@ -61,16 +61,31 @@ export interface TuiHandle {
 export type RenderInstance = { unmount(): void; waitUntilExit(): Promise<void> };
 export type RenderLike = (node: React.ReactElement, options?: unknown) => RenderInstance;
 
-export function mountTui(
-  opts: MountOpts,
+/** The reusable fullscreen scaffold (bugfix pass B3): everything `mountTui` does that is not the
+ *  `<App>` itself — the headless guard, the alt-screen escape order, the damage-diffing writer
+ *  (WITH B1's cursor-escape pass-through, since it IS `makeDiffingStdout`), the kill-switch, the
+ *  resize reset hook and the exit hygiene. Extracted so `norma agents` mounts through the SAME
+ *  machinery instead of hand-rolling a second alt-screen stack (the B1 ledger lesson: the blank
+ *  launch lived in exactly this plumbing, and a copy would not have inherited the fix).
+ *  `makeNode` receives the idempotent exit requester so the surface can wire its own quit path
+ *  (App's `onExitRequest`; the agents runner's `unmount`). */
+export interface FullscreenHandle {
+  waitUntilExit(): Promise<void>;
+  /** Idempotent: mouse-off → unmount, the first half of HARD CONSTRAINT 3's teardown order.
+   *  `waitUntilExit` writes LEAVE as its own last step. */
+  requestExit(): void;
+}
+
+export function mountFullscreen(
+  makeNode: (requestExit: () => void) => React.ReactElement,
   renderImpl: RenderLike = inkRender as unknown as RenderLike,
   write: (s: string) => void = (s) => { process.stdout.write(s); },
   stdoutStream: NodeJS.WriteStream = process.stdout,
-): TuiHandle {
+): FullscreenHandle {
   if (!process.stdout.isTTY) {
     // Non-TTY: never render, never write an escape — hand back an already-resolved handle so the
     // caller's `await handle.waitUntilExit()` returns immediately (headless untouched).
-    return { waitUntilExit: () => Promise.resolve() };
+    return { waitUntilExit: () => Promise.resolve(), requestExit: () => {} };
   }
 
   enterAltScreen(write);
@@ -100,15 +115,38 @@ export function mountTui(
 
   let instance: RenderInstance;
   let requested = false;
-  const onExitRequest = (): void => {
+  const requestExit = (): void => {
     if (requested) return; // idempotent — repeated presses collapse into the one teardown
     requested = true;
     disableMouseTracking(write);
     instance.unmount();
   };
 
-  instance = renderImpl(
-    React.createElement(App, {
+  instance = renderImpl(makeNode(requestExit), { stdout: inkStdout, exitOnCtrlC: false });
+
+  return {
+    requestExit,
+    waitUntilExit: async () => {
+      // Block until Ink unmounts (via requestExit, or any other path), THEN write the leave escape
+      // last — completing the HARD CONSTRAINT 3 order: disableMouseTracking → unmount →
+      // waitUntilExit → leaveAltScreen. If Ink unmounted by a path that didn't go through
+      // requestExit, mouse tracking hasn't been disabled yet, so do it here first.
+      await instance.waitUntilExit();
+      if (onResize) stdoutStream.off("resize", onResize); // T4: the differ's resize hook dies with the mount
+      if (!requested) disableMouseTracking(write);
+      leaveAltScreen(write);
+    },
+  };
+}
+
+export function mountTui(
+  opts: MountOpts,
+  renderImpl: RenderLike = inkRender as unknown as RenderLike,
+  write: (s: string) => void = (s) => { process.stdout.write(s); },
+  stdoutStream: NodeJS.WriteStream = process.stdout,
+): TuiHandle {
+  const handle = mountFullscreen(
+    (requestExit) => React.createElement(App, {
       client: opts.client,
       bridge: opts.bridge,
       sessionId: opts.sessionId,
@@ -120,22 +158,10 @@ export function mountTui(
       sessionModelOverride: opts.sessionModelOverride,
       sessionEffortOverride: opts.sessionEffortOverride,
       initialActivity: opts.initialActivity,
-      onExitRequest,
+      onExitRequest: requestExit,
       resumeTargetSeq: opts.resumeTargetSeq,
     }),
-    { stdout: inkStdout, exitOnCtrlC: false },
+    renderImpl, write, stdoutStream,
   );
-
-  return {
-    waitUntilExit: async () => {
-      // Block until Ink unmounts (via onExitRequest, or any other path), THEN write the leave escape
-      // last — completing the HARD CONSTRAINT 3 order: disableMouseTracking → unmount →
-      // waitUntilExit → leaveAltScreen. If Ink unmounted by a path that didn't go through
-      // onExitRequest, mouse tracking hasn't been disabled yet, so do it here first.
-      await instance.waitUntilExit();
-      if (onResize) stdoutStream.off("resize", onResize); // T4: the differ's resize hook dies with the mount
-      if (!requested) disableMouseTracking(write);
-      leaveAltScreen(write);
-    },
-  };
+  return { waitUntilExit: handle.waitUntilExit };
 }
