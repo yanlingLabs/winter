@@ -37,16 +37,31 @@ final class ShellChatSurfaceTests: XCTestCase {
         XCTAssertTrue(sessionRows(for: .cowork, in: rows()).isEmpty)
     }
 
-    // MARK: - The empty-state copy (PURE) — App shell T6 review fix
+    // MARK: - The empty-state copy (PURE) — App shell T6 review fix, retrued by bugfix pass B4
 
-    /// The empty state must name the ACTUAL create door — "New Chat" (`AppDelegate.newChat()`),
-    /// not "Chat" (which only browses this landing since App shell T6's retarget). The first
-    /// retarget pass briefly left this copy pointed at the wrong entry; pinned directly so it can't
-    /// silently drift again.
+    /// The empty state must name the ACTUAL create door — since B4 that door is IN THE VIEW: the
+    /// landing's own "New Chat" button (the same `AppDelegate.newChat()` the menu-bar entry fires,
+    /// injected — see `chatLandingShowsNewChatButton` below). Copy that still sent the user to the
+    /// menu bar would be stale the moment the button shipped — the exact drift class this pin
+    /// exists for (T6's first retarget pass briefly named the browse-only "Chat" entry here).
     func testChatLandingEmptyStateNamesTheActualCreateDoor() {
-        XCTAssertEqual(chatLandingEmptyStateSubtitle, "Start one from the menu bar's New Chat entry.")
-        XCTAssertTrue(chatLandingEmptyStateSubtitle.contains("New Chat"), "must name the entry that actually creates a session")
-        XCTAssertFalse(chatLandingEmptyStateSubtitle.contains("'s Chat entry"), "must not name the browse-only \"Chat\" entry as if it created something")
+        XCTAssertEqual(chatLandingEmptyStateSubtitle, "Start one with New Chat.")
+        XCTAssertTrue(chatLandingEmptyStateSubtitle.contains("New Chat"), "must name the affordance that actually creates a session")
+        XCTAssertFalse(chatLandingEmptyStateSubtitle.contains("menu bar"), "the landing carries its own button now — copy pointing at the menu bar is stale")
+    }
+
+    // MARK: - The "New Chat" button's presence gate (PURE) — bugfix pass B4
+
+    /// Presence is gated ONLY on the door being wired — never on the list: the button shows in the
+    /// empty state AND above a populated list (`hasRows` is in the signature precisely so this pin
+    /// can say both, the same always-there header posture `ModeLandingView`'s "New" button has). A
+    /// shell built WITHOUT the door (the pure window/geometry tests — `AppWindowController` with no
+    /// `openNewChat`) renders no dead button.
+    func testChatLandingNewChatButtonIsWiringGatedAndStateIndependent() {
+        XCTAssertTrue(chatLandingShowsNewChatButton(hasAction: true, hasRows: false), "the empty state offers the button")
+        XCTAssertTrue(chatLandingShowsNewChatButton(hasAction: true, hasRows: true), "the has-sessions state offers it too — presence must never depend on the list")
+        XCTAssertFalse(chatLandingShowsNewChatButton(hasAction: false, hasRows: false), "unwired = no dead button")
+        XCTAssertFalse(chatLandingShowsNewChatButton(hasAction: false, hasRows: true))
     }
 
     // MARK: - The `/background` verb's visibility (PURE)
