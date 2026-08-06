@@ -30,6 +30,15 @@ export function disableMouseTracking(write: (s: string) => void): void {
   write("\x1b[?1006l\x1b[?1000l");
 }
 
+/** DEC private mode 2026 "synchronized update" (TUI renderer T4) — BSU ("begin") / ESU ("end")
+ *  bracket a chunk so a understanding terminal paints it as one atomic frame; a terminal that
+ *  doesn't know the mode ignores both as no-ops (DEC private modes are safely
+ *  ignorable-if-unknown by spec). `sync-stdout.ts` has wrapped whole Ink frames in these bytes
+ *  since 3c; the diffing writer (`frame-diff.ts`) wraps its per-frame damage ops in the same
+ *  envelope — these named constants are the shared spelling. */
+export const BSU = "\x1b[?2026h";
+export const ESU = "\x1b[?2026l";
+
 // Mouse REPORT decoding used to live here (`parseMouseInput` / `createMouseReportFilter`) — it
 // moved to input-model.ts (TUI renderer T1: `decodeMouse` / `createMouseFilter` /
 // `isMouseArtifact`), where the decode is a first-class part of the input layer instead of a
