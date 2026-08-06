@@ -236,15 +236,48 @@ function composerRows(text: string, cursor: number, columns: number): number {
   return 2 + Math.max(1, contentRows);
 }
 
-/** The pinned bottom bar's rendered line count — subtracted from `rows-1` to size the transcript
+/** TUI renderer T3 — the chrome slot's hard budget: the pinned bottom bar may use at most this
+ *  fraction of the TERMINAL's rows (mechanism report Q7 cure 1 / Q4: CC's live region is
+ *  `maxHeight 50%`). Enforced by `bottomBarLayout` below — the pure layout model whose allotments
+ *  the render honors via JS-windowing (HARD CONSTRAINT 2), so the model's number IS the height. */
+export const BAR_MAX_FRACTION = 0.5;
+
+/** `bottomBarLayout`'s allotments — what the render is ALLOWED to draw. `rows` is the bar's total;
+ *  the rest are the per-piece grants the JSX honors: `showTasks` (all-or-nothing — tasks shed
+ *  FIRST under pressure; ctrl+t re-shows nothing until room frees), `agentsShown` roster rows (2
+ *  lines each; when fewer than the roster's total, ONE extra `… +N more agents` line renders and
+ *  is counted — unless not even that fits, in which case the footer's own `N agents` pill remains
+ *  the honest count), `composerContentRows` (the capped composer's visible wrapped content rows —
+ *  the window slides with the cursor, composer.tsx's `windowComposerContent`), and `planBodyRows`
+ *  (a plan card's visible body lines; truncation adds one counted disclosure line). */
+export interface BottomBarLayout {
+  rows: number;
+  showTasks: boolean;
+  agentsShown: number;
+  agentOverflow: number;
+  composerContentRows: number;
+  planBodyRows: number;
+}
+
+/** The pinned bottom bar's layout model — subtracted from `rows-1` to size the transcript
  *  viewport. Deliberately a JS line-count model (HARD CONSTRAINT 2: the frame height must be
  *  computed, never guessed via Yoga). Slight OVER-estimates are safe (they only leave blank space in
  *  the flexGrow viewport); the risk is UNDER-estimating so the viewport overflows its flex share and
  *  Yoga shrink-distorts — so the fixed pieces (footer 1, the T5 "Resuming conversation…" line 1 while
  *  active) and the per-row task/agent counts are chosen to match the components' natural (unwrapped)
  *  heights; the composer alone is wrap-aware (`composerRows` above, T5's hard-requirement fix) —
- *  task subjects/footer stay best-effort single-line estimates, per that same review. */
-export function bottomBarRows(input: {
+ *  task subjects/footer stay best-effort single-line estimates, per that same review.
+ *
+ *  T3 CAP SEMANTICS: `totalRows` (the terminal's rows) bounds the bar at
+ *  `floor(totalRows × BAR_MAX_FRACTION)`. Essentials are never shed — footer, spinner, resuming,
+ *  the completion menu (R4: its behavior is untouchable), the composer's borders + at least ONE
+ *  content row, a card's fixed rows — so on absurdly tiny terminals the essentials floor wins over
+ *  the cap (rows ≤ max(cap, floor), pinned). Grant order above the floor: input-slot content
+ *  (composer window / plan body) first, then agents (windowed, +1 overflow line), then tasks
+ *  (all-or-nothing, first to shed). The question card keeps its natural estimate (bounded by its
+ *  option count in practice — disclosed, not capped). Omitting `totalRows` (legacy tests) means
+ *  "uncapped": every piece gets its natural height, byte-identical to the pre-T3 model. */
+export function bottomBarLayout(input: {
   tasksVisible: boolean;
   tasks: TaskRow[];
   agents: AgentRow[];
@@ -265,19 +298,73 @@ export function bottomBarRows(input: {
    *  `composerCursor` already use above). Irrelevant while `pending` is set for the same reason:
    *  the composer (and its menu) isn't even mounted then. */
   menuRows: number;
-}): number {
+}, totalRows: number = Number.POSITIVE_INFINITY): BottomBarLayout {
   const { tasksVisible, tasks, agents, running, pending, columns, composerText, composerCursor, resuming, menuRows } = input;
   // TUI renderer T3: the in-flight streaming turn no longer lives in this bar — it renders inside
   // the transcript's line log (`makeStreamRenderer` rows appended to `lineLog` in App below), so
   // this model counts only chrome: tasks · spinner · resuming · card|composer+menu · agents · footer.
-  let n = 0;
-  if (tasks.length > 0 && tasksVisible) n += taskListRows(tasks);
-  if (running) n += 1; // Spinner
-  if (resuming) n += 1; // "Resuming conversation…"
-  n += pending ? pendingCardRows(pending) : composerRows(composerText, composerCursor, columns) + menuRows;
-  if (agents.length > 0) n += agents.length * 2; // each agent: head row + continuation row
-  n += 1; // Footer
-  return n;
+  const cap = Math.floor(totalRows * BAR_MAX_FRACTION);
+  let used = 1 + (running ? 1 : 0) + (resuming ? 1 : 0); // Footer + Spinner + "Resuming conversation…"
+
+  // --- input slot (essential; its CONTENT is the first grant above the floor) ---
+  let composerContentRows = 0;
+  let planBodyRows = 0;
+  if (pending) {
+    if (pending.kind === "plan") {
+      used += 5; // "Plan" header + the fixed 3-line menu + the choose line
+      const natural = pending.plan.split("\n").length;
+      const budget = Math.max(1, cap - used);
+      planBodyRows = natural <= budget ? natural : Math.max(1, budget - 1); // -1 reserves the "… +N more lines" row
+      used += planBodyRows + (planBodyRows < natural ? 1 : 0);
+    } else {
+      used += pendingCardRows(pending); // approval/question: natural estimate (see doc above)
+    }
+  } else {
+    used += 2 + menuRows; // border rules + the completion menu (both essential — R4)
+    const natural = composerRows(composerText, composerCursor, columns) - 2; // content rows only
+    composerContentRows = Math.min(natural, Math.max(1, cap - used));
+    used += composerContentRows;
+  }
+
+  // --- agents: windowed to fit (2 rows each; +1 overflow line when truncated and any row fits) ---
+  let agentsShown = agents.length;
+  let agentOverflow = 0;
+  if (agents.length > 0) {
+    const budget = cap - used;
+    if (agents.length * 2 <= budget) {
+      used += agents.length * 2;
+    } else {
+      agentsShown = Math.max(0, Math.floor((budget - 1) / 2));
+      agentOverflow = agents.length - agentsShown;
+      used += agentsShown * 2 + (agentsShown > 0 ? 1 : 0); // the footer pill still counts a fully-hidden roster
+    }
+  }
+
+  // --- tasks: all-or-nothing, the first thing shed under pressure ---
+  let showTasks = false;
+  if (tasks.length > 0 && tasksVisible) {
+    const t = taskListRows(tasks);
+    if (used + t <= cap) {
+      showTasks = true;
+      used += t;
+    }
+  }
+
+  return { rows: used, showTasks, agentsShown, agentOverflow, composerContentRows, planBodyRows };
+}
+
+/** The bar's total row count — `bottomBarLayout`'s one-number view (kept as the established name;
+ *  same model, same cap). */
+export function bottomBarRows(input: Parameters<typeof bottomBarLayout>[0], totalRows?: number): number {
+  return bottomBarLayout(input, totalRows).rows;
+}
+
+/** TUI renderer T3 — where the agents WINDOW starts when the roster is truncated: 0 normally, but
+ *  while select mode's highlight sits past the window it slides so the highlighted row stays
+ *  visible (the highlight is the reason the user is looking). Pure; exported for tests. */
+export function agentWindowStart(total: number, shown: number, selIdx: number | null): number {
+  if (shown <= 0 || total <= shown || selIdx === null) return 0;
+  return Math.min(Math.max(0, selIdx - shown + 1), total - shown);
 }
 
 export function App({
@@ -508,12 +595,25 @@ export function App({
   const streamRows = streamRenderer.lines(state.activeAssistant, state.activeTools, { columns, highlight, dimToolDot });
   const lineLog = childLines ?? welcome.concat(bodyLines, streamRows);
 
-  const barRows = bottomBarRows({
+  // TUI renderer T3: the capped layout model — the bar's allotments AND its height come from the
+  // one pure computation (`bottomBarLayout`, ≤ 50% of terminal rows), and the JSX below draws
+  // exactly what it granted (JS-windowing, HARD CONSTRAINT 2) so the height model never lies.
+  const layout = bottomBarLayout({
     tasksVisible, tasks: state.tasks, agents: visibleAgents,
     running: state.turnRunning, pending: state.pending,
     columns, composerText: composerState.text, composerCursor: composerState.cursor, resuming,
     menuRows,
-  });
+  }, rows);
+  const barRows = layout.rows;
+  // The agents window (layout.agentsShown rows of the roster) slides only to keep select mode's
+  // highlight visible; the highlight index passed down is window-relative.
+  const agentStart = agentWindowStart(visibleAgents.length, layout.agentsShown, selIdx);
+  const agentsWindow = layout.agentsShown >= visibleAgents.length
+    ? visibleAgents
+    : visibleAgents.slice(agentStart, agentStart + layout.agentsShown);
+  const agentSelInWindow = selIdx !== null && selIdx >= agentStart && selIdx < agentStart + agentsWindow.length
+    ? selIdx - agentStart
+    : undefined;
   // The child-view header (childHeaderLine) is pinned ABOVE the viewport, outside both the line
   // log and the bottom bar — subtract its one row here so the frame stays exactly rows-1 tall.
   const viewH = Math.max(1, (rows - 1) - barRows - (childOpen ? 1 : 0));
@@ -792,7 +892,7 @@ export function App({
       {childOpen ? <Text>{childHeaderLine(childRow!, columns)}</Text> : null}
       <TranscriptViewport lines={lineLog} scroll={scrollForRender} viewportRows={viewH} />
       <Box flexDirection="column" flexShrink={0}>
-        {state.tasks.length > 0 && tasksVisible ? <TaskList tasks={state.tasks} nowMs={nowMs} /> : null}
+        {state.tasks.length > 0 && tasksVisible && layout.showTasks ? <TaskList tasks={state.tasks} nowMs={nowMs} /> : null}
         <Spinner
           running={state.turnRunning}
           turnStartMs={state.turnStartMs}
@@ -802,7 +902,7 @@ export function App({
         />
         {resuming ? <Text dimColor>Resuming conversation…</Text> : null}
         {state.pending ? (
-          <PendingCards pending={state.pending} onApprove={onApprove} onAnswer={onAnswer} onPlan={onPlan} />
+          <PendingCards pending={state.pending} onApprove={onApprove} onAnswer={onAnswer} onPlan={onPlan} planBodyRows={layout.planBodyRows} />
         ) : (
           <Composer
             running={state.turnRunning}
@@ -823,6 +923,7 @@ export function App({
             onRunCommand={onRunCommand}
             onMenuRowsChange={onComposerMenuRowsChange}
             columns={columns}
+            maxContentRows={layout.composerContentRows}
             fileIndex={fileIndex}
             onNeedFileIndex={onNeedFileIndex}
             // Passed ONLY while a child view is open: an empty-buffer Esc then closes the view
@@ -830,7 +931,10 @@ export function App({
             onEscEmpty={childOpen ? onCloseChildView : undefined}
           />
         )}
-        {visibleAgents.length > 0 ? <AgentList agents={visibleAgents} nowMs={nowMs} selectedIndex={selIdx ?? undefined} /> : null}
+        {agentsWindow.length > 0 ? <AgentList agents={agentsWindow} nowMs={nowMs} selectedIndex={agentSelInWindow} /> : null}
+        {layout.agentOverflow > 0 && layout.agentsShown > 0 ? (
+          <Text dimColor>{`… +${layout.agentOverflow} more agent${layout.agentOverflow === 1 ? "" : "s"} (ctrl+a)`}</Text>
+        ) : null}
         <Footer policy={policy} running={state.turnRunning} agents={visibleAgents} exitArmed={exitArmedKey} />
       </Box>
     </Box>

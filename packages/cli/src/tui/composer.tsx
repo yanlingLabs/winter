@@ -41,6 +41,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { Box, Text, useInput, useStdin } from "ink";
 import { Chalk } from "chalk";
+import wrapAnsi from "wrap-ansi";
 import type { ApprovalPolicy } from "@norma/protocol";
 import { footerKeyAction } from "../keys";
 import type { FooterSelection } from "../task-block";
@@ -139,6 +140,23 @@ export function computeFileQuery(state: InputState): string | null {
   return computeFileToken(state)?.query ?? null;
 }
 
+/** TUI renderer T3 — the CAPPED composer's pure window: wraps the fully-styled content string
+ *  (prompt glyph + before + baked-inverse cursor cell + after) at `columns` and, when the wrapped
+ *  rows exceed `maxRows`, keeps the `maxRows`-tall window CONTAINING THE CURSOR (found by its
+ *  unique `\x1b[7m` inverse marker — user text can never contain ESC, the input path refuses it),
+ *  biased so the cursor sits at the window's bottom while typing past the cap (the terminal-input
+ *  convention). `total` is the natural row count — the caller renders the window only when
+ *  `total > maxRows`, so an uncapped composer's render path is byte-identical to before. Pure and
+ *  exported for direct unit tests (the Ink harness can't reach wrap internals). */
+export function windowComposerContent(content: string, columns: number, maxRows: number): { rows: string[]; total: number } {
+  const rows = wrapAnsi(content, Math.max(1, columns), { hard: true, trim: false }).split("\n");
+  if (rows.length <= Math.max(1, maxRows)) return { rows, total: rows.length };
+  const cursorRow = Math.max(0, rows.findIndex((r: string) => r.includes("\x1b[7m")));
+  const max = Math.max(1, maxRows);
+  const start = Math.min(Math.max(0, cursorRow - (max - 1)), rows.length - max);
+  return { rows: rows.slice(start, start + max), total: rows.length };
+}
+
 export interface ComposerProps {
   running: boolean;
   policy: ApprovalPolicy;
@@ -198,6 +216,14 @@ export interface ComposerProps {
    *  doc: never Yoga-wrap, so `bottomBarRows`' per-row budget stays exact). Defaults to 80, the same
    *  fallback `app.tsx`'s own `readCols` uses. */
   columns?: number;
+  /** TUI renderer T3 — the CAPPED composer: the maximum wrapped CONTENT rows this box may draw
+   *  (App passes `bottomBarLayout(...).composerContentRows`, its share of the ≤50% chrome budget).
+   *  When the buffer's natural wrap fits, the render is byte-identical to before this prop existed
+   *  (the nested-inverse-cursor single-root-Text shape, Ink bug and all); past it, the content is
+   *  pre-wrapped and JS-windowed around the cursor (`windowComposerContent`) so a huge paste can
+   *  never grow the chrome slot past its cap. Optional: omitted (legacy call sites/tests) means
+   *  uncapped — today's behavior exactly. */
+  maxContentRows?: number;
   /** Phase 3d T3: the App-owned file index (see app.tsx's `fileIndexRef` doc) — `undefined` until
    *  the FIRST "@"-trigger's build resolves, a (possibly empty) array once it has. While
    *  `undefined` and the cursor is in an "@"-token, the menu shows the single disabled
@@ -244,6 +270,7 @@ export function Composer({
   onRunCommand,
   onMenuRowsChange,
   columns = 80,
+  maxContentRows,
   fileIndex,
   onNeedFileIndex,
   onEscEmpty,
@@ -602,6 +629,33 @@ export function Composer({
   );
 
   const { before, at, after } = renderWithCursor(state);
+
+  // TUI renderer T3 — the capped path: only when the buffer's natural wrap EXCEEDS the granted
+  // content rows does the render switch to the pre-wrapped, cursor-following window (one root
+  // <Text> of joined rows — codes baked, incl. the cursor's inverse, so the single-Text Ink-bug
+  // dodge below still holds). Within budget, the original JSX below renders byte-identical.
+  if (maxContentRows !== undefined) {
+    const full = `${running ? ansi.dim("❯ ") : "❯ "}${before}${ansi.inverse(at || " ")}${after}`;
+    const win = windowComposerContent(full, columns, maxContentRows);
+    if (win.total > Math.max(1, maxContentRows)) {
+      return (
+        <>
+          {menuVisible ? <CompletionMenu items={menuItems} selected={boundedSelected} columns={columns} /> : null}
+          <Box
+            borderStyle="round"
+            borderTop
+            borderBottom
+            borderLeft={false}
+            borderRight={false}
+            borderColor={theme.promptBorder}
+            width="100%"
+          >
+            <Text>{win.rows.join("\n")}</Text>
+          </Box>
+        </>
+      );
+    }
+  }
 
   return (
     <>

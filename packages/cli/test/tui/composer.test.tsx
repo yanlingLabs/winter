@@ -1705,3 +1705,44 @@ describe("Composer — mouse bytes never become text (TUI renderer T1)", () => {
     expect(stripAnsi(lastFrame() ?? "")).not.toContain("65;10");
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// TUI renderer T3 — windowComposerContent: the capped composer's pure cursor-following window.
+// ---------------------------------------------------------------------------------------------
+
+import { Chalk } from "chalk";
+import { windowComposerContent } from "../../src/tui/composer";
+
+describe("windowComposerContent (T3 — the capped composer)", () => {
+  const chalk3 = new Chalk({ level: 3 });
+  const INV = (s: string) => chalk3.inverse(s);
+
+  test("content within budget passes through whole", () => {
+    const { rows, total } = windowComposerContent(`❯ short${INV(" ")}`, 40, 3);
+    expect(total).toBe(1);
+    expect(rows.length).toBe(1);
+  });
+
+  test("overflowing content windows to maxRows with the cursor row at the window's bottom", () => {
+    // 100 chars at 10 columns → 10+ rows; cursor at the very end (the typical typing case).
+    const content = `❯ ${"a".repeat(100)}${INV(" ")}`;
+    const { rows, total } = windowComposerContent(content, 10, 3);
+    expect(total).toBeGreaterThan(3);
+    expect(rows.length).toBe(3);
+    expect(rows[rows.length - 1]!.includes("\x1b[7m")).toBe(true); // cursor visible, bottom row
+  });
+
+  test("cursor near the top keeps the window anchored at the start", () => {
+    const content = `❯ ${INV("x")}${"b".repeat(100)}`;
+    const { rows } = windowComposerContent(content, 10, 3);
+    expect(rows.length).toBe(3);
+    expect(rows[0]!.includes("\x1b[7m")).toBe(true); // first row holds the cursor — window starts at 0
+  });
+
+  test("every windowed row stays within the columns budget", () => {
+    const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+    const content = `❯ ${"word ".repeat(50)}${INV(" ")}`;
+    const { rows } = windowComposerContent(content, 12, 4);
+    for (const r of rows) expect(strip(r).length).toBeLessThanOrEqual(12);
+  });
+});

@@ -609,3 +609,25 @@ describe("PendingCards — question (ask_user)", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// TUI renderer T3 — capPlanBody: the plan card's pure body budget.
+// ---------------------------------------------------------------------------------------------
+
+import { capPlanBody } from "../../src/tui/pending-cards";
+
+describe("capPlanBody (T3 — the capped plan card)", () => {
+  test("undefined budget or a fitting plan returns the original string untouched", () => {
+    expect(capPlanBody("a\nb\nc")).toEqual({ shown: "a\nb\nc", hidden: 0 });
+    expect(capPlanBody("a\nb\nc", 3)).toEqual({ shown: "a\nb\nc", hidden: 0 });
+    expect(capPlanBody("a\nb\nc", 10)).toEqual({ shown: "a\nb\nc", hidden: 0 });
+  });
+
+  test("an overflowing plan keeps its FIRST lines and reports the hidden count", () => {
+    expect(capPlanBody("a\nb\nc\nd\ne", 2)).toEqual({ shown: "a\nb", hidden: 3 });
+  });
+
+  test("a zero/negative budget floors at one visible line (never an empty body)", () => {
+    expect(capPlanBody("a\nb\nc", 0)).toEqual({ shown: "a", hidden: 2 });
+  });
+});

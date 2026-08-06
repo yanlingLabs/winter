@@ -41,6 +41,24 @@ export interface PendingCardsProps {
   onApprove: (callId: string, yes: boolean, optionId?: string) => void;
   onAnswer: (callId: string, payload: AnswerPayload) => void;
   onPlan: (callId: string, resp: ReturnType<typeof parsePlanResponse>) => void;
+  /** TUI renderer T3 — the PLAN card's visible body-line budget (App passes
+   *  `bottomBarLayout(...).planBodyRows`, its share of the ≤50% chrome cap): past it, the body
+   *  truncates to its FIRST lines plus one dim `… +N more lines` disclosure (`capPlanBody`).
+   *  Optional and only meaningful for `kind: "plan"`; omitted (legacy call sites/tests) renders
+   *  the full plan byte-identical to before. The parse/submit behavior is untouched either way —
+   *  the response line reads the PendingCard's full plan, never the truncated view. */
+  planBodyRows?: number;
+}
+
+/** Pure body-truncation for the plan card (exported for unit tests — the exact-boundary cases are
+ *  easier to pin here than through a rendered frame). Logical source lines, same unit the layout
+ *  model counts. `maxBodyRows` undefined or big enough → the untouched original string. */
+export function capPlanBody(plan: string, maxBodyRows?: number): { shown: string; hidden: number } {
+  if (maxBodyRows === undefined) return { shown: plan, hidden: 0 };
+  const lines = plan.split("\n");
+  const max = Math.max(1, maxBodyRows);
+  if (lines.length <= max) return { shown: plan, hidden: 0 };
+  return { shown: lines.slice(0, max).join("\n"), hidden: lines.length - max };
 }
 
 /** Shared "cooked line" input handling every card below uses identically: printable chars append
@@ -167,18 +185,23 @@ function ApprovalCard({ pending, onApprove }: { pending: ApprovalCardPending; on
   );
 }
 
-function PlanCard({ pending, onPlan }: { pending: Extract<PendingCard, { kind: "plan" }>; onPlan: PendingCardsProps["onPlan"] }) {
+function PlanCard({ pending, onPlan, planBodyRows }: { pending: Extract<PendingCard, { kind: "plan" }>; onPlan: PendingCardsProps["onPlan"]; planBodyRows?: number }) {
   const [buffer, setBuffer] = useBufferedInput((line) => {
     onPlan(pending.callId, parsePlanResponse(line));
     setBuffer("");
   });
+
+  // TUI renderer T3: the body honors the layout model's grant (see capPlanBody's doc) — the
+  // response parsing above is untouched by truncation.
+  const { shown, hidden } = capPlanBody(pending.plan, planBodyRows);
 
   // Phase 3b T7 restyle (theme colors only): the "Plan" header takes the Norma accent; the plan body
   // and the fixed menu are unchanged.
   return (
     <Box flexDirection="column">
       <Text color={theme.accent}>Plan</Text>
-      <Text>{pending.plan}</Text>
+      <Text>{shown}</Text>
+      {hidden > 0 ? <Text dimColor>{`… +${hidden} more lines`}</Text> : null}
       <Text>{"  1) approve — I'll approve each edit"}</Text>
       <Text>{"  2) approve + auto-accept edits"}</Text>
       <Text>{"  3) reject (type: 3 <reason>)"}</Text>
@@ -297,14 +320,14 @@ function QuestionCard({ pending, onAnswer }: { pending: Extract<PendingCard, { k
   );
 }
 
-export function PendingCards({ pending, onApprove, onAnswer, onPlan }: PendingCardsProps) {
+export function PendingCards({ pending, onApprove, onAnswer, onPlan, planBodyRows }: PendingCardsProps) {
   switch (pending.kind) {
     case "approval":
       return <ApprovalCard pending={pending} onApprove={onApprove} />;
     case "question":
       return <QuestionCard pending={pending} onAnswer={onAnswer} />;
     case "plan":
-      return <PlanCard pending={pending} onPlan={onPlan} />;
+      return <PlanCard pending={pending} onPlan={onPlan} planBodyRows={planBodyRows} />;
     default: {
       const _exhaustive: never = pending;
       return _exhaustive;

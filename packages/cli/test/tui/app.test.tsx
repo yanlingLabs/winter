@@ -1384,3 +1384,86 @@ describe("T3 — streamed complete lines are scrollable transcript content mid-s
     expect(log2.slice(w2.start, w2.end)).toEqual(visible1); // growth never moves a reader
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// TUI renderer T3 — the 50% chrome cap, pinned AT THE LAYOUT MODEL: `bottomBarLayout` computes
+// every piece's allotment and sheds (tasks → agents → input-slot content) until the bar fits
+// `floor(rows/2)`. The render honors the allotments (JS-windowing, HARD CONSTRAINT 2), so the
+// model's number IS the rendered height.
+// ---------------------------------------------------------------------------------------------
+
+import { bottomBarLayout, BAR_MAX_FRACTION } from "../../src/tui/app";
+
+describe("bottomBarLayout — the composer+chrome slot never exceeds 50% of terminal rows (T3 pin)", () => {
+  const task = (subject: string, status: TaskRow["status"]): TaskRow => ({ id: subject, subject, status });
+  const agent = (threadId: string): AgentRow => ({
+    threadId, agentType: "general-purpose", label: "a", status: "working",
+    outputTokens: 0, liveOutputChars: 0, activeMs: 0, toolCalls: 0,
+  });
+  type LayoutBase = Parameters<typeof bottomBarLayout>[0];
+  const base = (overrides: Partial<LayoutBase>): LayoutBase => ({
+    tasksVisible: true, tasks: [], agents: [], running: false, pending: null,
+    columns: 80, composerText: "", composerCursor: 0, resuming: false, menuRows: 0,
+    ...overrides,
+  });
+
+  test("BAR_MAX_FRACTION is one half", () => {
+    expect(BAR_MAX_FRACTION).toBe(0.5);
+  });
+
+  test("adversarial everything at rows=24 stays ≤ 12", () => {
+    const layout = bottomBarLayout(base({
+      tasks: Array.from({ length: 100 }, (_, i) => task(`t${i}`, "pending")),
+      agents: Array.from({ length: 40 }, (_, i) => agent(`th_${i}`)),
+      running: true, resuming: true, menuRows: 6,
+      composerText: "x".repeat(2000), composerCursor: 2000, columns: 40,
+    }), 24);
+    expect(layout.rows).toBeLessThanOrEqual(12);
+  });
+
+  test("a huge pasted composer text is windowed, never overflows the cap", () => {
+    const text = "y".repeat(5000);
+    const layout = bottomBarLayout(base({ columns: 20, composerText: text, composerCursor: text.length }), 24);
+    expect(layout.rows).toBeLessThanOrEqual(12);
+    expect(layout.composerContentRows).toBeGreaterThanOrEqual(1);
+    // content rows + 2 border rows + footer 1 = the whole bar here
+    expect(layout.rows).toBe(layout.composerContentRows + 2 + 1);
+  });
+
+  test("a 200-line plan card is truncated to the cap with a disclosure line", () => {
+    const layout = bottomBarLayout(base({
+      pending: { kind: "plan", callId: "c", plan: Array.from({ length: 200 }, (_, i) => `step ${i}`).join("\n") },
+    }), 24);
+    expect(layout.rows).toBeLessThanOrEqual(12);
+    expect(layout.planBodyRows).toBeGreaterThanOrEqual(1);
+    expect(layout.planBodyRows).toBeLessThan(200);
+  });
+
+  test("shed order: tasks go before agents; agents window with an overflow line", () => {
+    const layout = bottomBarLayout(base({
+      tasks: Array.from({ length: 8 }, (_, i) => task(`t${i}`, "pending")),
+      agents: Array.from({ length: 8 }, (_, i) => agent(`th_${i}`)),
+    }), 24);
+    expect(layout.rows).toBeLessThanOrEqual(12);
+    expect(layout.showTasks).toBe(false); // tasks shed first (8 agents alone already fill the budget)
+    expect(layout.agentsShown).toBeGreaterThan(0); // agents kept (windowed)
+    expect(layout.agentsShown).toBeLessThan(8);
+  });
+
+  test("everything visible when it all fits (no shedding below the cap)", () => {
+    const layout = bottomBarLayout(base({
+      tasks: [task("a", "pending")], agents: [agent("x")], running: true,
+    }), 40); // cap 20; tasks(2)+spinner(1)+composer(3)+agents(2)+footer(1) = 9
+    expect(layout.showTasks).toBe(true);
+    expect(layout.agentsShown).toBe(1);
+    expect(layout.rows).toBe(9);
+    expect(layout.rows).toBe(bottomBarRows(base({
+      tasks: [task("a", "pending")], agents: [agent("x")], running: true,
+    }), 40)); // bottomBarRows is the layout's total — one model, two views
+  });
+
+  test("tiny terminal: essentials (composer minimum + footer) may exceed the cap — floors win, and are bounded", () => {
+    const layout = bottomBarLayout(base({}), 6); // cap 3, but composer(3)+footer(1) = 4 is the floor
+    expect(layout.rows).toBe(4);
+  });
+});
