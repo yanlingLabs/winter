@@ -102,7 +102,7 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
     // discloses both the current value and the direct form. Esc = no write, no note.
     if (ctx.openChoice && settings.provider.type === "codex-oauth") {
       ctx.openChoice({
-        title: `model — effort: ${settings.provider.reasoningEffort ?? "default"} (/model --effort <level> to change)`,
+        title: `model — effort: ${settings.provider.reasoningEffort ?? "default"} (/model --effort)`,
         options: CODEX_MODELS.map((m) => ({ value: m.id, label: m.id, current: m.id === settings.provider.model })),
         onPick: (slug) => applyModelPick(ctx, slug),
       });

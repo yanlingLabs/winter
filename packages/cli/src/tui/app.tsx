@@ -107,6 +107,7 @@ import type { Highlighter } from "./markdown";
 import { makeDeltaCoalescer, type EventBridge } from "./event-bridge";
 import type { parsePlanResponse } from "../plan-response";
 import { runCommand, type CommandCtx } from "./commands";
+import { ChoiceMenu, choiceMenuRows, initialChoiceSelection, moveChoice, type ChoiceRequest } from "./choice-menu";
 import { buildFileIndex } from "./file-index";
 import type { NormaClient } from "../client";
 
@@ -328,13 +329,20 @@ export function bottomBarLayout(input: {
    *  counted so the 50% cap sheds OTHER content when the work line appears. Optional, defaulting
    *  to the pre-T5 footer's flat 1, so every legacy call site is byte-identical. */
   chromeRows?: number;
+  /** Bugfix-pass B2: the bottom picker's rendered row count (`choiceMenuRows` — 1 title row + the
+   *  windowed option rows) while open, 0 while closed. ESSENTIAL like `chromeRows`/the completion
+   *  menu (the picker IS the input surface while open — shedding it would strand the keyboard), so
+   *  the cap sheds other content instead. Only ever nonzero while `pending` is null — the App
+   *  dismisses the picker the moment a card takes input. Optional, defaulting to 0, so every
+   *  legacy call site is byte-identical. */
+  pickerRows?: number;
 }, totalRows: number = Number.POSITIVE_INFINITY): BottomBarLayout {
-  const { tasksVisible, tasks, agents, running, pending, columns, composerText, composerCursor, resuming, menuRows, chromeRows = 1 } = input;
+  const { tasksVisible, tasks, agents, running, pending, columns, composerText, composerCursor, resuming, menuRows, chromeRows = 1, pickerRows = 0 } = input;
   // TUI renderer T3: the in-flight streaming turn no longer lives in this bar — it renders inside
   // the transcript's line log (`makeStreamRenderer` rows appended to `lineLog` in App below), so
   // this model counts only chrome: tasks · spinner · resuming · card|composer+menu · agents · chrome.
   const cap = Math.floor(totalRows * BAR_MAX_FRACTION);
-  let used = chromeRows + (running ? 1 : 0) + (resuming ? 1 : 0); // status chrome + Spinner + "Resuming conversation…"
+  let used = chromeRows + (running ? 1 : 0) + (resuming ? 1 : 0) + pickerRows; // status chrome + Spinner + "Resuming conversation…" + the B2 picker
 
   // --- input slot (essential; its CONTENT is the first grant above the floor) ---
   let composerContentRows = 0;
@@ -452,6 +460,28 @@ export function App({
   const [liveGlobal, setLiveGlobal] = useState<{ model: string; effort?: string }>({ model, effort });
   const onModelChanged = useCallback((m: string, e?: string) => setLiveGlobal({ model: m, effort: e }), []);
 
+  // Bugfix-pass B2 — the bottom picker (choice-menu.tsx): a command whose no-arg reply is a list
+  // the user picks from (`/model`, `/output-style`) opens it via `CommandCtx.openChoice` instead of
+  // dumping the list into the transcript. App owns the open request + the highlight index; the
+  // component is purely presentational and the key branch in the scroll/toggle `useInput` below is
+  // the SINGLE actor for ↑/↓/Enter/Esc while open (the composer is disabled for the duration, same
+  // discipline as roster select mode). An empty request is refused defensively — the runners
+  // already fall back to a note when there's nothing to pick.
+  const [choice, setChoice] = useState<ChoiceRequest | null>(null);
+  const [choiceSel, setChoiceSel] = useState(0);
+  const openChoice = useCallback((req: ChoiceRequest) => {
+    if (req.options.length === 0) return;
+    setChoice(req);
+    setChoiceSel(initialChoiceSelection(req.options));
+  }, []);
+  // A pending card taking over input dismisses an open picker (no write, no note) — the key branch
+  // below is inactive while `state.pending` is set (its hook gates on it), so a surviving request
+  // would be an unanswerable zombie holding `pickerRows` in the layout.
+  useEffect(() => {
+    if (state.pending !== null) setChoice(null);
+  }, [state.pending]);
+  const pickerOpen = choice !== null && state.pending === null;
+
   const onRunCommand = useCallback((text: string) => {
     const ctx: CommandCtx = {
       client: client as unknown as NormaClient,
@@ -460,9 +490,10 @@ export function App({
       appendNote,
       onCwdChanged: (newCwd: string) => { cwdRef.current = newCwd; },
       onModelChanged,
+      openChoice,
     };
     void runCommand(ctx, text);
-  }, [client, sessionId, appendNote, onModelChanged]);
+  }, [client, sessionId, appendNote, onModelChanged, openChoice]);
 
   // Phase 3d T3: the "@"-file mention index (file-index.ts) — App owns the ONE lazy build for the
   // composer's whole lifetime, per the brief ("keep it simple: one build per session, no refresh in
@@ -680,6 +711,8 @@ export function App({
     columns, composerText: composerState.text, composerCursor: composerState.cursor, resuming,
     menuRows,
     chromeRows: chrome.lines.length,
+    // B2: `choiceMenuRows` is the component's own accounting twin, so model and render agree.
+    pickerRows: pickerOpen ? choiceMenuRows(choice!.options.length) : 0,
   }, rows);
   const barRows = layout.rows;
   // The agents window (layout.agentsShown rows of the roster) slides only to keep select mode's
@@ -739,6 +772,11 @@ export function App({
   const pendingRef = useRef<PendingCard | null>(state.pending);
   visibleAgentCountRef.current = visibleAgents.length;
   pendingRef.current = state.pending;
+  // B2: same event-time-read pattern for the picker — the emitter patch's ctrl+a branch must not
+  // open roster select mode over an open picker (both would claim ↑/↓; the picker branch would win
+  // every keystroke, leaving select mode a frozen highlight).
+  const pickerOpenRef = useRef(pickerOpen);
+  pickerOpenRef.current = pickerOpen;
 
   // --- mouse + ctrl+a: intercept at the shared stdin input emitter, BEFORE any useInput consumer
   // (this App's or the composer's) sees them. Ink emits the RAW chunk (ESC intact) on
@@ -785,7 +823,7 @@ export function App({
         // is chosen before Ink dispatches at all. Swallowed ONLY while roster rows exist AND no
         // pending card owns input — otherwise \x01 falls through untouched (empty roster keeps the
         // composer's cursor-Home byte-identical; a pending card keeps today's input ownership).
-        if (chunk === "\x01" && pendingRef.current === null && visibleAgentCountRef.current > 0) {
+        if (chunk === "\x01" && pendingRef.current === null && !pickerOpenRef.current && visibleAgentCountRef.current > 0) {
           setAgentSel((cur) => (cur === null ? 0 : null));
           return true;
         }
@@ -881,6 +919,30 @@ export function App({
       // handler, but if any mouse-shaped input slips through (Ink strips the leading ESC), swallow it
       // here too so it never triggers a key branch below. Scrolling is handled by the patch, not here.
       if (isMouseArtifact(input)) return;
+
+      // Bugfix-pass B2 — the bottom picker owns ↑/↓/Enter/Esc while open. The composer is DISABLED
+      // for the duration (see its `disabled` prop below) and this branch runs BEFORE roster select
+      // mode's, so no keystroke ever has two actors. Esc dismisses the picker ONLY (no interrupt —
+      // the same "closing the surface outranks interrupting" precedent as select-mode Esc and
+      // `onEscEmpty`); every other key falls through to the scroll/toggle bindings below. Enter
+      // resolves the pick OUTSIDE React (the runner's onPick does settings I/O and appends its own
+      // confirmation note); a rejection lands as a note, never a crash — runCommand's own contract.
+      if (pickerOpen) {
+        const req = choice!;
+        if (key.upArrow) { setChoiceSel((s) => moveChoice(s, -1, req.options.length)); return; }
+        if (key.downArrow) { setChoiceSel((s) => moveChoice(s, 1, req.options.length)); return; }
+        if (key.return) {
+          const opt = req.options[moveChoice(choiceSel, 0, req.options.length)];
+          setChoice(null);
+          if (opt) {
+            Promise.resolve()
+              .then(() => req.onPick(opt.value))
+              .catch((err: unknown) => appendNote(`selection failed: ${err instanceof Error ? err.message : String(err)}`));
+          }
+          return;
+        }
+        if (key.escape) { setChoice(null); return; }
+      }
 
       // child-transcript-view T3 — roster select mode owns ↑/↓/Enter/x/Esc while active. The
       // composer is DISABLED for select mode's whole duration (see its `disabled` prop below), so
@@ -978,6 +1040,10 @@ export function App({
           tasks={state.tasks}
         />
         {resuming ? <Text dimColor>Resuming conversation…</Text> : null}
+        {/* B2: the bottom picker — the completion menu's slot (directly above the composer's box;
+         *  the two can never be open at once: running the command cleared the buffer, which closed
+         *  the slash menu). Keys are handled in the scroll/toggle useInput above, never here. */}
+        {pickerOpen ? <ChoiceMenu title={choice!.title} options={choice!.options} selected={choiceSel} columns={columns} /> : null}
         {state.pending ? (
           <PendingCards pending={state.pending} onApprove={onApprove} onAnswer={onAnswer} onPlan={onPlan} planBodyRows={layout.planBodyRows} />
         ) : (
@@ -986,8 +1052,9 @@ export function App({
             policy={policy}
             // Select mode disables the composer wholesale (child-transcript-view T3) — its five
             // keys (↑/↓/Enter/x/Esc) belong to the App's select branch alone while active; the
-            // buffer/cursor are preserved untouched for when select mode exits.
-            disabled={!!state.pending || selIdx !== null}
+            // buffer/cursor are preserved untouched for when select mode exits. B2: an open bottom
+            // picker disables it the same way (its ↑/↓/Enter/Esc belong to the App's picker branch).
+            disabled={!!state.pending || selIdx !== null || pickerOpen}
             onSubmit={onSubmit}
             onSteer={onSteer}
             onInterrupt={onInterrupt}
