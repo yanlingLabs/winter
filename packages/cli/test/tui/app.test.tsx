@@ -350,6 +350,42 @@ describe("App (fullscreen shell)", () => {
     expect(after.join("\n")).not.toContain("G-LATE-0"); // the new content stayed below the window
   });
 
+  // T2 fix round 1 — growth compensation must be gated on the WRAP BASIS: a columns resize rewraps
+  // existing content (row-count delta, ZERO new content), which must NOT shift a scrolled-back
+  // offset the way genuine bottom-appended growth does. Geometry: cols 80 → welcome 3 + one long
+  // note ("✻ " + 100 chars → 2 rows) + 40 one-row notes = 45 rows; viewH 19; PgUp → offset 18 →
+  // content rows 8..25 (top = RW-3, the long note sits fully ABOVE the window) + indicator
+  // "↓ 19 newer lines". Resizing to cols 40 rewraps ONLY the long note (2 → 3 rows, +1 above the
+  // window): the same content must stay in view — top line still RW-3, indicator still 19. A raw
+  // length-delta compensation instead bumps offset by the rewrap delta and shows RW-2 / 20.
+  test("(k6) a columns-resize rewrap while scrolled back does NOT shift the view: offset ungrown, top line and indicator count unchanged", async () => {
+    const stdoutShape = process.stdout as unknown as { columns?: number };
+    const prevCols = stdoutShape.columns;
+    stdoutShape.columns = 80;
+    const bridge = makeEventBridge();
+    bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: "x".repeat(100) })); // rewraps: 2 rows @80, 3 @40
+    for (let i = 0; i < 40; i++) bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: `RW-${i}` }));
+    const { stdin, lastFrame } = render(<App client={fakeClient()} bridge={bridge} {...baseProps} />);
+    try {
+      await wait();
+
+      stdin.write("\x1b[5~"); // PgUp -> offset 18, unfollowed
+      await wait();
+      const before = lastFrame() ?? "";
+      expect(before.split("\n")[0]).toContain("RW-3"); // window top — long note entirely above it
+      expect(before).toContain("↓ 19 newer lines");
+
+      stdoutShape.columns = 40;
+      process.stdout.emit("resize");
+      await wait();
+      const after = lastFrame() ?? "";
+      expect(after.split("\n")[0]).toContain("RW-3"); // same content on top — rewrap did not scroll the reader
+      expect(after).toContain("↓ 19 newer lines"); // hidden-below count unchanged — offset was not "compensated"
+    } finally {
+      stdoutShape.columns = prevCols;
+    }
+  });
+
   test("(l) resize: the frame re-renders to the new terminal height", async () => {
     const prev = (process.stdout as unknown as { rows?: number }).rows;
     const { lastFrame } = render(<App client={fakeClient()} bridge={makeEventBridge()} {...baseProps} />);

@@ -507,18 +507,31 @@ export function App({
   // must hold on the very frame the growth lands — an effect alone would paint one shifted frame
   // first), and the effect below folds it into stored state via the UPDATER form, never the derived
   // value: a value-form setScroll could clobber a wheel step queued between commit and effect
-  // flush, whereas relative updaters compose in dispatch order. `prevLenRef` syncs ONLY in the
-  // effect, so each growth interval is counted exactly once however renders interleave; a shrink or
-  // a wholesale log swap (verbose retoggle, child-view open/close) just re-syncs — shrink clamping
-  // is visibleSlice's render-time job, and the child-view effect above re-follows anyway.
-  const prevLenRef = useRef(lineLog.length);
-  const grownBy = lineLog.length - prevLenRef.current;
+  // flush, whereas relative updaters compose in dispatch order. The basis ref syncs ONLY in the
+  // effect, so each growth interval is counted exactly once however renders interleave.
+  //
+  // FIX ROUND 1 (T2 review): a raw length delta cannot tell bottom-appended content from a REWRAP
+  // of existing content — a columns resize alone can double a block's row count with zero new
+  // content. Compensation is therefore gated on the WRAP BASIS: the snapshot carries every input
+  // that changes the log's row count without new content — the flatten opts (`columns`, `verbose`,
+  // `highlight`; the exact parameter set of the `cache.lines`/`makeFlattenCache` calls above) plus
+  // the log's SOURCE identity (`childViewId` — a main↔child swap is a wholesale different array).
+  // A basis change resyncs the stored length WITHOUT compensating (`offset` keeps meaning "rows
+  // above the bottom" against the rewrapped log; visibleSlice/applyWheel clamp if it shrank); only
+  // a same-basis growth is genuinely appended content and compensates. A shrink just re-syncs —
+  // shrink clamping is visibleSlice's render-time job, and the child-view effect above re-follows.
+  const growthBasisRef = useRef({ len: lineLog.length, columns, verbose, highlight, childViewId });
+  const basis = growthBasisRef.current;
+  const sameBasis = basis.columns === columns && basis.verbose === verbose && basis.highlight === highlight && basis.childViewId === childViewId;
+  const grownBy = sameBasis ? lineLog.length - basis.len : 0;
   const scrollForRender = grownBy > 0 ? onContentGrown(scroll, grownBy) : scroll;
   useEffect(() => {
-    const grown = lineLog.length - prevLenRef.current;
-    prevLenRef.current = lineLog.length;
+    const prev = growthBasisRef.current;
+    const same = prev.columns === columns && prev.verbose === verbose && prev.highlight === highlight && prev.childViewId === childViewId;
+    const grown = same ? lineLog.length - prev.len : 0;
+    growthBasisRef.current = { len: lineLog.length, columns, verbose, highlight, childViewId };
     if (grown > 0) setScroll((cur) => onContentGrown(cur, grown));
-  }, [lineLog.length]);
+  }, [lineLog.length, columns, verbose, highlight, childViewId]);
 
   // Keep `len`/`viewH` current for the input handlers + the mouse emitter patch (both may run from a
   // closure created on an earlier render); refs updated during render, read at event time.
