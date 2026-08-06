@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   AGENTS_EMPTY_STATE, AGENTS_KEY_HINT,
-  agentResumeCommand, applyActivityEvent, applySessionList, emptyAgentsState,
-  formatAgentsSnapshot, formatCwdColumn, formatForColumn, keyToAgentsAction, moveSelection, runAgentVerb,
-  runAgentsCommand, selectedAgent, AgentsStore,
+  agentResumeCommand, applyActivityEvent, applySessionList, emptyAgentsState, ensureRosterStart,
+  formatAgentsSnapshot, formatCwdColumn, formatForColumn, keyToAgentsAction, moveSelection,
+  planAgentsViewport, runAgentVerb,
+  runAgentsCommand, selectedAgent, wheelToAgentsAction, AgentsStore,
   type AgentsState,
 } from "../src/agents-cli";
 import type { NormaClient } from "../src/client";
@@ -376,6 +377,72 @@ describe("keyToAgentsAction — the keymap, pure so the Ink hook stays a one-lin
   test("anything else is ignored — a stray keystroke never fires a verb", () => {
     expect(keyToAgentsAction("z", K())).toBeNull();
     expect(keyToAgentsAction("", K())).toBeNull();
+  });
+});
+
+// -------------------------------------------------------------------------------------------
+// Bugfix pass B3 — the fullscreen viewport's pure layer. `norma agents` is now an alt-screen
+// surface like the main TUI, so the roster must fit a frame: `planAgentsViewport` decides how many
+// list rows the frame can hold (and whether overflow markers are needed), `ensureRosterStart`
+// keeps the selected row inside that window with minimal movement (the ensure-visible idiom, not
+// scroll-model's wheel-offset — selection drives this list), and `wheelToAgentsAction` maps a
+// decoded wheel notch (input-model's first-class WheelEvent, the main TUI's wheel-at-input cure)
+// onto the same move action the arrow keys produce.
+// -------------------------------------------------------------------------------------------
+
+describe("planAgentsViewport — how many roster rows fit the fullscreen frame", () => {
+  test("everything fits: capacity is the frame minus chrome (title + hint), no markers", () => {
+    // frame 10, chrome 2 (title + key hint) → 8 list rows available; 5 rows need no markers.
+    expect(planAgentsViewport(10, 5, false)).toEqual({ capacity: 8, markers: false });
+  });
+
+  test("a notice costs one chrome row", () => {
+    expect(planAgentsViewport(10, 5, true)).toEqual({ capacity: 7, markers: false });
+  });
+
+  test("overflow: two marker lines are reserved and capacity shrinks by exactly those two", () => {
+    // frame 10 → 8 available; 20 rows overflow → markers reserve 2 → 6 shown.
+    expect(planAgentsViewport(10, 20, false)).toEqual({ capacity: 6, markers: true });
+  });
+
+  test("degenerate tiny frame still shows at least one row", () => {
+    expect(planAgentsViewport(3, 20, true).capacity).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("ensureRosterStart — the window follows the selection with minimal movement", () => {
+  test("selection inside the window: start does not move", () => {
+    expect(ensureRosterStart(3, 5, 20, 6)).toBe(3); // window [3,9), sel 5 visible
+  });
+
+  test("selection below the window: window slides down just enough", () => {
+    expect(ensureRosterStart(0, 7, 20, 6)).toBe(2); // sel 7 → start 7-6+1
+  });
+
+  test("selection above the window: window snaps up to the selection", () => {
+    expect(ensureRosterStart(10, 4, 20, 6)).toBe(4);
+  });
+
+  test("a stale start past the end clamps into range (rows shrank under the window)", () => {
+    expect(ensureRosterStart(18, -1, 8, 6)).toBe(2); // maxStart = 8-6
+  });
+
+  test("no selection (sel -1) just clamps the previous start", () => {
+    expect(ensureRosterStart(3, -1, 20, 6)).toBe(3);
+  });
+
+  test("fewer rows than capacity: start is always 0", () => {
+    expect(ensureRosterStart(5, 2, 4, 6)).toBe(0);
+  });
+});
+
+describe("wheelToAgentsAction — a wheel notch is the same move the arrows make", () => {
+  test("wheelUp moves the selection up one row", () => {
+    expect(wheelToAgentsAction({ kind: "wheelUp", lines: 3 })).toEqual({ kind: "move", delta: -1 });
+  });
+
+  test("wheelDown moves the selection down one row", () => {
+    expect(wheelToAgentsAction({ kind: "wheelDown", lines: 3 })).toEqual({ kind: "move", delta: 1 });
   });
 });
 

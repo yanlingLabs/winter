@@ -38,6 +38,7 @@
 import { homedir } from "node:os";
 import type { NormaClient } from "./client";
 import { formatElapsed } from "./task-display";
+import type { WheelEvent } from "./tui/input-model";
 
 /** The client name this roster hello's with. `cli-` prefix ⇒ TERMINAL kind by T5's
  *  `TERMINAL_CLIENT_PREFIXES` (core/src/sessions/activity-enforcement.ts). That classification is
@@ -276,6 +277,48 @@ export function keyToAgentsAction(input: string, key: AgentsKey): AgentsAction |
     case "q": return { kind: "quit" };
     default: return null;
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The fullscreen viewport (bugfix pass B3) — pure, like everything else in this file
+// ---------------------------------------------------------------------------------------------
+
+/** How many roster rows the fullscreen frame can hold, and whether overflow markers are needed.
+ *  Chrome is the title row + the key-hint row (+ the notice row when one is showing). When the
+ *  roster overflows, TWO marker lines are reserved unconditionally (`↑ N more` / `↓ N more` slots —
+ *  blank at an edge) rather than only when each edge is actually cut: a marker line that appears
+ *  and disappears as the window slides would resize the window it is describing — a feedback loop.
+ *  The floor of 1 keeps a degenerate terminal showing SOMETHING (the same posture as
+ *  `bottomBarLayout`'s essentials floor). */
+export interface AgentsViewportPlan { capacity: number; markers: boolean }
+
+export function planAgentsViewport(frameRows: number, rowCount: number, hasNotice: boolean): AgentsViewportPlan {
+  const chrome = 2 + (hasNotice ? 1 : 0); // title + key hint (+ notice)
+  const avail = Math.max(1, frameRows - chrome);
+  if (rowCount <= avail) return { capacity: avail, markers: false };
+  return { capacity: Math.max(1, avail - 2), markers: true };
+}
+
+/** The window's first visible row, given where it was last frame. Ensure-visible with MINIMAL
+ *  movement (the selection drives this list, so this is deliberately not scroll-model's
+ *  wheel-offset state): the window moves only when the selection would leave it, and a stale start
+ *  (rows removed under the window) clamps into range. `selectedIndex` is -1 when nothing is
+ *  selected — the previous window (clamped) is the least surprising thing to keep showing. */
+export function ensureRosterStart(prevStart: number, selectedIndex: number, rowCount: number, capacity: number): number {
+  const maxStart = Math.max(0, rowCount - capacity);
+  let start = Math.min(Math.max(0, prevStart), maxStart);
+  if (selectedIndex < 0) return start;
+  if (selectedIndex < start) start = selectedIndex;
+  else if (selectedIndex >= start + capacity) start = selectedIndex - capacity + 1;
+  return Math.min(Math.max(0, start), maxStart);
+}
+
+/** One decoded wheel notch → the exact action the arrow keys produce. Magnitude is deliberately 1
+ *  row per notch, not the event's `lines` (±3): that scroll magnitude belongs to a CONTENT viewport
+ *  (scroll-model's transcript); on a selection cursor a 3-row jump would skip rows the user is
+ *  trying to land on. */
+export function wheelToAgentsAction(w: WheelEvent): AgentsAction {
+  return { kind: "move", delta: w.kind === "wheelUp" ? -1 : 1 };
 }
 
 // ---------------------------------------------------------------------------------------------
