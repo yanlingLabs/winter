@@ -165,43 +165,9 @@ function flattenCollapsedSummary(summary: string, columns: number): string[] {
   return gutterRows(2, `${ansi.dim("⏺")} `, "  ", [ansi.dim(`${summary} (ctrl+o to expand)`)], columns);
 }
 
-/** The IN-FLIGHT (not-yet-committed) active turn as wrapped ANSI lines — the string analog of
- *  `<ActiveTurn>` (active-turn.tsx), so `app.tsx` can JS-WINDOW it (tail-slice to ⌈rows/3⌉) into the
- *  pinned bottom bar instead of leaning on a Yoga `maxHeight` (HARD CONSTRAINT 2: Yoga clipping is
- *  unreliable). Mirrors `<ActiveTurn>`'s visible layout:
- *   - streaming assistant text: the 2-col `⏺` gutter (steady `theme.text` dot) + the stable prefix
- *     rendered through `renderMarkdown` then the still-growing `tail` as plain text (same
- *     `splitStableBoundary` split the component uses — the tail is NOT markdown-parsed, avoiding
- *     half-parsed flicker mid-stream);
- *   - each in-flight tool: the 2-col gutter (dot dimmed when `dimToolDot`, the blink the component
- *     drives off `nowMs` parity) + `bold(name)(argsHead)`.
- *  Returns [] when idle (no assistant text, no in-flight tools) — the component's "hidden when idle". */
-export function activeTurnLines(
-  assistant: string,
-  tools: { name: string; argsJson: string }[],
-  opts: { columns: number; highlight?: Highlighter; dimToolDot: boolean },
-): string[] {
-  const { columns, highlight, dimToolDot } = opts;
-  const out: string[] = [];
-  if (assistant) {
-    const { stable, tail } = splitStableBoundary(assistant);
-    const content: string[] = [];
-    if (stable) content.push(...renderMarkdown(stable, highlight).split("\n"));
-    if (tail) content.push(...tail.split("\n"));
-    out.push(...gutterRows(2, `${ansi.hex(theme.text)("⏺")} `, "  ", content, columns));
-  }
-  for (const t of tools) {
-    const argsHead = formatArgsHead(t.argsJson);
-    const headText = `${ansi.bold(t.name)}${argsHead ? `(${argsHead})` : ""}`;
-    const dot = dimToolDot ? ansi.dim("⏺") : "⏺";
-    out.push(...gutterRows(2, `${dot} `, "  ", headText.split("\n"), columns));
-  }
-  return out;
-}
-
 /** TUI renderer T3 — the in-flight turn rendered as TRANSCRIPT rows (the streaming block is the
  *  line log's last row-group now, not a pinned-bar slice — mechanism report Q2/Q7 cures 1-2).
- *  Supersedes `activeTurnLines` for the production path. A stateful factory (one per App mount,
+ *  Supersedes the deleted `activeTurnLines`/`<ActiveTurn>` pair (absorbed here, T3). A stateful factory (one per App mount,
  *  same lifecycle idiom as `makeFlattenCache`) because it owns a `createStreamingMarkdown`
  *  instance — the monotonic stable-boundary cache that keeps per-delta work bounded to the open
  *  markdown segment (markdown.ts's T3 pin).
@@ -214,7 +180,7 @@ export function activeTurnLines(
  *  committed block in ONE state update), the committed block's flattened rows are byte-identical
  *  to the streamed rows of the same text: the swap repaints nothing.
  *
- *  In-flight tool rows keep `activeTurnLines`' exact shape (blinking dot via `dimToolDot`, bold
+ *  In-flight tool rows keep the pinned-bar era's exact shape (blinking dot via `dimToolDot`, bold
  *  name + argsHead) and render AFTER the assistant rows — the same order their committed
  *  counterparts take in the transcript, so a tool_result landing mid-turn also swaps in place. */
 export function makeStreamRenderer(): {

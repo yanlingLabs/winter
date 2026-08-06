@@ -8,7 +8,7 @@
  *
  *  The transcript is a JS-windowed line log now (no Ink <Static>): the flattened committed lines are
  *  sliced to the viewport height and rendered one <Text> per visible line, above a PINNED bottom bar
- *  (active-turn tail · tasks · spinner · composer|card · agents · footer). Scroll keys / wheel move
+ *  (tasks · spinner · composer|card · agents · footer; the in-flight turn streams inside the transcript now, T3). Scroll keys / wheel move
  *  the window; "stick" auto-follows the tail until the user scrolls away. */
 
 import { afterEach, describe, expect, test } from "bun:test";

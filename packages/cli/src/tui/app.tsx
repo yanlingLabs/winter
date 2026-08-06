@@ -455,7 +455,7 @@ export function App({
   const [resuming, setResuming] = useState<boolean>(() => resumeTargetSeq !== undefined && resumeTargetSeq > 0);
 
   // Terminal geometry, live off process.stdout (+ a resize listener). Ink lays the root out at an
-  // explicit height=rows-1, and the transcript/active-turn are pre-wrapped at `columns`.
+  // explicit height=rows-1, and the transcript (incl. its streamed tail) is pre-wrapped at `columns`.
   const [rows, setRows] = useState(readRows);
   const [columns, setColumns] = useState(readCols);
   useEffect(() => {

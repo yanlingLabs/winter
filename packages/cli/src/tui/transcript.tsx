@@ -187,7 +187,7 @@ function DisplayEntry({ item, highlight }: { item: DisplayItem; highlight?: High
  *  live `columns`), so 1 array entry = 1 terminal row BY CONSTRUCTION and the slice math never
  *  drifts from rendered height. The residual error bound is a width-measurement disagreement
  *  between `string-width` (wrap-ansi's ruler) and the terminal's own cell count for exotic
- *  graphemes — shared by every other height model in this app (composerRows, activeTurnLines). */
+ *  graphemes — shared by every other height model in this app (composerRows, makeStreamRenderer). */
 export function TranscriptViewport({ lines, scroll, viewportRows }: {
   lines: string[];
   scroll: ScrollState;
