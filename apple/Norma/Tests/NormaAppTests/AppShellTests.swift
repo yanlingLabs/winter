@@ -619,4 +619,84 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(delegate.appWindow?.navigation.destination, .dashboard(pane: .pluginManager), "the last-fired item's deep link must have actually landed")
         delegate.appWindow?.hide()
     }
+
+    // MARK: - Bugfix pass B4: the chat landing's own "New Chat" door (injected — never a second create path)
+
+    /// The recorder seam: `AppWindowController` CARRIES the injected door verbatim (it's what
+    /// `ShellRootView` hands the chat landing's button), and defaults to none — a shell built
+    /// without it (this file's own `makeController()`, the pure window/geometry tests) renders no
+    /// dead button (`chatLandingShowsNewChatButton`'s gate). One invocation fires the injected
+    /// action exactly once.
+    func testAppWindowControllerCarriesTheInjectedNewChatDoorExactlyOnce() {
+        XCTAssertNil(makeController().openNewChat, "a shell built without the door stays door-less")
+
+        var fired = 0
+        let controller = AppWindowController(
+            directory: SessionDirectory(lister: { [] }),
+            openNewChat: { fired += 1 },
+            frame: NSRect(x: 100, y: 80, width: 1100, height: 720)
+        )
+        controller.openNewChat?()
+        XCTAssertEqual(fired, 1, "one tap = exactly one firing of the injected action")
+    }
+
+    /// THE wire pin (the "no new create path" proof): the door `summonAppWindow` injects IS
+    /// `AppDelegate.newChat()` — firing it once produces exactly ONE `session.create` (mode
+    /// `"chat"`, no `cwd`) across EVERY transport the app has ever minted, and then summons onto
+    /// the fresh id, which is the exact create → navigate → `isChatSession`-self-heal flow the
+    /// menu-bar entry rides (`ChatWindowTests`' pins). A landing button with its own
+    /// `session.create` call site — the "second create path with no owner" the T3 report warned
+    /// about — fails the exactly-one count here.
+    func testSummonAppWindowWiresTheLandingsNewChatDoorToTheOneMenuCreatePath() async throws {
+        let factory = RecordingTransportFactory()
+        let model = AppModel(makeTransport: { factory.make() }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+
+        await waitUntil { !factory.made.isEmpty }
+        let t = factory.made[0]
+        await waitUntil { t.sent.count >= 1 }
+        t.feed(#"{"jsonrpc":"2.0","id":\#(lineJSON(t.sent[0])["id"] as! Int),"result":{"ok":true}}"#)
+        await waitUntil { t.sent.count >= 2 }
+        let list = lineJSON(t.sent[1])
+        XCTAssertEqual(list["method"] as? String, "session.list")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(list["id"] as! Int),"result":{"sessions":[]}}"#)
+        await waitUntil { model.session.state.status == .idle }
+
+        let delegate = AppDelegate()
+        delegate.setAppModelForTesting(model)
+        defer { delegate.appWindow?.hide() }
+
+        delegate.summonAppWindow()
+        guard let door = delegate.appWindow?.openNewChat else {
+            return XCTFail("summonAppWindow must inject the New Chat door into the shell it constructs")
+        }
+
+        door()
+
+        var create: [String: Any] = [:]
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline {
+            if let found = t.sent.map(lineJSON).first(where: { $0["method"] as? String == "session.create" }) {
+                create = found
+                break
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(create["method"] as? String, "session.create", "the door must ride newChat()'s create on model.client: \(t.sent)")
+        let params = create["params"] as? [String: Any]
+        XCTAssertEqual(params?["mode"] as? String, "chat")
+        XCTAssertNil(params?["cwd"], "chat sessions carry no fs tools — newChat()'s own no-cwd shape")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_b4_chat","trusted":true}}"#)
+
+        await waitUntil { delegate.appWindow?.navigation.destination == .session("s_b4_chat") }
+        XCTAssertEqual(
+            delegate.appWindow?.navigation.destination, .session("s_b4_chat"),
+            "the door is newChat()'s WHOLE flow — create, then summon straight onto the fresh id (the self-heal path)"
+        )
+
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        let creates = factory.made.flatMap(\.sent).map(lineJSON).filter { $0["method"] as? String == "session.create" }
+        XCTAssertEqual(creates.count, 1, "ONE create call site, on the ONE management connection — the landing button must never mint its own session.create")
+    }
 }

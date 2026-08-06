@@ -21,6 +21,11 @@ struct ShellRootView: View {
     /// Task 7: the Dashboard's injected data/closures — `nil` for a shell built without one (see
     /// `AppWindowController.dashboardWiring`), same host-less-fallback posture as `host` above.
     var dashboardWiring: DashboardWiring?
+    /// Bugfix pass B4: the chat landing's "New Chat" door — `AppDelegate.newChat()` injected
+    /// through `AppWindowController.openNewChat`; `nil` for a shell built without one (same
+    /// fallback posture as `host`/`dashboardWiring` above), which renders the landing with no
+    /// button (`chatLandingShowsNewChatButton`'s gate).
+    var newChat: (() -> Void)? = nil
     /// Task 7: the Dashboard's current-pane memory — UNCONDITIONAL (see
     /// `AppWindowController.dashboardSelection`'s own doc comment for why it's never optional).
     @ObservedObject var dashboardSelection: DashboardSelectionModel
@@ -71,7 +76,7 @@ struct ShellRootView: View {
                 ShellLandingView(destination: nav.destination)
             }
         case .mode(.chat):
-            ChatLandingView(nav: nav, directory: directory)
+            ChatLandingView(nav: nav, directory: directory, newChat: newChat)
         case .mode(.code):
             if let host {
                 ModeLandingView(mode: .code, nav: nav, directory: directory, host: host)

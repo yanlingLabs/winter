@@ -12,7 +12,7 @@
  *  the window; "stick" auto-follows the tail until the user scrolls away. */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanup, render } from "ink-testing-library";
@@ -1589,6 +1589,120 @@ describe("bottomBarLayout — T5: the chrome rows are counted (the cap can't be 
     expect(one.rows).toBeLessThanOrEqual(12);
     expect(two.rows).toBeLessThanOrEqual(12); // the cap holds WITH the extra chrome row counted
     expect(two.composerContentRows).toBe(one.composerContentRows - 1); // the row came out of content
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Bugfix-pass B2 — the bottom picker wired into the App: `/model` (no args) opens choice-menu.tsx
+// in the bar (never the transcript dump), ↑/↓ move, Enter applies THE SAME write path as the typed
+// form (footer flips, one confirmation note), Esc dismisses with no write and no note. The picker's
+// rows are counted by `bottomBarLayout` the way T5's chrome rows are (`pickerRows`, essential).
+// ---------------------------------------------------------------------------------------------
+
+describe("bottomBarLayout — B2: pickerRows are counted (essential, like chromeRows)", () => {
+  type LayoutBase = Parameters<typeof bottomBarLayout>[0];
+  const base = (overrides: Partial<LayoutBase>): LayoutBase => ({
+    tasksVisible: true, tasks: [], agents: [], running: false, pending: null,
+    columns: 80, composerText: "", composerCursor: 0, resuming: false, menuRows: 0,
+    ...overrides,
+  });
+
+  test("pickerRows defaults to 0 (every pre-B2 expectation unchanged: empty = 4)", () => {
+    expect(bottomBarLayout(base({})).rows).toBe(4);
+  });
+
+  test("an open 3-option picker (title + 3 rows = 4) adds exactly its rows", () => {
+    expect(bottomBarLayout(base({ pickerRows: 4 })).rows).toBe(8);
+  });
+
+  test("PIN: the picker doesn't break the 50% cap — composer content sheds instead", () => {
+    const text = "x".repeat(200);
+    const without = bottomBarLayout(base({ columns: 20, composerText: text, composerCursor: text.length }), 24);
+    const withPicker = bottomBarLayout(base({ columns: 20, composerText: text, composerCursor: text.length, pickerRows: 4 }), 24);
+    expect(without.rows).toBeLessThanOrEqual(12);
+    expect(withPicker.rows).toBeLessThanOrEqual(12); // the cap holds WITH the picker counted
+    expect(withPicker.composerContentRows).toBe(without.composerContentRows - 4); // rows came out of content
+  });
+});
+
+describe("App — B2 the /model bottom picker end-to-end", () => {
+  // Same temp-NORMA_HOME discipline as commands.test.ts's /model suite — never ~/.norma.
+  const withTempHome = async (fn: (home: string) => Promise<void>) => {
+    const home = mkdtempSync(join(tmpdir(), "norma-tui-b2-picker-"));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }));
+    const prevHome = process.env.NORMA_HOME;
+    process.env.NORMA_HOME = home;
+    try {
+      await fn(home);
+    } finally {
+      if (prevHome === undefined) delete process.env.NORMA_HOME;
+      else process.env.NORMA_HOME = prevHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  };
+
+  test("(p1) `/model` opens the picker in the BOTTOM BAR — the transcript never gets the model dump", async () => {
+    await withTempHome(async () => {
+      const bridge = makeEventBridge();
+      const client = fakeClient();
+      const { stdin, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+      await wait();
+      stdin.write("/model");
+      await wait();
+      stdin.write("\r");
+      await wait();
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("esc cancel"); // the picker's title row (its key grammar)
+      expect(frame).toContain("gpt-5.6-terra"); // catalogue rows are visible to pick
+      expect(frame).toContain("* gpt-5.6-sol"); // current marked
+      expect(frame).not.toContain("available (codex-oauth):"); // THE BUG: the old transcript dump
+      expect(client.calls).toEqual([]); // /model never touches the client
+    });
+  });
+
+  test("(p2) ↓ + Enter applies the selection: settings written, footer flips, ONE confirmation note, picker closed", async () => {
+    await withTempHome(async (home) => {
+      const bridge = makeEventBridge();
+      const client = fakeClient();
+      const { stdin, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+      await wait();
+      stdin.write("/model");
+      await wait();
+      stdin.write("\r");
+      await wait();
+      stdin.write("\x1b[B"); // ↓ — sol (current, initial) → terra
+      await wait();
+      stdin.write("\r"); // Enter — pick terra
+      await wait();
+      const frame = lastFrame() ?? "";
+      expect(frame).not.toContain("esc cancel"); // picker closed
+      expect(frame).toContain("updated (model gpt-5.6-terra)"); // the confirmation note (transcript, AFTER selection)
+      expect(frame).toContain("gpt-5.6-terra"); // the footer chip flipped (same frame)
+      const settings = JSON.parse(readFileSync(join(home, "settings.json"), "utf8")) as { provider: { model: string } };
+      expect(settings.provider.model).toBe("gpt-5.6-terra"); // the write really landed on disk
+    });
+  });
+
+  test("(p3) Esc dismisses: no write, no note, footer keeps the mount model", async () => {
+    await withTempHome(async (home) => {
+      const bridge = makeEventBridge();
+      const client = fakeClient();
+      const { stdin, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+      await wait();
+      stdin.write("/model");
+      await wait();
+      stdin.write("\r");
+      await wait();
+      expect(lastFrame() ?? "").toContain("esc cancel");
+      stdin.write("\x1b"); // Esc — dismiss, no change
+      await wait();
+      const frame = lastFrame() ?? "";
+      expect(frame).not.toContain("esc cancel");
+      expect(frame).not.toContain("updated (");
+      expect(frame).toContain("gpt-5-codex"); // footer unchanged (the mount model)
+      const settings = JSON.parse(readFileSync(join(home, "settings.json"), "utf8")) as { provider: { model: string } };
+      expect(settings.provider.model).toBe("gpt-5.6-sol"); // untouched on disk
+    });
   });
 });
 

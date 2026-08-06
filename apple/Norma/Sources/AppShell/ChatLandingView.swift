@@ -1,13 +1,24 @@
 import SwiftUI
 
 /// PURE: the empty-state subtitle — pinned directly (`ShellChatSurfaceTests`) since the wording
-/// names a specific menu entry and must track whichever one actually creates a session. App shell
-/// T6 (review fix): "New Chat" is the create door (`AppDelegate.newChat()`), not "Chat" (which only
-/// browses the landing) — this names "New Chat" precisely so the copy can't silently drift stale
-/// again the way the first retarget pass briefly left it (this SwiftUI file's own convention: bodies
+/// names a specific create door and must track whichever one actually creates a session. App shell
+/// T6 (review fix) named the menu bar's "New Chat" entry here — the only door then. Bugfix pass B4
+/// gives the landing its OWN "New Chat" button (the SAME door, injected — see `newChat` below), so
+/// the copy now points at the button instead of sending the user away to the menu bar — the exact
+/// stale-copy drift class this pin exists for (this SwiftUI file's own convention: bodies
 /// themselves are never unit-tested, only their pure decision helpers, per `DashboardTests`' file
 /// doc — extracting the string is what makes that possible here).
-let chatLandingEmptyStateSubtitle = "Start one from the menu bar's New Chat entry."
+let chatLandingEmptyStateSubtitle = "Start one with New Chat."
+
+/// PURE (bugfix pass B4): whether the landing renders its "New Chat" header button. Gated ONLY on
+/// the door being wired (`hasAction`) — deliberately NOT on the list: `hasRows` is in the signature
+/// precisely so the pin (`ShellChatSurfaceTests`) can state that presence is identical in the empty
+/// state and above a populated list, the same always-there header posture `ModeLandingView`'s "New"
+/// button has. Unwired (a shell built without the door — `AppWindowController`'s pure window/
+/// geometry tests pass no `openNewChat`) renders no dead button.
+func chatLandingShowsNewChatButton(hasAction: Bool, hasRows: Bool) -> Bool {
+    hasAction
+}
 
 /// app-shell T3: the Chat mode's landing — the first real landing surface, and the shape the other
 /// three follow (T4 generalizes it into `ModeLandingView`; this file is the one-mode instance that
@@ -23,17 +34,28 @@ let chatLandingEmptyStateSubtitle = "Start one from the menu bar's New Chat entr
 ///
 /// GALLERY EXTENSION POINT: the phone's own chat list is a `List` of title + relative time rows
 /// (`norma-ios`'s session list), which is what this mirrors; what does not transfer is the phone's
-/// swipe actions (no macOS equivalent worth faking) and its floating compose button — creating a
-/// chat is the menu bar's door (App shell T6's `AppDelegate.newChat()`), and a landing button that
-/// duplicated it would be a second create path with no owner.
+/// swipe actions (no macOS equivalent worth faking). Its floating compose button DOES transfer now
+/// (bugfix pass B4, header form): the landing's "New Chat" button is NOT the "second create path
+/// with no owner" the T3 report warned against — it is the ONE create door, `AppDelegate.newChat()`
+/// (create → summon `.session(id)` → the `isChatSession` self-heal), INJECTED through
+/// `AppWindowController.openNewChat` → `ShellRootView.newChat`; this view never talks to a client.
 struct ChatLandingView: View {
     @ObservedObject var nav: ShellNavigationModel
     @ObservedObject var directory: SessionDirectory
+    /// B4: the create door. `nil` for a shell built without one (`AppWindowController`'s pure
+    /// window/geometry tests) — the landing then renders no header at all
+    /// (`chatLandingShowsNewChatButton`), the same wiring-less fallback posture
+    /// `ShellRootView.host`/`dashboardWiring` follow.
+    var newChat: (() -> Void)? = nil
 
     private var rows: [SessionSummary] { sessionRows(for: .chat, in: directory.rows) }
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
+            if chatLandingShowsNewChatButton(hasAction: newChat != nil, hasRows: !rows.isEmpty) {
+                header
+                Divider()
+            }
             if rows.isEmpty {
                 emptyState
             } else {
@@ -54,6 +76,27 @@ struct ChatLandingView: View {
         // The same belt `ShellSidebar`/`SessionSidebar` carry: the shell's 5s poll (T2) only runs
         // while the window is visible, and this surface can appear before its first tick.
         .task { await directory.refresh() }
+    }
+
+    /// B4: the landing's own create affordance — `ModeLandingView.header`'s visual conventions
+    /// verbatim (right-aligned `plus.circle` label, plain style, secondary tint, same padding),
+    /// minus the tab picker chat doesn't have. Labeled "New Chat" — the door's established name
+    /// (the menu-bar entry, and the empty-state copy that points here) — where the code landing's
+    /// says "New" (its create opens a folder picker first; this one creates immediately).
+    private var header: some View {
+        HStack(spacing: 12) {
+            Spacer(minLength: 8)
+            Button {
+                newChat?()
+            } label: {
+                Label("New Chat", systemImage: "plus.circle")
+                    .font(.system(size: 12))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 
     private var emptyState: some View {

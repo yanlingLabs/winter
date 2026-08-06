@@ -361,8 +361,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // and had no other caller once T1 retargeted the menu item and the dock's reopen path. `newChat()`
     // itself SURVIVES, below, with new innards (App shell T6 review fix) — see its own doc comment.
 
-    /// App shell T6 (review fix): the menu bar's "New Chat" entry. T3's own report named this
-    /// task as chat-create's door ("creating a chat is still the menu bar's door until T6
+    /// App shell T6 (review fix): the ONE chat-create door — the menu bar's "New Chat" entry, and
+    /// (bugfix pass B4) the chat landing's own "New Chat" button, which reaches here through the
+    /// injected `AppWindowController.openNewChat` closure rather than growing a create path of its
+    /// own. T3's own report named this task as chat-create's door ("creating a chat is still the
+    /// menu bar's door until T6
     /// retargets it") — the FIRST retarget pass wrongly collapsed "New Chat" onto the same plain
     /// summon as "Chat", silently dropping the create. This restores create, on the ESTABLISHED
     /// bare-RPC pattern `ShellSessionHost.managementClient`/`ShellSessionHost.createSession(with:)`
@@ -443,6 +446,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             directory: model.directory,
             host: host,
             dashboardWiring: makeDashboardWiring(model: model),
+            // Bugfix pass B4: the chat landing's in-window "New Chat" button fires the SAME create
+            // door as the menu-bar entry — `newChat()` verbatim (create → summon `.session(id)` →
+            // the `isChatSession` self-heal), never a second `session.create` call site
+            // (`AppShellTests`' exactly-one-create wire pin).
+            openNewChat: { [weak self] in self?.newChat() },
             frame: centeredAppWindowFrame(visibleFrame: visible)
         )
         // The activation-policy machinery is RETARGETED, not rebuilt: a visible shell is a main

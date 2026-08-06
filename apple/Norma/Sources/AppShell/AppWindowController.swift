@@ -95,6 +95,14 @@ final class AppWindowController: NSObject, NSWindowDelegate {
     /// alongside `host`.
     let dashboardWiring: DashboardWiring?
 
+    /// Bugfix pass B4: the chat landing's "New Chat" door — `AppDelegate.newChat()` injected at
+    /// construction (the same one-owner discipline `dashboardWiring` follows): the landing's button
+    /// must fire the EXACT create-then-summon flow the menu-bar entry does (`newChat()`'s create →
+    /// `.session(id)` → the `isChatSession` self-heal), never a `session.create` call site of its
+    /// own. `nil` for a shell built without it (the pure window/geometry tests) — the landing then
+    /// renders no dead button (`chatLandingShowsNewChatButton`).
+    let openNewChat: (() -> Void)?
+
     /// Task 7: the Dashboard's current-pane memory — UNCONDITIONALLY constructed (unlike
     /// `dashboardWiring`): it has no `AppModel` dependency of its own, and a host-less/wiring-less
     /// shell still benefits from a real object here rather than an extra layer of optionality. See
@@ -137,7 +145,7 @@ final class AppWindowController: NSObject, NSWindowDelegate {
     /// expression is checked as a nonisolated context regardless of the enclosing initializer's
     /// own isolation — the exact trap `DashboardWindowController.init`'s `session:` parameter
     /// documents. The fallback is constructed in this (`@MainActor`) body instead.
-    init(directory: SessionDirectory, host: ShellSessionHost? = nil, dashboardWiring: DashboardWiring? = nil, navigation: ShellNavigationModel? = nil, frame: NSRect) {
+    init(directory: SessionDirectory, host: ShellSessionHost? = nil, dashboardWiring: DashboardWiring? = nil, navigation: ShellNavigationModel? = nil, openNewChat: (() -> Void)? = nil, frame: NSRect) {
         let window = NSWindow(
             contentRect: frame,
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -162,6 +170,7 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         self.navigation = navigationModel
         self.host = host
         self.dashboardWiring = dashboardWiring
+        self.openNewChat = openNewChat
 
         super.init()
 
@@ -186,7 +195,8 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         }
         window.contentView = NSHostingView(rootView: ShellRootView(
             nav: navigationModel, directory: directory, host: host,
-            dashboardWiring: dashboardWiring, dashboardSelection: dashboardSelection,
+            dashboardWiring: dashboardWiring, newChat: openNewChat,
+            dashboardSelection: dashboardSelection,
             pairingPresentation: pairingPresentation
         ))
         window.setFrame(frame, display: true)

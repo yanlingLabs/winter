@@ -19,6 +19,9 @@ import { formatRoutineLine } from "../routines-cli";
 import { formatMemoryList } from "../memory-cli";
 import { filterCodeSessions } from "../session-mode";
 import type { NormaClient } from "../client";
+// Type-only (erased at compile time — this module stays free of any runtime React/Ink dependency,
+// per the file doc): the picker request shape lives beside the component that renders it.
+import type { ChoiceRequest } from "./choice-menu";
 
 export interface CommandCtx {
   client: NormaClient;
@@ -38,6 +41,16 @@ export interface CommandCtx {
    *  show/validation-error/usage-error (nothing changed). Same optional-callback discipline as
    *  `onCwdChanged` above. */
   onModelChanged?(model: string, effort?: string): void;
+  /** Bugfix-pass B2: a command whose NO-ARG reply is a list the user is expected to PICK FROM
+   *  (`/model`'s catalogue, `/output-style`'s styles) calls this INSTEAD of dumping the list into
+   *  the transcript — the App renders the request as the bottom picker (choice-menu.tsx, the
+   *  completion-menu interaction grammar) and calls `onPick` with the chosen value on Enter (the
+   *  SAME settings write path the direct typed form takes); Esc dismisses with no write and no
+   *  note. Purely INFORMATIONAL replies (`/skills`, `/mcp`, `/sessions`, ...) never use this.
+   *  Optional, same discipline as `onCwdChanged`/`onModelChanged` above: callers with no picker
+   *  surface (headless ctxs, tests) simply don't wire it and the runner falls back to the
+   *  historical transcript note byte-identically. */
+  openChoice?(req: ChoiceRequest): void;
 }
 
 export interface SlashCommand {
@@ -82,6 +95,21 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
   const settings = loadSettings(settingsPath);
 
   if (action.kind === "show") {
+    // B2: with a picker surface wired AND a real catalogue to choose from (codex-oauth), the
+    // no-arg form IS the picker — the model list must never land in the transcript (the
+    // user-reported bug this fixes). The EFFORT knob stays direct-form-only (`/model --effort
+    // <level>`) — a second picker stage would double the interaction for the rare axis; the title
+    // discloses both the current value and the direct form. Esc = no write, no note.
+    if (ctx.openChoice && settings.provider.type === "codex-oauth") {
+      ctx.openChoice({
+        title: `model — effort: ${settings.provider.reasoningEffort ?? "default"} (/model --effort)`,
+        options: CODEX_MODELS.map((m) => ({ value: m.id, label: m.id, current: m.id === settings.provider.model })),
+        onPick: (slug) => applyModelPick(ctx, slug),
+      });
+      return;
+    }
+    // Headless fallback (no picker surface), and any provider without a fixed catalogue: the
+    // historical transcript note, byte-identical.
     const effortSuffix = settings.provider.reasoningEffort ? `  effort: ${settings.provider.reasoningEffort}` : "";
     const lines = [`${settings.provider.model}${effortSuffix}`];
     if (settings.provider.type === "codex-oauth") {
@@ -114,6 +142,21 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
   ctx.appendNote(`updated (${changed}) — takes effect next turn, no daemon restart needed`);
 }
 
+/** B2: the model picker's Enter path — the SAME write path as `/model <slug>` (validate via the
+ *  same helpers, `setProviderModel`, save, `onModelChanged` with both axes, the identical
+ *  confirmation note), just fed by a selection instead of a typed slug. Settings are re-read at
+ *  PICK time, not captured at open time — the picker may sit open across other writes. */
+function applyModelPick(ctx: CommandCtx, slug: string): void {
+  const settingsPath = join(resolveNormaHome(), "settings.json");
+  const settings = loadSettings(settingsPath);
+  const err = validateModelSlug(settings.provider.type, slug);
+  if (err) { ctx.appendNote(err); return; }
+  const next = setProviderModel(settings, slug);
+  saveSettings(settingsPath, next);
+  ctx.onModelChanged?.(next.provider.model, next.provider.reasoningEffort);
+  ctx.appendNote(`updated (model ${next.provider.model}) — takes effect next turn, no daemon restart needed`);
+}
+
 /** Mirrors main.ts `case "output-style"` (~:1546): NO client/daemon RPC at all — same
  *  no-daemon-restart precedent as /model above (the daemon's live style resolver re-resolves
  *  settings.outputStyle on the session's next turn). Reuses output-style-cli.ts's
@@ -140,7 +183,19 @@ async function runOutputStyle(ctx: CommandCtx, argText: string): Promise<void> {
   const current = settings.outputStyle ?? "default";
 
   if (action.action === "list") {
-    ctx.appendNote(store.list(ctx.cwd).map((s) => `${s.name === current ? "*" : " "} ${s.name.padEnd(14)} ${s.description}`).join("\n"));
+    const styles = store.list(ctx.cwd);
+    // B2: same picker-over-transcript-dump rule as /model's show branch — the style list is a
+    // choice the user acts on, so with a picker surface wired it opens the bottom picker
+    // (descriptions ride as row hints); the headless fallback below stays byte-identical.
+    if (ctx.openChoice && styles.length > 0) {
+      ctx.openChoice({
+        title: "output style",
+        options: styles.map((s) => ({ value: s.name, label: s.name, hint: s.description, current: s.name === current })),
+        onPick: (name) => applyOutputStylePick(ctx, name),
+      });
+      return;
+    }
+    ctx.appendNote(styles.map((s) => `${s.name === current ? "*" : " "} ${s.name.padEnd(14)} ${s.description}`).join("\n"));
     return;
   }
 
@@ -151,6 +206,22 @@ async function runOutputStyle(ctx: CommandCtx, argText: string): Promise<void> {
   }
   saveSettings(settingsPath, setOutputStyle(settings, action.name));
   ctx.appendNote(`Output style set to: ${action.name}`);
+}
+
+/** B2: the style picker's Enter path — the SAME write path as `/output-style <name>` (fresh
+ *  settings/store read at pick time, the same store.resolve validation and unknown-name note, the
+ *  identical confirmation note). */
+function applyOutputStylePick(ctx: CommandCtx, name: string): void {
+  const home = resolveNormaHome();
+  const settingsPath = join(home, "settings.json");
+  const settings = loadSettings(settingsPath);
+  const store = new OutputStyleStore({ normaHome: home, trust: new TrustStore(join(home, "trust.json")) });
+  if (!store.resolve(name, ctx.cwd)) {
+    ctx.appendNote(`Unknown output style: ${name}\nAvailable: ${store.list(ctx.cwd).map((s) => s.name).join(", ")}`);
+    return;
+  }
+  saveSettings(settingsPath, setOutputStyle(settings, name));
+  ctx.appendNote(`Output style set to: ${name}`);
 }
 
 /** Mirrors main.ts `case "status"` (~:929): `client.daemonStatus()`, same provider/"(none
