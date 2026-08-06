@@ -43,7 +43,7 @@ import { Chalk } from "chalk";
 import wrapAnsi from "wrap-ansi";
 import type { Block } from "./state";
 import { theme } from "./theme";
-import { createStreamingMarkdown, renderMarkdown, splitStableBoundary, type Highlighter } from "./markdown";
+import { createStreamingMarkdown, renderMarkdown, type Highlighter } from "./markdown";
 import { pickVerb, TURN_VERBS } from "./spinner-verbs";
 import { formatElapsed, formatTokens } from "../task-display";
 import { groupBlocks } from "./group-blocks";
