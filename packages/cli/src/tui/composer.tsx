@@ -51,6 +51,7 @@ import {
   end,
   home,
   insert,
+  isMouseArtifact,
   left,
   right,
   renderWithCursor,
@@ -581,7 +582,21 @@ export function Composer({
       // `input` to "" for all four (see the T3 doc comment above) — and ctrl/meta combos with no
       // dedicated branch above carry no printable text of their own (e.g. ctrl+c arrives as input
       // "c", key.ctrl true), so they stay excluded from the buffer.
-      if (input && !key.ctrl && !key.meta) setState((s) => insert(s, input));
+      //
+      // TUI renderer T1 — mouse bytes are refused HERE, before the insert fallback, not only at
+      // app.tsx's emitter patch: Ink's use-input strips one leading ESC and hands a full SGR
+      // report to every useInput consumer as the printable string "[<64;116;23M" (ctrl/meta both
+      // false), which this fallback used to type into the buffer — the user-reported
+      // wheel-into-composer leak. The emitter patch is a SEPARATE consumer bolted beside Ink's
+      // parser; whatever ever reaches this component (a report forwarded by an unpatched path, or
+      // the continuation of a report split inside its ESC prefix) must die at the input layer's
+      // last exit. `isMouseArtifact` swallows only whole-string mouse debris; a raw interior ESC
+      // (never producible by typing — Ink strips the one leading ESC and real keys parse to named
+      // keys) is refused on the same "unknown CSI never becomes text" rule.
+      if (input && !key.ctrl && !key.meta) {
+        if (isMouseArtifact(input) || input.includes("\x1b")) return;
+        setState((s) => insert(s, input));
+      }
     },
     { isActive: !disabled },
   );
