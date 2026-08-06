@@ -1,6 +1,6 @@
 /** `flatten-blocks.ts` (Phase 3c Task 2) — renders committed `Block`s (see `state.ts`) to
- *  pre-wrapped ANSI STRINGS: the unit the windowed transcript viewport (`viewport.ts`, Task 4)
- *  scrolls through. This SUPERSEDES `pager.tsx`'s `pagerLines` (deleted in Task 4) and re-expresses
+ *  pre-wrapped ANSI STRINGS: the unit the virtualized transcript viewport (`scroll-model.ts` +
+ *  `<TranscriptViewport>`, TUI renderer T2 — superseding Task 4's `viewport.ts`) scrolls through. This SUPERSEDES `pager.tsx`'s `pagerLines` (deleted in Task 4) and re-expresses
  *  3b's `transcript.tsx` per-block Ink renderers as string builders, so the VISIBLE text (glyphs,
  *  spacing, caps, wording) matches those components exactly — see per-kind notes below. An exact
  *  byte-for-byte ANSI match with `transcript.tsx` is NOT required (Ink owns its own layout/props;
@@ -43,7 +43,7 @@ import { Chalk } from "chalk";
 import wrapAnsi from "wrap-ansi";
 import type { Block } from "./state";
 import { theme } from "./theme";
-import { renderMarkdown, splitStableBoundary, type Highlighter } from "./markdown";
+import { createStreamingMarkdown, renderMarkdown, type Highlighter } from "./markdown";
 import { pickVerb, TURN_VERBS } from "./spinner-verbs";
 import { formatElapsed, formatTokens } from "../task-display";
 import { groupBlocks } from "./group-blocks";
@@ -165,38 +165,85 @@ function flattenCollapsedSummary(summary: string, columns: number): string[] {
   return gutterRows(2, `${ansi.dim("⏺")} `, "  ", [ansi.dim(`${summary} (ctrl+o to expand)`)], columns);
 }
 
-/** The IN-FLIGHT (not-yet-committed) active turn as wrapped ANSI lines — the string analog of
- *  `<ActiveTurn>` (active-turn.tsx), so `app.tsx` can JS-WINDOW it (tail-slice to ⌈rows/3⌉) into the
- *  pinned bottom bar instead of leaning on a Yoga `maxHeight` (HARD CONSTRAINT 2: Yoga clipping is
- *  unreliable). Mirrors `<ActiveTurn>`'s visible layout:
- *   - streaming assistant text: the 2-col `⏺` gutter (steady `theme.text` dot) + the stable prefix
- *     rendered through `renderMarkdown` then the still-growing `tail` as plain text (same
- *     `splitStableBoundary` split the component uses — the tail is NOT markdown-parsed, avoiding
- *     half-parsed flicker mid-stream);
- *   - each in-flight tool: the 2-col gutter (dot dimmed when `dimToolDot`, the blink the component
- *     drives off `nowMs` parity) + `bold(name)(argsHead)`.
- *  Returns [] when idle (no assistant text, no in-flight tools) — the component's "hidden when idle". */
-export function activeTurnLines(
-  assistant: string,
-  tools: { name: string; argsJson: string }[],
-  opts: { columns: number; highlight?: Highlighter; dimToolDot: boolean },
-): string[] {
-  const { columns, highlight, dimToolDot } = opts;
-  const out: string[] = [];
-  if (assistant) {
-    const { stable, tail } = splitStableBoundary(assistant);
-    const content: string[] = [];
-    if (stable) content.push(...renderMarkdown(stable, highlight).split("\n"));
-    if (tail) content.push(...tail.split("\n"));
-    out.push(...gutterRows(2, `${ansi.hex(theme.text)("⏺")} `, "  ", content, columns));
-  }
-  for (const t of tools) {
-    const argsHead = formatArgsHead(t.argsJson);
-    const headText = `${ansi.bold(t.name)}${argsHead ? `(${argsHead})` : ""}`;
-    const dot = dimToolDot ? ansi.dim("⏺") : "⏺";
-    out.push(...gutterRows(2, `${dot} `, "  ", headText.split("\n"), columns));
-  }
-  return out;
+/** T6 CC-parity SPACING RHYTHM — which block kinds open a new "conversation beat" and therefore
+ *  get ONE blank line above them (the CC reference gives every message group a top margin; adapted
+ *  here as a leading spacer emitted at ASSEMBLY time, never baked into the cached per-item lines,
+ *  since "am I first in the log?" is positional, not content):
+ *   - `user` and `assistant` — the conversation's beats. A blank line lands between a turn's end
+ *     and the next prompt, and between a tool cluster and the assistant text that follows it.
+ *   - Everything else stays TIGHT: tool cards/collapsed runs cluster under their assistant lead-in
+ *     (deliberate house deviation from CC's per-tool-card margin — REQUIRED by the T3 no-glue pin:
+ *     an in-flight tool head streams with no way to know the committed log precedes it, so a
+ *     committed-side-only gap would make the turn-end swap non-byte-identical; tight on both sides
+ *     keeps the swap exact), notes/skill lines are system meta, `turn-summary` is the turn's own
+ *     footer, and `interrupted` is a ⎿ continuation of the turn it ends.
+ *  The streamed twin: `makeStreamRenderer` emits the SAME leading blank above its assistant rows
+ *  when the caller says committed content precedes (`precededByContent`), so the swap parity the
+ *  T3 pins enforce holds row-for-row with the spacer included. */
+const BEAT_KINDS: ReadonlySet<Block["kind"]> = new Set(["user", "assistant"]);
+
+/** TUI renderer T3 — the in-flight turn rendered as TRANSCRIPT rows (the streaming block is the
+ *  line log's last row-group now, not a pinned-bar slice — mechanism report Q2/Q7 cures 1-2).
+ *  Supersedes the deleted `activeTurnLines`/`<ActiveTurn>` pair (absorbed here, T3). A stateful factory (one per App mount,
+ *  same lifecycle idiom as `makeFlattenCache`) because it owns a `createStreamingMarkdown`
+ *  instance — the monotonic stable-boundary cache that keeps per-delta work bounded to the open
+ *  markdown segment (markdown.ts's T3 pin).
+ *
+ *  SWAP PARITY (the no-glue guarantee's pure half, pinned by flatten-blocks.test.ts): the
+ *  assistant rows are built through the IDENTICAL `gutterRows` call `flattenBlock`'s assistant
+ *  case uses — same glyph, same gutter widths, same wrap — over `createStreamingMarkdown`'s
+ *  output, which is itself pinned byte-equal to `renderMarkdown(text)` at every prefix. So when
+ *  `assistant_message` commits the streamed text (the reducer swaps `activeAssistant` → a
+ *  committed block in ONE state update), the committed block's flattened rows are byte-identical
+ *  to the streamed rows of the same text: the swap repaints nothing.
+ *
+ *  BOUNDED EXCEPTIONS to that parity (disclosed at the code, T3 fix round 1): (1) a mid-stream
+ *  attach/resume holds only a suffix of the deltas (transients are never persisted) — the swap
+ *  then shows the full text, a real content change, not glue; (2) a reference-link definition
+ *  settled before its use streams renders literal until the swap resolves it (lex-composition,
+ *  one row); (3) past `STREAM_OPEN_SEGMENT_MAX` the streaming markdown DEGRADES to a plain dim
+ *  tail (markdown.ts, option B) — the swap's full render restyles it by design.
+ *
+ *  In-flight tool rows keep the pinned-bar era's exact shape (blinking dot via `dimToolDot`, bold
+ *  name + argsHead) and render AFTER the assistant rows — the same order their committed
+ *  counterparts take in the transcript, so a tool_result landing mid-turn also swaps in place. */
+export function makeStreamRenderer(): {
+  lines(
+    assistant: string,
+    tools: { name: string; argsJson: string }[],
+    opts: {
+      columns: number;
+      highlight?: Highlighter;
+      dimToolDot: boolean;
+      /** T6 spacing rhythm: true when the committed line log is non-empty (App passes
+       *  `bodyLines.length > 0`) — the streamed assistant rows then carry the SAME single leading
+       *  blank a committed assistant block gets from `makeFlattenCache` (see BEAT_KINDS above), so
+       *  the turn-end swap stays byte-identical spacer-and-all. Tool heads never gap (tight on
+       *  both sides by design). Defaults false: a stream with nothing above it opens no gap —
+       *  exactly the committed first-block shape. */
+      precededByContent?: boolean;
+    },
+  ): string[];
+} {
+  const streamingMd = createStreamingMarkdown();
+  return {
+    lines(assistant, tools, opts) {
+      const { columns, highlight, dimToolDot } = opts;
+      const out: string[] = [];
+      if (assistant) {
+        if (opts.precededByContent) out.push("");
+        const rendered = streamingMd.render(assistant, highlight);
+        out.push(...gutterRows(2, `${ansi.hex(theme.text)("⏺")} `, "  ", rendered.split("\n"), columns));
+      }
+      for (const t of tools) {
+        const argsHead = formatArgsHead(t.argsJson);
+        const headText = `${ansi.bold(t.name)}${argsHead ? `(${argsHead})` : ""}`;
+        const dot = dimToolDot ? ansi.dim("⏺") : "⏺";
+        out.push(...gutterRows(2, `${dot} `, "  ", headText.split("\n"), columns));
+      }
+      return out;
+    },
+  };
 }
 
 /** Memoizing wrapper over `flattenBlock` (+ the collapsed-run summary) across an APPEND-ONLY
@@ -254,6 +301,7 @@ export function makeFlattenCache(
             cached = flatten(blocks[i]!, opts);
             blockCache.set(i, cached);
           }
+          if (out.length > 0 && BEAT_KINDS.has(blocks[i]!.kind)) out.push(""); // T6 spacing rhythm (assembly-time, never cached)
           out.push(...cached);
         }
         return out;
@@ -293,6 +341,7 @@ export function makeFlattenCache(
             cached = flatten(item.block, opts);
             spanCache.set(key, cached);
           }
+          if (out.length > 0 && BEAT_KINDS.has(item.block.kind)) out.push(""); // T6 spacing rhythm (assembly-time, never cached)
           out.push(...cached);
         }
       }

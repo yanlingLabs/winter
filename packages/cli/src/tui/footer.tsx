@@ -1,110 +1,61 @@
-/** `<Footer>` (Phase 3b Task 5; Phase 3c Task 5 — exit-armed override; SP-policies Task 13 — 6-mode
- *  render) — the CC-shaped single dim hint line beneath the composer: an approval-policy mode
- *  indicator for every non-`ask` policy (`plan`/`dont-ask`/`accept-edits`/`auto`/`bypass`, colored
- *  per `theme.planMode`/`theme.warning`/`theme.autoAccept`(×2)/`theme.dangerMode` respectively;
- *  `ask` renders no special segment — it's the unmarked default), an `esc to interrupt` hint while a
- *  turn runs, and an agents pill (`N agent(s) · ctrl+a`) when any subagents are live — segments
- *  joined with `" · "`.
- *  Live child-transcript view T3: the pill's hint changed from `ctrl+t` to `ctrl+a` — `ctrl+t`
- *  never opened/selected an agent, it toggles the (unrelated) task-list view; the roster's own
- *  select-mode toggle (app.tsx) is `ctrl+a`, so this is a truthfulness fix, not a rebind (`ctrl+t`
- *  keeps its existing task-list behavior, unchanged, just no longer misattributed here).
- *  When none of those render, a fallback `? for shortcuts · shift+tab to cycle modes` hint keeps
- *  the line non-empty (cc-ui-study-chrome.md §1's `PromptInputFooterLeftSide` empty-state hint,
- *  adapted; Phase 3d T4 adds the `? for shortcuts` half, pointing at the composer's own `?`-on-
- *  empty -> `/help` shortcut — composer.tsx).
+/** `<Footer>` (Phase 3b Task 5; Phase 3c Task 5; SP-policies Task 13; TUI renderer T5 — rebuilt as
+ *  the thin renderer over `statusChromeModel`'s output).
  *
- *  T5: while the double-ctrl+C/ctrl+D exit window is armed (`exitArmed` carries WHICH key armed it —
- *  whole-branch review item 3), this REPLACES the whole line with the exact key-specific dim hint
- *  ("Press Ctrl-C again to exit" / "Press Ctrl-D again to exit", reference behavior) — no other
- *  segment renders alongside it, so the line reads unambiguously as "press again to exit" rather
- *  than getting lost among mode/agents chrome.
+ *  T5: ALL content decisions moved into the pure selector (`statusChromeModel`, state.ts) — which
+ *  segments render (policy mode / esc-hint / agents pill / fallback / activity chip / model+effort),
+ *  the running-work line, the two-line cap, and exit-armed's whole-chrome replacement. This
+ *  component only lays that model out: one `<Text wrap="truncate">` per StatusLine (each line is
+ *  EXACTLY one terminal row — never a wrap — so app.tsx's `bottomBarLayout` can count
+ *  `lines.length` and the height model never lies), dim base with per-segment theme colors, and
+ *  the line's own `sep` between segments (the established `" · "` on the status line; a plain
+ *  space between the work line's spinner glyph and its summary).
  *
- *  Pure — no client, no timers; `policy`/`running`/`agents`/`exitArmed` are all caller-supplied
- *  snapshots. */
+ *  Pure — no client, no timers; `lines` is the caller-computed snapshot (App runs the selector
+ *  with its live policy/model/roster/bgTasks/activity/exit-armed state each render; byte-stability
+ *  across idle renders is the SELECTOR's contract, pinned in state.test.ts + here). */
 
 import React from "react";
-import { Text } from "ink";
-import type { ApprovalPolicy } from "@norma/protocol";
+import { Box, Text } from "ink";
 import { theme } from "./theme";
-import type { AgentRow } from "./state";
+import type { StatusLine, StatusTone } from "./state";
 
-/** Which key armed the T5 double-press exit window — declared here (the component that renders the
- *  distinction) and imported by app.tsx (the component that tracks it). */
+/** Which key armed the T5 double-press exit window — declared here (its historical home; app.tsx
+ *  imports it) and structurally identical to `StatusChromeInput.exitArmed`'s union. */
 export type ExitKey = "ctrl-c" | "ctrl-d";
 
 export interface FooterProps {
-  policy: ApprovalPolicy;
-  running: boolean;
-  agents: AgentRow[];
-  /** T5 double-ctrl+C/ctrl+D exit flow: the key that armed the ~800ms window on its FIRST press;
-   *  `undefined` when not armed. Optional so every pre-T5 call site (and non-Ink test) stays
-   *  byte-identical. */
-  exitArmed?: ExitKey;
+  /** `statusChromeModel(...)`'s `lines`, rendered verbatim — one terminal row each. */
+  lines: StatusLine[];
 }
 
-export function Footer({ policy, running, agents, exitArmed }: FooterProps) {
-  if (exitArmed) {
-    return <Text dimColor>{exitArmed === "ctrl-d" ? "Press Ctrl-D again to exit" : "Press Ctrl-C again to exit"}</Text>;
+/** Tone → Ink color. `"dim"` returns undefined so the segment inherits the line's dim base. */
+function toneColor(tone: StatusTone): string | undefined {
+  switch (tone) {
+    case "planMode": return theme.planMode;
+    case "warning": return theme.warning;
+    case "autoAccept": return theme.autoAccept;
+    case "dangerMode": return theme.dangerMode;
+    case "accent": return theme.accent;
+    default: return undefined;
   }
+}
 
-  const segments: React.ReactNode[] = [];
-
-  if (policy === "plan") {
-    segments.push(
-      <Text key="mode" color={theme.planMode}>
-        ⏸ plan mode on (shift+tab to cycle)
-      </Text>,
-    );
-  } else if (policy === "dont-ask") {
-    segments.push(
-      <Text key="mode" color={theme.warning}>
-        ✕ dont-ask — auto-declines prompts (shift+tab to cycle)
-      </Text>,
-    );
-  } else if (policy === "accept-edits") {
-    segments.push(
-      <Text key="mode" color={theme.autoAccept}>
-        ✎ accept edits (shift+tab to cycle)
-      </Text>,
-    );
-  } else if (policy === "auto") {
-    segments.push(
-      <Text key="mode" color={theme.autoAccept}>
-        ⏵⏵ auto mode on (shift+tab to cycle)
-      </Text>,
-    );
-  } else if (policy === "bypass") {
-    segments.push(
-      <Text key="mode" color={theme.dangerMode}>
-        ⚠ bypass — all actions auto-approved (shift+tab to cycle)
-      </Text>,
-    );
-  }
-
-  if (running) segments.push(<Text key="interrupt">esc to interrupt</Text>);
-
-  if (agents.length > 0) {
-    const noun = agents.length === 1 ? "agent" : "agents";
-    segments.push(
-      <Text key="agents">
-        {agents.length} {noun} · ctrl+a
-      </Text>,
-    );
-  }
-
-  if (segments.length === 0) {
-    segments.push(<Text key="fallback">? for shortcuts · shift+tab to cycle modes</Text>);
-  }
-
+export function Footer({ lines }: FooterProps) {
   return (
-    <Text dimColor>
-      {segments.map((segment, i) => (
-        <Text key={`slot-${i}`}>
-          {i > 0 ? " · " : ""}
-          {segment}
+    <Box flexDirection="column">
+      {lines.map((line) => (
+        <Text key={line.key} dimColor wrap="truncate">
+          {line.segments.map((segment, i) => {
+            const color = toneColor(segment.tone);
+            return (
+              <Text key={`${line.key}-${i}`}>
+                {i > 0 ? line.sep : ""}
+                {color !== undefined ? <Text color={color}>{segment.text}</Text> : segment.text}
+              </Text>
+            );
+          })}
         </Text>
       ))}
-    </Text>
+    </Box>
   );
 }

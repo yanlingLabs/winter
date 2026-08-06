@@ -7,19 +7,28 @@
  *  FULLSCREEN LAYOUT (Task 4), inside a root `<Box flexDirection="column" height={rows-1}>` (HARD
  *  CONSTRAINT 1: an explicit numeric height keeps Ink's `outputHeight < stdout.rows` unconditionally,
  *  so Ink never emits the scrollback-erasing clearTerminal):
- *    <Box flexGrow={1}>            — the transcript viewport: EXACTLY the visible lines of the flattened
- *                                    line log (welcome header ++ `makeFlattenCache().lines(committed)`),
- *                                    sliced by `viewport.ts` to `viewH` = (rows-1) − bottomBarRows, ONE
+ *    <TranscriptViewport>          — the transcript viewport (transcript.tsx, TUI renderer T2):
+ *                                    EXACTLY the visible lines of the flattened line log (welcome
+ *                                    header ++ `makeFlattenCache().lines(committed)`), sliced by
+ *                                    `scroll-model.ts` to `viewH` = (rows-1) − bottomBarRows, ONE
  *                                    <Text> per line (HARD CONSTRAINT 2: JS-window everything; never
- *                                    lean on Yoga overflow). `flexGrow` pushes the bar to the bottom
- *                                    when the log is shorter than the viewport.
- *    <Box flexShrink={0}>          — the pinned bottom bar, top-to-bottom:
- *      activeTurn (tail-sliced)     — the in-flight streaming turn, JS tail-capped at ⌈rows/3⌉ lines.
+ *                                    lean on Yoga overflow), plus the `↓ N newer lines` indicator
+ *                                    while scrolled back. Its root Box `flexGrow`s to push the bar
+ *                                    to the bottom when the log is shorter than the viewport.
+ *                                    While a turn streams, the in-flight assistant text + tool heads
+ *                                    are the line log's LAST row-group (TUI renderer T3 — streaming
+ *                                    lives inside the transcript; `makeStreamRenderer`), so the page
+ *                                    scrolls instead of a pinned block self-scrolling, and turn-end
+ *                                    swaps streamed rows for the committed block byte-identically.
+ *    <Box flexShrink={0}>          — the pinned bottom bar (chrome only now), top-to-bottom:
  *      [TaskList]                   — when tasks exist AND `tasksVisible` (DEFAULT TRUE; ctrl+t toggles).
  *      Spinner                      — animated in-progress indicator (only while a turn runs).
  *      PendingCards | Composer      — a card takes over input when `state.pending` is set.
  *      [AgentList]                  — the subagent tree, only while any agent is live.
- *      Footer                       — policy/interrupt/agents hint line.
+ *      Footer                       — the T5 status chrome (statusChromeModel, state.ts): one line
+ *                                     (policy · hints · agents pill · activity chip · model+effort),
+ *                                     two while running work exists (spinner + task summary) — never
+ *                                     more; its row count feeds bottomBarLayout's accounting.
  *
  *  KEY ROUTING — TWO `useInput` hooks, deliberately split (Phase 3c Task 5 review finding: a single
  *  `isActive: !state.pending` hook made ctrl+C dead the instant a pending card took over input, and
@@ -42,12 +51,13 @@
  *       shows the exact key-specific "Press Ctrl-C|Ctrl-D again to exit" hint (below).
  *  Home/End when the composer is EMPTY jump the transcript to its top/bottom (spec §5) — routed
  *  through the composer's T3 raw side-channel (the single consumer of those byte sequences), which
- *  calls back into this App's `scrollToTop`/`scrollToBottom` viewport updates instead of running its
+ *  calls back into this App's `scrollToTop`/`followBottom` scroll updates instead of running its
  *  cursor ops; with text in the buffer they keep their cursor semantics and never scroll.
- *  Mouse SGR reports (wheel + any button/motion) are intercepted at the shared stdin input emitter
- *  and swallowed BEFORE any `useInput` consumer (either hook here, the composer's, or a pending
- *  card's) sees them — wheel scrolls ±3, every other mouse report is dropped (so no mouse bytes ever
- *  land in the composer buffer). Neither that emitter patch nor the composer's own T3 raw side-
+ *  Mouse reports (SGR or legacy X10; wheel + any button/motion) are intercepted at the shared stdin
+ *  input emitter and swallowed BEFORE any `useInput` consumer (either hook here, the composer's, or
+ *  a pending card's) sees them — wheel arrives as a first-class `WheelEvent` (input-model.ts, TUI
+ *  renderer T1) scrolling by its `lines`, every other mouse report is dropped (so no mouse bytes
+ *  ever land in the composer buffer). Neither that emitter patch nor the composer's own T3 raw side-
  *  channel ever matches \x03/\x04, so neither interferes with the exit hook.
  *
  *  CHILD-TRANSCRIPT VIEW (child-transcript-view T3, CC sub-agents parity): ctrl+a (intercepted at
@@ -77,24 +87,24 @@ import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } 
 import { Box, Text, useInput, useStdin } from "ink";
 import { Chalk } from "chalk";
 import wrapAnsi from "wrap-ansi";
-import { METHODS, type ApprovalPolicy, type SessionEvent } from "@norma/protocol";
+import { METHODS, type ApprovalPolicy, type SessionActivity, type SessionEvent } from "@norma/protocol";
 import { POLICY_ORDER } from "./policy-order";
-import { initialState, reduce, type AgentRow, type Block, type LocalEvent, type PendingCard, type TuiState } from "./state";
-import { activeTurnLines, makeFlattenCache } from "./flatten-blocks";
-import { scrollBy, scrollToBottom, scrollToTop, viewportSlice, type ViewportState } from "./viewport";
+import { initialState, reduce, statusChromeModel, type AgentRow, type Block, type LocalEvent, type PendingCard, type TuiState } from "./state";
+import { makeFlattenCache, makeStreamRenderer } from "./flatten-blocks";
+import { applyWheel, followBottom, onContentGrown, scrollToTop, type ScrollState } from "./scroll-model";
+import { TranscriptViewport } from "./transcript";
 import { collapseCompleted, sortTasksForDisplay, type TaskRow } from "../task-display";
-import { renderWithCursor, type InputState } from "./input-model";
+import { createMouseFilter, isMouseArtifact, renderWithCursor, type InputState } from "./input-model";
 import { Spinner } from "./spinner";
 import { TaskList } from "./task-list";
 import { AgentList, FINISH_LABEL } from "./agent-list";
 import { Footer, type ExitKey } from "./footer";
 import { Composer } from "./composer";
 import { PendingCards, type AnswerPayload } from "./pending-cards";
-import { parseMouseInput, createMouseReportFilter } from "./alt-screen";
 import { theme } from "./theme";
 import { loadSafeHighlighter } from "./highlight-guard";
 import type { Highlighter } from "./markdown";
-import type { EventBridge } from "./event-bridge";
+import { makeDeltaCoalescer, type EventBridge } from "./event-bridge";
 import type { parsePlanResponse } from "../plan-response";
 import { runCommand, type CommandCtx } from "./commands";
 import { buildFileIndex } from "./file-index";
@@ -131,9 +141,27 @@ export interface AppProps {
   sessionId: string;
   cwd: string;
   initialPolicy: ApprovalPolicy;
-  /** Welcome-banner data (main.ts threads these through mountTui). */
+  /** Welcome-banner data (main.ts threads these through mountTui). `model` doubles as the status
+   *  chrome's GLOBAL model seed (TUI renderer T5) — the settings.json value read at mount. */
   version: string;
   model: string;
+  /** T5 status chrome: the global reasoning effort at mount (settings.provider.reasoningEffort),
+   *  read alongside `model` in main.ts. Optional — absent renders the bare model slug. */
+  effort?: string;
+  /** T5 status chrome, resume route only: the session's PER-SESSION model/effort overrides off the
+   *  resume path's existing `session.list` read (`SessionRow.model`/`.effort`, set via the phone's
+   *  `session.setModel`/`.setEffort` — the daemon resolves `meta.model || global`, engine.ts's
+   *  `resolveSel`). When set, the chrome shows the override and `/model`'s GLOBAL switch does NOT
+   *  move it (the daemon wouldn't either — truth over recency). Each axis is independent, exactly
+   *  like the daemon's own resolution. No wire event announces a later `session.setModel`, so a
+   *  mid-session override change from another client stays invisible until re-resume (disclosed
+   *  T5 limitation; polling for it would be a new wire read). */
+  sessionModelOverride?: string;
+  sessionEffortOverride?: string;
+  /** T5 status chrome, resume route only: the session's activity off that same `session.list` row —
+   *  seeds the chip until the first live `session_activity` transient arrives (a resumed
+   *  backgrounded session emits none on attach: its derived state didn't change). */
+  initialActivity?: SessionActivity;
   /** Injectable clock (tests). Defaults to Date.now — the ONLY place Date.now enters; passed to
    *  `reduce` strictly as the injected `nowMs`, keeping the reducer pure. Also times the T5
    *  double-press exit window (never `Date.now` directly). */
@@ -159,15 +187,19 @@ const readRows = (): number => (typeof process.stdout.rows === "number" ? proces
 const readCols = (): number => (typeof process.stdout.columns === "number" ? process.stdout.columns : 80);
 
 /** The welcome header — the FIRST lines of the transcript line log (prepended once; they scroll off
- *  the top as the transcript grows, exactly like any other scrollback line). Bold-accent `Norma` +
- *  dim version, then a dim `model · cwd` line, then a blank spacer. A fixed-level Chalk instance
- *  (same reason as flatten-blocks.ts / markdown.ts: the ambient default downgrades to level 0 under
- *  a non-TTY and would strip these codes). */
+ *  the top as the transcript grows, exactly like any other scrollback line). T6 CC-parity polish:
+ *  an accent `✻` identity mark (the CC reference leads its banner with a brand glyph beside a text
+ *  column — adapted to Norma's spark, the glyph the spinner/notes already own) + bold-accent
+ *  `Norma` + dim version, then the dim `model · cwd` context line indented 2 columns so it sits
+ *  under the wordmark exactly like the transcript's own gutter content column. Still exactly 3
+ *  lines — the banner's row count is load-bearing for the scroll tests' geometry. A fixed-level
+ *  Chalk instance (same reason as flatten-blocks.ts / markdown.ts: the ambient default downgrades
+ *  to level 0 under a non-TTY and would strip these codes). */
 function welcomeLines(version: string, model: string, cwd: string): string[] {
   const ansi = new Chalk({ level: 3 });
   return [
-    `${ansi.hex(theme.accent).bold("Norma")}${ansi.dim(` v${version}`)}`,
-    ansi.dim(`${model} · ${cwd}`),
+    `${ansi.hex(theme.accent)("✻")} ${ansi.hex(theme.accent).bold("Norma")}${ansi.dim(` v${version}`)}`,
+    `  ${ansi.dim(`${model} · ${cwd}`)}`,
     "",
   ];
 }
@@ -229,21 +261,53 @@ function composerRows(text: string, cursor: number, columns: number): number {
   return 2 + Math.max(1, contentRows);
 }
 
-/** The pinned bottom bar's rendered line count — subtracted from `rows-1` to size the transcript
+/** TUI renderer T3 — the chrome slot's hard budget: the pinned bottom bar may use at most this
+ *  fraction of the TERMINAL's rows (mechanism report Q7 cure 1 / Q4: CC's live region is
+ *  `maxHeight 50%`). Enforced by `bottomBarLayout` below — the pure layout model whose allotments
+ *  the render honors via JS-windowing (HARD CONSTRAINT 2), so the model's number IS the height. */
+export const BAR_MAX_FRACTION = 0.5;
+
+/** `bottomBarLayout`'s allotments — what the render is ALLOWED to draw. `rows` is the bar's total;
+ *  the rest are the per-piece grants the JSX honors: `showTasks` (all-or-nothing — tasks shed
+ *  FIRST under pressure; ctrl+t re-shows nothing until room frees), `agentsShown` roster rows (2
+ *  lines each; when fewer than the roster's total, ONE extra `… +N more agents` line renders and
+ *  is counted — unless not even that fits, in which case the footer's own `N agents` pill remains
+ *  the honest count), `composerContentRows` (the capped composer's visible wrapped content rows —
+ *  the window slides with the cursor, composer.tsx's `windowComposerContent`), and `planBodyRows`
+ *  (a plan card's visible body lines; truncation adds one counted disclosure line). */
+export interface BottomBarLayout {
+  rows: number;
+  showTasks: boolean;
+  agentsShown: number;
+  agentOverflow: number;
+  composerContentRows: number;
+  planBodyRows: number;
+}
+
+/** The pinned bottom bar's layout model — subtracted from `rows-1` to size the transcript
  *  viewport. Deliberately a JS line-count model (HARD CONSTRAINT 2: the frame height must be
  *  computed, never guessed via Yoga). Slight OVER-estimates are safe (they only leave blank space in
  *  the flexGrow viewport); the risk is UNDER-estimating so the viewport overflows its flex share and
  *  Yoga shrink-distorts — so the fixed pieces (footer 1, the T5 "Resuming conversation…" line 1 while
  *  active) and the per-row task/agent counts are chosen to match the components' natural (unwrapped)
  *  heights; the composer alone is wrap-aware (`composerRows` above, T5's hard-requirement fix) —
- *  task subjects/footer stay best-effort single-line estimates, per that same review. */
-export function bottomBarRows(input: {
+ *  task subjects/footer stay best-effort single-line estimates, per that same review.
+ *
+ *  T3 CAP SEMANTICS: `totalRows` (the terminal's rows) bounds the bar at
+ *  `floor(totalRows × BAR_MAX_FRACTION)`. Essentials are never shed — footer, spinner, resuming,
+ *  the completion menu (R4: its behavior is untouchable), the composer's borders + at least ONE
+ *  content row, a card's fixed rows — so on absurdly tiny terminals the essentials floor wins over
+ *  the cap (rows ≤ max(cap, floor), pinned). Grant order above the floor: input-slot content
+ *  (composer window / plan body) first, then agents (windowed, +1 overflow line), then tasks
+ *  (all-or-nothing, first to shed). The question card keeps its natural estimate (bounded by its
+ *  option count in practice — disclosed, not capped). Omitting `totalRows` (legacy tests) means
+ *  "uncapped": every piece gets its natural height, byte-identical to the pre-T3 model. */
+export function bottomBarLayout(input: {
   tasksVisible: boolean;
   tasks: TaskRow[];
   agents: AgentRow[];
   running: boolean;
   pending: PendingCard | null;
-  activeTurnRows: number;
   /** Terminal width — feeds the composer's wrap-aware row count (or is simply unused when a card
    *  replaces the composer). */
   columns: number;
@@ -259,20 +323,83 @@ export function bottomBarRows(input: {
    *  `composerCursor` already use above). Irrelevant while `pending` is set for the same reason:
    *  the composer (and its menu) isn't even mounted then. */
   menuRows: number;
-}): number {
-  const { tasksVisible, tasks, agents, running, pending, activeTurnRows, columns, composerText, composerCursor, resuming, menuRows } = input;
-  let n = activeTurnRows; // in-flight active turn (already tail-capped at ⌈rows/3⌉)
-  if (tasks.length > 0 && tasksVisible) n += taskListRows(tasks);
-  if (running) n += 1; // Spinner
-  if (resuming) n += 1; // "Resuming conversation…"
-  n += pending ? pendingCardRows(pending) : composerRows(composerText, composerCursor, columns) + menuRows;
-  if (agents.length > 0) n += agents.length * 2; // each agent: head row + continuation row
-  n += 1; // Footer
-  return n;
+  /** TUI renderer T5: the status chrome's rendered row count — `statusChromeModel(...).lines.length`
+   *  (1, or 2 while running work exists; the selector caps it there). ESSENTIAL rows, never shed —
+   *  counted so the 50% cap sheds OTHER content when the work line appears. Optional, defaulting
+   *  to the pre-T5 footer's flat 1, so every legacy call site is byte-identical. */
+  chromeRows?: number;
+}, totalRows: number = Number.POSITIVE_INFINITY): BottomBarLayout {
+  const { tasksVisible, tasks, agents, running, pending, columns, composerText, composerCursor, resuming, menuRows, chromeRows = 1 } = input;
+  // TUI renderer T3: the in-flight streaming turn no longer lives in this bar — it renders inside
+  // the transcript's line log (`makeStreamRenderer` rows appended to `lineLog` in App below), so
+  // this model counts only chrome: tasks · spinner · resuming · card|composer+menu · agents · chrome.
+  const cap = Math.floor(totalRows * BAR_MAX_FRACTION);
+  let used = chromeRows + (running ? 1 : 0) + (resuming ? 1 : 0); // status chrome + Spinner + "Resuming conversation…"
+
+  // --- input slot (essential; its CONTENT is the first grant above the floor) ---
+  let composerContentRows = 0;
+  let planBodyRows = 0;
+  if (pending) {
+    if (pending.kind === "plan") {
+      used += 5; // "Plan" header + the fixed 3-line menu + the choose line
+      const natural = pending.plan.split("\n").length;
+      const budget = Math.max(1, cap - used);
+      planBodyRows = natural <= budget ? natural : Math.max(1, budget - 1); // -1 reserves the "… +N more lines" row
+      used += planBodyRows + (planBodyRows < natural ? 1 : 0);
+    } else {
+      used += pendingCardRows(pending); // approval/question: natural estimate (see doc above)
+    }
+  } else {
+    used += 2 + menuRows; // border rules + the completion menu (both essential — R4)
+    const natural = composerRows(composerText, composerCursor, columns) - 2; // content rows only
+    composerContentRows = Math.min(natural, Math.max(1, cap - used));
+    used += composerContentRows;
+  }
+
+  // --- agents: windowed to fit (2 rows each; +1 overflow line when truncated and any row fits) ---
+  let agentsShown = agents.length;
+  let agentOverflow = 0;
+  if (agents.length > 0) {
+    const budget = cap - used;
+    if (agents.length * 2 <= budget) {
+      used += agents.length * 2;
+    } else {
+      agentsShown = Math.max(0, Math.floor((budget - 1) / 2));
+      agentOverflow = agents.length - agentsShown;
+      used += agentsShown * 2 + (agentsShown > 0 ? 1 : 0); // the footer pill still counts a fully-hidden roster
+    }
+  }
+
+  // --- tasks: all-or-nothing, the first thing shed under pressure ---
+  let showTasks = false;
+  if (tasks.length > 0 && tasksVisible) {
+    const t = taskListRows(tasks);
+    if (used + t <= cap) {
+      showTasks = true;
+      used += t;
+    }
+  }
+
+  return { rows: used, showTasks, agentsShown, agentOverflow, composerContentRows, planBodyRows };
+}
+
+/** The bar's total row count — `bottomBarLayout`'s one-number view (kept as the established name;
+ *  same model, same cap). */
+export function bottomBarRows(input: Parameters<typeof bottomBarLayout>[0], totalRows?: number): number {
+  return bottomBarLayout(input, totalRows).rows;
+}
+
+/** TUI renderer T3 — where the agents WINDOW starts when the roster is truncated: 0 normally, but
+ *  while select mode's highlight sits past the window it slides so the highlighted row stays
+ *  visible (the highlight is the reason the user is looking). Pure; exported for tests. */
+export function agentWindowStart(total: number, shown: number, selIdx: number | null): number {
+  if (shown <= 0 || total <= shown || selIdx === null) return 0;
+  return Math.min(Math.max(0, selIdx - shown + 1), total - shown);
 }
 
 export function App({
   client, bridge, sessionId, cwd, initialPolicy, version, model,
+  effort, sessionModelOverride, sessionEffortOverride, initialActivity,
   now = Date.now, onExitRequest, resumeTargetSeq,
 }: AppProps) {
   const [state, dispatch] = useReducer(
@@ -316,6 +443,15 @@ export function App({
   // `ctx.cwd`.
   const appendNote = useCallback((text: string) => dispatch({ type: "local_note", text }), []);
   const cwdRef = useRef(cwd);
+
+  // TUI renderer T5 — the status chrome's LIVE GLOBAL model/effort: seeded from the mount-time
+  // settings read (props), flipped by `/model`'s post-write `onModelChanged` callback (commands.ts)
+  // — the truthful live source, since /model is the only in-TUI writer and no wire event announces
+  // a global model change. Per-session overrides (resume-route props) are applied at display time
+  // below, per axis, mirroring the daemon's own `meta.model || global` resolution.
+  const [liveGlobal, setLiveGlobal] = useState<{ model: string; effort?: string }>({ model, effort });
+  const onModelChanged = useCallback((m: string, e?: string) => setLiveGlobal({ model: m, effort: e }), []);
+
   const onRunCommand = useCallback((text: string) => {
     const ctx: CommandCtx = {
       client: client as unknown as NormaClient,
@@ -323,9 +459,10 @@ export function App({
       cwd: cwdRef.current,
       appendNote,
       onCwdChanged: (newCwd: string) => { cwdRef.current = newCwd; },
+      onModelChanged,
     };
     void runCommand(ctx, text);
-  }, [client, sessionId, appendNote]);
+  }, [client, sessionId, appendNote, onModelChanged]);
 
   // Phase 3d T3: the "@"-file mention index (file-index.ts) — App owns the ONE lazy build for the
   // composer's whole lifetime, per the brief ("keep it simple: one build per session, no refresh in
@@ -359,7 +496,7 @@ export function App({
   const [resuming, setResuming] = useState<boolean>(() => resumeTargetSeq !== undefined && resumeTargetSeq > 0);
 
   // Terminal geometry, live off process.stdout (+ a resize listener). Ink lays the root out at an
-  // explicit height=rows-1, and the transcript/active-turn are pre-wrapped at `columns`.
+  // explicit height=rows-1, and the transcript (incl. its streamed tail) is pre-wrapped at `columns`.
   const [rows, setRows] = useState(readRows);
   const [columns, setColumns] = useState(readCols);
   useEffect(() => {
@@ -368,8 +505,9 @@ export function App({
     return () => { process.stdout.off("resize", onResize); };
   }, []);
 
-  // Scroll state for the windowed transcript (viewport.ts). Starts stuck to the bottom (auto-follow).
-  const [vp, setVp] = useState<ViewportState>(() => scrollToBottom());
+  // Scroll state for the virtualized transcript (scroll-model.ts, TUI renderer T2). Bottom-anchored:
+  // `offset` counts rows above the log's bottom, `follow` is stick-to-bottom. Starts followed.
+  const [scroll, setScroll] = useState<ScrollState>(followBottom);
 
   // ---- Live child-transcript view (child-transcript-view T3) -----------------------------------
   // `agentSel` — roster select mode's highlight index into `visibleAgents` (null = off; toggled by
@@ -388,8 +526,9 @@ export function App({
   );
 
   // Roster-shrink bookkeeping: select mode exits when nothing is left to select; an out-of-range
-  // highlight (a row above it vanished) folds back to the last row — same "fold a clamp back into
-  // state" convention as the viewport's own clampedVp effect below.
+  // highlight (a row above it vanished) folds back to the last row — the app's "fold a clamp back
+  // into state" convention (the scroll model, by contrast, render-time-clamps in visibleSlice and
+  // needs no fold-back).
   useEffect(() => {
     if (agentSel === null) return;
     if (visibleAgents.length === 0) setAgentSel(null);
@@ -409,10 +548,11 @@ export function App({
     });
   }, [state.agents, childViewId]);
 
-  // Opening/closing a child view re-sticks the viewport to the bottom — a fresh view starts at its
-  // own tail, and returning to main resumes auto-follow (never a stale scroll offset from the
-  // OTHER view's line log).
-  useEffect(() => { setVp(scrollToBottom()); }, [childViewId]);
+  // Opening/closing a child view re-follows the bottom — a fresh view starts at its own tail, and
+  // returning to main resumes auto-follow (never a stale scroll offset from the OTHER view's line
+  // log). Ordering vs the growth-sync effect below is a non-issue: whichever lands last, a
+  // compensation updater over a followed state is a no-op, and this absolute reset wins either way.
+  useEffect(() => { setScroll(followBottom()); }, [childViewId]);
 
   // The child view is "open" only while its roster row still exists — the row is the header/status
   // source, and the auto-close effect above resets `childViewId` on the next tick anyway; gating
@@ -428,19 +568,32 @@ export function App({
   // Whole-branch review item 2 (spec §5, previously dead): Home/End with an EMPTY composer jump the
   // transcript to its top/bottom. The composer's T3 raw side-channel is the single consumer of those
   // byte sequences, so it calls back through these instead of its cursor ops when its text is empty
-  // (see composer.tsx). `scrollToTop` unsticks (nothing below the top to follow); `scrollToBottom`
-  // re-sticks so the tail auto-follows again.
-  const onComposerScrollTop = useCallback(() => setVp((cur) => scrollToTop(cur)), []);
-  const onComposerScrollBottom = useCallback(() => setVp(() => scrollToBottom()), []);
+  // (see composer.tsx). `scrollToTop` unfollows onto the concrete max offset (nothing below the top
+  // to follow; growth compensation then HOLDS the top); `followBottom` re-follows the tail. Both
+  // read the live geometry refs at event time (declared below, initialized long before any event).
+  const onComposerScrollTop = useCallback(() => setScroll(() => scrollToTop(viewHRef.current, lineCountRef.current)), []);
+  const onComposerScrollBottom = useCallback(() => setScroll(followBottom()), []);
 
   // Subscribe to the bridge; flush its pre-subscribe (attach-replay) backlog then forward live. T5:
   // also clears `resuming` once the replay reaches `resumeTargetSeq` — every `SessionEvent` carries a
   // `seq` (protocol/events.ts's `Base`), so this needs no per-type special-casing (a `task_notification`
   // still reduces to a no-op in state.ts, replaying invisibly, but its `seq` still counts here).
-  useEffect(() => bridge.subscribe((e) => {
-    dispatch(e);
-    if (resumeTargetSeq !== undefined && e.seq >= resumeTargetSeq) setResuming(false);
-  }), [bridge, resumeTargetSeq]);
+  //
+  // TUI renderer T4 — the coalescer sits between the bridge and `dispatch`: `assistant_delta`
+  // bursts fold into ONE merged dispatch per ~16ms window (per thread), so streaming costs one
+  // React commit per window instead of one per delta; every other event type flushes ahead of
+  // itself and passes through untouched (wire order preserved — see makeDeltaCoalescer's doc).
+  // The `resuming` check stays at ARRIVAL (not flush): it reads only `e.seq`, and clearing the
+  // banner a window early is strictly more honest than a window late. Cleanup disposes the
+  // coalescer (flushes, cancels the timer) BEFORE unsubscribing replaces the handler.
+  useEffect(() => {
+    const coalescer = makeDeltaCoalescer(dispatch);
+    const unsubscribe = bridge.subscribe((e) => {
+      coalescer.push(e);
+      if (resumeTargetSeq !== undefined && e.seq >= resumeTargetSeq) setResuming(false);
+    });
+    return () => { unsubscribe(); coalescer.dispose(); };
+  }, [bridge, resumeTargetSeq]);
 
   // Ticking clock so elapsed/spinner chrome advances between real events (legacy 120ms tick twin).
   useEffect(() => {
@@ -460,6 +613,10 @@ export function App({
   // columns/verbose changes are handled by the cache's own internal invalidation.
   const cache = useMemo(() => makeFlattenCache(), [highlight]);
 
+  // TUI renderer T3: the in-flight turn's row source — one stateful renderer per mount (it owns the
+  // incremental streaming-markdown boundary; highlight changes reset it internally, so no dep here).
+  const streamRenderer = useMemo(() => makeStreamRenderer(), []);
+
   // --- derived per render -------------------------------------------------------------------------
   const welcome = useMemo(() => welcomeLines(version, model, cwd), [version, model, cwd]);
   const bodyLines = cache.lines(state.committed, { columns, verbose, highlight });
@@ -477,24 +634,98 @@ export function App({
     () => (childBlocksArr === null ? null : makeFlattenCache().lines(childBlocksArr, { columns, verbose, highlight })),
     [childBlocksArr, columns, verbose, highlight],
   );
-  const lineLog = childLines ?? welcome.concat(bodyLines);
 
-  const activeCap = Math.ceil(rows / 3);
+  // TUI renderer T3 — streaming lives INSIDE the transcript (mechanism report Q7 cures 1-2): the
+  // in-flight turn's rows are the line log's LAST row-group, so streamed complete lines join the
+  // scrollable flow the moment they exist (scroll back mid-stream and read them — growth rides the
+  // SAME onContentGrown path as committed content, and the `↓ N newer lines` indicator counts them
+  // honestly), and turn-end's reducer swap (committed+block / activeAssistant="" in ONE update)
+  // replaces these rows with the committed block's byte-identical rows — no glue frame. The child
+  // view deliberately excludes MAIN's stream rows (it shows the child's own blocks; MAIN keeps
+  // streaming into its own log for the return). dimToolDot only flips row CONTENT (1 row), never
+  // row count, so the 500ms blink never triggers growth compensation.
   const dimToolDot = Math.floor(nowMs / 500) % 2 === 0;
-  const atAll = activeTurnLines(state.activeAssistant, state.activeTools, { columns, highlight, dimToolDot });
-  const atVisible = atAll.slice(-activeCap); // JS tail-slice (HARD CONSTRAINT 2)
+  // T6 spacing rhythm: `precededByContent` tells the stream renderer whether committed rows sit
+  // above it — its assistant rows then open with the same single blank a committed assistant block
+  // gets from the flatten cache, so the turn-end swap stays byte-identical spacer-and-all.
+  const streamRows = streamRenderer.lines(state.activeAssistant, state.activeTools, { columns, highlight, dimToolDot, precededByContent: bodyLines.length > 0 });
+  const lineLog = childLines ?? welcome.concat(bodyLines, streamRows);
 
-  const barRows = bottomBarRows({
+  // TUI renderer T5 — the bottom status chrome's content, from the ONE pure selector
+  // (`statusChromeModel`, state.ts): policy + esc-hint + agents pill + activity chip + live
+  // model/effort on the status line, plus the running-work line (subagents + bg tasks) while any
+  // work runs. Display model/effort resolve per axis: session override (resume route) wins over
+  // the live global, mirroring the daemon's `meta.model || base.model`. `nowMs` only moves the
+  // work line's spinner glyph — idle chrome is byte-stable across ticks (the T4 flicker pin).
+  const chrome = statusChromeModel({
+    policy,
+    running: state.turnRunning,
+    agents: visibleAgents,
+    bgTasks: state.bgTasks,
+    model: sessionModelOverride ?? liveGlobal.model,
+    effort: sessionEffortOverride ?? liveGlobal.effort,
+    activity: state.activity ?? initialActivity,
+    exitArmed: exitArmedKey,
+    nowMs,
+  });
+
+  // TUI renderer T3: the capped layout model — the bar's allotments AND its height come from the
+  // one pure computation (`bottomBarLayout`, ≤ 50% of terminal rows), and the JSX below draws
+  // exactly what it granted (JS-windowing, HARD CONSTRAINT 2) so the height model never lies.
+  // T5: the chrome's rendered row count feeds the accounting — the selector's output IS the
+  // rendered height (one truncate-capped row per line), so model and render can't disagree.
+  const layout = bottomBarLayout({
     tasksVisible, tasks: state.tasks, agents: visibleAgents,
-    running: state.turnRunning, pending: state.pending, activeTurnRows: atVisible.length,
+    running: state.turnRunning, pending: state.pending,
     columns, composerText: composerState.text, composerCursor: composerState.cursor, resuming,
     menuRows,
-  });
+    chromeRows: chrome.lines.length,
+  }, rows);
+  const barRows = layout.rows;
+  // The agents window (layout.agentsShown rows of the roster) slides only to keep select mode's
+  // highlight visible; the highlight index passed down is window-relative.
+  const agentStart = agentWindowStart(visibleAgents.length, layout.agentsShown, selIdx);
+  const agentsWindow = layout.agentsShown >= visibleAgents.length
+    ? visibleAgents
+    : visibleAgents.slice(agentStart, agentStart + layout.agentsShown);
+  const agentSelInWindow = selIdx !== null && selIdx >= agentStart && selIdx < agentStart + agentsWindow.length
+    ? selIdx - agentStart
+    : undefined;
   // The child-view header (childHeaderLine) is pinned ABOVE the viewport, outside both the line
   // log and the bottom bar — subtract its one row here so the frame stays exactly rows-1 tall.
   const viewH = Math.max(1, (rows - 1) - barRows - (childOpen ? 1 : 0));
 
-  const { visible, vp: clampedVp } = viewportSlice(lineLog, vp, viewH);
+  // Growth compensation (scroll-model.ts, TUI renderer T2): the scroll offset is BOTTOM-anchored,
+  // so a log that grew while the user is scrolled back would slide the view toward newer rows
+  // unless the offset grows by the same amount. THIS render derives the compensated state (the view
+  // must hold on the very frame the growth lands — an effect alone would paint one shifted frame
+  // first), and the effect below folds it into stored state via the UPDATER form, never the derived
+  // value: a value-form setScroll could clobber a wheel step queued between commit and effect
+  // flush, whereas relative updaters compose in dispatch order. The basis ref syncs ONLY in the
+  // effect, so each growth interval is counted exactly once however renders interleave.
+  //
+  // FIX ROUND 1 (T2 review): a raw length delta cannot tell bottom-appended content from a REWRAP
+  // of existing content — a columns resize alone can double a block's row count with zero new
+  // content. Compensation is therefore gated on the WRAP BASIS: the snapshot carries every input
+  // that changes the log's row count without new content — the flatten opts (`columns`, `verbose`,
+  // `highlight`; the exact parameter set of the `cache.lines`/`makeFlattenCache` calls above) plus
+  // the log's SOURCE identity (`childViewId` — a main↔child swap is a wholesale different array).
+  // A basis change resyncs the stored length WITHOUT compensating (`offset` keeps meaning "rows
+  // above the bottom" against the rewrapped log; visibleSlice/applyWheel clamp if it shrank); only
+  // a same-basis growth is genuinely appended content and compensates. A shrink just re-syncs —
+  // shrink clamping is visibleSlice's render-time job, and the child-view effect above re-follows.
+  const growthBasisRef = useRef({ len: lineLog.length, columns, verbose, highlight, childViewId });
+  const basis = growthBasisRef.current;
+  const sameBasis = basis.columns === columns && basis.verbose === verbose && basis.highlight === highlight && basis.childViewId === childViewId;
+  const grownBy = sameBasis ? lineLog.length - basis.len : 0;
+  const scrollForRender = grownBy > 0 ? onContentGrown(scroll, grownBy) : scroll;
+  useEffect(() => {
+    const prev = growthBasisRef.current;
+    const same = prev.columns === columns && prev.verbose === verbose && prev.highlight === highlight && prev.childViewId === childViewId;
+    const grown = same ? lineLog.length - prev.len : 0;
+    growthBasisRef.current = { len: lineLog.length, columns, verbose, highlight, childViewId };
+    if (grown > 0) setScroll((cur) => onContentGrown(cur, grown));
+  }, [lineLog.length, columns, verbose, highlight, childViewId]);
 
   // Keep `len`/`viewH` current for the input handlers + the mouse emitter patch (both may run from a
   // closure created on an earlier render); refs updated during render, read at event time.
@@ -509,26 +740,21 @@ export function App({
   visibleAgentCountRef.current = visibleAgents.length;
   pendingRef.current = state.pending;
 
-  // Fold back a clamp (e.g. verbose toggle shrank the log under a stored scrollTop) so state stays
-  // consistent — no-op when viewportSlice returned the same reference.
-  useEffect(() => {
-    if (clampedVp !== vp) setVp(clampedVp);
-  }, [clampedVp, vp]);
-
   // --- mouse + ctrl+a: intercept at the shared stdin input emitter, BEFORE any useInput consumer
   // (this App's or the composer's) sees them. Ink emits the RAW chunk (ESC intact) on
   // internal_eventEmitter 'input' (its App.js) — one chunk per `stdin.read()`, which is NOT the
-  // same as one chunk per SGR report: rapid trackpad scroll batches many reports into a single
-  // read, and a report can just as easily be split across two reads at a buffer boundary. A single
-  // stateful `createMouseReportFilter()` (tui-mouse fix) handles both: it loop-consumes every
-  // complete report in the chunk (a wheel report scrolls ±3 each; every mouse report, wheel or
-  // button/motion, is dropped so no mouse bytes ever reach the composer buffer) and carries a
-  // trailing partial report across chunks in its own closure — one instance per mount, held in a
-  // ref so its buffer survives across effect re-runs. ctrl+a (\x01) toggles roster select mode
-  // while agents exist (child-transcript-view T3 — see the branch's own comment inside). Restored
-  // on unmount. ---
+  // same as one chunk per mouse report: rapid trackpad scroll batches many reports into a single
+  // read, and a report can just as easily be split across two reads at a buffer boundary — at ANY
+  // byte, including inside the 3-byte "\x1b[<" prefix. A single stateful `createMouseFilter()`
+  // (input-model.ts, TUI renderer T1) owns all of it at this input layer: complete/batched/split
+  // reports (SGR and legacy X10) are consumed here, wheel notches arrive as first-class
+  // `WheelEvent`s (scrolled below — the same channel ctrl+a rides), every other mouse report is
+  // dropped, and dead partial mouse CSI is swallowed rather than flushed — so no mouse bytes ever
+  // reach the composer buffer. One instance per mount, held in a ref so its carried tail survives
+  // across effect re-runs. ctrl+a (\x01) toggles roster select mode while agents exist
+  // (child-transcript-view T3 — see the branch's own comment inside). Restored on unmount. ---
   const { internal_eventEmitter: inputEmitter } = useStdin();
-  const mouseFilterRef = useRef(createMouseReportFilter());
+  const mouseFilterRef = useRef(createMouseFilter());
   useEffect(() => {
     const em = inputEmitter;
     if (!em) return;
@@ -537,17 +763,18 @@ export function App({
     const patched = (event: string, ...args: unknown[]): boolean => {
       if (event === "input") {
         const chunk = String(args[0]);
-        const { literal, wheelEvents } = consumeMouseReports(chunk);
-        for (const wheel of wheelEvents) {
-          const delta = wheel.dir === "up" ? -3 : 3;
-          setVp((cur) => scrollBy(cur, delta, lineCountRef.current, viewHRef.current));
+        const { text, wheel } = consumeMouseReports(chunk);
+        for (const w of wheel) {
+          // T1's first-class WheelEvent feeds the scroll model whole — no sign/step re-derivation
+          // here; geometry refs are read when the updater RUNS, so batched notches see live values.
+          setScroll((cur) => applyWheel(cur, w, viewHRef.current, lineCountRef.current));
         }
-        if (literal !== chunk) {
+        if (text !== chunk) {
           // The chunk contained mouse-report bytes (fully, or a now-resolved/still-pending
           // partial) — never forward the ORIGINAL raw chunk (that's the tui-mouse leak). Forward
           // only whatever genuine text is left over, if any; nothing left means fully swallowed.
-          if (literal === "") return true;
-          return orig(event, literal);
+          if (text === "") return true;
+          return orig(event, text);
         }
         // Untouched fast path — chunk had no mouse-report bytes at all (the overwhelmingly common
         // case): preserve the exact original ctrl+a-then-passthrough behavior byte-for-byte.
@@ -650,11 +877,10 @@ export function App({
 
   useInput(
     (input, key) => {
-      // Mouse defense-in-depth: the emitter patch above already swallows SGR reports before this
+      // Mouse defense-in-depth: the emitter patch above already swallows mouse reports before this
       // handler, but if any mouse-shaped input slips through (Ink strips the leading ESC), swallow it
       // here too so it never triggers a key branch below. Scrolling is handled by the patch, not here.
-      const m = parseMouseInput(input.startsWith("\x1b") ? input : `\x1b${input}`);
-      if (m.isMouse) return;
+      if (isMouseArtifact(input)) return;
 
       // child-transcript-view T3 — roster select mode owns ↑/↓/Enter/x/Esc while active. The
       // composer is DISABLED for select mode's whole duration (see its `disabled` prop below), so
@@ -685,11 +911,13 @@ export function App({
         if (key.escape) { setAgentSel(null); return; }
       }
 
+      // Scroll keys ride the SAME wheel-shaped channel as mouse notches (wheel is a first-class
+      // key, the T1/T2 shape) — one model, one clamp/follow rule set, no parallel scroll math.
       const len = lineCountRef.current;
       const vh = viewHRef.current;
-      if (key.pageUp) { setVp((cur) => scrollBy(cur, -(vh - 1), len, vh)); return; }
-      if (key.pageDown) { setVp((cur) => scrollBy(cur, vh - 1, len, vh)); return; }
-      if (key.ctrl && input === "u") { setVp((cur) => scrollBy(cur, -Math.ceil(vh / 2), len, vh)); return; }
+      if (key.pageUp) { setScroll((cur) => applyWheel(cur, { kind: "wheelUp", lines: vh - 1 }, vh, len)); return; }
+      if (key.pageDown) { setScroll((cur) => applyWheel(cur, { kind: "wheelDown", lines: vh - 1 }, vh, len)); return; }
+      if (key.ctrl && input === "u") { setScroll((cur) => applyWheel(cur, { kind: "wheelUp", lines: Math.ceil(vh / 2) }, vh, len)); return; }
       if (key.ctrl && input === "o") { setVerbose((v) => !v); return; }
       if (key.ctrl && input === "t") { setTasksVisible((v) => !v); return; }
       // ctrl+C AND ctrl+D are deliberately NOT handled here — both belong solely to the dedicated
@@ -739,16 +967,9 @@ export function App({
           rendered OUTSIDE the scrolling viewport (always visible, unlike the welcome banner which
           scrolls off) and pre-counted in viewH's math above. */}
       {childOpen ? <Text>{childHeaderLine(childRow!, columns)}</Text> : null}
-      <Box flexGrow={1} flexDirection="column" overflow="hidden">
-        {visible.map((line, i) => (
-          <Text key={i}>{line.length > 0 ? line : " "}</Text>
-        ))}
-      </Box>
+      <TranscriptViewport lines={lineLog} scroll={scrollForRender} viewportRows={viewH} />
       <Box flexDirection="column" flexShrink={0}>
-        {atVisible.map((line, i) => (
-          <Text key={`at${i}`}>{line.length > 0 ? line : " "}</Text>
-        ))}
-        {state.tasks.length > 0 && tasksVisible ? <TaskList tasks={state.tasks} nowMs={nowMs} /> : null}
+        {state.tasks.length > 0 && tasksVisible && layout.showTasks ? <TaskList tasks={state.tasks} nowMs={nowMs} /> : null}
         <Spinner
           running={state.turnRunning}
           turnStartMs={state.turnStartMs}
@@ -758,7 +979,7 @@ export function App({
         />
         {resuming ? <Text dimColor>Resuming conversation…</Text> : null}
         {state.pending ? (
-          <PendingCards pending={state.pending} onApprove={onApprove} onAnswer={onAnswer} onPlan={onPlan} />
+          <PendingCards pending={state.pending} onApprove={onApprove} onAnswer={onAnswer} onPlan={onPlan} planBodyRows={layout.planBodyRows} />
         ) : (
           <Composer
             running={state.turnRunning}
@@ -779,6 +1000,7 @@ export function App({
             onRunCommand={onRunCommand}
             onMenuRowsChange={onComposerMenuRowsChange}
             columns={columns}
+            maxContentRows={layout.composerContentRows}
             fileIndex={fileIndex}
             onNeedFileIndex={onNeedFileIndex}
             // Passed ONLY while a child view is open: an empty-buffer Esc then closes the view
@@ -786,8 +1008,11 @@ export function App({
             onEscEmpty={childOpen ? onCloseChildView : undefined}
           />
         )}
-        {visibleAgents.length > 0 ? <AgentList agents={visibleAgents} nowMs={nowMs} selectedIndex={selIdx ?? undefined} /> : null}
-        <Footer policy={policy} running={state.turnRunning} agents={visibleAgents} exitArmed={exitArmedKey} />
+        {agentsWindow.length > 0 ? <AgentList agents={agentsWindow} nowMs={nowMs} selectedIndex={agentSelInWindow} /> : null}
+        {layout.agentOverflow > 0 && layout.agentsShown > 0 ? (
+          <Text dimColor>{`… +${layout.agentOverflow} more agent${layout.agentOverflow === 1 ? "" : "s"} (ctrl+a)`}</Text>
+        ) : null}
+        <Footer lines={chrome.lines} />
       </Box>
     </Box>
   );

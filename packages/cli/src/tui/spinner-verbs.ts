@@ -73,6 +73,21 @@ export const TURN_VERBS: string[] = [
   "Simmered",
 ];
 
+// TUI renderer T5 — the spinner GLYPH cycle, hoisted here from spinner.tsx so pure modules
+// (state.ts's `statusChromeModel`) can share the exact frame math without importing an Ink
+// component module. Forward half + full reverse (12 entries — the boundary glyphs `✽`/`·` each
+// hold for two consecutive frames), matching the CC reference's `[...chars, ...chars.reverse()]`
+// construction (cc-ui-study-chrome.md §2). spinner.tsx re-exports `spinnerFrame`, so its existing
+// import surface (spinner.test.tsx) is unchanged.
+const SPINNER_GLYPHS = ["·", "✢", "✳", "✶", "✻", "✽"];
+const SPINNER_CYCLE: string[] = [...SPINNER_GLYPHS, ...[...SPINNER_GLYPHS].reverse()];
+
+/** elapsedMs -> glyph. Index = floor(elapsed/120) % 12; pure, no wall-clock access. */
+export function spinnerFrame(elapsedMs: number): string {
+  const index = Math.floor(elapsedMs / 120) % SPINNER_CYCLE.length;
+  return SPINNER_CYCLE[index] as string;
+}
+
 /**
  * Deterministically pick an entry from `list` using `seed`. Equal seeds
  * always yield equal results; no Math.random / Date.now inside this module —

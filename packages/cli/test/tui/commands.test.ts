@@ -37,6 +37,7 @@ function makeCtx(client: NormaClient, overrides: Partial<Omit<CommandCtx, "clien
   const notes: string[] = [];
   const ctx: CommandCtx = {
     client,
+    ...overrides, // optional callbacks (onCwdChanged, T5's onModelChanged) thread through
     sessionId: overrides.sessionId ?? "sess-1",
     cwd: overrides.cwd ?? "/work/dir",
     appendNote: (text: string) => notes.push(text),
@@ -863,5 +864,35 @@ describe("/model — mirrors `case \"model\"` (direct settings.json I/O under NO
     const { ctx, notes } = makeCtx(client);
     await runCommand(ctx, "/model --effort");
     expect(notes[0]).toContain("usage:");
+  });
+
+  // TUI renderer T5 — the status chrome's live model source: a SUCCESSFUL write reports the new
+  // resolved global model+effort through `onModelChanged` (the same optional-callback shape as
+  // `onCwdChanged`), so the App's footer flips the moment /model lands instead of showing the
+  // mount-time snapshot forever.
+  test("(T5) a successful switch fires onModelChanged with the new model AND effort", async () => {
+    const { client } = makeClient({});
+    const changes: Array<[string, string | undefined]> = [];
+    const { ctx } = makeCtx(client, { onModelChanged: (m, e) => changes.push([m, e]) });
+    await runCommand(ctx, "/model gpt-5.6-luna --effort high");
+    expect(changes).toEqual([["gpt-5.6-luna", "high"]]);
+  });
+
+  test("(T5) an effort-only switch still reports both axes (model unchanged, new effort)", async () => {
+    const { client } = makeClient({});
+    const changes: Array<[string, string | undefined]> = [];
+    const { ctx } = makeCtx(client, { onModelChanged: (m, e) => changes.push([m, e]) });
+    await runCommand(ctx, "/model --effort medium");
+    expect(changes).toEqual([["gpt-5.6-sol", "medium"]]);
+  });
+
+  test("(T5) show / invalid slug / usage error never fire onModelChanged (nothing changed)", async () => {
+    const { client } = makeClient({});
+    const changes: unknown[] = [];
+    const { ctx } = makeCtx(client, { onModelChanged: (...a: unknown[]) => changes.push(a) });
+    await runCommand(ctx, "/model");
+    await runCommand(ctx, "/model not-a-real-model");
+    await runCommand(ctx, "/model --effort");
+    expect(changes).toEqual([]);
   });
 });

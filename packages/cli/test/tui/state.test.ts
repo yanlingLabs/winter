@@ -17,6 +17,9 @@ describe("state.ts — initialState", () => {
       pending: null,
       childBlocks: {},
       childPendingTool: {},
+      bgTasks: [], // TUI renderer T5 — the bg-task liveness fold
+      // `activity` spread-ABSENT on purpose (T5): toEqual pins that no `activity: undefined` key
+      // is ever set — absence means "nothing known yet".
     });
   });
 });
@@ -712,5 +715,252 @@ describe("state.ts — purity", () => {
     ];
     const run = () => events.reduce<TuiState>((acc, e) => reduce(acc, e, T0 + 42), initialState());
     expect(run()).toEqual(run());
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// TUI renderer T5 — the bottom status chrome's pure model (`statusChromeModel`) + the two new
+// TuiState folds it reads: `bgTasks` (bg_task_started/exited liveness) and `activity`
+// (the session_activity transient). Spec §3: one line; two when tasks run; never more.
+// ---------------------------------------------------------------------------------------------
+
+import { statusChromeModel, type AgentRow, type StatusLine } from "../../src/tui/state";
+import { spinnerFrame } from "../../src/tui/spinner-verbs";
+import { diffFrames } from "../../src/tui/frame-diff";
+
+/** Textual projection of one StatusLine — exactly how Footer lays it out (segments joined by the
+ *  line's own `sep`), so byte-level assertions here are honest about the rendered row. */
+const lineText = (l: StatusLine): string => l.segments.map((s) => s.text).join(l.sep);
+
+function chromeAgent(threadId: string, over: Partial<AgentRow> = {}): AgentRow {
+  return {
+    threadId,
+    agentType: "general-purpose",
+    label: "scout",
+    status: "working",
+    outputTokens: 0,
+    liveOutputChars: 0,
+    activeMs: 0,
+    toolCalls: 0,
+    ...over,
+  };
+}
+
+type ChromeInput = Parameters<typeof statusChromeModel>[0];
+const chromeBase = (over: Partial<ChromeInput> = {}): ChromeInput => ({
+  policy: "ask",
+  running: false,
+  agents: [],
+  bgTasks: [],
+  model: "gpt-5.6-luna",
+  effort: "high",
+  nowMs: T0,
+  ...over,
+});
+
+describe("state.ts — bgTasks fold (bg_task_started/exited liveness, T5)", () => {
+  test("initialState carries an empty bgTasks list", () => {
+    expect(initialState().bgTasks).toEqual([]);
+  });
+
+  test("bg_task_started appends {taskId, command}; the committed note is unchanged", () => {
+    let s = initialState();
+    s = reduce(s, { type: "bg_task_started", threadId: "main", taskId: "bg1", command: "bun test" }, T0);
+    expect(s.bgTasks).toEqual([{ taskId: "bg1", command: "bun test" }]);
+    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "▶ bg bg1 started: bun test" });
+  });
+
+  test("a replayed duplicate bg_task_started does not duplicate the row", () => {
+    let s = initialState();
+    s = reduce(s, { type: "bg_task_started", threadId: "main", taskId: "bg1", command: "bun test" }, T0);
+    s = reduce(s, { type: "bg_task_started", threadId: "main", taskId: "bg1", command: "bun test" }, T0);
+    expect(s.bgTasks).toEqual([{ taskId: "bg1", command: "bun test" }]);
+  });
+
+  test("bg_task_exited removes its row; an unknown taskId leaves the list untouched", () => {
+    let s = initialState();
+    s = reduce(s, { type: "bg_task_started", threadId: "main", taskId: "bg1", command: "bun test" }, T0);
+    s = reduce(s, { type: "bg_task_started", threadId: "main", taskId: "bg2", command: "sleep 5" }, T0);
+    s = reduce(s, { type: "bg_task_exited", threadId: "main", taskId: "bg1", exitCode: 0, killed: false }, T0);
+    expect(s.bgTasks).toEqual([{ taskId: "bg2", command: "sleep 5" }]);
+    const before = s.bgTasks;
+    s = reduce(s, { type: "bg_task_exited", threadId: "main", taskId: "ghost", exitCode: 0, killed: false }, T0);
+    expect(s.bgTasks).toBe(before); // referential no-op on the liveness list (notes still commit)
+  });
+});
+
+describe("state.ts — session_activity fold (T5)", () => {
+  test("session_activity sets state.activity; absent until the first event", () => {
+    let s = initialState();
+    expect(s.activity).toBeUndefined();
+    s = reduce(s, { type: "session_activity", activity: "background" }, T0);
+    expect(s.activity).toBe("background");
+    s = reduce(s, { type: "session_activity", activity: "active" }, T0 + 1);
+    expect(s.activity).toBe("active");
+  });
+
+  test("an unchanged activity is a referential no-op (no repaint churn from re-broadcasts)", () => {
+    let s = initialState();
+    s = reduce(s, { type: "session_activity", activity: "background" }, T0);
+    const same = reduce(s, { type: "session_activity", activity: "background" }, T0 + 1);
+    expect(same).toBe(s);
+  });
+
+  test("session_activity commits nothing (transient — no transcript note)", () => {
+    let s = initialState();
+    s = reduce(s, { type: "session_activity", activity: "background" }, T0);
+    expect(s.committed).toEqual([]);
+  });
+});
+
+describe("statusChromeModel — the pin: one line; two when tasks run; never more", () => {
+  test("no tasks -> exactly ONE line (the status line)", () => {
+    const { lines } = statusChromeModel(chromeBase());
+    expect(lines.length).toBe(1);
+    expect(lines[0]!.key).toBe("status");
+  });
+
+  test("a running agent -> exactly TWO lines, work line first", () => {
+    const { lines } = statusChromeModel(chromeBase({ agents: [chromeAgent("a")] }));
+    expect(lines.length).toBe(2);
+    expect(lines[0]!.key).toBe("work");
+    expect(lines[1]!.key).toBe("status");
+  });
+
+  test("MANY work items -> still two lines, truncated summary '5 running: a, b, +3' — never a third line", () => {
+    const agents = [chromeAgent("t1", { label: "a" }), chromeAgent("t2", { label: "b" }), chromeAgent("t3", { label: "c" })];
+    const bgTasks = [{ taskId: "bg1", command: "bun test" }, { taskId: "bg2", command: "sleep 9" }];
+    const { lines } = statusChromeModel(chromeBase({ agents, bgTasks }));
+    expect(lines.length).toBe(2);
+    expect(lineText(lines[0]!)).toContain("5 running: a, b, +3");
+  });
+
+  test("one work item: '1 running: scout' (invariant label — no singular/plural fork)", () => {
+    const { lines } = statusChromeModel(chromeBase({ agents: [chromeAgent("a")] }));
+    expect(lineText(lines[0]!)).toContain("1 running: scout");
+  });
+
+  test("agents count by liveness: done rows are NOT running work; queued rows are", () => {
+    const { lines } = statusChromeModel(chromeBase({
+      agents: [chromeAgent("d", { status: "done", finish: "done" }), chromeAgent("q", { status: "queued", label: "waiter" })],
+    }));
+    expect(lines.length).toBe(2);
+    expect(lineText(lines[0]!)).toContain("1 running: waiter");
+  });
+
+  test("an agent's re-task `name` outranks its description label; bg tasks use their command", () => {
+    const { lines } = statusChromeModel(chromeBase({
+      agents: [chromeAgent("a", { name: "fixer", label: "long description label" })],
+      bgTasks: [{ taskId: "bg1", command: "bun test --watch" }],
+    }));
+    expect(lineText(lines[0]!)).toContain("2 running: fixer, bun test --watch");
+  });
+
+  test("long labels are shortened to 20 chars with an ellipsis", () => {
+    const { lines } = statusChromeModel(chromeBase({
+      bgTasks: [{ taskId: "bg1", command: "x".repeat(40) }],
+    }));
+    expect(lineText(lines[0]!)).toContain(`1 running: ${"x".repeat(19)}…`);
+  });
+
+  test("the work line's spinner glyph comes from the shared cycle and animates with nowMs", () => {
+    const at = (nowMs: number) => statusChromeModel(chromeBase({ agents: [chromeAgent("a")], nowMs })).lines[0]!;
+    expect(at(T0).segments[0]!.text).toBe(spinnerFrame(T0));
+    expect(at(T0).segments[0]!.tone).toBe("accent");
+    // 120ms is the cycle step — a different bucket must render a different glyph.
+    expect(at(0).segments[0]!.text).not.toBe(at(120).segments[0]!.text);
+  });
+});
+
+describe("statusChromeModel — the status line (policy, model/effort, chip, hints)", () => {
+  test("model + effort render as one dim segment: 'gpt-5.6-luna (high)'", () => {
+    const { lines } = statusChromeModel(chromeBase());
+    const seg = lines[0]!.segments.find((s) => s.text.includes("gpt-5.6-luna"));
+    expect(seg).toEqual({ text: "gpt-5.6-luna (high)", tone: "dim" });
+  });
+
+  test("no effort -> bare model slug; no model (unknown) -> segment omitted entirely", () => {
+    const bare = statusChromeModel(chromeBase({ effort: undefined }));
+    expect(lineText(bare.lines[0]!)).toContain("gpt-5.6-luna");
+    expect(lineText(bare.lines[0]!)).not.toContain("(");
+    const unknown = statusChromeModel(chromeBase({ model: "" }));
+    expect(lineText(unknown.lines[0]!)).not.toContain("gpt");
+  });
+
+  test("a model switch mid-session reflects immediately (pure: new input, new line)", () => {
+    const before = statusChromeModel(chromeBase());
+    const after = statusChromeModel(chromeBase({ model: "gpt-5.6-sol", effort: "medium" }));
+    expect(lineText(before.lines[0]!)).toContain("gpt-5.6-luna (high)");
+    expect(lineText(after.lines[0]!)).toContain("gpt-5.6-sol (medium)");
+    expect(lineText(after.lines[0]!)).not.toContain("luna");
+  });
+
+  test("policy display: the five marked modes keep their exact footer wording + tone", () => {
+    const cases: Array<[ChromeInput["policy"], string, string]> = [
+      ["plan", "⏸ plan mode on (shift+tab to cycle)", "planMode"],
+      ["dont-ask", "✕ dont-ask — auto-declines prompts (shift+tab to cycle)", "warning"],
+      ["accept-edits", "✎ accept edits (shift+tab to cycle)", "autoAccept"],
+      ["auto", "⏵⏵ auto mode on (shift+tab to cycle)", "autoAccept"],
+      ["bypass", "⚠ bypass — all actions auto-approved (shift+tab to cycle)", "dangerMode"],
+    ];
+    for (const [policy, text, tone] of cases) {
+      const { lines } = statusChromeModel(chromeBase({ policy }));
+      expect(lines[0]!.segments[0]).toEqual({ text, tone: tone as never });
+    }
+  });
+
+  test("ask policy renders no mode segment (the unmarked default)", () => {
+    const { lines } = statusChromeModel(chromeBase());
+    expect(lineText(lines[0]!)).not.toContain("shift+tab to cycle)");
+  });
+
+  test("running shows 'esc to interrupt'; live agents show the ctrl+a pill", () => {
+    const { lines } = statusChromeModel(chromeBase({ running: true, agents: [chromeAgent("a"), chromeAgent("b")] }));
+    const status = lines.find((l) => l.key === "status")!;
+    expect(lineText(status)).toContain("esc to interrupt");
+    expect(lineText(status)).toContain("2 agents · ctrl+a");
+  });
+
+  test("activity chip: backgrounded/archived render a warning chip; active/idle/absent none", () => {
+    const bg = statusChromeModel(chromeBase({ activity: "background" }));
+    expect(bg.lines[0]!.segments).toContainEqual({ text: "● backgrounded", tone: "warning" });
+    const ar = statusChromeModel(chromeBase({ activity: "archived" }));
+    expect(ar.lines[0]!.segments).toContainEqual({ text: "● archived", tone: "warning" });
+    for (const activity of ["active", "idle", undefined] as const) {
+      const { lines } = statusChromeModel(chromeBase({ activity }));
+      expect(lineText(lines[0]!)).not.toContain("●");
+    }
+  });
+
+  test("empty-state hint survives: ask+idle+no agents still shows '? for shortcuts' beside the model", () => {
+    const { lines } = statusChromeModel(chromeBase());
+    expect(lineText(lines[0]!)).toContain("? for shortcuts · shift+tab to cycle modes");
+    // …but any keybinding-bearing segment suppresses it, exactly as the old footer did.
+    const busy = statusChromeModel(chromeBase({ running: true }));
+    expect(lineText(busy.lines[0]!)).not.toContain("? for shortcuts");
+  });
+
+  test("exitArmed REPLACES the whole chrome with the one key-specific hint line — even mid-work", () => {
+    const { lines } = statusChromeModel(chromeBase({ agents: [chromeAgent("a")], exitArmed: "ctrl-d" }));
+    expect(lines.length).toBe(1);
+    expect(lineText(lines[0]!)).toBe("Press Ctrl-D again to exit");
+    const c = statusChromeModel(chromeBase({ exitArmed: "ctrl-c" }));
+    expect(lineText(c.lines[0]!)).toBe("Press Ctrl-C again to exit");
+  });
+});
+
+describe("statusChromeModel — flicker pin: idle chrome is byte-stable across clock ticks (T4 frame-diff)", () => {
+  test("two consecutive idle frames produce ZERO diff ops", () => {
+    const a = statusChromeModel(chromeBase({ nowMs: T0 }));
+    const b = statusChromeModel(chromeBase({ nowMs: T0 + 100 }));
+    expect(b).toEqual(a); // deep-equal model output — nothing on line 1 reads the clock
+    expect(diffFrames(a.lines.map(lineText), b.lines.map(lineText))).toEqual([]);
+  });
+
+  test("working chrome within one 120ms spinner bucket is also byte-stable", () => {
+    const mk = (nowMs: number) => statusChromeModel(chromeBase({ agents: [chromeAgent("a")], nowMs }));
+    const a = mk(1_200);
+    const b = mk(1_260); // same floor(now/120) bucket
+    expect(diffFrames(a.lines.map(lineText), b.lines.map(lineText))).toEqual([]);
   });
 });

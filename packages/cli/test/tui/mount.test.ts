@@ -10,6 +10,7 @@
  *  so the ordering is a pure, deterministic assertion with no Ink instance and no stdout bytes. */
 
 import { describe, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import { mountTui, type RenderInstance } from "../../src/tui/mount";
 import { makeEventBridge } from "../../src/tui/event-bridge";
 import { formatResumeHint } from "../../src/main";
@@ -189,6 +190,129 @@ describe("mountTui — resumeTargetSeq passthrough (Phase 3c Task 5)", () => {
     } finally {
       (process.stdout as unknown as { isTTY: boolean }).isTTY = prev;
     }
+  });
+});
+
+// TUI renderer T4 — the damage-diffed writer under Ink. mountTui hands Ink a stdout proxy built
+// over an INJECTED stream (4th param; production default process.stdout), so these tests drive the
+// exact object Ink would write frames to and read the exact bytes the terminal would see.
+describe("mountTui — the diffing writer under Ink (TUI renderer T4)", () => {
+  const BSU = "\x1b[?2026h";
+  const ESU = "\x1b[?2026l";
+  const ERASE_SCREEN = "\x1b[2J";
+
+  function fakeStdoutStream(): { stream: NodeJS.WriteStream; writes: string[] } {
+    const writes: string[] = [];
+    const em = new EventEmitter() as unknown as Record<string, unknown>;
+    em.rows = 24;
+    em.columns = 80;
+    em.isTTY = true;
+    em.write = (chunk: unknown) => { writes.push(String(chunk)); return true; };
+    return { stream: em as unknown as NodeJS.WriteStream, writes };
+  }
+
+  type Mounted = {
+    inkStdout: NodeJS.WriteStream;
+    writes: string[];
+    stream: NodeJS.WriteStream;
+    exit: () => Promise<void>;
+  };
+
+  /** Mounts with a fake render + fake stdout stream; returns the stdout Ink was handed. */
+  function mountWithFakes(): Mounted {
+    const { stream, writes } = fakeStdoutStream();
+    let inkStdout: NodeJS.WriteStream | undefined;
+    let capturedOnExit: (() => void) | undefined;
+    let resolveExit!: () => void;
+    const exitP = new Promise<void>((r) => { resolveExit = r; });
+    const handle = mountTui(
+      mountOpts(),
+      (node, o) => {
+        inkStdout = (o as { stdout: NodeJS.WriteStream }).stdout;
+        capturedOnExit = (node.props as { onExitRequest?: () => void }).onExitRequest;
+        return { unmount() {}, waitUntilExit: () => exitP };
+      },
+      () => {},
+      stream,
+    );
+    return {
+      inkStdout: inkStdout!,
+      writes,
+      stream,
+      exit: async () => { capturedOnExit!(); resolveExit(); await handle.waitUntilExit(); },
+    };
+  }
+
+  function withTty<T>(fn: () => T): T {
+    const prev = process.stdout.isTTY;
+    (process.stdout as unknown as { isTTY: boolean }).isTTY = true;
+    try { return fn(); } finally { (process.stdout as unknown as { isTTY: boolean }).isTTY = prev; }
+  }
+
+  function withDiffEnv<T>(value: string | undefined, fn: () => T): T {
+    const prev = process.env.NORMA_TUI_DIFF;
+    if (value === undefined) delete process.env.NORMA_TUI_DIFF;
+    else process.env.NORMA_TUI_DIFF = value;
+    try { return fn(); } finally {
+      if (prev === undefined) delete process.env.NORMA_TUI_DIFF;
+      else process.env.NORMA_TUI_DIFF = prev;
+    }
+  }
+
+  test("default mode: Ink's frames are DIFFED — full repaint first, damage after, zero bytes on an identical frame", () => {
+    withTty(() => withDiffEnv(undefined, () => {
+      const m = mountWithFakes();
+      m.inkStdout.write("a\nb\n"); // Ink's first frame (no prelude)
+      expect(m.writes.length).toBe(1);
+      expect(m.writes[0]).toBe(BSU + ERASE_SCREEN + "\x1b[1;1Ha\x1b[K\x1b[2;1Hb\x1b[K\x1b[2;1H" + ESU);
+      m.inkStdout.write("\x1b[2K\x1b[1A\x1b[2K\x1b[G" + "a\nc\n"); // steady-state: eraseLines(2) prelude
+      expect(m.writes[1]).toBe(BSU + "\x1b[2;1Hc\x1b[K\x1b[2;1H" + ESU); // ONE damaged row
+      m.inkStdout.write("\x1b[2K\x1b[1A\x1b[2K\x1b[G" + "a\nc\n"); // identical frame
+      expect(m.writes.length).toBe(2); // zero damage ⇒ zero bytes
+    }));
+  });
+
+  test("THE KILL-SWITCH: NORMA_TUI_DIFF=0 bypasses the differ entirely — BSU/ESU write-through, byte-identical chunks", () => {
+    withTty(() => withDiffEnv("0", () => {
+      const m = mountWithFakes();
+      const chunk = "\x1b[2K\x1b[G" + "a\nb\n";
+      m.inkStdout.write(chunk);
+      m.inkStdout.write(chunk); // write-through does NOT dedupe — every chunk passes verbatim
+      expect(m.writes).toEqual([BSU + chunk + ESU, BSU + chunk + ESU]);
+    }));
+  });
+
+  test("resize on the stdout stream resets the differ — the next frame is a FULL repaint", () => {
+    withTty(() => withDiffEnv(undefined, () => {
+      const m = mountWithFakes();
+      m.inkStdout.write("a\nb\n");
+      (m.stream as unknown as EventEmitter).emit("resize"); // SIGWINCH → node's WriteStream 'resize'
+      m.inkStdout.write("\x1b[2K\x1b[1A\x1b[2K\x1b[G" + "a\nb\n"); // identical content post-resize
+      expect(m.writes.length).toBe(2);
+      expect(m.writes[1]).toContain(ERASE_SCREEN); // repainted fully, not diffed to zero
+    }));
+  });
+
+  test("teardown removes the resize hook from the stdout stream", async () => {
+    const prev = process.stdout.isTTY;
+    (process.stdout as unknown as { isTTY: boolean }).isTTY = true;
+    try {
+      await withDiffEnv(undefined, async () => {
+        const m = mountWithFakes();
+        expect((m.stream as unknown as EventEmitter).listenerCount("resize")).toBe(1);
+        await m.exit();
+        expect((m.stream as unknown as EventEmitter).listenerCount("resize")).toBe(0);
+      });
+    } finally {
+      (process.stdout as unknown as { isTTY: boolean }).isTTY = prev;
+    }
+  });
+
+  test("kill-switch mode registers NO resize hook (nothing to reset)", () => {
+    withTty(() => withDiffEnv("0", () => {
+      const m = mountWithFakes();
+      expect((m.stream as unknown as EventEmitter).listenerCount("resize")).toBe(0);
+    }));
   });
 });
 

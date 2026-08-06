@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { render } from "ink-testing-library";
 import { CommittedTranscript, formatArgsHead } from "../../src/tui/transcript";
-import { ActiveTurn } from "../../src/tui/active-turn";
 import { TaskList } from "../../src/tui/task-list";
 import { AgentList } from "../../src/tui/agent-list";
 import { ROSTER_STALL_MS } from "../../src/subagent-state";
@@ -414,61 +413,7 @@ describe("TaskList — CC task rows (phase 3b Task 6, a+b)", () => {
   });
 });
 
-// Phase 3b Task 3 rewrite: streaming assistant text now goes through splitStableBoundary +
-// renderMarkdown (migrating 3a's plain-cyan-text coverage), and in-flight tools render the
-// CC-style `bold name(argsHead)` USE line instead of the 3a `⚙ name args` one-liner, with a
-// blinking (nowMs-parity) gutter dot — (h) below is the brief's new required case.
-describe("ActiveTurn — streaming assistant text (memoized stable prefix)", () => {
-  test("renders a completed leading paragraph (stable, markdown-rendered) plus a growing partial tail", () => {
-    const { lastFrame } = render(
-      <ActiveTurn assistant={"First **para** complete.\n\nSecond para partial"} tools={[]} nowMs={0} />,
-    );
-    const frame = lastFrame() ?? "";
-    expect(frame).toContain("First");
-    expect(frame).toContain("para"); // bold marker rendered, not left literal
-    expect(frame).not.toContain("**para**");
-    expect(frame).toContain("complete.");
-    expect(frame).toContain("Second para partial");
-  });
-
-  test("streaming text shares the ⏺ gutter layout (T3 review fix): the dot renders on the FIRST streamed line, so committing the block causes no indent jump", () => {
-    const { lastFrame } = render(<ActiveTurn assistant="streaming reply text" tools={[]} nowMs={0} />);
-    const frame = lastFrame() ?? "";
-    expect(frame).toContain("⏺");
-    // the gutter and the text share one row: "⏺ streaming reply text" (2-col gutter → one space
-    // between the dot and the flexGrow column), identical to the committed assistant block's layout
-    const firstLine = frame.split("\n")[0] ?? "";
-    expect(firstLine).toContain("⏺");
-    expect(firstLine).toContain("streaming reply text");
-  });
-
-  test("hidden when idle (no assistant text, no in-flight tools)", () => {
-    const { lastFrame } = render(<ActiveTurn assistant="" tools={[]} nowMs={0} />);
-    expect((lastFrame() ?? "").trim()).toBe("");
-  });
-});
-
-describe("ActiveTurn — in-flight tools (bold name(argsHead160) + blinking dot) (h)", () => {
-  test("renders bold tool name + args head alongside the gutter dot", () => {
-    const { lastFrame } = render(
-      <ActiveTurn assistant="" tools={[{ name: "bash", argsJson: '{"command":"ls"}' }]} nowMs={0} />,
-    );
-    const frame = lastFrame() ?? "";
-    expect(frame).toContain("⏺");
-    expect(frame).toContain("bash");
-    expect(frame).toContain('({"command":"ls"})');
-  });
-
-  test("(h) the gutter dot's dim/normal state flips across two nowMs values 500ms apart, and returns at 1000ms", () => {
-    const tools = [{ name: "bash", argsJson: '{"command":"ls"}' }];
-    const { lastFrame, rerender } = render(<ActiveTurn assistant="" tools={tools} nowMs={0} />);
-    const frameAt0 = lastFrame() ?? "";
-
-    rerender(<ActiveTurn assistant="" tools={tools} nowMs={500} />);
-    const frameAt500 = lastFrame() ?? "";
-    expect(frameAt500).not.toBe(frameAt0); // parity flipped -> different dim styling
-
-    rerender(<ActiveTurn assistant="" tools={tools} nowMs={1000} />);
-    expect(lastFrame() ?? "").toBe(frameAt0); // parity flipped back -> byte-identical to nowMs=0
-  });
-});
+// TUI renderer T3: the <ActiveTurn> component (and its describes that lived here) is ABSORBED —
+// the in-flight turn renders inside the transcript via flatten-blocks.ts's makeStreamRenderer,
+// whose suite pins the same semantics strictly stronger (byte-parity with the committed block,
+// blinking tool dot, hidden-when-idle) — see test/tui/flatten-blocks.test.ts.

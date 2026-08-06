@@ -1634,3 +1634,115 @@ describe("Composer — @-file mention menu (Phase 3d T3)", () => {
     expect(frame).not.toContain("src/tui/app.tsx"); // file menu never overlaps slash's
   });
 });
+
+// TUI renderer T1 — the wheel-into-composer regression pin (plan Task 1; mechanism report Q3 +
+// Q7 cure 3). mount.ts enables SGR mouse reporting (\x1b[?1000h\x1b[?1006h — alt-screen.ts), so
+// ONE wheel-up notch makes the terminal write exactly "\x1b[<64;COL;ROWM" to stdin. Ink 5.2.1's
+// use-input strips a single leading ESC and hands the remnant to EVERY useInput consumer with
+// name:"", ctrl:false, meta:false (verified against its parse-keypress directly) — so the
+// composer's printable-insert fallback typed "[<64;116;23M" into the buffer: the user-reported
+// bug, byte-for-byte. App.tsx's emitter-level filter cannot pin this shut from here: it is a
+// SEPARATE consumer patched beside Ink's parser, and whatever it forwards (e.g. the continuation
+// of a report split inside its 3-byte ESC prefix at a pty-buffer boundary) reaches this component
+// exactly as written below. The composer itself must refuse mouse bytes BEFORE its insert
+// fallback — that refusal is what these tests pin.
+describe("Composer — mouse bytes never become text (TUI renderer T1)", () => {
+  const mount = () => {
+    const submitted: string[] = [];
+    const r = render(
+      <Composer
+        running={false}
+        policy="ask"
+        onSubmit={(t) => submitted.push(t)}
+        onSteer={() => {}}
+        onInterrupt={() => {}}
+        onCyclePolicy={() => {}}
+        nowMs={0}
+        historyPath={historyPath()}
+      />,
+    );
+    return { ...r, submitted };
+  };
+
+  test("(mouse-1) the exact bytes a wheel notch produces leave the buffer EMPTY — and typing still works after", async () => {
+    const { stdin, lastFrame } = mount();
+    await wait();
+    stdin.write("\x1b[<64;116;23M"); // one SGR wheel-up notch, verbatim
+    await wait();
+    expect(stripAnsi(lastFrame() ?? "")).not.toContain("64;116");
+
+    stdin.write("[<64;116;23M"); // the ESC-stripped continuation shape (split-report leak)
+    await wait();
+    expect(stripAnsi(lastFrame() ?? "")).not.toContain("64;116");
+
+    stdin.write("hi"); // the guard must swallow ONLY mouse bytes — typing is untouched
+    await wait();
+    expect(stripAnsi(lastFrame() ?? "")).toContain("hi");
+  });
+
+  test("(mouse-2) click and legacy-X10 wheel bytes are swallowed too, and never submit", async () => {
+    const { stdin, lastFrame, submitted } = mount();
+    await wait();
+    stdin.write("\x1b[<0;10;5M"); // SGR click press
+    await wait();
+    stdin.write("\x1b[<0;10;5m"); // SGR click release
+    await wait();
+    stdin.write("\x1b[M\x60\x21\x21"); // legacy X10 wheel-up (1000-without-1006 terminals)
+    await wait();
+    const frame = stripAnsi(lastFrame() ?? "");
+    expect(frame).not.toContain("0;10;5");
+    expect(frame).not.toContain("[M");
+    stdin.write("\r");
+    await wait();
+    expect(submitted).toEqual([]); // an empty buffer never submits — nothing leaked in
+  });
+
+  test("(mouse-3) batched wheel reports in one chunk (fast flick) leave the buffer empty", async () => {
+    const { stdin, lastFrame } = mount();
+    await wait();
+    stdin.write("\x1b[<65;10;5M\x1b[<65;10;6M\x1b[<65;10;7M");
+    await wait();
+    expect(stripAnsi(lastFrame() ?? "")).not.toContain("65;10");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// TUI renderer T3 — windowComposerContent: the capped composer's pure cursor-following window.
+// ---------------------------------------------------------------------------------------------
+
+import { Chalk } from "chalk";
+import { windowComposerContent } from "../../src/tui/composer";
+
+describe("windowComposerContent (T3 — the capped composer)", () => {
+  const chalk3 = new Chalk({ level: 3 });
+  const INV = (s: string) => chalk3.inverse(s);
+
+  test("content within budget passes through whole", () => {
+    const { rows, total } = windowComposerContent(`❯ short${INV(" ")}`, 40, 3);
+    expect(total).toBe(1);
+    expect(rows.length).toBe(1);
+  });
+
+  test("overflowing content windows to maxRows with the cursor row at the window's bottom", () => {
+    // 100 chars at 10 columns → 10+ rows; cursor at the very end (the typical typing case).
+    const content = `❯ ${"a".repeat(100)}${INV(" ")}`;
+    const { rows, total } = windowComposerContent(content, 10, 3);
+    expect(total).toBeGreaterThan(3);
+    expect(rows.length).toBe(3);
+    expect(rows[rows.length - 1]!.includes("\x1b[7m")).toBe(true); // cursor visible, bottom row
+  });
+
+  test("cursor near the top keeps the window anchored at the start", () => {
+    const content = `❯ ${INV("x")}${"b".repeat(100)}`;
+    const { rows } = windowComposerContent(content, 10, 3);
+    expect(rows.length).toBe(3);
+    expect(rows[0]!.includes("\x1b[7m")).toBe(true); // first row holds the cursor — window starts at 0
+  });
+
+  test("every windowed row stays within the columns budget", () => {
+    const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+    const content = `❯ ${"word ".repeat(50)}${INV(" ")}`;
+    const { rows } = windowComposerContent(content, 12, 4);
+    for (const r of rows) expect(strip(r).length).toBeLessThanOrEqual(12);
+  });
+});

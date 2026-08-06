@@ -12,20 +12,13 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { theme } from "./theme";
-import { pickVerb, SPINNER_VERBS } from "./spinner-verbs";
+import { pickVerb, SPINNER_VERBS, spinnerFrame } from "./spinner-verbs";
 import { formatElapsed, formatTokens, type TaskRow } from "../task-display";
 
-// Forward half + full reverse (12 entries total — the boundary glyphs `✽`/`·` each hold for two
-// consecutive frames), matching the CC reference's `[...chars, ...chars.reverse()]` construction
-// (cc-ui-study-chrome.md §2).
-const SPINNER_GLYPHS = ["·", "✢", "✳", "✶", "✻", "✽"];
-const SPINNER_CYCLE: string[] = [...SPINNER_GLYPHS, ...[...SPINNER_GLYPHS].reverse()];
-
-/** elapsedMs -> glyph. Index = floor(elapsed/120) % 12; pure, no wall-clock access. */
-export function spinnerFrame(elapsedMs: number): string {
-  const index = Math.floor(elapsedMs / 120) % SPINNER_CYCLE.length;
-  return SPINNER_CYCLE[index] as string;
-}
+// TUI renderer T5: the glyph cycle + `spinnerFrame` moved to spinner-verbs.ts (the pure module) so
+// `statusChromeModel` (state.ts) can share the frame math without an Ink import; re-exported here
+// so this module's existing import surface (spinner.test.tsx and any future consumer) is unchanged.
+export { spinnerFrame };
 
 export interface SpinnerProps {
   running: boolean;

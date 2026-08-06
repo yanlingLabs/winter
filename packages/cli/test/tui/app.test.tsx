@@ -8,7 +8,7 @@
  *
  *  The transcript is a JS-windowed line log now (no Ink <Static>): the flattened committed lines are
  *  sliced to the viewport height and rendered one <Text> per visible line, above a PINNED bottom bar
- *  (active-turn tail · tasks · spinner · composer|card · agents · footer). Scroll keys / wheel move
+ *  (tasks · spinner · composer|card · agents · footer; the in-flight turn streams inside the transcript now, T3). Scroll keys / wheel move
  *  the window; "stick" auto-follows the tail until the user scrolls away. */
 
 import { afterEach, describe, expect, test } from "bun:test";
@@ -303,6 +303,87 @@ describe("App (fullscreen shell)", () => {
     stdin.write("\r");
     await wait();
     expect(client.calls).toEqual([]);
+  });
+
+  // TUI renderer T2 — the scrolled-back honesty indicator. Geometry as (k2): viewH 19, 40 pushed
+  // notes + 3 welcome lines = 43 log lines. PgUp scrolls wheel-shaped by viewH-1 = 18 → offset 18;
+  // the indicator replaces the viewport's BOTTOM row (the top edge — where the user is reading —
+  // stays put), so 18 content rows show and the count includes the displaced row: 43 - 24 = 19.
+  test("(k4) scrolled back: a '↓ N newer lines' indicator discloses hidden content with a truthful count that tracks growth; re-sticking clears it", async () => {
+    const bridge = makeEventBridge();
+    for (let i = 0; i < 40; i++) bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: `IND-${i}` }));
+    const { stdin, lastFrame } = render(<App client={fakeClient()} bridge={bridge} {...baseProps} />);
+    await wait();
+    expect(lastFrame() ?? "").not.toContain("newer line"); // followed bottom: nothing hidden, no indicator
+
+    stdin.write("\x1b[5~"); // PgUp -> offset 18, unfollowed
+    await wait();
+    expect(lastFrame() ?? "").toContain("↓ 19 newer lines");
+
+    // Growth while scrolled back: the view holds (see k5) and the count grows with the hidden tail.
+    bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: "IND-NEW" }));
+    await wait();
+    expect(lastFrame() ?? "").toContain("↓ 20 newer lines");
+
+    stdin.write("\x1b[F"); // End (empty composer) -> re-follow the bottom
+    await wait();
+    const frame = lastFrame() ?? "";
+    expect(frame).not.toContain("newer line"); // indicator gone
+    expect(frame).toContain("IND-NEW"); // and the tail is visible again
+  });
+
+  test("(k5) growth while scrolled back does NOT move the view: the viewport's top line is byte-identical across appends", async () => {
+    const bridge = makeEventBridge();
+    for (let i = 0; i < 40; i++) bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: `G-${i}` }));
+    const { stdin, lastFrame } = render(<App client={fakeClient()} bridge={bridge} {...baseProps} />);
+    await wait();
+
+    stdin.write("\x1b[5~"); // PgUp — scroll back
+    await wait();
+    const before = (lastFrame() ?? "").split("\n");
+
+    for (let i = 0; i < 3; i++) bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: `G-LATE-${i}` }));
+    await wait();
+    const after = (lastFrame() ?? "").split("\n");
+
+    expect(after[0]).toBe(before[0]!); // top edge pinned — growth compensated, the reader never moves
+    expect(after.join("\n")).not.toContain("G-LATE-0"); // the new content stayed below the window
+  });
+
+  // T2 fix round 1 — growth compensation must be gated on the WRAP BASIS: a columns resize rewraps
+  // existing content (row-count delta, ZERO new content), which must NOT shift a scrolled-back
+  // offset the way genuine bottom-appended growth does. Geometry: cols 80 → welcome 3 + one long
+  // note ("✻ " + 100 chars → 2 rows) + 40 one-row notes = 45 rows; viewH 19; PgUp → offset 18 →
+  // content rows 8..25 (top = RW-3, the long note sits fully ABOVE the window) + indicator
+  // "↓ 19 newer lines". Resizing to cols 40 rewraps ONLY the long note (2 → 3 rows, +1 above the
+  // window): the same content must stay in view — top line still RW-3, indicator still 19. A raw
+  // length-delta compensation instead bumps offset by the rewrap delta and shows RW-2 / 20.
+  test("(k6) a columns-resize rewrap while scrolled back does NOT shift the view: offset ungrown, top line and indicator count unchanged", async () => {
+    const stdoutShape = process.stdout as unknown as { columns?: number };
+    const prevCols = stdoutShape.columns;
+    stdoutShape.columns = 80;
+    const bridge = makeEventBridge();
+    bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: "x".repeat(100) })); // rewraps: 2 rows @80, 3 @40
+    for (let i = 0; i < 40; i++) bridge.push(ev({ type: "bg_task_output", taskId: "t", chunk: `RW-${i}` }));
+    const { stdin, lastFrame } = render(<App client={fakeClient()} bridge={bridge} {...baseProps} />);
+    try {
+      await wait();
+
+      stdin.write("\x1b[5~"); // PgUp -> offset 18, unfollowed
+      await wait();
+      const before = lastFrame() ?? "";
+      expect(before.split("\n")[0]).toContain("RW-3"); // window top — long note entirely above it
+      expect(before).toContain("↓ 19 newer lines");
+
+      stdoutShape.columns = 40;
+      process.stdout.emit("resize");
+      await wait();
+      const after = lastFrame() ?? "";
+      expect(after.split("\n")[0]).toContain("RW-3"); // same content on top — rewrap did not scroll the reader
+      expect(after).toContain("↓ 19 newer lines"); // hidden-below count unchanged — offset was not "compensated"
+    } finally {
+      stdoutShape.columns = prevCols;
+    }
   });
 
   test("(l) resize: the frame re-renders to the new terminal height", async () => {
@@ -1133,7 +1214,7 @@ describe("bottomBarRows (pinned-bar line-count model)", () => {
   // unchanged; only the NEW "small columns" describe block below exercises actual wrapping.
   type Base = Parameters<typeof bottomBarRows>[0];
   const base = (overrides: Partial<Base>): Base => ({
-    tasksVisible: true, tasks: [], agents: [], running: false, pending: null, activeTurnRows: 0,
+    tasksVisible: true, tasks: [], agents: [], running: false, pending: null,
     columns: 80, composerText: "", composerCursor: 0, resuming: false, menuRows: 0,
     ...overrides,
   });
@@ -1156,8 +1237,7 @@ describe("bottomBarRows (pinned-bar line-count model)", () => {
     expect(bottomBarRows(base({ agents: [agent("x"), agent("y")] }))).toBe(4 + 4);
   });
 
-  test("active-turn tail rows and a pending card both count; the card replaces the composer's 3", () => {
-    expect(bottomBarRows(base({ activeTurnRows: 5 }))).toBe(9); // 5 + composer 3 + footer 1
+  test("a pending card replaces the composer's 3 (TUI renderer T3: the streaming turn no longer counts here — it lives in the transcript)", () => {
     const withCard = bottomBarRows(base({
       pending: { kind: "approval", callId: "c", toolName: "bash", summary: "x" },
     }));
@@ -1211,5 +1291,385 @@ describe("bottomBarRows (pinned-bar line-count model)", () => {
       }));
       expect(rows).toBe(1 + 1); // approval card (1) + footer (1) — menuRows never added
     });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// TUI renderer T3 — streaming inside the transcript, pinned PURE (no Ink): these compose the
+// exact per-render derivation App runs — reduce → makeFlattenCache.lines(committed) ++
+// makeStreamRenderer.lines(activeAssistant, activeTools) — so they hold in any environment,
+// unlike the TTY-classed frame tests above.
+// ---------------------------------------------------------------------------------------------
+
+import { initialState, reduce } from "../../src/tui/state";
+import { makeFlattenCache, makeStreamRenderer } from "../../src/tui/flatten-blocks";
+import { applyWheel, followBottom, onContentGrown, visibleSlice } from "../../src/tui/scroll-model";
+
+// BOUNDED EXCEPTIONS to this pin, disclosed here AT the pin (T3 fix round 1, reviewer item):
+//  1. Mid-stream attach/resume: a client that missed earlier deltas (transients are never
+//     persisted) holds only a SUFFIX of the text — the swap then renders the full committed text,
+//     a real content difference (one honest reflow), not a glue artifact. This pin streams the
+//     whole text, the only case where byte-equality is even claimable.
+//  2. Cross-boundary reference-link definitions (`[ref]: url` settled before `[text][ref]`
+//     streams): the settled prefix was lexed without the later definition, so the streamed frame
+//     can show the literal form where the cold render resolves it — a one-row difference at the
+//     swap, self-correcting. Same lex-composition assumption CC's monotonic boundary makes.
+//  3. Degradation (createStreamingMarkdown's plain-tail mode past STREAM_OPEN_SEGMENT_MAX): the
+//     dim plain overflow is deliberately NOT the cold render — the swap restyles it (pinned in
+//     markdown.test.ts's degradation suite). This pin's texts stay under the threshold.
+describe("T3 — the turn-end swap renders byte-identical rows (the no-glue pin)", () => {
+  const FULL = "Streaming **works** now.\n\nSecond para with `code`.\n\n- item a\n- item b\n\nAll done here.";
+
+  function streamedState(chunk: number) {
+    let s = initialState();
+    s = reduce(s, ev({ type: "turn_started", threadId: "main" }), 0);
+    for (let i = chunk; i < FULL.length + chunk; i += chunk) {
+      const upto = Math.min(i, FULL.length);
+      const from = upto - Math.min(chunk, upto - (i - chunk));
+      s = reduce(s, ev({ type: "assistant_delta", threadId: "main", delta: FULL.slice(i - chunk, upto), from }), 0);
+    }
+    return s;
+  }
+
+  test("lineLog before assistant_message === lineLog after, element-wise (arbitrary delta chunking)", () => {
+    for (const chunk of [1, 5, FULL.length]) {
+      const flatten = makeFlattenCache();
+      const stream = makeStreamRenderer();
+      const fopts = { columns: 80, verbose: false };
+      const sopts = { columns: 80, dimToolDot: false };
+
+      const s = streamedState(chunk);
+      expect(s.activeAssistant).toBe(FULL); // wire property: deltas concat to the final text
+      const before = [...flatten.lines(s.committed, fopts), ...stream.lines(s.activeAssistant, s.activeTools, sopts)];
+
+      const s2 = reduce(s, ev({ type: "assistant_message", threadId: "main", text: FULL }), 0);
+      // ONE state update: the block commits AND the stream clears in the same reduce.
+      expect(s2.activeAssistant).toBe("");
+      expect(s2.committed.length).toBe(s.committed.length + 1);
+      const after = [...flatten.lines(s2.committed, fopts), ...stream.lines(s2.activeAssistant, s2.activeTools, sopts)];
+
+      expect(after).toEqual(before); // byte-identical rows ⇒ the swap repaints nothing
+    }
+  });
+
+  test("swap parity also holds when in-flight tool heads trail the streamed text", () => {
+    const flatten = makeFlattenCache();
+    const stream = makeStreamRenderer();
+    const fopts = { columns: 80, verbose: false };
+    const sopts = { columns: 80, dimToolDot: false };
+
+    let s = streamedState(7);
+    s = reduce(s, ev({ type: "tool_call", threadId: "main", name: "bash", argsJson: '{"command":"ls"}' }), 0);
+    const before = [...flatten.lines(s.committed, fopts), ...stream.lines(s.activeAssistant, s.activeTools, sopts)];
+    const s2 = reduce(s, ev({ type: "assistant_message", threadId: "main", text: FULL }), 0);
+    const after = [...flatten.lines(s2.committed, fopts), ...stream.lines(s2.activeAssistant, s2.activeTools, sopts)];
+    expect(after).toEqual(before); // tool head rows stay put after the assistant rows either way
+  });
+
+  // T6 spacing rhythm — the MID-CONVERSATION half of the pin (review gap): the two tests above
+  // fold from an EMPTY committed log, so the streamed spacer branch (`precededByContent: true`)
+  // never fires there. This one seeds a REAL completed first exchange through the reducer, so the
+  // second turn streams over non-empty committed content — the committed cache's beat-gap
+  // (`out.length > 0 && BEAT_KINDS`) and the stream renderer's `precededByContent` spacer are BOTH
+  // live, and any drift between those two computations breaks the array-equality here (verified
+  // RED by mutation: a stream renderer that ignores the flag fails this test's `toEqual`).
+  test("mid-conversation swap parity: a second turn streamed over a committed first exchange stays byte-identical (precededByContent=true live)", () => {
+    const flatten = makeFlattenCache();
+    const stream = makeStreamRenderer();
+    const fopts = { columns: 80, verbose: false };
+    // App's exact per-render derivation (app.tsx), spacer flag included: the stream renderer is
+    // told committed rows precede it exactly when the flattened committed log is non-empty.
+    const compose = (st: ReturnType<typeof initialState>) => {
+      const body = flatten.lines(st.committed, fopts);
+      return {
+        body,
+        log: [...body, ...stream.lines(st.activeAssistant, st.activeTools, { columns: 80, dimToolDot: false, precededByContent: body.length > 0 })],
+      };
+    };
+
+    // A full first exchange, folded through the real reducer: user → turn → answer → summary.
+    let s = initialState();
+    s = reduce(s, ev({ type: "user_message", threadId: "main", text: "first question" }), 0);
+    s = reduce(s, ev({ type: "turn_started", threadId: "main" }), 0);
+    s = reduce(s, ev({ type: "assistant_message", threadId: "main", text: "First answer, committed." }), 0);
+    s = reduce(s, ev({ type: "turn_completed", threadId: "main", stopReason: "end", inputTokens: 10, outputTokens: 5 }), 100);
+    s = reduce(s, ev({ type: "user_message", threadId: "main", text: "second question" }), 200);
+    s = reduce(s, ev({ type: "turn_started", threadId: "main" }), 200);
+    const SECOND = "Second **answer** streams now.\n\n- over a list\n- of items";
+    for (let i = 0; i < SECOND.length; i += 5) {
+      s = reduce(s, ev({ type: "assistant_delta", threadId: "main", delta: SECOND.slice(i, i + 5), from: i }), 200);
+    }
+    expect(s.committed.length).toBeGreaterThan(0); // the seed worked — this is NOT the first beat
+    expect(s.activeAssistant).toBe(SECOND);
+
+    const before = compose(s);
+    // The spacer is genuinely LIVE in this scenario: the streamed rows open with the beat gap.
+    expect(before.log[before.body.length]).toBe("");
+
+    const s2 = reduce(s, ev({ type: "assistant_message", threadId: "main", text: SECOND }), 200);
+    expect(s2.activeAssistant).toBe("");
+    const after = compose(s2);
+    expect(after.log).toEqual(before.log); // byte-identical spacer-and-all ⇒ the swap repaints nothing
+  });
+});
+
+describe("T3 — streamed complete lines are scrollable transcript content mid-stream", () => {
+  test("scroll back during a stream: streamed lines are readable, and further growth holds the view", () => {
+    const stream = makeStreamRenderer();
+    const sopts = { columns: 80, dimToolDot: false };
+    const viewH = 5;
+
+    // A stream tall enough to scroll: 12 complete plain lines + an open tail.
+    const lines = Array.from({ length: 12 }, (_, i) => `streamed line ${i}`);
+    const buf1 = lines.join("\n") + "\nopen tail";
+    const log1 = stream.lines(buf1, [], sopts);
+    expect(log1.length).toBeGreaterThan(viewH);
+
+    // Wheel back far enough that the window sits over early streamed lines.
+    let scroll = followBottom();
+    scroll = applyWheel(scroll, { kind: "wheelUp", lines: 8 }, viewH, log1.length);
+    const w1 = visibleSlice(log1, scroll, viewH, 0);
+    const visible1 = log1.slice(w1.start, w1.end);
+    expect(visible1.join("\n")).toContain("streamed line 2"); // an EARLY complete line, readable mid-stream
+
+    // The stream grows (more complete lines land): compensation keeps the SAME rows in view.
+    const buf2 = buf1 + " grows\nmore 1\nmore 2\nmore 3\n";
+    const log2 = stream.lines(buf2, [], sopts);
+    const grownBy = log2.length - log1.length;
+    expect(grownBy).toBeGreaterThan(0);
+    scroll = onContentGrown(scroll, grownBy);
+    const w2 = visibleSlice(log2, scroll, viewH, 0);
+    expect(log2.slice(w2.start, w2.end)).toEqual(visible1); // growth never moves a reader
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// TUI renderer T3 — the 50% chrome cap, pinned AT THE LAYOUT MODEL: `bottomBarLayout` computes
+// every piece's allotment and sheds (tasks → agents → input-slot content) until the bar fits
+// `floor(rows/2)`. The render honors the allotments (JS-windowing, HARD CONSTRAINT 2), so the
+// model's number IS the rendered height.
+// ---------------------------------------------------------------------------------------------
+
+import { bottomBarLayout, BAR_MAX_FRACTION } from "../../src/tui/app";
+
+describe("bottomBarLayout — the composer+chrome slot never exceeds 50% of terminal rows (T3 pin)", () => {
+  const task = (subject: string, status: TaskRow["status"]): TaskRow => ({ id: subject, subject, status });
+  const agent = (threadId: string): AgentRow => ({
+    threadId, agentType: "general-purpose", label: "a", status: "working",
+    outputTokens: 0, liveOutputChars: 0, activeMs: 0, toolCalls: 0,
+  });
+  type LayoutBase = Parameters<typeof bottomBarLayout>[0];
+  const base = (overrides: Partial<LayoutBase>): LayoutBase => ({
+    tasksVisible: true, tasks: [], agents: [], running: false, pending: null,
+    columns: 80, composerText: "", composerCursor: 0, resuming: false, menuRows: 0,
+    ...overrides,
+  });
+
+  test("BAR_MAX_FRACTION is one half", () => {
+    expect(BAR_MAX_FRACTION).toBe(0.5);
+  });
+
+  test("adversarial everything at rows=24 stays ≤ 12", () => {
+    const layout = bottomBarLayout(base({
+      tasks: Array.from({ length: 100 }, (_, i) => task(`t${i}`, "pending")),
+      agents: Array.from({ length: 40 }, (_, i) => agent(`th_${i}`)),
+      running: true, resuming: true, menuRows: 6,
+      composerText: "x".repeat(2000), composerCursor: 2000, columns: 40,
+    }), 24);
+    expect(layout.rows).toBeLessThanOrEqual(12);
+  });
+
+  test("a huge pasted composer text is windowed, never overflows the cap", () => {
+    const text = "y".repeat(5000);
+    const layout = bottomBarLayout(base({ columns: 20, composerText: text, composerCursor: text.length }), 24);
+    expect(layout.rows).toBeLessThanOrEqual(12);
+    expect(layout.composerContentRows).toBeGreaterThanOrEqual(1);
+    // content rows + 2 border rows + footer 1 = the whole bar here
+    expect(layout.rows).toBe(layout.composerContentRows + 2 + 1);
+  });
+
+  test("a 200-line plan card is truncated to the cap with a disclosure line", () => {
+    const layout = bottomBarLayout(base({
+      pending: { kind: "plan", callId: "c", plan: Array.from({ length: 200 }, (_, i) => `step ${i}`).join("\n") },
+    }), 24);
+    expect(layout.rows).toBeLessThanOrEqual(12);
+    expect(layout.planBodyRows).toBeGreaterThanOrEqual(1);
+    expect(layout.planBodyRows).toBeLessThan(200);
+  });
+
+  test("shed order: tasks go before agents; agents window with an overflow line", () => {
+    const layout = bottomBarLayout(base({
+      tasks: Array.from({ length: 8 }, (_, i) => task(`t${i}`, "pending")),
+      agents: Array.from({ length: 8 }, (_, i) => agent(`th_${i}`)),
+    }), 24);
+    expect(layout.rows).toBeLessThanOrEqual(12);
+    expect(layout.showTasks).toBe(false); // tasks shed first (8 agents alone already fill the budget)
+    expect(layout.agentsShown).toBeGreaterThan(0); // agents kept (windowed)
+    expect(layout.agentsShown).toBeLessThan(8);
+  });
+
+  test("everything visible when it all fits (no shedding below the cap)", () => {
+    const layout = bottomBarLayout(base({
+      tasks: [task("a", "pending")], agents: [agent("x")], running: true,
+    }), 40); // cap 20; tasks(2)+spinner(1)+composer(3)+agents(2)+footer(1) = 9
+    expect(layout.showTasks).toBe(true);
+    expect(layout.agentsShown).toBe(1);
+    expect(layout.rows).toBe(9);
+    expect(layout.rows).toBe(bottomBarRows(base({
+      tasks: [task("a", "pending")], agents: [agent("x")], running: true,
+    }), 40)); // bottomBarRows is the layout's total — one model, two views
+  });
+
+  test("tiny terminal: essentials (composer minimum + footer) may exceed the cap — floors win, and are bounded", () => {
+    const layout = bottomBarLayout(base({}), 6); // cap 3, but composer(3)+footer(1) = 4 is the floor
+    expect(layout.rows).toBe(4);
+  });
+});
+
+// TUI renderer T4 — delta coalescing wired into App's bridge subscription (event-bridge.ts's
+// makeDeltaCoalescer; strict window semantics live in delta-coalescer.test.ts on injected fake
+// time). This is the WIRING pin, render-counted mechanism-appropriately: ink-testing-library's
+// `frames` records one entry per Ink render, so counting the DISTINCT partial fold states that
+// ever rendered counts the renders the burst caused (the ticking clock re-renders the SAME fold
+// state, so it can't inflate the count; only a delta dispatch can mint a NEW state).
+describe("App — delta coalescing (TUI renderer T4)", () => {
+  test("a rapid delta burst folds to a handful of rendered states — never one render per delta", async () => {
+    const bridge = makeEventBridge();
+    const client = fakeClient();
+    const { frames, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+    await wait(); // subscribe effect
+    bridge.push(ev({ type: "user_message", threadId: "main", text: "go" }));
+    bridge.push(ev({ type: "turn_started", threadId: "main" }));
+    await wait();
+    const N = 12;
+    for (let i = 0; i < N; i++) {
+      bridge.push(ev({ type: "assistant_delta", threadId: "main", delta: `«${i}»` }));
+      await wait(1); // macrotask spacing — each delta arrives as its own task, like the wire
+    }
+    await wait(40); // let the trailing-edge window(s) flush
+    expect(lastFrame() ?? "").toContain(`«${N - 1}»`); // the full burst landed — nothing dropped
+    // For each frame: the highest «i» visible = which fold state that render showed.
+    const states = new Set<number>();
+    for (const f of frames) {
+      for (let i = N - 1; i >= 0; i--) {
+        if (f.includes(`«${i}»`)) { states.add(i); break; }
+      }
+    }
+    expect(states.size).toBeGreaterThan(0);
+    expect(states.size).toBeLessThanOrEqual(3); // 12 deltas ⇒ ≤3 rendered fold states (≈1-2 windows)
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// TUI renderer T5 — the bottom status chrome wired into the App: the chrome rows feed
+// `bottomBarLayout`'s accounting (the 50% cap counts them), and the live sources flow end-to-end
+// (bg_task events → work line; session_activity → chip; /model → the model segment).
+// ---------------------------------------------------------------------------------------------
+
+describe("bottomBarLayout — T5: the chrome rows are counted (the cap can't be lied to)", () => {
+  type LayoutBase = Parameters<typeof bottomBarLayout>[0];
+  const base = (overrides: Partial<LayoutBase>): LayoutBase => ({
+    tasksVisible: true, tasks: [], agents: [], running: false, pending: null,
+    columns: 80, composerText: "", composerCursor: 0, resuming: false, menuRows: 0,
+    ...overrides,
+  });
+
+  test("chromeRows defaults to 1 (every pre-T5 expectation unchanged: empty = 4)", () => {
+    expect(bottomBarLayout(base({})).rows).toBe(4);
+  });
+
+  test("the second chrome line adds exactly one row", () => {
+    expect(bottomBarLayout(base({ chromeRows: 2 })).rows).toBe(5);
+  });
+
+  test("PIN: adding the second line doesn't break the 50% cap — content sheds instead", () => {
+    const text = "x".repeat(200); // a fat wrapped composer that alone would fill the cap
+    const one = bottomBarLayout(base({ columns: 20, composerText: text, composerCursor: text.length, chromeRows: 1 }), 24);
+    const two = bottomBarLayout(base({ columns: 20, composerText: text, composerCursor: text.length, chromeRows: 2 }), 24);
+    expect(one.rows).toBeLessThanOrEqual(12);
+    expect(two.rows).toBeLessThanOrEqual(12); // the cap holds WITH the extra chrome row counted
+    expect(two.composerContentRows).toBe(one.composerContentRows - 1); // the row came out of content
+  });
+});
+
+describe("App — T5 status chrome end-to-end (live sources, zero daemon changes)", () => {
+  test("(sc1) a bg_task_started shows the work line; its bg_task_exited clears it", async () => {
+    const bridge = makeEventBridge();
+    const client = fakeClient();
+    const { lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+    await wait();
+    expect(lastFrame() ?? "").not.toContain("1 running:");
+
+    bridge.push(ev({ type: "bg_task_started", threadId: "main", taskId: "bg1", command: "bun test" }));
+    await wait();
+    expect(lastFrame() ?? "").toContain("1 running: bun test");
+
+    bridge.push(ev({ type: "bg_task_exited", threadId: "main", taskId: "bg1", exitCode: 0, killed: false }));
+    await wait();
+    expect(lastFrame() ?? "").not.toContain("1 running:");
+  });
+
+  test("(sc2) a session_activity transient flips the chip on and off", async () => {
+    const bridge = makeEventBridge();
+    const client = fakeClient();
+    const { lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+    await wait();
+    expect(lastFrame() ?? "").not.toContain("● backgrounded");
+
+    bridge.push(ev({ type: "session_activity", activity: "background" }));
+    await wait();
+    expect(lastFrame() ?? "").toContain("● backgrounded");
+
+    bridge.push(ev({ type: "session_activity", activity: "active" }));
+    await wait();
+    expect(lastFrame() ?? "").not.toContain("● backgrounded");
+  });
+
+  test("(sc3) the footer shows the mount model; /model switches it IMMEDIATELY (live through the CommandCtx callback)", async () => {
+    // Same temp-NORMA_HOME discipline as commands.test.ts's /model suite — never ~/.norma.
+    const home = mkdtempSync(join(tmpdir(), "norma-tui-t5-model-"));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }));
+    const prevHome = process.env.NORMA_HOME;
+    process.env.NORMA_HOME = home;
+    try {
+      const bridge = makeEventBridge();
+      const client = fakeClient();
+      const { stdin, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+      await wait();
+      // The mount-time model rides the footer's status line from the first frame (baseProps.model).
+      expect(lastFrame() ?? "").toContain("gpt-5-codex");
+
+      stdin.write("/model gpt-5.6-luna --effort high");
+      await wait();
+      stdin.write("\r");
+      await wait();
+
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("model gpt-5.6-luna, effort high"); // the committed note (unchanged wording)
+      expect(frame).toContain("gpt-5.6-luna (high)"); // THE PIN: the footer segment flipped, same frame
+      expect(client.calls).toEqual([]); // /model never touches the client (settings.json route)
+    } finally {
+      if (prevHome === undefined) delete process.env.NORMA_HOME;
+      else process.env.NORMA_HOME = prevHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("(sc4) the work line ALSO counts live agents — and the viewport gives up the row (layout honesty)", async () => {
+    const bridge = makeEventBridge();
+    const client = fakeClient();
+    const { lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
+    await wait();
+
+    bridge.push(ev({ type: "thread_started", threadId: "th_1", agentType: "general-purpose", description: "scout run", ts: 500 }));
+    bridge.push(ev({ type: "turn_started", threadId: "th_1", ts: 1000 }));
+    await wait();
+
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("1 running: scout run"); // the work line
+    expect(frame).toContain("1 agent · ctrl+a"); // the roster pill stays (the ctrl+a affordance)
+    // The frame is still exactly rows-1 = 23 lines tall — the chrome row was paid for by the
+    // viewport via bottomBarLayout, not stacked on top of the frame.
+    expect((frame.split("\n").length)).toBeLessThanOrEqual(23);
   });
 });

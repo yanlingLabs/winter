@@ -256,3 +256,98 @@ describe("makeFlattenCache — incremental memoization (append-only ⇒ only new
     expect(count()).toBe(3);
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// TUI renderer T3 — makeStreamRenderer: the in-flight turn as transcript rows. The load-bearing
+// pin is SWAP PARITY: after streaming a text in arbitrary chunks, the renderer's assistant rows
+// are byte-identical (array-equal) to `flattenBlock({kind:"assistant", text})` — which is exactly
+// what the committed block renders at turn end, so the streamed→committed swap repaints nothing.
+// ---------------------------------------------------------------------------------------------
+
+import { makeStreamRenderer } from "../../src/tui/flatten-blocks";
+import { theme } from "../../src/tui/theme";
+
+const streamOpts = (o: Partial<{ columns: number; dimToolDot: boolean }> = {}) => ({
+  columns: 80,
+  dimToolDot: false,
+  ...o,
+});
+
+const SWAP_CORPUS: string[] = [
+  "plain reply, no markdown at all",
+  "hi **there**, friend",
+  "# Title\n\nBody with `code` and a longer paragraph that will wrap when the columns budget is small enough to force it.\n",
+  "Intro\n\n```js\nconst x = 1;\n```\n\nAfter",
+  "- item 1\n- item 2\n\n> quoted\n\ndone",
+  "table:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n",
+];
+
+describe("makeStreamRenderer — swap parity with flattenBlock (T3's no-glue pin, pure half)", () => {
+  test("after streaming in chunks, assistant rows array-equal the committed assistant block's rows", () => {
+    for (const text of SWAP_CORPUS) {
+      for (const chunk of [1, 4, text.length]) {
+        const r = makeStreamRenderer();
+        let rows: string[] = [];
+        for (let i = chunk; i < text.length + chunk; i += chunk) {
+          rows = r.lines(text.slice(0, Math.min(i, text.length)), [], streamOpts());
+        }
+        expect(rows).toEqual(flattenBlock({ kind: "assistant", text }, opts()));
+      }
+    }
+  });
+
+  test("swap parity holds with a highlighter and at a narrow width", () => {
+    const marker = (code: string, lang?: string) => `«${lang ?? "?"}:${code}»`;
+    const text = "Intro paragraph that wraps at narrow widths for sure.\n\n```js\nconst long = 1;\n```\n";
+    const r = makeStreamRenderer();
+    let rows: string[] = [];
+    for (let i = 3; i < text.length + 3; i += 3) {
+      rows = r.lines(text.slice(0, Math.min(i, text.length)), [], { ...streamOpts({ columns: 24 }), highlight: marker });
+    }
+    expect(rows).toEqual(flattenBlock({ kind: "assistant", text }, opts({ columns: 24, highlight: marker })));
+  });
+});
+
+describe("makeStreamRenderer — per-delta row stability (T3: only the open segment re-renders)", () => {
+  test("a tail-only delta leaves every row above the open segment byte-identical", () => {
+    const r = makeStreamRenderer();
+    const settled = "First **para** settled.\n\nSecond para settled.\n\n";
+    const before = r.lines(`${settled}open tail grows`, [], streamOpts());
+    const after = r.lines(`${settled}open tail grows more`, [], streamOpts());
+    // The settled blocks' rows (everything except the open paragraph's own rows) are unchanged.
+    const settledRowCount = before.length - 1; // the open para renders as its single last row here
+    expect(after.slice(0, settledRowCount)).toEqual(before.slice(0, settledRowCount));
+  });
+});
+
+describe("makeStreamRenderer — in-flight tool rows (the activeTurnLines shape carried forward)", () => {
+  test("tool head: gutter dot + bold name + (argsHead); dot dims on dimToolDot", () => {
+    const r = makeStreamRenderer();
+    const tools = [{ name: "bash", argsJson: '{"command":"ls"}' }];
+    const normal = r.lines("", tools, streamOpts({ dimToolDot: false }));
+    expect(normal.length).toBe(1);
+    expect(stripAnsi(normal[0]!)).toBe('⏺ bash({"command":"ls"})');
+    expect(normal[0]!).toContain(ansi.bold("bash"));
+    const dimmed = r.lines("", tools, streamOpts({ dimToolDot: true }));
+    expect(dimmed[0]!).toContain(ansi.dim("⏺"));
+  });
+
+  test("assistant rows precede tool rows; idle (no text, no tools) renders []", () => {
+    const r = makeStreamRenderer();
+    expect(r.lines("", [], streamOpts())).toEqual([]);
+    const rows = r.lines("thinking out loud", [{ name: "read", argsJson: "{}" }], streamOpts());
+    expect(stripAnsi(rows[0]!)).toContain("thinking out loud");
+    expect(stripAnsi(rows[rows.length - 1]!)).toContain("read");
+  });
+
+  test("every row respects the columns budget", () => {
+    const r = makeStreamRenderer();
+    const rows = r.lines(
+      "A rather long streaming paragraph with **inline** styling that must hard-wrap at the narrow budget.",
+      [{ name: "bash", argsJson: JSON.stringify({ command: "echo " + "x".repeat(120) }) }],
+      streamOpts({ columns: 30 }),
+    );
+    for (const row of rows) expect(stripAnsi(row).length).toBeLessThanOrEqual(30);
+    void theme;
+  });
+});

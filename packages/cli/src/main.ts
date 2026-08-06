@@ -393,6 +393,13 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
   // NORMA_LEGACY_CLI chat resume, non-TTY, resumeOneShot) — mountTui/`<App>` treat that exactly like
   // today (no resuming line, ever).
   let resumeTargetSeq: number | undefined;
+  // TUI renderer T5 (status chrome): the resume route's per-session model/effort overrides + the
+  // row's activity, off the SAME `listSessions()` read the mode gate below already performs (no new
+  // wire read). Undefined on every other route — the chrome then shows the global settings values,
+  // which IS the daemon's resolution for an override-less session (engine.ts `meta.model || base`).
+  let sessionModelOverride: string | undefined;
+  let sessionEffortOverride: string | undefined;
+  let initialActivity: import("@norma/protocol").SessionActivity | undefined;
   const wd: WatchdogState = { turnRunning: false, toolsInFlight: 0, approvalsPending: 0, lastEventAt: Date.now() };
   let wdTimer: ReturnType<typeof setInterval> | undefined; // one session-long stall poll; cleared on teardown
   let exiting = false; // guard to ensure a single exit path wins (stall watchdog vs endHeadlessTurn vs ctrl+C)
@@ -814,10 +821,20 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
     // chat route and the resumeOneShot route flow through here) — CLIENT-side mode gate, same
     // reasoning as `case "send"`/`case "watch"` (product-surface rule, not a security boundary;
     // session-mode.ts's file doc). The not-found message stays byte-identical to before.
-    const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; scope: string; lastSeq: number; mode?: string }> };
+    const { sessions } = (await c.listSessions()) as {
+      sessions: Array<{
+        sessionId: string; scope: string; lastSeq: number; mode?: string;
+        // T5 status chrome: the row's per-session model/effort overrides + derived activity
+        // (SessionSummary fields the daemon already serves — methods.ts SessionListResult).
+        model?: string; effort?: string; activity?: import("@norma/protocol").SessionActivity;
+      }>;
+    };
     const check = checkCodeSession(sessions, existingSessionId);
     if (!check.ok) { console.error(check.message); c.close(); process.exit(1); }
     const info = check.row;
+    sessionModelOverride = info.model;
+    sessionEffortOverride = info.effort;
+    initialActivity = info.activity;
     console.log(`${DIM}↻ resuming ${existingSessionId} — ${info.scope}, ${info.lastSeq} events${RESET}`);
     // Attach from the tip (info.lastSeq) on every route EXCEPT the Ink resume route: attaching from
     // 0 there replays the whole session so `<App>` can render the full transcript back (T5), with a
@@ -857,11 +874,17 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
     // with an inert fallback so missing settings never blocks the interactive session.
     const version = CORE_VERSION;
     let model = "";
+    let effort: string | undefined;
     try {
-      model = loadSettings(join(resolveNormaHome(), "settings.json")).provider.model;
+      const s = loadSettings(join(resolveNormaHome(), "settings.json"));
+      model = s.provider.model;
+      effort = s.provider.reasoningEffort; // T5 status chrome: the global effort half
     } catch { /* keep fallback */ }
     await mountTui({
       client: c, bridge: bridge!, sessionId, cwd, initialPolicy: policy, version, model,
+      // T5 status chrome: global effort + the resume route's per-session overrides/activity seed
+      // (all undefined on the fresh-session route — see their declarations above).
+      effort, sessionModelOverride, sessionEffortOverride, initialActivity,
       ...(resumeTargetSeq !== undefined ? { resumeTargetSeq } : {}),
     }).waitUntilExit();
     // T5: printed AFTER waitUntilExit resolves — mountTui's own teardown has already written the
