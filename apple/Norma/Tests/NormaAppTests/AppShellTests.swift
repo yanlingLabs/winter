@@ -50,9 +50,15 @@ final class AppShellTests: XCTestCase {
 
     // MARK: - ShellDestination / ShellNavigationModel (PURE)
 
-    func testNavigationModelDefaultsToTheCodeLanding() {
+    /// RETRUED (chatgpt-ui T2, spec R2): the app LAUNCHES onto the new-chat page — chat mode,
+    /// ready to type, no session minted. T1 deliberately hard-coded `.mode(.code)` (decoupling
+    /// this constant from `sidebarOrder.first` precisely so the reorder didn't smuggle a launch
+    /// change) with a "T2 retargets" note; this is that retarget. Re-summon mid-run still
+    /// preserves prior state — `summon(navigatingTo: nil)` never touches the destination
+    /// (`testLaunchLandsOnNewChatAndResummonPreservesPriorState`).
+    func testNavigationModelDefaultsToTheNewChatPage() {
         XCTAssertEqual(ShellNavigationModel().destination, defaultShellDestination)
-        XCTAssertEqual(defaultShellDestination, .mode(.code))
+        XCTAssertEqual(defaultShellDestination, .newChat)
     }
 
     func testNavigateRetargetsTheDestination() {
@@ -83,7 +89,7 @@ final class AppShellTests: XCTestCase {
     }
 
     func testEveryDestinationHasATitleAndSystemImage() {
-        let destinations: [ShellDestination] = SessionMode.sidebarOrder.map { .mode($0) } + [.session("s_1"), .dashboard(pane: nil), .dashboard(pane: .pluginManager)]
+        let destinations: [ShellDestination] = SessionMode.sidebarOrder.map { .mode($0) } + [.session("s_1"), .dashboard(pane: nil), .dashboard(pane: .pluginManager), .newChat]
         for destination in destinations {
             XCTAssertFalse(shellDestinationTitle(destination).isEmpty, "\(destination) needs a non-empty title")
             XCTAssertFalse(shellDestinationSystemImage(destination).isEmpty, "\(destination) needs a non-empty SF Symbol name")
@@ -538,15 +544,15 @@ final class AppShellTests: XCTestCase {
         delegate.appWindow?.hide()
     }
 
-    /// "New Chat" is fired through the real item — review fix: unlike "Chat", it still CREATES
-    /// (`AppDelegate.newChat()`'s restored innards, see its own doc comment), so a degraded
-    /// (no-token) test boot can only prove the failure half here — the create RPC has no real
-    /// daemon to land against, so nothing must summon. The success half (create shape, no
-    /// self-attach on the create path, navigate-to-created-id) needs a scripted transport and is
-    /// pinned in `ChatWindowTests.testNewChatCreatesViaSessionCreateWithChatModeNoCwdAndNoAttachOnTheCreatePath`
-    /// instead — same "guard/no-crash at the menu level, real RPC shape via `setAppModelForTesting`"
-    /// split every other AppDelegate RPC path in this codebase already uses.
-    func testNewChatMenuItemFiresAndFailsFastWithoutSummoningOnTheDegradedBoot() async throws {
+    /// RETRUED (chatgpt-ui T2, spec §2): "New Chat" no longer creates at the door — it summons the
+    /// shell onto the NEW-CHAT PAGE (`.newChat`), same fired-through-the-real-item posture as
+    /// "Chat" beside it. The old pin proved the degraded boot's create failure summoned nothing;
+    /// that create no longer exists at the door at all — the page opens fine with no daemon (the
+    /// FIRST SEND is what needs one, and its failure is the page's own visible state:
+    /// `ChatWindowTests.testFirstSendCreateFailureIsVisibleOnThePageAndNeverNavigates`). The
+    /// zero-create wire proof needs a recorder and lives in
+    /// `testNewChatDoorsOpenThePageAndMintNothing`.
+    func testNewChatMenuItemSummonsToTheNewChatPage() {
         let delegate = AppDelegate()
         XCTAssertTrue(delegate.boot())
         guard let item = delegate.menuBar?.newChatItem else {
@@ -554,10 +560,11 @@ final class AppShellTests: XCTestCase {
         }
 
         NSApp.sendAction(item.action!, to: item.target, from: item)
-        try? await Task.sleep(nanoseconds: 300_000_000)
 
-        XCTAssertNil(delegate.appWindow, "the degraded (no-token) boot's create RPC cannot succeed — nothing should summon")
+        XCTAssertNotNil(delegate.appWindow, "the menu item must summon the shell, not spawn a detached window")
+        XCTAssertEqual(delegate.appWindow?.navigation.destination, .newChat, "the door opens the page — the create waits for the first send")
         XCTAssertTrue(delegate.detachedWindows.isEmpty)
+        delegate.appWindow?.hide()
     }
 
     /// "Dashboard…" summons the shell onto a PLAIN `.dashboard(pane: nil)` — App shell T7: the real
@@ -636,8 +643,10 @@ final class AppShellTests: XCTestCase {
     }
 
     /// The destination table: every mode row navigates to its `.mode(...)` landing UNCHANGED; New
-    /// chat is `nil` — an action row, never a selection (until T2 it fires the existing `newChat()`
-    /// door; T2 retargets it to the new-chat page).
+    /// chat is `nil` — an action row, never a selection (T2: the door it fires now opens the
+    /// `.newChat` page; kept as an action so the row's no-dead-affordance wiring gate survives,
+    /// and `.newChat` matches no row tag — the sidebar goes quiet on the page, the same posture
+    /// as a `.session` destination).
     func testShellSidebarRowDestinationsModeRowsNavigateNewChatIsAnAction() {
         XCTAssertNil(shellSidebarRowDestination(.newChat), "New chat is an action row — never a selection destination")
         XCTAssertEqual(shellSidebarRowDestination(.mode(.chat)), .mode(.chat))
@@ -760,14 +769,18 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(fired, 1, "one tap = exactly one firing of the injected action")
     }
 
-    /// THE wire pin (the "no new create path" proof): the door `summonAppWindow` injects IS
-    /// `AppDelegate.newChat()` — firing it once produces exactly ONE `session.create` (mode
-    /// `"chat"`, no `cwd`) across EVERY transport the app has ever minted, and then summons onto
-    /// the fresh id, which is the exact create → navigate → `isChatSession`-self-heal flow the
-    /// menu-bar entry rides (`ChatWindowTests`' pins). A landing button with its own
-    /// `session.create` call site — the "second create path with no owner" the T3 report warned
-    /// about — fails the exactly-one count here.
-    func testSummonAppWindowWiresTheLandingsNewChatDoorToTheOneMenuCreatePath() async throws {
+    /// RETARGETED (chatgpt-ui T2) — THE all-doors wire pin (spec §2: "one behavior everywhere; no
+    /// door mints a session without a send"): the injected door `summonAppWindow` wires
+    /// (`AppWindowController.openNewChat` — the sidebar's New chat row AND the chat landing's
+    /// button both fire this exact closure) and the menu path (`newChat()` — proven wired to the
+    /// real item by `testNewChatMenuItemSummonsToTheNewChatPage`) are the SAME door, and firing
+    /// them ALL now produces ZERO `session.create` across EVERY transport the app has ever
+    /// minted — the eager create is gone from every door at once. The create belongs to the
+    /// page's first send alone (`ChatWindowTests.
+    /// testNewChatOpensThePageAndOnlyTheFirstSendCreatesWithChatModeNoCwd`). B4's "second create
+    /// path with no owner" warning still binds — a landing button growing its own
+    /// `session.create` fails the zero count here.
+    func testNewChatDoorsOpenThePageAndMintNothing() async throws {
         let factory = RecordingTransportFactory()
         let model = AppModel(makeTransport: { factory.make() }, token: "tok")
         let startTask = Task { await model.start() }
@@ -787,36 +800,59 @@ final class AppShellTests: XCTestCase {
         delegate.setAppModelForTesting(model)
         defer { delegate.appWindow?.hide() }
 
-        delegate.summonAppWindow()
+        // Door 1: the menu path (the real item fires this exact method — see the booted pin).
+        delegate.newChat()
+        XCTAssertEqual(delegate.appWindow?.navigation.destination, .newChat, "the menu door opens the page")
+
+        // Doors 2+3: the injected closure — the sidebar's New chat row and the chat landing's
+        // button both fire this verbatim (`ShellRootView.newChat` → `ShellSidebar`/`ChatLandingView`).
         guard let door = delegate.appWindow?.openNewChat else {
             return XCTFail("summonAppWindow must inject the New Chat door into the shell it constructs")
         }
-
+        // Navigate away first so the door's page-open is observable again.
+        delegate.appWindow?.navigation.navigate(to: .mode(.code))
         door()
+        XCTAssertEqual(delegate.appWindow?.navigation.destination, .newChat, "the injected door opens the page")
 
-        var create: [String: Any] = [:]
-        let deadline = Date().addingTimeInterval(3)
-        while Date() < deadline {
-            if let found = t.sent.map(lineJSON).first(where: { $0["method"] as? String == "session.create" }) {
-                create = found
-                break
-            }
-            try? await Task.sleep(nanoseconds: 20_000_000)
-        }
-        XCTAssertEqual(create["method"] as? String, "session.create", "the door must ride newChat()'s create on model.client: \(t.sent)")
-        let params = create["params"] as? [String: Any]
-        XCTAssertEqual(params?["mode"] as? String, "chat")
-        XCTAssertNil(params?["cwd"], "chat sessions carry no fs tools — newChat()'s own no-cwd shape")
-        t.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_b4_chat","trusted":true}}"#)
-
-        await waitUntil { delegate.appWindow?.navigation.destination == .session("s_b4_chat") }
-        XCTAssertEqual(
-            delegate.appWindow?.navigation.destination, .session("s_b4_chat"),
-            "the door is newChat()'s WHOLE flow — create, then summon straight onto the fresh id (the self-heal path)"
-        )
-
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 300_000_000)
         let creates = factory.made.flatMap(\.sent).map(lineJSON).filter { $0["method"] as? String == "session.create" }
-        XCTAssertEqual(creates.count, 1, "ONE create call site, on the ONE management connection — the landing button must never mint its own session.create")
+        XCTAssertEqual(creates.count, 0, "NO door mints a session without a send — the eager-create path is gone everywhere: \(creates)")
+    }
+
+    // MARK: - chatgpt-ui T2: the new-chat page (spec §2 — launch destination + house-voice greeting)
+
+    /// The launch-vs-resummon split, at the controller level (spec R2's two halves in one pin): a
+    /// FRESH shell lands on the new-chat page (`defaultShellDestination`, seeded by
+    /// `ShellNavigationModel` itself); a mid-run re-summon with no destination PRESERVES whatever
+    /// the user was on (the existing `summon(navigatingTo: nil)` restore machinery, untouched) —
+    /// launching onto the page must never come at the cost of yanking a running shell back to it.
+    func testLaunchLandsOnNewChatAndResummonPreservesPriorState() {
+        let controller = makeController()
+        defer { controller.hide() }
+
+        controller.summon()
+        XCTAssertEqual(controller.navigation.destination, .newChat, "launch = the new-chat page, ready to type")
+
+        controller.navigation.navigate(to: .mode(.code))
+        controller.hide()
+        controller.summon()
+        XCTAssertEqual(controller.navigation.destination, .mode(.code), "re-summon mid-run = prior state, never a forced hop back to the page")
+    }
+
+    /// The greeting is HOUSE VOICE (spec §2: short, calm, ours — anchored to the field's own
+    /// "Ask Norma…" register) and explicitly NOT ChatGPT's copy (their rotating question-form
+    /// greetings — "What can I help with?" et al). Pinned as a string, same extracted-copy
+    /// discipline as `chatLandingEmptyStateSubtitle`.
+    func testNewChatGreetingIsHouseVoiceNotChatGPTs() {
+        XCTAssertEqual(newChatGreeting, "Ask Norma anything.")
+        XCTAssertFalse(newChatGreeting.contains("help with"), "not ChatGPT's copy")
+        XCTAssertFalse(newChatGreeting.contains("?"), "calm statement, not their question-form register")
+    }
+
+    /// The page's daemon-unreachable sentence is the house fallback, shared with every other RPC
+    /// seam's copy (`setActivityFromRoster`/`applyDirsOp`'s exact string) — one voice for one
+    /// failure.
+    func testNewChatUnreachableMessageMatchesTheHouseFallback() {
+        XCTAssertEqual(newChatUnreachableMessage, "couldn't reach the daemon — try again")
     }
 }

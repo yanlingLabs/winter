@@ -68,6 +68,16 @@ struct ShellRootView: View {
     @ViewBuilder
     private var detail: some View {
         switch nav.destination {
+        case .newChat:
+            // chatgpt-ui T2: the new-chat page (spec §2) — the launch surface, and every New-chat
+            // door's target. Host-required: the first send creates through the host's management
+            // client; a host-less shell (the pure window tests) renders the honest placeholder,
+            // same posture as `.mode(.code)` below.
+            if let host {
+                NewChatPage(nav: nav, host: host)
+            } else {
+                ShellLandingView(destination: nav.destination)
+            }
         case .session:
             if let host {
                 ShellSessionView(host: host, directory: directory)
@@ -144,7 +154,9 @@ func shellSidebarRowSystemImage(_ row: ShellSidebarRow) -> String {
 }
 
 /// PURE: the row's selection destination — `nil` for New chat, which is an ACTION row (it fires
-/// the injected door, never sets selection; a page is not somewhere the sidebar can be "on").
+/// the injected door — since T2, `AppDelegate.newChat()`'s summon onto the `.newChat` page — and
+/// never sets selection; the List's tags therefore never highlight it, the same quiet posture the
+/// mode rows keep while a `.session`/`.dashboard` destination is showing).
 /// Mode rows navigate to their `.mode(...)` landings unchanged.
 func shellSidebarRowDestination(_ row: ShellSidebarRow) -> ShellDestination? {
     switch row {
@@ -213,7 +225,8 @@ struct ShellSidebar: View {
     /// the same no-dead-affordance posture as `newChat` below.
     var host: ShellSessionHost? = nil
     /// chatgpt-ui T1: the New chat row's door — the SAME injected `AppDelegate.newChat()` the chat
-    /// landing's button fires (B4's one-create-path rule). `nil` renders no row (the
+    /// landing's button fires (T2: the door opens the `.newChat` page; the create waits for the
+    /// page's first send — B4's one-door rule, retargeted). `nil` renders no row (the
     /// `chatLandingShowsNewChatButton` posture: an unwired door never renders a dead affordance).
     var newChat: (() -> Void)? = nil
 
@@ -286,7 +299,10 @@ struct ShellSidebar: View {
         switch row {
         case .newChat:
             if let newChat {
-                Button(action: newChat) { // T2 retargets to the new-chat page
+                // chatgpt-ui T2: the door now OPENS THE PAGE (`AppDelegate.newChat()` →
+                // `summonAppWindow(navigatingTo: .newChat)`) — no create until the page's first
+                // send. Still the one injected door all three New-chat affordances share.
+                Button(action: newChat) {
                     rowLabel(row)
                         .contentShape(Rectangle())
                 }

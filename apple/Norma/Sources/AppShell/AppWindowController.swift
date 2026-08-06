@@ -95,12 +95,14 @@ final class AppWindowController: NSObject, NSWindowDelegate {
     /// alongside `host`.
     let dashboardWiring: DashboardWiring?
 
-    /// Bugfix pass B4: the chat landing's "New Chat" door — `AppDelegate.newChat()` injected at
-    /// construction (the same one-owner discipline `dashboardWiring` follows): the landing's button
-    /// must fire the EXACT create-then-summon flow the menu-bar entry does (`newChat()`'s create →
-    /// `.session(id)` → the `isChatSession` self-heal), never a `session.create` call site of its
-    /// own. `nil` for a shell built without it (the pure window/geometry tests) — the landing then
-    /// renders no dead button (`chatLandingShowsNewChatButton`).
+    /// Bugfix pass B4 (retargeted by chatgpt-ui T2): the New-chat door — `AppDelegate.newChat()`
+    /// injected at construction (the same one-owner discipline `dashboardWiring` follows), fired
+    /// by the chat landing's button AND the sidebar's New chat row. Since T2 the door OPENS THE
+    /// `.newChat` PAGE (spec §2) — the create happens on the page's first send
+    /// (`ShellSessionHost.sendFirstChatMessage`), so no affordance here ever grows a
+    /// `session.create` call site of its own. `nil` for a shell built without it (the pure
+    /// window/geometry tests) — the landing then renders no dead button
+    /// (`chatLandingShowsNewChatButton`).
     let openNewChat: (() -> Void)?
 
     /// Task 7: the Dashboard's current-pane memory — UNCONDITIONALLY constructed (unlike

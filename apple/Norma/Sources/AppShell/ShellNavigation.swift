@@ -93,16 +93,22 @@ enum ShellDestination: Hashable, Sendable {
     case mode(SessionMode)
     case session(String)
     case dashboard(pane: DashboardPane?)
+    /// chatgpt-ui T2 (spec §2): the new-chat page — a real destination (centered greeting + the
+    /// existing composer, chat mode, NO session on arrival; the session is created on first send,
+    /// `ShellSessionHost.sendFirstChatMessage`). The launch destination (`defaultShellDestination`)
+    /// and the target of all three New-chat doors (sidebar row, chat landing button, menu-bar item
+    /// — all through the one injected `AppDelegate.newChat()` door).
+    case newChat
 }
 
 /// Where a freshly opened shell lands. chatgpt-ui T1 DECOUPLED this from `sidebarOrder.first`
-/// (its old derivation): the row reorder (Chats first, spec R1) is T1's reskin, but the LAUNCH
-/// surface change is T2's one behavior change — deriving would have silently shipped a
-/// launches-onto-Chats interim nobody ruled for. Hard-coded to the code landing, exactly what
-/// `sidebarOrder.first` produced before the reorder (pin:
-/// `AppShellTests.testNavigationModelDefaultsToTheCodeLanding`, green untouched).
-/// T2 retargets to the new-chat page.
-let defaultShellDestination: ShellDestination = .mode(.code)
+/// (its old derivation) precisely so THIS task could move it deliberately: T2 (spec R2) makes the
+/// LAUNCH surface the new-chat page — the app opens like ChatGPT, ready to type, no session
+/// minted until the first send. Re-summon mid-run is untouched (`summon(navigatingTo: nil)` never
+/// writes the destination — the existing restore machinery), so this constant is genuinely
+/// launch-only. Pin: `AppShellTests.testNavigationModelDefaultsToTheNewChatPage` (T1's
+/// `…DefaultsToTheCodeLanding`, retrued by this task).
+let defaultShellDestination: ShellDestination = .newChat
 
 /// PURE: which sidebar MODE row renders highlighted for a destination — `nil` for a recents entry
 /// or the Dashboard, so the four rows go quiet when the user is somewhere else (iOS's own nav: the
@@ -118,6 +124,7 @@ func shellDestinationTitle(_ destination: ShellDestination) -> String {
     case .mode(let mode): return mode.title
     case .session: return "Session"
     case .dashboard: return "Dashboard"
+    case .newChat: return "New chat" // the sidebar row's own register (sentence case)
     }
 }
 
@@ -127,6 +134,7 @@ func shellDestinationSystemImage(_ destination: ShellDestination) -> String {
     case .mode(let mode): return mode.systemImage
     case .session: return "text.bubble"
     case .dashboard: return "gearshape"
+    case .newChat: return "square.and.pencil" // the sidebar row's pencil-square, shared
     }
 }
 
@@ -168,7 +176,10 @@ func excludingArchived(_ rows: [SessionSummary]) -> [SessionSummary] {
 /// cases above it) — never in production.
 func shellLandingPlaceholderText(_ destination: ShellDestination) -> String {
     switch destination {
-    case .mode, .session: return "This shell has no session host."
+    // chatgpt-ui T2: `.newChat` joins the host-needing set — the page's first send creates through
+    // `ShellSessionHost`, so a host-less shell (the pure window tests) has no send flow to offer
+    // and says so, the same honest posture as the host-less `.mode`/`.session` cases.
+    case .mode, .session, .newChat: return "This shell has no session host."
     case .dashboard: return "The Dashboard surface has no wiring."
     }
 }

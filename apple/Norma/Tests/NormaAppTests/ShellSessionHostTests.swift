@@ -830,4 +830,181 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(launched.count, 1)
         XCTAssertEqual(launched.first?.dir, NSHomeDirectory())
     }
+
+    // MARK: - chatgpt-ui T2: the new-chat page's create-on-send flow (spec §2 — the wire pins)
+
+    /// A connected `NormaClient` on its OWN scripted transport — standing in for `AppModel.client`
+    /// (the management connection the create rides), the exact `ModeLandingViewTests` idiom.
+    private func connectedManagementClient() async -> (client: NormaClient, transport: ShellScriptedTransport) {
+        let transport = ShellScriptedTransport()
+        let client = NormaClient(makeTransport: { transport }, token: "tok", clientName: "orb")
+        let connectTask = Task { try? await client.connect() }
+        await feedWaitUntil { transport.sent.count >= 1 }
+        let hello = feedLineJSON(transport.sent[0])
+        transport.feed(#"{"jsonrpc":"2.0","id":\#(hello["id"] as! Int),"result":{"ok":true}}"#)
+        await connectTask.value
+        return (client, transport)
+    }
+
+    private func makeHostWithManagement(rows: [SessionSummary] = []) async -> (host: ShellSessionHost, factory: ShellTransportFactory, mgmt: ShellScriptedTransport) {
+        let (client, transport) = await connectedManagementClient()
+        let factory = ShellTransportFactory()
+        let directory = SessionDirectory(lister: { rows })
+        let host = ShellSessionHost(directory: directory, makeFeed: { sessionId in
+            let session = SessionModel()
+            let feed = SessionFeed(makeTransport: { factory.make() }, token: "tok", clientName: "orb",
+                                   mode: .pinned(sessionId: sessionId), session: session)
+            return (feed, session)
+        }, managementClient: client)
+        return (host, factory, transport)
+    }
+
+    /// THE ordering pin (spec §2): first send ⇒ exactly ONE `session.create` (mode `"chat"`,
+    /// `cwd` ABSENT) on the MANAGEMENT connection — then, on the created session's OWN harness,
+    /// attach strictly BEFORE `session.send`, with the typed text as the verbatim payload. The
+    /// text is seeded into the attached composer at attach (the carry — no empty beat) and clears
+    /// only once the send actually lands.
+    func testFirstSendCreatesOnceThenAttachesThenSendsInWireOrder() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+
+        var landed: [String] = []
+        host.sendFirstChatMessage("  the first message  ") { id in
+            landed.append(id)
+            host.apply(destination: .session(id)) // the page's navigate, at the host's own seam
+        }
+        XCTAssertEqual(host.newChatCreate, .creating)
+
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("the first send must ride session.create on the management connection: \(mgmt.methods)")
+        }
+        let params = create["params"] as? [String: Any]
+        XCTAssertEqual(params?["mode"] as? String, "chat")
+        XCTAssertEqual(params?["scope"] as? String, "global")
+        XCTAssertEqual(params?["approvalPolicy"] as? String, "auto")
+        XCTAssertNil(params?["cwd"], "cwd ABSENT — the established chat-create shape")
+        XCTAssertTrue(factory.made.isEmpty, "nothing attaches before the create lands")
+
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_chat_new","trusted":true}}"#)
+
+        await waitUntilMade(factory, 1)
+        XCTAssertEqual(landed, ["s_chat_new"], "success navigates — once")
+        XCTAssertEqual(host.newChatCreate, .idle)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "s_chat_new")
+
+        // The carry: the trimmed text sits in the attached composer before the send lands.
+        await feedWaitUntil { host.attachment != nil }
+        XCTAssertEqual(host.attachment?.adapter.composerDraft, "the first message",
+                       "the typed text (trimmed) carries into the attached composer — no empty beat, no lost keystrokes")
+
+        await feedWaitUntil { t.methods.contains("session.send") }
+        guard let send = t.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.send" }) else {
+            return XCTFail("the pending first message must send on the ATTACHED harness: \(t.methods)")
+        }
+        XCTAssertEqual((send["params"] as? [String: Any])?["sessionId"] as? String, "s_chat_new")
+        XCTAssertEqual((send["params"] as? [String: Any])?["text"] as? String, "the first message",
+                       "the send text IS the first message payload, verbatim")
+        XCTAssertEqual(Array(t.attachmentMethods.prefix(3)), ["protocol.hello", "session.attach", "session.send"],
+                       "attach strictly before send — the daemon refuses sends on an unattached connection")
+        XCTAssertTrue(mgmt.methods.allSatisfy { $0 != "session.send" }, "the send never rides the management connection")
+
+        t.feed(#"{"jsonrpc":"2.0","id":\#(send["id"] as! Int),"result":{"seq":1}}"#)
+        await feedWaitUntil { host.attachment?.adapter.composerDraft == "" }
+        XCTAssertEqual(host.attachment?.adapter.composerDraft, "", "the carried draft clears once the send lands")
+
+        let creates = mgmt.methods.filter { $0 == "session.create" } + factory.made.flatMap(\.methods).filter { $0 == "session.create" }
+        XCTAssertEqual(creates.count, 1, "exactly ONE create, ever, for the whole flow")
+    }
+
+    /// The double-send race (decided: BLOCK): a second submit while the create is in flight is a
+    /// no-op — ONE create total, one navigation, and the text is still in the page's composer the
+    /// whole time so nothing is lost by the block.
+    func testDoubleSendWhileCreateInFlightYieldsExactlyOneCreate() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+
+        var landed: [String] = []
+        host.sendFirstChatMessage("first press") { landed.append($0) }
+        host.sendFirstChatMessage("second press") { landed.append($0) } // the race: create still in flight
+
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(mgmt.methods.filter { $0 == "session.create" }.count, 1,
+                       "the second send while a create is in flight must NOT mint a second create")
+
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else { return }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_once","trusted":true}}"#)
+        await feedWaitUntil { !landed.isEmpty }
+        XCTAssertEqual(landed, ["s_once"], "one create, one navigation")
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(mgmt.methods.filter { $0 == "session.create" }.count, 1, "still exactly one after the response")
+    }
+
+    /// The unreachable-daemon matrix (decided: VISIBLE failure, no navigation): an RpcError
+    /// publishes the daemon's sentence VERBATIM; a host with no management client at all (the
+    /// degraded shape) publishes the house fallback; neither ever fires `onCreated`. A whitespace
+    /// -only submit does nothing at all (no state churn, no RPC).
+    func testFirstSendFailurePublishesVisiblyAndNeverNavigates() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+
+        var navigated = false
+        host.sendFirstChatMessage("hello") { _ in navigated = true }
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else { return }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"error":{"code":1,"message":"chat is temporarily unavailable"}}"#)
+
+        await feedWaitUntil { host.newChatCreate != .creating }
+        XCTAssertEqual(host.newChatCreate, .failed("chat is temporarily unavailable"),
+                       "the daemon's own sentence, verbatim — the house refusal discipline")
+        XCTAssertFalse(navigated, "a failed create never navigates")
+        XCTAssertTrue(factory.made.isEmpty, "a failed create never attaches")
+
+        // A retry can fire again after a failure (the block is per-in-flight-create, not forever).
+        host.sendFirstChatMessage("hello again") { _ in navigated = true }
+        await feedWaitUntil { mgmt.methods.filter { $0 == "session.create" }.count == 2 }
+        XCTAssertEqual(host.newChatCreate, .creating, "a failure never wedges the page — the next Enter retries")
+
+        // The degraded shape: no management client at all → the house fallback, synchronously.
+        let (bare, _) = makeHost()
+        var bareNavigated = false
+        bare.sendFirstChatMessage("hello") { _ in bareNavigated = true }
+        XCTAssertEqual(bare.newChatCreate, .failed(newChatUnreachableMessage))
+        XCTAssertFalse(bareNavigated)
+
+        // Whitespace-only: nothing happens at all.
+        let (empty, _) = makeHost()
+        empty.sendFirstChatMessage("   \n ") { _ in XCTFail("an empty submit must not create") }
+        XCTAssertEqual(empty.newChatCreate, .idle, "an empty submit is a no-op, not a failure")
+    }
+
+    /// Navigating to the page detaches whatever was attached (spec §2: NO session on the page)
+    /// and issues no RPCs of its own; a stale create failure clears on entry so the page always
+    /// starts clean.
+    func testApplyNewChatDetachesAndStartsThePageClean() async {
+        let (host, factory) = makeHost()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "S1")
+        XCTAssertEqual(host.attachedSessionId, "S1")
+
+        host.apply(destination: .newChat)
+
+        XCTAssertNil(host.attachedSessionId, "the page shows no session — the attachment drops")
+        XCTAssertNil(host.attachment)
+        await feedWaitUntil { t.closeCallCount == 1 } // the close rides a Task — wait, don't race it
+        XCTAssertEqual(t.closeCallCount, 1, "the detach IS the socket closing")
+        let methods = t.methods
+        XCTAssertFalse(methods.contains("session.create"), "arriving on the page mints nothing")
+
+        // A stale failure from a previous visit clears on re-entry.
+        host.sendFirstChatMessage("x") { _ in } // no management client → failed
+        XCTAssertEqual(host.newChatCreate, .failed(newChatUnreachableMessage))
+        host.apply(destination: .newChat)
+        XCTAssertEqual(host.newChatCreate, .idle, "the page starts clean on every entry")
+    }
 }

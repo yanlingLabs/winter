@@ -1,10 +1,11 @@
 import SwiftUI
 
 /// PURE: the empty-state subtitle — pinned directly (`ShellChatSurfaceTests`) since the wording
-/// names a specific create door and must track whichever one actually creates a session. App shell
-/// T6 (review fix) named the menu bar's "New Chat" entry here — the only door then. Bugfix pass B4
-/// gives the landing its OWN "New Chat" button (the SAME door, injected — see `newChat` below), so
-/// the copy now points at the button instead of sending the user away to the menu bar — the exact
+/// names a specific door and must track where creating actually STARTS. App shell T6 (review fix)
+/// named the menu bar's "New Chat" entry here — the only door then. Bugfix pass B4 gave the
+/// landing its OWN "New Chat" button (the SAME door, injected — see `newChat` below); chatgpt-ui
+/// T2 retargets that door onto the new-chat page (the session is created on the page's first
+/// send), and "Start one with New Chat" remains exactly what the button does — the exact
 /// stale-copy drift class this pin exists for (this SwiftUI file's own convention: bodies
 /// themselves are never unit-tested, only their pure decision helpers, per `DashboardTests`' file
 /// doc — extracting the string is what makes that possible here).
@@ -36,16 +37,17 @@ func chatLandingShowsNewChatButton(hasAction: Bool, hasRows: Bool) -> Bool {
 /// (`norma-ios`'s session list), which is what this mirrors; what does not transfer is the phone's
 /// swipe actions (no macOS equivalent worth faking). Its floating compose button DOES transfer now
 /// (bugfix pass B4, header form): the landing's "New Chat" button is NOT the "second create path
-/// with no owner" the T3 report warned against — it is the ONE create door, `AppDelegate.newChat()`
-/// (create → summon `.session(id)` → the `isChatSession` self-heal), INJECTED through
+/// with no owner" the T3 report warned against — it is the ONE New-chat door,
+/// `AppDelegate.newChat()` (chatgpt-ui T2: opens the `.newChat` page; the create happens on the
+/// page's first send — `ShellSessionHost.sendFirstChatMessage`), INJECTED through
 /// `AppWindowController.openNewChat` → `ShellRootView.newChat`; this view never talks to a client.
 struct ChatLandingView: View {
     @ObservedObject var nav: ShellNavigationModel
     @ObservedObject var directory: SessionDirectory
-    /// B4: the create door. `nil` for a shell built without one (`AppWindowController`'s pure
-    /// window/geometry tests) — the landing then renders no header at all
-    /// (`chatLandingShowsNewChatButton`), the same wiring-less fallback posture
-    /// `ShellRootView.host`/`dashboardWiring` follow.
+    /// B4: the New-chat door (T2: opens the new-chat page — creation starts there, on first
+    /// send). `nil` for a shell built without one (`AppWindowController`'s pure window/geometry
+    /// tests) — the landing then renders no header at all (`chatLandingShowsNewChatButton`), the
+    /// same wiring-less fallback posture `ShellRootView.host`/`dashboardWiring` follow.
     var newChat: (() -> Void)? = nil
 
     private var rows: [SessionSummary] { sessionRows(for: .chat, in: directory.rows) }
