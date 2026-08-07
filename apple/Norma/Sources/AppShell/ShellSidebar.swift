@@ -63,23 +63,33 @@ struct ShellRootView: View {
                 // painted content plane — against the window's default system grey it looks
                 // wrong rather than warm. Painted here, at the shell level, so every destination
                 // inherits it and none has to remember.
-                .background(Theme.cardSurface)
-                // …and it is a CARD, the phone's own treatment brought over (user call,
-                // 2026-08-07): iOS masks its reveal card with a continuous rounded rect, traces
-                // that exact shape with a hairline rim, and floats it on the warm base. Only the
-                // LEADING corners round — the other two meet the window's own edge, which already
-                // has the system's rounding, and doubling it would read as a card inside a card.
+                // The CARD — the phone's own treatment brought over (user call, 2026-08-07): iOS
+                // masks its reveal card with a continuous rounded rect, traces that exact shape
+                // with a hairline rim, and floats it on the warm base. Only the LEADING corners
+                // round — the other two meet the window's own edge, which already has the
+                // system's rounding, and doubling it would read as a card inside a card.
                 //
-                // This REPLACED the full-height boundary hairline that used to sit between the
-                // pane and the detail: a straight line cannot follow a rounded corner, so it
-                // would have run past the card's edge. The rim is the separator now, which is
-                // also how the phone does it.
-                .clipShape(shellDetailCardShape)
-                .overlay(
+                // Drawn as a BACKGROUND LAYER that ignores the safe area, not as a clip on the
+                // content. `detail`'s content is inset by the titlebar's safe area (only the
+                // sidebar opts out), so clipping the content produced a ~23 pt gap above the card
+                // — invisible before only because the window's own `CardSurface` fill was quietly
+                // covering that band, and revealed the moment `canvas` went behind it. A
+                // background layer reaches the window's top edge without moving any content.
+                //
+                // This REPLACED the full-height boundary hairline between pane and detail: a
+                // straight line cannot follow a rounded corner, so it would have run past the
+                // card's edge. The rim is the separator now, which is also how the phone does it.
+                .background {
                     shellDetailCardShape
-                        .strokeBorder(Theme.hairline, lineWidth: shellSidebarHairlineWidth)
-                )
-                .shadow(color: .black.opacity(0.05), radius: 10, x: -2)
+                        .fill(Theme.cardSurface)
+                        .overlay(
+                            shellDetailCardShape
+                                .strokeBorder(Theme.hairline,
+                                              lineWidth: shellSidebarHairlineWidth)
+                        )
+                        .shadow(color: .black.opacity(0.05), radius: 10, x: -2)
+                        .ignoresSafeArea()
+                }
         }
         // The base plane behind everything, so the card's rounded corners reveal warm canvas
         // rather than the window's own fill. The sidebar paints its own `canvas` too; this is what
@@ -365,8 +375,12 @@ let shellSidebarHairlineWidth: CGFloat = 1
 
 /// The detail card's leading corner radius. Only the leading corners round: the trailing two meet
 /// the window's own edge, which already carries the system's rounding, and doubling it would read
-/// as a card inside a card. Tune-at-gate.
-let shellDetailCardCornerRadius: CGFloat = 12
+/// as a card inside a card.
+///
+/// Generous on purpose — the phone's card uses 54 to sit with the display's own corner, and a
+/// timid Mac radius (this shipped at 12 first) reads as a rendering artefact rather than as a
+/// deliberate card edge. Tune-at-gate.
+let shellDetailCardCornerRadius: CGFloat = 28
 
 /// The detail card's shape — declared ONCE so the clip and the rim trace the same geometry. Two
 /// separate constructions is how a rim ends up a hair off its own clip edge.
