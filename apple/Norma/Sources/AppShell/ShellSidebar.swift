@@ -122,6 +122,13 @@ struct ShellRootView: View {
         // sidebar-brand T4: the search palette (spec R2) — an overlay on the WHOLE shell so it
         // centres over the window rather than over the detail pane, and so it survives whatever
         // destination is showing beneath it. No dimming scrim; the reference has none.
+        //
+        // Declared AFTER the toggle overlay above, deliberately: the palette's backdrop then sits
+        // ON TOP of the toggle, so while the palette is open a click there dismisses it rather
+        // than collapsing the sidebar behind it. That is the modal behaviour we want — one click,
+        // one effect — and it is a consequence of this ordering, so do not reorder these two
+        // without meaning to. (The traffic lights are unaffected: they are `NSWindow` buttons
+        // living above the content view, not SwiftUI siblings, so they stay clickable throughout.)
         .overlay {
             if searchPalette.isPresented {
                 SidebarSearchPalette(nav: nav, directory: directory, presentation: searchPalette)
@@ -283,10 +290,13 @@ let shellSidebarHairlineWidth: CGFloat = 1
 
 // MARK: - custom-sidebar: the pane's own metrics + the row treatment (PURE decisions hoisted)
 
-/// The pane's FIXED width — the ChatGPT desktop sidebar measures ~277 pt (sidebar-brand: was
-/// 260). Fixed and always visible (decide-and-disclose): the split view's user-draggable 208–320
-/// column died with the native container, and a collapse toggle would need a custom affordance
-/// this rework doesn't add.
+/// The pane's width when it is showing — the ChatGPT desktop sidebar measures ~277 pt
+/// (sidebar-brand: was 260). FIXED, not user-draggable: the split view's 208–320 column died with
+/// the native container and nothing replaced it.
+///
+/// It is no longer "always visible", which this comment used to say: sidebar-brand added the
+/// collapse toggle the custom-sidebar rework had explicitly declined to build
+/// (`shellSidebarToggleSystemImage` and `ShellRootView.sidebarVisible`).
 let shellSidebarWidth: CGFloat = 272
 
 /// Explicit top padding clearing the traffic-light region — the pane ignores the top safe area
@@ -319,10 +329,12 @@ let shellSidebarRowCornerRadius: CGFloat = 6
 
 /// How far in from the window's top-left corner the traffic lights are nudged, applied by
 /// `AppWindowController.positionTrafficLights` (see its doc for WHY it is done by hand rather
-/// than by the unified toolbar that normally provides this). Measured against the ChatGPT
-/// reference, whose lights sit ~6–7 pt further in than the macOS default in both axes.
-/// Tune-at-gate, like every other constant in this block. Measured twice: an initial (6, 6) still
-/// read ~4 pt shy of the reference in a side-by-side, so this is the second pass.
+/// than by the unified toolbar that normally provides this).
+///
+/// Arrived at in two passes against the ChatGPT reference: a first estimate of (6, 6) still read
+/// visibly shy in a side-by-side, and (10, 8) is the corrected measurement. Tune-at-gate, like
+/// every other constant in this block — and note it interacts with
+/// `shellSidebarToggleLeadingInset` below, which has to keep clearing the buttons as they move.
 let shellTrafficLightInset = CGPoint(x: 10, y: 8)
 
 /// The sidebar toggle's hit box, and where it sits: to the RIGHT of the traffic lights, in the
