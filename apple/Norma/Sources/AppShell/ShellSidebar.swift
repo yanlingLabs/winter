@@ -425,11 +425,14 @@ let shellSidebarWordmarkRowHeight: CGFloat = 38
 /// reference's seven. Still far above the original 14, which was the real problem.
 let shellSidebarSectionGap: CGFloat = 32
 
-/// The floating account strip's height, and the soft fade above it. The scroll content reserves
-/// both as bottom padding, so the last recents row can be scrolled fully clear of the strip
-/// instead of resting under it forever.
+/// The floating account strip's height, and how far the fade reaches ABOVE it. The scroll content
+/// reserves both as bottom padding, so the last recents row can be scrolled fully clear of the
+/// strip instead of resting under it forever.
+///
+/// The fade is generous because it is the only thing separating the strip from the list — a short
+/// ramp reads as an edge, which is precisely what the removed divider was.
 let shellAccountStripHeight: CGFloat = 46
-let shellAccountFadeHeight: CGFloat = 20
+let shellAccountFadeHeight: CGFloat = 32
 
 /// The rounded-rect hover/selection fill's corner radius — shared by every row, one vocabulary.
 let shellSidebarRowCornerRadius: CGFloat = 6
@@ -864,26 +867,33 @@ struct ShellSidebar: View {
     /// This REPLACES the plain navigate-to-Dashboard button. The Dashboard is still reachable —
     /// every menu entry lands in it — but by NAME rather than as one undifferentiated door, which
     /// is the user's "split into settings and other things".
-    /// The floating bottom strip: a soft fade, then the account row over a blur.
+    /// The floating bottom strip: the account row over ONE continuous ramp into the pane's canvas.
     ///
-    /// The DIVIDER that used to sit here is gone (user call, 2026-08-07). What separates the strip
-    /// from the list now is the list itself softening as it passes under — a gradient into the
-    /// pane's own canvas, then `.ultraThinMaterial` so rows genuinely blur behind the row rather
-    /// than being covered by an opaque band. The gradient matters as much as the blur: without it
-    /// the blur would begin at a hard line, which is the very edge the divider was.
+    /// The DIVIDER that used to sit here is gone (user call, 2026-08-07), and the first attempt at
+    /// replacing it put `.ultraThinMaterial` behind the row. That was wrong for a specific reason:
+    /// a material TINTS regardless of what is behind it, and this pane is opaque canvas — so
+    /// instead of blurring rows it painted a grey band with a hard top edge. That is the divider
+    /// again, just drawn as a tone change instead of a line.
+    ///
+    /// So: no material. One gradient spanning the WHOLE strip — transparent at the top, fully
+    /// canvas by just over halfway, canvas the rest of the way — so rows dissolve into the pane's
+    /// own colour as they pass under and there is no boundary anywhere to catch the eye. The ramp
+    /// has to cover the row's own height too; ending it above the row is what reintroduces an edge.
     private var accountStrip: some View {
-        VStack(spacing: 0) {
-            LinearGradient(
-                colors: [Theme.canvas.opacity(0), Theme.canvas],
-                startPoint: .top, endPoint: .bottom
-            )
-            .frame(height: shellAccountFadeHeight)
-            .allowsHitTesting(false)
-
-            accountRow
-                .frame(height: shellAccountStripHeight)
-                .background(.ultraThinMaterial)
-        }
+        accountRow
+            .frame(height: shellAccountStripHeight)
+            .background(alignment: .bottom) {
+                LinearGradient(
+                    stops: [
+                        .init(color: Theme.canvas.opacity(0), location: 0),
+                        .init(color: Theme.canvas, location: 0.55),
+                        .init(color: Theme.canvas, location: 1),
+                    ],
+                    startPoint: .top, endPoint: .bottom
+                )
+                .frame(height: shellAccountStripHeight + shellAccountFadeHeight)
+                .allowsHitTesting(false)
+            }
     }
 
     private var accountRow: some View {
