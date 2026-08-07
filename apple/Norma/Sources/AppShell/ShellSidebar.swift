@@ -32,6 +32,11 @@ struct ShellRootView: View {
     /// Task 7 (spec §1 windows disposition): the pairing sheet's presentation state, attached below
     /// as a SwiftUI `.sheet` — replaces `PairingSheetWindowController` (deleted this task).
     @ObservedObject var pairingPresentation: PairingSheetPresentationModel
+    /// sidebar-brand T4: the search palette's presentation state, owned HERE rather than in the
+    /// sidebar — the palette is an overlay on this ROOT (so it centres over the whole window and
+    /// survives whatever destination is showing), while the ⌕ that opens it lives in the pane.
+    /// The two are siblings, so the state has to live at their common parent.
+    @StateObject private var searchPalette = SearchPalettePresentation()
 
     var body: some View {
         HStack(spacing: 0) {
@@ -39,13 +44,15 @@ struct ShellRootView: View {
             // door — both optional, same fallback posture as `detail` below. It owns its own fixed
             // width (`shellSidebarWidth`) — the split view's user-draggable 208–320 column died
             // with the container (decide-and-disclose: fixed always-visible, no collapse toggle).
-            ShellSidebar(nav: nav, directory: directory, host: host, newChat: newChat)
+            ShellSidebar(nav: nav, directory: directory, host: host, newChat: newChat,
+                         presentation: searchPalette)
             // chatgpt-ui T3's boundary hairline, now a genuine layout sibling rather than an
             // overlay compensating for the split view's undrawn divider. `ignoresSafeArea` so it
             // spans the full height including the transparent-titlebar region — the ChatGPT
-            // reference's full-height line; `separatorColor` follows both appearances.
+            // reference's full-height line. sidebar-brand: the warm brand `hairline` replaces the
+            // system `separatorColor`, which reads cool against the cream planes either side.
             Rectangle()
-                .fill(Color(nsColor: .separatorColor))
+                .fill(Theme.hairline)
                 .frame(width: shellSidebarHairlineWidth)
                 .ignoresSafeArea()
             detail
@@ -69,6 +76,24 @@ struct ShellRootView: View {
             set: { if !$0 { pairingPresentation.dismiss() } }
         )) {
             PairingSheetContainerView(presentation: pairingPresentation)
+        }
+        // sidebar-brand T4: the search palette (spec R2) — an overlay on the WHOLE shell so it
+        // centres over the window rather than over the detail pane, and so it survives whatever
+        // destination is showing beneath it. No dimming scrim; the reference has none.
+        .overlay {
+            if searchPalette.isPresented {
+                SidebarSearchPalette(nav: nav, directory: directory, presentation: searchPalette)
+            }
+        }
+        // ⌘K, the palette's other door (the wordmark row's ⌕ is the first). A zero-size hidden
+        // button is how a SwiftUI view registers a chord with no menu-bar item behind it; it
+        // TOGGLES so the same chord closes what it opened.
+        .background {
+            Button("Search sessions") { searchPalette.toggle() }
+                .keyboardShortcut("k", modifiers: .command)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
         }
     }
 
@@ -216,10 +241,11 @@ let shellSidebarHairlineWidth: CGFloat = 1
 
 // MARK: - custom-sidebar: the pane's own metrics + the row treatment (PURE decisions hoisted)
 
-/// The pane's FIXED width — the ChatGPT desktop sidebar's ~260 pt. Fixed and always visible
-/// (decide-and-disclose): the split view's user-draggable 208–320 column died with the native
-/// container, and a collapse toggle would need a custom affordance this rework doesn't add.
-let shellSidebarWidth: CGFloat = 260
+/// The pane's FIXED width — the ChatGPT desktop sidebar measures ~277 pt (sidebar-brand: was
+/// 260). Fixed and always visible (decide-and-disclose): the split view's user-draggable 208–320
+/// column died with the native container, and a collapse toggle would need a custom affordance
+/// this rework doesn't add.
+let shellSidebarWidth: CGFloat = 272
 
 /// Explicit top padding clearing the traffic-light region — the pane ignores the top safe area
 /// (its flat fill reaches the very top and content scrolls under the transparent titlebar), so
@@ -230,11 +256,21 @@ let shellSidebarWidth: CGFloat = 260
 /// figure. Tune-at-gate constant.
 let shellSidebarTopInset: CGFloat = 44
 
-/// Compact row height (icon+label rows and Recents rows alike) — the ChatGPT reference's ~30 pt.
-let shellSidebarRowHeight: CGFloat = 30
+/// Compact row height (icon+label rows and Recents rows alike) — the ChatGPT reference's ~31 pt
+/// (sidebar-brand: was 30).
+let shellSidebarRowHeight: CGFloat = 32
 
-/// The rounded-rect hover/selection fill's corner radius — shared by every row and the search
-/// field, one vocabulary.
+/// sidebar-brand: the WORDMARK header row's height. Taller than a nav row because it is also
+/// what clears the inline traffic lights (together with `shellSidebarTopInset` above it).
+let shellSidebarWordmarkRowHeight: CGFloat = 38
+
+/// sidebar-brand: the gap between the nav block and the Recents section label —
+/// reference-measured at ~44 pt (was 14). This single value does more than any other to make the
+/// pane read like the reference: at the old spacing the whole pane was one undifferentiated
+/// column of rows, with nothing separating navigation from history.
+let shellSidebarSectionGap: CGFloat = 44
+
+/// The rounded-rect hover/selection fill's corner radius — shared by every row, one vocabulary.
 let shellSidebarRowCornerRadius: CGFloat = 6
 
 /// The three fills a row can wear. `selected` is the slightly stronger of the two live fills;
@@ -298,8 +334,11 @@ struct ShellSidebar: View {
     /// page's first send — B4's one-door rule, retargeted). `nil` renders no row (the
     /// `chatLandingShowsNewChatButton` posture: an unwired door never renders a dead affordance).
     var newChat: (() -> Void)? = nil
-
-    @State private var searchQuery = ""
+    /// sidebar-brand T4: the search palette's presentation flag, OWNED by `ShellRootView` (the
+    /// palette is an overlay on the ROOT — a sibling of this pane, not a child of it) and shared
+    /// here so the wordmark row's ⌕ can open it. The old inline `searchQuery` state moved into
+    /// `SidebarSearchPalette` with the field itself.
+    @ObservedObject var presentation: SearchPalettePresentation
 
     /// Task 7 (carried to the account row): highlighted for ANY `.dashboard` destination
     /// regardless of pane payload, so drilling into a specific pane keeps the row lit.
@@ -310,21 +349,24 @@ struct ShellSidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // sidebar-brand T4: the wordmark is PINNED above the scroll area — it owns the
+            // traffic-light clearance now, and rows scroll BENEATH it rather than past it.
+            wordmarkRow
             ScrollView {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 1) {
                     ForEach(shellSidebarTopRows, id: \.self) { row in
                         topRow(row)
                     }
-                    searchField
-                        .padding(.top, 10)
                     // The Recents section label — dim, sentence case (uppercase-free, the ChatGPT
                     // register; deliberately NOT `DashboardSurface`'s `.uppercased()` treatment).
+                    // sidebar-brand: the warm brand grey at the reference's larger, quieter
+                    // register (was 11 pt semibold `.secondary`), under a generous section gap.
                     Text("Recents")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.top, 14)
-                        .padding(.bottom, 2)
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.textMuted)
+                        .padding(.horizontal, 10)
+                        .padding(.top, shellSidebarSectionGap)
+                        .padding(.bottom, 4)
                     // app-shell T4: Recents FILTERS OUT archived rows (`excludingArchived` — the
                     // hidden-by-default ruling, T3 review as-m10). An ordinary Recents click just
                     // navigates to `.session(id)`, and the shell resumes-by-attaching whatever
@@ -338,13 +380,14 @@ struct ShellSidebar: View {
                     // is now gone from Recents entirely (spec R6: it is reached only through its
                     // own sidebar row). The search palette calls the same function, so the two
                     // lists cannot drift apart.
-                    let candidates = recentsCandidates(directory.rows)
-                    let recents = filteredRecents(candidates, query: searchQuery)
+                    // sidebar-brand T4: no local query any more — the search field moved into the
+                    // palette (spec R2), so this list is simply every candidate row.
+                    let recents = recentsCandidates(directory.rows)
                     if recents.isEmpty {
-                        Text(candidates.isEmpty ? "No sessions yet" : "No matches")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 8)
+                        Text("No sessions yet")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.textMuted)
+                            .padding(.horizontal, 10)
                             .padding(.vertical, 4)
                     } else {
                         ForEach(recents) { row in
@@ -352,11 +395,6 @@ struct ShellSidebar: View {
                         }
                     }
                 }
-                // The explicit traffic-light clearance (`shellSidebarTopInset`'s own doc): the
-                // pane ignores the top safe area below, so this padding — INSIDE the scroll
-                // content — is what starts the rows below the inline traffic lights, and scrolled
-                // content slides up under the transparent titlebar, the ChatGPT look.
-                .padding(.top, shellSidebarTopInset)
                 .padding(.horizontal, 8)
                 .padding(.bottom, 8)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -367,7 +405,11 @@ struct ShellSidebar: View {
         // Flat opaque fill, edge-to-edge and top-to-bottom — the pane's ONE background, reaching
         // the very top of the window (nothing native reserves the titlebar band any more: the
         // window's toolbar died with this rework, `AppWindowController`).
-        .background(Color(nsColor: .windowBackgroundColor))
+        // sidebar-brand: that fill is now the brand BASE PLANE (`docs/brand.md` § the plane
+        // mapping) — warm cream in light, warm charcoal in dark. The content side wears
+        // `cardSurface`, one step brighter; that difference IS the separation, and the hairline
+        // is only secondary.
+        .background(Theme.canvas)
         .ignoresSafeArea(.container, edges: .top)
         // Same "the view's own appearance is the belt" posture as `SessionSidebar.task` — the
         // wirer-level `startInitialLoad()` kick can lose its race against this directory's harness
@@ -413,7 +455,7 @@ struct ShellSidebar: View {
     /// metrics (`shellSidebarRowHeight`, the inner padding) and the full-width hit target, so
     /// every caller's Button is nothing but wiring.
     private func rowLabel(_ row: ShellSidebarRow) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Image(systemName: shellSidebarRowSystemImage(row))
                 .font(.system(size: 13))
                 .frame(width: 18)
@@ -421,36 +463,53 @@ struct ShellSidebar: View {
                 .font(.system(size: 13))
             Spacer(minLength: 4)
             if case .mode(let mode) = row, !mode.isAvailable {
-                // Deglassed (the capsule fill died with the reskin): a quiet tertiary tag.
+                // Deglassed (the capsule fill died with the reskin): a quiet tag, now in the
+                // brand's warm muted grey rather than the cooler system `.tertiary`.
                 Text("Soon")
                     .font(.caption2.weight(.medium))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.textMuted)
             }
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 10)
         .frame(height: shellSidebarRowHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
 
-    /// The custom rounded-rect inset search field (spec §1 row 4) — live, local-only, never a
-    /// native `.searchable`. Sits in the scroll content so it scrolls with the rows exactly like
-    /// the reference; its fill shares the rows' corner vocabulary.
-    private var searchField: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
-            TextField("Search", text: $searchQuery)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
+    /// sidebar-brand T4 (spec R1): the wordmark header row — Norma's ONE serif accent on the Mac
+    /// (`Theme.wordmark`: New York, the iOS serif allowlist's binding #1, restored here at a 20 pt
+    /// Mac size register after the 2026-08-06 pass had dropped it).
+    ///
+    /// PINNED above the scroll area like the reference's, so it never scrolls away, and carrying
+    /// `shellSidebarTopInset` so it — rather than the first nav row — is what clears the inline
+    /// traffic lights.
+    ///
+    /// The ⌕ is the search palette's door (spec R2, `SidebarSearchPalette`); ⌘K is the other, wired
+    /// in `ShellRootView`. The old always-visible inline search field died with this row.
+    private var wordmarkRow: some View {
+        HStack(spacing: 8) {
+            Text("Norma")
+                .font(Theme.wordmark)
+                .foregroundStyle(.primary)
+                .accessibilityAddTraits(.isHeader)
+            Spacer(minLength: 8)
+            Button {
+                presentation.open()
+            } label: {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.textMuted)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Search sessions")
+            .accessibilityLabel("Search sessions")
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 5)
-        .background(
-            RoundedRectangle(cornerRadius: shellSidebarRowCornerRadius, style: .continuous)
-                .fill(.quaternary.opacity(0.5))
-        )
+        .padding(.horizontal, 10)
+        .frame(height: shellSidebarWordmarkRowHeight)
+        .padding(.top, shellSidebarTopInset)
+        .padding(.bottom, 6)
     }
 
     /// One compact Recents row: single-line middle-truncated title + the subtle activity dot
@@ -474,7 +533,7 @@ struct ShellSidebar: View {
                         .accessibilityLabel(activityChipLabel(row.activity) ?? "")
                 }
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 10)
             .frame(height: shellSidebarRowHeight)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
@@ -501,7 +560,9 @@ struct ShellSidebar: View {
     /// ONE row treatment as everything above it (hover included — pass 1's bespoke fill didn't).
     private var accountRow: some View {
         VStack(spacing: 0) {
-            Divider()
+            Rectangle()
+                .fill(Theme.hairline)
+                .frame(height: 1)
             Button {
                 nav.navigate(to: shellSidebarAccountRowDestination)
             } label: {
@@ -511,13 +572,19 @@ struct ShellSidebar: View {
                         .scaledToFit()
                         .frame(width: 20, height: 20)
                         .clipShape(RoundedRectangle(cornerRadius: 5))
-                    Text("Norma")
+                    // sidebar-brand T4 (spec R1): "Dashboard", not "Norma". A CORRECTION rather
+                    // than a change of meaning — this row's destination
+                    // (`shellSidebarAccountRowDestination`), its `.help` and its
+                    // `.accessibilityLabel` were ALREADY Dashboard; only the visible label said
+                    // something else, and only because nothing else in the pane carried the
+                    // product name. The wordmark row carries it now.
+                    Text("Dashboard")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.primary)
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.textMuted)
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
@@ -561,15 +628,22 @@ struct ShellSidebarRowStyle: ButtonStyle {
                 .onHover { isHovered = $0 }
         }
 
-        /// The decision is pure and pinned (`shellSidebarRowFill`); only the paint lives here —
-        /// one quaternary vocabulary, `selected` the slightly stronger of the two (the brief's
-        /// "hover fill (quaternary), slightly stronger for the selected row"). Both follow the
-        /// system appearance by construction. Tune-at-gate values.
+        /// The decision is pure and pinned (`shellSidebarRowFill`); only the paint lives here.
+        ///
+        /// sidebar-brand: the generic `.quaternary` system vocabulary is replaced by the brand
+        /// tokens (`docs/brand.md`). `rowHover` is authored as an interpolation between `canvas`
+        /// and `selectionPill`, so hover → selected reads as ONE ramp rather than two unrelated
+        /// tints — and it is a real asset rather than an `.opacity()` hack precisely because a
+        /// runtime alpha has no dark-mode variant to tune (the guide's anti-rule).
+        ///
+        /// Note `selectionPill` is DARKER than the pane in dark mode: Claude's measured
+        /// semantics, deliberate, and differing from ChatGPT (whose selected row is lighter).
+        /// Both follow the system appearance by construction. Tune-at-gate values.
         private var fill: AnyShapeStyle {
             switch shellSidebarRowFill(isSelected: isSelected,
                                        isHovered: isHovered || configuration.isPressed) {
-            case .selected: return AnyShapeStyle(.quaternary)
-            case .hover: return AnyShapeStyle(.quaternary.opacity(0.5))
+            case .selected: return AnyShapeStyle(Theme.selectionPill)
+            case .hover: return AnyShapeStyle(Theme.rowHover)
             case .none: return AnyShapeStyle(.clear)
             }
         }
