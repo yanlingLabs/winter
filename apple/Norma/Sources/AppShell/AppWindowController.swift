@@ -289,6 +289,11 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         occlusionVisible = true
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        // sidebar-brand: re-assert the inset here too. AppKit re-lays the standard window buttons
+        // out on its own schedule — not only on resize — and a summon follows an order-out, which
+        // is one of the moments it does. Offsetting from the remembered baseline makes re-applying
+        // free and idempotent, so the cheap thing is to do it at every plausible moment.
+        positionTrafficLights()
         syncState()
     }
 
@@ -311,6 +316,12 @@ final class AppWindowController: NSObject, NSWindowDelegate {
     /// zoom, which routes through here too), so the inset has to be re-applied or it is lost the
     /// first time the user drags an edge.
     func windowDidResize(_ notification: Notification) {
+        positionTrafficLights()
+    }
+
+    /// The other moment AppKit re-lays the buttons out — becoming key after the window has been
+    /// off-screen, or after returning from another Space. Same free, idempotent re-application.
+    func windowDidBecomeKey(_ notification: Notification) {
         positionTrafficLights()
     }
 
