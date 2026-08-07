@@ -54,6 +54,38 @@ Not because CEF is bad — because of Norma's release pipeline. `scripts/release
 
 That is a **permanent tax on every release**, not a one-off integration cost.
 
+### Measured: what the ChatGPT Mac app actually does (2026-08-07)
+
+Inspected `/Applications/ChatGPT.app` directly, because it is the closest real-world comparable. **It ships full Chromium**, rebranded:
+
+- `Codex Framework.framework/Versions/**151.0.7922.71**` — a Chrome version string, in a Chromium framework layout
+- Helper apps: `Codex (Renderer).app`, `Codex (GPU).app`, `Codex (Service).app`, `Codex (Alerts).app`
+- `libEGL.dylib`, `libGLESv2.dylib`, `libvk_swiftshader.dylib`, `libvulkan.dylib` — ANGLE + SwiftShader
+- `chrome_100_percent.pak`, `resources.pak`, `icudtl.dat`, `v8_context_snapshot.arm64.bin`
+- Also `app_mode_loader` and `web_app_shortcut_copier`, which come from **Chrome's own codebase** rather than stock CEF — this looks like an embed of Chrome, not a plain CEF integration
+- The main binary is a **68 KB stub** linking only `libSystem`; everything real lives in the framework
+
+**Size: 1.4 GB total** — 358 MB framework, 1.0 GB Resources.
+
+**Entitlements**, which confirm the predicted cost exactly:
+
+```
+com.apple.security.cs.allow-jit                        true
+com.apple.security.cs.allow-unsigned-executable-memory true
+com.apple.security.app-sandbox                         (present)
+com.apple.security.network.client, device.camera, device.audio-input,
+files.user-selected.read-write, automation.apple-events
+```
+
+Signed `Developer ID Application: OpenAI OpCo, LLC`, hardened runtime on, no MAS receipt — Developer ID with a provisioning profile (for push and app groups).
+
+**Two corrections to the analysis above, from this evidence:**
+
+1. **Sandbox + Chromium is achievable.** ChatGPT is App-Sandboxed *and* embeds Chromium. Harder than implied above, but not the blocker the CEF-vs-MAS forum threads suggest.
+2. **`disable-library-validation` is NOT required.** Listed as typical above; ChatGPT does without it, presumably because every nested binary is signed under one team ID. Only the two JIT entitlements are unavoidable.
+
+**What this does not change:** 1.4 GB, an owned Chromium patch cadence, and `allow-unsigned-executable-memory` — which is a strict superset of `allow-jit` and materially weakens the process. OpenAI pays that because their product *is* a web app in a shell. Norma's is not.
+
 **Choose Chromium only if you need a hard capability WebKit lacks** — realistically: Chrome extension support, or CDP-driven automation of the embedded browser. If the browser panel is for *viewing and light browsing*, WKWebView is strictly better here.
 
 ---
