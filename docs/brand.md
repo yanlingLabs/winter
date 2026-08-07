@@ -135,13 +135,26 @@ The sidebar's vocabulary, measured from the ChatGPT desktop reference. All are *
 | `shellSidebarTopInset` | 44 | Traffic-light clearance. |
 | `shellSidebarHairlineWidth` | 1 | |
 | `shellTrafficLightInset` | (10, 8) | See below. |
-| `shellSidebarToggleLeadingInset` | 88 | Toggle starts beyond the three window buttons. |
-| `shellSidebarToggleTopInset` | 8 | From the window top, *not* the safe area. |
-| `shellSidebarToggleSize` | 24 | |
+| `shellSidebarToggleLeadingInset` | 88 | Cluster starts beyond the three window buttons. |
+| `shellSidebarToggleTopInset` | 11 | From the window top, *not* the safe area. Shared by both clusters. |
+| `shellTitlebarButtonSize` | 26 | Every titlebar button. |
+| `shellTitlebarClusterSpacing` | 8 | Size + spacing = the reference's **34 pt pitch**. |
+| `shellTitlebarTrailingInset` | 8 | Trailing cluster's gap from the window edge. |
+| `shellSidebarContentInset` | 18 | The pane's content column. |
 
 `shellSidebarSectionGap` deserves a note: at the old 14 pt the pane read as one undifferentiated column of rows. Widening that single gap does more than any other value to make the sidebar read like the reference.
 
 `shellTrafficLightInset` deserves a longer one. macOS insets the traffic lights automatically only when a window has a **unified NSToolbar** — and this window deliberately has none (`AppShellTests` pins `window.toolbar == nil`; the ChatGPT app has no toolbar and the custom-sidebar rework removed ours on purpose). Rather than reinstate chrome that was removed by decision, `AppWindowController.positionTrafficLights()` offsets the three standard window buttons by hand, from a **remembered AppKit baseline** so repeated application cannot drift them, re-applied on resize because AppKit re-lays them out.
+
+### The titlebar clusters
+
+Two clusters flank the titlebar band, both on the **traffic lights' centre line**: the sidebar toggle plus back/forward at the leading edge, and three window affordances at the trailing edge. Metrics are measured off the reference by cropping its titlebar corners, not estimated — the 34 pt centre-to-centre pitch is its figure.
+
+Three rules:
+
+1. **Both clusters read one `shellSidebarToggleTopInset`**, so they share a centre line by construction rather than by two numbers happening to agree.
+2. **Every icon up there is a `ShellTitlebarButton`** — one hit box, one metric, one hover treatment. The hover fill is `ShellSidebarRowStyle`, the same treatment sidebar rows wear: a background fill, never a colour change on the glyph.
+3. **Placeholders hover and click like anything else**, one step quieter in colour, and their help text says *"not wired yet"* — so hovering one cannot promise a feature that does not exist. (An earlier pass rendered them `.disabled`; the user's call was that they should behave as buttons.)
 
 ### The sidebar toggle
 

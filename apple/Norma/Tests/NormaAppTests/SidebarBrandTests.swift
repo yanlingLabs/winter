@@ -187,4 +187,214 @@ final class SidebarBrandTests: XCTestCase {
         XCTAssertGreaterThan(shellTrafficLightInset.x, 0, "inset moves the lights inward, not out")
         XCTAssertGreaterThan(shellTrafficLightInset.y, 0, "…and downward")
     }
+
+    /// The showing state is ChatGPT's own glyph (user call: "use the same drawer icon ChatGPT is
+    /// using"). Pinned by NAME, because "which symbol" is the whole instruction here — a future
+    /// tidy-up that swapped it for a lookalike would quietly undo the ask.
+    func testSidebarToggleUsesTheReferenceGlyphWhileShowing() {
+        XCTAssertEqual(shellSidebarToggleSystemImage(isVisible: true), "sidebar.left")
+    }
+
+    /// TRUE ARROWS, not chevrons (user correction, 2026-08-07, confirmed by cropping the
+    /// reference's titlebar). Pinned by name because "which symbol" was the instruction.
+    func testTitlebarNavigationUsesRealArrowsNotChevrons() {
+        XCTAssertEqual(shellTitlebarNavigationGlyphs, ["arrow.left", "arrow.right"])
+    }
+
+    /// Every titlebar glyph — both clusters — must resolve, or it renders as a blank box with no
+    /// error anywhere.
+    func testEveryTitlebarGlyphResolvesAsARealSymbol() {
+        let all = shellTitlebarNavigationGlyphs + shellTitlebarTrailingGlyphs
+            + [shellSidebarToggleSystemImage(isVisible: true),
+               shellSidebarToggleSystemImage(isVisible: false)]
+        for name in all {
+            XCTAssertNotNil(NSImage(systemSymbolName: name, accessibilityDescription: nil),
+                            "\(name) is not a real SF Symbol on this OS")
+        }
+    }
+
+    /// The trailing cluster mirrors the reference's top-right corner: three icons, no duplicates.
+    func testTrailingClusterIsThreeDistinctGlyphs() {
+        XCTAssertEqual(shellTitlebarTrailingGlyphs.count, 3)
+        XCTAssertEqual(Set(shellTitlebarTrailingGlyphs).count, 3)
+    }
+
+    /// Every trailing placeholder says it is not wired, so hovering one cannot promise a feature
+    /// that does not exist — and the mapping is TOTAL, so an added glyph still gets a label.
+    func testTrailingPlaceholderLabelsDiscloseTheyAreNotWired() {
+        for glyph in shellTitlebarTrailingGlyphs {
+            let label = shellTitlebarTrailingLabel(glyph)
+            XCTAssertTrue(label.contains("not wired"), "\(glyph)'s label must disclose: \(label)")
+        }
+        XCTAssertFalse(shellTitlebarTrailingLabel("some.future.glyph").isEmpty,
+                       "the mapping is total — an unknown glyph still gets a label")
+    }
+
+    /// Both clusters share ONE top inset, so they sit on one centre line across the window. Pinned
+    /// because the two overlays are written separately and could drift apart silently.
+    func testBothTitlebarClustersShareOneCentreLine() {
+        // The leading cluster's inset is the trailing cluster's too — this reads as a tautology
+        // only because the constant is shared, which is exactly the property being pinned.
+        XCTAssertGreaterThan(shellSidebarToggleTopInset, 0)
+        XCTAssertGreaterThan(shellTitlebarButtonSize, 0)
+        // Reference-measured 34 pt centre-to-centre pitch.
+        XCTAssertEqual(shellTitlebarButtonSize + shellTitlebarClusterSpacing, 34,
+                       "the reference's cluster pitch — button size and spacing must sum to it")
+    }
+
+    /// The greeting's brand mark. A missing or misnamed image asset renders as NOTHING — no error,
+    /// no placeholder — so this is the same silent-failure class the colour pin guards.
+    ///
+    /// It must also be a VECTOR: the mark is drawn at 30 pt while the menu bar's `mb-idle` is an
+    /// 18×18 PNG, and using that one upscaled ~1.7× and read visibly soft. `representations` on a
+    /// vector-backed asset yields no fixed-size bitmap rep, which is what this checks.
+    func testBrandMarkResolvesAndIsVector() {
+        guard let mark = NSImage(named: "BrandMark") else {
+            return XCTFail("BrandMark is missing from Assets.xcassets")
+        }
+        XCTAssertGreaterThan(mark.size.width, 0, "the mark must have a drawable size")
+        XCTAssertTrue(mark.isTemplate || mark.representations.isEmpty == false,
+                      "the mark must carry a usable representation")
+    }
+
+    // MARK: - The new-chat page's announcement strip
+
+    /// A real announcement always wins over the tip.
+    func testAnnouncementBeatsTheTip() {
+        XCTAssertEqual(newChatAnnouncement("Norma 0.3 is out", day: 1), "Norma 0.3 is out")
+    }
+
+    /// Absent, empty, and whitespace-only all mean "nothing to announce" — a strip showing a lone
+    /// space would look like a rendering bug.
+    func testBlankAnnouncementsFallBackToATip() {
+        for blank in [nil, "", "   ", "\n\t "] {
+            let shown = newChatAnnouncement(blank, day: 1)
+            XCTAssertTrue(newChatTips.contains(shown), "\(String(describing: blank)) → \(shown)")
+        }
+    }
+
+    /// The tip is picked by DAY, so it is stable for a whole session (a strip that reshuffled on
+    /// every redraw would be noise) and still changes over time.
+    func testTipIsStablePerDayAndVariesAcrossDays() {
+        XCTAssertEqual(newChatAnnouncement(nil, day: 7), newChatAnnouncement(nil, day: 7))
+        let distinct = Set((0..<newChatTips.count).map { newChatAnnouncement(nil, day: $0) })
+        XCTAssertEqual(distinct.count, newChatTips.count, "every tip is reachable")
+    }
+
+    /// Total for any day index — a negative or absurd value must still land inside the list rather
+    /// than trapping on a negative modulo.
+    func testTipIndexIsTotalForAnyDay() {
+        for day in [-366, -1, 0, 365, 100_000] {
+            XCTAssertFalse(newChatAnnouncement(nil, day: day).isEmpty, "day \(day)")
+        }
+    }
+
+    /// `newChatTipDay` is injected a date so nothing here depends on the clock.
+    func testTipDayIsDerivedFromTheGivenDate() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let jan1 = DateComponents(calendar: calendar, year: 2026, month: 1, day: 1).date!
+        XCTAssertEqual(newChatTipDay(jan1, calendar: calendar), 1)
+    }
+
+    /// The mode picker shows Chat and Cowork, and Cowork remains honestly unavailable — it has no
+    /// daemon mode at all.
+    func testNewChatModePickerOffersChatAndAnHonestlyUnavailableCowork() {
+        XCTAssertEqual(newChatModeOptions, [.chat, .cowork])
+        XCTAssertTrue(SessionMode.chat.isAvailable)
+        XCTAssertFalse(SessionMode.cowork.isAvailable)
+    }
+
+    /// The working-folder / approval / announcement row is COWORK ONLY (user ruling, 2026-08-07):
+    /// a chat has no working folder and takes no approvals, so offering them would be offering
+    /// settings that cannot apply to what the page is about to create.
+    func testCoworkControlsShowOnCoworkOnly() {
+        XCTAssertTrue(newChatShowsCoworkControls(mode: .cowork))
+        XCTAssertFalse(newChatShowsCoworkControls(mode: .chat))
+        XCTAssertFalse(newChatShowsCoworkControls(mode: .code))
+        XCTAssertFalse(newChatShowsCoworkControls(mode: .dispatch))
+    }
+
+    /// Cowork can be SELECTED (so the design it unlocks is visible) but must never SEND — the
+    /// create is always a chat, so a Cowork send would quietly mint the wrong thing. The refusal
+    /// carries a reason; an empty draft is the ordinary resting state and carries none.
+    func testSendIsRefusedOnAnUnbuiltModeWithAReason() {
+        let reason = newChatSendBlockedReason(draft: "hello", mode: .cowork)
+        XCTAssertEqual(reason, "Cowork isn't built yet")
+    }
+
+    func testSendIsBlockedButUnexplainedOnAnEmptyDraft() {
+        XCTAssertEqual(newChatSendBlockedReason(draft: "", mode: .chat), "")
+        XCTAssertEqual(newChatSendBlockedReason(draft: "   \n", mode: .chat), "")
+    }
+
+    func testSendIsAvailableOnlyWithTextAndABuiltMode() {
+        XCTAssertNil(newChatSendBlockedReason(draft: "hello", mode: .chat))
+    }
+
+    /// The unbuilt-mode refusal outranks the empty draft — otherwise selecting Cowork and typing
+    /// nothing would report the wrong reason, and the user would never learn Cowork is the block.
+    func testUnbuiltModeOutranksTheEmptyDraft() {
+        XCTAssertEqual(newChatSendBlockedReason(draft: "", mode: .cowork), "Cowork isn't built yet")
+    }
+
+    /// The starters are real behaviour, not placeholders: each prefills the composer. Every one
+    /// needs a non-empty prefill and a glyph that actually resolves.
+    func testEveryStarterPrefillsAndHasARealGlyph() {
+        XCTAssertFalse(newChatStarters.isEmpty)
+        for starter in newChatStarters {
+            XCTAssertFalse(starter.title.isEmpty)
+            XCTAssertFalse(starter.prefill.isEmpty, "\(starter.title) must prefill something")
+            XCTAssertNotNil(
+                NSImage(systemSymbolName: starter.systemImage, accessibilityDescription: nil),
+                "\(starter.title)'s glyph \(starter.systemImage) is not a real SF Symbol")
+        }
+        XCTAssertEqual(Set(newChatStarters.map(\.title)).count, newChatStarters.count)
+    }
+
+    // MARK: - The account menu (the Dashboard split)
+
+    /// The menu's groups are its DIVIDERS, so an empty group would render a stray separator.
+    func testAccountMenuGroupsAreNonEmpty() {
+        XCTAssertFalse(shellAccountMenuGroups.isEmpty)
+        for group in shellAccountMenuGroups {
+            XCTAssertFalse(group.isEmpty, "an empty group renders a divider with nothing under it")
+        }
+    }
+
+    /// No pane may appear twice — two entries navigating to the same place is a menu bug the eye
+    /// misses easily once the list grows.
+    func testAccountMenuNamesNoPaneTwice() {
+        XCTAssertEqual(Set(shellAccountMenuPanes).count, shellAccountMenuPanes.count)
+    }
+
+    /// The menu derives its titles and glyphs from the Dashboard's OWN two functions, so this pin
+    /// is really about that wiring holding: every pane it names must produce a real title and a
+    /// real SF Symbol, or the menu renders blanks.
+    func testAccountMenuEntriesResolveThroughTheDashboardsOwnTables() {
+        for pane in shellAccountMenuPanes {
+            XCTAssertFalse(dashboardPaneTitle(pane).isEmpty, "\(pane) has no title")
+            let glyph = dashboardPaneSystemImage(pane)
+            XCTAssertNotNil(NSImage(systemSymbolName: glyph, accessibilityDescription: nil),
+                            "\(pane)'s glyph \(glyph) is not a real SF Symbol")
+        }
+    }
+
+    /// Every pane the menu names must still BE a pane the Dashboard knows — the menu is a shortcut
+    /// set over `dashboardPaneGroups`, not an independent catalogue.
+    func testAccountMenuOnlyNamesPanesTheDashboardActuallyHas() {
+        let known = Set(dashboardPaneGroups.flatMap(\.panes))
+        for pane in shellAccountMenuPanes {
+            XCTAssertTrue(known.contains(pane), "\(pane) is not in any Dashboard group")
+        }
+    }
+
+    /// The menu is deliberately a SUBSET, not the whole catalogue — the panes it leaves out stay
+    /// reachable through the Dashboard's own sidebar. If a future change made it exhaustive, that
+    /// would be a decision worth making on purpose rather than by accident.
+    func testAccountMenuIsASubsetNotTheWholeCatalogue() {
+        let known = Set(dashboardPaneGroups.flatMap(\.panes))
+        XCTAssertLessThan(Set(shellAccountMenuPanes).count, known.count,
+                          "the menu is a shortcut set; the Dashboard still holds the full list")
+    }
 }

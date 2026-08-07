@@ -93,6 +93,17 @@ enum Theme {
     /// A pinned size is the deliberate exception for a LOGO LOCKUP, not text.
     static let wordmark: Font = .system(size: 20, weight: .semibold, design: .serif)
 
+    /// The new-chat page's greeting — serif allowlist **binding #5**, added 2026-08-07.
+    ///
+    /// Not a fifth binding invented on a whim: the iOS gallery's typography file already names
+    /// "the home greeting" as a sanctioned serif moment alongside the wordmark, so this is that
+    /// moment finally having a surface on the Mac. It is a genuine editorial beat — one line, once
+    /// per empty page — which is exactly the restraint the allowlist exists to enforce.
+    ///
+    /// Larger than the wordmark because it is the page's subject rather than its label. 34 pt is a
+    /// second pass: 28 measured visibly smaller than the reference's line side by side.
+    static let greeting: Font = .system(size: 34, weight: .regular, design: .serif)
+
     // Everything the serif allowlist does NOT cover — rows, labels, chrome, lists, tool output —
     // stays on the standard system sans (San Francisco): a plain `Font` with no design override.
     // There is nothing to wrap here; reach for `.font(.system(size:weight:))` directly.

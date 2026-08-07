@@ -83,14 +83,16 @@ struct SidebarSearchPalette: View {
         // The BACKDROP (live-gate finding, 2026-08-07): the card alone is only 670 pt wide, so
         // without this every click outside it fell straight THROUGH to the app behind — the
         // palette looked modal while the sidebar underneath stayed live, and clicking "Dispatch"
-        // navigated the shell with the palette still sitting on top of it. A full-bleed,
-        // effectively-invisible backdrop makes the palette actually modal and gives it the
-        // reference's click-away dismissal at the same time.
+        // navigated the shell with the palette still sitting on top of it. A full-bleed backdrop
+        // makes the palette actually modal and gives it the reference's click-away dismissal.
         //
-        // `.opacity(0.001)` rather than `.clear`: a fully clear shape is not hit-testable, so a
-        // clear backdrop would swallow nothing and change nothing.
+        // It DIMS (user call, 2026-08-07 — this pass first shipped it at `opacity(0.001)`, just
+        // hit-testable and invisible). A scrim is what tells you at a glance that the rest of the
+        // window is not accepting clicks right now, which the invisible version left you to
+        // discover by clicking. Kept light: the palette is a quick find-and-go, not a sheet, and a
+        // heavy scrim would make it feel like a bigger interruption than it is.
         ZStack {
-            Color.black.opacity(0.001)
+            Color.black.opacity(searchPaletteScrimOpacity)
                 .ignoresSafeArea()
                 .onTapGesture { presentation.close() }
             card
@@ -249,3 +251,8 @@ let searchPaletteRowHeight: CGFloat = 34
 
 /// Caps the result list so a long session history cannot grow the card past the window.
 let searchPaletteMaxResultsHeight: CGFloat = 420
+
+/// The backdrop's dim. Light on purpose — enough to say "the window is busy", not enough to make
+/// a quick find-and-go feel like a modal sheet. Works in both appearances: black at a low alpha
+/// deepens the warm charcoal as readily as it shades the cream.
+let searchPaletteScrimOpacity: Double = 0.16
