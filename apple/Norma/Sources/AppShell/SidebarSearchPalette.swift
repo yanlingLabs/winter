@@ -80,6 +80,24 @@ struct SidebarSearchPalette: View {
     }
 
     var body: some View {
+        // The BACKDROP (live-gate finding, 2026-08-07): the card alone is only 670 pt wide, so
+        // without this every click outside it fell straight THROUGH to the app behind — the
+        // palette looked modal while the sidebar underneath stayed live, and clicking "Dispatch"
+        // navigated the shell with the palette still sitting on top of it. A full-bleed,
+        // effectively-invisible backdrop makes the palette actually modal and gives it the
+        // reference's click-away dismissal at the same time.
+        //
+        // `.opacity(0.001)` rather than `.clear`: a fully clear shape is not hit-testable, so a
+        // clear backdrop would swallow nothing and change nothing.
+        ZStack {
+            Color.black.opacity(0.001)
+                .ignoresSafeArea()
+                .onTapGesture { presentation.close() }
+            card
+        }
+    }
+
+    private var card: some View {
         VStack(spacing: 0) {
             field
             if rows.isEmpty {
@@ -117,6 +135,12 @@ struct SidebarSearchPalette: View {
         }
         .onKeyPress(.upArrow) { move(-1); return .handled }
         .onKeyPress(.downArrow) { move(1); return .handled }
+        // Esc. `.onKeyPress` rather than `.onExitCommand` (live-gate finding, 2026-08-07): with
+        // the TextField holding focus, `.onExitCommand` never fired and Esc did nothing at all.
+        // `.onKeyPress` routes up from the focused descendant, which is what the arrow keys above
+        // already rely on. `.onExitCommand` is KEPT as a second path for the case where focus is
+        // not in the field.
+        .onKeyPress(.escape) { presentation.close(); return .handled }
         .onExitCommand { presentation.close() }
     }
 
