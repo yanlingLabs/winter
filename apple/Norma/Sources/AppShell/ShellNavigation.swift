@@ -162,6 +162,38 @@ func excludingArchived(_ rows: [SessionSummary]) -> [SessionSummary] {
     rows.filter { $0.activity != "archived" }
 }
 
+/// PURE (sidebar-brand, spec R6): drops the ONE permanent dispatch session.
+///
+/// Dispatch is a get-or-create SINGLETON conversation (`session.dispatch {}`,
+/// `ShellSessionHost.resolveDispatch`) reached only through its own sidebar row — so it has no
+/// business in a list of recent things, which is where the mode-agnostic Recents list used to put
+/// it.
+///
+/// This targets the singleton, NOT the feature: dispatch CHILDREN are created as `mode: "code"`
+/// with `origin: "dispatch-child"` (`packages/core/src/agent/dispatch-children.ts`) — real code
+/// sessions with real work — and stay listed. `SessionMode(wire:)`'s nil/unknown → `.code`
+/// fallback is what makes that safe: absence is never read as dispatch, so no row is ever hidden
+/// by accident.
+func excludingDispatch(_ rows: [SessionSummary]) -> [SessionSummary] {
+    rows.filter { SessionMode(wire: $0.mode) != .dispatch }
+}
+
+/// PURE: **THE** row filter for every session list in the shell — the sidebar's flat Recents list
+/// and the search palette's results both call this and nothing else.
+///
+/// Deliberately ONE composed entry point rather than two hand-composed chains: two filter chains
+/// over the same rows is the silent-drift class this repo's protocol checklist warns about — one
+/// surface gains an exclusion, the other quietly keeps showing the row, and nothing fails to
+/// compile. Add future exclusions HERE.
+///
+/// Note this is NOT the landings' filter: `ModeLandingView`'s per-mode tabs legitimately show
+/// archived rows (the Archived tab's resume is the one place that click is meant to un-archive)
+/// and the Dispatch surface legitimately shows the dispatch session. Those call
+/// `excludingArchived`/`sessionRows` directly, as they always did.
+func recentsCandidates(_ rows: [SessionSummary]) -> [SessionSummary] {
+    excludingDispatch(excludingArchived(rows))
+}
+
 /// PURE: Task 1's placeholder copy, narrowed by T3/T4/T5. Every mode now has a real landing
 /// (`ChatLandingView`/`ModeLandingView`/`DispatchSurface`/`CoworkPlaceholder`); `ShellRootView.detail`
 /// wires chat and cowork UNCONDITIONALLY (neither needs a host), so `.mode(.chat)` and

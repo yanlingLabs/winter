@@ -333,10 +333,15 @@ struct ShellSidebar: View {
                     // would make an idle click silently un-archive it. Archived sessions are
                     // reachable only through the Archived tab (`ModeLandingView`), where resume is
                     // the stated, deliberate action.
-                    let unarchived = excludingArchived(directory.rows)
-                    let recents = filteredRecents(unarchived, query: searchQuery)
+                    // sidebar-brand T2: the ONE shared filter (`recentsCandidates`) — archived
+                    // rows stay hidden for the reason above, and the permanent dispatch singleton
+                    // is now gone from Recents entirely (spec R6: it is reached only through its
+                    // own sidebar row). The search palette calls the same function, so the two
+                    // lists cannot drift apart.
+                    let candidates = recentsCandidates(directory.rows)
+                    let recents = filteredRecents(candidates, query: searchQuery)
                     if recents.isEmpty {
-                        Text(unarchived.isEmpty ? "No sessions yet" : "No matches")
+                        Text(candidates.isEmpty ? "No sessions yet" : "No matches")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 8)
