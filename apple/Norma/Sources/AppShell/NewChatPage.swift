@@ -121,6 +121,12 @@ let newChatModelPlaceholder = "Default model"
 /// page is for, so this asks rather than repeats — the reference's own split.
 let newChatComposerPlaceholder = "How can I help you today?"
 
+/// ONE size for everything the composer slot renders — the live text, its placeholder, and the
+/// held draft shown while a create is in flight. They must agree or the text changes size the
+/// moment you type, or the moment you send. 16 pt, not the component's default 14: on this page
+/// the composer IS the subject rather than a strip under a transcript (user call, 2026-08-07).
+let newChatComposerFontSize: CGFloat = 16
+
 /// PURE: whether the card shows its SECOND control row (working folder, approval mode,
 /// announcement).
 ///
@@ -437,7 +443,7 @@ struct NewChatPage: View {
                 // rather than near-black, and this token is precisely "the base plane of the
                 // opposite appearance", so it softens the line in light mode and brightens it in
                 // dark by the same construction. `.primary` reads as a hard near-black here.
-                .foregroundStyle(Theme.inverseCanvas)
+                .foregroundStyle(Theme.inverseCanvas.opacity(0.72))
         }
         .multilineTextAlignment(.center)
     }
@@ -497,7 +503,8 @@ struct NewChatPage: View {
                     ComposerTextView(
                         text: $draft,
                         onSubmit: { submit() },
-                        usesAdaptiveColors: true
+                        usesAdaptiveColors: true,
+                        fontSize: newChatComposerFontSize
                     )
                     // The composer component has no placeholder parameter (its own doc notes the
                     // v1 shape never had one), so the placeholder is an overlay that steps aside
@@ -506,7 +513,7 @@ struct NewChatPage: View {
                     .overlay(alignment: .topLeading) {
                         if draft.isEmpty {
                             Text(newChatComposerPlaceholder)
-                                .font(.system(size: 15))
+                                .font(.system(size: newChatComposerFontSize))
                                 .foregroundStyle(Theme.textMuted)
                                 .padding(.horizontal, ComposerTextView.textContainerInset.width)
                                 .padding(.vertical, ComposerTextView.textContainerInset.height)
@@ -518,7 +525,7 @@ struct NewChatPage: View {
                     // (its `textContainerInset`/zero line-fragment padding, mirrored) so the swap
                     // doesn't visibly jump; secondary color is what reads as "disabled" here.
                     Text(draft)
-                        .font(.system(size: 14))
+                        .font(.system(size: newChatComposerFontSize))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, ComposerTextView.textContainerInset.width)
                         .padding(.vertical, ComposerTextView.textContainerInset.height)
