@@ -242,6 +242,54 @@ final class SidebarBrandTests: XCTestCase {
                        "the reference's cluster pitch — button size and spacing must sum to it")
     }
 
+    // MARK: - The new-chat page's announcement strip
+
+    /// A real announcement always wins over the tip.
+    func testAnnouncementBeatsTheTip() {
+        XCTAssertEqual(newChatAnnouncement("Norma 0.3 is out", day: 1), "Norma 0.3 is out")
+    }
+
+    /// Absent, empty, and whitespace-only all mean "nothing to announce" — a strip showing a lone
+    /// space would look like a rendering bug.
+    func testBlankAnnouncementsFallBackToATip() {
+        for blank in [nil, "", "   ", "\n\t "] {
+            let shown = newChatAnnouncement(blank, day: 1)
+            XCTAssertTrue(newChatTips.contains(shown), "\(String(describing: blank)) → \(shown)")
+        }
+    }
+
+    /// The tip is picked by DAY, so it is stable for a whole session (a strip that reshuffled on
+    /// every redraw would be noise) and still changes over time.
+    func testTipIsStablePerDayAndVariesAcrossDays() {
+        XCTAssertEqual(newChatAnnouncement(nil, day: 7), newChatAnnouncement(nil, day: 7))
+        let distinct = Set((0..<newChatTips.count).map { newChatAnnouncement(nil, day: $0) })
+        XCTAssertEqual(distinct.count, newChatTips.count, "every tip is reachable")
+    }
+
+    /// Total for any day index — a negative or absurd value must still land inside the list rather
+    /// than trapping on a negative modulo.
+    func testTipIndexIsTotalForAnyDay() {
+        for day in [-366, -1, 0, 365, 100_000] {
+            XCTAssertFalse(newChatAnnouncement(nil, day: day).isEmpty, "day \(day)")
+        }
+    }
+
+    /// `newChatTipDay` is injected a date so nothing here depends on the clock.
+    func testTipDayIsDerivedFromTheGivenDate() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let jan1 = DateComponents(calendar: calendar, year: 2026, month: 1, day: 1).date!
+        XCTAssertEqual(newChatTipDay(jan1, calendar: calendar), 1)
+    }
+
+    /// The mode picker shows Chat and Cowork, and Cowork is honestly unavailable — it has no
+    /// daemon mode at all. Pinned so a future "tidy-up" cannot quietly mark it selectable.
+    func testNewChatModePickerOffersChatAndAnHonestlyUnavailableCowork() {
+        XCTAssertEqual(newChatModeOptions, [.chat, .cowork])
+        XCTAssertTrue(SessionMode.chat.isAvailable)
+        XCTAssertFalse(SessionMode.cowork.isAvailable, "Cowork renders, but must not select")
+    }
+
     // MARK: - The account menu (the Dashboard split)
 
     /// The menu's groups are its DIVIDERS, so an empty group would render a stray separator.
