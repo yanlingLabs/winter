@@ -73,9 +73,32 @@ Same OOXML-native editing core, same fidelity, **without the five-service stack*
 - **Status: open beta** (announced Nov 2024, still beta at the time of writing). WASM LibreOffice is also large and slow to start.
 - **Verdict:** highest ceiling, real risk. Worth a spike, not a commitment.
 
-#### D. Roll your own (ProseMirror/TipTap + `mammoth.js` + `docx.js`)
+#### D. Build our own, from the STANDARD — the option that keeps Apache-2.0
 
-Total control of the UX, and **you own OOXML fidelity forever**. Viable for a constrained subset ("Norma writes simple documents"); not viable for "open the deck my colleague sent me and edit it". For PowerPoint specifically, do not.
+This is more viable than "roll your own" usually is, because of one fact: **OOXML is a published open standard — ECMA-376 / ISO/IEC 29500.** Implementing a documented format from its spec carries **no** licence contamination. File formats are not copyrightable; expression is.
+
+**The legal line, stated once.** You do not need ONLYOFFICE's source for any of this, and you should not read it. Reading AGPL code and then writing your own creates derivative-work risk; the standard mitigation is a clean room (one team reads and writes a functional spec, a *different* team implements from it), which a small team cannot actually run — the firewall is the entire mechanism. Note also that using an **AI as the intermediary** to "translate" AGPL code is contested and untested in court, and may not satisfy the clean-room standard at all. Implement from ECMA-376; use their *product* as a UX reference, which is observation of behaviour, not copying of expression. (Not legal advice.)
+
+**And most of it is already built, permissively.** Libraries that already do the hard part:
+
+| Library | Licence | Notes |
+| --- | --- | --- |
+| [`pterror/ooxml`](https://github.com/pterror/ooxml) | **MIT/Apache-2.0** | Rust; typed structs generated from the ECMA-376 RELAX NG schemas, and **preserves unknown elements and attributes through round-trip** — exactly the property that makes fidelity possible |
+| [`office_oxide`](https://github.com/yfedoseev/office_oxide) | **MIT/Apache-2.0** | DOCX/XLSX/PPTX + legacy; **JS/TS and WASM bindings**, so it fits both the Bun daemon and the Chromium panel |
+| [`ooxmlsdk`](https://github.com/KaiserY/ooxmlsdk) | Rust | Modelled on the .NET Open XML SDK |
+| [`pptx-viewer`](https://github.com/ChristopherVR/pptx-viewer/) | **Apache-2.0** | TypeScript, 18,800+ tests |
+
+**The one thing not to build: the WYSIWYG layout engine.** A human-editable Word view means line breaking, pagination, float positioning, table cell algorithms, font fallback and decades of Word compatibility quirks. LibreOffice is ~10M lines and 30 years old. That is not a "lessons learnt" project. It is also precisely where ONLYOFFICE's value lives — which is why *using* their engine and *rebuilding* it are so far apart in cost.
+
+**So split the problem by who is editing:**
+
+| | Approach |
+| --- | --- |
+| **Agent edits** | **Surgical OOXML** via `office_oxide` / `pterror/ooxml` — touch only what changes, everything unknown round-trips verbatim. Fidelity comes free from *not re-rendering*. |
+| **Faithful preview** | Render in Chromium via a converter (LibreOffice headless is MPL-2.0 and would only be *invoked*, never linked) or a permissive renderer. Read-only, accurate. |
+| **Human edits** | A simplified content editor for text-level changes, or **"Open in Word/Pages"** — the user already owns an app that does this perfectly. |
+
+The insight underneath: **most agent edits are content-level** — change this paragraph, add a slide, update that table. None of that needs a layout engine; it needs surgical XML editing plus a faithful preview. That dodges the entire hard problem **and keeps Norma Apache-2.0**.
 
 #### E. Drive Microsoft Office if installed
 
