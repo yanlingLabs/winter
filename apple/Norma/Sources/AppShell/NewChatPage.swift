@@ -178,17 +178,22 @@ struct NewChatControlChip: View {
 
     var body: some View {
         Button {} label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 7) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 11))
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.textMuted)
+                // PRIMARY, not muted, and at the control row's own size — these are CONTROLS you
+                // would click, and the reference sets them as such. Muted 11 pt read as captions
+                // sitting under the composer rather than as pickers.
                 Text(title)
-                    .font(.system(size: 11))
+                    .font(.system(size: 14))
+                    .foregroundStyle(.primary)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.textMuted)
             }
-            .foregroundStyle(Theme.textMuted)
             .padding(.horizontal, 8)
-            .frame(height: 22)
+            .frame(height: 26)
             .contentShape(Rectangle())
         }
         .buttonStyle(ShellSidebarRowStyle(isSelected: false))
@@ -540,17 +545,19 @@ struct NewChatPage: View {
             NewChatControlChip(systemImage: "hand.raised", title: "Ask",
                                label: "Approval mode (not wired yet)")
             Spacer(minLength: 12)
-            HStack(spacing: 5) {
+            HStack(spacing: 6) {
                 Image(systemName: "sparkles")
-                    .font(.system(size: 11))
+                    .font(.system(size: 12))
                 Text(newChatAnnouncement(announcement, day: newChatTipDay(Date())))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
-            .font(.system(size: 12))
+            .font(.system(size: 13))
             .foregroundStyle(Theme.textMuted)
         }
-        .padding(.horizontal, 14)
+        // Matches the control row's own inset, so the folder glyph lands on the same column as the
+        // plus directly above it — the reference aligns those two.
+        .padding(.horizontal, 18)
         .frame(height: newChatCoworkStripHeight)
     }
 
