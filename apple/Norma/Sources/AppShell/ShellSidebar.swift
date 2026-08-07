@@ -57,6 +57,13 @@ struct ShellRootView: View {
                 .ignoresSafeArea()
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // sidebar-brand T5: the RAISED plane (`docs/brand.md` § the plane mapping).
+                // REQUIRED, not cosmetic: the sidebar's cream only reads correctly against a
+                // painted content plane — against the window's default system grey it looks
+                // wrong rather than warm. Painted here, at the shell level, so every destination
+                // inherits it and none has to remember; the transcript/composer/cards keep their
+                // own treatment for the next pass.
+                .background(Theme.cardSurface)
         }
         // app-shell T4: the hop-away "keep working?" banner (spec §1, T3 review as-m9) — an
         // OVERLAY on the whole split view, not inside `detail`, so it survives the very

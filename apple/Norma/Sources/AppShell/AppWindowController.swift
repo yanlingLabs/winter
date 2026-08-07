@@ -171,6 +171,13 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         // action, which rode the toolbar, now rides `ShellSessionView`'s header pill.
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
+        // sidebar-brand T5: the window's own fill matches the CONTENT plane (`docs/brand.md`), so
+        // a live resize never flashes the system grey behind the SwiftUI hosting view — the
+        // sidebar's own `Theme.canvas` is painted by the pane itself. Named-asset lookup with the
+        // system fallback kept: this runs during window construction, and a window that fails to
+        // build because a colorset is missing would be a far worse failure than an unbranded one
+        // (the catalog itself is pinned by `SidebarBrandTests`, which is where that must fail).
+        window.backgroundColor = NSColor(named: "CardSurface") ?? .windowBackgroundColor
         window.isReleasedWhenClosed = false // this controller owns the window's lifetime, forever
         window.minSize = NSSize(width: 820, height: 520)
         // Spec §1: opt OUT of native full-screen — a hidden full-screen window strands a Space.
