@@ -419,11 +419,17 @@ let shellSidebarRowHeight: CGFloat = 32
 /// what clears the inline traffic lights (together with `shellSidebarTopInset` above it).
 let shellSidebarWordmarkRowHeight: CGFloat = 38
 
-/// sidebar-brand: the gap between the nav block and the Recents section label —
-/// reference-measured at ~44 pt (was 14). This single value does more than any other to make the
-/// pane read like the reference: at the old spacing the whole pane was one undifferentiated
-/// column of rows, with nothing separating navigation from history.
-let shellSidebarSectionGap: CGFloat = 44
+/// The gap between the nav block and the Recents section label. Reference-measured at ~44 pt, then
+/// pulled back to 32 on the user's eye — 44 separated the two blocks correctly but left the pane
+/// reading loose in Norma's shorter nav list, where there are five rows rather than the
+/// reference's seven. Still far above the original 14, which was the real problem.
+let shellSidebarSectionGap: CGFloat = 32
+
+/// The floating account strip's height, and the soft fade above it. The scroll content reserves
+/// both as bottom padding, so the last recents row can be scrolled fully clear of the strip
+/// instead of resting under it forever.
+let shellAccountStripHeight: CGFloat = 46
+let shellAccountFadeHeight: CGFloat = 20
 
 /// The rounded-rect hover/selection fill's corner radius — shared by every row, one vocabulary.
 let shellSidebarRowCornerRadius: CGFloat = 6
@@ -678,11 +684,17 @@ struct ShellSidebar: View {
                     }
                 }
                 .padding(.horizontal, 8)
-                .padding(.bottom, 8)
+                // Clearance for the FLOATING account strip below, so the last recents row can
+                // still be scrolled fully clear of it instead of resting permanently underneath.
+                .padding(.bottom, shellAccountStripHeight + shellAccountFadeHeight)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            accountRow
         }
+        // The account strip FLOATS over the scroll rather than sitting below it (user call,
+        // 2026-08-07), so recents pass UNDERNEATH it: a soft fade first, then the blurred strip.
+        // That is what replaced the divider — the rows softening as they go under says "there is
+        // more here" far better than a hard rule ever did.
+        .overlay(alignment: .bottom) { accountStrip }
         .frame(width: shellSidebarWidth)
         // Flat opaque fill, edge-to-edge and top-to-bottom — the pane's ONE background, reaching
         // the very top of the window (nothing native reserves the titlebar band any more: the
@@ -852,11 +864,30 @@ struct ShellSidebar: View {
     /// This REPLACES the plain navigate-to-Dashboard button. The Dashboard is still reachable —
     /// every menu entry lands in it — but by NAME rather than as one undifferentiated door, which
     /// is the user's "split into settings and other things".
+    /// The floating bottom strip: a soft fade, then the account row over a blur.
+    ///
+    /// The DIVIDER that used to sit here is gone (user call, 2026-08-07). What separates the strip
+    /// from the list now is the list itself softening as it passes under — a gradient into the
+    /// pane's own canvas, then `.ultraThinMaterial` so rows genuinely blur behind the row rather
+    /// than being covered by an opaque band. The gradient matters as much as the blur: without it
+    /// the blur would begin at a hard line, which is the very edge the divider was.
+    private var accountStrip: some View {
+        VStack(spacing: 0) {
+            LinearGradient(
+                colors: [Theme.canvas.opacity(0), Theme.canvas],
+                startPoint: .top, endPoint: .bottom
+            )
+            .frame(height: shellAccountFadeHeight)
+            .allowsHitTesting(false)
+
+            accountRow
+                .frame(height: shellAccountStripHeight)
+                .background(.ultraThinMaterial)
+        }
+    }
+
     private var accountRow: some View {
         VStack(spacing: 0) {
-            Rectangle()
-                .fill(Theme.hairline)
-                .frame(height: 1)
             HStack(spacing: 8) {
                 // A Button + popover, NOT a SwiftUI `Menu` (caught live, 2026-08-07): `Menu`'s
                 // label is rendered by AppKit's menu machinery, which ignored the custom HStack —
