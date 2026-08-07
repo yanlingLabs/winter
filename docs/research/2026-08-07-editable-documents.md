@@ -176,6 +176,26 @@ The Document Foundation's own framing: *an office suite implements a document th
 | **Collabora Online bundled** | A good editing UI already exists. Costs a local server process. Still MPL-2.0. |
 | **ZetaOffice (WASM)** | No server, lives in the Chromium panel, ZetaJS drives UNO. Still beta. |
 
+### Evaluated and rejected: Univer
+
+[Univer](https://github.com/dream-num/univer) (DreamNum) deserves a written verdict, because on paper it looks like a better fit than LOKit and it is not.
+
+**What is genuinely excellent:**
+
+- **Apache-2.0** core — a perfect licence fit, no contamination at all.
+- **Isomorphic**: the same TypeScript API runs in the browser *and* headless in Node (≥18.17). Their own framing is "Headless for AI infrastructure — run workbook and document logic in Node.js to power agents, automation, and server-side workflows", which is Norma's daemon architecture described back at us.
+- It would deliver the one-engine property **more cleanly than LOKit**: the agent manipulates documents in the daemon through the *identical API* the editor uses in the Chromium panel. No UNO bridge, no tile protocol, no C++ build.
+
+**Why it fails the rule anyway:**
+
+- **OOXML import/export is NOT in the open-source package.** It requires `@univerjs-pro/exchange-client`, under the **Univer Commercial License**, server-backed, watermarked and quota-limited without a licence. Univer OSS is an editor *for its own document model*.
+- Univer's own OSS guidance is to "use open-source DOCX parsing libraries to parse files into data structures that conform to the `IDocumentData` interface" — i.e. **write the OOXML mapping yourself**. That lands on the *same* two-translation problem as LibreOffice (Univer's model is its own, not OOXML-shaped) but with a far less mature engine and none of LibreOffice's fifteen years of filter work. Strictly worse for this rule.
+- **Maturity**: Sheets production-ready, **Docs a release candidate**, **Slides "under active development"**. The rule says full PowerPoint.
+
+**Verdict: does not displace LOKit.** The licence is right and the agent story is arguably better, but format support is the entire requirement and it is paywalled.
+
+**Worth remembering for a DIFFERENT question.** If Norma ever wants *native* documents — sheets and docs created and living in Norma, agent-manipulated headlessly, never round-tripping to Microsoft formats — Univer is an excellent Apache-2.0 foundation and cleaner than anything LibreOffice offers for that job. Two different products; Univer wins the other one.
+
 ### The risk to retire first
 
 **Building LibreOffice for macOS arm64 as an embeddable library.** It is an enormous codebase with its own build system (`gbuild`), and published LOKit binaries skew towards mobile targets. This is the single most likely thing to consume weeks unexpectedly, and it gates everything else — so it should be spike #1, before any UI work.
