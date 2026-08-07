@@ -13,6 +13,31 @@ let newChatGreeting = "Ask Norma anything."
 /// (`setActivityFromRoster`/`applyDirsOp`), extracted so the page and the host publish ONE string.
 let newChatUnreachableMessage = "couldn't reach the daemon — try again"
 
+/// chatgpt-ui T3 (the T2 review's routed c-m3): what the page's send affordance shows for a given
+/// create state — the pure half of the in-flight feedback, table-tested directly
+/// (`AppShellTests`). A struct rather than a tuple so the pin compares whole values.
+struct NewChatSendUI: Equatable {
+    let composerEnabled: Bool
+    let showsWorkingIndicator: Bool
+}
+
+/// PURE: send-state → {composer enabled, working indicator}. `.creating` is the ONLY state that
+/// disables the composer and shows the indicator — the feedback spans exactly "send until
+/// navigation (or visible error)": `.creating` lifts at the create ack, the same beat a
+/// current-page create's navigation fires (`sendFirstChatMessage` sets `.idle` then calls
+/// `onCreated` synchronously), and a failed create re-enables with the page's own error text
+/// (its display is `NewChatPage.body`'s existing `.failed` branch, pinned by
+/// `testFirstSendCreateFailureIsVisibleOnThePageAndNeverNavigates`). Idle and failed BOTH leave
+/// the composer enabled — a failure must never wedge the page (Enter retries, the T2 contract).
+/// This was the T2 review's named root cause of the send-race windows: a page with no in-flight
+/// state read as a dead app and invited the navigate-away → re-enter → re-send flow.
+func newChatSendUI(_ state: ShellSessionHost.NewChatCreateState) -> NewChatSendUI {
+    switch state {
+    case .creating: return NewChatSendUI(composerEnabled: false, showsWorkingIndicator: true)
+    case .idle, .failed: return NewChatSendUI(composerEnabled: true, showsWorkingIndicator: false)
+    }
+}
+
 /// The new-chat page: centered greeting + the EXISTING composer component, chat mode context,
 /// **no session on arrival** (spec §2's wire pin: navigating here mints ZERO `session.create`).
 /// The first send runs create → attach → send as one flow through
@@ -58,12 +83,39 @@ struct NewChatPage: View {
 
     /// The existing composer, in a quiet bordered card so it reads as THE affordance on an
     /// otherwise-empty page (framing only — the component inside is untouched).
+    ///
+    /// chatgpt-ui T3 (c-m3, the in-flight feedback): while a create is in flight
+    /// (`newChatSendUI`'s `.creating` row) the live composer is SWAPPED for a non-editable
+    /// held-draft rendering of the same text in the same card — the honest disable:
+    /// `.disabled()` is a no-op on the `NSViewRepresentable` composer (its `NSTextView` never
+    /// reads the SwiftUI environment, and the component itself is fenced — Global Constraints:
+    /// hosted unchanged), so unmounting it is the one way keyboard input actually stops. The
+    /// draft is view-local `@State`, so the text survives the swap in BOTH directions: shown
+    /// (secondary, visibly held) while creating, restored verbatim into the live composer on
+    /// failure. A small spinner rides the card's corner as the subtle working indicator. On
+    /// success the whole page navigates away in the create-ack's own beat, so the re-enabled
+    /// composer never flashes.
     private var composerCard: some View {
-        ComposerTextView(
-            text: $draft,
-            onSubmit: { submit() },
-            usesAdaptiveColors: true
-        )
+        let ui = newChatSendUI(host.newChatCreate)
+        return Group {
+            if ui.composerEnabled {
+                ComposerTextView(
+                    text: $draft,
+                    onSubmit: { submit() },
+                    usesAdaptiveColors: true
+                )
+            } else {
+                // The held draft — same type size, same top-leading start as the live composer
+                // (its `textContainerInset`/zero line-fragment padding, mirrored) so the swap
+                // doesn't visibly jump; secondary color is what reads as "disabled" here.
+                Text(draft)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, ComposerTextView.textContainerInset.width)
+                    .padding(.vertical, ComposerTextView.textContainerInset.height)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+        }
         .frame(height: 88)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -71,6 +123,14 @@ struct NewChatPage: View {
             RoundedRectangle(cornerRadius: 12)
                 .strokeBorder(.quaternary, lineWidth: 1)
         )
+        .overlay(alignment: .bottomTrailing) {
+            if ui.showsWorkingIndicator {
+                ProgressView()
+                    .controlSize(.small)
+                    .padding(10)
+                    .accessibilityLabel("Starting chat")
+            }
+        }
         .frame(maxWidth: 640)
     }
 

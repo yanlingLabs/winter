@@ -881,4 +881,19 @@ final class AppShellTests: XCTestCase {
     func testNewChatUnreachableMessageMatchesTheHouseFallback() {
         XCTAssertEqual(newChatUnreachableMessage, "couldn't reach the daemon — try again")
     }
+
+    // MARK: - chatgpt-ui T3: the page's in-flight feedback (c-m3 — PURE send-state mapping)
+
+    /// The T2 review's routed minor, root cause of both send-race windows: a create in flight
+    /// must READ as one. `.creating` — and ONLY `.creating` — disables the composer and shows
+    /// the working indicator; idle and failed both leave the composer enabled (a failure must
+    /// never wedge the page — the error text's own display is pinned by
+    /// `ChatWindowTests.testFirstSendCreateFailureIsVisibleOnThePageAndNeverNavigates`, and
+    /// Enter retries per the T2 contract). Exhaustive over `NewChatCreateState`.
+    func testNewChatSendUIDisablesComposerAndShowsIndicatorOnlyWhileCreating() {
+        XCTAssertEqual(newChatSendUI(.idle), NewChatSendUI(composerEnabled: true, showsWorkingIndicator: false))
+        XCTAssertEqual(newChatSendUI(.creating), NewChatSendUI(composerEnabled: false, showsWorkingIndicator: true))
+        XCTAssertEqual(newChatSendUI(.failed("boom")), NewChatSendUI(composerEnabled: true, showsWorkingIndicator: false),
+                       "a failed create re-enables — the page must never wedge; its error text is a separate, pinned display")
+    }
 }
