@@ -2,15 +2,20 @@ import Foundation
 
 // MARK: - The four modes (the iOS nav mirror)
 
-/// The four Norma session modes the shell's sidebar presents — the Mac mirror of the phone's own
-/// `SessionMode` (`norma-ios/Norma/App/SessionMode.swift`), deliberately field-for-field: the same
-/// four cases, the same `sidebarOrder` literal (pinned on iOS by `SessionModeTests`, and here by
-/// `AppShellTests.testSidebarOrderMirrorsThePhonesFourRows` — two lists that must move together),
-/// the same `isAvailable` reading of cowork.
+/// The four Norma session modes the shell's sidebar presents — the same four cases and the same
+/// `isAvailable` reading of cowork as the phone's own `SessionMode`
+/// (`norma-ios/Norma/App/SessionMode.swift`).
 ///
-/// Spec §2 (post-review correction): the sidebar is FOUR mode rows plus a flat Recents list — the
-/// Dashboard is reached from a gear affordance, NOT a fifth session-like row. `ShellDestination`
-/// below is where that distinction lives.
+/// chatgpt-ui T1 (spec R1, superseding the shell spec's iOS-mirror ruling FOR THE MAC ONLY): the
+/// Mac's `sidebarOrder` is now Chats-first — the ChatGPT-desktop sidebar shape (New chat action row
+/// on top of these, `shellSidebarTopRows`) — and deliberately NO LONGER matches the phone's
+/// `[.code, .dispatch, .cowork, .chat]` literal (still pinned there by `SessionModeTests`; the
+/// Liquid Glass gallery remains the PHONE's styling authority). The Mac half of the old
+/// two-lists-move-together pin is retrued as
+/// `AppShellTests.testSidebarModeRowOrderIsChatsFirstPerTheChatGPTShape`.
+///
+/// The Dashboard is reached from the bottom account-style row, NOT a fifth session-like row.
+/// `ShellDestination` below is where that distinction lives.
 ///
 /// Cowork has no daemon mode at all yet (`session_spawn` pre-flight-rejects it), so it renders as
 /// the honest "Coming soon" shell (Task 5) rather than an empty list.
@@ -46,8 +51,9 @@ enum SessionMode: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    /// Approved sidebar order: functional modes first, then the coming-soon shell.
-    static let sidebarOrder: [SessionMode] = [.code, .dispatch, .cowork, .chat]
+    /// chatgpt-ui T1 (spec §1): Chats directly under the New chat action row, then the working
+    /// modes, then the coming-soon shell. See the type doc for the deliberate iOS divergence.
+    static let sidebarOrder: [SessionMode] = [.chat, .code, .dispatch, .cowork]
 
     /// The wire's `mode` string (`SessionSummary.mode`, threaded through from `session.list`).
     /// `nil` — which the daemon sends for a plain code session — and any unknown future mode both
@@ -87,12 +93,22 @@ enum ShellDestination: Hashable, Sendable {
     case mode(SessionMode)
     case session(String)
     case dashboard(pane: DashboardPane?)
+    /// chatgpt-ui T2 (spec §2): the new-chat page — a real destination (centered greeting + the
+    /// existing composer, chat mode, NO session on arrival; the session is created on first send,
+    /// `ShellSessionHost.sendFirstChatMessage`). The launch destination (`defaultShellDestination`)
+    /// and the target of all three New-chat doors (sidebar row, chat landing button, menu-bar item
+    /// — all through the one injected `AppDelegate.newChat()` door).
+    case newChat
 }
 
-/// Where a freshly opened shell lands — the FIRST row in `SessionMode.sidebarOrder`, computed
-/// rather than hard-coded, so reordering the rows can never silently change the landing surface
-/// (same posture as `defaultDashboardPane`, which reads `dashboardPaneOrder.first`).
-let defaultShellDestination: ShellDestination = .mode(SessionMode.sidebarOrder.first ?? .code)
+/// Where a freshly opened shell lands. chatgpt-ui T1 DECOUPLED this from `sidebarOrder.first`
+/// (its old derivation) precisely so THIS task could move it deliberately: T2 (spec R2) makes the
+/// LAUNCH surface the new-chat page — the app opens like ChatGPT, ready to type, no session
+/// minted until the first send. Re-summon mid-run is untouched (`summon(navigatingTo: nil)` never
+/// writes the destination — the existing restore machinery), so this constant is genuinely
+/// launch-only. Pin: `AppShellTests.testNavigationModelDefaultsToTheNewChatPage` (T1's
+/// `…DefaultsToTheCodeLanding`, retrued by this task).
+let defaultShellDestination: ShellDestination = .newChat
 
 /// PURE: which sidebar MODE row renders highlighted for a destination — `nil` for a recents entry
 /// or the Dashboard, so the four rows go quiet when the user is somewhere else (iOS's own nav: the
@@ -108,6 +124,7 @@ func shellDestinationTitle(_ destination: ShellDestination) -> String {
     case .mode(let mode): return mode.title
     case .session: return "Session"
     case .dashboard: return "Dashboard"
+    case .newChat: return "New chat" // the sidebar row's own register (sentence case)
     }
 }
 
@@ -117,6 +134,7 @@ func shellDestinationSystemImage(_ destination: ShellDestination) -> String {
     case .mode(let mode): return mode.systemImage
     case .session: return "text.bubble"
     case .dashboard: return "gearshape"
+    case .newChat: return "square.and.pencil" // the sidebar row's pencil-square, shared
     }
 }
 
@@ -158,7 +176,10 @@ func excludingArchived(_ rows: [SessionSummary]) -> [SessionSummary] {
 /// cases above it) — never in production.
 func shellLandingPlaceholderText(_ destination: ShellDestination) -> String {
     switch destination {
-    case .mode, .session: return "This shell has no session host."
+    // chatgpt-ui T2: `.newChat` joins the host-needing set — the page's first send creates through
+    // `ShellSessionHost`, so a host-less shell (the pure window tests) has no send flow to offer
+    // and says so, the same honest posture as the host-less `.mode`/`.session` cases.
+    case .mode, .session, .newChat: return "This shell has no session host."
     case .dashboard: return "The Dashboard surface has no wiring."
     }
 }

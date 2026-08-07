@@ -361,42 +361,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // and had no other caller once T1 retargeted the menu item and the dock's reopen path. `newChat()`
     // itself SURVIVES, below, with new innards (App shell T6 review fix) — see its own doc comment.
 
-    /// App shell T6 (review fix): the ONE chat-create door — the menu bar's "New Chat" entry, and
-    /// (bugfix pass B4) the chat landing's own "New Chat" button, which reaches here through the
-    /// injected `AppWindowController.openNewChat` closure rather than growing a create path of its
-    /// own. T3's own report named this task as chat-create's door ("creating a chat is still the
-    /// menu bar's door until T6
-    /// retargets it") — the FIRST retarget pass wrongly collapsed "New Chat" onto the same plain
-    /// summon as "Chat", silently dropping the create. This restores create, on the ESTABLISHED
-    /// bare-RPC pattern `ShellSessionHost.managementClient`/`ShellSessionHost.createSession(with:)`
-    /// already use for the shell's own "New" button: `model.client` is a plain, already-connected
-    /// socket (never an attaching harness — `makeDetachedFeed` mints those, and would be the wrong
-    /// tool here), so `session.create` rides it with no attach of its own. `cwd` is omitted
-    /// entirely (chat sessions carry no fs tools, so there is no working directory to seed) — the
-    /// daemon writes `dirs = []`, the same "no folder" shape `WorkingDirChoice.noFolder`'s own
-    /// `cwdParam` produces. (The original `createAndOpenChat()`, deleted by this same task, sent
-    /// `cwd: NSHomeDirectory()` — a stale hardcoded-HOME habit the working-dirs plan already retired
-    /// for code sessions; not carried forward here. No other live path creates a `mode:"chat"`
-    /// session to check for the same staleness — this was the only one.)
+    /// The ONE New-chat door — the menu bar's "New Chat" entry, the chat landing's button and the
+    /// sidebar's New chat row (both reach here through the injected `AppWindowController.openNewChat`
+    /// closure — B4's one-door discipline, kept).
     ///
-    /// On success, summons the shell straight onto the new session (`.session(id)`) —
-    /// `ShellSessionHost.apply(destination:)` is what actually attaches, on ITS OWN separate
-    /// harness (a SECOND socket, per that type's own doc comment), not this call. On failure, logs
-    /// and does not summon — same defensive posture as every other menu-path guard in this file;
-    /// no richer user-facing error affordance exists on any menu path today, so none is invented
-    /// here either.
+    /// chatgpt-ui T2 (spec §2): the door OPENS THE PAGE — a targeted summon onto `.newChat`, and
+    /// nothing else. The eager `session.create` this method carried since App shell T6's review
+    /// fix MOVED into `ShellSessionHost.sendFirstChatMessage` (the page's first send): create
+    /// (mode `"chat"`, `cwd` omitted — the same wire shape, on the same bare `managementClient` =
+    /// `model.client`) → attach (the host's own separate harness) → the typed text sends →
+    /// navigation lands on the live session. No door mints a session without a send any more —
+    /// empty-session litter ends (`AppShellTests`' zero-create wire pin;
+    /// `ChatWindowTests`' create-on-send pins own the flow itself).
+    ///
+    /// `summonAppWindow`'s own no-appModel guard covers the never-booted case (log + no-op —
+    /// `testNewChatNoOpsWithoutAppModel`'s posture, unchanged).
     func newChat() {
-        guard let model = appModel else {
-            OrbDebug.log("newChat: no appModel — create aborted")
-            return
-        }
-        Task { [weak self] in
-            guard let created = try? await model.client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat") else {
-                OrbDebug.log("newChat: session.create(mode: chat) failed — summon aborted")
-                return
-            }
-            self?.summonAppWindow(navigatingTo: .session(created.sessionId))
-        }
+        summonAppWindow(navigatingTo: .newChat)
     }
 
     /// App shell T1 — THE summon primitive (spec §1). Every path that wants the app window goes
@@ -446,10 +427,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             directory: model.directory,
             host: host,
             dashboardWiring: makeDashboardWiring(model: model),
-            // Bugfix pass B4: the chat landing's in-window "New Chat" button fires the SAME create
-            // door as the menu-bar entry — `newChat()` verbatim (create → summon `.session(id)` →
-            // the `isChatSession` self-heal), never a second `session.create` call site
-            // (`AppShellTests`' exactly-one-create wire pin).
+            // Bugfix pass B4 (retargeted by chatgpt-ui T2): the chat landing's button and the
+            // sidebar's New chat row fire the SAME door as the menu-bar entry — `newChat()`
+            // verbatim, which now opens the `.newChat` page; the create waits for the page's
+            // first send (`ShellSessionHost.sendFirstChatMessage` — the one create site;
+            // `AppShellTests`' zero-create-on-navigation wire pin).
             openNewChat: { [weak self] in self?.newChat() },
             frame: centeredAppWindowFrame(visibleFrame: visible)
         )
@@ -1020,10 +1002,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // App shell T6 (the menu-bar retarget): every remaining menu path now summons+navigates
             // the SAME singleton instead of spawning its own window. "Chat" browses the chat mode's
             // landing (`.mode(.chat)`) — `openChat()`'s old open-newest-or-create detached-window
-            // spawn is retired below, nothing else ever called it. "New Chat" (review fix: the
-            // first retarget pass wrongly collapsed this onto the same plain summon as "Chat",
-            // silently dropping the create T3's own report assigned to this task) still CREATES —
-            // see `newChat()`'s own doc comment for the restored shape.
+            // spawn is retired below, nothing else ever called it. "New Chat" (chatgpt-ui T2)
+            // opens the NEW-CHAT PAGE — the create now happens on the page's first send, never at
+            // the door — see `newChat()`'s own doc comment.
             openNewChat: { [weak self] in self?.newChat() },
             openChat: { [weak self] in self?.summonAppWindow(navigatingTo: .mode(.chat)) },
             // App shell T7: "Dashboard…" and "Manage Plugins…" now DIFFER — the real

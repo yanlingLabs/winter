@@ -12,11 +12,14 @@ import AppKit
 final class AppShellTests: XCTestCase {
     // MARK: - SessionMode: the iOS nav mirror (PURE)
 
-    /// The sidebar's four rows, in the phone's own `sidebarOrder` — pinned on iOS by
-    /// `SessionModeTests` (`norma-ios/NormaTests/SessionModeTests.swift`) with this exact literal.
-    /// Two lists that must move together; this is the Mac half of that pin.
-    func testSidebarOrderMirrorsThePhonesFourRows() {
-        XCTAssertEqual(SessionMode.sidebarOrder, [.code, .dispatch, .cowork, .chat])
+    /// RETRUED (chatgpt-ui T1, spec R1): the mode rows are now Chats-first — the ChatGPT-desktop
+    /// sidebar order (New chat sits above these as an ACTION row, `shellSidebarTopRows`). This pin
+    /// used to assert the phone's own `[.code, .dispatch, .cowork, .chat]` literal ("two lists that
+    /// must move together"); the 2026-08-06 spec supersedes the iOS-mirror ruling FOR THE MAC ONLY
+    /// (spec "Why" #3 — the phone keeps the Liquid Glass gallery and its own order, pinned there by
+    /// `SessionModeTests`; the two lists deliberately no longer move together).
+    func testSidebarModeRowOrderIsChatsFirstPerTheChatGPTShape() {
+        XCTAssertEqual(SessionMode.sidebarOrder, [.chat, .code, .dispatch, .cowork])
         XCTAssertEqual(Set(SessionMode.sidebarOrder), Set(SessionMode.allCases), "every mode appears exactly once")
     }
 
@@ -47,9 +50,15 @@ final class AppShellTests: XCTestCase {
 
     // MARK: - ShellDestination / ShellNavigationModel (PURE)
 
-    func testNavigationModelDefaultsToTheCodeLanding() {
+    /// RETRUED (chatgpt-ui T2, spec R2): the app LAUNCHES onto the new-chat page — chat mode,
+    /// ready to type, no session minted. T1 deliberately hard-coded `.mode(.code)` (decoupling
+    /// this constant from `sidebarOrder.first` precisely so the reorder didn't smuggle a launch
+    /// change) with a "T2 retargets" note; this is that retarget. Re-summon mid-run still
+    /// preserves prior state — `summon(navigatingTo: nil)` never touches the destination
+    /// (`testLaunchLandsOnNewChatAndResummonPreservesPriorState`).
+    func testNavigationModelDefaultsToTheNewChatPage() {
         XCTAssertEqual(ShellNavigationModel().destination, defaultShellDestination)
-        XCTAssertEqual(defaultShellDestination, .mode(.code))
+        XCTAssertEqual(defaultShellDestination, .newChat)
     }
 
     func testNavigateRetargetsTheDestination() {
@@ -80,7 +89,7 @@ final class AppShellTests: XCTestCase {
     }
 
     func testEveryDestinationHasATitleAndSystemImage() {
-        let destinations: [ShellDestination] = SessionMode.sidebarOrder.map { .mode($0) } + [.session("s_1"), .dashboard(pane: nil), .dashboard(pane: .pluginManager)]
+        let destinations: [ShellDestination] = SessionMode.sidebarOrder.map { .mode($0) } + [.session("s_1"), .dashboard(pane: nil), .dashboard(pane: .pluginManager), .newChat]
         for destination in destinations {
             XCTAssertFalse(shellDestinationTitle(destination).isEmpty, "\(destination) needs a non-empty title")
             XCTAssertFalse(shellDestinationSystemImage(destination).isEmpty, "\(destination) needs a non-empty SF Symbol name")
@@ -238,6 +247,32 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(window.styleMask.contains(.closable))
         XCTAssertTrue(window.styleMask.contains(.resizable))
         XCTAssertTrue(window.styleMask.contains(.miniaturizable))
+    }
+
+    /// chatgpt-ui T3 (spec §4): the seamless ChatGPT-desktop chrome, asserted on the REAL window.
+    /// Transparent titlebar over full-size content — the traffic lights sit inline over the
+    /// sidebar's own flat background (T1's fill `ignoresSafeArea`, so it reaches the very top);
+    /// the title TEXT is hidden (the seamless top carries no "Norma" label) while the window
+    /// KEEPS its title — Mission Control/Window-menu identity must survive the reskin; and the
+    /// empty unified toolbar stays — it is the inset-traffic-lights machinery (the
+    /// `DetachedWindowController` recipe, minus its clear/non-opaque shell: THIS window stays
+    /// opaque). The summon/visibility/geometry pins around this one are the guardrail — chrome
+    /// flags must never change behavior.
+    func testWindowChromeIsSeamlessTitlebarOverFullSizeContent() {
+        let controller = makeController()
+        defer { controller.hide() }
+        controller.summon()
+        guard let window = controller.windowForTesting else {
+            return XCTFail("summon() must construct a real window")
+        }
+
+        XCTAssertTrue(window.titlebarAppearsTransparent, "spec §4: the seamless top — the sidebar shows through the titlebar")
+        XCTAssertTrue(window.styleMask.contains(.fullSizeContentView), "content extends under the titlebar")
+        XCTAssertEqual(window.titleVisibility, .hidden, "no title text over the seamless top")
+        XCTAssertEqual(window.title, "Norma", "the window keeps its NAME — Mission Control/Window-menu identity")
+        XCTAssertNotNil(window.toolbar, "the empty unified toolbar is the inset-traffic-lights machinery")
+        XCTAssertEqual(window.toolbarStyle, .unified)
+        XCTAssertTrue(window.isOpaque, "the shell is an opaque window — the detached windows' clear shell is NOT this recipe")
     }
 
     /// A plain re-summon PRESERVES the current destination (the `openDashboard` plain-refocus
@@ -535,15 +570,15 @@ final class AppShellTests: XCTestCase {
         delegate.appWindow?.hide()
     }
 
-    /// "New Chat" is fired through the real item — review fix: unlike "Chat", it still CREATES
-    /// (`AppDelegate.newChat()`'s restored innards, see its own doc comment), so a degraded
-    /// (no-token) test boot can only prove the failure half here — the create RPC has no real
-    /// daemon to land against, so nothing must summon. The success half (create shape, no
-    /// self-attach on the create path, navigate-to-created-id) needs a scripted transport and is
-    /// pinned in `ChatWindowTests.testNewChatCreatesViaSessionCreateWithChatModeNoCwdAndNoAttachOnTheCreatePath`
-    /// instead — same "guard/no-crash at the menu level, real RPC shape via `setAppModelForTesting`"
-    /// split every other AppDelegate RPC path in this codebase already uses.
-    func testNewChatMenuItemFiresAndFailsFastWithoutSummoningOnTheDegradedBoot() async throws {
+    /// RETRUED (chatgpt-ui T2, spec §2): "New Chat" no longer creates at the door — it summons the
+    /// shell onto the NEW-CHAT PAGE (`.newChat`), same fired-through-the-real-item posture as
+    /// "Chat" beside it. The old pin proved the degraded boot's create failure summoned nothing;
+    /// that create no longer exists at the door at all — the page opens fine with no daemon (the
+    /// FIRST SEND is what needs one, and its failure is the page's own visible state:
+    /// `ChatWindowTests.testFirstSendCreateFailureIsVisibleOnThePageAndNeverNavigates`). The
+    /// zero-create wire proof needs a recorder and lives in
+    /// `testNewChatDoorsOpenThePageAndMintNothing`.
+    func testNewChatMenuItemSummonsToTheNewChatPage() {
         let delegate = AppDelegate()
         XCTAssertTrue(delegate.boot())
         guard let item = delegate.menuBar?.newChatItem else {
@@ -551,10 +586,11 @@ final class AppShellTests: XCTestCase {
         }
 
         NSApp.sendAction(item.action!, to: item.target, from: item)
-        try? await Task.sleep(nanoseconds: 300_000_000)
 
-        XCTAssertNil(delegate.appWindow, "the degraded (no-token) boot's create RPC cannot succeed — nothing should summon")
+        XCTAssertNotNil(delegate.appWindow, "the menu item must summon the shell, not spawn a detached window")
+        XCTAssertEqual(delegate.appWindow?.navigation.destination, .newChat, "the door opens the page — the create waits for the first send")
         XCTAssertTrue(delegate.detachedWindows.isEmpty)
+        delegate.appWindow?.hide()
     }
 
     /// "Dashboard…" summons the shell onto a PLAIN `.dashboard(pane: nil)` — App shell T7: the real
@@ -620,6 +656,125 @@ final class AppShellTests: XCTestCase {
         delegate.appWindow?.hide()
     }
 
+    // MARK: - chatgpt-ui T1: the sidebar's row table (PURE — spec §1's exact structure)
+
+    /// THE row-order pin, spec §1 top-to-bottom: New chat (an ACTION row — the one row that fires
+    /// a door instead of setting selection), then Chats, then Code/Dispatch/Cowork. The search
+    /// field, Recents, and the account row sit below these and are pinned separately
+    /// (`filteredRecents`, `shellSidebarAccountRowDestination`).
+    func testShellSidebarTopRowsAreNewChatThenChatsThenTheModeRows() {
+        XCTAssertEqual(shellSidebarTopRows, [
+            .newChat, .mode(.chat), .mode(.code), .mode(.dispatch), .mode(.cowork),
+        ])
+    }
+
+    /// The destination table: every mode row navigates to its `.mode(...)` landing UNCHANGED; New
+    /// chat is `nil` — an action row, never a selection (T2: the door it fires now opens the
+    /// `.newChat` page; kept as an action so the row's no-dead-affordance wiring gate survives,
+    /// and `.newChat` matches no row tag — the sidebar goes quiet on the page, the same posture
+    /// as a `.session` destination).
+    func testShellSidebarRowDestinationsModeRowsNavigateNewChatIsAnAction() {
+        XCTAssertNil(shellSidebarRowDestination(.newChat), "New chat is an action row — never a selection destination")
+        XCTAssertEqual(shellSidebarRowDestination(.mode(.chat)), .mode(.chat))
+        XCTAssertEqual(shellSidebarRowDestination(.mode(.code)), .mode(.code))
+        XCTAssertEqual(shellSidebarRowDestination(.mode(.dispatch)), .mode(.dispatch))
+        XCTAssertEqual(shellSidebarRowDestination(.mode(.cowork)), .mode(.cowork))
+    }
+
+    /// Row labels: "New chat" (sentence case — the ChatGPT reference's own register) and "Chats"
+    /// (PLURAL — the row lists chat sessions; the MODE's title stays "Chat" everywhere else:
+    /// `ChatLandingView`'s navigation title, `shellDestinationTitle`). Code/Dispatch/Cowork read
+    /// their mode titles verbatim.
+    func testShellSidebarRowTitles() {
+        XCTAssertEqual(shellSidebarRowTitle(.newChat), "New chat")
+        XCTAssertEqual(shellSidebarRowTitle(.mode(.chat)), "Chats")
+        XCTAssertEqual(shellSidebarRowTitle(.mode(.code)), "Code")
+        XCTAssertEqual(shellSidebarRowTitle(.mode(.dispatch)), "Dispatch")
+        XCTAssertEqual(shellSidebarRowTitle(.mode(.cowork)), "Cowork")
+        XCTAssertEqual(SessionMode.chat.title, "Chat", "the MODE title is untouched — only the sidebar row pluralizes")
+    }
+
+    /// Glyphs: the pencil-square on New chat (spec §1's named glyph); mode rows keep their own
+    /// `systemImage` (the phone's glyph set, unchanged by the reskin).
+    func testShellSidebarRowGlyphs() {
+        XCTAssertEqual(shellSidebarRowSystemImage(.newChat), "square.and.pencil")
+        for mode in SessionMode.sidebarOrder {
+            XCTAssertEqual(shellSidebarRowSystemImage(.mode(mode)), mode.systemImage)
+        }
+    }
+
+    /// The bottom account-style row REPLACES the gear and inherits its exact navigation: a PLAIN
+    /// `.dashboard(pane: nil)` — pane memory preserved (`summon`'s "nil never resets" contract),
+    /// never a targeted deep link.
+    func testShellSidebarAccountRowNavigatesToThePlainDashboard() {
+        XCTAssertEqual(shellSidebarAccountRowDestination, .dashboard(pane: nil))
+    }
+
+    // MARK: - chatgpt-ui T1: the Recents search filter (PURE — the exhaustive matrix)
+
+    private func searchRows() -> [SessionSummary] {
+        [
+            SessionSummary(sessionId: "s_parser", title: "Fix the Parser", createdAt: 5, scope: "global", cwd: "/repo", mode: "code", activity: "idle"),
+            SessionSummary(sessionId: "s_untitled", title: nil, createdAt: 4, scope: "global", cwd: nil, mode: "chat", activity: nil),
+            SessionSummary(sessionId: "s_release", title: "release notes", createdAt: 3, scope: "global", cwd: "/repo", mode: "code", activity: "active"),
+            SessionSummary(sessionId: "s_ws", title: "   ", createdAt: 2, scope: "global", cwd: nil, mode: "chat", activity: nil),
+        ]
+    }
+
+    /// Empty and whitespace-only queries filter NOTHING — the field at rest shows the full list.
+    func testFilteredRecentsEmptyAndWhitespaceQueriesReturnAllRowsInOrder() {
+        let rows = searchRows()
+        XCTAssertEqual(filteredRecents(rows, query: "").map(\.sessionId), rows.map(\.sessionId))
+        XCTAssertEqual(filteredRecents(rows, query: "   \n ").map(\.sessionId), rows.map(\.sessionId))
+    }
+
+    /// Case-insensitive SUBSTRING match, anywhere in the title — never prefix-only, never
+    /// case-sensitive, and the directory's order (newest first) is preserved, never re-sorted.
+    func testFilteredRecentsMatchesCaseInsensitiveSubstringsPreservingOrder() {
+        let rows = searchRows()
+        XCTAssertEqual(filteredRecents(rows, query: "parser").map(\.sessionId), ["s_parser"])
+        XCTAssertEqual(filteredRecents(rows, query: "PARSER").map(\.sessionId), ["s_parser"])
+        XCTAssertEqual(filteredRecents(rows, query: "RELEASE").map(\.sessionId), ["s_release"])
+        XCTAssertEqual(filteredRecents(rows, query: "e").map(\.sessionId), ["s_parser", "s_untitled", "s_release", "s_ws"],
+                       "a one-letter query matches every title containing it — display order intact")
+        XCTAssertEqual(filteredRecents(rows, query: "ix the p").map(\.sessionId), ["s_parser"], "substrings span word boundaries")
+    }
+
+    /// The filter matches what the USER SEES: an untitled (nil or whitespace) row displays — and
+    /// therefore matches — "New session" (`sessionDisplayTitle`'s fallback), never the raw title.
+    func testFilteredRecentsMatchesUntitledRowsByTheirDisplayedFallbackTitle() {
+        let rows = searchRows()
+        XCTAssertEqual(filteredRecents(rows, query: "new session").map(\.sessionId), ["s_untitled", "s_ws"])
+        XCTAssertEqual(filteredRecents(rows, query: "SESS").map(\.sessionId), ["s_untitled", "s_ws"])
+    }
+
+    /// No match → empty, with surrounding whitespace trimmed before matching (a trailing space
+    /// must not turn a hit into a miss).
+    func testFilteredRecentsNoMatchIsEmptyAndQueryWhitespaceIsTrimmed() {
+        let rows = searchRows()
+        XCTAssertEqual(filteredRecents(rows, query: "zebra").map(\.sessionId), [])
+        XCTAssertEqual(filteredRecents(rows, query: "  parser  ").map(\.sessionId), ["s_parser"])
+        XCTAssertEqual(filteredRecents([], query: "anything").map(\.sessionId), [], "an empty directory filters to empty, never crashes")
+    }
+
+    // MARK: - chatgpt-ui T1: the Recents activity dot (PURE — the deglassed chip's compact form)
+
+    /// Spec §1: Recents shows activity as a SUBTLE dot — only for the two states that mean
+    /// "something is happening" (active/background, the chip colors' own live states). Idle is the
+    /// resting state (a dot on every row says nothing); `nil` is a non-participating mode
+    /// (chat/dispatch — `ACTIVITY_MODES`); archived never reaches Recents (`excludingArchived`,
+    /// pinned upstream) but reads quiet here too rather than guessing; an unknown future value is
+    /// NOT a licence to guess (`moveToCliOffered`'s own fail-quiet posture) — the mode landings'
+    /// full chip still shows it verbatim, so nothing is silently lost.
+    func testRecentsActivityDotOnlyForActiveAndBackground() {
+        XCTAssertEqual(recentsActivityDotStyle("active"), .active)
+        XCTAssertEqual(recentsActivityDotStyle("background"), .background)
+        XCTAssertNil(recentsActivityDotStyle("idle"), "idle is the resting state — no dot")
+        XCTAssertNil(recentsActivityDotStyle(nil), "chat/dispatch rows carry no activity at all")
+        XCTAssertNil(recentsActivityDotStyle("archived"), "archived never reaches Recents anyway — quiet, not guessed")
+        XCTAssertNil(recentsActivityDotStyle("teleporting"), "an unknown future value is not a licence to guess")
+    }
+
     // MARK: - Bugfix pass B4: the chat landing's own "New Chat" door (injected — never a second create path)
 
     /// The recorder seam: `AppWindowController` CARRIES the injected door verbatim (it's what
@@ -640,14 +795,18 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(fired, 1, "one tap = exactly one firing of the injected action")
     }
 
-    /// THE wire pin (the "no new create path" proof): the door `summonAppWindow` injects IS
-    /// `AppDelegate.newChat()` — firing it once produces exactly ONE `session.create` (mode
-    /// `"chat"`, no `cwd`) across EVERY transport the app has ever minted, and then summons onto
-    /// the fresh id, which is the exact create → navigate → `isChatSession`-self-heal flow the
-    /// menu-bar entry rides (`ChatWindowTests`' pins). A landing button with its own
-    /// `session.create` call site — the "second create path with no owner" the T3 report warned
-    /// about — fails the exactly-one count here.
-    func testSummonAppWindowWiresTheLandingsNewChatDoorToTheOneMenuCreatePath() async throws {
+    /// RETARGETED (chatgpt-ui T2) — THE all-doors wire pin (spec §2: "one behavior everywhere; no
+    /// door mints a session without a send"): the injected door `summonAppWindow` wires
+    /// (`AppWindowController.openNewChat` — the sidebar's New chat row AND the chat landing's
+    /// button both fire this exact closure) and the menu path (`newChat()` — proven wired to the
+    /// real item by `testNewChatMenuItemSummonsToTheNewChatPage`) are the SAME door, and firing
+    /// them ALL now produces ZERO `session.create` across EVERY transport the app has ever
+    /// minted — the eager create is gone from every door at once. The create belongs to the
+    /// page's first send alone (`ChatWindowTests.
+    /// testNewChatOpensThePageAndOnlyTheFirstSendCreatesWithChatModeNoCwd`). B4's "second create
+    /// path with no owner" warning still binds — a landing button growing its own
+    /// `session.create` fails the zero count here.
+    func testNewChatDoorsOpenThePageAndMintNothing() async throws {
         let factory = RecordingTransportFactory()
         let model = AppModel(makeTransport: { factory.make() }, token: "tok")
         let startTask = Task { await model.start() }
@@ -667,36 +826,74 @@ final class AppShellTests: XCTestCase {
         delegate.setAppModelForTesting(model)
         defer { delegate.appWindow?.hide() }
 
-        delegate.summonAppWindow()
+        // Door 1: the menu path (the real item fires this exact method — see the booted pin).
+        delegate.newChat()
+        XCTAssertEqual(delegate.appWindow?.navigation.destination, .newChat, "the menu door opens the page")
+
+        // Doors 2+3: the injected closure — the sidebar's New chat row and the chat landing's
+        // button both fire this verbatim (`ShellRootView.newChat` → `ShellSidebar`/`ChatLandingView`).
         guard let door = delegate.appWindow?.openNewChat else {
             return XCTFail("summonAppWindow must inject the New Chat door into the shell it constructs")
         }
-
+        // Navigate away first so the door's page-open is observable again.
+        delegate.appWindow?.navigation.navigate(to: .mode(.code))
         door()
+        XCTAssertEqual(delegate.appWindow?.navigation.destination, .newChat, "the injected door opens the page")
 
-        var create: [String: Any] = [:]
-        let deadline = Date().addingTimeInterval(3)
-        while Date() < deadline {
-            if let found = t.sent.map(lineJSON).first(where: { $0["method"] as? String == "session.create" }) {
-                create = found
-                break
-            }
-            try? await Task.sleep(nanoseconds: 20_000_000)
-        }
-        XCTAssertEqual(create["method"] as? String, "session.create", "the door must ride newChat()'s create on model.client: \(t.sent)")
-        let params = create["params"] as? [String: Any]
-        XCTAssertEqual(params?["mode"] as? String, "chat")
-        XCTAssertNil(params?["cwd"], "chat sessions carry no fs tools — newChat()'s own no-cwd shape")
-        t.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_b4_chat","trusted":true}}"#)
-
-        await waitUntil { delegate.appWindow?.navigation.destination == .session("s_b4_chat") }
-        XCTAssertEqual(
-            delegate.appWindow?.navigation.destination, .session("s_b4_chat"),
-            "the door is newChat()'s WHOLE flow — create, then summon straight onto the fresh id (the self-heal path)"
-        )
-
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 300_000_000)
         let creates = factory.made.flatMap(\.sent).map(lineJSON).filter { $0["method"] as? String == "session.create" }
-        XCTAssertEqual(creates.count, 1, "ONE create call site, on the ONE management connection — the landing button must never mint its own session.create")
+        XCTAssertEqual(creates.count, 0, "NO door mints a session without a send — the eager-create path is gone everywhere: \(creates)")
+    }
+
+    // MARK: - chatgpt-ui T2: the new-chat page (spec §2 — launch destination + house-voice greeting)
+
+    /// The launch-vs-resummon split, at the controller level (spec R2's two halves in one pin): a
+    /// FRESH shell lands on the new-chat page (`defaultShellDestination`, seeded by
+    /// `ShellNavigationModel` itself); a mid-run re-summon with no destination PRESERVES whatever
+    /// the user was on (the existing `summon(navigatingTo: nil)` restore machinery, untouched) —
+    /// launching onto the page must never come at the cost of yanking a running shell back to it.
+    func testLaunchLandsOnNewChatAndResummonPreservesPriorState() {
+        let controller = makeController()
+        defer { controller.hide() }
+
+        controller.summon()
+        XCTAssertEqual(controller.navigation.destination, .newChat, "launch = the new-chat page, ready to type")
+
+        controller.navigation.navigate(to: .mode(.code))
+        controller.hide()
+        controller.summon()
+        XCTAssertEqual(controller.navigation.destination, .mode(.code), "re-summon mid-run = prior state, never a forced hop back to the page")
+    }
+
+    /// The greeting is HOUSE VOICE (spec §2: short, calm, ours — anchored to the field's own
+    /// "Ask Norma…" register) and explicitly NOT ChatGPT's copy (their rotating question-form
+    /// greetings — "What can I help with?" et al). Pinned as a string, same extracted-copy
+    /// discipline as `chatLandingEmptyStateSubtitle`.
+    func testNewChatGreetingIsHouseVoiceNotChatGPTs() {
+        XCTAssertEqual(newChatGreeting, "Ask Norma anything.")
+        XCTAssertFalse(newChatGreeting.contains("help with"), "not ChatGPT's copy")
+        XCTAssertFalse(newChatGreeting.contains("?"), "calm statement, not their question-form register")
+    }
+
+    /// The page's daemon-unreachable sentence is the house fallback, shared with every other RPC
+    /// seam's copy (`setActivityFromRoster`/`applyDirsOp`'s exact string) — one voice for one
+    /// failure.
+    func testNewChatUnreachableMessageMatchesTheHouseFallback() {
+        XCTAssertEqual(newChatUnreachableMessage, "couldn't reach the daemon — try again")
+    }
+
+    // MARK: - chatgpt-ui T3: the page's in-flight feedback (c-m3 — PURE send-state mapping)
+
+    /// The T2 review's routed minor, root cause of both send-race windows: a create in flight
+    /// must READ as one. `.creating` — and ONLY `.creating` — disables the composer and shows
+    /// the working indicator; idle and failed both leave the composer enabled (a failure must
+    /// never wedge the page — the error text's own display is pinned by
+    /// `ChatWindowTests.testFirstSendCreateFailureIsVisibleOnThePageAndNeverNavigates`, and
+    /// Enter retries per the T2 contract). Exhaustive over `NewChatCreateState`.
+    func testNewChatSendUIDisablesComposerAndShowsIndicatorOnlyWhileCreating() {
+        XCTAssertEqual(newChatSendUI(.idle), NewChatSendUI(composerEnabled: true, showsWorkingIndicator: false))
+        XCTAssertEqual(newChatSendUI(.creating), NewChatSendUI(composerEnabled: false, showsWorkingIndicator: true))
+        XCTAssertEqual(newChatSendUI(.failed("boom")), NewChatSendUI(composerEnabled: true, showsWorkingIndicator: false),
+                       "a failed create re-enables — the page must never wedge; its error text is a separate, pinned display")
     }
 }

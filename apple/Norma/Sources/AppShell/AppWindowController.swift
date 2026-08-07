@@ -95,12 +95,14 @@ final class AppWindowController: NSObject, NSWindowDelegate {
     /// alongside `host`.
     let dashboardWiring: DashboardWiring?
 
-    /// Bugfix pass B4: the chat landing's "New Chat" door — `AppDelegate.newChat()` injected at
-    /// construction (the same one-owner discipline `dashboardWiring` follows): the landing's button
-    /// must fire the EXACT create-then-summon flow the menu-bar entry does (`newChat()`'s create →
-    /// `.session(id)` → the `isChatSession` self-heal), never a `session.create` call site of its
-    /// own. `nil` for a shell built without it (the pure window/geometry tests) — the landing then
-    /// renders no dead button (`chatLandingShowsNewChatButton`).
+    /// Bugfix pass B4 (retargeted by chatgpt-ui T2): the New-chat door — `AppDelegate.newChat()`
+    /// injected at construction (the same one-owner discipline `dashboardWiring` follows), fired
+    /// by the chat landing's button AND the sidebar's New chat row. Since T2 the door OPENS THE
+    /// `.newChat` PAGE (spec §2) — the create happens on the page's first send
+    /// (`ShellSessionHost.sendFirstChatMessage`), so no affordance here ever grows a
+    /// `session.create` call site of its own. `nil` for a shell built without it (the pure
+    /// window/geometry tests) — the landing then renders no dead button
+    /// (`chatLandingShowsNewChatButton`).
     let openNewChat: (() -> Void)?
 
     /// Task 7: the Dashboard's current-pane memory — UNCONDITIONALLY constructed (unlike
@@ -151,6 +153,16 @@ final class AppWindowController: NSObject, NSWindowDelegate {
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
         window.title = "Norma"
+        // chatgpt-ui T3 (spec §4): the seamless top — the titlebar draws NO material and NO title
+        // text, so the traffic lights sit inline over the sidebar's own flat background (T1's
+        // `windowBackgroundColor` fill `ignoresSafeArea`, reaching the very top) and content
+        // scrolls under them, the ChatGPT-desktop look. The `title` above STAYS — Mission
+        // Control/the Window menu still need the name; only its in-window rendering goes.
+        // Deliberately NOT the rest of `DetachedWindowController`'s recipe: no `.clear`
+        // background/`isOpaque = false` — that window draws its own rounded shell, this one is a
+        // plain opaque window (pinned: `testWindowChromeIsSeamlessTitlebarOverFullSizeContent`).
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false // this controller owns the window's lifetime, forever
         window.minSize = NSSize(width: 820, height: 520)
         // Spec §1: opt OUT of native full-screen — a hidden full-screen window strands a Space.

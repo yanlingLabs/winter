@@ -50,29 +50,28 @@ func activityChipColor(_ style: ActivityChipStyle) -> Color {
 
 // MARK: - The view
 
-/// app-shell T4: the activity chip — a small capsule badge on a landing row.
+/// app-shell T4's activity chip, DEGLASSED by chatgpt-ui T1 (spec §1: "the chips lose the glass"):
+/// a subtle dot + label instead of the old tinted capsule fill — the ChatGPT-flat register the
+/// whole window now follows (the iOS 26 gallery's capsule convention is the PHONE's authority
+/// only). The pure decisions above — style, label, color — are UNTOUCHED and stay pinned by
+/// `ModeLandingViewTests`; only this presentational body changed. `ShellSidebar`'s Recents rows
+/// render the even-more-compact dot-only form (`recentsActivityDotStyle`).
 ///
-/// GALLERY EXTENSION POINT: `norma-ios/docs/ios26-design-gallery` has no dedicated "status chip"
-/// component to mirror (the phone's own activity/landing-tab surfaces are still on its debt list —
-/// same honest gap `ActivityMenu.swift` already documents for the `/background` affordance). What
-/// DOES transfer is `07-buttons-and-controls.md`'s stated convention — "capsule is the new default
-/// shape" — so this reuses the ONE capsule-chip precedent already shipped in this app
-/// (`ShellSidebar`'s "Soon" chip, `Capsule().fill(.quaternary)`) rather than inventing a second shape
-/// for the same idea.
-///
-/// Renders NOTHING when the row has no activity at all (`activityChipLabel` returning `nil`) — never
-/// an empty capsule.
+/// Renders NOTHING when the row has no activity at all (`activityChipLabel` returning `nil`) —
+/// never an empty badge.
 struct ActivityChip: View {
     let activity: String?
 
     var body: some View {
         if let label = activityChipLabel(activity), let style = activityChipStyle(activity) {
-            Text(label)
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(activityChipColor(style))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Capsule().fill(activityChipColor(style).opacity(0.15)))
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(activityChipColor(style))
+                    .frame(width: 5, height: 5)
+                Text(label)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(activityChipColor(style))
+            }
         }
     }
 }

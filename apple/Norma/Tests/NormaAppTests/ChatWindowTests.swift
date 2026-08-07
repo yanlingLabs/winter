@@ -97,26 +97,27 @@ final class ChatWindowTests: XCTestCase {
     // new innards (create via `model.client`'s bare RPC, no `cwd`, then summon straight onto
     // `.session(id)`) — see `AppDelegate.newChat()`'s own doc comment.
 
-    // MARK: - AppDelegate.newChat() — create via session.create(mode:"chat"), then summon (App shell T6 review fix)
+    // MARK: - AppDelegate.newChat() → the new-chat page + create-on-first-send (chatgpt-ui T2, spec §2)
 
     /// Defensive-guard precedent (matches every other menu-path guard in this file): no `appModel`
-    /// → log + no-op, no crash, no RPC issued.
+    /// → log + no-op, no crash, no RPC issued. T2: the guard is `summonAppWindow`'s own now
+    /// (`newChat()` is a plain targeted summon) — the observable contract is unchanged.
     func testNewChatNoOpsWithoutAppModel() {
         let delegate = AppDelegate()
         delegate.newChat()
         XCTAssertNil(delegate.appWindow)
     }
 
-    /// The wire-recording pattern: `newChat()` issues `session.create` on `model.client` — the
-    /// SAME bare, already-connected socket `ShellSessionHost.createSession(with:)` uses for the
-    /// shell's own "New" button, never an attaching harness — with `mode: "chat"` and NO `cwd` (chat
-    /// sessions carry no fs tools; the daemon reads an absent `cwd` as `dirs = []`, same shape
-    /// `WorkingDirChoice.noFolder`'s own `cwdParam` produces). On success, the shell summons
-    /// straight onto `.session(id)` — the ACTUAL attach is `ShellSessionHost`'s own doing, on its
-    /// own SEPARATE harness (a second socket), never a `session.attach` on the connection the create
-    /// itself rode. Both halves pinned in one flow since they're the same sequence: create → no
-    /// self-attach → navigate.
-    func testNewChatCreatesViaSessionCreateWithChatModeNoCwdAndNoAttachOnTheCreatePath() async throws {
+    /// RETARGETED (chatgpt-ui T2 — the deferred create): the door OPENS THE PAGE with ZERO
+    /// `session.create` on every transport the app has ever minted (the factory recorder is the
+    /// proof), and it is the page's FIRST SEND (`ShellSessionHost.sendFirstChatMessage`, driven
+    /// here through the exact seam `NewChatPage.submit` uses) that issues exactly ONE create —
+    /// the same wire shape the eager door pinned before this task (`mode: "chat"`, `scope:
+    /// "global"`, `approvalPolicy: "auto"`, NO `cwd` — chat sessions carry no fs tools; the
+    /// original createAndOpenChat()'s `cwd: NSHomeDirectory()` staleness stays dead) on
+    /// `model.client`, never an attaching harness — then navigates onto the fresh id. No
+    /// self-attach on the create connection, exactly as before.
+    func testNewChatOpensThePageAndOnlyTheFirstSendCreatesWithChatModeNoCwd() async throws {
         let factory = RecordingTransportFactory()
         let model = AppModel(makeTransport: { factory.make() }, token: "tok")
         let startTask = Task { await model.start() }
@@ -128,8 +129,6 @@ final class ChatWindowTests: XCTestCase {
         // hello
         await waitUntilSent(t, 1)
         t.feed(#"{"jsonrpc":"2.0","id":\#(lineJSON(t.sent[0])["id"] as! Int),"result":{"ok":true}}"#)
-        // session.list: nothing to auto-focus — keeps this test's wire trace to exactly
-        // [hello, session.list, session.create] before the create response.
         await waitUntilSent(t, 2)
         let list = lineJSON(t.sent[1])
         XCTAssertEqual(list["method"] as? String, "session.list")
@@ -142,12 +141,26 @@ final class ChatWindowTests: XCTestCase {
 
         delegate.newChat()
 
+        // Semantics 1's wire pin: landing on the page mints NOTHING.
+        XCTAssertEqual(delegate.appWindow?.navigation.destination, .newChat, "the door opens the page — never a session")
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertTrue(
+            factory.made.flatMap(\.sent).map(lineJSON).allSatisfy { $0["method"] as? String != "session.create" },
+            "navigating to the new-chat page must mint ZERO session.create on every transport ever made"
+        )
+
+        // Semantics 2: the first send — the page's exact submit seam.
+        guard let host = delegate.appWindow?.host else { return XCTFail("the summoned shell must carry a host") }
+        host.sendFirstChatMessage("hello there") { [weak delegate] id in
+            delegate?.appWindow?.navigation.navigate(to: .session(id))
+        }
+
         let create = await waitUntilMethod(t, "session.create")
         let params = create["params"] as? [String: Any]
         XCTAssertEqual(params?["mode"] as? String, "chat")
         XCTAssertEqual(params?["scope"] as? String, "global")
         XCTAssertEqual(params?["approvalPolicy"] as? String, "auto")
-        XCTAssertNil(params?["cwd"], "no cwd — chat sessions carry no fs tools; the original (now-deleted) createAndOpenChat() sent cwd: NSHomeDirectory() here, a stale hardcoded-HOME habit not carried forward")
+        XCTAssertNil(params?["cwd"], "no cwd — chat sessions carry no fs tools (the established B4 shape)")
         let sentBeforeResponse = t.sent.count
 
         t.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_new_chat","trusted":true}}"#)
@@ -159,11 +172,16 @@ final class ChatWindowTests: XCTestCase {
             afterCreate.contains { lineJSON($0)["method"] as? String == "session.attach" },
             "the create call must never self-attach on the connection it rode: \(afterCreate)"
         )
+        let creates = factory.made.flatMap(\.sent).map(lineJSON).filter { $0["method"] as? String == "session.create" }
+        XCTAssertEqual(creates.count, 1, "exactly ONE create for the whole page flow")
     }
 
-    /// A failed create must never summon — the shell stays exactly as it was (nil, in this
-    /// never-summoned-yet case), same "no half-open window" posture as every other menu-path guard.
-    func testNewChatDoesNotSummonWhenCreateFails() async throws {
+    /// RETARGETED (chatgpt-ui T2 — the honesty rule): a failed create is VISIBLE on the page and
+    /// never navigates — the shell stays on `.newChat` with the daemon's own sentence published
+    /// verbatim (`newChatCreate == .failed("boom")`), the same verbatim-refusal discipline every
+    /// other RPC seam keeps. (Before T2 the door itself created, and the failure pin was
+    /// "a failed create must never summon" — this is that pin's new-flow truth.)
+    func testFirstSendCreateFailureIsVisibleOnThePageAndNeverNavigates() async throws {
         let factory = RecordingTransportFactory()
         let model = AppModel(makeTransport: { factory.make() }, token: "tok")
         let startTask = Task { await model.start() }
@@ -184,23 +202,35 @@ final class ChatWindowTests: XCTestCase {
         defer { delegate.appWindow?.hide() }
 
         delegate.newChat()
+        guard let host = delegate.appWindow?.host else { return XCTFail("the summoned shell must carry a host") }
+
+        var navigated = false
+        host.sendFirstChatMessage("hello there") { _ in navigated = true }
 
         let create = await waitUntilMethod(t, "session.create")
         t.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"error":{"code":1,"message":"boom"}}"#)
 
-        try? await Task.sleep(nanoseconds: 300_000_000)
-        XCTAssertNil(delegate.appWindow, "a failed create must never summon the shell")
+        await waitUntil { host.newChatCreate == .failed("boom") }
+        XCTAssertEqual(host.newChatCreate, .failed("boom"), "the daemon's sentence, verbatim — a visible failure, never log-only")
+        XCTAssertFalse(navigated, "a failed create must never navigate")
+        XCTAssertEqual(delegate.appWindow?.navigation.destination, .newChat, "the shell stays on the page")
+        XCTAssertNil(delegate.appWindow?.host?.attachedSessionId, "nothing attaches on a failed create")
     }
 
-    /// IMP-1 fix (final whole-branch review, "the fourth door"): the restored New-Chat pin. Before
-    /// App shell T6 retargeted "New Chat" onto the shell summon, this door's own spawned
-    /// `DetachedWindowController` carried a pin asserting `adapterForTesting.isChatSession == true`
-    /// — T6's retarget dropped it with nothing replacing it, and the race it guarded against is
-    /// real: `newChat()` creates the session then immediately summons `.session(id)` — the fresh
-    /// row hasn't loaded into `model.directory` yet (the `session_created` broadcast's own refresh
-    /// round trip always loses that race), so `ShellSessionHost.attachFresh`'s one-shot derivation
-    /// reads `false` and the policy picker (gated `!adapter.isChatSession`,
-    /// `WindowContentView.swift`) shows for a chat session whose every tap the daemon refuses.
+    /// IMP-1 fix (final whole-branch review, "the fourth door"), RETARGETED to the T2 flow: the
+    /// New-Chat self-heal pin now rides page → first send → create → navigate. The race it guards
+    /// is unchanged: the fresh row hasn't loaded into `model.directory` when the shell attaches
+    /// (the `session_created` broadcast's own refresh round trip always loses that race), so
+    /// `ShellSessionHost.attachFresh`'s one-shot derivation reads `false` and the policy picker
+    /// (gated `!adapter.isChatSession`, `WindowContentView.swift`) would show for a chat session
+    /// whose every tap the daemon refuses — until `reconcileIsChatSession` heals it on the row's
+    /// arrival.
+    ///
+    /// This is ALSO the create-before-send wire pin (spec §2): the shell harness's OWN trace must
+    /// read hello → attach → send, with the typed text as the send's verbatim payload — the
+    /// pending first message delivers only after the attach ack (`SessionFeed.start()`'s pinned
+    /// ordering), and the create already happened on the OTHER connection before this one was
+    /// even minted.
     ///
     /// Answers every `session.list` call it sees (rather than a fixed occurrence index) because
     /// `newChat()` summons a REAL window here (`ShellSidebar`'s own `.task { await
@@ -227,6 +257,10 @@ final class ChatWindowTests: XCTestCase {
         defer { delegate.appWindow?.hide() }
 
         delegate.newChat()
+        guard let host = delegate.appWindow?.host else { return XCTFail("the summoned shell must carry a host") }
+        host.sendFirstChatMessage("first message text") { [weak delegate] id in
+            delegate?.appWindow?.navigation.navigate(to: .session(id))
+        }
 
         let create = await waitUntilMethod(t, "session.create")
         t.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_new_chat","trusted":true}}"#)
@@ -244,6 +278,26 @@ final class ChatWindowTests: XCTestCase {
         shellT.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
 
         await waitUntil { delegate.appWindow?.host?.attachment != nil }
+        // The first-message carry: the typed text is ALREADY the attached composer's draft (no
+        // empty beat between the page and the live session) — cleared only when the send lands.
+        XCTAssertEqual(delegate.appWindow?.host?.attachment?.adapter.composerDraft, "first message text",
+                       "the composer content carries over — seeded at attach, before the send lands")
+
+        // create → attach → SEND, on the wire: the pending first message rides THIS harness,
+        // strictly after its attach ack, with the typed text verbatim.
+        let send = await waitUntilMethod(shellT, "session.send")
+        XCTAssertEqual((send["params"] as? [String: Any])?["text"] as? String, "first message text",
+                       "the send text IS the first message payload — nothing lost, nothing rewritten")
+        // `sync.config` (the catalogue fetch, a READ fired from the same post-attach hook) lands
+        // asynchronously and may interleave — filtered out, the `attachmentMethods` discipline.
+        let methods = shellT.sent.compactMap { lineJSON($0)["method"] as? String }.filter { $0 != "sync.config" }
+        XCTAssertEqual(Array(methods.prefix(3)), ["protocol.hello", "session.attach", "session.send"],
+                       "attach strictly before send on the shell harness — the create already happened on the other connection")
+        shellT.feed(#"{"jsonrpc":"2.0","id":\#(send["id"] as! Int),"result":{"seq":1}}"#)
+        await waitUntil { delegate.appWindow?.host?.attachment?.adapter.composerDraft == "" }
+        XCTAssertEqual(delegate.appWindow?.host?.attachment?.adapter.composerDraft, "",
+                       "the carried draft clears once the send actually lands")
+
         XCTAssertFalse(
             delegate.appWindow?.host?.attachment?.adapter.isChatSession ?? true,
             "the fresh row hasn't loaded at attach time — derives false, same as before this fix"

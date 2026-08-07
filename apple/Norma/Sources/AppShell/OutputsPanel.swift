@@ -318,7 +318,13 @@ struct OutputsPanelContentView: View {
         .padding(12)
         .frame(width: outputsPanelDefaultSize.width, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        // chatgpt-ui T3 clash sweep (spec §4 names this panel by name: "the corner outputs panel
+        // … gets the minimal touch to not clash — flat backgrounds"): the glass card becomes a
+        // flat `windowBackgroundColor` card with the shell's 1 pt quaternary stroke vocabulary;
+        // radius and shadow unchanged — the full panel restyle is explicitly NOT this pass. Both
+        // appearances follow the system colors by construction.
+        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.quaternary, lineWidth: 1))
         .shadow(radius: 10)
     }
 }

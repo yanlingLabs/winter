@@ -361,6 +361,125 @@ final class ShellSessionHost: ObservableObject {
         }
     }
 
+    // MARK: - chatgpt-ui T2: the new-chat page's create-on-send flow (spec §2 — the ONE behavior change)
+
+    /// The page's create state — `idle` doubles as "not currently creating" and "created" (the
+    /// same no-second-source-of-truth posture as `DispatchResolution.idle`: once the shell
+    /// navigates, the attachment is the answer). `failed` carries the VISIBLE sentence the page
+    /// renders (RpcError verbatim — `set-activity.ts`-style one-sentence rules — or the
+    /// daemon-unreachable fallback).
+    enum NewChatCreateState: Equatable {
+        case idle, creating, failed(String)
+    }
+
+    @Published private(set) var newChatCreate: NewChatCreateState = .idle
+
+    /// The typed first messages, parked between each create's success and delivery on the created
+    /// session's OWN attach (`deliverPendingFirstMessage` — fired from the pinned feed's
+    /// post-attach `onConnected` on a fresh attach, and after `repin`'s attach on a hop;
+    /// `SessionFeed.start()`'s pinned branch awaits the attach ack BEFORE firing `onConnected`,
+    /// which is what makes create → attach → send hold in wire order with no sequencing here).
+    ///
+    /// T2 fix round 1 (review Important — the single-slot overwrite): a MAP keyed by sessionId,
+    /// never a shared slot. Each `sendFirstChatMessage` invocation binds its payload to ITS OWN
+    /// create's session identity end-to-end, so a later create can never touch an earlier
+    /// payload. The old `.creating` block only spans the create round-trip — it lifts at the
+    /// create ACK, before delivery (which waits for the attach on a second transport), so
+    /// navigate-away → re-enter → re-send inside that beat is a PLAUSIBLE flow (the page shows no
+    /// in-flight feedback yet — T3/T4 minor), and under the slot it silently dropped message A
+    /// and orphaned its session empty. **Late delivery is a commitment**: a departed create's
+    /// message delivers when THAT session's attach eventually lands — fresh attach or hop,
+    /// whenever that is — never timeout-dropped.
+    private var pendingFirstMessages: [String: String] = [:]
+
+    /// T2 fix round 1: the page-instance epoch — bumped on EVERY `apply(destination:)` (each
+    /// navigation is a new instance boundary; re-entering the page is a NEW instance).
+    /// `sendFirstChatMessage` captures it at submit; a create whose epoch has gone stale by ack
+    /// time belongs to a DEPARTED page instance: its message still parks (the commitment above)
+    /// but `onCreated` — navigation — never fires. The departed session appears in Recents via
+    /// the ordinary `session_created` → directory-refresh path and delivers quietly on its own
+    /// eventual attach; only the CURRENT page instance's create yanks the shell onto the session.
+    /// The same monotonic-token shape as `dispatchResolutionToken`, for the same race class.
+    private var newChatPageEpoch = 0
+
+    /// chatgpt-ui T2 (spec §2): the create-on-send flow — THE one `mode:"chat"` create site in
+    /// the app (`AppDelegate.newChat()`'s eager create MOVED here; every New-chat door now only
+    /// opens the page). Exactly ONE `session.create` (scope global, policy auto, `cwd` OMITTED —
+    /// chat sessions carry no fs tools, the established B4 wire shape) rides the bare
+    /// `managementClient`, never an attaching harness. On success the typed text is parked as the
+    /// pending first message and `onCreated` fires (the page navigates the shell onto the fresh
+    /// id) — navigation is what attaches (`apply` → `select` → `attachFresh`, the host's own
+    /// separate harness), and the message sends AFTER that attach lands. The text is seeded into
+    /// the attached composer until the send succeeds (`attachFresh`), so the hop into the live
+    /// session never flashes an empty composer and a failed send never loses the keystrokes.
+    ///
+    /// The edge decisions (each disclosed in the T2 report):
+    /// - **Double-send:** BLOCKED while a create is in flight — the second Enter no-ops; the text
+    ///   is still in the page's composer, so nothing is lost and nothing doubles.
+    /// - **Unreachable daemon:** VISIBLE failure, page-bound — `newChatCreate = .failed(…)` and
+    ///   `onCreated` never fires, so the shell never navigates on failure.
+    /// - **Create lands after the user navigated away:** lands QUIETLY — the session appears in
+    ///   Recents and the parked message delivers on that session's own attach (fresh or hop);
+    ///   only the CURRENT page instance's create navigates (the `newChatPageEpoch` gate below).
+    ///   The send is still a commitment — it delivers whenever the session is next opened.
+    func sendFirstChatMessage(_ text: String, onCreated: @escaping (String) -> Void) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        guard newChatCreate != .creating else { return } // double-send: one create, ever
+        guard let client = managementClient else {
+            newChatCreate = .failed(newChatUnreachableMessage)
+            return
+        }
+        newChatCreate = .creating
+        let epoch = newChatPageEpoch // T2 fix round 1: which page instance this send belongs to
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let created = try await client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat")
+                // Parked BEFORE `onCreated`: the navigate inside it drives apply → select →
+                // attachFresh SYNCHRONOUSLY, and attachFresh must already see the pending text
+                // to seed the adapter's composer. Do not reorder. Keyed to THIS create's session
+                // — a later create writes its own entry, never this one (fix round 1).
+                self.pendingFirstMessages[created.sessionId] = trimmed
+                self.newChatCreate = .idle
+                // Navigation fires only for the CURRENT page instance's create (fix round 1):
+                // a departed create delivers quietly — its session sits in Recents, its message
+                // lands on that session's own eventual attach, and nothing yanks the user.
+                if epoch == self.newChatPageEpoch {
+                    onCreated(created.sessionId)
+                }
+            } catch let error as RpcError {
+                self.newChatCreate = .failed(error.message)
+            } catch {
+                self.newChatCreate = .failed(newChatUnreachableMessage)
+            }
+        }
+    }
+
+    /// The delivery half: fires on the pinned feed's post-attach `onConnected` for a FRESH
+    /// attach, and after `repin`'s attach for a HOP (fix round 1 — a departed create's session is
+    /// usually opened from Recents while the shell is attached elsewhere, which is a hop; an
+    /// onConnected-only wiring would leave that message parked forever, breaking the late-delivery
+    /// commitment). Sends over the ATTACHED harness — the daemon refuses `session.send` on a
+    /// connection that hasn't attached (`ipc/server.ts`: "no send path around it"), which is
+    /// exactly why this cannot ride the management client. Consumes ONLY this session's own map
+    /// entry. On success the seeded composer clears — but only if it still holds the pending text
+    /// verbatim, so a user already typing their SECOND message never has it eaten. On failure the
+    /// draft stays: the text is visible in the composer, one Enter away from a retry — the same
+    /// clear-only-on-success contract `submit` keeps.
+    private func deliverPendingFirstMessage(for sessionId: String) {
+        guard let text = pendingFirstMessages[sessionId],
+              attachedSessionId == sessionId, let live = attachment else { return }
+        pendingFirstMessages[sessionId] = nil
+        let client = live.feed.client
+        Task { @MainActor [weak self] in
+            let ok = (try? await client.send(sessionId: sessionId, text: text)) != nil
+            guard ok, let self, self.attachedSessionId == sessionId,
+                  let adapter = self.attachment?.adapter, adapter.composerDraft == text else { return }
+            adapter.composerDraft = ""
+        }
+    }
+
     // MARK: - The three doors into the policy
 
     /// Show a session (a recents row, a landing-list row, an "open in app" affordance).
@@ -385,6 +504,7 @@ final class ShellSessionHost: ObservableObject {
     /// `.session(id)`, just with the id resolved here instead of arriving pre-known. Every other mode
     /// destination keeps the old rule (a landing, never a session).
     func apply(destination: ShellDestination) {
+        newChatPageEpoch += 1 // T2 fix round 1: every navigation is a page-instance boundary
         switch destination {
         case .session(let sessionId):
             dispatchResolutionToken += 1 // invalidate any dispatch resolution the shell moved on from
@@ -392,6 +512,16 @@ final class ShellSessionHost: ObservableObject {
             select(sessionId)
         case .mode(.dispatch):
             selectDispatch()
+        case .newChat:
+            // chatgpt-ui T2: the new-chat page shows NO session (spec §2 — nothing attaches, and
+            // the wire pin says nothing is created either: arriving here issues zero RPCs). A
+            // fresh entry clears a stale create failure — the page starts clean every time; an
+            // in-flight create is NOT cancelled (its send is a commitment — see
+            // `sendFirstChatMessage`'s own doc for the quiet-departed-landing decision).
+            dispatchResolutionToken += 1
+            dispatchResolution = .idle
+            if newChatCreate != .creating { newChatCreate = .idle }
+            deselect()
         default:
             dispatchResolutionToken += 1
             dispatchResolution = .idle
@@ -488,11 +618,19 @@ final class ShellSessionHost: ObservableObject {
         }
         let adapter = FieldStateAdapter(session: made.session)
         // A ONE-SHOT read of whatever `directory.rows` holds right now — for a session attached
-        // before its own row has loaded (the New-Chat race: create, then summon `.session(id)`
+        // before its own row has loaded (the New-Chat race: create, then navigate onto the id
         // immediately, always losing the `session_created` broadcast's own refresh round trip)
         // this reads `false` and the row isn't found. `reconcileIsChatSession` (wired in `init`)
         // is what makes that transient, not permanent — see its own doc comment.
         adapter.isChatSession = Self.isChatSession(sessionId, in: directory.rows)
+        // chatgpt-ui T2: the first-message carry (spec §2 — "composer content carries over; no
+        // flicker"). The pending text shows in the attached composer from the very first frame
+        // and clears only when the send actually lands (`deliverPendingFirstMessage`) — so the
+        // hop from the new-chat page never shows an empty beat, and a failed send leaves the
+        // text exactly where the user can retry it.
+        if let pending = pendingFirstMessages[sessionId] {
+            adapter.composerDraft = pending
+        }
         // Forward this harness's session events to the SHARED directory — the same side-observer
         // composition `DetachedWindowController` uses, and `false` for the same reason: the pinned
         // feed's own default application (apply events matching the pinned id + every connection
@@ -509,7 +647,13 @@ final class ShellSessionHost: ObservableObject {
         // only ever been covered by the pickers' own menu-open refresh. Not re-fetched on a hop, for
         // the reason `onRefreshModelCatalogue` documents: the catalogue is daemon-wide, so a session
         // switch cannot change it.
-        made.feed.onConnected = { [weak self] in self?.refreshModelCatalogue() }
+        // chatgpt-ui T2: the pending first message delivers here too — in PINNED mode this hook
+        // fires only after `client.attach`'s ack (`SessionFeed.start()`), which is the whole
+        // create → attach → send ordering guarantee in one line.
+        made.feed.onConnected = { [weak self] in
+            self?.refreshModelCatalogue()
+            self?.deliverPendingFirstMessage(for: sessionId)
+        }
         let live = ShellSessionAttachment(feed: made.feed, session: made.session, adapter: adapter)
         attachment = live
         attachedSessionId = sessionId
@@ -558,7 +702,19 @@ final class ShellSessionHost: ObservableObject {
         // A refusal is about the session it was refused FOR — "session is archived — resume it
         // first" rendered over a different session is a lie about a rule (the `dirsRefusal` lesson).
         live.adapter.activityRefusal = nil
-        Task { @MainActor in await live.feed.repin(to: sessionId) }
+        // T2 fix round 1: the first-message carry on the HOP path too — a departed new-chat
+        // session opened from Recents while the shell shows another session arrives HERE, not
+        // through `attachFresh`; the seed and the post-attach delivery must ride along or the
+        // late-delivery commitment silently breaks on the most natural reopen path.
+        if let pending = pendingFirstMessages[sessionId] {
+            live.adapter.composerDraft = pending
+        }
+        Task { @MainActor [weak self] in
+            await live.feed.repin(to: sessionId)
+            // After the repin's attach ack — same attach-before-send guarantee as `onConnected`'s
+            // fresh-attach ordering (`repin` awaits `client.attach` before returning).
+            self?.deliverPendingFirstMessage(for: sessionId)
+        }
     }
 
     /// Detach = close the socket. There is no `session.detach` RPC (the protocol has never had one);
@@ -1164,7 +1320,14 @@ struct HopAwayBackgroundBar: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        // chatgpt-ui T3 clash sweep (spec §4 + the "no glass anywhere in the main window" gate
+        // seed): this bar floats INSIDE the shell over the new flat surfaces — `.regularMaterial`
+        // was the last glass in the window. Flat `windowBackgroundColor` card + the shell's own
+        // 1 pt quaternary stroke vocabulary (the search field / new-chat composer card); radius
+        // and shadow unchanged — a minimal deglass, not a restyle. Both appearances follow the
+        // system colors by construction.
+        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary, lineWidth: 1))
         .shadow(radius: 8)
         .padding(.horizontal, 24)
     }

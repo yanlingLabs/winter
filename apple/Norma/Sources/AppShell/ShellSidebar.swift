@@ -1,17 +1,14 @@
+import AppKit
 import SwiftUI
 
 /// The shell's root content: the nav sidebar and the selected destination's surface.
 ///
 /// A `NavigationSplitView`, not the hand-rolled `HStack`+`ScrollView` sidebar `DashboardView` uses.
 /// That convention exists because nothing in this target had ever needed a real sidebar column;
-/// this window does, and on macOS 26 the split view's sidebar is exactly the first-party Liquid
-/// Glass column the gallery describes (`norma-ios/docs/ios26-design-gallery/01-navigation-shell.md`
-/// §1: "on iPad/Mac the sidebar becomes a floating Liquid Glass panel … you get this restyle for
-/// free"). GALLERY EXTENSION POINT: the gallery's drawer anatomy is written for iPhone, where §3's
-/// honest answer is that no first-party drawer API exists in either geometry and Claude's is a
-/// hand-rolled REVEAL. On the Mac the sanctioned container exists, so the geometry half of that
-/// section (reveal layering, card travel, edge-swipe gating, VoiceOver inversion) does not
-/// transfer — what transfers is the drawer's ANATOMY, which `ShellSidebar` mirrors row for row.
+/// this window does. chatgpt-ui T1: the sidebar column's styling authority is now the ChatGPT
+/// desktop app's sidebar (the 2026-08-06 spec's reference screenshots) — flat and opaque, NOT the
+/// iOS 26 Liquid Glass gallery, which remains the PHONE's authority only (spec "Why" #3 supersedes
+/// the shell spec's iOS-mirror ruling for the Mac).
 struct ShellRootView: View {
     @ObservedObject var nav: ShellNavigationModel
     @ObservedObject var directory: SessionDirectory
@@ -35,7 +32,9 @@ struct ShellRootView: View {
 
     var body: some View {
         NavigationSplitView {
-            ShellSidebar(nav: nav, directory: directory)
+            // chatgpt-ui T1: the sidebar carries the host (Move to CLI on Recents rows) and the
+            // injected New chat door — both optional, same fallback posture as `detail` below.
+            ShellSidebar(nav: nav, directory: directory, host: host, newChat: newChat)
                 .navigationSplitViewColumnWidth(min: 208, ideal: 240, max: 320)
         } detail: {
             detail
@@ -69,6 +68,16 @@ struct ShellRootView: View {
     @ViewBuilder
     private var detail: some View {
         switch nav.destination {
+        case .newChat:
+            // chatgpt-ui T2: the new-chat page (spec §2) — the launch surface, and every New-chat
+            // door's target. Host-required: the first send creates through the host's management
+            // client; a host-less shell (the pure window tests) renders the honest placeholder,
+            // same posture as `.mode(.code)` below.
+            if let host {
+                NewChatPage(nav: nav, host: host)
+            } else {
+                ShellLandingView(destination: nav.destination)
+            }
         case .session:
             if let host {
                 ShellSessionView(host: host, directory: directory)
@@ -110,25 +119,123 @@ struct ShellRootView: View {
     }
 }
 
-/// The nav sidebar — the measured Claude/iOS drawer anatomy, Mac-tuned (gallery
-/// `01-navigation-shell.md` §3's "what Claude actually ships", and the phone's own `SidebarView`):
+// MARK: - The sidebar's pure shape (chatgpt-ui T1 — driven directly by AppShellTests)
+
+/// A top-of-sidebar row: the New chat ACTION row, or one of the four mode rows. Exactly the
+/// spec §1 structure; the search field, Recents and the account row sit below and have their own
+/// pure helpers (`filteredRecents`, `recentsActivityDotStyle`, `shellSidebarAccountRowDestination`).
+enum ShellSidebarRow: Hashable {
+    case newChat
+    case mode(SessionMode)
+}
+
+/// THE row order, spec §1: New chat topmost, then Chats, then Code/Dispatch/Cowork. Derived from
+/// `SessionMode.sidebarOrder` so the two pins (`AppShellTests`) move in lockstep by construction.
+let shellSidebarTopRows: [ShellSidebarRow] = [.newChat] + SessionMode.sidebarOrder.map { .mode($0) }
+
+/// PURE: the row's label. "New chat" is sentence case (the ChatGPT reference's own register);
+/// "Chats" is PLURAL because the row lists chat sessions — the MODE's own title stays "Chat"
+/// everywhere else (`ChatLandingView`'s navigation title, `shellDestinationTitle`).
+func shellSidebarRowTitle(_ row: ShellSidebarRow) -> String {
+    switch row {
+    case .newChat: return "New chat"
+    case .mode(.chat): return "Chats"
+    case .mode(let mode): return mode.title
+    }
+}
+
+/// PURE: the row's glyph — the spec's pencil-square on New chat; every mode row keeps its own
+/// `systemImage` (the reskin restyles rows, it does not rebrand the modes).
+func shellSidebarRowSystemImage(_ row: ShellSidebarRow) -> String {
+    switch row {
+    case .newChat: return "square.and.pencil"
+    case .mode(let mode): return mode.systemImage
+    }
+}
+
+/// PURE: the row's selection destination — `nil` for New chat, which is an ACTION row (it fires
+/// the injected door — since T2, `AppDelegate.newChat()`'s summon onto the `.newChat` page — and
+/// never sets selection; the List's tags therefore never highlight it, the same quiet posture the
+/// mode rows keep while a `.session`/`.dashboard` destination is showing).
+/// Mode rows navigate to their `.mode(...)` landings unchanged.
+func shellSidebarRowDestination(_ row: ShellSidebarRow) -> ShellDestination? {
+    switch row {
+    case .newChat: return nil
+    case .mode(let mode): return .mode(mode)
+    }
+}
+
+/// The bottom account-style row's destination — the gear affordance's exact navigation, inherited:
+/// a PLAIN `.dashboard(pane: nil)` preserves whichever pane `DashboardSurface`'s own
+/// `DashboardSelectionModel` is already showing (see `AppWindowController.summon`'s doc comment);
+/// a fresh window still lands on `defaultDashboardPane`.
+let shellSidebarAccountRowDestination: ShellDestination = .dashboard(pane: nil)
+
+/// PURE: the search field's Recents filter — case-insensitive SUBSTRING match on the title the
+/// user actually SEES (`sessionDisplayTitle`, so an untitled row matches "New session", never its
+/// raw nil/whitespace title). Empty or whitespace-only query = the full list; surrounding
+/// whitespace is trimmed before matching; order is the caller's (the directory's newest-first),
+/// never re-sorted. Deliberately plain `lowercased().contains` — local, deterministic,
+/// locale-independent (the same posture every other pure pin in this file's tests takes).
+func filteredRecents(_ rows: [SessionSummary], query: String) -> [SessionSummary] {
+    let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard !needle.isEmpty else { return rows }
+    return rows.filter { sessionDisplayTitle($0.title).lowercased().contains(needle) }
+}
+
+/// PURE: which Recents rows get the subtle activity dot (spec §1: "activity as a subtle
+/// dot/label" — the deglassed compact form of `ActivityChip`). Only the two states that mean
+/// "something is happening": active and background. Idle is the resting state (a dot on every row
+/// says nothing); `nil` is a non-participating mode (chat/dispatch — `ACTIVITY_MODES`); archived
+/// never reaches Recents (`excludingArchived`); an unknown future value is NOT a licence to guess
+/// (`moveToCliOffered`'s fail-quiet posture) — a bare dot cannot carry a verbatim label, and the
+/// mode landings' full chip still shows the value verbatim, so nothing is silently lost.
+func recentsActivityDotStyle(_ activity: String?) -> ActivityChipStyle? {
+    switch activityChipStyle(activity) {
+    case .active: return .active
+    case .background: return .background
+    case .idle, .archived, .other, .none: return nil
+    }
+}
+
+/// chatgpt-ui T3: the sidebar/content boundary hairline's width — a tune-at-gate constant, same
+/// posture as `ShellSessionView`'s `topInset: 8` (the live gate may prefer a true pixel hairline;
+/// 1 pt reads correctly on Retina and matches the search field's own 1 pt stroke vocabulary).
+let shellSidebarHairlineWidth: CGFloat = 1
+
+// MARK: - The sidebar
+
+/// The nav sidebar — chatgpt-ui T1: the ChatGPT desktop app's sidebar anatomy, top to bottom
+/// (spec §1's exact order, pinned pure as `shellSidebarTopRows` + `shellSidebarAccountRowDestination`):
 ///
-/// - the serif "Norma" wordmark pinned at the top (the ONE serif accent),
-/// - the four mode rows in `SessionMode.sidebarOrder`, unavailable ones dimmed with a "Soon" chip
-///   but never dead (spec §2 / iOS: the row still selects, landing on its Coming-soon surface),
-/// - a FLAT Recents list under a sentence-case caption — mode-agnostic and empty-capable, exactly
-///   as on the phone (no nesting, no per-mode grouping here; the per-mode lists live on each mode's
-///   own landing view),
-/// - the gear → Dashboard affordance in a bottom bar. The Dashboard is reached from the gear, NOT
-///   from a fifth session-like row (the design review's nav correction).
+/// - **New chat** — a compact icon+label ACTION row (pencil-square), topmost. Fires the injected
+///   door, never a selection.
+/// - **Chats / Code / Dispatch / Cowork** — compact icon+label nav rows onto the existing
+///   `.mode(...)` landings; unavailable ones dimmed with a deglassed "Soon" tag but never dead.
+/// - **Search** — a thin field filtering Recents by title, live, local-only (`filteredRecents`).
+/// - **Recents** — flat, mode-agnostic, compact single-line rows; activity as a subtle dot
+///   (`recentsActivityDotStyle` — the chips lost the glass); Move to CLI on the context menu,
+///   the SAME `moveToCliOffered` gate + `ShellSessionHost.moveToCli` verb as the landings.
+/// - **Account row** — app glyph + "Norma" + chevron → the Dashboard (replaces the gear).
 ///
-/// Two deliberate Mac divergences from the phone, both noted as gallery extension points in the
-/// task report: selection is the system's own sidebar highlight (`List(selection:)`) rather than
-/// the phone's hand-drawn `Theme.selectionPill`, and the bottom bar is a plain `safeAreaInset`
-/// rather than a `.bottomBar` toolbar (macOS has no bottom bar placement).
+/// Flat OPAQUE background (`windowBackgroundColor` — both appearances follow the system), the
+/// split view's translucent sidebar material deliberately covered. The old serif wordmark died
+/// with the reskin — the account row carries the name now, and New chat must sit topmost.
 struct ShellSidebar: View {
     @ObservedObject var nav: ShellNavigationModel
     @ObservedObject var directory: SessionDirectory
+    /// chatgpt-ui T1: Move to CLI on Recents rows rides the host's ONE verb (`moveToCli` — which
+    /// itself handles the attached-session true move vs the detached launch-only split). `nil` (a
+    /// shell built without a host — the pure window/geometry tests) renders no menu item at all,
+    /// the same no-dead-affordance posture as `newChat` below.
+    var host: ShellSessionHost? = nil
+    /// chatgpt-ui T1: the New chat row's door — the SAME injected `AppDelegate.newChat()` the chat
+    /// landing's button fires (T2: the door opens the `.newChat` page; the create waits for the
+    /// page's first send — B4's one-door rule, retargeted). `nil` renders no row (the
+    /// `chatLandingShowsNewChatButton` posture: an unwired door never renders a dead affordance).
+    var newChat: (() -> Void)? = nil
+
+    @State private var searchQuery = ""
 
     /// `List(selection:)` wants an optional binding; the shell's destination is never absent, so
     /// the setter simply ignores a `nil` (a click that deselects everything, which the system can
@@ -140,11 +247,8 @@ struct ShellSidebar: View {
         )
     }
 
-    /// Task 7: the gear's own highlight — true for ANY `.dashboard` destination regardless of
-    /// which pane's payload it carries (`case .dashboard:` matches every payload, the associated-
-    /// value wildcard), so drilling into a specific pane (a deep link, or a click inside
-    /// `DashboardSurface`'s own sidebar) keeps the gear lit exactly like the plain "Dashboard…"
-    /// entry does.
+    /// Task 7 (carried to the account row): highlighted for ANY `.dashboard` destination
+    /// regardless of pane payload, so drilling into a specific pane keeps the row lit.
     private var isDashboardDestination: Bool {
         if case .dashboard = nav.destination { return true }
         return false
@@ -153,9 +257,12 @@ struct ShellSidebar: View {
     var body: some View {
         List(selection: selection) {
             Section {
-                ForEach(SessionMode.sidebarOrder) { mode in
-                    modeRow(mode).tag(ShellDestination.mode(mode))
+                ForEach(shellSidebarTopRows, id: \.self) { row in
+                    topRow(row)
                 }
+            }
+            Section {
+                searchField
             }
             // app-shell T4: Recents FILTERS OUT archived rows (`excludingArchived` — the
             // hidden-by-default ruling, T3 review as-m10). An ordinary Recents click just navigates
@@ -165,92 +272,177 @@ struct ShellSidebar: View {
             // silently un-archive it. Archived sessions are reachable only through the Archived tab
             // (`ModeLandingView`), where resume is the stated, deliberate action.
             Section("Recents") {
-                let recents = excludingArchived(directory.rows)
+                let unarchived = excludingArchived(directory.rows)
+                let recents = filteredRecents(unarchived, query: searchQuery)
                 if recents.isEmpty {
-                    Text("No sessions yet")
+                    Text(unarchived.isEmpty ? "No sessions yet" : "No matches")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(recents) { row in
-                        Text(sessionDisplayTitle(row.title))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .tag(ShellDestination.session(row.sessionId))
+                        recentsRow(row)
                     }
                 }
             }
         }
         .listStyle(.sidebar)
-        .safeAreaInset(edge: .top, spacing: 0) { wordmark }
-        .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
+        // The flat opaque reskin: hide the List's own scroll background so the fill below — not
+        // the split view's translucent sidebar material — is what shows, in both appearances.
+        .scrollContentBackground(.hidden)
+        .safeAreaInset(edge: .bottom, spacing: 0) { accountRow }
+        .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
+        // chatgpt-ui T3 (spec §4): the hairline at the sidebar/content boundary. EXPLICIT because
+        // nothing else guarantees it: macOS 26's split view renders the sidebar as a floating
+        // column with no drawn divider once T1's opaque fill covers its material, and both sides
+        // of the boundary are near-identical flat surfaces. An OVERLAY (not part of the
+        // background) so it paints over the account row's own opaque bar too; `ignoresSafeArea`
+        // so it spans the full height including the transparent-titlebar region — the ChatGPT
+        // reference's full-height line. `separatorColor` follows both appearances by
+        // construction; the 1 pt width is a tune-at-gate constant (`shellSidebarHairlineWidth`).
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(width: shellSidebarHairlineWidth)
+                .ignoresSafeArea()
+        }
         // Same "the view's own appearance is the belt" posture as `SessionSidebar.task` — the
         // wirer-level `startInitialLoad()` kick can lose its race against this directory's harness
         // connecting. Task 2 adds the owned 5 s poll on top (visible-only).
         .task { await directory.refresh() }
     }
 
-    /// The ONE serif accent, the phone's `Theme.wordmark` register — Mac-tuned (the phone's 25 pt
-    /// title sits under a status bar; this sits under the window's own titlebar).
-    private var wordmark: some View {
-        Text("Norma")
-            .font(.system(size: 19, weight: .regular, design: .serif))
-            .foregroundStyle(.primary)
-            .padding(.horizontal, 16)
-            .padding(.top, 4)
-            .padding(.bottom, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityAddTraits(.isHeader)
-    }
-
-    private func modeRow(_ mode: SessionMode) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: mode.systemImage)
-                .frame(width: 18)
-            Text(mode.title)
-            Spacer(minLength: 4)
-            if !mode.isAvailable {
-                Text("Soon")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(.quaternary))
-            }
-        }
-        // Unavailable modes read dimmed — but still select (never a dead row).
-        .foregroundStyle(mode.isAvailable ? .primary : .secondary)
-    }
-
-    /// The gear → Dashboard affordance. A bare button in a hairline-topped bar: on macOS the
-    /// system does not vend a bottom toolbar for a sidebar column, so the glass-bar treatment the
-    /// gallery describes for iOS becomes a plain bar here (extension point, reported).
-    private var bottomBar: some View {
-        VStack(spacing: 0) {
-            Divider()
-            HStack(spacing: 6) {
-                Button {
-                    // Task 7: a PLAIN navigation (`pane: nil`) — preserves whichever pane
-                    // `DashboardSurface`'s own `DashboardSelectionModel` is already showing (that
-                    // model is the one persistent source of truth for "current pane"; it is never
-                    // touched by a nil-payload navigation — see `AppWindowController.summon`'s own
-                    // doc comment). A fresh app window still lands on `defaultDashboardPane` (the
-                    // selection model's own init default).
-                    nav.navigate(to: .dashboard(pane: nil))
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.body)
-                        .frame(width: 22, height: 22)
+    /// One top row (`shellSidebarTopRows` order). New chat is a Button — an action row, no
+    /// selection tag; mode rows tag their `.mode(...)` destination for the system highlight.
+    @ViewBuilder
+    private func topRow(_ row: ShellSidebarRow) -> some View {
+        switch row {
+        case .newChat:
+            if let newChat {
+                // chatgpt-ui T2: the door now OPENS THE PAGE (`AppDelegate.newChat()` →
+                // `summonAppWindow(navigatingTo: .newChat)`) — no create until the page's first
+                // send. Still the one injected door all three New-chat affordances share.
+                Button(action: newChat) {
+                    rowLabel(row)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(isDashboardDestination ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                .help("Dashboard")
-                .accessibilityLabel("Dashboard")
-                Spacer(minLength: 0)
+                .accessibilityLabel("New chat")
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+        case .mode(let mode):
+            rowLabel(row)
+                // Unavailable modes read dimmed — but still select (never a dead row).
+                .foregroundStyle(mode.isAvailable ? .primary : .secondary)
+                .tag(ShellDestination.mode(mode))
         }
+    }
+
+    /// The shared compact icon+label anatomy — one register for all five rows.
+    private func rowLabel(_ row: ShellSidebarRow) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: shellSidebarRowSystemImage(row))
+                .font(.system(size: 13))
+                .frame(width: 18)
+            Text(shellSidebarRowTitle(row))
+                .font(.system(size: 13))
+            Spacer(minLength: 4)
+            if case .mode(let mode) = row, !mode.isAvailable {
+                // Deglassed (the capsule fill died with the reskin): a quiet tertiary tag.
+                Text("Soon")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    /// The thin search field (spec §1 row 4) — live, local-only, no notifications bell. Sits in
+    /// the List so it scrolls with the rows exactly like the reference; `selectionDisabled` keeps
+    /// a click-to-focus from fighting the List's selection.
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+            TextField("Search", text: $searchQuery)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .background(RoundedRectangle(cornerRadius: 7).strokeBorder(.quaternary, lineWidth: 1))
+        .selectionDisabled()
+    }
+
+    /// One compact Recents row: single-line middle-truncated title + the subtle activity dot
+    /// (`recentsActivityDotStyle` — deglassed; the landings keep the full labeled chip). The
+    /// context menu carries the existing Move to CLI verb behind the existing gate, unchanged.
+    private func recentsRow(_ row: SessionSummary) -> some View {
+        HStack(spacing: 6) {
+            Text(sessionDisplayTitle(row.title))
+                .font(.system(size: 13))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 4)
+            if let style = recentsActivityDotStyle(row.activity) {
+                Circle()
+                    .fill(activityChipColor(style))
+                    .frame(width: 6, height: 6)
+                    .accessibilityLabel(activityChipLabel(row.activity) ?? "")
+            }
+        }
+        .tag(ShellDestination.session(row.sessionId))
+        // cli-handoff T3's affordance, carried onto Recents (chatgpt-ui T1): the SAME one
+        // eligibility gate as the toolbar action and the landing rows (`moveToCliOffered`), the
+        // SAME host verb (`moveToCli` launches; for the attached session it also runs the true
+        // move — its own pinned split). No host (pure window tests) renders no item.
+        .contextMenu {
+            if let host, moveToCliOffered(row: row) {
+                Button {
+                    host.moveToCli(sessionId: row.sessionId)
+                } label: {
+                    Label("Move to CLI", systemImage: "terminal")
+                }
+            }
+        }
+    }
+
+    /// The bottom account-style row (spec §1 row 6): app glyph + "Norma" + chevron → the
+    /// Dashboard, REPLACING the gear affordance (its `.help`/`.accessibilityLabel` carried over;
+    /// menu items unchanged). Same hairline-topped `safeAreaInset` bar as before — macOS has no
+    /// bottom toolbar placement for a sidebar column.
+    private var accountRow: some View {
+        VStack(spacing: 0) {
+            Divider()
+            Button {
+                nav.navigate(to: shellSidebarAccountRowDestination)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 20, height: 20)
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                    Text("Norma")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(isDashboardDestination ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear))
+                )
+            }
+            .buttonStyle(.plain)
+            .help("Dashboard")
+            .accessibilityLabel("Dashboard")
+            .padding(6)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 
