@@ -139,6 +139,27 @@ struct NewChatStarter: Equatable {
     let prefill: String
 }
 
+/// One Cowork idea — the vertical list that REPLACES the starter chips in Cowork mode (user call,
+/// 2026-08-07). Same prefill mechanism as a starter; different shape because these are whole tasks
+/// rather than sentence openers, and a task does not fit on a chip.
+struct NewChatIdea: Equatable {
+    let title: String
+    let systemImage: String
+    let prefill: String
+}
+
+/// Cowork's ideas. Deliberately things Norma could plausibly be ASKED to do rather than features
+/// it ships — Cowork itself is unbuilt, so an idea list that implied working capabilities would be
+/// advertising vapour. They prefill the composer exactly like the chat starters.
+let newChatCoworkIdeas: [NewChatIdea] = [
+    NewChatIdea(title: "Send me a daily briefing", systemImage: "sun.horizon",
+                prefill: "Every morning, send me a briefing covering "),
+    NewChatIdea(title: "Keep an eye on a project folder", systemImage: "folder.badge.gearshape",
+                prefill: "Watch this folder and tell me when "),
+    NewChatIdea(title: "Set Cowork up for me", systemImage: "slider.horizontal.3",
+                prefill: "Help me set up Cowork so that "),
+]
+
 let newChatStarters: [NewChatStarter] = [
     NewChatStarter(title: "Write", systemImage: "pencil", prefill: "Help me write "),
     NewChatStarter(title: "Learn", systemImage: "graduationcap", prefill: "Explain "),
@@ -148,6 +169,89 @@ let newChatStarters: [NewChatStarter] = [
     NewChatStarter(title: "Norma's choice", systemImage: "lightbulb",
                    prefill: "Surprise me — pick something useful."),
 ]
+
+/// A starter chip. Hovering tints it with the ACCENT rather than a grey (user call, 2026-08-07:
+/// "rather than turning grey they should become the color of the send button") — so the page's one
+/// brand colour is used by exactly two things, the send button and the affordances that fill the
+/// composer, which is a coherent story rather than decoration.
+///
+/// The fill is the accent at low alpha with an accent rim, not a solid accent block: a chip is a
+/// suggestion, and solid brand colour on hover would read as "selected" or "primary action" — a
+/// claim these do not make. The send button keeps the solid fill precisely because it IS that.
+struct NewChatStarterChip: View {
+    let starter: NewChatStarter
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: starter.systemImage)
+                    .font(.system(size: 12))
+                Text(starter.title)
+                    .font(.system(size: 13))
+            }
+            .foregroundStyle(isHovered ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.primary))
+            .padding(.horizontal, 14)
+            .frame(height: 34)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isHovered ? AnyShapeStyle(Theme.accent.opacity(0.10))
+                                : AnyShapeStyle(Theme.composerSurface))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(isHovered ? AnyShapeStyle(Theme.accent.opacity(0.45))
+                                        : AnyShapeStyle(Theme.hairline),
+                              lineWidth: shellSidebarHairlineWidth)
+        )
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .onHover { isHovered = $0 }
+        .help("Start with: \(starter.prefill)")
+    }
+}
+
+/// One Cowork idea row — glyph, title, and the trailing mode tag the reference carries. Same
+/// accent-on-hover treatment as the chips, since both do the same job: fill the composer.
+struct NewChatIdeaRow: View {
+    let idea: NewChatIdea
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: idea.systemImage)
+                    .font(.system(size: 15))
+                    .foregroundStyle(isHovered ? AnyShapeStyle(Theme.accent)
+                                               : AnyShapeStyle(Theme.textMuted))
+                    .frame(width: 22)
+                Text(idea.title)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 12)
+                Text(SessionMode.cowork.title)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textMuted)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isHovered ? AnyShapeStyle(Theme.accent.opacity(0.10))
+                                : AnyShapeStyle(Color.clear))
+        )
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .onHover { isHovered = $0 }
+        .help("Start with: \(idea.prefill)")
+    }
+}
 
 /// A bare icon button in the composer card's control row.
 struct NewChatControlButton: View {
@@ -233,6 +337,9 @@ struct NewChatPage: View {
     /// chat), which is exactly why sending is refused while it sits on an unbuilt mode rather than
     /// quietly creating something else — `newChatSendBlockedReason`.
     @State private var mode: SessionMode = .chat
+    /// Whether the pointer is over the composer card — drives its rim only. See the rim's own note
+    /// for why this is hover and not focus.
+    @State private var composerHovered = false
 
     var body: some View {
         // Reference-measured gaps, and they DIFFER — greeting→card ~33 pt, card→chips ~22 — so a
@@ -296,35 +403,34 @@ struct NewChatPage: View {
     /// The prompt starters below the card (the reference's own row). Each PREFILLS the composer
     /// and focuses it — real behaviour, not a placeholder: a starter needs no session and no
     /// backend, so there was no reason to fake it.
+    /// Chat's starter chips, or Cowork's idea list — never both. Cowork's tasks do not fit on a
+    /// chip, which is why the reference changes shape here rather than just changing the words.
+    @ViewBuilder
     private var starters: some View {
-        HStack(spacing: 10) {
-            ForEach(newChatStarters, id: \.title) { starter in
-                Button {
-                    draft = starter.prefill
-                } label: {
-                    HStack(spacing: 7) {
-                        Image(systemName: starter.systemImage)
-                            .font(.system(size: 12))
-                        Text(starter.title)
-                            .font(.system(size: 13))
-                    }
-                    .foregroundStyle(.primary)
-                    .padding(.horizontal, 14)
-                    .frame(height: 34)
-                    .contentShape(Rectangle())
+        if newChatShowsCoworkControls(mode: mode) {
+            coworkIdeas
+        } else {
+            HStack(spacing: 10) {
+                ForEach(newChatStarters, id: \.title) { starter in
+                    NewChatStarterChip(starter: starter) { draft = starter.prefill }
                 }
-                .buttonStyle(.plain)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Theme.composerSurface)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Theme.hairline, lineWidth: 1)
-                )
-                .help("Start with: \(starter.prefill)")
             }
         }
+    }
+
+    /// Cowork's "Ideas for you" — a vertical list with a trailing mode tag, the reference's shape.
+    private var coworkIdeas: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Ideas for you")
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.textMuted)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 6)
+            ForEach(newChatCoworkIdeas, id: \.title) { idea in
+                NewChatIdeaRow(idea: idea) { draft = idea.prefill }
+            }
+        }
+        .frame(width: newChatCardWidth, alignment: .leading)
     }
 
     /// The existing composer, in a quiet bordered card so it reads as THE affordance on an
@@ -391,11 +497,25 @@ struct NewChatPage: View {
             RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
                 .fill(Theme.composerSurface)
         )
+        // The rim STRENGTHENS on hover — the composer is the page's main affordance and should
+        // answer when the pointer is over it. Only the RIM moves, never the fill: a card that
+        // changed colour under the pointer would read as selected rather than as ready.
+        //
+        // Hover only, NOT focus. The composer is `ComposerTextView`, an `NSViewRepresentable`
+        // hosted unchanged under the Global Constraints, and it exposes no first-responder
+        // callback — so "focused to type" cannot be observed without either changing that
+        // component or KVO-ing `NSWindow.firstResponder`, which is not documented as observable.
+        // Wiring focus properly means giving the component a focus callback; that is a real
+        // change to a fenced file rather than something to sneak in here.
         .overlay(
             RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                .strokeBorder(Theme.hairline, lineWidth: 1)
+                .strokeBorder(composerHovered ? AnyShapeStyle(Theme.accent.opacity(0.55))
+                                              : AnyShapeStyle(Theme.hairline),
+                              lineWidth: shellSidebarHairlineWidth)
         )
         .shadow(color: .black.opacity(0.05), radius: 16, y: 4)
+        .animation(.easeOut(duration: 0.14), value: composerHovered)
+        .onHover { composerHovered = $0 }
         .overlay(alignment: .bottomTrailing) {
             if ui.showsWorkingIndicator {
                 ProgressView()
@@ -418,9 +538,13 @@ struct NewChatPage: View {
             // border, which is exactly the "expansion" look being corrected here.
             RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
                 .fill(Theme.canvas)
+                // FAINTER than the composer's own rim (user call, 2026-08-07). It should — the
+                // strip is a surface BEHIND the composer, and a background object tracing itself
+                // as strongly as the thing in front competes with it for the same edge.
                 .overlay(
                     RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                        .strokeBorder(Theme.hairline, lineWidth: 1)
+                        .strokeBorder(Theme.hairline.opacity(0.5),
+                                      lineWidth: shellSidebarHairlineWidth)
                 )
                 .frame(height: newChatComposerHeight + band)
                 .overlay(alignment: .bottom) {

@@ -368,10 +368,18 @@ func recentsActivityDotStyle(_ activity: String?) -> ActivityChipStyle? {
     }
 }
 
-/// The sidebar/content boundary hairline's width. Since sidebar-chrome-2 this is the width of the
-/// detail CARD's rim rather than of a standalone divider — the rim replaced the divider, because a
-/// straight full-height line cannot follow the card's rounded corners.
-let shellSidebarHairlineWidth: CGFloat = 1
+/// THE hairline width for every rim and border the shell draws — the detail card, the composer,
+/// the starter chips, the Cowork strip.
+///
+/// 0.5 pt, i.e. ONE device pixel on a Retina display (user call, 2026-08-07: the borders "are all
+/// too thick"). A 1 pt border is two physical pixels and reads as a drawn line; half a point reads
+/// as an edge, which is what a rim is meant to be. The phone does the same thing by dividing by
+/// `displayScale`; on the Mac every supported display is 2× so the constant is simpler.
+///
+/// Since sidebar-chrome-2 this is also the detail CARD's rim rather than a standalone divider —
+/// the rim replaced the divider, because a straight full-height line cannot follow a rounded
+/// corner.
+let shellSidebarHairlineWidth: CGFloat = 0.5
 
 /// The detail card's leading corner radius. Only the leading corners round: the trailing two meet
 /// the window's own edge, which already carries the system's rounding, and doubling it would read

@@ -338,6 +338,31 @@ final class SidebarBrandTests: XCTestCase {
         XCTAssertEqual(newChatSendBlockedReason(draft: "", mode: .cowork), "Cowork isn't built yet")
     }
 
+    /// Cowork swaps the chat starter CHIPS for an idea LIST — a whole task does not fit on a chip,
+    /// which is why the reference changes shape rather than just the words. Both prefill.
+    func testCoworkIdeasAreDistinctFromChatStartersAndAllPrefill() {
+        XCTAssertFalse(newChatCoworkIdeas.isEmpty)
+        for idea in newChatCoworkIdeas {
+            XCTAssertFalse(idea.title.isEmpty)
+            XCTAssertFalse(idea.prefill.isEmpty, "\(idea.title) must prefill something")
+            XCTAssertNotNil(
+                NSImage(systemSymbolName: idea.systemImage, accessibilityDescription: nil),
+                "\(idea.title)'s glyph \(idea.systemImage) is not a real SF Symbol")
+        }
+        XCTAssertEqual(Set(newChatCoworkIdeas.map(\.title)).count, newChatCoworkIdeas.count)
+        // The two sets are for different modes and must not be the same content in two shapes.
+        XCTAssertTrue(Set(newChatCoworkIdeas.map(\.title))
+            .isDisjoint(with: Set(newChatStarters.map(\.title))))
+    }
+
+    /// Every rim the shell draws is ONE device pixel on Retina, not two. Pinned because "borders
+    /// are too thick" was a live finding, and a future edit that reaches for the obvious `1` would
+    /// silently undo it.
+    func testEveryRimIsASingleDevicePixel() {
+        XCTAssertEqual(shellSidebarHairlineWidth, 0.5,
+                       "0.5 pt = 1 physical pixel at 2×; 1 pt reads as a drawn line")
+    }
+
     /// The starters are real behaviour, not placeholders: each prefills the composer. Every one
     /// needs a non-empty prefill and a glyph that actually resolves.
     func testEveryStarterPrefillsAndHasARealGlyph() {
