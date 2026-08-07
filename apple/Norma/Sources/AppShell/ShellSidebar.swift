@@ -101,28 +101,19 @@ struct ShellRootView: View {
         // the pane) is what makes that possible.
         .overlay(alignment: .topLeading) {
             HStack(spacing: shellTitlebarClusterSpacing) {
-                Button {
+                ShellTitlebarButton(
+                    systemImage: shellSidebarToggleSystemImage(isVisible: sidebarVisible),
+                    label: shellSidebarToggleLabel(isVisible: sidebarVisible)
+                ) {
                     withAnimation(.easeInOut(duration: 0.22)) { sidebarVisible.toggle() }
-                } label: {
-                    Image(systemName: shellSidebarToggleSystemImage(isVisible: sidebarVisible))
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Theme.textMuted)
-                        .frame(width: shellSidebarToggleSize, height: shellSidebarToggleSize)
-                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .help(shellSidebarToggleLabel(isVisible: sidebarVisible))
-                .accessibilityLabel(shellSidebarToggleLabel(isVisible: sidebarVisible))
 
-                // The back/forward pair — PLACEHOLDERS until the shell has a navigation history
-                // (see `shellTitlebarNavigationGlyphs`). `.disabled(true)` is the honest state:
-                // they read as not-yet-available instead of pretending to work.
+                // The back/forward pair — placeholders until the shell has a navigation history
+                // (see `shellTitlebarNavigationGlyphs`), but real buttons that hover like the rest.
                 ForEach(shellTitlebarNavigationGlyphs, id: \.self) { glyph in
-                    Image(systemName: glyph)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.tertiary)
-                        .frame(width: shellSidebarToggleSize, height: shellSidebarToggleSize)
-                        .accessibilityHidden(true)
+                    ShellTitlebarButton(systemImage: glyph,
+                                        label: glyph == "arrow.left" ? "Back" : "Forward",
+                                        isPlaceholder: true)
                 }
             }
             .padding(.leading, shellSidebarToggleLeadingInset)
@@ -130,6 +121,21 @@ struct ShellRootView: View {
             // The whole point of the placement: sit in the TITLEBAR band beside the traffic
             // lights. Without this the overlay is laid out inside the safe area and drops level
             // with the wordmark instead — the same top-safe-area opt-out the pane itself takes.
+            .ignoresSafeArea(.container, edges: .top)
+        }
+        // sidebar-chrome-2: the TRAILING cluster, mirroring the reference's top-right corner. Same
+        // button, same metrics, same top inset as the leading cluster — so the two clusters share
+        // one centre line across the window by construction, not by two numbers agreeing.
+        .overlay(alignment: .topTrailing) {
+            HStack(spacing: shellTitlebarClusterSpacing) {
+                ForEach(shellTitlebarTrailingGlyphs, id: \.self) { glyph in
+                    ShellTitlebarButton(systemImage: glyph,
+                                        label: shellTitlebarTrailingLabel(glyph),
+                                        isPlaceholder: true)
+                }
+            }
+            .padding(.trailing, shellTitlebarTrailingInset)
+            .padding(.top, shellSidebarToggleTopInset)
             .ignoresSafeArea(.container, edges: .top)
         }
         // sidebar-brand T4: the search palette (spec R2) — an overlay on the WHOLE shell so it
@@ -411,14 +417,45 @@ let shellTrafficLightInset = CGPoint(x: 10, y: 8)
 /// `shellSidebarToggleTopInset` is measured from the very top of the WINDOW, not from the safe
 /// area: the overlay carrying these buttons ignores the top safe area, exactly as the sidebar pane
 /// does. Without that they land ~34 pt lower, level with the wordmark instead of the traffic
-/// lights, which is what the first live build did. The value is a second pass: 8 pt sat ~3 pt
-/// ABOVE the lights' centre line in a side-by-side, so this centres on them.
+/// lights, which is what the first live build did.
+///
+/// The figures below are MEASURED off the reference by cropping its titlebar corner (2026-08-07),
+/// not estimated: its cluster runs on a **34 pt centre-to-centre pitch** and every icon shares the
+/// traffic lights' centre line. Button 26 + spacing 8 reproduces that pitch exactly; the leading
+/// inset puts the first button's centre ~35 pt right of the last traffic light, as the reference
+/// does.
 let shellSidebarToggleLeadingInset: CGFloat = 88
 let shellSidebarToggleTopInset: CGFloat = 11
-let shellSidebarToggleSize: CGFloat = 24
 
-/// Gap between the cluster's buttons (toggle, then the two navigation arrows).
-let shellTitlebarClusterSpacing: CGFloat = 2
+/// Every titlebar cluster button's hit box — square, and the size the hover fill wears.
+let shellTitlebarButtonSize: CGFloat = 26
+
+/// Gap between cluster buttons. With `shellTitlebarButtonSize` this is the reference's 34 pt pitch.
+let shellTitlebarClusterSpacing: CGFloat = 8
+
+/// How far the trailing cluster sits from the window's right edge (reference-measured: its last
+/// icon's centre is ~21 pt in, i.e. 8 pt of padding past a 26 pt button).
+let shellTitlebarTrailingInset: CGFloat = 8
+
+/// The TRAILING cluster's glyphs, read off the reference's top-right corner (2026-08-07):
+/// a dashed circle, a docked-window rectangle, and a right-hand panel.
+///
+/// **PLACEHOLDERS**, like the navigation arrows — Norma has no feature behind any of them yet.
+/// `sidebar.right` is the one with an obvious future: the side-browser panel from the app vision.
+let shellTitlebarTrailingGlyphs: [String] = ["circle.dashed", "dock.rectangle", "sidebar.right"]
+
+/// PURE: a trailing placeholder's help text. Names what the affordance will BE, not what the glyph
+/// looks like — and says it is not wired, so hovering one does not promise a feature that is not
+/// there. Total by construction: an unknown glyph gets the generic label rather than crashing or
+/// silently rendering an empty tooltip.
+func shellTitlebarTrailingLabel(_ glyph: String) -> String {
+    switch glyph {
+    case "circle.dashed": return "Temporary chat (not wired yet)"
+    case "dock.rectangle": return "Compact window (not wired yet)"
+    case "sidebar.right": return "Side panel (not wired yet)"
+    default: return "Not wired yet"
+    }
+}
 
 /// PURE: the toggle's glyph, which STATES the sidebar's condition rather than naming the action.
 ///
@@ -432,17 +469,50 @@ func shellSidebarToggleSystemImage(isVisible: Bool) -> String {
 }
 
 /// The two navigation arrows that sit right of the toggle, matching the reference's cluster.
+/// TRUE ARROWS, not chevrons (user correction, 2026-08-07) — cropping the reference's titlebar
+/// confirms a full shaft with a head, which is what `arrow.left`/`arrow.right` draw.
 ///
-/// **PLACEHOLDERS** (user call, 2026-08-07: "as placeholder icons rn, we shall wire them in
-/// another session"). They render disabled rather than active-but-inert: a control that looks
-/// live and does nothing is worse than one that honestly shows it is not ready yet, and this way
-/// nobody has to remember they are fake. Wiring them means giving the shell a navigation history
-/// — `ShellNavigationModel` has no back-stack today, which is the actual missing piece.
-let shellTitlebarNavigationGlyphs: [String] = ["chevron.left", "chevron.right"]
+/// **PLACEHOLDERS** (user call: "we shall wire them in another session"). They are nonetheless
+/// REAL BUTTONS that hover like every other control here — the user's explicit call, overriding
+/// this pass's first take, which rendered them `.disabled` on the argument that an inert-but-live
+/// affordance misleads. Wiring them means giving the shell a navigation history;
+/// `ShellNavigationModel` has no back-stack today, which is the actual missing piece.
+let shellTitlebarNavigationGlyphs: [String] = ["arrow.left", "arrow.right"]
 
 /// PURE: the toggle's help/accessibility text — the ACTION, complementing the glyph's state.
 func shellSidebarToggleLabel(isVisible: Bool) -> String {
     isVisible ? "Hide sidebar" : "Show sidebar"
+}
+
+/// One titlebar cluster button. EVERY icon up there is one of these — the toggle, the navigation
+/// arrows, and the trailing trio — so they share a hit box, a metric, and a hover treatment by
+/// construction rather than by three views agreeing to look alike.
+///
+/// The hover fill is `ShellSidebarRowStyle`, the same treatment every sidebar row wears (user
+/// call, 2026-08-07: "a button like highlight when hovered — not icon color but background color
+/// just like the sidebar items"). One row vocabulary across the whole shell, now including the
+/// titlebar.
+struct ShellTitlebarButton: View {
+    let systemImage: String
+    let label: String
+    /// Placeholders read one step quieter than live controls, but still hover and still click —
+    /// they are honestly not wired, not pretending to be disabled.
+    var isPlaceholder: Bool = false
+    var action: () -> Void = {}
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(isPlaceholder ? AnyShapeStyle(.tertiary)
+                                               : AnyShapeStyle(Theme.textMuted))
+                .frame(width: shellTitlebarButtonSize, height: shellTitlebarButtonSize)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(ShellSidebarRowStyle(isSelected: false))
+        .help(label)
+        .accessibilityLabel(label)
+    }
 }
 
 /// The three fills a row can wear. `selected` is the slightly stronger of the two live fills;

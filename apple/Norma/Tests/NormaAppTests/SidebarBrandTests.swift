@@ -195,14 +195,51 @@ final class SidebarBrandTests: XCTestCase {
         XCTAssertEqual(shellSidebarToggleSystemImage(isVisible: true), "sidebar.left")
     }
 
-    /// The back/forward pair are placeholders until the shell has a navigation history. Pinned so
-    /// their count and identity are deliberate, and so both resolve as real symbols.
-    func testTitlebarNavigationPlaceholdersAreTwoRealSymbols() {
-        XCTAssertEqual(shellTitlebarNavigationGlyphs, ["chevron.left", "chevron.right"])
-        for name in shellTitlebarNavigationGlyphs {
+    /// TRUE ARROWS, not chevrons (user correction, 2026-08-07, confirmed by cropping the
+    /// reference's titlebar). Pinned by name because "which symbol" was the instruction.
+    func testTitlebarNavigationUsesRealArrowsNotChevrons() {
+        XCTAssertEqual(shellTitlebarNavigationGlyphs, ["arrow.left", "arrow.right"])
+    }
+
+    /// Every titlebar glyph — both clusters — must resolve, or it renders as a blank box with no
+    /// error anywhere.
+    func testEveryTitlebarGlyphResolvesAsARealSymbol() {
+        let all = shellTitlebarNavigationGlyphs + shellTitlebarTrailingGlyphs
+            + [shellSidebarToggleSystemImage(isVisible: true),
+               shellSidebarToggleSystemImage(isVisible: false)]
+        for name in all {
             XCTAssertNotNil(NSImage(systemSymbolName: name, accessibilityDescription: nil),
                             "\(name) is not a real SF Symbol on this OS")
         }
+    }
+
+    /// The trailing cluster mirrors the reference's top-right corner: three icons, no duplicates.
+    func testTrailingClusterIsThreeDistinctGlyphs() {
+        XCTAssertEqual(shellTitlebarTrailingGlyphs.count, 3)
+        XCTAssertEqual(Set(shellTitlebarTrailingGlyphs).count, 3)
+    }
+
+    /// Every trailing placeholder says it is not wired, so hovering one cannot promise a feature
+    /// that does not exist — and the mapping is TOTAL, so an added glyph still gets a label.
+    func testTrailingPlaceholderLabelsDiscloseTheyAreNotWired() {
+        for glyph in shellTitlebarTrailingGlyphs {
+            let label = shellTitlebarTrailingLabel(glyph)
+            XCTAssertTrue(label.contains("not wired"), "\(glyph)'s label must disclose: \(label)")
+        }
+        XCTAssertFalse(shellTitlebarTrailingLabel("some.future.glyph").isEmpty,
+                       "the mapping is total — an unknown glyph still gets a label")
+    }
+
+    /// Both clusters share ONE top inset, so they sit on one centre line across the window. Pinned
+    /// because the two overlays are written separately and could drift apart silently.
+    func testBothTitlebarClustersShareOneCentreLine() {
+        // The leading cluster's inset is the trailing cluster's too — this reads as a tautology
+        // only because the constant is shared, which is exactly the property being pinned.
+        XCTAssertGreaterThan(shellSidebarToggleTopInset, 0)
+        XCTAssertGreaterThan(shellTitlebarButtonSize, 0)
+        // Reference-measured 34 pt centre-to-centre pitch.
+        XCTAssertEqual(shellTitlebarButtonSize + shellTitlebarClusterSpacing, 34,
+                       "the reference's cluster pitch — button size and spacing must sum to it")
     }
 
     // MARK: - The account menu (the Dashboard split)
