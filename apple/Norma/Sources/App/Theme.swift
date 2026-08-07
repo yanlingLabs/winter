@@ -100,8 +100,9 @@ enum Theme {
     /// moment finally having a surface on the Mac. It is a genuine editorial beat — one line, once
     /// per empty page — which is exactly the restraint the allowlist exists to enforce.
     ///
-    /// Larger than the wordmark because it is the page's subject rather than its label.
-    static let greeting: Font = .system(size: 28, weight: .regular, design: .serif)
+    /// Larger than the wordmark because it is the page's subject rather than its label. 34 pt is a
+    /// second pass: 28 measured visibly smaller than the reference's line side by side.
+    static let greeting: Font = .system(size: 34, weight: .regular, design: .serif)
 
     // Everything the serif allowlist does NOT cover — rows, labels, chrome, lists, tool output —
     // stays on the standard system sans (San Francisco): a plain `Font` with no design override.

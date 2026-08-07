@@ -84,6 +84,14 @@ func newChatTipDay(_ date: Date, calendar: Calendar = .current) -> Int {
 let newChatCardWidth: CGFloat = 670
 let newChatCardCornerRadius: CGFloat = 16
 
+/// The composer box's FIXED height — field + control row. Fixed by ruling: selecting Cowork adds
+/// a strip below rather than resizing this, so the field and its controls never move under you.
+/// The Cowork strip positions itself against this figure, so the two must stay in step.
+let newChatComposerHeight: CGFloat = 116
+
+/// The Cowork strip's height — the band that slides out from behind the composer.
+let newChatCoworkStripHeight: CGFloat = 40
+
 /// What the model/effort slot reads until it is wired. NOT a real model name: showing one would
 /// claim this page had picked it, and the page has no session to pick for yet.
 let newChatModelPlaceholder = "Default model"
@@ -141,11 +149,12 @@ let newChatStarters: [NewChatStarter] = [
 struct NewChatControlButton: View {
     let systemImage: String
     let label: String
+    var size: CGFloat = 13
 
     var body: some View {
         Button {} label: {
             Image(systemName: systemImage)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: size, weight: .medium))
                 .foregroundStyle(Theme.textMuted)
                 .frame(width: 26, height: 26)
                 .contentShape(Rectangle())
@@ -254,12 +263,16 @@ struct NewChatPage: View {
                     .resizable()
                     .renderingMode(.template)
                     .scaledToFit()
-                    .frame(width: 26, height: 26)
+                    .frame(width: 30, height: 30)
                     .foregroundStyle(Theme.accent)
             }
             Text(newChatGreeting)
                 .font(Theme.greeting)
-                .foregroundStyle(.primary)
+                // `inverseCanvas`, not `.primary` — the reference sets its greeting in a WARM dark
+                // rather than near-black, and this token is precisely "the base plane of the
+                // opposite appearance", so it softens the line in light mode and brightens it in
+                // dark by the same construction. `.primary` reads as a hard near-black here.
+                .foregroundStyle(Theme.inverseCanvas)
         }
         .multilineTextAlignment(.center)
     }
@@ -268,29 +281,29 @@ struct NewChatPage: View {
     /// and focuses it — real behaviour, not a placeholder: a starter needs no session and no
     /// backend, so there was no reason to fake it.
     private var starters: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             ForEach(newChatStarters, id: \.title) { starter in
                 Button {
                     draft = starter.prefill
                 } label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 7) {
                         Image(systemName: starter.systemImage)
-                            .font(.system(size: 11))
-                        Text(starter.title)
                             .font(.system(size: 12))
+                        Text(starter.title)
+                            .font(.system(size: 13))
                     }
                     .foregroundStyle(.primary)
-                    .padding(.horizontal, 12)
-                    .frame(height: 30)
+                    .padding(.horizontal, 14)
+                    .frame(height: 34)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .background(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(Theme.composerSurface)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .strokeBorder(Theme.hairline, lineWidth: 1)
                 )
                 .help("Start with: \(starter.prefill)")
@@ -314,7 +327,7 @@ struct NewChatPage: View {
     /// composer never flashes.
     private var composerCard: some View {
         let ui = newChatSendUI(host.newChatCreate)
-        return VStack(spacing: 0) {
+        let box = VStack(spacing: 0) {
             Group {
                 if ui.composerEnabled {
                     ComposerTextView(
@@ -329,7 +342,7 @@ struct NewChatPage: View {
                     .overlay(alignment: .topLeading) {
                         if draft.isEmpty {
                             Text(newChatComposerPlaceholder)
-                                .font(.system(size: 14))
+                                .font(.system(size: 15))
                                 .foregroundStyle(Theme.textMuted)
                                 .padding(.horizontal, ComposerTextView.textContainerInset.width)
                                 .padding(.vertical, ComposerTextView.textContainerInset.height)
@@ -349,17 +362,14 @@ struct NewChatPage: View {
                 }
             }
             .frame(height: 54)
-            .padding(.horizontal, 14)
-            .padding(.top, 14)
+            .padding(.horizontal, 16)
+            .padding(.top, 15)
 
             controlRow
-            // Cowork only (`newChatShowsCoworkControls`): a chat has no working folder and takes
-            // no approvals, so offering those on a chat would be offering settings that cannot
-            // apply to what it creates.
-            if newChatShowsCoworkControls(mode: mode) {
-                announcementRow
-            }
         }
+        .frame(height: newChatComposerHeight)
+        // The composer's OWN face and border. Fixed: selecting Cowork must not resize this box
+        // (user ruling, 2026-08-07) — the extra controls arrive BELOW it instead.
         .background(
             RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
                 .fill(Theme.composerSurface)
@@ -368,7 +378,6 @@ struct NewChatPage: View {
             RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
                 .strokeBorder(Theme.hairline, lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.06), radius: 10, y: 3)
         .overlay(alignment: .bottomTrailing) {
             if ui.showsWorkingIndicator {
                 ProgressView()
@@ -377,6 +386,34 @@ struct NewChatPage: View {
                     .accessibilityLabel("Starting chat")
             }
         }
+
+        // The Cowork strip SLIDES DOWN FROM BEHIND the composer rather than growing it: the strip
+        // is drawn first (underneath, in z-order) and revealed by a top-edge move transition, and
+        // the whole stack is clipped — so it reads as sliding out from under a box that never
+        // changed size. Growing the card instead would shift the composer and its controls, which
+        // is exactly what the ruling rules out.
+        return ZStack(alignment: .top) {
+            if newChatShowsCoworkControls(mode: mode) {
+                announcementRow
+                    .padding(.top, newChatComposerHeight - newChatCardCornerRadius)
+                    .background(
+                        RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
+                            .fill(Theme.canvas)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: newChatCardCornerRadius,
+                                                 style: .continuous)
+                                    .strokeBorder(Theme.hairline, lineWidth: 1)
+                            )
+                            // Only the strip's own band is drawn — the part hidden behind the
+                            // composer would otherwise double the border.
+                            .padding(.top, newChatCardCornerRadius)
+                    )
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+            box
+        }
+        .clipShape(RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous))
+        .shadow(color: .black.opacity(0.06), radius: 10, y: 3)
         .frame(maxWidth: newChatCardWidth)
     }
 
@@ -390,17 +427,25 @@ struct NewChatPage: View {
     /// that concept does not exist. Wiring them is its own piece of work.
     private var controlRow: some View {
         HStack(spacing: 8) {
-            NewChatControlButton(systemImage: "plus", label: "Attach (not wired yet)")
+            NewChatControlButton(systemImage: "plus", label: "Attach (not wired yet)", size: 16)
             modePicker
             Spacer(minLength: 12)
-            Text(newChatModelPlaceholder)
-                .font(.system(size: 12))
-                .foregroundStyle(Theme.textMuted)
+            // The model reads PRIMARY, like the reference's — it is the thing you would click,
+            // not a caption. The chevron says so even while the picker itself is unwired.
+            HStack(spacing: 4) {
+                Text(newChatModelPlaceholder)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.primary)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(Theme.textMuted)
+            }
+            .help("Model and effort (not wired yet)")
             NewChatControlButton(systemImage: "mic", label: "Dictate (not wired yet)")
             sendButton
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
     }
 
     /// Chat / Cowork, the reference's segmented pair. Cowork renders but never selects — it has no
@@ -411,10 +456,12 @@ struct NewChatPage: View {
             ForEach(newChatModeOptions, id: \.self) { option in
                 let isSelected = option == mode
                 Button {
-                    mode = option
+                    // Animated so the Cowork strip visibly SLIDES out from under the composer
+                    // rather than snapping into existence.
+                    withAnimation(.easeInOut(duration: 0.24)) { mode = option }
                 } label: {
                     Text(option.title)
-                        .font(.system(size: 12, weight: isSelected ? .medium : .regular))
+                        .font(.system(size: 13, weight: isSelected ? .medium : .regular))
                         .foregroundStyle(isSelected ? AnyShapeStyle(.primary)
                                                     : AnyShapeStyle(Theme.textMuted))
                         .padding(.horizontal, 10)
@@ -480,7 +527,7 @@ struct NewChatPage: View {
     /// drop the promotion). It is a place for Norma to say something occasionally — and when there
     /// is nothing to say it shows the day's tip rather than sitting empty or congratulating itself.
     private var announcementRow: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 10) {
             NewChatControlChip(systemImage: "folder", title: "Project or folder",
                                label: "Working folder (not wired yet)")
             NewChatControlChip(systemImage: "hand.raised", title: "Ask",
@@ -488,16 +535,16 @@ struct NewChatPage: View {
             Spacer(minLength: 12)
             HStack(spacing: 5) {
                 Image(systemName: "sparkles")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                 Text(newChatAnnouncement(announcement, day: newChatTipDay(Date())))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
-            .font(.system(size: 11))
+            .font(.system(size: 12))
             .foregroundStyle(Theme.textMuted)
         }
         .padding(.horizontal, 14)
-        .padding(.bottom, 11)
+        .frame(height: newChatCoworkStripHeight)
     }
 
     /// First send = the create-on-send flow (spec §2): exactly ONE `session.create` (mode chat,
