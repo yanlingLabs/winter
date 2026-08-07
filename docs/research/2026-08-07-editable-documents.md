@@ -106,50 +106,86 @@ AppleScript or Office add-ins against a real Office install. Perfect fidelity by
 
 ---
 
-## 3. What this means in practice
+## 3. DECIDED: LibreOffice via LibreOfficeKit
 
-**The order of difficulty is not what it looks like from outside.** Rendering these formats is nearly free (QuickLook, per the previous note). Editing them faithfully is one of the genuinely hard problems in desktop software, and it is hard in a way that does not yield to effort — it yields to *choosing someone else's engine*.
+**User rule (2026-08-07):** full Word, Excel and PowerPoint — editable by the user *and* by the agent, **including layout**, not just content. Norma must stay **Apache-2.0**. The upstream project must be modifiable. Microsoft's proprietary extras are explicitly out of scope.
 
-**Recommended shape:**
+Those constraints admit exactly one family. **LibreOffice, embedded through [LibreOfficeKit](https://docs.libreoffice.org/libreofficekit.html).**
 
-1. **Ship the code editor first.** Monaco + `monaco-languageclient` over the existing `LspManager`. Highest value per unit of work by a wide margin, and it proves the panel/tab shell that everything else will sit in.
-2. **Spike ZetaOffice/ZetaJS** before committing to anything heavier. If WASM LibreOffice is usable, it is the cleanest possible answer for a Chromium-based app — no server, no IPC, agent and user on one engine. A spike is days; the answer is worth knowing before spending weeks elsewhere.
-3. **If the spike fails, the choice is a LICENCE decision, not a technical one** — see §4.
-4. **Do not build your own OOXML editor.** For Word maybe, for PowerPoint no.
-5. **Decide the agent's mutation path at the same time as the editor** — not after. Picking an editor and *then* asking "how does the agent edit this?" is how you end up with two engines and silent divergence.
+### Why the licence works, precisely
+
+**MPL-2.0 is FILE-LEVEL copyleft.** MPL files may be combined with your own code in separate files, and your files keep whatever licence you choose. So:
+
+- **Norma stays Apache-2.0.**
+- You publish modifications to **LibreOffice's own files** only — which is exactly the "allowed to modify it to fit my needs" requirement, satisfied rather than merely tolerated.
+- Bonus: LibreOffice already contains Apache-2.0 code inherited from OpenOffice, and Apache-2.0 is explicitly compatible with MPL-2.0.
+
+This is the decisive difference from ONLYOFFICE, whose AGPL would pull the shipped app to AGPL. Same capability class, opposite licence outcome.
+
+### Why LibreOfficeKit is the right seam
+
+LOKit is the documented bridge between LibreOffice and an embedding application:
+
+- usable as a **static library** — no server and no separate process required
+- **tiled rendering** into 32-bit BGRA bitmap buffers, with callbacks for tile invalidation (`LOK_CALLBACK_INVALIDATE_TILES`), cursor position and text selection — i.e. the host draws the document, into a Chromium canvas or a native view
+- **`postUnoCommand()`** dispatches any UNO command, with parameters
+- explicitly intended to let applications drive LibreOffice "from different applications or **web browsers**"
+
+Collabora Online is itself built on LOKit — so this is using the engine beneath their product rather than their product.
+
+### Layout-level agent control, which was the actual requirement
+
+UNO exposes the document model, not just its text:
+
+| | What the agent can manipulate |
+| --- | --- |
+| **Word** | Paragraph and page styles, section breaks, text frames, anchoring, tables, columns, margins — `com.sun.star.text.*` |
+| **PowerPoint** | Shape position/size/rotation, slide layouts, masters, placeholders, z-order — `com.sun.star.drawing.*` / `com.sun.star.presentation.*` |
+| **Excel** | Cells, ranges, formulas, charts — `com.sun.star.sheet.*`. The easy one, as expected: a spreadsheet has a clean addressable model. |
+
+**And crucially: one engine.** The user edits through LOKit's tiles and input events; the agent edits through UNO commands into the *same* loaded document. No second model, no divergence — the constraint §2 identified as the thing that kills naive designs is satisfied structurally.
+
+### Fidelity, and why the carve-out matters
+
+LibreOffice is ODF-native and handles Microsoft formats "well but not perfectly". That gap is concentrated in **undocumented and proprietary Microsoft behaviour** — which the rule explicitly excludes. Documented OOXML it handles thoroughly. The scope carve-out and the engine's real weakness line up almost exactly.
+
+### Three ways to ship it
+
+| | Trade-off |
+| --- | --- |
+| **LOKit embedded directly** | Most control, no server, engine inside the app. **Biggest integration cost** — the editing UI is built on tiles plus callbacks. What Collabora's own mobile apps do. |
+| **Collabora Online bundled** | A good editing UI already exists. Costs a local server process. Still MPL-2.0. |
+| **ZetaOffice (WASM)** | No server, lives in the Chromium panel, ZetaJS drives UNO. Still beta. |
+
+### The risk to retire first
+
+**Building LibreOffice for macOS arm64 as an embeddable library.** It is an enormous codebase with its own build system (`gbuild`), and published LOKit binaries skew towards mobile targets. This is the single most likely thing to consume weeks unexpectedly, and it gates everything else — so it should be spike #1, before any UI work.
 
 ---
 
-## 4. The licence question — Norma is Apache-2.0, and that is the whole decision
+## 4. The licence table, for the record
 
-Norma is **Apache-2.0** (`packages/*/package.json`) and public at `github.com/yanlingLabs/norma`. An earlier draft assumed proprietary and called AGPL a blocker. **Wrong** — but the licence still decides this, just differently.
-
-Apache-2.0 is **one-way compatible** with AGPL v3: Apache code can be combined into an AGPL work, and the **combined work is then AGPL v3**.
+Norma is **Apache-2.0** (`packages/*/package.json`), public at `github.com/yanlingLabs/norma`. An earlier draft of this note assumed proprietary and called AGPL a blocker — wrong, but the licence still decides the engine, just differently.
 
 | Engine | Licence | Effect on Norma |
 | --- | --- | --- |
-| ONLYOFFICE (Docs or Desktop Editors) | **AGPL v3** | The **shipped app becomes AGPL v3.** The repo can stay Apache-2.0, but what you distribute carries AGPL obligations, including the network clause. |
-| Collabora Online | **MPL 2.0** | **Norma stays Apache-2.0.** Publish changes to Collabora's own files only. |
-| LibreOffice / ZetaOffice | **MPL 2.0** | Same — Norma stays Apache-2.0. |
+| ONLYOFFICE (Docs or Desktop Editors) | **AGPL v3** | The **shipped app becomes AGPL v3.** Repo may stay Apache-2.0; the distribution carries AGPL obligations including the network clause. **Ruled out by the Apache-2.0 rule.** |
+| **LibreOffice / LibreOfficeKit** | **MPL 2.0** | **Norma stays Apache-2.0.** Publish changes to their files only — which is also the permission to modify. **Chosen.** |
+| Collabora Online | **MPL 2.0** | Same; a packaging of the above. |
+| ZetaOffice / ZetaJS | **MPL 2.0** | Same; a WASM packaging of the above. |
 
-**This is a values decision, not a legal obstacle.** Going AGPL is entirely legitimate for a free, open project, and buys the best OOXML fidelity available. What it costs:
-
-- **Permissive forking goes away.** Apache-2.0 lets anyone build proprietary products on Norma; AGPL does not. If that permission is deliberate, AGPL removes it.
-- **The network clause** reaches anyone who runs Norma as a service.
-- **Some organisations ban AGPL outright**, which narrows who can adopt it at work.
-
-**So the fork in the road:**
-
-- **Best `.docx`/`.pptx` fidelity matters most, and AGPL is acceptable** → ONLYOFFICE **Desktop Editors** (no server, already CEF-based, `sdkjs` for agent control).
-- **Staying Apache-2.0 matters most** → **Collabora** or **ZetaOffice** (both MPL 2.0), accepting somewhat weaker OOXML fidelity.
-
-That is the actual decision. Everything else follows from it.
+Apache-2.0 is one-way compatible with AGPL v3 — Apache code can be pulled into an AGPL work, and the combination is then AGPL. That is the mechanism that rules ONLYOFFICE out under the stated rule, not any technical shortcoming: its OOXML fidelity is the best of the open options.
 
 ---
 
-## 5. One thing to settle early
+## 5. Order of work
 
-**One thing to settle early:** whether "the agent modifies the document" means *while the user has it open* (live co-editing, needs the editor's automation API and an operational-transform story) or *when it is closed* (much easier — mutate the file, reopen). Those are very different projects, and the second is a legitimate v1.
+1. **Spike the LOKit build for macOS arm64 first.** It is the riskiest unknown and it gates everything else. Do not design UI against an engine you have not yet built.
+2. **Ship the code editor in parallel or first** (§1) — Monaco + `monaco-languageclient` over the existing `LspManager`. It is nearly free, and it builds the panel/tab shell the office surfaces will live in.
+3. **Then choose the delivery shape** — LOKit embedded, Collabora Online bundled, or ZetaOffice — from what the spike teaches. All three are MPL-2.0, so this stays a technical choice rather than a licensing one.
+4. **Design the agent's UNO path alongside the editing UI, not after it.** Both drive the same loaded document; that is the property that makes this work, and it is easy to lose by building the UI first and bolting automation on.
+
+**One thing to settle early:** whether "the agent modifies the document" means *while the user has it open* — live, needing UNO commands into the live document and a coherent story for concurrent edits — or *only when closed*, which is far simpler. With LOKit both are possible; the first is meaningfully more work and is a legitimate v2.
 
 ---
 
