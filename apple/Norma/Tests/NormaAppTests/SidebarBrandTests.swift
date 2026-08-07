@@ -282,12 +282,59 @@ final class SidebarBrandTests: XCTestCase {
         XCTAssertEqual(newChatTipDay(jan1, calendar: calendar), 1)
     }
 
-    /// The mode picker shows Chat and Cowork, and Cowork is honestly unavailable — it has no
-    /// daemon mode at all. Pinned so a future "tidy-up" cannot quietly mark it selectable.
+    /// The mode picker shows Chat and Cowork, and Cowork remains honestly unavailable — it has no
+    /// daemon mode at all.
     func testNewChatModePickerOffersChatAndAnHonestlyUnavailableCowork() {
         XCTAssertEqual(newChatModeOptions, [.chat, .cowork])
         XCTAssertTrue(SessionMode.chat.isAvailable)
-        XCTAssertFalse(SessionMode.cowork.isAvailable, "Cowork renders, but must not select")
+        XCTAssertFalse(SessionMode.cowork.isAvailable)
+    }
+
+    /// The working-folder / approval / announcement row is COWORK ONLY (user ruling, 2026-08-07):
+    /// a chat has no working folder and takes no approvals, so offering them would be offering
+    /// settings that cannot apply to what the page is about to create.
+    func testCoworkControlsShowOnCoworkOnly() {
+        XCTAssertTrue(newChatShowsCoworkControls(mode: .cowork))
+        XCTAssertFalse(newChatShowsCoworkControls(mode: .chat))
+        XCTAssertFalse(newChatShowsCoworkControls(mode: .code))
+        XCTAssertFalse(newChatShowsCoworkControls(mode: .dispatch))
+    }
+
+    /// Cowork can be SELECTED (so the design it unlocks is visible) but must never SEND — the
+    /// create is always a chat, so a Cowork send would quietly mint the wrong thing. The refusal
+    /// carries a reason; an empty draft is the ordinary resting state and carries none.
+    func testSendIsRefusedOnAnUnbuiltModeWithAReason() {
+        let reason = newChatSendBlockedReason(draft: "hello", mode: .cowork)
+        XCTAssertEqual(reason, "Cowork isn't built yet")
+    }
+
+    func testSendIsBlockedButUnexplainedOnAnEmptyDraft() {
+        XCTAssertEqual(newChatSendBlockedReason(draft: "", mode: .chat), "")
+        XCTAssertEqual(newChatSendBlockedReason(draft: "   \n", mode: .chat), "")
+    }
+
+    func testSendIsAvailableOnlyWithTextAndABuiltMode() {
+        XCTAssertNil(newChatSendBlockedReason(draft: "hello", mode: .chat))
+    }
+
+    /// The unbuilt-mode refusal outranks the empty draft — otherwise selecting Cowork and typing
+    /// nothing would report the wrong reason, and the user would never learn Cowork is the block.
+    func testUnbuiltModeOutranksTheEmptyDraft() {
+        XCTAssertEqual(newChatSendBlockedReason(draft: "", mode: .cowork), "Cowork isn't built yet")
+    }
+
+    /// The starters are real behaviour, not placeholders: each prefills the composer. Every one
+    /// needs a non-empty prefill and a glyph that actually resolves.
+    func testEveryStarterPrefillsAndHasARealGlyph() {
+        XCTAssertFalse(newChatStarters.isEmpty)
+        for starter in newChatStarters {
+            XCTAssertFalse(starter.title.isEmpty)
+            XCTAssertFalse(starter.prefill.isEmpty, "\(starter.title) must prefill something")
+            XCTAssertNotNil(
+                NSImage(systemSymbolName: starter.systemImage, accessibilityDescription: nil),
+                "\(starter.title)'s glyph \(starter.systemImage) is not a real SF Symbol")
+        }
+        XCTAssertEqual(Set(newChatStarters.map(\.title)).count, newChatStarters.count)
     }
 
     // MARK: - The account menu (the Dashboard split)

@@ -88,6 +88,55 @@ let newChatCardCornerRadius: CGFloat = 16
 /// claim this page had picked it, and the page has no session to pick for yet.
 let newChatModelPlaceholder = "Default model"
 
+/// The composer's own placeholder, inside the card. The greeting above already says what this
+/// page is for, so this asks rather than repeats — the reference's own split.
+let newChatComposerPlaceholder = "How can I help you today?"
+
+/// PURE: whether the card shows its SECOND control row (working folder, approval mode,
+/// announcement).
+///
+/// Cowork only (user ruling, 2026-08-07): a chat has no working folder and takes no approvals —
+/// showing those controls on a chat would offer settings that cannot apply to what it is about to
+/// create. The announcement strip rides the same row and so shares its fate.
+func newChatShowsCoworkControls(mode: SessionMode) -> Bool {
+    mode == .cowork
+}
+
+/// PURE: why send is unavailable, or `nil` when it is available.
+///
+/// Two independent reasons, and the ORDER matters: an empty draft is the ordinary resting state
+/// and needs no explanation, whereas a Cowork selection needs one — the mode picker can be moved
+/// to Cowork so the design is visible, but Cowork has no daemon mode at all, so sending would
+/// silently create a CHAT session instead. Refusing with a reason is the honest alternative to
+/// either hiding the mode or quietly lying about what was created.
+func newChatSendBlockedReason(draft: String, mode: SessionMode) -> String? {
+    if !mode.isAvailable { return "\(mode.title) isn't built yet" }
+    if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "" }
+    return nil
+}
+
+/// One suggestion chip below the card — a prompt starter that PREFILLS the composer.
+///
+/// Genuinely wired, unlike the card's control placeholders: prefilling a draft needs no session,
+/// no defaults concept, and no backend, so there is no reason to fake it.
+struct NewChatStarter: Equatable {
+    let title: String
+    let systemImage: String
+    /// What lands in the composer. Deliberately an OPENING, not a whole prompt — it hands you the
+    /// first few words and leaves the sentence yours to finish.
+    let prefill: String
+}
+
+let newChatStarters: [NewChatStarter] = [
+    NewChatStarter(title: "Write", systemImage: "pencil", prefill: "Help me write "),
+    NewChatStarter(title: "Learn", systemImage: "graduationcap", prefill: "Explain "),
+    NewChatStarter(title: "Code", systemImage: "chevron.left.forwardslash.chevron.right",
+                   prefill: "Help me with this code: "),
+    NewChatStarter(title: "Plan", systemImage: "list.bullet.rectangle", prefill: "Help me plan "),
+    NewChatStarter(title: "Norma's choice", systemImage: "lightbulb",
+                   prefill: "Surprise me — pick something useful."),
+]
+
 /// A bare icon button in the composer card's control row.
 struct NewChatControlButton: View {
     let systemImage: String
@@ -159,12 +208,17 @@ struct NewChatPage: View {
     var announcement: String? = nil
 
     @State private var draft = ""
+    /// The card's mode segment. View-local: it selects nothing real yet (the create is always a
+    /// chat), which is exactly why sending is refused while it sits on an unbuilt mode rather than
+    /// quietly creating something else — `newChatSendBlockedReason`.
+    @State private var mode: SessionMode = .chat
 
     var body: some View {
         VStack(spacing: 22) {
             Spacer(minLength: 0)
             greeting
             composerCard
+            starters
             // Visible failure (spec's honesty rule): a create that failed says so, in place —
             // the page never navigates on failure (`sendFirstChatMessage`'s own contract).
             if case .failed(let message) = host.newChatCreate {
@@ -189,15 +243,59 @@ struct NewChatPage: View {
     /// the field itself uses.
     private var greeting: some View {
         HStack(spacing: 12) {
-            Image(nsImage: NSApp.applicationIconImage)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 30, height: 30)
+            // Norma's own brand mark, ACCENT-TINTED — the reference sets its mark in the brand
+            // colour beside the greeting, and this is that treatment with our mark and our teal.
+            // `mb-idle` is the menu bar's mark and is authored as a TEMPLATE image
+            // (`MenuBarController.templateImage`), which is exactly what makes it tintable; the
+            // app icon cannot do this — it is full-colour artwork on a white tile and reads as an
+            // icon pasted onto the page rather than as a mark.
+            if let mark = Bundle.main.image(forResource: "mb-idle") {
+                Image(nsImage: mark)
+                    .resizable()
+                    .renderingMode(.template)
+                    .scaledToFit()
+                    .frame(width: 26, height: 26)
+                    .foregroundStyle(Theme.accent)
+            }
             Text(newChatGreeting)
                 .font(Theme.greeting)
                 .foregroundStyle(.primary)
         }
         .multilineTextAlignment(.center)
+    }
+
+    /// The prompt starters below the card (the reference's own row). Each PREFILLS the composer
+    /// and focuses it — real behaviour, not a placeholder: a starter needs no session and no
+    /// backend, so there was no reason to fake it.
+    private var starters: some View {
+        HStack(spacing: 8) {
+            ForEach(newChatStarters, id: \.title) { starter in
+                Button {
+                    draft = starter.prefill
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: starter.systemImage)
+                            .font(.system(size: 11))
+                        Text(starter.title)
+                            .font(.system(size: 12))
+                    }
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 12)
+                    .frame(height: 30)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Theme.composerSurface)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(Theme.hairline, lineWidth: 1)
+                )
+                .help("Start with: \(starter.prefill)")
+            }
+        }
     }
 
     /// The existing composer, in a quiet bordered card so it reads as THE affordance on an
@@ -224,6 +322,20 @@ struct NewChatPage: View {
                         onSubmit: { submit() },
                         usesAdaptiveColors: true
                     )
+                    // The composer component has no placeholder parameter (its own doc notes the
+                    // v1 shape never had one), so the placeholder is an overlay that steps aside
+                    // the moment there is text. Non-hit-testing, or it would eat the click that
+                    // focuses the field underneath it.
+                    .overlay(alignment: .topLeading) {
+                        if draft.isEmpty {
+                            Text(newChatComposerPlaceholder)
+                                .font(.system(size: 14))
+                                .foregroundStyle(Theme.textMuted)
+                                .padding(.horizontal, ComposerTextView.textContainerInset.width)
+                                .padding(.vertical, ComposerTextView.textContainerInset.height)
+                                .allowsHitTesting(false)
+                        }
+                    }
                 } else {
                     // The held draft — same type size, same top-leading start as the live composer
                     // (its `textContainerInset`/zero line-fragment padding, mirrored) so the swap
@@ -236,12 +348,17 @@ struct NewChatPage: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
             }
-            .frame(height: 76)
+            .frame(height: 54)
             .padding(.horizontal, 14)
-            .padding(.top, 12)
+            .padding(.top, 14)
 
             controlRow
-            announcementRow
+            // Cowork only (`newChatShowsCoworkControls`): a chat has no working folder and takes
+            // no approvals, so offering those on a chat would be offering settings that cannot
+            // apply to what it creates.
+            if newChatShowsCoworkControls(mode: mode) {
+                announcementRow
+            }
         }
         .background(
             RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
@@ -291,19 +408,30 @@ struct NewChatPage: View {
     /// sidebar's Cowork row gets rather than hiding a mode the user knows is coming.
     private var modePicker: some View {
         HStack(spacing: 2) {
-            ForEach(newChatModeOptions, id: \.self) { mode in
-                let isSelected = mode == .chat
-                Text(mode.title)
-                    .font(.system(size: 12, weight: isSelected ? .medium : .regular))
-                    .foregroundStyle(mode.isAvailable ? AnyShapeStyle(.primary)
-                                                      : AnyShapeStyle(Theme.textMuted))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(isSelected ? AnyShapeStyle(Theme.canvas) : AnyShapeStyle(.clear))
-                    )
-                    .help(mode.isAvailable ? mode.title : "\(mode.title) — not built yet")
+            ForEach(newChatModeOptions, id: \.self) { option in
+                let isSelected = option == mode
+                Button {
+                    mode = option
+                } label: {
+                    Text(option.title)
+                        .font(.system(size: 12, weight: isSelected ? .medium : .regular))
+                        .foregroundStyle(isSelected ? AnyShapeStyle(.primary)
+                                                    : AnyShapeStyle(Theme.textMuted))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isSelected ? AnyShapeStyle(Theme.composerSurface)
+                                         : AnyShapeStyle(Color.clear))
+                )
+                // Cowork IS selectable, so the design it unlocks (the second control row) can
+                // actually be seen — but it cannot send. See `newChatSendBlockedReason`: the
+                // alternative was either hiding a mode the user knows is coming, or letting a
+                // Cowork send quietly mint a chat session.
+                .help(option.isAvailable ? option.title : "\(option.title) — not built yet")
             }
         }
         .padding(2)
@@ -315,19 +443,34 @@ struct NewChatPage: View {
     /// The send affordance — the ONE live control in the row. Accent-tinted like the reference's,
     /// which is the single place the brand teal earns its way onto this surface.
     private var sendButton: some View {
-        Button(action: submit) {
-            Image(systemName: "arrow.up")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.canvas)
-                .frame(width: 26, height: 26)
-                .background(Circle().fill(Theme.accent))
-                .contentShape(Circle())
+        let blocked = newChatSendBlockedReason(draft: draft, mode: mode)
+        return Group {
+            if blocked == nil {
+                // Ready: the accent-tinted arrow — the one place the brand teal earns its way
+                // onto this surface, exactly as the reference tints its own send.
+                Button(action: submit) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.canvas)
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(Theme.accent))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Send")
+                .accessibilityLabel("Send")
+            } else {
+                // Not ready: the reference's waveform sits here until there is something to send.
+                // A blocked send shows WHY on hover when there is a reason worth giving (Cowork);
+                // an empty draft is the ordinary resting state and explains itself.
+                Image(systemName: "waveform")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.textMuted)
+                    .frame(width: 26, height: 26)
+                    .help(blocked!.isEmpty ? "Type a message to send" : blocked!)
+                    .accessibilityLabel(blocked!.isEmpty ? "Send — type a message first" : blocked!)
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-        .opacity(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.4 : 1)
-        .help("Send")
-        .accessibilityLabel("Send")
     }
 
     /// The card's second row: the working-folder and approval-mode pickers (both placeholders, for
