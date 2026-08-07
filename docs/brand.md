@@ -134,8 +134,21 @@ The sidebar's vocabulary, measured from the ChatGPT desktop reference. All are *
 | `shellSidebarRowCornerRadius` | 6 | Shared by every row fill. |
 | `shellSidebarTopInset` | 44 | Traffic-light clearance. |
 | `shellSidebarHairlineWidth` | 1 | |
+| `shellTrafficLightInset` | (10, 8) | See below. |
+| `shellSidebarToggleLeadingInset` | 88 | Toggle starts beyond the three window buttons. |
+| `shellSidebarToggleTopInset` | 8 | From the window top, *not* the safe area. |
+| `shellSidebarToggleSize` | 24 | |
 
 `shellSidebarSectionGap` deserves a note: at the old 14 pt the pane read as one undifferentiated column of rows. Widening that single gap does more than any other value to make the sidebar read like the reference.
+
+`shellTrafficLightInset` deserves a longer one. macOS insets the traffic lights automatically only when a window has a **unified NSToolbar** — and this window deliberately has none (`AppShellTests` pins `window.toolbar == nil`; the ChatGPT app has no toolbar and the custom-sidebar rework removed ours on purpose). Rather than reinstate chrome that was removed by decision, `AppWindowController.positionTrafficLights()` offsets the three standard window buttons by hand, from a **remembered AppKit baseline** so repeated application cannot drift them, re-applied on resize because AppKit re-lays them out.
+
+### The sidebar toggle
+
+The pane collapses, driven by a toggle pinned in the titlebar band to the right of the traffic lights. Two rules:
+
+1. **It stays in the same place in both states.** An affordance that disappears along with the pane it controls is unfindable. This is why it is an overlay on the shell root rather than a child of the pane.
+2. **The glyph states the condition; the label names the action.** Two distinct symbols — `rectangle.leadinghalf.inset.filled` when showing, `sidebar.left` when hidden — not one symbol in two tints, which would be ambiguous exactly when the referenced pane is off-screen. Help text reads "Hide sidebar" / "Show sidebar".
 
 ---
 
