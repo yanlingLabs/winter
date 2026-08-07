@@ -381,11 +381,18 @@ struct NewChatPage: View {
             controlRow
         }
         .frame(height: newChatComposerHeight)
-        // The composer's OWN face and border. Fixed: selecting Cowork must not resize this box
-        // (user ruling, 2026-08-07) — the extra controls arrive BELOW it instead.
-        // Face only — the BORDER lives on the outer container below, which is what keeps a single
-        // outline around composer+strip instead of two nested ones once Cowork opens.
-        .background(Theme.composerSurface)
+        // The composer keeps its OWN complete face and border — all four corners, always. That is
+        // what makes the Cowork strip read as a second surface BEHIND it rather than as this card
+        // growing a section (user correction, 2026-08-07).
+        .background(
+            RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
+                .fill(Theme.composerSurface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
+                .strokeBorder(Theme.hairline, lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.05), radius: 16, y: 4)
         .overlay(alignment: .bottomTrailing) {
             if ui.showsWorkingIndicator {
                 ProgressView()
@@ -395,32 +402,37 @@ struct NewChatPage: View {
             }
         }
 
-        // The Cowork strip is a SIBLING BELOW the composer, in a clipped container — not a
-        // z-ordered layer under it.
-        //
-        // The first attempt WAS a ZStack with the strip behind: it broke, because the composer's
-        // own opaque face is painted over whatever sits under it, so the strip rendered as a
-        // ghost bleeding through the card's bottom edge. Siblings in a clipped stack give the same
-        // read honestly — `.move(edge: .top)` slides the strip DOWN into its slot from behind the
-        // composer's bottom edge, the clip hides it until it arrives, and the composer's own fixed
-        // height means nothing above it shifts (the ruling).
-        return VStack(spacing: 0) {
-            box
-            if newChatShowsCoworkControls(mode: mode) {
-                announcementRow
-                    .background(Theme.canvas)
-                    .overlay(alignment: .top) {
-                        Rectangle().fill(Theme.hairline).frame(height: 1)
-                    }
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous))
-        .overlay(
+        // How far the strip protrudes below the composer. Animating THIS is the whole effect: the
+        // strip is a full-height rounded rect sitting behind the composer, and growing it downward
+        // slides its band out from underneath.
+        let band = newChatShowsCoworkControls(mode: mode) ? newChatCoworkStripHeight : 0
+
+        return ZStack(alignment: .top) {
+            // The second surface, BEHIND. It spans the composer's whole height plus the band, so
+            // its side borders and bottom corners are the only parts that ever show — the composer
+            // is opaque and covers the rest. Two earlier attempts got this wrong in opposite ways:
+            // one let the strip bleed through as a ghost, the other wrapped both in a single
+            // border, which is exactly the "expansion" look being corrected here.
             RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                .strokeBorder(Theme.hairline, lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.05), radius: 16, y: 4)
+                .fill(Theme.canvas)
+                .overlay(
+                    RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
+                        .strokeBorder(Theme.hairline, lineWidth: 1)
+                )
+                .frame(height: newChatComposerHeight + band)
+                .overlay(alignment: .bottom) {
+                    // Pinned to the growing edge and clipped, so the row travels DOWN with the
+                    // band instead of being uncovered in place — that is the difference between
+                    // "slides out from beneath" and "fades in".
+                    announcementRow
+                        .frame(height: newChatCoworkStripHeight)
+                        .frame(height: band, alignment: .bottom)
+                        .clipped()
+                }
+                .opacity(band > 0 ? 1 : 0)
+
+            box
+        }
         .frame(maxWidth: newChatCardWidth)
     }
 
