@@ -52,6 +52,8 @@ Not because CEF is bad — because of Norma's release pipeline. `scripts/release
 - the nested-signing step (already the fiddliest part of the pipeline — see the hardened-runtime comments in `release.ts`) grows a whole tree of helper executables,
 - the Chromium version becomes a recurring **delivery** obligation you own (see below).
 
+That is a **permanent tax on every release**, not a one-off integration cost.
+
 #### "Doesn't Google handle the security patching?"
 
 Partly — and the distinction is the entire cost, so it is worth stating precisely.
@@ -77,11 +79,9 @@ Note *where* those exploited bugs sit: V8, Skia, WebGPU — exactly the code tha
 
 **Fair counterweight:** this is entirely doable, and OpenAI demonstrates it. It is a *commitment*, not a blocker. The question is not "can it be done" but "do we want a fortnightly security obligation attached to a side panel, when WebKit renders the same content with Apple carrying that obligation".
 
-That is a **permanent tax on every release**, not a one-off integration cost.
-
 ### Measured: what the ChatGPT Mac app actually does (2026-08-07)
 
-Inspected `/Applications/ChatGPT.app` directly, because it is the closest real-world comparable. **It ships full Chromium**, rebranded:
+Inspected `/Applications/ChatGPT.app` directly, because it is the closest real-world comparable. **It is an Electron app** — i.e. full Chromium plus Node, with the framework rebranded:
 
 - `Codex Framework.framework/Versions/**151.0.7922.71**` — a Chrome version string, in a Chromium framework layout
 - Helper apps: `Codex (Renderer).app`, `Codex (GPU).app`, `Codex (Service).app`, `Codex (Alerts).app`
