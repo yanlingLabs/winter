@@ -885,8 +885,8 @@ final class ShellSessionHost: ObservableObject {
     // MARK: - The hosted view's wiring
 
     /// The `SidebarWiring` the hosted `WindowContentView` renders. RIGHT-ONLY: the shell's own
-    /// `NavigationSplitView` sidebar is the session switcher, so the inner left column is opted out
-    /// of (`showsSessionSwitcher: false`) and the work column keeps everything else.
+    /// custom sidebar pane (`ShellSidebar`) is the session switcher, so the inner left column is
+    /// opted out of (`showsSessionSwitcher: false`) and the work column keeps everything else.
     ///
     /// Built fresh per read (a struct of closures — nothing to cache) so `currentSessionId` always
     /// reads the live attachment, the same "read fresh at render" convention the work column's own
@@ -1163,17 +1163,19 @@ final class ShellSessionHost: ObservableObject {
 
 /// The shell's session surface: the shared `WindowContentView`, in its right-only configuration.
 ///
-/// GALLERY EXTENSION POINT: `norma-ios/docs/ios26-design-gallery` has no transcript-in-a-split-view
-/// geometry (the phone's chat is always full-bleed), so what transfers here is the CONTENT — the
-/// same header row, transcript, cards, composer and work column every other Norma window renders —
-/// while the framing is the Mac's own: no self-drawn chrome, no `.ignoresSafeArea()`, because the
-/// split view's detail column already sits correctly under the window's unified toolbar.
+/// GALLERY EXTENSION POINT: `norma-ios/docs/ios26-design-gallery` has no transcript-beside-a-
+/// sidebar geometry (the phone's chat is always full-bleed), so what transfers here is the
+/// CONTENT — the same header row, transcript, cards, composer and work column every other Norma
+/// window renders — while the framing is the Mac's own: no self-drawn chrome, no
+/// `.ignoresSafeArea()`, because the shell's content column already sits below the titlebar band
+/// via the safe area (custom-sidebar rework: the unified toolbar is gone; only the custom PANE
+/// bleeds under the transparent titlebar, deliberately).
 struct ShellSessionView: View {
     @ObservedObject var host: ShellSessionHost
     /// cli-handoff T3: the shared directory, observed HERE (not through `host`, whose reference to
-    /// it is a plain `let` no view re-renders on) so the toolbar action's eligibility gate re-reads
-    /// the live wire row — a row that archives out from under an open session drops the affordance
-    /// the moment the fold lands, not on the next unrelated republish.
+    /// it is a plain `let` no view re-renders on) so the Move-to-CLI pill's eligibility gate
+    /// re-reads the live wire row — a row that archives out from under an open session drops the
+    /// affordance the moment the fold lands, not on the next unrelated republish.
     @ObservedObject var directory: SessionDirectory
 
     var body: some View {
@@ -1188,13 +1190,39 @@ struct ShellSessionView: View {
                     WindowContentView(
                         adapter: attachment.adapter,
                         tint: Color(red: 0.45, green: 0.75, blue: 1.0),
-                        // The detail column is already inset below the toolbar (unlike a detached
-                        // window, which bleeds under its own hidden titlebar and pays 52pt for it) —
-                        // this is the plain breathing room above the header row. Tune-at-gate constant.
+                        // The detail column is already inset below the titlebar band by the safe
+                        // area (unlike a detached window, which bleeds under its own hidden
+                        // titlebar and pays 52pt for it) — this is the plain breathing room above
+                        // the header row. Tune-at-gate constant.
                         topInset: 8,
                         sidebars: host.sidebarWiring
                     ) {
-                        EmptyView()
+                        // cli-handoff T3's open-session "Move to CLI", RE-HOSTED (custom-sidebar
+                        // rework): the window toolbar it rode died with the native chrome
+                        // (`AppWindowController` — ChatGPT has none), so the SAME gated verb now
+                        // renders as a custom pill in the header's shell-owned accessory slot —
+                        // the exact slot the morph window injects its traffic lights through,
+                        // still never inside the shared `WindowContentView` itself. Same ONE
+                        // eligibility gate as the landing rows and the Recents context menu
+                        // (`moveToCliOffered`, on the ATTACHED session's live wire row — which is
+                        // also what keeps it absent on `DispatchSurface`'s hosting of this view),
+                        // same host verb, same help/accessibility labels as the toolbar item had.
+                        if let sessionId = host.attachedSessionId,
+                           moveToCliOffered(row: directory.rows.first(where: { $0.sessionId == sessionId })) {
+                            Button {
+                                host.moveToCli(sessionId: sessionId)
+                            } label: {
+                                Label("Move to CLI", systemImage: "terminal")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Capsule().fill(.quaternary))
+                                    .contentShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Open Terminal in this session's folder, attached to this session")
+                            .accessibilityLabel("Move to CLI")
+                        }
                     }
                     // The outputs box — COLLAPSED/ABSENT when empty (the pinned "never a hollow
                     // box" rule). `host.outputFiles` is already mode-gated at the source
@@ -1210,28 +1238,6 @@ struct ShellSessionView: View {
                 if let openFile = host.openOutputFile {
                     Divider()
                     FileViewer(url: openFile, onClose: { host.closeOutputFile() })
-                }
-            }
-            // cli-handoff T3: the open-session "Move to CLI" action — SHELL-OWNED chrome. It lives
-            // on THIS view, never inside the shared `WindowContentView` (the orb's morph window and
-            // every detached window host that view too, and they gain NOTHING here — the plan's
-            // shell-owned-placement constraint), so the window toolbar grows the action only while
-            // the shell itself is showing an eligible session. Gated on the ATTACHED session's live
-            // wire row through the same ONE function as the landing rows' context-menu item
-            // (`moveToCliOffered`) — which is also what keeps it absent on `DispatchSurface`'s
-            // hosting of this view (the dispatch singleton's row is mode "dispatch").
-            .toolbar {
-                if let sessionId = host.attachedSessionId,
-                   moveToCliOffered(row: directory.rows.first(where: { $0.sessionId == sessionId })) {
-                    ToolbarItem(placement: .primaryAction) {
-                        Button {
-                            host.moveToCli(sessionId: sessionId)
-                        } label: {
-                            Label("Move to CLI", systemImage: "terminal")
-                        }
-                        .help("Open Terminal in this session's folder, attached to this session")
-                        .accessibilityLabel("Move to CLI")
-                    }
                 }
             }
         } else {

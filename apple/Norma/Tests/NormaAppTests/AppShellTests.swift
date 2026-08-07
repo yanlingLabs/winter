@@ -250,14 +250,19 @@ final class AppShellTests: XCTestCase {
     }
 
     /// chatgpt-ui T3 (spec §4): the seamless ChatGPT-desktop chrome, asserted on the REAL window.
-    /// Transparent titlebar over full-size content — the traffic lights sit inline over the
-    /// sidebar's own flat background (T1's fill `ignoresSafeArea`, so it reaches the very top);
-    /// the title TEXT is hidden (the seamless top carries no "Norma" label) while the window
-    /// KEEPS its title — Mission Control/Window-menu identity must survive the reskin; and the
-    /// empty unified toolbar stays — it is the inset-traffic-lights machinery (the
-    /// `DetachedWindowController` recipe, minus its clear/non-opaque shell: THIS window stays
-    /// opaque). The summon/visibility/geometry pins around this one are the guardrail — chrome
-    /// flags must never change behavior.
+    /// Transparent titlebar over full-size content — the traffic lights float over the custom
+    /// pane's own flat background (which ignores the top safe area and clears them with
+    /// `shellSidebarTopInset`); the title TEXT is hidden (the seamless top carries no "Norma"
+    /// label) while the window KEEPS its title — Mission Control/Window-menu identity must
+    /// survive the reskin.
+    ///
+    /// RETRUED (custom-sidebar rework): the toolbar assertion INVERTED — pass 1 kept an empty
+    /// unified toolbar as inset-traffic-lights machinery, but the ChatGPT desktop app has no
+    /// toolbar at all, and with the native `NavigationSplitView` gone nothing needs one; the
+    /// traffic lights sit at their standard inline position. `nil` is now the pinned state so a
+    /// toolbar can never quietly grow back (native chrome needs an explicit user OK). The
+    /// summon/visibility/geometry pins around this one are the guardrail — chrome flags must
+    /// never change behavior.
     func testWindowChromeIsSeamlessTitlebarOverFullSizeContent() {
         let controller = makeController()
         defer { controller.hide() }
@@ -270,8 +275,7 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(window.styleMask.contains(.fullSizeContentView), "content extends under the titlebar")
         XCTAssertEqual(window.titleVisibility, .hidden, "no title text over the seamless top")
         XCTAssertEqual(window.title, "Norma", "the window keeps its NAME — Mission Control/Window-menu identity")
-        XCTAssertNotNil(window.toolbar, "the empty unified toolbar is the inset-traffic-lights machinery")
-        XCTAssertEqual(window.toolbarStyle, .unified)
+        XCTAssertNil(window.toolbar, "custom-sidebar: NO toolbar — ChatGPT has none; the traffic lights float over the custom pane")
         XCTAssertTrue(window.isOpaque, "the shell is an opaque window — the detached windows' clear shell is NOT this recipe")
     }
 
@@ -773,6 +777,42 @@ final class AppShellTests: XCTestCase {
         XCTAssertNil(recentsActivityDotStyle(nil), "chat/dispatch rows carry no activity at all")
         XCTAssertNil(recentsActivityDotStyle("archived"), "archived never reaches Recents anyway — quiet, not guessed")
         XCTAssertNil(recentsActivityDotStyle("teleporting"), "an unknown future value is not a licence to guess")
+    }
+
+    // MARK: - custom-sidebar: the row fill decision (PURE — one function, every row obeys it)
+
+    /// The custom pane's rounded-rect row fill, decided in ONE pure function so every row — top
+    /// rows, Recents rows, the account row — behaves identically: selection beats hover (a hovered
+    /// selected row must not flicker to the weaker fill), hover shows only on an unselected row,
+    /// and a row at rest draws no fill at all (the flat pane IS the resting background).
+    func testSidebarRowFillSelectionBeatsHoverAndRestIsBare() {
+        XCTAssertEqual(shellSidebarRowFill(isSelected: true, isHovered: true), .selected,
+                       "selection beats hover — hovering a selected row never weakens its fill")
+        XCTAssertEqual(shellSidebarRowFill(isSelected: true, isHovered: false), .selected)
+        XCTAssertEqual(shellSidebarRowFill(isSelected: false, isHovered: true), .hover)
+        XCTAssertEqual(shellSidebarRowFill(isSelected: false, isHovered: false), ShellSidebarRowFill.none,
+                       "a row at rest draws no fill — the flat pane is the background")
+    }
+
+    /// The custom pane's row-selection decision (replaces `List(selection:)`'s tag matching): a
+    /// mode row is selected exactly on its own `.mode(...)` landing; New chat is an ACTION row and
+    /// is NEVER selected — including while the `.newChat` page itself is showing (the pinned
+    /// quiet-sidebar posture: the page matches no row, same as a `.session` destination); every
+    /// row goes quiet on `.session`/`.dashboard` destinations.
+    func testSidebarRowSelectionFollowsModeLandingsAndIsQuietElsewhere() {
+        XCTAssertTrue(shellSidebarRowIsSelected(.mode(.chat), destination: .mode(.chat)))
+        XCTAssertTrue(shellSidebarRowIsSelected(.mode(.cowork), destination: .mode(.cowork)),
+                      "an unavailable mode still selects — dimmed, never dead")
+        XCTAssertFalse(shellSidebarRowIsSelected(.mode(.code), destination: .mode(.chat)))
+        XCTAssertFalse(shellSidebarRowIsSelected(.newChat, destination: .newChat),
+                       "New chat is an action row — never selected, even on the page it opens")
+        XCTAssertFalse(shellSidebarRowIsSelected(.newChat, destination: .mode(.chat)))
+        for row in shellSidebarTopRows {
+            XCTAssertFalse(shellSidebarRowIsSelected(row, destination: .session("s1")),
+                           "\(row): every row goes quiet while a session is showing")
+            XCTAssertFalse(shellSidebarRowIsSelected(row, destination: .dashboard(pane: nil)),
+                           "\(row): every row goes quiet on the Dashboard")
+        }
     }
 
     // MARK: - Bugfix pass B4: the chat landing's own "New Chat" door (injected — never a second create path)

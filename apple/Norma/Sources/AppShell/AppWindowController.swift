@@ -154,13 +154,21 @@ final class AppWindowController: NSObject, NSWindowDelegate {
             backing: .buffered, defer: false)
         window.title = "Norma"
         // chatgpt-ui T3 (spec §4): the seamless top — the titlebar draws NO material and NO title
-        // text, so the traffic lights sit inline over the sidebar's own flat background (T1's
-        // `windowBackgroundColor` fill `ignoresSafeArea`, reaching the very top) and content
-        // scrolls under them, the ChatGPT-desktop look. The `title` above STAYS — Mission
-        // Control/the Window menu still need the name; only its in-window rendering goes.
-        // Deliberately NOT the rest of `DetachedWindowController`'s recipe: no `.clear`
-        // background/`isOpaque = false` — that window draws its own rounded shell, this one is a
-        // plain opaque window (pinned: `testWindowChromeIsSeamlessTitlebarOverFullSizeContent`).
+        // text, so the traffic lights sit inline over the sidebar's own flat background (the
+        // custom pane's `windowBackgroundColor` fill, reaching the very top) and content scrolls
+        // under them, the ChatGPT-desktop look. The `title` above STAYS — Mission Control/the
+        // Window menu still need the name; only its in-window rendering goes. Deliberately NOT
+        // the rest of `DetachedWindowController`'s recipe: no `.clear` background/`isOpaque =
+        // false` — that window draws its own rounded shell, this one is a plain opaque window
+        // (pinned: `testWindowChromeIsSeamlessTitlebarOverFullSizeContent`).
+        //
+        // custom-sidebar rework: NO NSToolbar — the ChatGPT desktop app has none. The unified
+        // toolbar was the inset-traffic-lights machinery AND what let macOS 26 render the old
+        // `NavigationSplitView` sidebar as the system's glass column; both died with the native
+        // container. The traffic lights now sit at their standard inline position, floating over
+        // the custom pane, which clears them itself (`shellSidebarTopInset` — the pane ignores
+        // the top safe area, so nothing native reserves that band). The open-session Move to CLI
+        // action, which rode the toolbar, now rides `ShellSessionView`'s header pill.
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false // this controller owns the window's lifetime, forever
@@ -169,14 +177,6 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         // `.fullScreenNone` also leaves the green button as a plain zoom, which is the right verb
         // for a window that hides rather than closes.
         window.collectionBehavior = [.fullScreenNone]
-        // Same Safari-style unified-toolbar technique `DetachedWindowController`/
-        // `DashboardWindowController` use for inset traffic lights (an empty toolbar + `.unified`
-        // style). On macOS 26 this is also what lets the `NavigationSplitView` sidebar render as the
-        // system's own glass column rather than a flush opaque panel.
-        let toolbar = NSToolbar(identifier: "norma.appshell.toolbar")
-        toolbar.displayMode = .iconOnly
-        window.toolbar = toolbar
-        window.toolbarStyle = .unified
         let navigationModel = navigation ?? ShellNavigationModel()
         self.window = window
         self.navigation = navigationModel
