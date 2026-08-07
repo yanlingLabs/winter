@@ -171,6 +171,13 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         // action, which rode the toolbar, now rides `ShellSessionView`'s header pill.
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
+        // sidebar-brand T5: the window's own fill matches the CONTENT plane (`docs/brand.md`), so
+        // a live resize never flashes the system grey behind the SwiftUI hosting view — the
+        // sidebar's own `Theme.canvas` is painted by the pane itself. Named-asset lookup with the
+        // system fallback kept: this runs during window construction, and a window that fails to
+        // build because a colorset is missing would be a far worse failure than an unbranded one
+        // (the catalog itself is pinned by `SidebarBrandTests`, which is where that must fail).
+        window.backgroundColor = NSColor(named: "CardSurface") ?? .windowBackgroundColor
         window.isReleasedWhenClosed = false // this controller owns the window's lifetime, forever
         window.minSize = NSSize(width: 820, height: 520)
         // Spec §1: opt OUT of native full-screen — a hidden full-screen window strands a Space.
@@ -212,7 +219,40 @@ final class AppWindowController: NSObject, NSWindowDelegate {
             pairingPresentation: pairingPresentation
         ))
         window.setFrame(frame, display: true)
+        positionTrafficLights()
     }
+
+    // MARK: - sidebar-brand: the traffic-light inset
+
+    /// Nudges the three standard window buttons in from the window's top-left corner.
+    ///
+    /// The reference (ChatGPT desktop, user measurement 2026-08-07) sits its traffic lights
+    /// noticeably further in than the macOS default, and ours read cramped against the corner by
+    /// comparison. The mechanism that normally produces that inset is a UNIFIED NSTOOLBAR — which
+    /// this window deliberately does not have (`AppShellTests` pins `window.toolbar == nil`; the
+    /// ChatGPT app has none and the custom-sidebar rework removed ours on purpose). So the offset
+    /// is applied by hand instead of reinstating chrome that was removed by decision.
+    ///
+    /// AppKit re-lays the buttons out on its own schedule, so this is re-applied from
+    /// `windowDidResize` and on every summon rather than only at construction — the offset is
+    /// relative to whatever AppKit just decided, so re-applying is idempotent ONLY if we compute
+    /// from a remembered baseline, which is what `trafficLightBaseline` below is for.
+    private func positionTrafficLights() {
+        let types: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
+        for type in types {
+            guard let button = window.standardWindowButton(type) else { continue }
+            // Remember where AppKit put it the FIRST time; every later application offsets from
+            // that baseline, so repeated calls cannot drift the buttons across the titlebar.
+            let baseline = trafficLightBaseline[type] ?? button.frame.origin
+            trafficLightBaseline[type] = baseline
+            button.setFrameOrigin(CGPoint(x: baseline.x + shellTrafficLightInset.x,
+                                          y: baseline.y - shellTrafficLightInset.y))
+        }
+    }
+
+    /// AppKit's own placement for each button, captured once. Offsets are computed from this, never
+    /// from the button's current frame — otherwise each call would shift them again.
+    private var trafficLightBaseline: [NSWindow.ButtonType: CGPoint] = [:]
 
     /// The one summon primitive every path funnels through (dock, menu bar, and — later — the orb,
     /// the outputs panel, and every "open in app" affordance).
@@ -249,6 +289,11 @@ final class AppWindowController: NSObject, NSWindowDelegate {
         occlusionVisible = true
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        // sidebar-brand: re-assert the inset here too. AppKit re-lays the standard window buttons
+        // out on its own schedule — not only on resize — and a summon follows an order-out, which
+        // is one of the moments it does. Offsetting from the remembered baseline makes re-applying
+        // free and idempotent, so the cheap thing is to do it at every plausible moment.
+        positionTrafficLights()
         syncState()
     }
 
@@ -265,6 +310,19 @@ final class AppWindowController: NSObject, NSWindowDelegate {
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         hide()
         return false
+    }
+
+    /// sidebar-brand: AppKit re-lays the standard window buttons out after a resize (and after a
+    /// zoom, which routes through here too), so the inset has to be re-applied or it is lost the
+    /// first time the user drags an edge.
+    func windowDidResize(_ notification: Notification) {
+        positionTrafficLights()
+    }
+
+    /// The other moment AppKit re-lays the buttons out — becoming key after the window has been
+    /// off-screen, or after returning from another Space. Same free, idempotent re-application.
+    func windowDidBecomeKey(_ notification: Notification) {
+        positionTrafficLights()
     }
 
     func windowDidChangeOcclusionState(_ notification: Notification) {

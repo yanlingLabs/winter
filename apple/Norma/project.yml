@@ -27,6 +27,12 @@ targets:
       # verified at load (RemoteAccessCoordinator.loadVerifiedRelayConfig) against
       # NormaKit's RelayConfigTrust.productionPublicKey before a single relay URL is trusted.
       - path: Resources
+      # sidebar-brand T1: the brand palette (docs/brand.md) — colorsets ONLY, no app-icon set.
+      # The `.icns` path still owns the icon via Info.plist's CFBundleIconFile
+      # ($(NORMA_APP_ICON)), and ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME stays unset so
+      # the `AccentColor` colorset here is a plain named color, NOT the app-wide control tint
+      # (the iOS ruling: the accent stays out of the sidebar).
+      - path: Assets.xcassets
     dependencies:
       - package: NormaKit
       - package: NormaProtocol
