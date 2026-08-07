@@ -1319,7 +1319,14 @@ struct HopAwayBackgroundBar: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        // chatgpt-ui T3 clash sweep (spec §4 + the "no glass anywhere in the main window" gate
+        // seed): this bar floats INSIDE the shell over the new flat surfaces — `.regularMaterial`
+        // was the last glass in the window. Flat `windowBackgroundColor` card + the shell's own
+        // 1 pt quaternary stroke vocabulary (the search field / new-chat composer card); radius
+        // and shadow unchanged — a minimal deglass, not a restyle. Both appearances follow the
+        // system colors by construction.
+        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary, lineWidth: 1))
         .shadow(radius: 8)
         .padding(.horizontal, 24)
     }
