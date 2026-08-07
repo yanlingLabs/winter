@@ -87,7 +87,7 @@ Inspected `/Applications/ChatGPT.app` directly, because it is the closest real-w
 - Helper apps: `Codex (Renderer).app`, `Codex (GPU).app`, `Codex (Service).app`, `Codex (Alerts).app`
 - `libEGL.dylib`, `libGLESv2.dylib`, `libvk_swiftshader.dylib`, `libvulkan.dylib` — ANGLE + SwiftShader
 - `chrome_100_percent.pak`, `resources.pak`, `icudtl.dat`, `v8_context_snapshot.arm64.bin`
-- Also `app_mode_loader` and `web_app_shortcut_copier`, which come from **Chrome's own codebase** rather than stock CEF — this looks like an embed of Chrome, not a plain CEF integration
+- **It is ELECTRON**, with the framework renamed (`Electron Framework.framework` → `Codex Framework.framework`, a standard electron-builder step). Decisive markers: `Resources/app.asar` (220 MB of app code), `app.asar.unpacked`, `electron.icns`, `owl-electron-app.json`. An earlier read of this note guessed "a Chrome-derived shell" from the helper-app names — that was wrong; those names are just Electron's Chromium
 - The main binary is a **68 KB stub** linking only `libSystem`; everything real lives in the framework
 
 **Size: 1.4 GB total** — 358 MB framework, 1.0 GB Resources.
@@ -111,7 +111,27 @@ Signed `Developer ID Application: OpenAI OpCo, LLC`, hardened runtime on, no MAS
 
 **What this does not change:** 1.4 GB, an owned Chromium patch cadence, and `allow-unsigned-executable-memory` — which is a strict superset of `allow-jit` and materially weakens the process. OpenAI pays that because their product *is* a web app in a shell. Norma's is not.
 
-**Choose Chromium only if you need a hard capability WebKit lacks** — realistically: Chrome extension support, or CDP-driven automation of the embedded browser. If the browser panel is for *viewing and light browsing*, WKWebView is strictly better here.
+### The honest case FOR Chromium
+
+Stated plainly, because the rest of this note argues the other way:
+
+1. **CDP (Chrome DevTools Protocol)** — and this one is strong *for Norma specifically*. Full programmatic control of a page: intercept network, read the real post-JS DOM, click, fill, screenshot, wait for selectors. It is what Puppeteer and Playwright speak. `WKWebView` offers `evaluateJavaScript` plus navigation delegates — far thinner and far more brittle for driving a page.
+
+   Norma already ships `computer.ts`, `read-page.ts`, `page-core.ts`, `web.ts` — and `page-core` is **fetch → clean HTML → text, with no browser at all**. So today Norma cannot read a JS-rendered page, use a logged-in session, or interact with anything. Chromium + CDP would not merely be a viewer; it would be a genuine capability jump for the agent.
+2. **Chrome extensions** — uBlock, password managers. WebKit has no embeddable extension model at all.
+3. **Site compatibility** — the web is tested against Chrome; some SaaS degrades in WebKit.
+4. **Web APIs WebKit lacks or lags** — WebUSB, WebSerial, WebHID, File System Access, parts of WebCodecs.
+5. **Identical rendering cross-platform**, if Norma ever leaves macOS.
+6. **Stronger 3D/WebGL**, which touches the three.js case directly.
+
+**Separate the two goals before deciding**, because they are different products:
+
+- A panel **for the user to look at things** → `WKWebView` wins easily.
+- A browser **for Norma to operate on the user's behalf** → CDP is a real capability WebKit cannot match, and the size and update cadence start to look like a fair price.
+
+**They are not mutually exclusive.** A `WKWebView` viewing panel plus a **headless Chromium for automation, driven from the daemon** — where the seatbelt machinery already lives — is a real architecture, and it keeps the heavyweight engine out of the UI process entirely. That is probably the best of both if automation becomes the goal.
+
+**Choose bundled Chromium in the UI only if you need a hard capability WebKit lacks** — realistically: Chrome extension support, or CDP-driven automation of the embedded browser. If the browser panel is for *viewing and light browsing*, WKWebView is strictly better here.
 
 ---
 
