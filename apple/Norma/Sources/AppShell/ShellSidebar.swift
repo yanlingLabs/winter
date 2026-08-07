@@ -100,18 +100,31 @@ struct ShellRootView: View {
         // does not vanish along with the pane it controls. An overlay on the root (not a child of
         // the pane) is what makes that possible.
         .overlay(alignment: .topLeading) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.22)) { sidebarVisible.toggle() }
-            } label: {
-                Image(systemName: shellSidebarToggleSystemImage(isVisible: sidebarVisible))
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Theme.textMuted)
-                    .frame(width: shellSidebarToggleSize, height: shellSidebarToggleSize)
-                    .contentShape(Rectangle())
+            HStack(spacing: shellTitlebarClusterSpacing) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.22)) { sidebarVisible.toggle() }
+                } label: {
+                    Image(systemName: shellSidebarToggleSystemImage(isVisible: sidebarVisible))
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Theme.textMuted)
+                        .frame(width: shellSidebarToggleSize, height: shellSidebarToggleSize)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(shellSidebarToggleLabel(isVisible: sidebarVisible))
+                .accessibilityLabel(shellSidebarToggleLabel(isVisible: sidebarVisible))
+
+                // The back/forward pair — PLACEHOLDERS until the shell has a navigation history
+                // (see `shellTitlebarNavigationGlyphs`). `.disabled(true)` is the honest state:
+                // they read as not-yet-available instead of pretending to work.
+                ForEach(shellTitlebarNavigationGlyphs, id: \.self) { glyph in
+                    Image(systemName: glyph)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: shellSidebarToggleSize, height: shellSidebarToggleSize)
+                        .accessibilityHidden(true)
+                }
             }
-            .buttonStyle(.plain)
-            .help(shellSidebarToggleLabel(isVisible: sidebarVisible))
-            .accessibilityLabel(shellSidebarToggleLabel(isVisible: sidebarVisible))
             .padding(.leading, shellSidebarToggleLeadingInset)
             .padding(.top, shellSidebarToggleTopInset)
             // The whole point of the placement: sit in the TITLEBAR band beside the traffic
@@ -208,7 +221,7 @@ struct ShellRootView: View {
 
 /// A top-of-sidebar row: the New chat ACTION row, or one of the four mode rows. Exactly the
 /// spec §1 structure; the search field, Recents and the account row sit below and have their own
-/// pure helpers (`filteredRecents`, `recentsActivityDotStyle`, `shellSidebarAccountRowDestination`).
+/// pure helpers (`filteredRecents`, `recentsActivityDotStyle`, `shellAccountMenuGroups`).
 enum ShellSidebarRow: Hashable {
     case newChat
     case mode(SessionMode)
@@ -229,11 +242,17 @@ func shellSidebarRowTitle(_ row: ShellSidebarRow) -> String {
     }
 }
 
-/// PURE: the row's glyph — the spec's pencil-square on New chat; every mode row keeps its own
-/// `systemImage` (the reskin restyles rows, it does not rebrand the modes).
+/// PURE: the row's glyph — every mode row keeps its own `systemImage` (the reskin restyles rows,
+/// it does not rebrand the modes).
+///
+/// New chat is a PLUS (user call, 2026-08-07), not the pencil-square the 2026-08-06 spec asked
+/// for: the pencil is ChatGPT's, and "+ New" is Claude's, which is the register this pane is
+/// converging on. `ShellNavigation`'s `shellDestinationSystemImage(.newChat)` deliberately keeps
+/// the pencil — that one titles the DESTINATION (the new-chat page), where "compose" is the right
+/// idea; this one labels the ACTION of adding one.
 func shellSidebarRowSystemImage(_ row: ShellSidebarRow) -> String {
     switch row {
-    case .newChat: return "square.and.pencil"
+    case .newChat: return "plus"
     case .mode(let mode): return mode.systemImage
     }
 }
@@ -250,11 +269,52 @@ func shellSidebarRowDestination(_ row: ShellSidebarRow) -> ShellDestination? {
     }
 }
 
-/// The bottom account-style row's destination — the gear affordance's exact navigation, inherited:
-/// a PLAIN `.dashboard(pane: nil)` preserves whichever pane `DashboardSurface`'s own
-/// `DashboardSelectionModel` is already showing (see `AppWindowController.summon`'s doc comment);
-/// a fresh window still lands on `defaultDashboardPane`.
-let shellSidebarAccountRowDestination: ShellDestination = .dashboard(pane: nil)
+// MARK: - The account menu (sidebar-chrome-2)
+
+/// The account row's menu, as DATA — the user's 2026-08-07 call that "the dashboard should be
+/// split into settings and other things rather than everything being in dashboard".
+///
+/// Each entry names a `DashboardPane` and nothing else: titles and glyphs are read from
+/// `dashboardPaneTitle`/`dashboardPaneSystemImage`, the SAME two functions the Dashboard's own
+/// sidebar uses, so a renamed pane cannot end up with one name in the menu and another one row
+/// later. The outer array is the menu's DIVIDER groups.
+///
+/// The split: settings-and-this-Mac first, then the things you *keep* (memory, skills) and the
+/// things that *run* (workflows, plugins). Deliberately NOT every pane — `peripheral`, `trust`,
+/// `cliInstaller`, `updater`, `loginItem` and `quota` stay reachable inside the Dashboard itself
+/// rather than flattening its whole catalogue into a menu, which would just move the problem.
+///
+/// **This grouping is a first proposal, not a settled information architecture** — the real
+/// restructure (what "Settings" should contain as a surface of its own) is its own piece of work.
+let shellAccountMenuGroups: [[DashboardPane]] = [
+    [.provider, .pairedDevices, .daemonStatus],
+    [.memory, .skills, .workflows, .pluginManager],
+]
+
+/// PURE: the account row's label. A placeholder for the profile that does not exist yet — the row
+/// is shaped like Claude's account control (avatar + name + chevron) precisely so that profile can
+/// drop into it later without the pane changing shape again.
+let shellAccountRowTitle = "Norma"
+
+/// The monogram avatar's diameter, and the account row's overall height. The row is given an
+/// EXPLICIT height because it is a `Menu` label: AppKit's menu machinery does not reliably honour
+/// intrinsic sizing there, so the row states its own height rather than inferring one.
+let shellAccountAvatarSize: CGFloat = 24
+let shellAccountRowHeight: CGFloat = 34
+
+/// The account popover's width — wide enough for the longest pane title without wrapping.
+let shellAccountMenuWidth: CGFloat = 240
+
+/// PURE: every pane the menu offers, flattened — the pin reads this to check the groups are
+/// non-empty and name no pane twice.
+var shellAccountMenuPanes: [DashboardPane] { shellAccountMenuGroups.flatMap { $0 } }
+
+// sidebar-chrome-2 DELETED `shellSidebarAccountRowDestination` (was `.dashboard(pane: nil)` — the
+// gear affordance's inherited navigation). The account row no longer has a single plain "open the
+// Dashboard" action: every entry in `shellAccountMenuGroups` targets a NAMED pane instead, which
+// is the whole point of the split. Nothing is stranded by that — the Dashboard's own sidebar still
+// lists every group, so landing on any pane reaches all of them; and the menu-bar "Dashboard…"
+// item keeps the untargeted `.dashboard(pane: nil)` door, which is where that behaviour belongs.
 
 /// PURE: the search field's Recents filter — case-insensitive SUBSTRING match on the title the
 /// user actually SEES (`sessionDisplayTitle`, so an untitled row matches "New session", never its
@@ -325,6 +385,13 @@ let shellSidebarSectionGap: CGFloat = 44
 /// The rounded-rect hover/selection fill's corner radius — shared by every row, one vocabulary.
 let shellSidebarRowCornerRadius: CGFloat = 6
 
+/// Where the pane's CONTENT column starts, measured from the pane's own leading edge. Rows reach
+/// it as 8 pt of scroll-content padding plus 10 pt inside the row (the 10 is inside the row so the
+/// hover/selection fill extends past the text, as the reference's does); anything OUTSIDE the
+/// scroll view — the wordmark, the account row — must apply the whole figure itself so every
+/// glyph and label in the pane lines up on one column.
+let shellSidebarContentInset: CGFloat = 18
+
 // MARK: - sidebar-brand: window chrome + the sidebar toggle
 
 /// How far in from the window's top-left corner the traffic lights are nudged, applied by
@@ -337,26 +404,41 @@ let shellSidebarRowCornerRadius: CGFloat = 6
 /// `shellSidebarToggleLeadingInset` below, which has to keep clearing the buttons as they move.
 let shellTrafficLightInset = CGPoint(x: 10, y: 8)
 
-/// The sidebar toggle's hit box, and where it sits: to the RIGHT of the traffic lights, in the
-/// titlebar band, at the same place whether the sidebar is showing or hidden (the reference keeps
-/// it fixed there — a toggle that moved with the pane would be unfindable once the pane is gone).
+/// Where the titlebar control cluster sits: to the RIGHT of the traffic lights, in the titlebar
+/// band, at the same place whether the sidebar is showing or hidden (the reference keeps it fixed
+/// there — a toggle that moved with the pane would be unfindable once the pane is gone).
 ///
 /// `shellSidebarToggleTopInset` is measured from the very top of the WINDOW, not from the safe
-/// area: the overlay carrying this button ignores the top safe area, exactly as the sidebar pane
-/// does. Without that it lands ~34 pt lower, level with the wordmark instead of the traffic
-/// lights, which is what the first live build did.
+/// area: the overlay carrying these buttons ignores the top safe area, exactly as the sidebar pane
+/// does. Without that they land ~34 pt lower, level with the wordmark instead of the traffic
+/// lights, which is what the first live build did. The value is a second pass: 8 pt sat ~3 pt
+/// ABOVE the lights' centre line in a side-by-side, so this centres on them.
 let shellSidebarToggleLeadingInset: CGFloat = 88
-let shellSidebarToggleTopInset: CGFloat = 8
+let shellSidebarToggleTopInset: CGFloat = 11
 let shellSidebarToggleSize: CGFloat = 24
+
+/// Gap between the cluster's buttons (toggle, then the two navigation arrows).
+let shellTitlebarClusterSpacing: CGFloat = 2
 
 /// PURE: the toggle's glyph, which STATES the sidebar's condition rather than naming the action.
 ///
-/// Two distinct symbols, not one symbol in two tints: showing = a solid leading panel (the pane is
-/// there), hidden = an outlined one (there is a pane to bring back). A single glyph would leave
-/// the button ambiguous the moment the pane it refers to is off-screen.
+/// The showing state is ChatGPT's own glyph (user call, 2026-08-07: "use the same drawer icon
+/// ChatGPT is using") — an outlined panel with a leading column. The hidden state fills that
+/// leading column, because two distinct symbols beat one symbol in two tints: a single glyph
+/// leaves the button ambiguous exactly when the pane it refers to is off-screen and cannot be
+/// compared against.
 func shellSidebarToggleSystemImage(isVisible: Bool) -> String {
-    isVisible ? "rectangle.leadinghalf.inset.filled" : "sidebar.left"
+    isVisible ? "sidebar.left" : "rectangle.leadinghalf.inset.filled"
 }
+
+/// The two navigation arrows that sit right of the toggle, matching the reference's cluster.
+///
+/// **PLACEHOLDERS** (user call, 2026-08-07: "as placeholder icons rn, we shall wire them in
+/// another session"). They render disabled rather than active-but-inert: a control that looks
+/// live and does nothing is worse than one that honestly shows it is not ready yet, and this way
+/// nobody has to remember they are fake. Wiring them means giving the shell a navigation history
+/// — `ShellNavigationModel` has no back-stack today, which is the actual missing piece.
+let shellTitlebarNavigationGlyphs: [String] = ["chevron.left", "chevron.right"]
 
 /// PURE: the toggle's help/accessibility text — the ACTION, complementing the glyph's state.
 func shellSidebarToggleLabel(isVisible: Bool) -> String {
@@ -391,7 +473,7 @@ func shellSidebarRowIsSelected(_ row: ShellSidebarRow, destination: ShellDestina
 // MARK: - The sidebar
 
 /// The nav sidebar — chatgpt-ui T1: the ChatGPT desktop app's sidebar anatomy, top to bottom
-/// (spec §1's exact order, pinned pure as `shellSidebarTopRows` + `shellSidebarAccountRowDestination`):
+/// (spec §1's exact order, pinned pure as `shellSidebarTopRows` + `shellAccountMenuGroups`):
 ///
 /// - **New chat** — a compact icon+label ACTION row (pencil-square), topmost. Fires the injected
 ///   door, never a selection.
@@ -430,12 +512,15 @@ struct ShellSidebar: View {
     /// `SidebarSearchPalette` with the field itself.
     @ObservedObject var presentation: SearchPalettePresentation
 
-    /// Task 7 (carried to the account row): highlighted for ANY `.dashboard` destination
-    /// regardless of pane payload, so drilling into a specific pane keeps the row lit.
-    private var isDashboardDestination: Bool {
-        if case .dashboard = nav.destination { return true }
-        return false
-    }
+    /// The account popover's presentation flag — local to this pane, since both the button that
+    /// opens it and the popover itself live here (unlike the search palette, whose door and body
+    /// are siblings and therefore need state at their common parent).
+    @State private var accountMenuShown = false
+
+    // sidebar-chrome-2 DELETED `isDashboardDestination` (Task 7's "lit for ANY .dashboard
+    // destination"). The account row is a MENU now, not a navigation row, so it has no selected
+    // state to compute — a menu button that highlights because of where you happen to be would be
+    // claiming a selection it does not represent.
 
     var body: some View {
         VStack(spacing: 0) {
@@ -596,7 +681,11 @@ struct ShellSidebar: View {
             .help("Search sessions")
             .accessibilityLabel("Search sessions")
         }
-        .padding(.horizontal, 10)
+        // The wordmark row lives OUTSIDE the ScrollView, so it does not inherit the scroll
+        // content's own 8 pt horizontal padding — its inset has to add up to the same figure the
+        // rows land on (8 + 10), or "Norma" sits ~8 pt further left than every glyph below it and
+        // reads as crowding the window edge (user call, 2026-08-07).
+        .padding(.horizontal, shellSidebarContentInset)
         .frame(height: shellSidebarWordmarkRowHeight)
         .padding(.top, shellSidebarTopInset)
         .padding(.bottom, 6)
@@ -644,48 +733,137 @@ struct ShellSidebar: View {
         }
     }
 
-    /// The bottom account-style row (spec §1 row 6): app glyph + "Norma" + chevron → the
-    /// Dashboard, REPLACING the gear affordance (its `.help`/`.accessibilityLabel` carried over;
-    /// destination unchanged). Pinned below the scroll area with a top hairline; wears the same
-    /// ONE row treatment as everything above it (hover included — pass 1's bespoke fill didn't).
+    /// The bottom account row — Claude's shape (user call, 2026-08-07): a circular avatar, the
+    /// name, and a chevron that opens a MENU, with a quiet placeholder affordance at the trailing
+    /// edge. Claude's "· Max" plan tag is deliberately absent — the user's ruling that it "has no
+    /// reason to exist" here, and Norma has no plans to name.
+    ///
+    /// The shape is the point: there is no profile yet (`shellAccountRowTitle` is a placeholder),
+    /// and building the row as an account control now means the real profile can drop straight in
+    /// without the pane changing shape a third time.
+    ///
+    /// This REPLACES the plain navigate-to-Dashboard button. The Dashboard is still reachable —
+    /// every menu entry lands in it — but by NAME rather than as one undifferentiated door, which
+    /// is the user's "split into settings and other things".
     private var accountRow: some View {
         VStack(spacing: 0) {
             Rectangle()
                 .fill(Theme.hairline)
                 .frame(height: 1)
-            Button {
-                nav.navigate(to: shellSidebarAccountRowDestination)
-            } label: {
-                HStack(spacing: 8) {
-                    Image(nsImage: NSApp.applicationIconImage)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 20, height: 20)
-                        .clipShape(RoundedRectangle(cornerRadius: 5))
-                    // sidebar-brand T4 (spec R1): "Dashboard", not "Norma". A CORRECTION rather
-                    // than a change of meaning — this row's destination
-                    // (`shellSidebarAccountRowDestination`), its `.help` and its
-                    // `.accessibilityLabel` were ALREADY Dashboard; only the visible label said
-                    // something else, and only because nothing else in the pane carried the
-                    // product name. The wordmark row carries it now.
-                    Text("Dashboard")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.primary)
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Theme.textMuted)
+            HStack(spacing: 8) {
+                // A Button + popover, NOT a SwiftUI `Menu` (caught live, 2026-08-07): `Menu`'s
+                // label is rendered by AppKit's menu machinery, which ignored the custom HStack —
+                // first blowing the avatar up to its natural ~100 pt, then collapsing the whole
+                // label to a bare indicator and one letter. A popover is drawn by SwiftUI, so the
+                // row looks exactly like what is written here, and it keeps the pane fully
+                // custom-drawn ([[custom-chrome-not-native]]) instead of borrowing menu chrome.
+                Button {
+                    accountMenuShown.toggle()
+                } label: {
+                    HStack(spacing: 8) {
+                        avatar
+                        Text(shellAccountRowTitle)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.primary)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Theme.textMuted)
+                    }
+                    .padding(.horizontal, 8)
+                    .frame(height: shellAccountRowHeight)
+                    .contentShape(Rectangle())
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+                .buttonStyle(ShellSidebarRowStyle(isSelected: false))
+                .accessibilityLabel("Account and settings")
+                .popover(isPresented: $accountMenuShown, arrowEdge: .top) {
+                    accountMenuContent
+                }
+
+                Spacer(minLength: 0)
+
+                // PLACEHOLDER (user call: "the downloads icon on the corner we shall deal with it
+                // later"). Disabled for the same reason the navigation arrows are — an affordance
+                // that looks live and does nothing is worse than one that admits it isn't ready.
+                Image(systemName: "arrow.down.circle")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
             }
-            .buttonStyle(ShellSidebarRowStyle(isSelected: isDashboardDestination))
-            .help("Dashboard")
-            .accessibilityLabel("Dashboard")
-            .padding(6)
+            .padding(.horizontal, shellSidebarContentInset - 8)
+            .padding(.vertical, 8)
         }
+    }
+
+    /// The circular avatar — a drawn monogram, exactly the reference's (a tinted circle with an
+    /// initial), standing in for a profile picture that does not exist yet.
+    ///
+    /// DRAWN rather than `NSApp.applicationIconImage`: inside a `Menu`'s label, AppKit's menu
+    /// machinery ignored the image's `.frame`/`.clipShape` entirely and rendered the icon at its
+    /// natural ~100 pt, which swallowed the row (caught live, 2026-08-07). A shape and a `Text`
+    /// have no intrinsic size to fall back to, so they cannot reproduce that failure — and this is
+    /// closer to the reference besides.
+    private var avatar: some View {
+        Circle()
+            .fill(Theme.controlSurface)
+            .frame(width: shellAccountAvatarSize, height: shellAccountAvatarSize)
+            .overlay(
+                Text(String(shellAccountRowTitle.prefix(1)))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.textMuted)
+            )
+    }
+
+    /// The menu's content, built from `shellAccountMenuGroups` — titles and glyphs come from the
+    /// Dashboard's OWN two functions, so nothing here can drift from what the Dashboard calls the
+    /// same pane. Each entry navigates straight to its pane, which is the whole point: things are
+    /// reached by name rather than through one undifferentiated "Dashboard" door.
+    ///
+    /// Hand-drawn rows in the pane's own vocabulary (`ShellSidebarRowStyle`), so the popover reads
+    /// as part of this sidebar rather than as a system menu that wandered in.
+    private var accountMenuContent: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            // The header carries the identity the row is a placeholder for — the reference puts
+            // the account's email here. Non-interactive: it names, it does not navigate.
+            Text(shellAccountRowTitle)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.textMuted)
+                .padding(.horizontal, 10)
+                .padding(.top, 4)
+                .padding(.bottom, 6)
+
+            ForEach(Array(shellAccountMenuGroups.enumerated()), id: \.offset) { index, group in
+                if index > 0 {
+                    Rectangle()
+                        .fill(Theme.hairline)
+                        .frame(height: 1)
+                        .padding(.vertical, 5)
+                }
+                ForEach(group, id: \.self) { pane in
+                    Button {
+                        accountMenuShown = false
+                        nav.navigate(to: .dashboard(pane: pane))
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: dashboardPaneSystemImage(pane))
+                                .font(.system(size: 13))
+                                .foregroundStyle(Theme.textMuted)
+                                .frame(width: 18)
+                            Text(dashboardPaneTitle(pane))
+                                .font(.system(size: 13))
+                                .foregroundStyle(.primary)
+                            Spacer(minLength: 12)
+                        }
+                        .padding(.horizontal, 10)
+                        .frame(height: shellSidebarRowHeight)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(ShellSidebarRowStyle(isSelected: false))
+                }
+            }
+        }
+        .padding(6)
+        .frame(width: shellAccountMenuWidth)
     }
 }
 

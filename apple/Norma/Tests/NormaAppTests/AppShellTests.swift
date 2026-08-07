@@ -701,17 +701,28 @@ final class AppShellTests: XCTestCase {
     /// Glyphs: the pencil-square on New chat (spec §1's named glyph); mode rows keep their own
     /// `systemImage` (the phone's glyph set, unchanged by the reskin).
     func testShellSidebarRowGlyphs() {
-        XCTAssertEqual(shellSidebarRowSystemImage(.newChat), "square.and.pencil")
+        // RETRUED (sidebar-chrome-2, user call 2026-08-07): a PLUS, not the 2026-08-06 spec's
+        // pencil-square. The pencil is ChatGPT's register; "+ New" is Claude's, which is what this
+        // pane is converging on. The DESTINATION glyph (`shellDestinationSystemImage(.newChat)`)
+        // deliberately keeps the pencil — see `shellSidebarRowSystemImage`'s doc for why the two
+        // now differ on purpose.
+        XCTAssertEqual(shellSidebarRowSystemImage(.newChat), "plus")
+        XCTAssertEqual(shellDestinationSystemImage(.newChat), "square.and.pencil",
+                       "the destination keeps 'compose'; only the ACTION row became a plus")
         for mode in SessionMode.sidebarOrder {
             XCTAssertEqual(shellSidebarRowSystemImage(.mode(mode)), mode.systemImage)
         }
     }
 
-    /// The bottom account-style row REPLACES the gear and inherits its exact navigation: a PLAIN
-    /// `.dashboard(pane: nil)` — pane memory preserved (`summon`'s "nil never resets" contract),
-    /// never a targeted deep link.
-    func testShellSidebarAccountRowNavigatesToThePlainDashboard() {
-        XCTAssertEqual(shellSidebarAccountRowDestination, .dashboard(pane: nil))
+    /// RETIRED (sidebar-chrome-2, user call 2026-08-07): `shellSidebarAccountRowDestination` is
+    /// gone with the plain navigate-to-Dashboard row. The account row is a MENU now, and every
+    /// entry targets a NAMED pane — "the dashboard should be split into settings and other things
+    /// rather than everything being in dashboard". Its replacement pins live in
+    /// `SidebarBrandTests` (`testAccountMenu*`); the untargeted `.dashboard(pane: nil)` door,
+    /// whose pane-memory contract this used to pin, still exists on the menu-bar item.
+    func testShellSidebarAccountMenuTargetsNamedPanesNotAPlainDashboard() {
+        XCTAssertFalse(shellAccountMenuPanes.isEmpty,
+                       "the account row's menu is what replaced the plain Dashboard door")
     }
 
     // MARK: - chatgpt-ui T1: the Recents search filter (PURE — the exhaustive matrix)

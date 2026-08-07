@@ -187,4 +187,67 @@ final class SidebarBrandTests: XCTestCase {
         XCTAssertGreaterThan(shellTrafficLightInset.x, 0, "inset moves the lights inward, not out")
         XCTAssertGreaterThan(shellTrafficLightInset.y, 0, "…and downward")
     }
+
+    /// The showing state is ChatGPT's own glyph (user call: "use the same drawer icon ChatGPT is
+    /// using"). Pinned by NAME, because "which symbol" is the whole instruction here — a future
+    /// tidy-up that swapped it for a lookalike would quietly undo the ask.
+    func testSidebarToggleUsesTheReferenceGlyphWhileShowing() {
+        XCTAssertEqual(shellSidebarToggleSystemImage(isVisible: true), "sidebar.left")
+    }
+
+    /// The back/forward pair are placeholders until the shell has a navigation history. Pinned so
+    /// their count and identity are deliberate, and so both resolve as real symbols.
+    func testTitlebarNavigationPlaceholdersAreTwoRealSymbols() {
+        XCTAssertEqual(shellTitlebarNavigationGlyphs, ["chevron.left", "chevron.right"])
+        for name in shellTitlebarNavigationGlyphs {
+            XCTAssertNotNil(NSImage(systemSymbolName: name, accessibilityDescription: nil),
+                            "\(name) is not a real SF Symbol on this OS")
+        }
+    }
+
+    // MARK: - The account menu (the Dashboard split)
+
+    /// The menu's groups are its DIVIDERS, so an empty group would render a stray separator.
+    func testAccountMenuGroupsAreNonEmpty() {
+        XCTAssertFalse(shellAccountMenuGroups.isEmpty)
+        for group in shellAccountMenuGroups {
+            XCTAssertFalse(group.isEmpty, "an empty group renders a divider with nothing under it")
+        }
+    }
+
+    /// No pane may appear twice — two entries navigating to the same place is a menu bug the eye
+    /// misses easily once the list grows.
+    func testAccountMenuNamesNoPaneTwice() {
+        XCTAssertEqual(Set(shellAccountMenuPanes).count, shellAccountMenuPanes.count)
+    }
+
+    /// The menu derives its titles and glyphs from the Dashboard's OWN two functions, so this pin
+    /// is really about that wiring holding: every pane it names must produce a real title and a
+    /// real SF Symbol, or the menu renders blanks.
+    func testAccountMenuEntriesResolveThroughTheDashboardsOwnTables() {
+        for pane in shellAccountMenuPanes {
+            XCTAssertFalse(dashboardPaneTitle(pane).isEmpty, "\(pane) has no title")
+            let glyph = dashboardPaneSystemImage(pane)
+            XCTAssertNotNil(NSImage(systemSymbolName: glyph, accessibilityDescription: nil),
+                            "\(pane)'s glyph \(glyph) is not a real SF Symbol")
+        }
+    }
+
+    /// Every pane the menu names must still BE a pane the Dashboard knows — the menu is a shortcut
+    /// set over `dashboardPaneGroups`, not an independent catalogue.
+    func testAccountMenuOnlyNamesPanesTheDashboardActuallyHas() {
+        let known = Set(dashboardPaneGroups.flatMap(\.panes))
+        for pane in shellAccountMenuPanes {
+            XCTAssertTrue(known.contains(pane), "\(pane) is not in any Dashboard group")
+        }
+    }
+
+    /// The menu is deliberately a SUBSET, not the whole catalogue — the panes it leaves out stay
+    /// reachable through the Dashboard's own sidebar. If a future change made it exhaustive, that
+    /// would be a decision worth making on purpose rather than by accident.
+    func testAccountMenuIsASubsetNotTheWholeCatalogue() {
+        let known = Set(dashboardPaneGroups.flatMap(\.panes))
+        XCTAssertLessThan(Set(shellAccountMenuPanes).count, known.count,
+                          "the menu is a shortcut set; the Dashboard still holds the full list")
+    }
 }
