@@ -110,6 +110,13 @@ final class MorphModel: ObservableObject {
     /// computed once by `presentWindowSurface()` via `windowSurfaceLayout`. `nil` while `.field`.
     /// The window branch (`WindowSurfaceView`) and the mouse gate
     /// (`OrbWindowController.updateWindowMouseGate`) both read this.
+    ///
+    /// **INVARIANT: non-nil for exactly as long as `OrbWindowController.surface == .window`.**
+    /// Both transitions are ordered to preserve it at every observable instant — set BEFORE
+    /// entering (`presentWindowSurface`), cleared AFTER leaving (`collapseWindowToOrb`). Reversing
+    /// either opens a window where an observer sees `.window` with no layout, which is a real
+    /// intermittent failure and not a test artefact (it read as an environmental flake three times
+    /// before being traced).
     @Published var windowFinalRect: CGRect?
     /// The orb end of the window morph in window-LOCAL SwiftUI coords — where the shell shrinks to
     /// at progress 0 (the locked open anchor, mapped into the window frame). `nil` while `.field`.

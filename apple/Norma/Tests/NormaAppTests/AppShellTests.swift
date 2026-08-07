@@ -916,14 +916,40 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(controller.navigation.destination, .mode(.code), "re-summon mid-run = prior state, never a forced hop back to the page")
     }
 
-    /// The greeting is HOUSE VOICE (spec §2: short, calm, ours — anchored to the field's own
-    /// "Ask Norma…" register) and explicitly NOT ChatGPT's copy (their rotating question-form
-    /// greetings — "What can I help with?" et al). Pinned as a string, same extracted-copy
-    /// discipline as `chatLandingEmptyStateSubtitle`.
-    func testNewChatGreetingIsHouseVoiceNotChatGPTs() {
-        XCTAssertEqual(newChatGreeting, "Ask Norma anything.")
-        XCTAssertFalse(newChatGreeting.contains("help with"), "not ChatGPT's copy")
-        XCTAssertFalse(newChatGreeting.contains("?"), "calm statement, not their question-form register")
+    /// RETRUED (sidebar-chrome-2, user call 2026-08-07): the greeting ROTATES and is time-aware
+    /// (`newChatGreetings`), replacing the single fixed "Ask Norma anything.".
+    ///
+    /// This also retires the 2026-08-06 ruling that it must be a calm STATEMENT rather than a
+    /// question — the user asked for the reference's register directly, so the question form is
+    /// now wanted. What survives is the part that still matters: the copy is OURS. Every hour of
+    /// the day must offer a real choice of lines, and none of them may be a competitor's.
+    func testNewChatGreetingsRotateAndStayHouseVoice() {
+        for hour in 0..<24 {
+            let pool = newChatGreetings(hour: hour)
+            XCTAssertGreaterThan(pool.count, 2, "hour \(hour) needs a real pool, not one line")
+            XCTAssertEqual(Set(pool).count, pool.count, "hour \(hour) repeats a line")
+            for line in pool {
+                XCTAssertFalse(line.isEmpty)
+                // Verbatim competitor copy, the one thing the original pin really guarded.
+                XCTAssertFalse(line.contains("help with"), "\(line) is ChatGPT's")
+                XCTAssertNotEqual(line, "Ready when you are.", "ChatGPT's")
+                XCTAssertNotEqual(line, "Evening, how are things?", "Claude's — ours may rhyme, not copy")
+            }
+        }
+    }
+
+    /// The bands must actually DIFFER, or "time-aware" is decoration. Morning and evening are the
+    /// two furthest apart, so they are the honest check.
+    func testGreetingBandsDifferByHour() {
+        XCTAssertNotEqual(newChatGreetings(hour: 8), newChatGreetings(hour: 20))
+        XCTAssertEqual(newChatGreetings(hour: 8), newChatGreetings(hour: 11), "same band, same pool")
+    }
+
+    func testGreetingHourComesFromTheGivenDate() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let date = DateComponents(calendar: calendar, year: 2026, month: 8, day: 7, hour: 19).date!
+        XCTAssertEqual(newChatGreetingHour(date, calendar: calendar), 19)
     }
 
     /// The page's daemon-unreachable sentence is the house fallback, shared with every other RPC

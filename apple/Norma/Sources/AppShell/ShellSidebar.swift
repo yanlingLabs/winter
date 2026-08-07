@@ -55,16 +55,6 @@ struct ShellRootView: View {
                     // Slides out to the leading edge rather than fading — the pane is a physical
                     // surface, and a fade reads as dissolving rather than closing.
                     .transition(.move(edge: .leading))
-                // chatgpt-ui T3's boundary hairline, now a genuine layout sibling rather than an
-                // overlay compensating for the split view's undrawn divider. `ignoresSafeArea` so
-                // it spans the full height including the transparent-titlebar region — the ChatGPT
-                // reference's full-height line. sidebar-brand: the warm brand `hairline` replaces
-                // the system `separatorColor`, which reads cool against the cream planes either
-                // side; and it leaves WITH the pane (a divider dividing nothing is just a stripe).
-                Rectangle()
-                    .fill(Theme.hairline)
-                    .frame(width: shellSidebarHairlineWidth)
-                    .ignoresSafeArea()
             }
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -72,10 +62,39 @@ struct ShellRootView: View {
                 // REQUIRED, not cosmetic: the sidebar's cream only reads correctly against a
                 // painted content plane — against the window's default system grey it looks
                 // wrong rather than warm. Painted here, at the shell level, so every destination
-                // inherits it and none has to remember; the transcript/composer/cards keep their
-                // own treatment for the next pass.
-                .background(Theme.cardSurface)
+                // inherits it and none has to remember.
+                // The CARD — the phone's own treatment brought over (user call, 2026-08-07): iOS
+                // masks its reveal card with a continuous rounded rect, traces that exact shape
+                // with a hairline rim, and floats it on the warm base. Only the LEADING corners
+                // round — the other two meet the window's own edge, which already has the
+                // system's rounding, and doubling it would read as a card inside a card.
+                //
+                // Drawn as a BACKGROUND LAYER that ignores the safe area, not as a clip on the
+                // content. `detail`'s content is inset by the titlebar's safe area (only the
+                // sidebar opts out), so clipping the content produced a ~23 pt gap above the card
+                // — invisible before only because the window's own `CardSurface` fill was quietly
+                // covering that band, and revealed the moment `canvas` went behind it. A
+                // background layer reaches the window's top edge without moving any content.
+                //
+                // This REPLACED the full-height boundary hairline between pane and detail: a
+                // straight line cannot follow a rounded corner, so it would have run past the
+                // card's edge. The rim is the separator now, which is also how the phone does it.
+                .background {
+                    shellDetailCardShape
+                        .fill(Theme.cardSurface)
+                        .overlay(
+                            shellDetailCardShape
+                                .strokeBorder(Theme.hairline,
+                                              lineWidth: shellSidebarHairlineWidth)
+                        )
+                        .shadow(color: .black.opacity(0.05), radius: 10, x: -2)
+                        .ignoresSafeArea()
+                }
         }
+        // The base plane behind everything, so the card's rounded corners reveal warm canvas
+        // rather than the window's own fill. The sidebar paints its own `canvas` too; this is what
+        // covers the sliver the corners cut out of the detail side.
+        .background(Theme.canvas)
         // app-shell T4: the hop-away "keep working?" banner (spec §1, T3 review as-m9) — an
         // OVERLAY on the whole split view, not inside `detail`, so it survives the very
         // navigation that triggered it (the user has already moved on to a different surface by
@@ -349,10 +368,36 @@ func recentsActivityDotStyle(_ activity: String?) -> ActivityChipStyle? {
     }
 }
 
-/// chatgpt-ui T3: the sidebar/content boundary hairline's width — a tune-at-gate constant, same
-/// posture as `ShellSessionView`'s `topInset: 8` (the live gate may prefer a true pixel hairline;
-/// 1 pt reads correctly on Retina and matches the search field's own 1 pt stroke vocabulary).
-let shellSidebarHairlineWidth: CGFloat = 1
+/// THE hairline width for every rim and border the shell draws — the detail card, the composer,
+/// the starter chips, the Cowork strip.
+///
+/// 0.5 pt, i.e. ONE device pixel on a Retina display (user call, 2026-08-07: the borders "are all
+/// too thick"). A 1 pt border is two physical pixels and reads as a drawn line; half a point reads
+/// as an edge, which is what a rim is meant to be. The phone does the same thing by dividing by
+/// `displayScale`; on the Mac every supported display is 2× so the constant is simpler.
+///
+/// Since sidebar-chrome-2 this is also the detail CARD's rim rather than a standalone divider —
+/// the rim replaced the divider, because a straight full-height line cannot follow a rounded
+/// corner.
+let shellSidebarHairlineWidth: CGFloat = 0.5
+
+/// The detail card's leading corner radius. Only the leading corners round: the trailing two meet
+/// the window's own edge, which already carries the system's rounding, and doubling it would read
+/// as a card inside a card.
+///
+/// Generous on purpose — the phone's card uses 54 to sit with the display's own corner, and a
+/// timid Mac radius (this shipped at 12 first) reads as a rendering artefact rather than as a
+/// deliberate card edge. Tune-at-gate.
+let shellDetailCardCornerRadius: CGFloat = 28
+
+/// The detail card's shape — declared ONCE so the clip and the rim trace the same geometry. Two
+/// separate constructions is how a rim ends up a hair off its own clip edge.
+let shellDetailCardShape = UnevenRoundedRectangle(
+    topLeadingRadius: shellDetailCardCornerRadius,
+    bottomLeadingRadius: shellDetailCardCornerRadius,
+    bottomTrailingRadius: 0,
+    topTrailingRadius: 0,
+    style: .continuous)
 
 // MARK: - custom-sidebar: the pane's own metrics + the row treatment (PURE decisions hoisted)
 
@@ -382,11 +427,20 @@ let shellSidebarRowHeight: CGFloat = 32
 /// what clears the inline traffic lights (together with `shellSidebarTopInset` above it).
 let shellSidebarWordmarkRowHeight: CGFloat = 38
 
-/// sidebar-brand: the gap between the nav block and the Recents section label —
-/// reference-measured at ~44 pt (was 14). This single value does more than any other to make the
-/// pane read like the reference: at the old spacing the whole pane was one undifferentiated
-/// column of rows, with nothing separating navigation from history.
-let shellSidebarSectionGap: CGFloat = 44
+/// The gap between the nav block and the Recents section label. Reference-measured at ~44 pt, then
+/// pulled back to 32 on the user's eye — 44 separated the two blocks correctly but left the pane
+/// reading loose in Norma's shorter nav list, where there are five rows rather than the
+/// reference's seven. Still far above the original 14, which was the real problem.
+let shellSidebarSectionGap: CGFloat = 32
+
+/// The floating account strip's height, and how far the fade reaches ABOVE it. The scroll content
+/// reserves both as bottom padding, so the last recents row can be scrolled fully clear of the
+/// strip instead of resting under it forever.
+///
+/// The fade is generous because it is the only thing separating the strip from the list — a short
+/// ramp reads as an edge, which is precisely what the removed divider was.
+let shellAccountStripHeight: CGFloat = 46
+let shellAccountFadeHeight: CGFloat = 32
 
 /// The rounded-rect hover/selection fill's corner radius — shared by every row, one vocabulary.
 let shellSidebarRowCornerRadius: CGFloat = 6
@@ -641,11 +695,17 @@ struct ShellSidebar: View {
                     }
                 }
                 .padding(.horizontal, 8)
-                .padding(.bottom, 8)
+                // Clearance for the FLOATING account strip below, so the last recents row can
+                // still be scrolled fully clear of it instead of resting permanently underneath.
+                .padding(.bottom, shellAccountStripHeight + shellAccountFadeHeight)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            accountRow
         }
+        // The account strip FLOATS over the scroll rather than sitting below it (user call,
+        // 2026-08-07), so recents pass UNDERNEATH it: a soft fade first, then the blurred strip.
+        // That is what replaced the divider — the rows softening as they go under says "there is
+        // more here" far better than a hard rule ever did.
+        .overlay(alignment: .bottom) { accountStrip }
         .frame(width: shellSidebarWidth)
         // Flat opaque fill, edge-to-edge and top-to-bottom — the pane's ONE background, reaching
         // the very top of the window (nothing native reserves the titlebar band any more: the
@@ -815,11 +875,37 @@ struct ShellSidebar: View {
     /// This REPLACES the plain navigate-to-Dashboard button. The Dashboard is still reachable —
     /// every menu entry lands in it — but by NAME rather than as one undifferentiated door, which
     /// is the user's "split into settings and other things".
+    /// The floating bottom strip: the account row over ONE continuous ramp into the pane's canvas.
+    ///
+    /// The DIVIDER that used to sit here is gone (user call, 2026-08-07), and the first attempt at
+    /// replacing it put `.ultraThinMaterial` behind the row. That was wrong for a specific reason:
+    /// a material TINTS regardless of what is behind it, and this pane is opaque canvas — so
+    /// instead of blurring rows it painted a grey band with a hard top edge. That is the divider
+    /// again, just drawn as a tone change instead of a line.
+    ///
+    /// So: no material. One gradient spanning the WHOLE strip — transparent at the top, fully
+    /// canvas by just over halfway, canvas the rest of the way — so rows dissolve into the pane's
+    /// own colour as they pass under and there is no boundary anywhere to catch the eye. The ramp
+    /// has to cover the row's own height too; ending it above the row is what reintroduces an edge.
+    private var accountStrip: some View {
+        accountRow
+            .frame(height: shellAccountStripHeight)
+            .background(alignment: .bottom) {
+                LinearGradient(
+                    stops: [
+                        .init(color: Theme.canvas.opacity(0), location: 0),
+                        .init(color: Theme.canvas, location: 0.55),
+                        .init(color: Theme.canvas, location: 1),
+                    ],
+                    startPoint: .top, endPoint: .bottom
+                )
+                .frame(height: shellAccountStripHeight + shellAccountFadeHeight)
+                .allowsHitTesting(false)
+            }
+    }
+
     private var accountRow: some View {
         VStack(spacing: 0) {
-            Rectangle()
-                .fill(Theme.hairline)
-                .frame(height: 1)
             HStack(spacing: 8) {
                 // A Button + popover, NOT a SwiftUI `Menu` (caught live, 2026-08-07): `Menu`'s
                 // label is rendered by AppKit's menu machinery, which ignored the custom HStack —

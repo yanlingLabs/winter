@@ -38,6 +38,13 @@ struct ComposerTextView: NSViewRepresentable {
     /// requires. Defaults `false` so the field's own call-site (`NormaFieldView.swift`) is
     /// byte-identical / zero behavior change; only the window opts in.
     var usesAdaptiveColors: Bool = false
+    /// The typed text's point size. Defaults to 14 so every existing call site — the orb field and
+    /// the chat window — is byte-identical; only the new-chat page opts up, where the composer is
+    /// the page's whole subject rather than a strip at the bottom of a transcript.
+    ///
+    /// Anything drawing a PLACEHOLDER over this composer must use the same value, or the text
+    /// changes size the moment you type.
+    var fontSize: CGFloat = 14
     /// Task 6 (FieldFocus): virtual-focus keyboard chain, consulted first by
     /// `CommandTextView.doCommand(by:)` on ↑/↓/Enter — returning `true` means consumed (the
     /// pre-existing Enter/Shift+Enter contract does NOT run). Defaults `nil` so the chat window's
@@ -56,7 +63,7 @@ struct ComposerTextView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let textView = CommandTextView()
         textView.delegate = context.coordinator
-        textView.font = .systemFont(ofSize: 14)
+        textView.font = .systemFont(ofSize: fontSize)
         // GATE-3 FIX (F2): this composer is rendered inside `NormaFieldView.composerOrResponseContent`,
         // which is wrapped in `.modifier(GlassForegroundLegibility())` — `.blendMode(.difference)`
         // against the glass surface beneath (see that type + `GlassChromeColor`'s doc). Difference
@@ -78,10 +85,16 @@ struct ComposerTextView: NSViewRepresentable {
         textView.isVerticallyResizable = true
         textView.autoresizingMask = [.width]
         textView.typingAttributes = [
-            .font: textView.font ?? .systemFont(ofSize: 14),
+            .font: textView.font ?? .systemFont(ofSize: fontSize),
             .foregroundColor: usesAdaptiveColors ? NSColor.labelColor : NSColor.white
         ]
-        textView.insertionPointColor = .controlAccentColor
+        // The caret follows the TEXT, not the system accent (user call, 2026-08-07).
+        // `.controlAccentColor` is whatever the user picked in System Settings — Norma has its own
+        // brand colour and no reason to inherit an unrelated one, and a caret in a stranger's
+        // accent (yellow, in the report that prompted this) reads as a bug rather than a theme.
+        // The same rule the typing attributes above already follow: label colour when adaptive,
+        // white on the dark field.
+        textView.insertionPointColor = usesAdaptiveColors ? .labelColor : .white
         textView.string = text
         textView.onSubmit = onSubmit
         textView.onFocusKey = onFocusKey
@@ -109,6 +122,11 @@ struct ComposerTextView: NSViewRepresentable {
         textView.onSubmit = onSubmit
         textView.onFocusKey = onFocusKey
         textView.onTypingRefocus = onTypingRefocus
+        // Keep the live view in step if the size changes across an update — otherwise the font
+        // would be whatever `makeNSView` happened to set the first time this view was built.
+        if textView.font?.pointSize != fontSize {
+            textView.font = .systemFont(ofSize: fontSize)
+        }
         if textView.string != text {
             textView.string = text
         }

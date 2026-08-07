@@ -2,11 +2,35 @@ import SwiftUI
 
 // MARK: - chatgpt-ui T2: the new-chat page (spec §2 — the pass's ONE behavior change)
 
-/// PURE: the page's centered greeting — house voice (the field's own "Ask Norma…" register:
-/// short, calm, ours), deliberately NOT ChatGPT's copy (spec §2's explicit rule; their rotating
-/// question-form greetings — "What can I help with?" et al — are theirs). Pinned directly
-/// (`AppShellTests`), same extracted-string discipline as `chatLandingEmptyStateSubtitle`.
-let newChatGreeting = "Ask Norma anything."
+/// The page's greeting, ROTATING (user call, 2026-08-07 — a fresh line on every new-chat page and
+/// every launch). This retires the single fixed "Ask Norma anything.", and with it the 2026-08-06
+/// ruling that the greeting must be a calm STATEMENT rather than a question: the user asked for
+/// the reference's register explicitly, so the question form is now wanted, not avoided.
+///
+/// Time-aware. The hour's own lines come first and the neutral ones always follow, so every band
+/// has a real pool rather than two lines on repeat — and the copy is OURS, in the reference's
+/// register rather than its words.
+func newChatGreetings(hour: Int) -> [String] {
+    let timely: [String]
+    switch hour {
+    case 5..<12:  timely = ["Morning. What's first?", "Morning. Where do we start?"]
+    case 12..<17: timely = ["Afternoon. What's on your mind?", "Afternoon. What needs doing?"]
+    case 17..<22: timely = ["Evening. What's left?", "Evening. How's it going?"]
+    default:      timely = ["Late one. What do you need?", "Still up? Let's get to it."]
+    }
+    return timely + [
+        "What's on your mind?",
+        "What are we making?",
+        "Where do we start?",
+        "Tell me what you need.",
+        "What can I take off your hands?",
+    ]
+}
+
+/// PURE: the hour a greeting pool is chosen for. Injected so the pin is not clock-dependent.
+func newChatGreetingHour(_ date: Date, calendar: Calendar = .current) -> Int {
+    calendar.component(.hour, from: date)
+}
 
 /// PURE: the page's visible-failure copy for a create that could not ride an RpcError (transport
 /// down, daemon unreachable) — the same fallback sentence every other RPC seam in the shell uses
@@ -46,38 +70,31 @@ func newChatSendUI(_ state: ShellSessionHost.NewChatCreateState) -> NewChatSendU
 /// call: "keep the chat/cowork picker… it's not built yet in Norma but will be later."
 let newChatModeOptions: [SessionMode] = [.chat, .cowork]
 
-/// The announcement strip's fallback — what shows when Norma has nothing to announce.
+/// The announcement strip's resting lines — what shows when Norma has nothing to announce.
 ///
-/// The user's placeholder suggestion was "We are amazing!" and invited a better idea. This is it:
-/// a rotating TIP. Self-congratulation reads as filler the second time you see it, whereas a tip
-/// earns its space every time it changes — and every line here is true of the app TODAY, so the
-/// strip can never advertise something that does not exist.
-///
-/// Keep this list honest. A tip for an unbuilt feature is worse than no tip at all.
-let newChatTips: [String] = [
-    "⌘K searches every session by title",
-    "Move any session to the CLI from its right-click menu",
-    "Your keys live in the Keychain — never on disk",
-    "Sessions are append-only; nothing is deleted behind your back",
+/// This REPLACES the tips list (user call, 2026-08-07: it "looks like a dev tool", and it did —
+/// keyboard shortcuts and Keychain facts are documentation, not a thing you want to read on an
+/// empty page). These are meant to be worth glancing at: short, warm, about the WORK rather than
+/// about the app. The register belongs with the serif greeting above them.
+let newChatAnnouncementLines: [String] = [
+    "Half-formed ideas are welcome here.",
+    "Small steps still arrive.",
+    "Ask for more than seems reasonable.",
+    "Nothing you write here is ever lost.",
+    "Good work is mostly patience.",
+    "Start anywhere — we can rearrange later.",
+    "Think out loud. That's what I'm for.",
 ]
 
-/// PURE: what the announcement strip shows. A real announcement wins; otherwise the day's tip.
+/// PURE: what the announcement strip shows. A real announcement always wins; otherwise the line
+/// the page picked when it appeared.
 ///
-/// `day` is injected (rather than read from the clock here) so the pin is not time-dependent, the
-/// same discipline `relativeTimeBucket` follows. Picking by day rather than at random means the
-/// line is stable for a whole session — a strip that reshuffled on every redraw would be noise.
-func newChatAnnouncement(_ announcement: String?, day: Int) -> String {
+/// The rotation itself lives in the VIEW (`.onAppear`), not here, so this stays deterministic and
+/// pinnable — and so "a new line each time the page opens" means exactly that rather than a line
+/// that reshuffles on every redraw.
+func newChatAnnouncement(_ announcement: String?, fallback: String) -> String {
     let trimmed = announcement?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    if !trimmed.isEmpty { return trimmed }
-    guard !newChatTips.isEmpty else { return "" }
-    // `abs` + modulo: a negative or absurd day index must still land inside the list.
-    return newChatTips[abs(day) % newChatTips.count]
-}
-
-/// PURE: the day-of-year the strip picks its tip by. Extracted so the view has no date logic and
-/// the pin can hand it any date it likes.
-func newChatTipDay(_ date: Date, calendar: Calendar = .current) -> Int {
-    calendar.ordinality(of: .day, in: .year, for: date) ?? 0
+    return trimmed.isEmpty ? fallback : trimmed
 }
 
 /// The composer card's metrics — reference-measured (~670 pt wide), tune-at-gate like the rest.
@@ -103,6 +120,12 @@ let newChatModelPlaceholder = "Default model"
 /// The composer's own placeholder, inside the card. The greeting above already says what this
 /// page is for, so this asks rather than repeats — the reference's own split.
 let newChatComposerPlaceholder = "How can I help you today?"
+
+/// ONE size for everything the composer slot renders — the live text, its placeholder, and the
+/// held draft shown while a create is in flight. They must agree or the text changes size the
+/// moment you type, or the moment you send. 16 pt, not the component's default 14: on this page
+/// the composer IS the subject rather than a strip under a transcript (user call, 2026-08-07).
+let newChatComposerFontSize: CGFloat = 16
 
 /// PURE: whether the card shows its SECOND control row (working folder, approval mode,
 /// announcement).
@@ -139,6 +162,27 @@ struct NewChatStarter: Equatable {
     let prefill: String
 }
 
+/// One Cowork idea — the vertical list that REPLACES the starter chips in Cowork mode (user call,
+/// 2026-08-07). Same prefill mechanism as a starter; different shape because these are whole tasks
+/// rather than sentence openers, and a task does not fit on a chip.
+struct NewChatIdea: Equatable {
+    let title: String
+    let systemImage: String
+    let prefill: String
+}
+
+/// Cowork's ideas. Deliberately things Norma could plausibly be ASKED to do rather than features
+/// it ships — Cowork itself is unbuilt, so an idea list that implied working capabilities would be
+/// advertising vapour. They prefill the composer exactly like the chat starters.
+let newChatCoworkIdeas: [NewChatIdea] = [
+    NewChatIdea(title: "Send me a daily briefing", systemImage: "sun.horizon",
+                prefill: "Every morning, send me a briefing covering "),
+    NewChatIdea(title: "Keep an eye on a project folder", systemImage: "folder.badge.gearshape",
+                prefill: "Watch this folder and tell me when "),
+    NewChatIdea(title: "Set Cowork up for me", systemImage: "slider.horizontal.3",
+                prefill: "Help me set up Cowork so that "),
+]
+
 let newChatStarters: [NewChatStarter] = [
     NewChatStarter(title: "Write", systemImage: "pencil", prefill: "Help me write "),
     NewChatStarter(title: "Learn", systemImage: "graduationcap", prefill: "Explain "),
@@ -148,6 +192,89 @@ let newChatStarters: [NewChatStarter] = [
     NewChatStarter(title: "Norma's choice", systemImage: "lightbulb",
                    prefill: "Surprise me — pick something useful."),
 ]
+
+/// A starter chip. Hovering tints it with the ACCENT rather than a grey (user call, 2026-08-07:
+/// "rather than turning grey they should become the color of the send button") — so the page's one
+/// brand colour is used by exactly two things, the send button and the affordances that fill the
+/// composer, which is a coherent story rather than decoration.
+///
+/// The fill is the accent at low alpha with an accent rim, not a solid accent block: a chip is a
+/// suggestion, and solid brand colour on hover would read as "selected" or "primary action" — a
+/// claim these do not make. The send button keeps the solid fill precisely because it IS that.
+struct NewChatStarterChip: View {
+    let starter: NewChatStarter
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                Image(systemName: starter.systemImage)
+                    .font(.system(size: 12))
+                Text(starter.title)
+                    .font(.system(size: 13))
+            }
+            .foregroundStyle(isHovered ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.primary))
+            .padding(.horizontal, 14)
+            .frame(height: 34)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isHovered ? AnyShapeStyle(Theme.accent.opacity(0.10))
+                                : AnyShapeStyle(Theme.composerSurface))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(isHovered ? AnyShapeStyle(Theme.accent.opacity(0.45))
+                                        : AnyShapeStyle(Theme.hairline),
+                              lineWidth: shellSidebarHairlineWidth)
+        )
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .onHover { isHovered = $0 }
+        .help("Start with: \(starter.prefill)")
+    }
+}
+
+/// One Cowork idea row — glyph, title, and the trailing mode tag the reference carries. Same
+/// accent-on-hover treatment as the chips, since both do the same job: fill the composer.
+struct NewChatIdeaRow: View {
+    let idea: NewChatIdea
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: idea.systemImage)
+                    .font(.system(size: 15))
+                    .foregroundStyle(isHovered ? AnyShapeStyle(Theme.accent)
+                                               : AnyShapeStyle(Theme.textMuted))
+                    .frame(width: 22)
+                Text(idea.title)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 12)
+                Text(SessionMode.cowork.title)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textMuted)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isHovered ? AnyShapeStyle(Theme.accent.opacity(0.10))
+                                : AnyShapeStyle(Color.clear))
+        )
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .onHover { isHovered = $0 }
+        .help("Start with: \(idea.prefill)")
+    }
+}
 
 /// A bare icon button in the composer card's control row.
 struct NewChatControlButton: View {
@@ -233,6 +360,15 @@ struct NewChatPage: View {
     /// chat), which is exactly why sending is refused while it sits on an unbuilt mode rather than
     /// quietly creating something else — `newChatSendBlockedReason`.
     @State private var mode: SessionMode = .chat
+    /// Whether the pointer is over the composer card — drives its rim only. See the rim's own note
+    /// for why this is hover and not focus.
+    @State private var composerHovered = false
+    /// The greeting and announcement lines this page opened with. Picked ONCE in `.onAppear`, not
+    /// per redraw: the page is torn down on navigate-away and rebuilt on return, so "once per
+    /// appearance" is exactly the user's "every time a new chat page or the app is opened", while
+    /// a per-redraw pick would reshuffle the words under you as you type.
+    @State private var greetingLine = ""
+    @State private var announcementLine = ""
 
     var body: some View {
         // Reference-measured gaps, and they DIFFER — greeting→card ~33 pt, card→chips ~22 — so a
@@ -242,7 +378,13 @@ struct NewChatPage: View {
             greeting
                 .padding(.bottom, 12)
             composerCard
-            starters
+            // The suggestions step aside the moment there is a draft (user call, 2026-08-07) —
+            // in BOTH modes. They exist to get you started; once you have started they are just
+            // something else on the page.
+            if draft.isEmpty {
+                starters
+                    .transition(.opacity)
+            }
             // Visible failure (spec's honesty rule): a create that failed says so, in place —
             // the page never navigates on failure (`sendFirstChatMessage`'s own contract).
             if case .failed(let message) = host.newChatCreate {
@@ -256,6 +398,19 @@ struct NewChatPage: View {
         }
         .padding(.horizontal, 32)
         .navigationTitle(shellDestinationTitle(.newChat))
+        // A fresh greeting and a fresh line per appearance. Guarded on empty rather than assigned
+        // unconditionally: `onAppear` can fire again for the same live page (a window re-show),
+        // and re-rolling the words while someone is mid-thought would be worse than repeating one.
+        .onAppear {
+            if greetingLine.isEmpty {
+                greetingLine = newChatGreetings(hour: newChatGreetingHour(Date()))
+                    .randomElement() ?? ""
+            }
+            if announcementLine.isEmpty {
+                announcementLine = newChatAnnouncementLines.randomElement() ?? ""
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: draft.isEmpty)
     }
 
     /// The greeting — the reference's shape (brand mark + a serif line), Norma's own words.
@@ -282,13 +437,13 @@ struct NewChatPage: View {
                 .scaledToFit()
                 .frame(width: 36, height: 36)
                 .foregroundStyle(Theme.accent)
-            Text(newChatGreeting)
+            Text(greetingLine)
                 .font(Theme.greeting)
                 // `inverseCanvas`, not `.primary` — the reference sets its greeting in a WARM dark
                 // rather than near-black, and this token is precisely "the base plane of the
                 // opposite appearance", so it softens the line in light mode and brightens it in
                 // dark by the same construction. `.primary` reads as a hard near-black here.
-                .foregroundStyle(Theme.inverseCanvas)
+                .foregroundStyle(Theme.inverseCanvas.opacity(0.72))
         }
         .multilineTextAlignment(.center)
     }
@@ -296,35 +451,34 @@ struct NewChatPage: View {
     /// The prompt starters below the card (the reference's own row). Each PREFILLS the composer
     /// and focuses it — real behaviour, not a placeholder: a starter needs no session and no
     /// backend, so there was no reason to fake it.
+    /// Chat's starter chips, or Cowork's idea list — never both. Cowork's tasks do not fit on a
+    /// chip, which is why the reference changes shape here rather than just changing the words.
+    @ViewBuilder
     private var starters: some View {
-        HStack(spacing: 10) {
-            ForEach(newChatStarters, id: \.title) { starter in
-                Button {
-                    draft = starter.prefill
-                } label: {
-                    HStack(spacing: 7) {
-                        Image(systemName: starter.systemImage)
-                            .font(.system(size: 12))
-                        Text(starter.title)
-                            .font(.system(size: 13))
-                    }
-                    .foregroundStyle(.primary)
-                    .padding(.horizontal, 14)
-                    .frame(height: 34)
-                    .contentShape(Rectangle())
+        if newChatShowsCoworkControls(mode: mode) {
+            coworkIdeas
+        } else {
+            HStack(spacing: 10) {
+                ForEach(newChatStarters, id: \.title) { starter in
+                    NewChatStarterChip(starter: starter) { draft = starter.prefill }
                 }
-                .buttonStyle(.plain)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Theme.composerSurface)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Theme.hairline, lineWidth: 1)
-                )
-                .help("Start with: \(starter.prefill)")
             }
         }
+    }
+
+    /// Cowork's "Ideas for you" — a vertical list with a trailing mode tag, the reference's shape.
+    private var coworkIdeas: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Ideas for you")
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.textMuted)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 6)
+            ForEach(newChatCoworkIdeas, id: \.title) { idea in
+                NewChatIdeaRow(idea: idea) { draft = idea.prefill }
+            }
+        }
+        .frame(width: newChatCardWidth, alignment: .leading)
     }
 
     /// The existing composer, in a quiet bordered card so it reads as THE affordance on an
@@ -349,7 +503,8 @@ struct NewChatPage: View {
                     ComposerTextView(
                         text: $draft,
                         onSubmit: { submit() },
-                        usesAdaptiveColors: true
+                        usesAdaptiveColors: true,
+                        fontSize: newChatComposerFontSize
                     )
                     // The composer component has no placeholder parameter (its own doc notes the
                     // v1 shape never had one), so the placeholder is an overlay that steps aside
@@ -358,7 +513,7 @@ struct NewChatPage: View {
                     .overlay(alignment: .topLeading) {
                         if draft.isEmpty {
                             Text(newChatComposerPlaceholder)
-                                .font(.system(size: 15))
+                                .font(.system(size: newChatComposerFontSize))
                                 .foregroundStyle(Theme.textMuted)
                                 .padding(.horizontal, ComposerTextView.textContainerInset.width)
                                 .padding(.vertical, ComposerTextView.textContainerInset.height)
@@ -370,7 +525,7 @@ struct NewChatPage: View {
                     // (its `textContainerInset`/zero line-fragment padding, mirrored) so the swap
                     // doesn't visibly jump; secondary color is what reads as "disabled" here.
                     Text(draft)
-                        .font(.system(size: 14))
+                        .font(.system(size: newChatComposerFontSize))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, ComposerTextView.textContainerInset.width)
                         .padding(.vertical, ComposerTextView.textContainerInset.height)
@@ -391,11 +546,25 @@ struct NewChatPage: View {
             RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
                 .fill(Theme.composerSurface)
         )
+        // The rim STRENGTHENS on hover — the composer is the page's main affordance and should
+        // answer when the pointer is over it. Only the RIM moves, never the fill: a card that
+        // changed colour under the pointer would read as selected rather than as ready.
+        //
+        // Hover only, NOT focus. The composer is `ComposerTextView`, an `NSViewRepresentable`
+        // hosted unchanged under the Global Constraints, and it exposes no first-responder
+        // callback — so "focused to type" cannot be observed without either changing that
+        // component or KVO-ing `NSWindow.firstResponder`, which is not documented as observable.
+        // Wiring focus properly means giving the component a focus callback; that is a real
+        // change to a fenced file rather than something to sneak in here.
         .overlay(
             RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                .strokeBorder(Theme.hairline, lineWidth: 1)
+                .strokeBorder(composerHovered ? AnyShapeStyle(Color.primary.opacity(0.30))
+                                              : AnyShapeStyle(Theme.hairline),
+                              lineWidth: shellSidebarHairlineWidth)
         )
         .shadow(color: .black.opacity(0.05), radius: 16, y: 4)
+        .animation(.easeOut(duration: 0.14), value: composerHovered)
+        .onHover { composerHovered = $0 }
         .overlay(alignment: .bottomTrailing) {
             if ui.showsWorkingIndicator {
                 ProgressView()
@@ -418,9 +587,13 @@ struct NewChatPage: View {
             // border, which is exactly the "expansion" look being corrected here.
             RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
                 .fill(Theme.canvas)
+                // FAINTER than the composer's own rim (user call, 2026-08-07). It should — the
+                // strip is a surface BEHIND the composer, and a background object tracing itself
+                // as strongly as the thing in front competes with it for the same edge.
                 .overlay(
                     RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                        .strokeBorder(Theme.hairline, lineWidth: 1)
+                        .strokeBorder(Theme.hairline.opacity(0.5),
+                                      lineWidth: shellSidebarHairlineWidth)
                 )
                 .frame(height: newChatComposerHeight + band)
                 .overlay(alignment: .bottom) {
@@ -563,7 +736,7 @@ struct NewChatPage: View {
             HStack(spacing: 6) {
                 Image(systemName: "sparkles")
                     .font(.system(size: 12))
-                Text(newChatAnnouncement(announcement, day: newChatTipDay(Date())))
+                Text(newChatAnnouncement(announcement, fallback: announcementLine))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
