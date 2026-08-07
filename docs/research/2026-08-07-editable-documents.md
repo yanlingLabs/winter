@@ -194,6 +194,16 @@ The Document Foundation's own framing: *an office suite implements a document th
 
 **Verdict: does not displace LOKit.** The licence is right and the agent story is arguably better, but format support is the entire requirement and it is paywalled.
 
+**Why Univer has its own format at all — and whether that is a monetisation trick.**
+
+No editor works "directly in OOXML"; that is not a thing anyone does. Every suite has an in-memory model distinct from the file format (§3's mapping principle). Univer's is web-shaped for real engineering reasons: real-time collaboration needs fine-grained operations expressible as deltas (OT/CRDT) and OOXML is a *serialisation* format with no notion of an operation; you cannot parse and re-serialise a zip of XML per keystroke; canvas rendering wants a layout-shaped model; and one architecture spans sheets/docs/slides where OOXML is three schemas. Google Docs, Notion and Figma all do the same.
+
+**So the format is engineering. The PAYWALL PLACEMENT is commercial** — they could have open-sourced the converters and charged for collaboration and the server. Gating import/export is strategic precisely because every serious user needs it. Both statements are true and worth separating.
+
+**It is also an industry pattern, not a Univer quirk.** The JS spreadsheet ecosystem in 2026 is split between commercial upsell tiers and stalled open-source projects: **SheetJS Community deliberately omits styling, charts, images, pivots, conditional formatting and data validation *on write*** (all Pro); ExcelJS is MIT and does styling but has been **inactive since Oct 2023**; `excel4node` archived 2022; `xlsx-js-style` frozen at a 2022 fork. The healthiest current option is **[`@office-kit/xlsx`](https://github.com/office-kit/xlsx)** — pure MIT, actively developed, no Pro tier.
+
+**Writing OOXML filters for Univer yourself** is permitted (Apache-2.0) and is what Univer's own OSS guidance suggests — map OOXML ↔ `IWorkbookData`/`IDocumentData` via the Facade API. Sheets would be feasible, Docs a serious project, Slides hardest and unready. **But it does not change the decision:** that rebuilds the exact two-translation problem, on a model that is not OOXML-shaped either, without the filter history — taking on the hardest part of the job to avoid a C++ build.
+
 **Worth remembering for a DIFFERENT question.** If Norma ever wants *native* documents — sheets and docs created and living in Norma, agent-manipulated headlessly, never round-tripping to Microsoft formats — Univer is an excellent Apache-2.0 foundation and cleaner than anything LibreOffice offers for that job. Two different products; Univer wins the other one.
 
 ### The risk to retire first
