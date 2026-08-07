@@ -50,7 +50,32 @@ Not because CEF is bad — because of Norma's release pipeline. `scripts/release
 
 - every release uploads and every user downloads a far bigger artifact,
 - the nested-signing step (already the fiddliest part of the pipeline — see the hardened-runtime comments in `release.ts`) grows a whole tree of helper executables,
-- the CEF version becomes a recurring security-patch obligation *you* own, rather than one Apple ships in an OS update.
+- the Chromium version becomes a recurring **delivery** obligation you own (see below).
+
+#### "Doesn't Google handle the security patching?"
+
+Partly — and the distinction is the entire cost, so it is worth stating precisely.
+
+**Google authors every fix.** You would never do security research or write a patch. That part is genuinely free.
+
+**But nothing updates the copy in your bundle.** The difference is not authorship, it is *delivery*:
+
+| | Who delivers the fix to the user |
+| --- | --- |
+| `WKWebView` | **The OS.** A macOS update or Rapid Security Response patches the engine under your app. You ship nothing; users are protected even if you never release again. |
+| Embedded Chromium | **You.** Pick up the new build → rebuild → re-sign → re-notarize → ship → and the user must install it. |
+
+The cadence that implies:
+
+- Chrome moves to a **2-week release cycle from 8 September 2026** (Chrome 153), up from four.
+- **Five actively exploited zero-days in 2026** by early June — CVE-2026-2441 (CSS), CVE-2026-3909 (Skia), CVE-2026-3910 (V8), CVE-2026-5281 (Dawn/WebGPU), CVE-2026-11645 (V8).
+- Chrome 151 alone fixed 370 bugs, 7 of them critical.
+
+Note *where* those exploited bugs sit: V8, Skia, WebGPU — exactly the code that executes **untrusted web content**, which is precisely what a browser panel does.
+
+**Evidence that this is a live job, not a theoretical one:** ChatGPT.app bundles `Sparkle.framework` alongside Chromium — engine updates ride their own app-update train — and its framework was built five days before this was written, at Chromium 151. They are actively keeping pace on a fortnightly clock.
+
+**Fair counterweight:** this is entirely doable, and OpenAI demonstrates it. It is a *commitment*, not a blocker. The question is not "can it be done" but "do we want a fortnightly security obligation attached to a side panel, when WebKit renders the same content with Apple carrying that obligation".
 
 That is a **permanent tax on every release**, not a one-off integration cost.
 
