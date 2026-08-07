@@ -259,42 +259,31 @@ final class SidebarBrandTests: XCTestCase {
 
     // MARK: - The new-chat page's announcement strip
 
-    /// A real announcement always wins over the tip.
-    func testAnnouncementBeatsTheTip() {
-        XCTAssertEqual(newChatAnnouncement("Norma 0.3 is out", day: 1), "Norma 0.3 is out")
+    /// A real announcement always wins over the resting line.
+    func testAnnouncementBeatsTheRestingLine() {
+        XCTAssertEqual(newChatAnnouncement("Norma 0.3 is out", fallback: "x"), "Norma 0.3 is out")
     }
 
     /// Absent, empty, and whitespace-only all mean "nothing to announce" — a strip showing a lone
     /// space would look like a rendering bug.
-    func testBlankAnnouncementsFallBackToATip() {
+    func testBlankAnnouncementsFallBackToTheRestingLine() {
         for blank in [nil, "", "   ", "\n\t "] {
-            let shown = newChatAnnouncement(blank, day: 1)
-            XCTAssertTrue(newChatTips.contains(shown), "\(String(describing: blank)) → \(shown)")
+            XCTAssertEqual(newChatAnnouncement(blank, fallback: "resting"), "resting")
         }
     }
 
-    /// The tip is picked by DAY, so it is stable for a whole session (a strip that reshuffled on
-    /// every redraw would be noise) and still changes over time.
-    func testTipIsStablePerDayAndVariesAcrossDays() {
-        XCTAssertEqual(newChatAnnouncement(nil, day: 7), newChatAnnouncement(nil, day: 7))
-        let distinct = Set((0..<newChatTips.count).map { newChatAnnouncement(nil, day: $0) })
-        XCTAssertEqual(distinct.count, newChatTips.count, "every tip is reachable")
-    }
-
-    /// Total for any day index — a negative or absurd value must still land inside the list rather
-    /// than trapping on a negative modulo.
-    func testTipIndexIsTotalForAnyDay() {
-        for day in [-366, -1, 0, 365, 100_000] {
-            XCTAssertFalse(newChatAnnouncement(nil, day: day).isEmpty, "day \(day)")
+    /// The resting lines replaced a list of TIPS (keyboard shortcuts, Keychain facts) that read
+    /// as documentation on an empty page. These are about the work, not the app — so the pin is
+    /// that none of them is a feature claim, which is the failure mode being corrected.
+    func testRestingLinesAreCopyNotDocumentation() {
+        XCTAssertGreaterThan(newChatAnnouncementLines.count, 3, "a real rotation, not two lines")
+        XCTAssertEqual(Set(newChatAnnouncementLines).count, newChatAnnouncementLines.count)
+        for line in newChatAnnouncementLines {
+            XCTAssertFalse(line.isEmpty)
+            XCTAssertFalse(line.contains("⌘"), "\(line) is a shortcut reference, not copy")
+            XCTAssertFalse(line.lowercased().contains("keychain"), "\(line) is documentation")
+            XCTAssertFalse(line.lowercased().contains("click"), "\(line) is documentation")
         }
-    }
-
-    /// `newChatTipDay` is injected a date so nothing here depends on the clock.
-    func testTipDayIsDerivedFromTheGivenDate() {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "UTC")!
-        let jan1 = DateComponents(calendar: calendar, year: 2026, month: 1, day: 1).date!
-        XCTAssertEqual(newChatTipDay(jan1, calendar: calendar), 1)
     }
 
     /// The mode picker shows Chat and Cowork, and Cowork remains honestly unavailable — it has no

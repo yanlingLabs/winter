@@ -1420,6 +1420,20 @@ final class OrbWindowController: ObservableObject {
         )
         panel.setFrame(NSRect(origin: origin, size: morphModel.collapsedWindowSize), display: false)
         morphModel.activeWindowSize = morphModel.collapsedWindowSize
+
+        // `surface` LEAVES `.window` BEFORE the window-only layout is torn down, so the invariant
+        // "`windowFinalRect` is non-nil for exactly as long as `surface == .window`" holds at every
+        // observable instant. `presentWindowSurface()` already establishes it in the correct order
+        // on the way in (rect first, then surface); this is the same ordering on the way out.
+        //
+        // The old order nilled the rect first and flipped `surface` several lines later, leaving a
+        // window in which an observer could see `.window` with no layout. That is exactly what
+        // `SurfaceWindowTests.testRequestWindowDetachFiresOnceWithContentFrameAndExitsToOrb` kept
+        // hitting under a loaded full-suite run and never in isolation — it polls for `.window`
+        // and then reads the rect. Three separate failures were written off as an environmental
+        // flake before the ordering turned out to be the cause.
+        surface = .orb
+
         morphModel.windowFinalRect = nil
         morphModel.windowOrbPoint = nil
         morphModel.renderSurface = .field
@@ -1427,7 +1441,6 @@ final class OrbWindowController: ObservableObject {
         windowZoomed = false
         windowCollapseLockedScreen = nil // gate r8: scope the ride's locked screen to one collapse span
 
-        surface = .orb
         externalFocus?.restore()
         externalFocus = nil
         exchangeIndex = nil

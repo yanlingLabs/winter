@@ -81,7 +81,13 @@ struct ComposerTextView: NSViewRepresentable {
             .font: textView.font ?? .systemFont(ofSize: 14),
             .foregroundColor: usesAdaptiveColors ? NSColor.labelColor : NSColor.white
         ]
-        textView.insertionPointColor = .controlAccentColor
+        // The caret follows the TEXT, not the system accent (user call, 2026-08-07).
+        // `.controlAccentColor` is whatever the user picked in System Settings — Norma has its own
+        // brand colour and no reason to inherit an unrelated one, and a caret in a stranger's
+        // accent (yellow, in the report that prompted this) reads as a bug rather than a theme.
+        // The same rule the typing attributes above already follow: label colour when adaptive,
+        // white on the dark field.
+        textView.insertionPointColor = usesAdaptiveColors ? .labelColor : .white
         textView.string = text
         textView.onSubmit = onSubmit
         textView.onFocusKey = onFocusKey
