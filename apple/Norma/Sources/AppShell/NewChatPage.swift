@@ -208,9 +208,12 @@ struct NewChatControlChip: View {
 /// `ShellSessionHost.sendFirstChatMessage` — this view never talks to a client itself, the same
 /// no-client-in-a-view posture as `ChatLandingView`.
 ///
-/// The composer is `ComposerTextView` AS-IS (Global Constraints: the page HOSTS the existing
-/// component unchanged — same `usesAdaptiveColors: true` + 88pt frame as `WindowContentView`'s
-/// own composer slot; the transcript/composer restyle is the NEXT pass).
+/// The composer is still `ComposerTextView` AS-IS — the component itself remains untouched
+/// (`usesAdaptiveColors: true`, hosted unchanged). What changed in the sidebar-chrome-2 pass is
+/// only its FRAMING: the field is 54 pt rather than the 88 it shared with `WindowContentView`'s
+/// slot, it carries a placeholder overlay (the component has no placeholder parameter of its
+/// own), and it sits inside a card with two control rows. The TRANSCRIPT's restyle is still a
+/// later pass; this one reshaped the new-chat page only.
 ///
 /// Draft semantics (decided-and-disclosed, T2 report): the draft is view-local `@State`. It
 /// SURVIVES a hide/re-summon (the shell hides, never closes — the view stays mounted) and DROPS
