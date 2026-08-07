@@ -1267,7 +1267,7 @@ struct ShellSessionView: View {
 struct ShellSessionUnavailableView: View {
     var body: some View {
         VStack(spacing: 10) {
-            Image(systemName: "text.bubble")
+            Image(systemName: "message")
                 .font(.system(size: 34, weight: .light))
                 .foregroundStyle(.tertiary)
             Text("This session isn't open")

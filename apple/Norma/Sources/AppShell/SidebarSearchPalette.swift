@@ -252,8 +252,10 @@ struct SidebarSearchPalette: View {
 /// Reference-measured from the Claude Mac app's palette (~670 pt on a 1512 pt-wide screen).
 let searchPaletteWidth: CGFloat = 670
 
-/// Deliberately NOT the sidebar rows' 6 pt — the palette is a CARD, not a row.
-let searchPaletteCornerRadius: CGFloat = 14
+/// The SAME radius as the composer card (user call, 2026-08-07). Both are the app's floating
+/// cards, so they should be cut to one shape — a palette with its own radius reads as a different
+/// kind of object for no reason. Derived rather than copied, so the two cannot drift.
+let searchPaletteCornerRadius: CGFloat = newChatCardCornerRadius
 
 /// A palette row is slightly taller than a sidebar row: it carries a glyph and a trailing label,
 /// and it is read at the centre of the window rather than scanned down a narrow column.
@@ -283,7 +285,7 @@ let searchPaletteListPadding: CGFloat = 8
 
 /// How far below the window's top the palette sits. Pinned rather than centred, so the field
 /// stays under your eye while only the list below it changes length.
-let searchPaletteTopInset: CGFloat = 120
+let searchPaletteTopInset: CGFloat = 168
 
 /// The backdrop's dim. Light on purpose — enough to say "the window is busy", not enough to make
 /// a quick find-and-go feel like a modal sheet. Works in both appearances: black at a low alpha

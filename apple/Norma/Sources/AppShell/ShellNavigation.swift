@@ -40,7 +40,7 @@ enum SessionMode: String, CaseIterable, Identifiable, Sendable {
         case .code: return "chevron.left.forwardslash.chevron.right"
         case .dispatch: return "antenna.radiowaves.left.and.right"
         case .cowork: return "checklist"
-        case .chat: return "bubble.left.and.bubble.right"
+        case .chat: return "message"
         }
     }
 
@@ -132,7 +132,7 @@ func shellDestinationTitle(_ destination: ShellDestination) -> String {
 func shellDestinationSystemImage(_ destination: ShellDestination) -> String {
     switch destination {
     case .mode(let mode): return mode.systemImage
-    case .session: return "text.bubble"
+    case .session: return "message"
     case .dashboard: return "gearshape"
     case .newChat: return "square.and.pencil" // the sidebar row's pencil-square, shared
     }

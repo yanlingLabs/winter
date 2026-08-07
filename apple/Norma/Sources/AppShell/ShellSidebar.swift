@@ -178,13 +178,16 @@ struct ShellRootView: View {
         .overlay {
             if searchPalette.isPresented {
                 SidebarSearchPalette(nav: nav, directory: directory, presentation: searchPalette)
-                    // Drops in from above and lifts back out (user call, 2026-08-07). Scale rather
-                    // than a plain fade so it reads as arriving from the search glyph's own
-                    // direction; the scrim fades on its own inside the palette.
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    // A plain FADE (user call, 2026-08-07 — the drop-in-from-above read as too
+                    // much motion for something this quick). The palette is top-pinned, so it
+                    // already appears where it belongs; arriving there is not information the
+                    // animation needs to carry.
+                    .transition(.opacity)
             }
         }
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: searchPalette.isPresented)
+        // Ease, not a spring: a spring's overshoot is motion, and there is no motion left to
+        // shape once the transition is a fade.
+        .animation(.easeOut(duration: 0.16), value: searchPalette.isPresented)
         // ⌘K, the palette's other door (the wordmark row's ⌕ is the first). A zero-size hidden
         // button is how a SwiftUI view registers a chord with no menu-bar item behind it; it
         // TOGGLES so the same chord closes what it opened.
