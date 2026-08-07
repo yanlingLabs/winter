@@ -153,6 +153,16 @@ final class AppWindowController: NSObject, NSWindowDelegate {
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
         window.title = "Norma"
+        // chatgpt-ui T3 (spec §4): the seamless top — the titlebar draws NO material and NO title
+        // text, so the traffic lights sit inline over the sidebar's own flat background (T1's
+        // `windowBackgroundColor` fill `ignoresSafeArea`, reaching the very top) and content
+        // scrolls under them, the ChatGPT-desktop look. The `title` above STAYS — Mission
+        // Control/the Window menu still need the name; only its in-window rendering goes.
+        // Deliberately NOT the rest of `DetachedWindowController`'s recipe: no `.clear`
+        // background/`isOpaque = false` — that window draws its own rounded shell, this one is a
+        // plain opaque window (pinned: `testWindowChromeIsSeamlessTitlebarOverFullSizeContent`).
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false // this controller owns the window's lifetime, forever
         window.minSize = NSSize(width: 820, height: 520)
         // Spec §1: opt OUT of native full-screen — a hidden full-screen window strands a Space.

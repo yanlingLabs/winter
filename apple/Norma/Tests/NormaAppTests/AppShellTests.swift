@@ -249,6 +249,32 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(window.styleMask.contains(.miniaturizable))
     }
 
+    /// chatgpt-ui T3 (spec §4): the seamless ChatGPT-desktop chrome, asserted on the REAL window.
+    /// Transparent titlebar over full-size content — the traffic lights sit inline over the
+    /// sidebar's own flat background (T1's fill `ignoresSafeArea`, so it reaches the very top);
+    /// the title TEXT is hidden (the seamless top carries no "Norma" label) while the window
+    /// KEEPS its title — Mission Control/Window-menu identity must survive the reskin; and the
+    /// empty unified toolbar stays — it is the inset-traffic-lights machinery (the
+    /// `DetachedWindowController` recipe, minus its clear/non-opaque shell: THIS window stays
+    /// opaque). The summon/visibility/geometry pins around this one are the guardrail — chrome
+    /// flags must never change behavior.
+    func testWindowChromeIsSeamlessTitlebarOverFullSizeContent() {
+        let controller = makeController()
+        defer { controller.hide() }
+        controller.summon()
+        guard let window = controller.windowForTesting else {
+            return XCTFail("summon() must construct a real window")
+        }
+
+        XCTAssertTrue(window.titlebarAppearsTransparent, "spec §4: the seamless top — the sidebar shows through the titlebar")
+        XCTAssertTrue(window.styleMask.contains(.fullSizeContentView), "content extends under the titlebar")
+        XCTAssertEqual(window.titleVisibility, .hidden, "no title text over the seamless top")
+        XCTAssertEqual(window.title, "Norma", "the window keeps its NAME — Mission Control/Window-menu identity")
+        XCTAssertNotNil(window.toolbar, "the empty unified toolbar is the inset-traffic-lights machinery")
+        XCTAssertEqual(window.toolbarStyle, .unified)
+        XCTAssertTrue(window.isOpaque, "the shell is an opaque window — the detached windows' clear shell is NOT this recipe")
+    }
+
     /// A plain re-summon PRESERVES the current destination (the `openDashboard` plain-refocus
     /// precedent); a targeted summon retargets it.
     func testSummonNavigatesOnlyWhenGivenADestination() {

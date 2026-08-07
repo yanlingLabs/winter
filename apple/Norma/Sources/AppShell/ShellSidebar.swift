@@ -198,6 +198,11 @@ func recentsActivityDotStyle(_ activity: String?) -> ActivityChipStyle? {
     }
 }
 
+/// chatgpt-ui T3: the sidebar/content boundary hairline's width — a tune-at-gate constant, same
+/// posture as `ShellSessionView`'s `topInset: 8` (the live gate may prefer a true pixel hairline;
+/// 1 pt reads correctly on Retina and matches the search field's own 1 pt stroke vocabulary).
+let shellSidebarHairlineWidth: CGFloat = 1
+
 // MARK: - The sidebar
 
 /// The nav sidebar — chatgpt-ui T1: the ChatGPT desktop app's sidebar anatomy, top to bottom
@@ -286,6 +291,20 @@ struct ShellSidebar: View {
         .scrollContentBackground(.hidden)
         .safeAreaInset(edge: .bottom, spacing: 0) { accountRow }
         .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
+        // chatgpt-ui T3 (spec §4): the hairline at the sidebar/content boundary. EXPLICIT because
+        // nothing else guarantees it: macOS 26's split view renders the sidebar as a floating
+        // column with no drawn divider once T1's opaque fill covers its material, and both sides
+        // of the boundary are near-identical flat surfaces. An OVERLAY (not part of the
+        // background) so it paints over the account row's own opaque bar too; `ignoresSafeArea`
+        // so it spans the full height including the transparent-titlebar region — the ChatGPT
+        // reference's full-height line. `separatorColor` follows both appearances by
+        // construction; the 1 pt width is a tune-at-gate constant (`shellSidebarHairlineWidth`).
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(width: shellSidebarHairlineWidth)
+                .ignoresSafeArea()
+        }
         // Same "the view's own appearance is the belt" posture as `SessionSidebar.task` — the
         // wirer-level `startInitialLoad()` kick can lose its race against this directory's harness
         // connecting. Task 2 adds the owned 5 s poll on top (visible-only).
