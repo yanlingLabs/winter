@@ -418,9 +418,10 @@ final class ShellSessionHost: ObservableObject {
     ///   is still in the page's composer, so nothing is lost and nothing doubles.
     /// - **Unreachable daemon:** VISIBLE failure, page-bound — `newChatCreate = .failed(…)` and
     ///   `onCreated` never fires, so the shell never navigates on failure.
-    /// - **Create lands after the user navigated away:** still navigates onto the session — the
-    ///   send is a commitment, and it can only deliver through the session's attach; swallowing
-    ///   it would be a silent maybe-never send.
+    /// - **Create lands after the user navigated away:** lands QUIETLY — the session appears in
+    ///   Recents and the parked message delivers on that session's own attach (fresh or hop);
+    ///   only the CURRENT page instance's create navigates (the `newChatPageEpoch` gate below).
+    ///   The send is still a commitment — it delivers whenever the session is next opened.
     func sendFirstChatMessage(_ text: String, onCreated: @escaping (String) -> Void) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -516,7 +517,7 @@ final class ShellSessionHost: ObservableObject {
             // the wire pin says nothing is created either: arriving here issues zero RPCs). A
             // fresh entry clears a stale create failure — the page starts clean every time; an
             // in-flight create is NOT cancelled (its send is a commitment — see
-            // `sendFirstChatMessage`'s own doc for the navigate-after-departure decision).
+            // `sendFirstChatMessage`'s own doc for the quiet-departed-landing decision).
             dispatchResolutionToken += 1
             dispatchResolution = .idle
             if newChatCreate != .creating { newChatCreate = .idle }
