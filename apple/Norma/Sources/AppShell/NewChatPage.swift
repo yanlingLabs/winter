@@ -92,6 +92,10 @@ let newChatComposerHeight: CGFloat = 124
 /// The Cowork strip's height — the band that slides out from behind the composer.
 let newChatCoworkStripHeight: CGFloat = 40
 
+/// The send affordance's square. The reference's is a squircle a touch larger than a
+/// control-row icon button — it is the row's one primary action.
+let newChatSendButtonSize: CGFloat = 30
+
 /// What the model/effort slot reads until it is wired. NOT a real model name: showing one would
 /// claim this page had picked it, and the page has no session to pick for yet.
 let newChatModelPlaceholder = "Default model"
@@ -268,7 +272,7 @@ struct NewChatPage: View {
                 .resizable()
                 .renderingMode(.template)
                 .scaledToFit()
-                .frame(width: 30, height: 30)
+                .frame(width: 36, height: 36)
                 .foregroundStyle(Theme.accent)
             Text(newChatGreeting)
                 .font(Theme.greeting)
@@ -374,14 +378,9 @@ struct NewChatPage: View {
         .frame(height: newChatComposerHeight)
         // The composer's OWN face and border. Fixed: selecting Cowork must not resize this box
         // (user ruling, 2026-08-07) — the extra controls arrive BELOW it instead.
-        .background(
-            RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                .fill(Theme.composerSurface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                .strokeBorder(Theme.hairline, lineWidth: 1)
-        )
+        // Face only — the BORDER lives on the outer container below, which is what keeps a single
+        // outline around composer+strip instead of two nested ones once Cowork opens.
+        .background(Theme.composerSurface)
         .overlay(alignment: .bottomTrailing) {
             if ui.showsWorkingIndicator {
                 ProgressView()
@@ -391,32 +390,31 @@ struct NewChatPage: View {
             }
         }
 
-        // The Cowork strip SLIDES DOWN FROM BEHIND the composer rather than growing it: the strip
-        // is drawn first (underneath, in z-order) and revealed by a top-edge move transition, and
-        // the whole stack is clipped — so it reads as sliding out from under a box that never
-        // changed size. Growing the card instead would shift the composer and its controls, which
-        // is exactly what the ruling rules out.
-        return ZStack(alignment: .top) {
+        // The Cowork strip is a SIBLING BELOW the composer, in a clipped container — not a
+        // z-ordered layer under it.
+        //
+        // The first attempt WAS a ZStack with the strip behind: it broke, because the composer's
+        // own opaque face is painted over whatever sits under it, so the strip rendered as a
+        // ghost bleeding through the card's bottom edge. Siblings in a clipped stack give the same
+        // read honestly — `.move(edge: .top)` slides the strip DOWN into its slot from behind the
+        // composer's bottom edge, the clip hides it until it arrives, and the composer's own fixed
+        // height means nothing above it shifts (the ruling).
+        return VStack(spacing: 0) {
+            box
             if newChatShowsCoworkControls(mode: mode) {
                 announcementRow
-                    .padding(.top, newChatComposerHeight - newChatCardCornerRadius)
-                    .background(
-                        RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                            .fill(Theme.canvas)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: newChatCardCornerRadius,
-                                                 style: .continuous)
-                                    .strokeBorder(Theme.hairline, lineWidth: 1)
-                            )
-                            // Only the strip's own band is drawn — the part hidden behind the
-                            // composer would otherwise double the border.
-                            .padding(.top, newChatCardCornerRadius)
-                    )
+                    .background(Theme.canvas)
+                    .overlay(alignment: .top) {
+                        Rectangle().fill(Theme.hairline).frame(height: 1)
+                    }
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
-            box
         }
         .clipShape(RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
+                .strokeBorder(Theme.hairline, lineWidth: 1)
+        )
         .shadow(color: .black.opacity(0.05), radius: 16, y: 4)
         .frame(maxWidth: newChatCardWidth)
     }
@@ -431,21 +429,21 @@ struct NewChatPage: View {
     /// that concept does not exist. Wiring them is its own piece of work.
     private var controlRow: some View {
         HStack(spacing: 8) {
-            NewChatControlButton(systemImage: "plus", label: "Attach (not wired yet)", size: 16)
+            NewChatControlButton(systemImage: "plus", label: "Attach (not wired yet)", size: 17)
             modePicker
             Spacer(minLength: 12)
             // The model reads PRIMARY, like the reference's — it is the thing you would click,
             // not a caption. The chevron says so even while the picker itself is unwired.
             HStack(spacing: 4) {
                 Text(newChatModelPlaceholder)
-                    .font(.system(size: 13))
+                    .font(.system(size: 14))
                     .foregroundStyle(.primary)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
+                    .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(Theme.textMuted)
             }
             .help("Model and effort (not wired yet)")
-            NewChatControlButton(systemImage: "mic", label: "Dictate (not wired yet)")
+            NewChatControlButton(systemImage: "mic", label: "Dictate (not wired yet)", size: 15)
             sendButton
         }
         .padding(.horizontal, 18)
@@ -465,7 +463,7 @@ struct NewChatPage: View {
                     withAnimation(.easeInOut(duration: 0.24)) { mode = option }
                 } label: {
                     Text(option.title)
-                        .font(.system(size: 13, weight: isSelected ? .medium : .regular))
+                        .font(.system(size: 14, weight: isSelected ? .medium : .regular))
                         .foregroundStyle(isSelected ? AnyShapeStyle(.primary)
                                                     : AnyShapeStyle(Theme.textMuted))
                         .padding(.horizontal, 10)
@@ -501,11 +499,16 @@ struct NewChatPage: View {
                 // onto this surface, exactly as the reference tints its own send.
                 Button(action: submit) {
                     Image(systemName: "arrow.up")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(Theme.canvas)
-                        .frame(width: 26, height: 26)
-                        .background(Circle().fill(Theme.accent))
-                        .contentShape(Circle())
+                        .frame(width: newChatSendButtonSize, height: newChatSendButtonSize)
+                        // A rounded RECT, not a circle — the reference's send is a squircle, and a
+                        // circle read visibly different beside it.
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Theme.accent)
+                        )
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Send")
@@ -515,9 +518,9 @@ struct NewChatPage: View {
                 // A blocked send shows WHY on hover when there is a reason worth giving (Cowork);
                 // an empty draft is the ordinary resting state and explains itself.
                 Image(systemName: "waveform")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(Theme.textMuted)
-                    .frame(width: 26, height: 26)
+                    .frame(width: newChatSendButtonSize, height: newChatSendButtonSize)
                     .help(blocked!.isEmpty ? "Type a message to send" : blocked!)
                     .accessibilityLabel(blocked!.isEmpty ? "Send — type a message first" : blocked!)
             }
