@@ -101,4 +101,52 @@ final class SidebarBrandTests: XCTestCase {
         XCTAssertEqual(recentsCandidates([]).count, 0)
         XCTAssertEqual(recentsCandidates([summary("s_dispatch", mode: "dispatch")]).count, 0)
     }
+
+    // MARK: - T3: the search palette's pure helpers
+
+    /// `SessionSummary.createdAt` is epoch MILLISECONDS (every existing call site divides by
+    /// 1000) — reading it as seconds would bucket every session as "Older", silently and
+    /// uniformly. `now` is injected so this pin is not clock-dependent.
+    func testRelativeTimeBucketReadsMillisecondsAndBucketsCoarsely() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        func bucket(daysAgo: Double) -> String {
+            let ms = Int((now.timeIntervalSince1970 - daysAgo * 86_400) * 1000)
+            return relativeTimeBucket(createdAt: ms, now: now)
+        }
+        XCTAssertEqual(bucket(daysAgo: 0), "Today")
+        XCTAssertEqual(bucket(daysAgo: 0.9), "Today")
+        XCTAssertEqual(bucket(daysAgo: 3), "Past week")
+        XCTAssertEqual(bucket(daysAgo: 20), "Past month")
+        XCTAssertEqual(bucket(daysAgo: 200), "Past year")
+        XCTAssertEqual(bucket(daysAgo: 900), "Older")
+    }
+
+    /// A row stamped in the FUTURE (clock skew between the daemon's host and this Mac is
+    /// ordinary) must not fall off the bottom into "Older" — it is the newest thing we know of.
+    func testRelativeTimeBucketTreatsFutureStampsAsToday() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let future = Int((now.timeIntervalSince1970 + 3600) * 1000)
+        XCTAssertEqual(relativeTimeBucket(createdAt: future, now: now), "Today")
+    }
+
+    /// Clamped, never wrapping: ↓ on the last row stays put rather than jumping to the top.
+    func testSearchPaletteMoveSelectionClampsAtBothEnds() {
+        XCTAssertEqual(searchPaletteMoveSelection(current: 0, count: 5, delta: 1), 1)
+        XCTAssertEqual(searchPaletteMoveSelection(current: 4, count: 5, delta: 1), 4)
+        XCTAssertEqual(searchPaletteMoveSelection(current: 0, count: 5, delta: -1), 0)
+        XCTAssertEqual(searchPaletteMoveSelection(current: 3, count: 5, delta: -1), 2)
+    }
+
+    /// Total on an empty result set — the palette shows "No matches", and the arrow keys must not
+    /// produce an index that would crash the row lookup.
+    func testSearchPaletteMoveSelectionIsSafeOnEmptyResults() {
+        XCTAssertEqual(searchPaletteMoveSelection(current: 0, count: 0, delta: 1), 0)
+        XCTAssertEqual(searchPaletteMoveSelection(current: 3, count: 0, delta: -1), 0)
+    }
+
+    /// A STALE selection index — the query narrowed the list out from under it — must be clamped
+    /// back into range, not left pointing past the end. `delta: 0` is the re-clamp call.
+    func testSearchPaletteMoveSelectionClampsAStaleIndex() {
+        XCTAssertEqual(searchPaletteMoveSelection(current: 9, count: 3, delta: 0), 2)
+    }
 }
