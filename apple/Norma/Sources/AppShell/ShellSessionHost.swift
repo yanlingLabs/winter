@@ -1195,7 +1195,23 @@ struct ShellSessionView: View {
                         // titlebar and pays 52pt for it) — this is the plain breathing room above
                         // the header row. Tune-at-gate constant.
                         topInset: 8,
-                        sidebars: host.sidebarWiring
+                        sidebars: host.sidebarWiring,
+                        // The shell's chat page is the ONE surface that opts into the shared
+                        // composer card — see `WindowContentView.composerCardMode` for why the
+                        // orb's morph window and the detached window deliberately do not.
+                        //
+                        // Read from the DIRECTORY rather than from `adapter.isChatSession`: that
+                        // flag only distinguishes chat from not-chat, and the card needs the real
+                        // mode to decide whether the Chat/Cowork segment applies at all. A code
+                        // session gets the card without a segment, which is correct — it is not
+                        // one of the two modes that segment offers.
+                        // `host.attachedSessionId` READ FRESH, per this type's own standing rule
+                        // (see its doc: every closure reads it at call time rather than capturing
+                        // an id) — the attachment can be swapped under this view.
+                        composerCardMode: SessionMode(
+                            wire: directory.rows
+                                .first { $0.sessionId == host.attachedSessionId }?.mode
+                        )
                     ) {
                         // cli-handoff T3's open-session "Move to CLI", RE-HOSTED (custom-sidebar
                         // rework): the window toolbar it rode died with the native chrome

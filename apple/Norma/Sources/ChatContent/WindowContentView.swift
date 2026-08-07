@@ -17,6 +17,19 @@ struct WindowContentView<Accessory: View>: View {
     /// Declared BEFORE `headerAccessory` so the memberwise init keeps the `@ViewBuilder` accessory
     /// last (the two call sites pass it as a trailing closure).
     let sidebars: SidebarWiring?
+    /// The session's mode, which OPTS THIS SURFACE INTO the shared composer card
+    /// (`NormaComposerCard`). `nil` keeps the plain 88 pt `ComposerTextView` this view has always
+    /// rendered.
+    ///
+    /// Opt-in rather than global (2026-08-07) because this view has THREE homes and they are not
+    /// alike: the shell's chat page (which wants the card), the detached window, and the ORB's
+    /// morph window — and that last one is a glass surface under the difference-blend law, where a
+    /// cream card would read as broken. Only the shell passes a mode today; the other two keep
+    /// what they have until someone decides otherwise on purpose.
+    ///
+    /// It carries the MODE as well as the opt-in because the card needs it: the Chat/Cowork
+    /// segment only appears for those two modes, and the Cowork strip only exists for one of them.
+    var composerCardMode: SessionMode? = nil
     @ViewBuilder let headerAccessory: () -> Accessory
 
     /// Task 4 (2d-iii): the ⋯ menu's popover presentation state — local to this view (not the
@@ -157,12 +170,31 @@ struct WindowContentView<Accessory: View>: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            ComposerTextView(
-                text: adapter.draftBinding,
-                onSubmit: { adapter.onSubmit(adapter.composerDraft) },
-                usesAdaptiveColors: true
-            )
-            .frame(height: 88)
+            if let cardMode = composerCardMode {
+                // The SHARED card (user call, 2026-08-07: the live page's composer "should be the
+                // same as the one of the new chat page"). Its strip emerges from the TOP here —
+                // this composer sits at the bottom of the window, where "below" is off-screen.
+                //
+                // The mode segment is NOT selectable: a session's mode is fixed at creation and
+                // Norma has no mode-switch, so a live segment would offer something it cannot do.
+                NormaComposerCard(
+                    text: adapter.draftBinding,
+                    onSubmit: { adapter.onSubmit(adapter.composerDraft) },
+                    mode: .constant(cardMode),
+                    modeIsSelectable: false,
+                    stripEdge: .above,
+                    sendBlockedReason: adapter.composerDraft
+                        .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : nil
+                )
+                .frame(maxWidth: .infinity)
+            } else {
+                ComposerTextView(
+                    text: adapter.draftBinding,
+                    onSubmit: { adapter.onSubmit(adapter.composerDraft) },
+                    usesAdaptiveColors: true
+                )
+                .frame(height: 88)
+            }
 
             if !adapter.liveSubagents.isEmpty && !rightVisible {
                 subagentSection(adapter.liveSubagents)
