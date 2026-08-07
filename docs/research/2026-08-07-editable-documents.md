@@ -206,32 +206,38 @@ No editor works "directly in OOXML"; that is not a thing anyone does. Every suit
 
 **Worth remembering for a DIFFERENT question.** If Norma ever wants *native* documents — sheets and docs created and living in Norma, agent-manipulated headlessly, never round-tripping to Microsoft formats — Univer is an excellent Apache-2.0 foundation and cleaner than anything LibreOffice offers for that job. Two different products; Univer wins the other one.
 
-### Asked and answered: can Univer's collaborative engine be built into LibreOffice?
+### The command-bus architecture already exists — do not port Univer's
 
-No, for three reasons in increasing order of importance.
+The attractive thing about Univer is not its format, it is that **everything flows through one command API**: the UI drives it, collaboration serialises it, undo inverts it. The instinct to want that on LibreOffice is right. The answer is that **LibreOffice already has both halves.**
 
-**1. It is not open source.** Collaboration is **Univer Pro**, under the Univer Commercial License — the same gate as import/export. It cannot be lifted into anything regardless of technical merit.
+**1. The command bus is UNO dispatch.** Per LibreOffice's own docs, the dispatch framework is "an internal mechanism to dispatch the commands from the UI to the actual code that handles it, and also send data back to the user interface". Every menu item, toolbar button and shortcut fires a `.uno:` command with arguments (`DispatchHelper.executeDispatch(provider, url, args)`), which travels the frame until something handles it. ~25 years old. **`postUnoCommand()` injects into that same bus**, so the agent speaks the language the UI already speaks rather than getting a side door.
 
-**2. The architectures are incompatible at the root.**
+**2. The collaboration model is simpler than Univer's.** LOKit exposes `createView()` / `destroyView()` / `setView()` / `getView()` / `getViews()`: **one document instance, N views, no OT and no CRDT.** All views mutate the same in-memory model and receive callbacks about what changed — "cursor moves notify one view while inserting a slide notifies all views".
 
-| | Univer | LibreOffice / Collabora Online |
-| --- | --- | --- |
-| Document | Each client holds a **copy of the model** | **One authoritative document** in a LibreOffice process |
-| Edits are | **Operations**, merged by **OT** on a stateful Node server | **Input events** — keystrokes, pointer, commands |
-| Client receives | Transformed operations to apply locally | **Rendered tiles** |
-| Client is | A full participant | Essentially a **remote display** |
+**So Norma has no synchronisation problem at all.** The user's editor is one view; the agent posts commands into the same document; there is one model and one truth. Univer needs OT because it is a distributed web app with a model per client — porting it would import a problem this architecture does not have.
 
-Collabora's founding insight was that *"much of document editing is not the modification itself"* — most time is spent reading and browsing — so rendering is exposed as cacheable tiles and **the client never holds the document model at all**.
+**What to build instead: a thin TypeScript facade that is the ONLY mutation path.**
 
-Grafting OT on would mean giving LibreOffice's core an operation-based mutation model: every change expressible as a commutable operation with transform rules. Its core is 30-year-old C++ (`SwDoc`, `ScDocument`, `SdDrawDocument`) with undo/redo but no serialisable, commutable operation log. That is rewriting the mutation layer of a ~10M-line codebase, not writing a plugin.
+```
+      user (Chromium panel)          agent (tools)
+                |                          |
+                +------------+-------------+
+                     Norma command layer          <- the only mutation path
+                            |  (semantic ops + a log)
+                     UNO dispatch / UNO API
+                            |
+                   ONE LOKit document  --> view callbacks --> UI repaint
+```
 
-**3. The reason that actually settles it: Norma does not have the problem OT solves.**
+It buys three things raw LOKit does not give:
 
-OT exists for **distributed** concurrent editing — N clients, separate machines, network latency, no shared memory. Univer's engine targets up to 200 simultaneous editors.
+- **semantic operations** (`insertSlide`, `setParagraphStyle`) rather than the agent hand-assembling `.uno:` URLs;
+- **a command log** — LibreOffice has undo, but not "show me what the agent changed and let me reject it", which is a Norma feature and falls out of a single mutation path;
+- **one place for the awkwardness** — bridging C++ into TypeScript is unpleasant exactly once instead of in every feature.
 
-Norma's real situation is **one document, one process, two writers (the user and the agent), same machine, shared memory.** That is ordinary concurrency, not distributed consensus — and LOKit already provides the answer: user keystrokes and agent `postUnoCommand()` calls enter the *same loaded document*, sequenced by LibreOffice's own undo/redo stack. What is needed is a mutex, a policy for whether the agent edits while the user types, and a visual signal that it is working. **Days, not years.** Using OT for two writers sharing memory would be like running a consensus protocol to coordinate two threads.
+**The discipline is the point.** What is admirable in Univer is not portable technology, it is the rule that nothing bypasses the command layer. If the agent can reach UNO directly, the log and the guarantee are both gone. Enforce it.
 
-**If real multi-user collaboration is ever wanted** — several humans, different machines — **Collabora Online already solved it**, MPL-2.0, on LOKit, today. Adopt COOL rather than build OT.
+**Caveat to design for now:** not everything is reachable via `.uno:` dispatch. Dispatch covers UI-level commands; fine-grained model manipulation (a shape's exact position, walking paragraph properties) goes through the UNO **API** (`XTextDocument`, `setPropertyValue`), and `postUnoCommand` is dispatch-only. The facade will therefore have **two backends** — dispatch for UI-equivalent commands, direct API for model surgery. Normal, but it is where "everything is a command" stops being literally true, and better designed for than discovered when the agent needs to move a shape by 3 mm.
 
 ### The risk to retire first
 
