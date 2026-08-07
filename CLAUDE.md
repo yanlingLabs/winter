@@ -35,10 +35,15 @@ bun src/main.ts daemon run           # headless daemon
 bun src/main.ts -p "hello"           # one-shot prompt (separate terminal)
 bun src/main.ts                      # interactive TUI (Ink)
 
-# Dev profile: the Debug app is "Norma Dev" (com.norma.app.dev) on ~/.norma-dev; the global
-# `norma-dev` command (installed by the dev app's menu) is an env-setting bun wrapper. The
-# distribution app owns `norma` (symlink installed from the app / brew). Explicit NORMA_HOME
-# always wins over both defaults.
+# Dev profile: the Debug app is "Norma Dev" (com.norma.app.dev) on ~/.norma-dev, keychain
+# com.norma.core.dev; the global `norma-dev` command (installed by the dev app's menu) is an
+# env-setting bun wrapper. The distribution app owns `norma` (symlink installed from the app /
+# brew) on ~/.norma, keychain com.norma.core. Explicit NORMA_HOME always wins over both defaults.
+# TWO TRAPS: (1) plain `norma` is the DIST CLI — with a dead socket it AUTO-LAUNCHES the dist app
+# (`open -g -b com.norma.app`), so never use it for dev/test work: use `norma-dev`, or a temp
+# NORMA_HOME with a manually-spawned `daemon run`. (2) Debug builds do NOT embed norma-core —
+# "Norma Dev" cannot self-spawn a daemon; start the dev daemon below FIRST or the orb shows
+# disconnected.
 NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run   # dev daemon (or: norma-dev daemon run)
 
 # Versioning — never edit versions by hand; VERSION file (#.#.### format) is canonical

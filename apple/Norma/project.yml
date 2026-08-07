@@ -174,6 +174,12 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+        # Rider 2 (dock-ghost teardown): the harness-wide XCTestObservation registers via the test
+        # bundle's principal class — XCTest instantiates it once at bundle load, before any test
+        # runs (Tests/NormaAppTests/HarnessTeardownObserver.swift; the value is its bare @objc
+        # name, no module prefix). The target has no Info.plist file (GENERATE_INFOPLIST_FILE
+        # above), so this INFOPLIST_KEY_ build setting is how the key reaches the generated plist.
+        INFOPLIST_KEY_NSPrincipalClass: HarnessTeardownObserver
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Norma.app/Contents/MacOS/Norma"
         BUNDLE_LOADER: "$(TEST_HOST)"
   NormaHelper:
