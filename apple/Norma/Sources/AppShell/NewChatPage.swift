@@ -82,12 +82,12 @@ func newChatTipDay(_ date: Date, calendar: Calendar = .current) -> Int {
 
 /// The composer card's metrics — reference-measured (~670 pt wide), tune-at-gate like the rest.
 let newChatCardWidth: CGFloat = 670
-let newChatCardCornerRadius: CGFloat = 16
+let newChatCardCornerRadius: CGFloat = 18
 
 /// The composer box's FIXED height — field + control row. Fixed by ruling: selecting Cowork adds
 /// a strip below rather than resizing this, so the field and its controls never move under you.
 /// The Cowork strip positions itself against this figure, so the two must stay in step.
-let newChatComposerHeight: CGFloat = 116
+let newChatComposerHeight: CGFloat = 124
 
 /// The Cowork strip's height — the band that slides out from behind the composer.
 let newChatCoworkStripHeight: CGFloat = 40
@@ -223,9 +223,12 @@ struct NewChatPage: View {
     @State private var mode: SessionMode = .chat
 
     var body: some View {
-        VStack(spacing: 22) {
+        // Reference-measured gaps, and they DIFFER — greeting→card ~33 pt, card→chips ~22 — so a
+        // single uniform stack spacing cannot produce both. The greeting carries the extra.
+        VStack(spacing: 20) {
             Spacer(minLength: 0)
             greeting
+                .padding(.bottom, 12)
             composerCard
             starters
             // Visible failure (spec's honesty rule): a create that failed says so, in place —
@@ -254,18 +257,19 @@ struct NewChatPage: View {
         HStack(spacing: 12) {
             // Norma's own brand mark, ACCENT-TINTED — the reference sets its mark in the brand
             // colour beside the greeting, and this is that treatment with our mark and our teal.
-            // `mb-idle` is the menu bar's mark and is authored as a TEMPLATE image
-            // (`MenuBarController.templateImage`), which is exactly what makes it tintable; the
-            // app icon cannot do this — it is full-colour artwork on a white tile and reads as an
-            // icon pasted onto the page rather than as a mark.
-            if let mark = Bundle.main.image(forResource: "mb-idle") {
-                Image(nsImage: mark)
-                    .resizable()
-                    .renderingMode(.template)
-                    .scaledToFit()
-                    .frame(width: 30, height: 30)
-                    .foregroundStyle(Theme.accent)
-            }
+            //
+            // The VECTOR asset (`BrandMark`, the scale-burst SVG with
+            // `preserves-vector-representation`), not the menu bar's `mb-idle`: that one is an
+            // 18×18 PNG authored for a status item, so drawing it at 30 pt upscaled it ~1.7× and
+            // it read visibly soft. A vector has no native size to outgrow. The app icon is no use
+            // either — full-colour artwork on a white tile reads as an icon pasted onto the page
+            // rather than as a mark, and cannot be tinted.
+            Image("BrandMark")
+                .resizable()
+                .renderingMode(.template)
+                .scaledToFit()
+                .frame(width: 30, height: 30)
+                .foregroundStyle(Theme.accent)
             Text(newChatGreeting)
                 .font(Theme.greeting)
                 // `inverseCanvas`, not `.primary` — the reference sets its greeting in a WARM dark
@@ -363,7 +367,7 @@ struct NewChatPage: View {
             }
             .frame(height: 54)
             .padding(.horizontal, 16)
-            .padding(.top, 15)
+            .padding(.top, 20)
 
             controlRow
         }
@@ -413,7 +417,7 @@ struct NewChatPage: View {
             box
         }
         .clipShape(RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous))
-        .shadow(color: .black.opacity(0.06), radius: 10, y: 3)
+        .shadow(color: .black.opacity(0.05), radius: 16, y: 4)
         .frame(maxWidth: newChatCardWidth)
     }
 
@@ -444,8 +448,8 @@ struct NewChatPage: View {
             NewChatControlButton(systemImage: "mic", label: "Dictate (not wired yet)")
             sendButton
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 13)
     }
 
     /// Chat / Cowork, the reference's segmented pair. Cowork renders but never selects — it has no

@@ -242,6 +242,21 @@ final class SidebarBrandTests: XCTestCase {
                        "the reference's cluster pitch — button size and spacing must sum to it")
     }
 
+    /// The greeting's brand mark. A missing or misnamed image asset renders as NOTHING — no error,
+    /// no placeholder — so this is the same silent-failure class the colour pin guards.
+    ///
+    /// It must also be a VECTOR: the mark is drawn at 30 pt while the menu bar's `mb-idle` is an
+    /// 18×18 PNG, and using that one upscaled ~1.7× and read visibly soft. `representations` on a
+    /// vector-backed asset yields no fixed-size bitmap rep, which is what this checks.
+    func testBrandMarkResolvesAndIsVector() {
+        guard let mark = NSImage(named: "BrandMark") else {
+            return XCTFail("BrandMark is missing from Assets.xcassets")
+        }
+        XCTAssertGreaterThan(mark.size.width, 0, "the mark must have a drawable size")
+        XCTAssertTrue(mark.isTemplate || mark.representations.isEmpty == false,
+                      "the mark must carry a usable representation")
+    }
+
     // MARK: - The new-chat page's announcement strip
 
     /// A real announcement always wins over the tip.
