@@ -55,16 +55,6 @@ struct ShellRootView: View {
                     // Slides out to the leading edge rather than fading — the pane is a physical
                     // surface, and a fade reads as dissolving rather than closing.
                     .transition(.move(edge: .leading))
-                // chatgpt-ui T3's boundary hairline, now a genuine layout sibling rather than an
-                // overlay compensating for the split view's undrawn divider. `ignoresSafeArea` so
-                // it spans the full height including the transparent-titlebar region — the ChatGPT
-                // reference's full-height line. sidebar-brand: the warm brand `hairline` replaces
-                // the system `separatorColor`, which reads cool against the cream planes either
-                // side; and it leaves WITH the pane (a divider dividing nothing is just a stripe).
-                Rectangle()
-                    .fill(Theme.hairline)
-                    .frame(width: shellSidebarHairlineWidth)
-                    .ignoresSafeArea()
             }
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -72,10 +62,29 @@ struct ShellRootView: View {
                 // REQUIRED, not cosmetic: the sidebar's cream only reads correctly against a
                 // painted content plane — against the window's default system grey it looks
                 // wrong rather than warm. Painted here, at the shell level, so every destination
-                // inherits it and none has to remember; the transcript/composer/cards keep their
-                // own treatment for the next pass.
+                // inherits it and none has to remember.
                 .background(Theme.cardSurface)
+                // …and it is a CARD, the phone's own treatment brought over (user call,
+                // 2026-08-07): iOS masks its reveal card with a continuous rounded rect, traces
+                // that exact shape with a hairline rim, and floats it on the warm base. Only the
+                // LEADING corners round — the other two meet the window's own edge, which already
+                // has the system's rounding, and doubling it would read as a card inside a card.
+                //
+                // This REPLACED the full-height boundary hairline that used to sit between the
+                // pane and the detail: a straight line cannot follow a rounded corner, so it
+                // would have run past the card's edge. The rim is the separator now, which is
+                // also how the phone does it.
+                .clipShape(shellDetailCardShape)
+                .overlay(
+                    shellDetailCardShape
+                        .strokeBorder(Theme.hairline, lineWidth: shellSidebarHairlineWidth)
+                )
+                .shadow(color: .black.opacity(0.05), radius: 10, x: -2)
         }
+        // The base plane behind everything, so the card's rounded corners reveal warm canvas
+        // rather than the window's own fill. The sidebar paints its own `canvas` too; this is what
+        // covers the sliver the corners cut out of the detail side.
+        .background(Theme.canvas)
         // app-shell T4: the hop-away "keep working?" banner (spec §1, T3 review as-m9) — an
         // OVERLAY on the whole split view, not inside `detail`, so it survives the very
         // navigation that triggered it (the user has already moved on to a different surface by
@@ -349,10 +358,24 @@ func recentsActivityDotStyle(_ activity: String?) -> ActivityChipStyle? {
     }
 }
 
-/// chatgpt-ui T3: the sidebar/content boundary hairline's width — a tune-at-gate constant, same
-/// posture as `ShellSessionView`'s `topInset: 8` (the live gate may prefer a true pixel hairline;
-/// 1 pt reads correctly on Retina and matches the search field's own 1 pt stroke vocabulary).
+/// The sidebar/content boundary hairline's width. Since sidebar-chrome-2 this is the width of the
+/// detail CARD's rim rather than of a standalone divider — the rim replaced the divider, because a
+/// straight full-height line cannot follow the card's rounded corners.
 let shellSidebarHairlineWidth: CGFloat = 1
+
+/// The detail card's leading corner radius. Only the leading corners round: the trailing two meet
+/// the window's own edge, which already carries the system's rounding, and doubling it would read
+/// as a card inside a card. Tune-at-gate.
+let shellDetailCardCornerRadius: CGFloat = 12
+
+/// The detail card's shape — declared ONCE so the clip and the rim trace the same geometry. Two
+/// separate constructions is how a rim ends up a hair off its own clip edge.
+let shellDetailCardShape = UnevenRoundedRectangle(
+    topLeadingRadius: shellDetailCardCornerRadius,
+    bottomLeadingRadius: shellDetailCardCornerRadius,
+    bottomTrailingRadius: 0,
+    topTrailingRadius: 0,
+    style: .continuous)
 
 // MARK: - custom-sidebar: the pane's own metrics + the row treatment (PURE decisions hoisted)
 
