@@ -44,16 +44,24 @@ The second is where projects die. A `.docx` is a zip of XML with an enormous fea
 
 ### The realistic options
 
-#### A. ONLYOFFICE Docs — best fidelity, heaviest, licence problem
+#### A. ONLYOFFICE — and the important distinction between its TWO products
 
-- **OOXML is its native format.** It reads and writes `.docx`/`.xlsx`/`.pptx` directly rather than converting through ODF — the best Microsoft-format fidelity of the open options.
-- Has a **Plugin & Macros API** and an **Automation API** (restructured in 9.4, 2026, with a `Connector` class and content-control support) — so the agent can drive the same editor the human uses. That satisfies the one-engine rule directly.
-- **Cost:** Document Server is five services (PostgreSQL, RabbitMQ, Nginx, Redis, the server itself), ~4 GB RAM minimum. Bundling that inside a Mac app is a serious undertaking — it would make the 1.4 GB Chromium number look modest.
-- **Licence — the blocker.** Community is **AGPL v3**. Bundling it into a distributed proprietary app means releasing your source under AGPL, *or* buying a commercial licence (Developer Edition). Norma is proprietary and distributed, so **AGPL is not viable and a commercial licence is required.** Pricing is quote-based; this needs a real conversation, not an estimate.
+An earlier draft of this note pointed at **Document Server** and called it disqualifyingly heavy. That was aiming at the wrong product.
+
+**ONLYOFFICE Docs (Document Server)** is a *server* for multi-user concurrent editing. Its official minimum for Community in Docker is **single-core 2 GHz, 4 GB RAM, 40 GB disk, 4 GB swap**. The 4 GB is real and official — but note the **40 GB of disk**, which gives the game away: this is sized for a document store serving many editors, not for one person opening a file. Bundling it in a desktop app would be pointing a server at an audience of one.
+
+**ONLYOFFICE Desktop Editors** is the product that actually fits. It is:
+
+- **a native desktop app with no server at all** — works fully offline
+- **already built on the Chromium Embedded Framework**, which lines up exactly with the Chromium decision
+- **free and open source under AGPL v3**
+- split into [`desktop-sdk`](https://github.com/ONLYOFFICE/DesktopEditors) (the core) and **`sdkjs`** — a JavaScript SDK carrying the client-side APIs for every component, i.e. the surface an agent would drive
+
+Same OOXML-native editing core, same fidelity, **without the five-service stack**. This is the ONLYOFFICE option worth evaluating.
 
 #### B. Collabora Online — friendliest licence, lightest, weaker OOXML
 
-- **MPL 2.0** — file-level copyleft. You may bundle and link without opening your own source; you publish changes to *their* files only. **Far better suited to a proprietary desktop app than AGPL.**
+- **MPL 2.0** — file-level copyleft. You bundle and link freely and publish changes to *their* files only. **Norma stays Apache-2.0.**
 - **Single container, runs in ~1 GB RAM.** Dramatically lighter than ONLYOFFICE.
 - Built on LibreOffice, so **ODF-native**; Microsoft formats are handled "well but not perfectly". For a product whose whole point is editing `.docx`/`.pptx`, that gap is the risk.
 - Automation via LibreOffice's **UNO API**, which is mature and very capable.
@@ -83,11 +91,40 @@ AppleScript or Office add-ins against a real Office install. Perfect fidelity by
 
 1. **Ship the code editor first.** Monaco + `monaco-languageclient` over the existing `LspManager`. Highest value per unit of work by a wide margin, and it proves the panel/tab shell that everything else will sit in.
 2. **Spike ZetaOffice/ZetaJS** before committing to anything heavier. If WASM LibreOffice is usable, it is the cleanest possible answer for a Chromium-based app — no server, no IPC, agent and user on one engine. A spike is days; the answer is worth knowing before spending weeks elsewhere.
-3. **If the spike fails, choose on licence and fidelity:**
-   - Need best `.docx`/`.pptx` fidelity and can pay → **ONLYOFFICE with a commercial licence**.
-   - Need a clean licence and a light footprint, can accept OOXML imperfection → **Collabora (MPL 2.0)**.
+3. **If the spike fails, the choice is a LICENCE decision, not a technical one** — see §4.
 4. **Do not build your own OOXML editor.** For Word maybe, for PowerPoint no.
 5. **Decide the agent's mutation path at the same time as the editor** — not after. Picking an editor and *then* asking "how does the agent edit this?" is how you end up with two engines and silent divergence.
+
+---
+
+## 4. The licence question — Norma is Apache-2.0, and that is the whole decision
+
+Norma is **Apache-2.0** (`packages/*/package.json`) and public at `github.com/yanlingLabs/norma`. An earlier draft assumed proprietary and called AGPL a blocker. **Wrong** — but the licence still decides this, just differently.
+
+Apache-2.0 is **one-way compatible** with AGPL v3: Apache code can be combined into an AGPL work, and the **combined work is then AGPL v3**.
+
+| Engine | Licence | Effect on Norma |
+| --- | --- | --- |
+| ONLYOFFICE (Docs or Desktop Editors) | **AGPL v3** | The **shipped app becomes AGPL v3.** The repo can stay Apache-2.0, but what you distribute carries AGPL obligations, including the network clause. |
+| Collabora Online | **MPL 2.0** | **Norma stays Apache-2.0.** Publish changes to Collabora's own files only. |
+| LibreOffice / ZetaOffice | **MPL 2.0** | Same — Norma stays Apache-2.0. |
+
+**This is a values decision, not a legal obstacle.** Going AGPL is entirely legitimate for a free, open project, and buys the best OOXML fidelity available. What it costs:
+
+- **Permissive forking goes away.** Apache-2.0 lets anyone build proprietary products on Norma; AGPL does not. If that permission is deliberate, AGPL removes it.
+- **The network clause** reaches anyone who runs Norma as a service.
+- **Some organisations ban AGPL outright**, which narrows who can adopt it at work.
+
+**So the fork in the road:**
+
+- **Best `.docx`/`.pptx` fidelity matters most, and AGPL is acceptable** → ONLYOFFICE **Desktop Editors** (no server, already CEF-based, `sdkjs` for agent control).
+- **Staying Apache-2.0 matters most** → **Collabora** or **ZetaOffice** (both MPL 2.0), accepting somewhat weaker OOXML fidelity.
+
+That is the actual decision. Everything else follows from it.
+
+---
+
+## 5. One thing to settle early
 
 **One thing to settle early:** whether "the agent modifies the document" means *while the user has it open* (live co-editing, needs the editor's automation API and an operational-transform story) or *when it is closed* (much easier — mutate the file, reopen). Those are very different projects, and the second is a legitimate v1.
 
