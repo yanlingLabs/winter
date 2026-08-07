@@ -206,6 +206,33 @@ No editor works "directly in OOXML"; that is not a thing anyone does. Every suit
 
 **Worth remembering for a DIFFERENT question.** If Norma ever wants *native* documents — sheets and docs created and living in Norma, agent-manipulated headlessly, never round-tripping to Microsoft formats — Univer is an excellent Apache-2.0 foundation and cleaner than anything LibreOffice offers for that job. Two different products; Univer wins the other one.
 
+### Asked and answered: can Univer's collaborative engine be built into LibreOffice?
+
+No, for three reasons in increasing order of importance.
+
+**1. It is not open source.** Collaboration is **Univer Pro**, under the Univer Commercial License — the same gate as import/export. It cannot be lifted into anything regardless of technical merit.
+
+**2. The architectures are incompatible at the root.**
+
+| | Univer | LibreOffice / Collabora Online |
+| --- | --- | --- |
+| Document | Each client holds a **copy of the model** | **One authoritative document** in a LibreOffice process |
+| Edits are | **Operations**, merged by **OT** on a stateful Node server | **Input events** — keystrokes, pointer, commands |
+| Client receives | Transformed operations to apply locally | **Rendered tiles** |
+| Client is | A full participant | Essentially a **remote display** |
+
+Collabora's founding insight was that *"much of document editing is not the modification itself"* — most time is spent reading and browsing — so rendering is exposed as cacheable tiles and **the client never holds the document model at all**.
+
+Grafting OT on would mean giving LibreOffice's core an operation-based mutation model: every change expressible as a commutable operation with transform rules. Its core is 30-year-old C++ (`SwDoc`, `ScDocument`, `SdDrawDocument`) with undo/redo but no serialisable, commutable operation log. That is rewriting the mutation layer of a ~10M-line codebase, not writing a plugin.
+
+**3. The reason that actually settles it: Norma does not have the problem OT solves.**
+
+OT exists for **distributed** concurrent editing — N clients, separate machines, network latency, no shared memory. Univer's engine targets up to 200 simultaneous editors.
+
+Norma's real situation is **one document, one process, two writers (the user and the agent), same machine, shared memory.** That is ordinary concurrency, not distributed consensus — and LOKit already provides the answer: user keystrokes and agent `postUnoCommand()` calls enter the *same loaded document*, sequenced by LibreOffice's own undo/redo stack. What is needed is a mutex, a policy for whether the agent edits while the user types, and a visual signal that it is working. **Days, not years.** Using OT for two writers sharing memory would be like running a consensus protocol to coordinate two threads.
+
+**If real multi-user collaboration is ever wanted** — several humans, different machines — **Collabora Online already solved it**, MPL-2.0, on LOKit, today. Adopt COOL rather than build OT.
+
 ### The risk to retire first
 
 **Building LibreOffice for macOS arm64 as an embeddable library.** It is an enormous codebase with its own build system (`gbuild`), and published LOKit binaries skew towards mobile targets. This is the single most likely thing to consume weeks unexpectedly, and it gates everything else — so it should be spike #1, before any UI work.
