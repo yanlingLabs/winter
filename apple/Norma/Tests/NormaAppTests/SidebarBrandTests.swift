@@ -149,4 +149,42 @@ final class SidebarBrandTests: XCTestCase {
     func testSearchPaletteMoveSelectionClampsAStaleIndex() {
         XCTAssertEqual(searchPaletteMoveSelection(current: 9, count: 3, delta: 0), 2)
     }
+
+    // MARK: - The sidebar toggle + window chrome
+
+    /// The toggle STATES the sidebar's condition rather than naming the action, so the two glyphs
+    /// must actually differ — one symbol in two tints would leave the button ambiguous exactly
+    /// when it matters most: once the pane it refers to is off-screen.
+    func testSidebarToggleGlyphDiffersBetweenStates() {
+        let shown = shellSidebarToggleSystemImage(isVisible: true)
+        let hidden = shellSidebarToggleSystemImage(isVisible: false)
+        XCTAssertNotEqual(shown, hidden, "the two states must be visually distinguishable")
+    }
+
+    /// Both glyphs must exist on this OS — a missing SF Symbol renders as a blank box with no
+    /// error anywhere, which is precisely the kind of silent failure a name typo produces.
+    func testSidebarToggleGlyphsResolveAsRealSymbols() {
+        for name in [shellSidebarToggleSystemImage(isVisible: true),
+                     shellSidebarToggleSystemImage(isVisible: false)] {
+            XCTAssertNotNil(NSImage(systemSymbolName: name, accessibilityDescription: nil),
+                            "\(name) is not a real SF Symbol on this OS")
+        }
+    }
+
+    /// The help/accessibility text names the ACTION (complementing the glyph's state), so it must
+    /// invert relative to the glyph — "Hide sidebar" while it is showing.
+    func testSidebarToggleLabelNamesTheAction() {
+        XCTAssertEqual(shellSidebarToggleLabel(isVisible: true), "Hide sidebar")
+        XCTAssertEqual(shellSidebarToggleLabel(isVisible: false), "Show sidebar")
+    }
+
+    /// The toggle must clear the traffic lights, or it sits under them and is unclickable. The
+    /// three buttons plus their inset occupy roughly 80 pt; this pins the ordering relationship
+    /// rather than the exact figures, both of which stay tune-at-gate.
+    func testSidebarToggleClearsTheTrafficLights() {
+        XCTAssertGreaterThan(shellSidebarToggleLeadingInset, 80,
+                             "the toggle must start beyond the three window buttons")
+        XCTAssertGreaterThan(shellTrafficLightInset.x, 0, "inset moves the lights inward, not out")
+        XCTAssertGreaterThan(shellTrafficLightInset.y, 0, "…and downward")
+    }
 }

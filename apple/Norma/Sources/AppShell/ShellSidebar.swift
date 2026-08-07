@@ -37,24 +37,35 @@ struct ShellRootView: View {
     /// survives whatever destination is showing), while the ⌕ that opens it lives in the pane.
     /// The two are siblings, so the state has to live at their common parent.
     @StateObject private var searchPalette = SearchPalettePresentation()
+    /// sidebar-brand: whether the sidebar pane is showing. `@State` on the root suffices — the
+    /// window outlives every hide/re-summon (`AppWindowController` owns it forever), so the user's
+    /// choice survives exactly as long as the window itself does.
+    @State private var sidebarVisible = true
 
     var body: some View {
         HStack(spacing: 0) {
             // The sidebar carries the host (Move to CLI on Recents rows) and the injected New chat
             // door — both optional, same fallback posture as `detail` below. It owns its own fixed
             // width (`shellSidebarWidth`) — the split view's user-draggable 208–320 column died
-            // with the container (decide-and-disclose: fixed always-visible, no collapse toggle).
-            ShellSidebar(nav: nav, directory: directory, host: host, newChat: newChat,
-                         presentation: searchPalette)
-            // chatgpt-ui T3's boundary hairline, now a genuine layout sibling rather than an
-            // overlay compensating for the split view's undrawn divider. `ignoresSafeArea` so it
-            // spans the full height including the transparent-titlebar region — the ChatGPT
-            // reference's full-height line. sidebar-brand: the warm brand `hairline` replaces the
-            // system `separatorColor`, which reads cool against the cream planes either side.
-            Rectangle()
-                .fill(Theme.hairline)
-                .frame(width: shellSidebarHairlineWidth)
-                .ignoresSafeArea()
+            // with the container. sidebar-brand supersedes that rework's "no collapse toggle"
+            // ruling: the pane now collapses, driven by the titlebar toggle below.
+            if sidebarVisible {
+                ShellSidebar(nav: nav, directory: directory, host: host, newChat: newChat,
+                             presentation: searchPalette)
+                    // Slides out to the leading edge rather than fading — the pane is a physical
+                    // surface, and a fade reads as dissolving rather than closing.
+                    .transition(.move(edge: .leading))
+                // chatgpt-ui T3's boundary hairline, now a genuine layout sibling rather than an
+                // overlay compensating for the split view's undrawn divider. `ignoresSafeArea` so
+                // it spans the full height including the transparent-titlebar region — the ChatGPT
+                // reference's full-height line. sidebar-brand: the warm brand `hairline` replaces
+                // the system `separatorColor`, which reads cool against the cream planes either
+                // side; and it leaves WITH the pane (a divider dividing nothing is just a stripe).
+                Rectangle()
+                    .fill(Theme.hairline)
+                    .frame(width: shellSidebarHairlineWidth)
+                    .ignoresSafeArea()
+            }
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 // sidebar-brand T5: the RAISED plane (`docs/brand.md` § the plane mapping).
@@ -83,6 +94,30 @@ struct ShellRootView: View {
             set: { if !$0 { pairingPresentation.dismiss() } }
         )) {
             PairingSheetContainerView(presentation: pairingPresentation)
+        }
+        // sidebar-brand: the sidebar toggle, pinned in the titlebar band just right of the traffic
+        // lights — the reference's placement, and FIXED there in both states so the affordance
+        // does not vanish along with the pane it controls. An overlay on the root (not a child of
+        // the pane) is what makes that possible.
+        .overlay(alignment: .topLeading) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.22)) { sidebarVisible.toggle() }
+            } label: {
+                Image(systemName: shellSidebarToggleSystemImage(isVisible: sidebarVisible))
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.textMuted)
+                    .frame(width: shellSidebarToggleSize, height: shellSidebarToggleSize)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(shellSidebarToggleLabel(isVisible: sidebarVisible))
+            .accessibilityLabel(shellSidebarToggleLabel(isVisible: sidebarVisible))
+            .padding(.leading, shellSidebarToggleLeadingInset)
+            .padding(.top, shellSidebarToggleTopInset)
+            // The whole point of the placement: sit in the TITLEBAR band beside the traffic
+            // lights. Without this the overlay is laid out inside the safe area and drops level
+            // with the wordmark instead — the same top-safe-area opt-out the pane itself takes.
+            .ignoresSafeArea(.container, edges: .top)
         }
         // sidebar-brand T4: the search palette (spec R2) — an overlay on the WHOLE shell so it
         // centres over the window rather than over the detail pane, and so it survives whatever
@@ -279,6 +314,42 @@ let shellSidebarSectionGap: CGFloat = 44
 
 /// The rounded-rect hover/selection fill's corner radius — shared by every row, one vocabulary.
 let shellSidebarRowCornerRadius: CGFloat = 6
+
+// MARK: - sidebar-brand: window chrome + the sidebar toggle
+
+/// How far in from the window's top-left corner the traffic lights are nudged, applied by
+/// `AppWindowController.positionTrafficLights` (see its doc for WHY it is done by hand rather
+/// than by the unified toolbar that normally provides this). Measured against the ChatGPT
+/// reference, whose lights sit ~6–7 pt further in than the macOS default in both axes.
+/// Tune-at-gate, like every other constant in this block. Measured twice: an initial (6, 6) still
+/// read ~4 pt shy of the reference in a side-by-side, so this is the second pass.
+let shellTrafficLightInset = CGPoint(x: 10, y: 8)
+
+/// The sidebar toggle's hit box, and where it sits: to the RIGHT of the traffic lights, in the
+/// titlebar band, at the same place whether the sidebar is showing or hidden (the reference keeps
+/// it fixed there — a toggle that moved with the pane would be unfindable once the pane is gone).
+///
+/// `shellSidebarToggleTopInset` is measured from the very top of the WINDOW, not from the safe
+/// area: the overlay carrying this button ignores the top safe area, exactly as the sidebar pane
+/// does. Without that it lands ~34 pt lower, level with the wordmark instead of the traffic
+/// lights, which is what the first live build did.
+let shellSidebarToggleLeadingInset: CGFloat = 88
+let shellSidebarToggleTopInset: CGFloat = 8
+let shellSidebarToggleSize: CGFloat = 24
+
+/// PURE: the toggle's glyph, which STATES the sidebar's condition rather than naming the action.
+///
+/// Two distinct symbols, not one symbol in two tints: showing = a solid leading panel (the pane is
+/// there), hidden = an outlined one (there is a pane to bring back). A single glyph would leave
+/// the button ambiguous the moment the pane it refers to is off-screen.
+func shellSidebarToggleSystemImage(isVisible: Bool) -> String {
+    isVisible ? "rectangle.leadinghalf.inset.filled" : "sidebar.left"
+}
+
+/// PURE: the toggle's help/accessibility text — the ACTION, complementing the glyph's state.
+func shellSidebarToggleLabel(isVisible: Bool) -> String {
+    isVisible ? "Hide sidebar" : "Show sidebar"
+}
 
 /// The three fills a row can wear. `selected` is the slightly stronger of the two live fills;
 /// `none` means the flat pane itself IS the background (a resting row draws nothing).
