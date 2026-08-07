@@ -91,6 +91,14 @@ struct ShellRootView: View {
                         .ignoresSafeArea()
                 }
         }
+        // ONE brand tint for the whole shell (user call, 2026-08-07: every cursor in the app the
+        // same colour). `.tint` is what drives a SwiftUI `TextField`'s caret and selection, and it
+        // cascades — so setting it here covers the search palette, the Dashboard panes, the
+        // pending cards and anything added later, rather than each field remembering to opt in.
+        //
+        // Deliberately NOT `ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME`: that would retint
+        // every system control in the app process, including surfaces this pass does not own.
+        .tint(Theme.accent)
         // The base plane behind everything, so the card's rounded corners reveal warm canvas
         // rather than the window's own fill. The sidebar paints its own `canvas` too; this is what
         // covers the sliver the corners cut out of the detail side.
@@ -170,8 +178,13 @@ struct ShellRootView: View {
         .overlay {
             if searchPalette.isPresented {
                 SidebarSearchPalette(nav: nav, directory: directory, presentation: searchPalette)
+                    // Drops in from above and lifts back out (user call, 2026-08-07). Scale rather
+                    // than a plain fade so it reads as arriving from the search glyph's own
+                    // direction; the scrim fades on its own inside the palette.
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: searchPalette.isPresented)
         // ⌘K, the palette's other door (the wordmark row's ⌕ is the first). A zero-size hidden
         // button is how a SwiftUI view registers a chord with no menu-bar item behind it; it
         // TOGGLES so the same chord closes what it opened.
@@ -829,7 +842,15 @@ struct ShellSidebar: View {
         Button {
             nav.navigate(to: .session(row.sessionId))
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 10) {
+                // The session's OWN mode glyph (user call, 2026-08-07 — this pass first left it
+                // off as ChatGPT-faithful). `SessionMode(wire:)` is the shell's one mode table, so
+                // this is the same glyph set the mode rows above and the search palette already
+                // wear; there is no second table here to drift.
+                Image(systemName: SessionMode(wire: row.mode).systemImage)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textMuted)
+                    .frame(width: 16)
                 Text(sessionDisplayTitle(row.title))
                     .font(.system(size: 13))
                     .lineLimit(1)
@@ -940,7 +961,7 @@ struct ShellSidebar: View {
                 // PLACEHOLDER (user call: "the downloads icon on the corner we shall deal with it
                 // later"). Disabled for the same reason the navigation arrows are — an affordance
                 // that looks live and does nothing is worse than one that admits it isn't ready.
-                Image(systemName: "arrow.down.circle")
+                Image(systemName: "arrow.down.to.line.compact")
                     .font(.system(size: 14))
                     .foregroundStyle(.tertiary)
                     .accessibilityHidden(true)

@@ -344,6 +344,28 @@ final class SidebarBrandTests: XCTestCase {
             .isDisjoint(with: Set(newChatStarters.map(\.title))))
     }
 
+    /// The results list grows with its rows and then STOPS, after which it scrolls. Both halves
+    /// matter: a fixed height leaves dead space under three results, and an uncapped one grows
+    /// past the window on a long history.
+    func testSearchResultsHeightGrowsWithRowsThenCaps() {
+        XCTAssertEqual(searchPaletteResultsHeight(rowCount: 0), 0, "no rows, no list")
+        let one = searchPaletteResultsHeight(rowCount: 1)
+        let three = searchPaletteResultsHeight(rowCount: 3)
+        XCTAssertGreaterThan(one, 0)
+        XCTAssertGreaterThan(three, one, "it must actually follow the row count")
+        XCTAssertEqual(searchPaletteResultsHeight(rowCount: 500),
+                       searchPaletteMaxResultsHeight, "capped, then it scrolls")
+        // Monotonic up to the cap — a height that dipped as rows were added would be a layout bug
+        // nobody would think to look for.
+        var previous: CGFloat = 0
+        for count in 1...40 {
+            let height = searchPaletteResultsHeight(rowCount: count)
+            XCTAssertGreaterThanOrEqual(height, previous, "height dipped at \(count) rows")
+            XCTAssertLessThanOrEqual(height, searchPaletteMaxResultsHeight)
+            previous = height
+        }
+    }
+
     /// Every rim the shell draws is ONE device pixel on Retina, not two. Pinned because "borders
     /// are too thick" was a live finding, and a future edit that reaches for the obvious `1` would
     /// silently undo it.

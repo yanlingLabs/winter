@@ -91,11 +91,17 @@ struct SidebarSearchPalette: View {
         // window is not accepting clicks right now, which the invisible version left you to
         // discover by clicking. Kept light: the palette is a quick find-and-go, not a sheet, and a
         // heavy scrim would make it feel like a bigger interruption than it is.
-        ZStack {
+        //
+        // TOP-PINNED, not centred (user call, 2026-08-07). Centring made the card drift up and
+        // down as results came and went — and with none at all it sat dead centre, which reads as
+        // a dialog rather than as a search that dropped from the top. Pinned, the field stays put
+        // under your eye and only the list below it changes length.
+        ZStack(alignment: .top) {
             Color.black.opacity(searchPaletteScrimOpacity)
                 .ignoresSafeArea()
                 .onTapGesture { presentation.close() }
             card
+                .padding(.top, searchPaletteTopInset)
         }
     }
 
@@ -135,6 +141,7 @@ struct SidebarSearchPalette: View {
         .onChange(of: rows.count) { _, count in
             selection = searchPaletteMoveSelection(current: selection, count: count, delta: 0)
         }
+        .animation(.easeOut(duration: 0.16), value: rows.count)
         .onKeyPress(.upArrow) { move(-1); return .handled }
         .onKeyPress(.downArrow) { move(1); return .handled }
         // Esc. `.onKeyPress` rather than `.onExitCommand` (live-gate finding, 2026-08-07): with
@@ -173,7 +180,7 @@ struct SidebarSearchPalette: View {
 
     private var results: some View {
         ScrollView {
-            VStack(spacing: 1) {
+            VStack(spacing: searchPaletteRowSpacing) {
                 ForEach(Array(rows.enumerated()), id: \.element.sessionId) { index, row in
                     Button { open(row) } label: {
                         rowLabel(row, isHighlighted: index == selection)
@@ -183,9 +190,12 @@ struct SidebarSearchPalette: View {
                     .buttonStyle(ShellSidebarRowStyle(isSelected: index == selection))
                 }
             }
-            .padding(8)
+            .padding(searchPaletteListPadding)
         }
-        .frame(maxHeight: searchPaletteMaxResultsHeight)
+        // The list takes exactly the height its rows need, UP TO a cap — then it scrolls (user
+        // call, 2026-08-07). A fixed height would leave dead space under three results; an
+        // uncapped one would grow past the window on a long history.
+        .frame(height: searchPaletteResultsHeight(rowCount: rows.count))
     }
 
     private func rowLabel(_ row: SessionSummary, isHighlighted: Bool) -> some View {
@@ -251,6 +261,29 @@ let searchPaletteRowHeight: CGFloat = 34
 
 /// Caps the result list so a long session history cannot grow the card past the window.
 let searchPaletteMaxResultsHeight: CGFloat = 420
+
+/// PURE: how tall the results list is for a given row count — the rows' own height (plus the
+/// list's padding), capped, after which it scrolls.
+///
+/// Extracted rather than inlined so the "grows to fit, then scrolls" rule is one testable
+/// decision. Total for zero rows, which is not a case the view reaches (it renders "No matches"
+/// instead) but is exactly the kind of edge a future caller would hit.
+func searchPaletteResultsHeight(rowCount: Int) -> CGFloat {
+    guard rowCount > 0 else { return 0 }
+    let content = CGFloat(rowCount) * searchPaletteRowHeight
+        + CGFloat(max(0, rowCount - 1)) * searchPaletteRowSpacing
+        + searchPaletteListPadding * 2
+    return min(content, searchPaletteMaxResultsHeight)
+}
+
+/// The results list's own row spacing and outer padding — read by both the view and the height
+/// rule above, so the measurement cannot drift from what is drawn.
+let searchPaletteRowSpacing: CGFloat = 1
+let searchPaletteListPadding: CGFloat = 8
+
+/// How far below the window's top the palette sits. Pinned rather than centred, so the field
+/// stays under your eye while only the list below it changes length.
+let searchPaletteTopInset: CGFloat = 120
 
 /// The backdrop's dim. Light on purpose — enough to say "the window is busy", not enough to make
 /// a quick find-and-go feel like a modal sheet. Works in both appearances: black at a low alpha
