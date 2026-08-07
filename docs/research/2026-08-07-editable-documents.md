@@ -145,9 +145,28 @@ UNO exposes the document model, not just its text:
 
 **And crucially: one engine.** The user edits through LOKit's tiles and input events; the agent edits through UNO commands into the *same* loaded document. No second model, no divergence — the constraint §2 identified as the thing that kills naive designs is satisfied structurally.
 
-### Fidelity, and why the carve-out matters
+### Fidelity: what "ODF-native" actually costs, and why the carve-out matters
 
-LibreOffice is ODF-native and handles Microsoft formats "well but not perfectly". That gap is concentrated in **undocumented and proprietary Microsoft behaviour** — which the rule explicitly excludes. Documented OOXML it handles thoroughly. The scope carve-out and the engine's real weakness line up almost exactly.
+This is the real price of choosing LibreOffice, so it is worth stating mechanically rather than as a vague "handles MS formats well but not perfectly".
+
+The Document Foundation's own framing: *an office suite implements a document through an internal, in-memory representation; loading is a mapping INTO it and saving is a mapping OUT of it, and fidelity is greatest when the internal model is congruent with the format.*
+
+| | Internal model | Opening `.docx` | Saving `.docx` |
+| --- | --- | --- | --- |
+| **LibreOffice** | Shaped like **ODF** | OOXML → ODF-shaped model — **lossy** | ODF-shaped model → OOXML — **lossy again** |
+| **ONLYOFFICE** | Shaped like **OOXML** | Near-identity | Near-identity |
+
+**LibreOffice pays two translations per Microsoft-format round-trip; ONLYOFFICE pays roughly none** — and pays them on ODF instead, symmetrically. Losses show up in list/numbering continuation, section properties, style inheritance, shape anchoring, content controls and compatibility flags. Rarely catastrophic; real and cumulative.
+
+**Three things soften it here:**
+
+1. **The carve-out helps.** Microsoft's proprietary extras are excluded by the rule, and that is where the worst gaps concentrate.
+2. **The OOXML filters have had 15+ years of investment**, much of it from Collabora, precisely because their customers live in `.docx`.
+3. **The cost scales with boundary crossings.** Created in Norma, edited in Norma, exported once → barely affected. Cycling Word → Norma → Word repeatedly → drift accumulates. Which pattern real users have is worth knowing before optimising for it.
+
+**Source caveat:** this is a partisan topic. ONLYOFFICE publishes about LibreOffice's OOXML weakness; TDF publishes about OOXML suites handling ODF badly. Both are correct about the other. The neutral statement is only the mapping principle: *whichever format is not your internal model costs you fidelity.*
+
+**Name the trade honestly:** ONLYOFFICE has better `.docx`/`.pptx` fidelity, and the Apache-2.0 rule gives that up. A deliberate and defensible choice — but this is the bill, and it is better named now than discovered in a numbering bug six months in.
 
 ### Three ways to ship it
 
