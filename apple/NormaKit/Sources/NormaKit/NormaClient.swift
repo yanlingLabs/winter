@@ -309,6 +309,11 @@ extension SessionEvent {
         case .workflowCompleted(let v): return v.seq
         case .workflowFailed(let v): return v.seq
         case .sessionActivity(let v): return v.seq
+        case .panelTabOpened(let v): return v.seq
+        case .panelTabClosed(let v): return v.seq
+        case .panelTabActivated(let v): return v.seq
+        case .panelTabNavigated(let v): return v.seq
+        case .panelCommand(let v): return v.seq
         }
     }
 
@@ -359,6 +364,11 @@ extension SessionEvent {
         case .workflowCompleted(let v): return v.sessionId
         case .workflowFailed(let v): return v.sessionId
         case .sessionActivity(let v): return v.sessionId
+        case .panelTabOpened(let v): return v.sessionId
+        case .panelTabClosed(let v): return v.sessionId
+        case .panelTabActivated(let v): return v.sessionId
+        case .panelTabNavigated(let v): return v.sessionId
+        case .panelCommand(let v): return v.sessionId
         }
     }
 }

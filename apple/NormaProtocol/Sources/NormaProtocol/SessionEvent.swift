@@ -45,6 +45,11 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     case workflowCompleted(WorkflowCompleted)
     case workflowFailed(WorkflowFailed)
     case sessionActivity(SessionActivity)
+    case panelTabOpened(PanelTabOpened)
+    case panelTabClosed(PanelTabClosed)
+    case panelTabActivated(PanelTabActivated)
+    case panelTabNavigated(PanelTabNavigated)
+    case panelCommand(PanelCommand)
 
     public struct SessionCreated: Codable, Equatable, Sendable {
         public let seq: Int
@@ -728,6 +733,86 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let activity: String
     }
 
+    /// UI-drawn categories for a panel tab — CLOSED, unlike the verb-shaped String fields
+    /// elsewhere in this file (`WorktreeExited.action`, `PanelCommand.action` below): a tab's
+    /// kind selects which SwiftUI view renders it, so an unrecognized kind has no reasonable
+    /// fallback, and a new kind is exactly the sort of protocol change that already means walking
+    /// this file's variant checklist.
+    public enum PanelTabKind: String, Codable, Equatable, Sendable {
+        case web, document, code, note
+    }
+
+    /// panel-shell T3: the daemon-driven browsing/document panel's tab lifecycle. This event and
+    /// the three below (through PanelTabNavigated), plus PanelCommand further down, all extend
+    /// the plain `{seq, sessionId, ts}` base directly, NOT the thread-scoped shape most events
+    /// use — a panel tab is a fact about the whole session (like `HarnessAttached`/
+    /// `SessionActivity` above), never about one thread: the daemon opens/closes/navigates a tab
+    /// as a side effect of a tool call running on SOME thread, but the tab itself outlives that
+    /// thread.
+    public struct PanelTabOpened: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let tabId: String
+        public let kind: PanelTabKind
+        public let url: String?
+        public let title: String?
+    }
+
+    /// See PanelTabOpened above.
+    public struct PanelTabClosed: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let tabId: String
+    }
+
+    /// See PanelTabOpened above.
+    public struct PanelTabActivated: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let tabId: String
+    }
+
+    /// Committed TOP-LEVEL navigations only — no subframes, no in-flight redirects, no fragment
+    /// changes. That bound is what keeps a browsing session at ~10-50 events instead of
+    /// thousands, in a JSONL that is replayed on every session open.
+    public struct PanelTabNavigated: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let tabId: String
+        public let url: String
+        public let title: String
+    }
+
+    /// TRANSIENT (see `transientTypes` at the bottom of this file) — the daemon's only push
+    /// channel to the app for verbs needing CEF execution. A PERSISTED command would be replayed
+    /// on every future attach, and unlike a replayed `ask_user` (which renders a stale card) a
+    /// replayed `navigate` is an ACTION — transient removes that hazard by construction rather
+    /// than by a rule someone has to remember.
+    ///
+    /// Tab lifecycle mutations (the four events above) are NOT commands: the daemon mints the id
+    /// and appends the persisted event, and the app reacts to it. Commands carry only verbs whose
+    /// value is the RESULT.
+    ///
+    /// `action` is a plain String, not a Swift enum — the same call `WorktreeExited.action`/
+    /// `ToolReview.verdict` make above, and for the STRICT-decode reason `SessionActivity`'s own
+    /// comment spells out: the Mac app's `NormaClient` decodes every pushed frame into this exact
+    /// type, so a future verb an older client doesn't recognize must decode, not throw. Today's
+    /// sole value is `navigate`; validation of the allowed set lives on the TS producer side.
+    public struct PanelCommand: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let commandId: String
+        public let tabId: String?
+        public let action: String
+        public let url: String?
+        public let deadlineMs: Int
+    }
+
     private enum Discriminator: String, Codable {
         case session_created
         case harness_attached
@@ -773,6 +858,11 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case workflow_completed
         case workflow_failed
         case session_activity
+        case panel_tab_opened
+        case panel_tab_closed
+        case panel_tab_activated
+        case panel_tab_navigated
+        case panel_command
     }
 
     private enum TypeKey: String, CodingKey { case type }
@@ -824,6 +914,11 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case .workflow_completed:   self = .workflowCompleted(try WorkflowCompleted(from: decoder))
         case .workflow_failed:      self = .workflowFailed(try WorkflowFailed(from: decoder))
         case .session_activity:     self = .sessionActivity(try SessionActivity(from: decoder))
+        case .panel_tab_opened:     self = .panelTabOpened(try PanelTabOpened(from: decoder))
+        case .panel_tab_closed:     self = .panelTabClosed(try PanelTabClosed(from: decoder))
+        case .panel_tab_activated:  self = .panelTabActivated(try PanelTabActivated(from: decoder))
+        case .panel_tab_navigated:  self = .panelTabNavigated(try PanelTabNavigated(from: decoder))
+        case .panel_command:        self = .panelCommand(try PanelCommand(from: decoder))
         }
     }
 
@@ -1005,6 +1100,26 @@ public enum SessionEvent: Codable, Equatable, Sendable {
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)
             try c.encode(Discriminator.session_activity.rawValue, forKey: .type)
+        case .panelTabOpened(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.panel_tab_opened.rawValue, forKey: .type)
+        case .panelTabClosed(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.panel_tab_closed.rawValue, forKey: .type)
+        case .panelTabActivated(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.panel_tab_activated.rawValue, forKey: .type)
+        case .panelTabNavigated(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.panel_tab_navigated.rawValue, forKey: .type)
+        case .panelCommand(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.panel_command.rawValue, forKey: .type)
         }
     }
 }
@@ -1014,7 +1129,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
 // ================================================================================================
 
 extension SessionEvent {
-    /// The eight BROADCAST-ONLY TRANSIENT event types, as wire discriminators. Mirrors
+    /// The nine BROADCAST-ONLY TRANSIENT event types, as wire discriminators. Mirrors
     /// `TRANSIENT_EVENT_TYPES` in `packages/protocol/src/events.ts` — read that constant's doc
     /// comment for the full contract; the short version:
     ///
@@ -1042,6 +1157,9 @@ extension SessionEvent {
         "plugin_tile_updated",
         // session-activity-hygiene T4: the lifecycle's live signal (7 → 8).
         "session_activity",
+        // panel-shell T3: the daemon->app command channel (8 → 9) — see `PanelCommand`'s own doc
+        // comment above for why transient.
+        "panel_command",
     ]
 
     /// Case-level mirror of `transientTypes`, for callers holding a DECODED event (`NormaClient`)
@@ -1053,7 +1171,8 @@ extension SessionEvent {
     public var isTransient: Bool {
         switch self {
         case .assistantDelta, .leaseGranted, .leaseLost, .peripheralCallRequested,
-             .pluginToolInvoke, .hardwareRequested, .pluginTileUpdated, .sessionActivity:
+             .pluginToolInvoke, .hardwareRequested, .pluginTileUpdated, .sessionActivity,
+             .panelCommand:
             return true
         default:
             return false
