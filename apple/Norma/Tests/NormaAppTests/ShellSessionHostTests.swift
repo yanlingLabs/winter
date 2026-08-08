@@ -1169,6 +1169,19 @@ final class ShellSessionHostTests: XCTestCase {
     /// `answerHandshake` already uses — no second subscriber exists to feed instead), and it is
     /// filtered to the ATTACHED session. Mirrors `SessionFeedTests
     /// .testPinnedFeedAppliesOnlyItsSessionsEvents`'s proof for `SessionModel` exactly.
+    ///
+    /// review round 1, Important 2: merely asserting `panelStore.tabs` doesn't change right after
+    /// feeding a foreign event does NOT pin the pump's `e.sessionId == attached` guard
+    /// (`ShellSessionHost.swift`) — `PanelStore` has its OWN internal publish gate
+    /// (`sessionId == currentSessionId`), which blocks the SAME foreign session from being
+    /// *published* regardless of whether the pump's guard exists at all. Deleting the pump's guard
+    /// would still pass that assertion: the foreign event would reach `PanelStore.apply`, get
+    /// silently cached under its OWN session id, and only surface on a LATER switch to it. Hopping
+    /// to the foreign session and checking BEFORE any `panel.list` response can land is what
+    /// actually distinguishes "the pump filtered it" from "the store cached it but hasn't shown it
+    /// yet" — with the guard present that hop publishes `[]` (never cached); with it deleted, the
+    /// leaked event surfaces as `["other"]` the moment the hop's `switchSession` republishes
+    /// whatever `PanelTabsBySession` already silently holds for that id.
     func testPanelStoreReceivesOnlyTheAttachedSessionsLiveEvents() async {
         let (host, factory) = makeHost()
         defer { host.deselect() }
@@ -1179,15 +1192,22 @@ final class ShellSessionHostTests: XCTestCase {
         await answerHandshake(t, sessionId: "S1")
         await feedWaitUntil { host.attachment?.session.state.status != .disconnected }
 
-        // an event for a DIFFERENT session must NOT reach the panel store
-        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"panel_tab_opened","seq":1,"sessionId":"S2","ts":0,"tabId":"other","kind":"web","url":null,"title":null}}"#)
-        try? await Task.sleep(nanoseconds: 150_000_000)
-        XCTAssertEqual(host.panelStore.tabs, [], "another session's panel event reached the current one")
-
-        // an event for the ATTACHED session (S1) DOES
-        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"panel_tab_opened","seq":2,"sessionId":"S1","ts":0,"tabId":"mine","kind":"web","url":null,"title":null}}"#)
+        // an event for the ATTACHED session (S1) DOES reach the store
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"panel_tab_opened","seq":1,"sessionId":"S1","ts":0,"tabId":"mine","kind":"web","url":null,"title":null}}"#)
         await feedWaitUntil { !host.panelStore.tabs.isEmpty }
         XCTAssertEqual(host.panelStore.tabs.map(\.tabId), ["mine"])
+
+        // an event for a DIFFERENT session, fed while still attached to S1, must never reach
+        // PanelStore.apply AT ALL — proven by hopping to S2 (no `panel.list` response fed; `makeHost`
+        // carries no `managementClient`, so `refreshPanelTabs` no-ops and cannot mask the leak) and
+        // checking BEFORE anything else could seed it. `switchSession(to:)` republishes whatever
+        // `PanelTabsBySession` already holds for "S2" — `[]` only if the leaked event never landed.
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"panel_tab_opened","seq":2,"sessionId":"S2","ts":0,"tabId":"other","kind":"web","url":null,"title":null}}"#)
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        host.select("S2") // a hop: S1 is already attached
+        XCTAssertEqual(host.panelStore.tabs, [],
+                       "a foreign session's panel event reached PanelStore.apply — the pump's sessionId filter is gone")
     }
 
     /// `panel.list` fires on attach (the instant-display seed), targeted at the new session, over

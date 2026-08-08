@@ -106,6 +106,49 @@ final class PanelStoreSessionSwapTests: XCTestCase {
         XCTAssertEqual(store.activeTabId, "t1")
     }
 
+    /// review round 1, Important 1 — the collapse this task's own live-pump wiring would trigger on
+    /// EVERY attach: replay always redelivers a session's complete history (`fromSeq: 0`), so the
+    /// very first replayed event after a `panel.list` seed lands is virtually always a REDUNDANT
+    /// `panelTabOpened` for a tab the snapshot already named. Before the fix, folding that one event
+    /// from empty replaced the seed's 2 tabs with the fold of just that one buffered event —
+    /// collapsing the strip. The fix folds ON TOP of the seed, so a redundant replayed `opened` for
+    /// an already-known tab is a no-op (`foldPanelTabs`'s own dedupe) and every other seeded tab
+    /// survives untouched.
+    func testFetchedSnapshotSurvivesARedundantReplayedEventForATabItAlreadyNamed() {
+        let store = PanelStore()
+        store.switchSession(to: "s1")
+        store.applyFetchedSnapshot(
+            sessionId: "s1",
+            tabs: [
+                PanelTab(tabId: "t1", kind: .web, url: "https://a", title: "A"),
+                PanelTab(tabId: "t2", kind: .web, url: "https://b", title: "B"),
+            ],
+            activeTabId: "t2"
+        )
+        XCTAssertEqual(store.tabs.map(\.tabId), ["t1", "t2"], "the snapshot seeded both tabs")
+
+        // replay redelivering t1's OWN original open event — already reflected in the seed
+        store.apply(opened(sessionId: "s1", tabId: "t1"))
+
+        XCTAssertEqual(store.tabs.count, 2, "t2 must not be dropped by a redundant replayed event for t1")
+        XCTAssertEqual(store.tabs.map(\.tabId), ["t1", "t2"])
+        XCTAssertEqual(store.activeTabId, "t2", "the seed's activeTabId must also survive")
+    }
+
+    /// The seed is a STARTING POINT, not a ceiling — a genuinely NEW live event (not merely a
+    /// replay of something the snapshot already knew) must still be added on top of it.
+    func testFetchedSnapshotPlusAGenuinelyNewLiveEventKeepsBoth() {
+        let store = PanelStore()
+        store.switchSession(to: "s1")
+        store.applyFetchedSnapshot(
+            sessionId: "s1",
+            tabs: [PanelTab(tabId: "t1", kind: .web, url: nil, title: nil)],
+            activeTabId: nil
+        )
+        store.apply(opened(sessionId: "s1", tabId: "t2"))
+        XCTAssertEqual(store.tabs.map(\.tabId), ["t1", "t2"], "the new tab is added on top of the seed, not instead of it")
+    }
+
     /// The narrow race the fetch and replay share: a slow `panel.list` response landing AFTER
     /// replay has already started delivering this session's own events must never regress what
     /// replay already folded — it can only tie or be stale, never authoritative, once replay is

@@ -71,9 +71,22 @@ struct PanelTabState: Equatable {
 /// same `default` — this fold never needs to ASK "is this transient": it simply doesn't recognize
 /// anything but the four panel-lifecycle cases it lists explicitly, the same case-omission the TS
 /// fold uses (it never consults `TRANSIENT_EVENT_TYPES` either).
-func foldPanelTabs(_ events: [SessionEvent]) -> PanelTabState {
-    var tabs: [PanelTab] = []
-    var activeTabId: String?
+///
+/// panel-shell T9 (review round 1, Important 1): `startingFrom` — defaulted to an empty state, so
+/// every pre-existing call site (`PanelTabFoldTests`, `PanelTabsBySession.apply`) is untouched —
+/// lets a caller fold a batch of events ON TOP OF an already-known state instead of from scratch.
+/// `PanelStore.apply(_:)` is the one production caller that needs this: without it, a `panel.list`
+/// snapshot that seeded 3 tabs would be discarded and rebuilt from just ONE tab the moment the next
+/// replayed event arrived, because replaying always redelivers a session's COMPLETE history
+/// (`fromSeq: 0`, `SessionFeed.start()`) into a fold that otherwise only knew about that one event.
+/// Safe because every case above is IDEMPOTENT against its own prior output — re-processing an
+/// event whose effect the seed already reflects (`opened` for an already-open id, `closed` for an
+/// already-absent one, `activated`/`navigated` writing the same value again) is a no-op, so folding
+/// a session's full replayed history on top of its own already-correct snapshot converges to the
+/// identical answer rather than compounding.
+func foldPanelTabs(_ events: [SessionEvent], startingFrom initial: PanelTabState = PanelTabState()) -> PanelTabState {
+    var tabs: [PanelTab] = initial.tabs
+    var activeTabId: String? = initial.activeTabId
 
     for event in events {
         switch event {
