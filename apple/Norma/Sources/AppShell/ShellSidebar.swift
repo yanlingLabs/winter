@@ -41,8 +41,30 @@ struct ShellRootView: View {
     /// window outlives every hide/re-summon (`AppWindowController` owns it forever), so the user's
     /// choice survives exactly as long as the window itself does.
     @State private var sidebarVisible = true
+    /// panel-shell T2: the REQUESTED mode. `panelResolvedMode` may render `.hidden` on a narrow
+    /// window while this stays `.side`, so widening the window restores what the user asked for.
+    @State private var panelMode: PanelMode = .hidden
+    @State private var panelWidth: CGFloat = panelDefaultWidth
 
     var body: some View {
+        // panel-shell T2: the whole body moved inside a `GeometryReader` — `contentWidth` (the
+        // window minus the sidebar, NOT the whole window: the panel's minimums are about the
+        // content area, so a collapsed sidebar legitimately gives it more room) and the RESOLVED
+        // `mode` are needed both by the HStack's third column below and by the trailing titlebar
+        // cluster further down this same modifier chain, so both live here rather than being
+        // recomputed in two places.
+        GeometryReader { geo in
+            let contentWidth = geo.size.width - (sidebarVisible ? shellSidebarWidth : 0)
+            let mode = panelResolvedMode(requested: panelMode, contentWidth: contentWidth)
+
+            shellBody(contentWidth: contentWidth, mode: mode)
+        }
+    }
+
+    /// The shell's actual content — split out of `body` only so the `GeometryReader` above has a
+    /// single expression to return; no behaviour differs from having written it all inline.
+    @ViewBuilder
+    private func shellBody(contentWidth: CGFloat, mode: PanelMode) -> some View {
         HStack(spacing: 0) {
             // The sidebar carries the host (Move to CLI on Recents rows) and the injected New chat
             // door — both optional, same fallback posture as `detail` below. It owns its own fixed
@@ -56,40 +78,69 @@ struct ShellRootView: View {
                     // surface, and a fade reads as dissolving rather than closing.
                     .transition(.move(edge: .leading))
             }
-            detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                // sidebar-brand T5: the RAISED plane (`docs/brand.md` § the plane mapping).
-                // REQUIRED, not cosmetic: the sidebar's cream only reads correctly against a
-                // painted content plane — against the window's default system grey it looks
-                // wrong rather than warm. Painted here, at the shell level, so every destination
-                // inherits it and none has to remember.
-                // The CARD — the phone's own treatment brought over (user call, 2026-08-07): iOS
-                // masks its reveal card with a continuous rounded rect, traces that exact shape
-                // with a hairline rim, and floats it on the warm base. Only the LEADING corners
-                // round — the other two meet the window's own edge, which already has the
-                // system's rounding, and doubling it would read as a card inside a card.
-                //
-                // Drawn as a BACKGROUND LAYER that ignores the safe area, not as a clip on the
-                // content. `detail`'s content is inset by the titlebar's safe area (only the
-                // sidebar opts out), so clipping the content produced a ~23 pt gap above the card
-                // — invisible before only because the window's own `CardSurface` fill was quietly
-                // covering that band, and revealed the moment `canvas` went behind it. A
-                // background layer reaches the window's top edge without moving any content.
-                //
-                // This REPLACED the full-height boundary hairline between pane and detail: a
-                // straight line cannot follow a rounded corner, so it would have run past the
-                // card's edge. The rim is the separator now, which is also how the phone does it.
-                .background {
-                    shellDetailCardShape
-                        .fill(Theme.cardSurface)
-                        .overlay(
-                            shellDetailCardShape
-                                .strokeBorder(Theme.hairline,
-                                              lineWidth: shellSidebarHairlineWidth)
-                        )
-                        .shadow(color: .black.opacity(0.05), radius: 10, x: -2)
-                        .ignoresSafeArea()
+            // panel-shell T2: absent entirely in `.maximized` — the panel owns the whole content
+            // area then, and `detail` would have nothing left to show beside it.
+            if mode != .maximized {
+                detail
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // sidebar-brand T5: the RAISED plane (`docs/brand.md` § the plane mapping).
+                    // REQUIRED, not cosmetic: the sidebar's cream only reads correctly against a
+                    // painted content plane — against the window's default system grey it looks
+                    // wrong rather than warm. Painted here, at the shell level, so every destination
+                    // inherits it and none has to remember.
+                    // The CARD — the phone's own treatment brought over (user call, 2026-08-07): iOS
+                    // masks its reveal card with a continuous rounded rect, traces that exact shape
+                    // with a hairline rim, and floats it on the warm base. Only the LEADING corners
+                    // round — the other two meet the window's own edge, which already has the
+                    // system's rounding, and doubling it would read as a card inside a card.
+                    //
+                    // Drawn as a BACKGROUND LAYER that ignores the safe area, not as a clip on the
+                    // content. `detail`'s content is inset by the titlebar's safe area (only the
+                    // sidebar opts out), so clipping the content produced a ~23 pt gap above the card
+                    // — invisible before only because the window's own `CardSurface` fill was quietly
+                    // covering that band, and revealed the moment `canvas` went behind it. A
+                    // background layer reaches the window's top edge without moving any content.
+                    //
+                    // This REPLACED the full-height boundary hairline between pane and detail: a
+                    // straight line cannot follow a rounded corner, so it would have run past the
+                    // card's edge. The rim is the separator now, which is also how the phone does it.
+                    .background {
+                        shellDetailCardShape
+                            .fill(Theme.cardSurface)
+                            .overlay(
+                                shellDetailCardShape
+                                    .strokeBorder(Theme.hairline,
+                                                  lineWidth: shellSidebarHairlineWidth)
+                            )
+                            .shadow(color: .black.opacity(0.05), radius: 10, x: -2)
+                            .ignoresSafeArea()
+                    }
+            }
+
+            // panel-shell T2: the third column. The divider renders ONLY in `.side` — there is
+            // nothing to divide when the panel owns the whole content area (`.maximized`), and
+            // neither it nor the panel renders at all in `.hidden`.
+            //
+            // Every `panelClampWidth` call below is reachable ONLY when `mode == .side`, which
+            // `panelResolvedMode` guarantees means `panelFitsInContent(contentWidth)` already
+            // holds — that is what keeps the clamp's own bounds from inverting (Task 1's carried
+            // finding; the guarantee is pinned by
+            // `PanelModeTests.testClampBoundsAreNeverInvertedWhenThePanelFits`). Nothing here ever
+            // calls it below the threshold where it could.
+            if mode != .hidden {
+                if mode == .side {
+                    PanelDivider(width: $panelWidth, contentWidth: contentWidth)
                 }
+                ShellPanel()
+                    .frame(width: mode == .maximized
+                           ? nil
+                           : panelClampWidth(panelWidth, contentWidth: contentWidth))
+                    .frame(maxWidth: mode == .maximized ? .infinity : nil,
+                           maxHeight: .infinity)
+                    // Mirrors the sidebar's own leading-edge slide (`sidebarVisible` above) —
+                    // a physical surface sliding in from its own edge, not fading.
+                    .transition(.move(edge: .trailing))
+            }
         }
         // ONE brand tint for the whole shell (user call, 2026-08-07: every cursor in the app the
         // same colour). `.tint` is what drives a SwiftUI `TextField`'s caret and selection, and it
@@ -156,9 +207,35 @@ struct ShellRootView: View {
         .overlay(alignment: .topTrailing) {
             HStack(spacing: shellTitlebarClusterSpacing) {
                 ForEach(shellTitlebarTrailingGlyphs, id: \.self) { glyph in
-                    ShellTitlebarButton(systemImage: glyph,
-                                        label: shellTitlebarTrailingLabel(glyph),
-                                        isPlaceholder: true)
+                    if glyph == "sidebar.right" {
+                        // panel-shell T2: the placeholder named in `shellTitlebarTrailingLabel`
+                        // becomes the real toggle — `shellTitlebarTrailingLabel("sidebar.right")`
+                        // is left untouched (still says "not wired yet"): it is no longer CALLED
+                        // for this glyph, but `SidebarBrandTests` still calls it directly for
+                        // every glyph in `shellTitlebarTrailingGlyphs`, so changing its answer
+                        // would fail that pin for no behavioural gain.
+                        //
+                        // The label tracks `panelMode` (the REQUESTED state, same variable the
+                        // action mutates below) rather than the resolved `mode` — mirrors
+                        // `shellSidebarToggleLabel(isVisible:)`, the sibling toggle immediately
+                        // above, which keys its own label off the state IT mutates too.
+                        //
+                        // Disabled rather than hidden when the window is too narrow — a control
+                        // that vanishes reads as a bug, one that greys out reads as a constraint.
+                        ShellTitlebarButton(
+                            systemImage: glyph,
+                            label: panelMode == .hidden ? "Show panel" : "Hide panel"
+                        ) {
+                            withAnimation(.snappy) {
+                                panelMode = panelMode == .hidden ? .side : .hidden
+                            }
+                        }
+                        .disabled(!panelFitsInContent(contentWidth))
+                    } else {
+                        ShellTitlebarButton(systemImage: glyph,
+                                            label: shellTitlebarTrailingLabel(glyph),
+                                            isPlaceholder: true)
+                    }
                 }
             }
             .padding(.trailing, shellTitlebarTrailingInset)
@@ -569,13 +646,22 @@ struct ShellTitlebarButton: View {
     /// they are honestly not wired, not pretending to be disabled.
     var isPlaceholder: Bool = false
     var action: () -> Void = {}
+    /// panel-shell T2: read explicitly rather than trusted to dim on its own. `.disabled(...)`
+    /// (first real caller: the panel toggle, greyed rather than hidden on a too-narrow window)
+    /// only guarantees non-interactivity — `ShellSidebarRowStyle` is a fully custom `ButtonStyle`
+    /// that renders `configuration.label` verbatim, and this label's `foregroundStyle` below is an
+    /// explicit concrete colour, so nothing dims it automatically. Reuses the SAME quiet tone
+    /// `isPlaceholder` already wears rather than inventing a second one — a disabled control and a
+    /// placeholder now share a look (both honestly read as "not clickable right now"), though only
+    /// the placeholder still hovers and clicks.
+    @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(isPlaceholder ? AnyShapeStyle(.tertiary)
-                                               : AnyShapeStyle(Theme.textMuted))
+                .foregroundStyle((isPlaceholder || !isEnabled) ? AnyShapeStyle(.tertiary)
+                                                                : AnyShapeStyle(Theme.textMuted))
                 .frame(width: shellTitlebarButtonSize, height: shellTitlebarButtonSize)
                 .contentShape(Rectangle())
         }
