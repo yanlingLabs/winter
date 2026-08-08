@@ -271,6 +271,20 @@ final class ShellSessionHost: ObservableObject {
     /// observes those directly, exactly the `let directory: SessionDirectory` precedent just above.
     let panelStore = PanelStore()
 
+    /// panel-shell T12 follow-up (advisor review, post-commit self-check): the in-flight guard
+    /// `openPanelTab`'s auto-create branch needs — the SAME double-send race
+    /// `sendFirstChatMessage`'s own `newChatCreate != .creating` guard closes
+    /// (`testDoubleSendWhileCreateInFlightYieldsExactlyOneCreate`), reproduced here because
+    /// `attachedSessionId` only flips once the FIRST create's ack completes the navigate → attach
+    /// chain — so two rapid "+" clicks with nothing attached would otherwise each see
+    /// `attachedSessionId == nil` and mint their own session. Worse here than in chat: the orphaned
+    /// extra session carries a `panel_tab_opened` event (Requirement 2, this same task), so
+    /// `SessionStore.emptySessionIds` never reaps it — permanent litter, not a 10-minute one. A
+    /// plain `Bool`, not `@Published`: nothing renders off it (this is a re-entrancy lock, not
+    /// UI state — the button itself stays visually unchanged, exactly like the composer during a
+    /// chat create; only a rapid SECOND click silently no-ops).
+    private var panelAutoCreateInFlight = false
+
     /// IMP-1 fix (final whole-branch review, "the fourth door"): backs the `directory.$rows`
     /// subscription below — the ONE Combine wire this host holds, so its lifetime is this host's
     /// own (no separate teardown needed; `AnyCancellable.cancel()` fires on deinit).
@@ -390,12 +404,22 @@ final class ShellSessionHost: ObservableObject {
     /// response has already been received. Attaching first and letting the two race as independent
     /// in-flight calls on that one connection would leave a narrow window where the very first
     /// `panel.list` snapshot misses the tab — closed here by construction, not by luck.
+    ///
+    /// **Re-entrant while a create is already in flight → silent no-op** (`panelAutoCreateInFlight`,
+    /// this type's own doc comment for why — mirrors `sendFirstChatMessage`'s `newChatCreate !=
+    /// .creating` guard for the identical race, one click's worth of round trip wide). Without this,
+    /// two rapid "+" clicks with nothing attached would each see `attachedSessionId == nil` and mint
+    /// their own session — and the second one would be permanently immune to the empty-session
+    /// reaper (Requirement 2 above), not just safe for 10 minutes.
     func openPanelTab(kind: PanelTabKind = .web, url: String? = nil, title: String? = nil,
                        onSessionCreated: ((String) -> Void)? = nil) {
         guard let client = managementClient else { return }
         let kindRaw = kind.rawValue
         guard let sessionId = attachedSessionId else {
-            Task { @MainActor in
+            guard !panelAutoCreateInFlight else { return }
+            panelAutoCreateInFlight = true
+            Task { @MainActor [weak self] in
+                defer { self?.panelAutoCreateInFlight = false }
                 guard let created = try? await client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat") else { return }
                 _ = try? await client.openPanelTab(sessionId: created.sessionId, kind: kindRaw, url: url, title: title)
                 onSessionCreated?(created.sessionId)

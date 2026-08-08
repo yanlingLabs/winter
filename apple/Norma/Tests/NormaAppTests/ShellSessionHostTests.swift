@@ -1307,6 +1307,40 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(host.panelStore.tabs.map(\.tabId), ["minted-1"], "the panel actually shows the tab — the whole point of the bug report")
     }
 
+    /// panel-shell T12 follow-up (advisor review, post-commit self-check): the SAME double-send race
+    /// `sendFirstChatMessage`'s own in-flight guard closes
+    /// (`testDoubleSendWhileCreateInFlightYieldsExactlyOneCreate` above) exists on this path too, and
+    /// its cost is HIGHER here. `attachedSessionId` only flips once the FIRST create's ack completes
+    /// the navigate → attach chain (`onSessionCreated` → `nav.navigate` → `apply` → `select` →
+    /// `attachFresh`), so two rapid "+" clicks with nothing attached would each see
+    /// `attachedSessionId == nil` and mint their OWN session, before this fix. Requirement 2 (this
+    /// same task) makes the orphaned extra one worse than it would have been pre-T12: it carries a
+    /// `panel_tab_opened` event, so `emptySessionIds` never reaps it — permanent sidebar litter from
+    /// one double-click, not the pre-existing "gone in 10 minutes" cost. RED against the code before
+    /// this follow-up: two `session.create` calls.
+    func testDoubleOpenPanelTabWhileAutoCreateInFlightYieldsExactlyOneCreate() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+
+        host.openPanelTab(kind: .web)
+        host.openPanelTab(kind: .web) // the race: the first auto-create is still in flight
+
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(mgmt.methods.filter { $0 == "session.create" }.count, 1,
+                       "a second '+' while the first auto-create is in flight must NOT mint a second session")
+
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("must create at least once: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_panel_once","trusted":true}}"#)
+
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(mgmt.methods.filter { $0 == "session.create" }.count, 1, "still exactly one after the response")
+        XCTAssertEqual(mgmt.methods.filter { $0 == "panel.openTab" }.count, 1, "and exactly one tab, not two")
+    }
+
     // MARK: - panel-shell T9: the live pump + the panel.list fetch on attach/hop
 
     /// The two landmines Task 7's review carried into this task, proven end to end (not just at the
