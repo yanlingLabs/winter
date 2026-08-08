@@ -45,6 +45,14 @@ struct ShellRootView: View {
     /// window while this stays `.side`, so widening the window restores what the user asked for.
     @State private var panelMode: PanelMode = .hidden
     @State private var panelWidth: CGFloat = panelDefaultWidth
+    /// panel-shell T8: the app-side view of the daemon's panel tab state for whatever session this
+    /// shell currently shows — see `PanelStore`'s own doc comment for why `apply(_:)` is its ONE
+    /// mutator. `@StateObject` because this view MINTS it (the `searchPalette` property just above
+    /// is the identical precedent), not because anything downstream needs its own subscription.
+    /// Unfed for now: the live pump that calls `apply(_:)` off the attached session's event stream
+    /// is Task 9's — until then this starts, and stays, empty, which is expected (see the Task 8
+    /// brief's Step 5b).
+    @StateObject private var panelStore = PanelStore()
 
     var body: some View {
         // panel-shell T2: the whole body moved inside a `GeometryReader` — `contentWidth` (the
@@ -144,7 +152,7 @@ struct ShellRootView: View {
                 if mode == .side {
                     PanelDivider(width: $panelWidth, contentWidth: contentWidth)
                 }
-                ShellPanel()
+                ShellPanel(store: panelStore, host: host)
                     .frame(width: mode == .maximized
                            ? nil
                            : panelClampWidth(panelWidth, contentWidth: contentWidth))

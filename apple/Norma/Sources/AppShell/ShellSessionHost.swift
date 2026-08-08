@@ -325,6 +325,51 @@ final class ShellSessionHost: ObservableObject {
         }
     }
 
+    // MARK: - panel-shell T8: the panel's tab-strip mutation RPCs (bare, ATTACHED-session-targeted)
+    //
+    // Same `managementClient` reasoning as the roster verbs just above: `panel.openTab`/`closeTab`/
+    // `activateTab` all take `sessionId` directly, and the daemon appends straight to that
+    // session's hub (`hub.append(sessionId, …)`, `ipc/server.ts`) — the calling connection never
+    // needs to be ATTACHED to it. Targeted at `attachedSessionId` rather than an arbitrary roster
+    // row because the panel only ever shows the session the shell is currently attached to (Task
+    // 9's session-keyed swap is what makes that true across MULTIPLE sessions' tabs at once; this
+    // host has no session-keyed concept of its own).
+    //
+    // **None of these apply anything locally.** `PanelStore.apply(_:)` is the ONE path that may
+    // ever change `tabs`/`activeTabId` (its own doc comment, `PanelStore.swift`) — this host holds
+    // no `PanelStore` reference at all, so there is nothing here FOR a result to mutate. These
+    // three fire the RPC and stop; the resulting `panel_tab_opened`/`closed`/`activated` event is
+    // what actually updates the strip, once Task 9 wires the live pump. Until then a tap lands on
+    // the daemon and nothing in the app visibly changes — the documented, expected state of this
+    // task (see the brief's Step 5b).
+
+    /// The strip's `+`. Sends no `tabId` — the daemon mints one (`PanelOpenTabResult.tabId`),
+    /// which this deliberately discards: nothing here needs it, and seeding it anywhere would be
+    /// exactly the second, optimistic code path the design forbids.
+    func openPanelTab(kind: PanelTabKind = .web, url: String? = nil, title: String? = nil) {
+        guard let client = managementClient, let sessionId = attachedSessionId else { return }
+        let kindRaw = kind.rawValue
+        Task { @MainActor in
+            _ = try? await client.openPanelTab(sessionId: sessionId, kind: kindRaw, url: url, title: title)
+        }
+    }
+
+    /// A tab's `×`.
+    func closePanelTab(_ tabId: String) {
+        guard let client = managementClient, let sessionId = attachedSessionId else { return }
+        Task { @MainActor in
+            _ = try? await client.closePanelTab(sessionId: sessionId, tabId: tabId)
+        }
+    }
+
+    /// A tab click.
+    func activatePanelTab(_ tabId: String) {
+        guard let client = managementClient, let sessionId = attachedSessionId else { return }
+        Task { @MainActor in
+            _ = try? await client.activatePanelTab(sessionId: sessionId, tabId: tabId)
+        }
+    }
+
     // MARK: - T4: the landing's "New" button — the T8-wd create-time picker, reused
 
     /// AppKit half: opens the SAME `WorkingDirPickerSheetController` `DetachedWindowController.

@@ -1087,4 +1087,72 @@ final class ShellSessionHostTests: XCTestCase {
         host.apply(destination: .newChat)
         XCTAssertEqual(host.newChatCreate, .idle, "the page starts clean on every entry")
     }
+
+    // MARK: - panel-shell T8: the tab strip's mutation RPCs — bare, on the ATTACHED session, and
+    // (the whole point) applying NOTHING locally
+
+    /// The strip's three controls (`+`/click/`×`) each fire exactly one bare RPC on the management
+    /// connection, targeted at the session the shell is currently ATTACHED to. `openPanelTab` sends
+    /// no `tabId` — the daemon mints it (methods.ts's own doc on `PanelOpenTabParams`) — and
+    /// feeding every result back confirms there is nothing HERE for a result to mutate:
+    /// `ShellSessionHost` holds no `PanelStore` reference at all, so these calls have nowhere to
+    /// apply their result even if they wanted to (`PanelStore.apply(_:)` is the one path, fed by
+    /// Task 9's pump — this host never reaches past the `try?`).
+    func testPanelTabControlsFireBareRPCsOnTheAttachedSessionAndApplyNothingLocally() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+        XCTAssertEqual(host.attachedSessionId, "S1")
+
+        host.openPanelTab(kind: .web)
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("the '+' must fire panel.openTab: \(mgmt.methods)")
+        }
+        let openParams = open["params"] as? [String: Any]
+        XCTAssertEqual(openParams?["sessionId"] as? String, "S1")
+        XCTAssertEqual(openParams?["kind"] as? String, "web")
+        XCTAssertNil(openParams?["tabId"], "the daemon mints tabId — the caller must never send one")
+
+        host.activatePanelTab("t1")
+        await feedWaitUntil { mgmt.methods.contains("panel.activateTab") }
+        guard let activate = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.activateTab" }) else {
+            return XCTFail("a tab click must fire panel.activateTab: \(mgmt.methods)")
+        }
+        let activateParams = activate["params"] as? [String: Any]
+        XCTAssertEqual(activateParams?["sessionId"] as? String, "S1")
+        XCTAssertEqual(activateParams?["tabId"] as? String, "t1")
+
+        host.closePanelTab("t1")
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        guard let close = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.closeTab" }) else {
+            return XCTFail("a tab's × must fire panel.closeTab: \(mgmt.methods)")
+        }
+        let closeParams = close["params"] as? [String: Any]
+        XCTAssertEqual(closeParams?["sessionId"] as? String, "S1")
+        XCTAssertEqual(closeParams?["tabId"] as? String, "t1")
+
+        // Feed every result back. The point: nothing OBSERVABLE on the host reacts to them — there
+        // is no local mutator for any of these three to have reached.
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(open["id"] as! Int),"result":{"ok":true,"tabId":"minted-1"}}"#)
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(activate["id"] as! Int),"result":{"ok":true}}"#)
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(close["id"] as! Int),"result":{"ok":true}}"#)
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(host.attachedSessionId, "S1", "the responses land and change nothing else about the host")
+    }
+
+    /// No attached session (nothing selected, or the shell is hidden) → all three are silent
+    /// no-ops — never a crash, and never a call on the wire.
+    func testPanelTabControlsAreNoOpsWithNoAttachedSession() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.openPanelTab(kind: .web)
+        host.activatePanelTab("t1")
+        host.closePanelTab("t1")
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertTrue(mgmt.methods.filter { $0.hasPrefix("panel.") }.isEmpty,
+                      "no session attached — nothing should fire: \(mgmt.methods)")
+    }
 }

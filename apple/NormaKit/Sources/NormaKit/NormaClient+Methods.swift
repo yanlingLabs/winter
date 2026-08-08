@@ -1201,4 +1201,37 @@ extension NormaClient {
             clientEfforts: (r["clientEfforts"]?.arrayValue ?? []).compactMap { $0.stringValue }.filter { !$0.isEmpty }
         )
     }
+
+    // MARK: - panel-shell T6/T8: the panel tab-strip mutation RPCs
+    //
+    // Bare, sessionId-targeted — like `interrupt`/`setActivity` above, never requiring the calling
+    // connection to be ATTACHED to `sessionId` (`ipc/server.ts`'s handlers append straight to that
+    // session's hub). `kind` is a plain `String`, not `SessionEvent.PanelTabKind`: this package has
+    // no reason to depend on the App target's own UI-side `PanelTabKind`, and the wire values are
+    // already plain strings (`methods.ts`'s `PanelTabKind` zod enum).
+
+    /// `panel.openTab {sessionId, kind, url?, title?}` (methods.ts `PanelOpenTabParams`). The
+    /// daemon MINTS `tabId` (`PanelOpenTabResult.tabId`, returned here) — there is no way to pass
+    /// one in, on purpose: that is what makes an agent-opened tab and a user-opened tab
+    /// indistinguishable downstream (methods.ts's own doc comment on this RPC).
+    public func openPanelTab(sessionId: String, kind: String, url: String? = nil, title: String? = nil) async throws -> String {
+        let r = try await request("panel.openTab", params: obj([
+            "sessionId": .string(sessionId), "kind": .string(kind),
+            "url": url.map { .string($0) }, "title": title.map { .string($0) },
+        ]))
+        guard let tabId = r["tabId"]?.stringValue else {
+            throw RpcError(code: -3, message: "invalid result from server for panel.openTab")
+        }
+        return tabId
+    }
+
+    /// `panel.closeTab {sessionId, tabId}` (methods.ts `PanelCloseTabParams`).
+    public func closePanelTab(sessionId: String, tabId: String) async throws {
+        _ = try await request("panel.closeTab", params: obj(["sessionId": .string(sessionId), "tabId": .string(tabId)]))
+    }
+
+    /// `panel.activateTab {sessionId, tabId}` (methods.ts `PanelActivateTabParams`).
+    public func activatePanelTab(sessionId: String, tabId: String) async throws {
+        _ = try await request("panel.activateTab", params: obj(["sessionId": .string(sessionId), "tabId": .string(tabId)]))
+    }
 }
