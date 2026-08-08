@@ -1160,4 +1160,102 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertTrue(mgmt.methods.filter { $0.hasPrefix("panel.") }.isEmpty,
                       "no session attached — nothing should fire: \(mgmt.methods)")
     }
+
+    // MARK: - panel-shell T9: the live pump + the panel.list fetch on attach/hop
+
+    /// The two landmines Task 7's review carried into this task, proven end to end (not just at the
+    /// pure `PanelStore`/`PanelTabsBySession` level — `PanelSessionSwapTests.swift` covers those):
+    /// there is exactly ONE pump (this test drives events over the SAME `factory.made[0]` transport
+    /// `answerHandshake` already uses — no second subscriber exists to feed instead), and it is
+    /// filtered to the ATTACHED session. Mirrors `SessionFeedTests
+    /// .testPinnedFeedAppliesOnlyItsSessionsEvents`'s proof for `SessionModel` exactly.
+    func testPanelStoreReceivesOnlyTheAttachedSessionsLiveEvents() async {
+        let (host, factory) = makeHost()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "S1")
+        await feedWaitUntil { host.attachment?.session.state.status != .disconnected }
+
+        // an event for a DIFFERENT session must NOT reach the panel store
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"panel_tab_opened","seq":1,"sessionId":"S2","ts":0,"tabId":"other","kind":"web","url":null,"title":null}}"#)
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(host.panelStore.tabs, [], "another session's panel event reached the current one")
+
+        // an event for the ATTACHED session (S1) DOES
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"panel_tab_opened","seq":2,"sessionId":"S1","ts":0,"tabId":"mine","kind":"web","url":null,"title":null}}"#)
+        await feedWaitUntil { !host.panelStore.tabs.isEmpty }
+        XCTAssertEqual(host.panelStore.tabs.map(\.tabId), ["mine"])
+    }
+
+    /// `panel.list` fires on attach (the instant-display seed), targeted at the new session, over
+    /// the management connection — same as the three mutation RPCs above.
+    func testAttachFetchesPanelListForTheNewSessionAndSeedsTheStore() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+
+        await feedWaitUntil { mgmt.methods.contains("panel.list") }
+        guard let list = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.list" }) else {
+            return XCTFail("attach must fetch panel.list for the new session: \(mgmt.methods)")
+        }
+        XCTAssertEqual((list["params"] as? [String: Any])?["sessionId"] as? String, "S1")
+
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(list["id"] as! Int),"result":{"tabs":[{"tabId":"t1","kind":"web","url":"https://a","title":"A"}],"activeTabId":"t1"}}"#)
+        await feedWaitUntil { !host.panelStore.tabs.isEmpty }
+        XCTAssertEqual(host.panelStore.tabs.map(\.tabId), ["t1"])
+        XCTAssertEqual(host.panelStore.activeTabId, "t1")
+    }
+
+    /// A hop swaps which session's tabs are shown — never merges — and re-fetches `panel.list` for
+    /// the NEW session, on the SAME socket a hop always reuses
+    /// (`testHopDetachesThePreviousAndAttachesTheNewWithNoAbort`'s own wire-mechanics precedent).
+    func testHopSwapsPanelTabsAndFetchesTheNewSessions() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "S1")
+
+        await feedWaitUntil { mgmt.methods.contains("panel.list") }
+        guard let list1 = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.list" }) else {
+            return XCTFail("attach must fetch panel.list: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(list1["id"] as! Int),"result":{"tabs":[{"tabId":"t1","kind":"web","url":null,"title":null}],"activeTabId":null}}"#)
+        await feedWaitUntil { !host.panelStore.tabs.isEmpty }
+        XCTAssertEqual(host.panelStore.tabs.map(\.tabId), ["t1"])
+
+        host.select("S2") // S1 is already attached — this is a hop, not a fresh attach
+        XCTAssertEqual(host.panelStore.tabs, [], "switching must show S2 empty INSTANTLY, never S1's leftover tab")
+
+        // The SAME connection, never a second one — but NOT necessarily at a fixed index: the
+        // picker catalogue's own `sync.config` fetch (`onConnected`) rides this same transport and
+        // can interleave. Find the second `session.attach` by content, the same `.last(where:)`
+        // idiom already used for `panel.list` above, rather than assuming a position.
+        await feedWaitUntil { t.methods.filter { $0 == "session.attach" }.count == 2 }
+        guard let secondAttach = t.sent.map({ feedLineJSON($0) }).last(where: {
+            $0["method"] as? String == "session.attach" && ($0["params"] as? [String: Any])?["sessionId"] as? String == "S2"
+        }) else {
+            return XCTFail("the hop must re-attach on the SAME connection, targeted at S2: \(t.methods)")
+        }
+        t.feed(#"{"jsonrpc":"2.0","id":\#(secondAttach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+
+        await feedWaitUntil { mgmt.methods.filter { $0 == "panel.list" }.count == 2 }
+        guard let list2 = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.list" }) else {
+            return XCTFail("the hop must fetch panel.list for S2: \(mgmt.methods)")
+        }
+        XCTAssertEqual((list2["params"] as? [String: Any])?["sessionId"] as? String, "S2")
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(list2["id"] as! Int),"result":{"tabs":[{"tabId":"t2","kind":"web","url":null,"title":null}],"activeTabId":null}}"#)
+        await feedWaitUntil { host.panelStore.tabs.map(\.tabId) == ["t2"] }
+        XCTAssertEqual(host.panelStore.tabs.map(\.tabId), ["t2"], "S2 shows only its own tab, never merged with S1's")
+        XCTAssertEqual(factory.made.count, 1, "a hop stays on the SAME socket")
+    }
 }

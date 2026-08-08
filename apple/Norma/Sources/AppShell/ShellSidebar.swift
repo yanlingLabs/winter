@@ -45,14 +45,24 @@ struct ShellRootView: View {
     /// window while this stays `.side`, so widening the window restores what the user asked for.
     @State private var panelMode: PanelMode = .hidden
     @State private var panelWidth: CGFloat = panelDefaultWidth
-    /// panel-shell T8: the app-side view of the daemon's panel tab state for whatever session this
-    /// shell currently shows — see `PanelStore`'s own doc comment for why `apply(_:)` is its ONE
-    /// mutator. `@StateObject` because this view MINTS it (the `searchPalette` property just above
-    /// is the identical precedent), not because anything downstream needs its own subscription.
-    /// Unfed for now: the live pump that calls `apply(_:)` off the attached session's event stream
-    /// is Task 9's — until then this starts, and stays, empty, which is expected (see the Task 8
-    /// brief's Step 5b).
-    @StateObject private var panelStore = PanelStore()
+    /// panel-shell T9: Task 8's `@StateObject private var panelStore = PanelStore()` here is
+    /// REJECTED, not ratified. `ShellSessionHost` is constructed in `AppDelegate.summonAppWindow`
+    /// BEFORE this view exists at all, and it is `ShellSessionHost.attachFresh`/`hop` that know,
+    /// synchronously and at the exact right moment, which session just became current — a
+    /// `@StateObject` privately owned by this view has no way to be reached from a controller
+    /// object that predates it; there is no channel back INTO a view's private state. `host` above
+    /// (line 20) is also a plain, UNOBSERVED `var`, not `@ObservedObject` — this view could not
+    /// have driven the feed reactively off it even if it tried, which is exactly why Task 8's own
+    /// review deleted a gate in this file's sibling `ShellPanel.swift` that read `host`'s published
+    /// state the same non-reactive way (progress.md, Task 8 Important 2). `PanelStore` now lives on
+    /// `ShellSessionHost` itself (`let panelStore`, fed by its per-attachment `onEvent` hook) — this
+    /// is a plain pass-through read of it.
+    ///
+    /// `fallbackPanelStore` exists only for a shell built WITHOUT a host (the pure window tests,
+    /// same posture as `shellLandingPlaceholderText`'s host-less cases) — `ShellPanel.store` is
+    /// non-optional, so something must always be handed to it.
+    @StateObject private var fallbackPanelStore = PanelStore()
+    private var panelStore: PanelStore { host?.panelStore ?? fallbackPanelStore }
 
     var body: some View {
         // panel-shell T2: the whole body moved inside a `GeometryReader` — `contentWidth` (the

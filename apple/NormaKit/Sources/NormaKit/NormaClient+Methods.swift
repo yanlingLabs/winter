@@ -1234,4 +1234,34 @@ extension NormaClient {
     public func activatePanelTab(sessionId: String, tabId: String) async throws {
         _ = try await request("panel.activateTab", params: obj(["sessionId": .string(sessionId), "tabId": .string(tabId)]))
     }
+
+    /// panel-shell T9: `panel.list {sessionId}` (methods.ts `PanelListParams`/`PanelListResult`) —
+    /// the CURRENT fold, re-read fresh by the daemon on every call (Task 6's reviewer signed off on
+    /// that cost — bounded by tab count, never the phone transport). The app's instant-display seed
+    /// on a session switch, ahead of whatever the slower full replay eventually redelivers.
+    public func listPanelTabs(sessionId: String) async throws -> (tabs: [PanelTabInfo], activeTabId: String?) {
+        let r = try await request("panel.list", params: obj(["sessionId": .string(sessionId)]))
+        let tabs: [PanelTabInfo] = (r["tabs"]?.arrayValue ?? []).compactMap { t in
+            guard let tabId = t["tabId"]?.stringValue, let kind = t["kind"]?.stringValue else { return nil }
+            return PanelTabInfo(tabId: tabId, kind: kind, url: t["url"]?.stringValue, title: t["title"]?.stringValue)
+        }
+        return (tabs, r["activeTabId"]?.stringValue)
+    }
+}
+
+/// `panel.list`'s per-tab wire shape (`PanelTabSchema`, methods.ts). `kind` stays a plain `String`
+/// here, not the App target's UI-side `PanelTabKind` — this package has no reason to depend on it,
+/// same reasoning as `openPanelTab(kind:)`'s own doc comment just above.
+public struct PanelTabInfo: Equatable, Sendable {
+    public let tabId: String
+    public let kind: String
+    public let url: String?
+    public let title: String?
+
+    public init(tabId: String, kind: String, url: String?, title: String?) {
+        self.tabId = tabId
+        self.kind = kind
+        self.url = url
+        self.title = title
+    }
 }

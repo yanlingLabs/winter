@@ -474,6 +474,15 @@ final class ModeLandingViewTests: XCTestCase {
         host.select("S2")
         XCTAssertNotNil(host.hopAwayPrompt)
 
+        // panel-shell T9: BOTH the fresh attach to S1 above AND this hop to S2 fire their own
+        // `panel.list` fetch on this same management connection (`ShellSessionHost.attachFresh`/
+        // `hop`'s `refreshPanelTabs`) — unrelated to the dismiss this test is about, but async, so
+        // either can land inside an unguarded "nothing new was sent" window purely by timing.
+        // Waiting for `.contains("panel.list")` alone is satisfied by S1's (fired first, at
+        // `select("S1")` above) and can resolve before S2's has even been SENT yet — let BOTH
+        // settle before taking the baseline, so the only thing that can still move
+        // `transport.sent.count` afterward is the dismiss itself.
+        await feedWaitUntil { transport.methods.filter { $0 == "panel.list" }.count == 2 }
         let sentBeforehand = transport.sent.count
         host.dismissHopAwayPrompt()
         XCTAssertNil(host.hopAwayPrompt)

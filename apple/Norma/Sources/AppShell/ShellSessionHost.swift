@@ -260,6 +260,17 @@ final class ShellSessionHost: ObservableObject {
     /// own doc comment for why a second consumer (T9) must do the same.
     private let outputsWatcher: OutputsWatcher?
 
+    /// panel-shell T9: the panel's session-keyed tab state, OWNED here rather than by
+    /// `ShellRootView` (Task 8 left that placement for this task to ratify — REJECTED: this host is
+    /// constructed in `AppDelegate.summonAppWindow`, before `ShellRootView` even exists, and it is
+    /// `attachFresh`/`hop` below that know synchronously, at the exact right moment, which session
+    /// just became current — a private `@StateObject` on a child view has no way to be reached from
+    /// a controller object that predates it. `ShellRootView` reads `host?.panelStore` instead of
+    /// minting its own. `let`, not `@Published`: this store's own IDENTITY never changes across the
+    /// host's lifetime — only its INTERNAL `@Published tabs`/`activeTabId` do, and `ShellPanel`
+    /// observes those directly, exactly the `let directory: SessionDirectory` precedent just above.
+    let panelStore = PanelStore()
+
     /// IMP-1 fix (final whole-branch review, "the fourth door"): backs the `directory.$rows`
     /// subscription below — the ONE Combine wire this host holds, so its lifetime is this host's
     /// own (no separate teardown needed; `AnyCancellable.cancel()` fires on deinit).
@@ -325,23 +336,22 @@ final class ShellSessionHost: ObservableObject {
         }
     }
 
-    // MARK: - panel-shell T8: the panel's tab-strip mutation RPCs (bare, ATTACHED-session-targeted)
+    // MARK: - panel-shell T8/T9: the panel's tab-strip mutation RPCs (bare, ATTACHED-session-targeted)
     //
     // Same `managementClient` reasoning as the roster verbs just above: `panel.openTab`/`closeTab`/
     // `activateTab` all take `sessionId` directly, and the daemon appends straight to that
     // session's hub (`hub.append(sessionId, …)`, `ipc/server.ts`) — the calling connection never
     // needs to be ATTACHED to it. Targeted at `attachedSessionId` rather than an arbitrary roster
-    // row because the panel only ever shows the session the shell is currently attached to (Task
-    // 9's session-keyed swap is what makes that true across MULTIPLE sessions' tabs at once; this
-    // host has no session-keyed concept of its own).
+    // row because these three represent a tap on the strip the user is CURRENTLY LOOKING AT — the
+    // one session `panelStore` is presently publishing (`currentSessionId`, `PanelStore.swift`).
     //
-    // **None of these apply anything locally.** `PanelStore.apply(_:)` is the ONE path that may
-    // ever change `tabs`/`activeTabId` (its own doc comment, `PanelStore.swift`) — this host holds
-    // no `PanelStore` reference at all, so there is nothing here FOR a result to mutate. These
-    // three fire the RPC and stop; the resulting `panel_tab_opened`/`closed`/`activated` event is
-    // what actually updates the strip, once Task 9 wires the live pump. Until then a tap lands on
-    // the daemon and nothing in the app visibly changes — the documented, expected state of this
-    // task (see the brief's Step 5b).
+    // **None of these apply anything locally, even though this host now holds `panelStore`
+    // (T9).** `PanelStore.apply(_:)` is the ONE path that may ever change `tabs`/`activeTabId` (its
+    // own doc comment, `PanelStore.swift`), and it is fed EXCLUSIVELY by the live pump — the
+    // `onEvent` hook `attachFresh` wires below, never by these three. They fire the RPC and stop;
+    // the resulting `panel_tab_opened`/`closed`/`activated` event reaches `panelStore` (and so the
+    // strip) live, through that hook — this is what makes the round trip "tap → daemon → strip
+    // updates" rather than an optimistic local mutation racing the daemon's own answer.
 
     /// The strip's `+`. Sends no `tabId` — the daemon mints one (`PanelOpenTabResult.tabId`),
     /// which this deliberately discards: nothing here needs it, and seeding it anywhere would be
@@ -367,6 +377,31 @@ final class ShellSessionHost: ObservableObject {
         guard let client = managementClient, let sessionId = attachedSessionId else { return }
         Task { @MainActor in
             _ = try? await client.activatePanelTab(sessionId: sessionId, tabId: tabId)
+        }
+    }
+
+    /// panel-shell T9: `panel.list` on every attach/hop (`attachFresh`/`hop`, both call this right
+    /// after `panelStore.switchSession(to:)`) — the instant-display seed, ahead of whatever the
+    /// slower full replay eventually redelivers over the SAME attachment's own event pump. Rides
+    /// `managementClient` like the three mutation RPCs above (bare, `sessionId`-targeted, no attach
+    /// required) rather than the per-attachment `feed.client` — consistent with them, and available
+    /// immediately rather than waiting on this specific attachment's own handshake.
+    ///
+    /// A daemon that doesn't answer (`try?`), or a response with an unparseable `kind` for one tab,
+    /// degrades to "drop that tab" rather than a guessed default (`?? .web`) — mirroring how a
+    /// REPLAYED event with an unrecognized `kind` fails its OWN whole-event decode and is silently
+    /// skipped (`SessionEvent`'s per-event `try?` decode); a snapshot that disagreed with what
+    /// replay would eventually show for the same wire value would be a second, diverging behavior
+    /// for the identical case.
+    private func refreshPanelTabs(for sessionId: String) {
+        guard let client = managementClient else { return }
+        Task { @MainActor [weak self] in
+            guard let result = try? await client.listPanelTabs(sessionId: sessionId) else { return }
+            let tabs: [PanelTab] = result.tabs.compactMap { info in
+                guard let kind = PanelTabKind(rawValue: info.kind) else { return nil }
+                return PanelTab(tabId: info.tabId, kind: kind, url: info.url, title: info.title)
+            }
+            self?.panelStore.applyFetchedSnapshot(sessionId: sessionId, tabs: tabs, activeTabId: result.activeTabId)
         }
     }
 
@@ -682,8 +717,24 @@ final class ShellSessionHost: ObservableObject {
         // state) must still run. This is also how a `session_activity` transient for the session the
         // shell is showing reaches the directory at all: it is broadcast to that session's
         // ATTACHMENTS, which is this socket, not the orb's.
+        //
+        // panel-shell T9: `panelStore.apply` rides the SAME hook — this is the ONE pump
+        // (`SessionFeed.start()`'s `for await ev in self.client.events`, `PanelStore`'s own doc
+        // comment for why a second subscriber would race it, not duplicate it) — filtered to
+        // `self?.attachedSessionId` read FRESH on every event, never a captured `sessionId`: this
+        // closure is set ONCE per `attachFresh` and survives every later `hop(to:)` on the SAME
+        // attachment (`ShellSessionAttachment`'s own doc comment — "a HOP keeps this exact object"),
+        // so a captured id would go stale the moment a hop changed which session is current. Mirrors
+        // `SessionFeed.handle`'s own `.pinned` branch (`e.sessionId == sessionId`) — the identical
+        // guard, just evaluated here instead, since `SessionFeed` has no knowledge of `PanelStore`
+        // (a layering boundary Task 9 does not cross — see `PanelStore`'s own doc comment).
         made.feed.onEvent = { [weak self] event in
-            if case .session(let e) = event { self?.directory.handle(e) }
+            if case .session(let e) = event {
+                self?.directory.handle(e)
+                if let attached = self?.attachedSessionId, e.sessionId == attached {
+                    self?.panelStore.apply(e)
+                }
+            }
             return false
         }
         // The pickers' catalogue, fetched when this harness is actually CONNECTED. Deliberately not
@@ -704,6 +755,13 @@ final class ShellSessionHost: ObservableObject {
         attachedSessionId = sessionId
         refreshOutputFiles(for: sessionId)
         openOutputFile = nil
+        // panel-shell T9: swap the panel's published slice onto this session BEFORE the feed's pump
+        // can deliver a single event for it (both calls below are synchronous), then fetch the
+        // instant-display seed — see `PanelStore.switchSession`/`refreshPanelTabs`'s own doc
+        // comments for why ordering here matters (a switch after the first event would show a
+        // flash of the OLD session's tabs under the NEW session's identity).
+        panelStore.switchSession(to: sessionId)
+        refreshPanelTabs(for: sessionId)
         wire(adapter: adapter, feed: made.feed)
         live.feedTask = Task { await made.feed.start() }
     }
@@ -736,6 +794,11 @@ final class ShellSessionHost: ObservableObject {
         attachedSessionId = sessionId
         refreshOutputFiles(for: sessionId)
         openOutputFile = nil
+        // panel-shell T9: same swap + instant-seed pair as `attachFresh` — see those calls' own doc
+        // comments. Both run synchronously here too, before the `repin` Task below is even created,
+        // so `attachedSessionId`/`panelStore.currentSessionId` are never observably out of step.
+        panelStore.switchSession(to: sessionId)
+        refreshPanelTabs(for: sessionId)
         // Everything the OLD session's identity decided has to be re-derived or dropped, exactly as
         // an in-place switch does elsewhere: a different session means a different mode, a different
         // pinned model/effort, and refusals that were about the session the user just left.
@@ -770,6 +833,7 @@ final class ShellSessionHost: ObservableObject {
     private func detachCurrent() {
         guard let live = attachment else {
             attachedSessionId = nil
+            panelStore.detach() // defensive symmetry with the branch below — see that call's own note
             return
         }
         // Same hop-away moment as `hop(to:)` above — hiding the shell or navigating to a non-session
@@ -789,6 +853,10 @@ final class ShellSessionHost: ObservableObject {
         attachedSessionId = nil
         outputFiles = []
         openOutputFile = nil
+        // panel-shell T9: the panel shows nothing while detached, but `panelStore.detach()` never
+        // discards what's cached for any session — a later re-attach, even to this SAME session,
+        // still benefits from it (`PanelStore.detach`'s own doc comment).
+        panelStore.detach()
     }
 
     // MARK: - T4: the hop-away prompt's two doors
