@@ -358,6 +358,11 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // working-directories T8: a refusal is about the session it was refused FOR — "that directory
         // is locked for this session" rendered over a different session's chip is a lie about a rule.
         adapter.dirsRefusal = nil
+        // panel-shell T10b: same "about the session it was about" discipline as the resets just
+        // above — this window mounts the shared `WindowContentView`/`PendingCardsView` too, so an
+        // in-place session switch here is the identical sibling case `ShellSessionHost.hop(to:)`
+        // already covers for the shell's own attachment (same reasoning, same adapter field).
+        adapter.pendingCardDrafts = [:]
         Task { @MainActor [weak self] in
             await self?.feed.repin(to: sessionId)
         }

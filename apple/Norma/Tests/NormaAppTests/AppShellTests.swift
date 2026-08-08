@@ -1000,11 +1000,24 @@ final class AppShellTests: XCTestCase {
         let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
         let nav = ShellNavigationModel()
         let page = NewChatPage(nav: nav, host: host)
-        let hasDraftState = Mirror(reflecting: page).children.contains { $0.label == "_draft" }
-        XCTAssertFalse(hasDraftState,
+        let stateBackedLabels = Set(Mirror(reflecting: page).children.compactMap { child -> String? in
+            guard let label = child.label,
+                  String(describing: type(of: child.value)).contains("State<") else { return nil }
+            return label
+        })
+        XCTAssertFalse(stateBackedLabels.contains("_draft"),
             "NewChatPage's draft must not be view-local @State — it needs to live on `host` " +
             "(mirroring FieldStateAdapter.composerDraft's precedent) so it survives ShellRootView's " +
             "`.maximized` teardown of `detail`")
+        // Exhaustive, house-style pin, not just "no _draft": everything else here is still
+        // legitimately @State (a mode-picker selection, a hover flag, two picked-once display
+        // strings — none of it user-entered data; see the task-10b report's "Scope guards"
+        // section). Pinning the exact set means a FUTURE @State var that holds real typed input
+        // fails this test too, not only a second property literally renamed `draft`.
+        XCTAssertEqual(stateBackedLabels, ["_mode", "_composerHovered", "_greetingLine", "_announcementLine"],
+            "an unexpected @State property appeared on NewChatPage — if it holds user-entered " +
+            "data, it needs the same host-hoisting treatment `draft` got; if not, add it to this " +
+            "pin's allowed set deliberately")
     }
 
     // MARK: - chatgpt-ui T3: the page's in-flight feedback (c-m3 — PURE send-state mapping)

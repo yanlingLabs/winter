@@ -409,9 +409,16 @@ final class PendingCardsTests: XCTestCase {
     // unreachable (there is nothing constructible to reflect on). Once fixed, this becomes a
     // permanent tripwire: a future edit that reintroduces even one local `@State` var on either
     // view (bypassing the externally-owned draft) fails the suite forever after.
+    /// Catches BOTH `@State` (`"State<...>"`) and `@StateObject` (`"StateObject<...>"`) — a locally
+    /// OWNED reference-type store would be the identical bug in a different property-wrapper
+    /// costume (still destroyed on `detail`'s teardown; SwiftUI-owned storage keyed to view
+    /// identity either way). The two checks are independent substring tests rather than one
+    /// `.contains("State")`, so this never accidentally flags an unrelated type that merely
+    /// contains the letters "State" somewhere in its name (`OrbSessionState`, etc.).
     private func hasAnyStateBackedStorage<T>(_ value: T) -> Bool {
         Mirror(reflecting: value).children.contains {
-            String(describing: type(of: $0.value)).contains("State<")
+            let typeName = String(describing: type(of: $0.value))
+            return typeName.contains("State<") || typeName.contains("StateObject<")
         }
     }
 
