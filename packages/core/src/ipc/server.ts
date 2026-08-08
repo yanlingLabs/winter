@@ -1,6 +1,7 @@
 import { chmodSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
@@ -26,6 +27,7 @@ import {
   ProviderConfigureParams,
   WorkflowListParams, WorkflowRunParams, WorkflowStopParams, WorkflowGetParams,
   SyncHeadsParams, SyncPullParams, SyncPushParams, SyncConfigParams, SyncMemoryParams,
+  PanelListParams, PanelOpenTabParams, PanelCloseTabParams, PanelActivateTabParams, PanelReportNavigationParams,
   SYSTEM_SESSION_ID,
   type SessionEvent, ConnWriter, type WritableSocket,
 } from "@norma/protocol";
@@ -45,6 +47,7 @@ import { setSessionActivity, type SetActivityDeps } from "../sessions/set-activi
 import { setSessionDirs, type SetDirsDeps } from "../sessions/set-dirs";
 import { reapEmptySessions } from "../sessions/reaper";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
+import { foldPanelTabs } from "../panel/store";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { AgentEngine } from "../agent/engine";
@@ -2435,6 +2438,83 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           actionId: p.actionId,
         };
         return opts.supervisor.pushToPlugin(p.pluginId, event);
+      }
+
+      // -----------------------------------------------------------------------------------------
+      // Panel (panel-shell T6): the RPC surface over Task 5's `foldPanelTabs` (panel/store.ts).
+      // Harness/admin-only by construction — none of the five are in REMOTE_ALLOWED_METHODS or
+      // PLUGIN_ALLOWED_METHODS above, so a remote/plugin connection is role-rejected before dispatch
+      // ever reaches this switch (the pre-switch gate a few hundred lines up). Every handler below
+      // maps an unknown SESSION to NOT_FOUND (the sessionHistory/directory_added precedent) — but,
+      // deliberately, none of them additionally check that a `tabId` currently exists before
+      // appending. See panel.closeTab's own comment just below for why.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.panelList: {
+        const p = parseParams(PanelListParams, params);
+        try {
+          return foldPanelTabs(opts.store.read(p.sessionId));
+        } catch (e) {
+          throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
+        }
+      }
+      case METHODS.panelOpenTab: {
+        const p = parseParams(PanelOpenTabParams, params);
+        // The daemon mints the id — the caller never supplies one ("persisted events are the
+        // instruction"). This is what makes an agent-opened tab and a user-opened tab
+        // indistinguishable downstream: exactly one code path creates a tab, and it always runs
+        // here, regardless of who asked.
+        const tabId = randomUUID();
+        try {
+          hub.append(p.sessionId, {
+            type: "panel_tab_opened", sessionId: p.sessionId, tabId, kind: p.kind, url: p.url, title: p.title,
+          });
+        } catch (e) {
+          throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
+        }
+        return { ok: true, tabId };
+      }
+      case METHODS.panelCloseTab: {
+        const p = parseParams(PanelCloseTabParams, params);
+        // No pre-check that `tabId` is currently open: close has TWO producers (the user in the
+        // app, the agent via Plan B) that can legitimately race each other, and `foldPanelTabs`
+        // already tolerates a close of an unknown/already-gone tab as a silent no-op (splice finds
+        // nothing, moves on). Rejecting the loser of that race with NOT_FOUND would turn a routine
+        // double-close into an error every caller has to catch and ignore, for no benefit — the
+        // fold is the one designed absorber for this, and a strict check here would just be a
+        // second, contradictory policy over the same events.
+        try {
+          hub.append(p.sessionId, { type: "panel_tab_closed", sessionId: p.sessionId, tabId: p.tabId });
+        } catch (e) {
+          throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
+        }
+        return { ok: true };
+      }
+      case METHODS.panelActivateTab: {
+        const p = parseParams(PanelActivateTabParams, params);
+        // Same permissive-append reasoning as panel.closeTab just above: `foldPanelTabs` ignores
+        // activation of an unknown tabId rather than erroring, so this handler does too.
+        try {
+          hub.append(p.sessionId, { type: "panel_tab_activated", sessionId: p.sessionId, tabId: p.tabId });
+        } catch (e) {
+          throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
+        }
+        return { ok: true };
+      }
+      case METHODS.panelReportNavigation: {
+        const p = parseParams(PanelReportNavigationParams, params);
+        // The app is the SOLE witness of a committed top-level navigation — this call records the
+        // fact unconditionally. An unknown/already-closed tabId is not refused here: it is the
+        // exact stale-in-flight race `foldPanelTabs`'s `panel_tab_navigated` case already tolerates
+        // (a close that lands before this report arrives), and rejecting it would turn an expected
+        // race into a surfaced error for a report the app has no way to retract.
+        try {
+          hub.append(p.sessionId, {
+            type: "panel_tab_navigated", sessionId: p.sessionId, tabId: p.tabId, url: p.url, title: p.title,
+          });
+        } catch (e) {
+          throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
+        }
+        return { ok: true };
       }
 
       default:

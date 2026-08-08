@@ -4,7 +4,7 @@ import { z } from "zod";
 // from this file — methods.ts already imports from events.ts, so the reverse edge would be a module
 // cycle whose `z.enum(...)` const would be in the TDZ at events.ts's evaluation. Re-exported by the
 // package index either way, so `@norma/protocol` consumers see no difference.
-import { SessionEvent, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption } from "./events";
+import { SessionEvent, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind } from "./events";
 
 export const PROTOCOL_VERSION = 0;
 
@@ -1417,6 +1417,61 @@ export const SyncMemoryResult = z.object({
 export type SyncMemoryParams = z.infer<typeof SyncMemoryParams>;
 export type SyncMemoryResult = z.infer<typeof SyncMemoryResult>;
 
+/** panel-shell T6: the RPC surface over Task 5's `foldPanelTabs` (packages/core/src/panel/store.ts)
+ *  — five methods, all harness/admin-only (never added to REMOTE_ALLOWED_METHODS or
+ *  PLUGIN_ALLOWED_METHODS in ipc/server.ts: the phone has no panel, and a plugin has no reason to
+ *  drive one).
+ *
+ *  There is deliberately NO `panel.navigate`. A navigation has two producers that must not be
+ *  conflated: the agent's navigation is a REQUEST and travels later as a `panel_command` (transient,
+ *  Plan B — not this task); the user clicking a link inside a page is a FACT only the app observes,
+ *  via CEF, and travels as `panel.reportNavigation`. Both converge on the same persisted
+ *  `panel_tab_navigated` event, through the same handler — see that handler's own doc comment in
+ *  ipc/server.ts for why an unknown/already-closed tabId is accepted rather than refused there. */
+export const PanelTabSchema = z.object({
+  tabId: z.string().min(1),
+  kind: PanelTabKind,
+  url: z.string().optional(),
+  title: z.string().optional(),
+});
+
+export const PanelListParams = z.object({ sessionId: z.string().min(1) });
+/** Mirrors `PanelTabState` (core/src/panel/store.ts) field-for-field — this IS the fold, verbatim. */
+export const PanelListResult = z.object({
+  tabs: z.array(PanelTabSchema),
+  activeTabId: z.string().optional(),
+});
+
+/** `panel.openTab` mints `tabId` DAEMON-SIDE (`crypto.randomUUID()`, ipc/server.ts) — the caller
+ *  never supplies one, on purpose: that is what makes an agent-opened tab and a user-opened tab
+ *  indistinguishable downstream. Exactly one code path creates a tab, and it always runs here,
+ *  regardless of who asked — see CLAUDE.md's "the rule that decides who mints what". */
+export const PanelOpenTabParams = z.object({
+  sessionId: z.string().min(1),
+  kind: PanelTabKind,
+  url: z.string().optional(),
+  title: z.string().optional(),
+});
+export const PanelOpenTabResult = z.object({ ok: z.literal(true), tabId: z.string().min(1) });
+
+export const PanelCloseTabParams = z.object({ sessionId: z.string().min(1), tabId: z.string().min(1) });
+export const PanelCloseTabResult = z.object({ ok: z.literal(true) });
+
+export const PanelActivateTabParams = z.object({ sessionId: z.string().min(1), tabId: z.string().min(1) });
+export const PanelActivateTabResult = z.object({ ok: z.literal(true) });
+
+/** The app is the SOLE witness of a committed top-level navigation (CEF fired it) — this is a FACT
+ *  report, never a request, and has no `panel.navigate` counterpart (see this section's own doc
+ *  comment above). `url` is required non-empty; `title` is required but MAY be empty (a page with no
+ *  `<title>`), mirroring `PanelTabNavigatedEvent` (events.ts) exactly. */
+export const PanelReportNavigationParams = z.object({
+  sessionId: z.string().min(1),
+  tabId: z.string().min(1),
+  url: z.string().min(1),
+  title: z.string(),
+});
+export const PanelReportNavigationResult = z.object({ ok: z.literal(true) });
+
 export const METHODS = {
   hello: "protocol.hello",
   sessionCreate: "session.create",
@@ -1503,4 +1558,9 @@ export const METHODS = {
   syncPush: "sync.push",
   syncConfig: "sync.config",
   syncMemory: "sync.memory",
+  panelList: "panel.list",
+  panelOpenTab: "panel.openTab",
+  panelCloseTab: "panel.closeTab",
+  panelActivateTab: "panel.activateTab",
+  panelReportNavigation: "panel.reportNavigation",
 } as const;
