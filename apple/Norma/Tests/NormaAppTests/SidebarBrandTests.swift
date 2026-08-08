@@ -201,9 +201,10 @@ final class SidebarBrandTests: XCTestCase {
         XCTAssertEqual(shellTitlebarNavigationGlyphs, ["arrow.left", "arrow.right"])
     }
 
-    /// Every titlebar glyph — both clusters, plus panel-shell T10's own expand button (moved out
-    /// of `shellTitlebarTrailingGlyphs` and into the panel's cluster, so it needs its own listing
-    /// here) — must resolve, or it renders as a blank box with no error anywhere.
+    /// Every titlebar glyph — both clusters, plus panel-shell T10's own expand button (a NEW glyph
+    /// that no existing list covers — `shellTitlebarTrailingGlyphs` is unchanged, still the
+    /// original three, per `testTrailingClusterIsThreeDistinctGlyphs` below — so it needs its own
+    /// listing here) — must resolve, or it renders as a blank box with no error anywhere.
     func testEveryTitlebarGlyphResolvesAsARealSymbol() {
         let all = shellTitlebarNavigationGlyphs + shellTitlebarTrailingGlyphs
             + [shellSidebarToggleSystemImage(isVisible: true),

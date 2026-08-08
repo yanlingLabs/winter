@@ -322,12 +322,21 @@ struct ShellRootView: View {
                             // Disabled rather than hidden when the window is too narrow — a control
                             // that vanishes reads as a bug, one that greys out reads as a constraint.
                             //
-                            // This instance renders ONLY while `mode == .hidden` (this whole branch's
-                            // own gate), so `presentation.mode == .hidden` always holds here too and
-                            // the label is therefore always "Show panel" — the ternary is kept anyway
-                            // (rather than hand-simplified to the literal) so this stays correct by
-                            // construction if that gate ever changes, not by an editor remembering to
-                            // revisit a dropped branch.
+                            // review round 1, Minor 3: this branch's own gate is the RESOLVED
+                            // `mode == .hidden`, which is not the same as the REQUESTED
+                            // `presentation.mode` being `.hidden` too — `panelResolvedMode` also
+                            // forces `.hidden` when the window is too narrow, whatever was
+                            // requested, which is exactly the "Widen the window…" case ten lines
+                            // above. That forced case requires `!fits`; so `fits == true` here can
+                            // only be the OTHER way resolved `.hidden` happens — the user actually
+                            // requested `.hidden` — which is what makes `presentation.mode ==
+                            // .hidden` hold whenever the inner ternary is reached at all. When
+                            // `fits == false`, `presentation.mode` really could be `.side`/
+                            // `.maximized` (the forced case) — but the OUTER ternary has already
+                            // picked the "Widen the window…" arm by then, so the inner one is never
+                            // evaluated either way, and the ternary is kept (rather than
+                            // hand-simplified to the literal) so it stays correct by construction
+                            // if that no-longer-coincidental relationship ever changes.
                             let fits = panelFitsInContent(contentWidth)
                             ShellTitlebarButton(
                                 systemImage: glyph,

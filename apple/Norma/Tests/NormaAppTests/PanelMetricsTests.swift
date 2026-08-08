@@ -63,9 +63,23 @@ final class PanelMetricsTests: XCTestCase {
                        panelTabPillMinWidth)
     }
 
+    /// review round 1, Important 1: the OTHER bound Step 3b actually asks for — "panelTabPillSize
+    /// .width is a MAXIMUM" — had zero coverage. `testTabPillWidthCompressesForATwoTabRowAt
+    /// DefaultWidth` above proves compression engages under crowding; this proves the cap still
+    /// holds with room to spare, which `min(panelTabPillSize.width, …)` inside `panelTabPillWidth`
+    /// is the only thing enforcing. Deleting that `min(...)` left the WHOLE suite green before this
+    /// test existed (mutation-verified by hand: one tab in a huge available width returns the raw,
+    /// uncapped `share` — 1819 here — instead of 156 without it; restored, both pass).
+    func testTabPillWidthCapsAtTheMeasuredSizeWhenThereIsRoomToSpare() {
+        XCTAssertEqual(panelTabPillWidth(tabCount: 1, availableWidth: 2000), panelTabPillSize.width)
+    }
+
     /// Zero tabs is reachable (a fresh panel before `panel.list` resolves) and must not divide by
-    /// zero — the strip has nothing to lay out, so the cap is as good an answer as any.
-    func testTabPillWidthIsTotalOnZeroTabs() {
+    /// zero — the strip has nothing to lay out, so the cap is as good an answer as any. Renamed
+    /// (review round 1, Minor 10) from `testTabPillWidthIsTotalOnZeroTabs`, which named the
+    /// input-domain property ("total", the codebase's usual word for "doesn't crash on this edge
+    /// case") rather than the actual asserted VALUE.
+    func testTabPillWidthReturnsTheCapOnZeroTabsRatherThanDividingByZero() {
         XCTAssertEqual(panelTabPillWidth(tabCount: 0, availableWidth: panelDefaultWidth),
                        panelTabPillSize.width)
     }

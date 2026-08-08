@@ -206,8 +206,20 @@ struct PanelTabStrip: View {
                 // is computed against this SAME subtraction (its own `overhead`), which is what
                 // keeps "how much room the pills get" and "how much room this frame grants them"
                 // from ever being two different numbers.
-                .frame(width: geo.size.width - panelNewTabButtonGap - panelTrailingClusterWidth,
-                       alignment: .leading)
+                //
+                // review round 1, Minor 6: `max(0, …)` — steady state never goes negative (the
+                // panel's own minimum width is well above `panelTrailingClusterWidth`), but a
+                // `GeometryReader`'s FIRST layout pass can report `size.width == 0` before its real
+                // size is known, and an un-guarded `.frame(width: -126)` is SwiftUI console noise
+                // for one frame rather than a real bug — cheap to close off regardless.
+                //
+                // review round 1, Minor 7: explicit `height:` alongside `width:` — this is the
+                // outer `HStack`'s only child without a fixed cross-axis size (`trailingButtonCluster`
+                // is already exactly `panelTabPillSize.height` tall via its own three
+                // `panelExpandButtonSize` buttons), so leaving it to size itself risked the two
+                // trailing elements centring a few points apart rather than sharing one line.
+                .frame(width: max(0, geo.size.width - panelNewTabButtonGap - panelTrailingClusterWidth),
+                       height: panelTabPillSize.height, alignment: .leading)
 
                 trailingButtonCluster
             }
