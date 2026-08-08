@@ -9,14 +9,20 @@ import NormaKit
 /// target's existing real-window fixtures (`DetachedScriptedTransport` from `DetachedWindowTests`,
 /// `NormaClientTestFactory` from `DashboardTests`).
 ///
-/// These tests flip the REAL `NSApp.activationPolicy()` of the xctest host — safe here because the
-/// host launches `.accessory` (see `ScaffoldTests.testActivationPolicyIsAccessory`) and every test
-/// below closes whatever window(s) it opened, so production's own demotion path
-/// (`registerDetachedWindow`'s `onClosed` → `syncDockPresence`, or the shell's own
-/// `onVisibilityChange`) always restores `.accessory` by the time the test returns — nothing leaks
-/// into a later test.
+/// Dock seam retarget: these tests used to flip the REAL `NSApp.activationPolicy()` of the xctest
+/// host. With the seam (`DockPolicy.apply`, swapped for `HarnessTeardownObserver`'s recorder at
+/// bundle load) the host can never really promote — a killed/cancelled clone can no longer strand
+/// a ghost Dock tile — so the dock-presence pins below assert the recorded SEQUENCE of applied
+/// policies instead: every transition production attempted, in order, which is strictly stronger
+/// than the end-state reads they replaced. The recorder is cleared after every case (observer),
+/// so each test reads exactly its own applications; the observer's tripwire separately pins that
+/// the REAL policy never moved.
 @MainActor
 final class AppLifecycleTests: XCTestCase {
+
+    /// The seam recorder, under a case-local name — the policies production applied since this
+    /// case started.
+    private var applied: [NSApplication.ActivationPolicy] { HarnessTeardownObserver.recordedPolicies }
     // MARK: - terminateDecision (PURE — no NSApp/AppleEvent reference)
 
     /// T3 review fix: the second axis is `systemInitiated` (the Apple-Event logout/restart/
@@ -61,13 +67,14 @@ final class AppLifecycleTests: XCTestCase {
 
     func testShowDockIconSetsRegularHideDockIconRestoresAccessory() {
         let delegate = AppDelegate()
-        XCTAssertEqual(NSApp.activationPolicy(), .accessory, "the xctest host launches LSUIElement — accessory going in")
+        XCTAssertEqual(NSApp.activationPolicy(), .accessory, "the xctest host launches LSUIElement — accessory going in (a real read, still valid: the seam means nothing under test can change it)")
+        XCTAssertEqual(applied, [], "no dock-policy application yet")
 
         delegate.showDockIcon()
-        XCTAssertEqual(NSApp.activationPolicy(), .regular)
+        XCTAssertEqual(applied, [.regular])
 
         delegate.hideDockIcon()
-        XCTAssertEqual(NSApp.activationPolicy(), .accessory)
+        XCTAssertEqual(applied, [.regular, .accessory])
     }
 
     // MARK: - registerDetachedWindow: promotion / demotion
@@ -79,18 +86,18 @@ final class AppLifecycleTests: XCTestCase {
 
         delegate.registerDetachedWindow(window)
 
-        XCTAssertEqual(NSApp.activationPolicy(), .regular, "opening a real chat window must show the dock icon")
+        XCTAssertEqual(applied, [.regular], "opening a real chat window must apply the dock-icon promotion")
     }
 
     func testClosingTheLastDetachedWindowDemotesTheDockIcon() {
         let delegate = AppDelegate()
         let window = makeDetachedWindow()
         delegate.registerDetachedWindow(window)
-        XCTAssertEqual(NSApp.activationPolicy(), .regular)
+        XCTAssertEqual(applied, [.regular])
 
         window.close()
 
-        XCTAssertEqual(NSApp.activationPolicy(), .accessory, "closing the last main window must hide the dock icon again")
+        XCTAssertEqual(applied, [.regular, .accessory], "closing the last main window must apply the demotion")
     }
 
     func testClosingOneOfTwoDetachedWindowsKeepsTheDockIconUntilTheOtherAlsoCloses() {
@@ -99,12 +106,16 @@ final class AppLifecycleTests: XCTestCase {
         let b = makeDetachedWindow(sessionId: "B")
         delegate.registerDetachedWindow(a)
         delegate.registerDetachedWindow(b)
+        // `syncDockPresence` applies unconditionally on every registry mutation, so two registers
+        // are two `.regular` applications — the duplicates are the machinery's real behavior, and
+        // the pin is the full transition sequence. Don't "fix" them here.
+        XCTAssertEqual(applied, [.regular, .regular])
 
         a.close()
-        XCTAssertEqual(NSApp.activationPolicy(), .regular, "one main window is still open — the dock icon must stay")
+        XCTAssertEqual(applied, [.regular, .regular, .regular], "one main window is still open — the close's re-sync must re-apply promotion, never demote")
 
         b.close()
-        XCTAssertEqual(NSApp.activationPolicy(), .accessory, "the last main window just closed — demote")
+        XCTAssertEqual(applied, [.regular, .regular, .regular, .accessory], "the last main window just closed — demote")
     }
 
     // Task 7: `testOpeningDashboardPromotesAndClosingItDemotes` and
@@ -129,14 +140,17 @@ final class AppLifecycleTests: XCTestCase {
         delegate.systemQuitReasonProvider = { false }
         let window = makeDetachedWindow()
         delegate.registerDetachedWindow(window)
-        XCTAssertEqual(NSApp.activationPolicy(), .regular)
+        XCTAssertEqual(applied, [.regular])
         XCTAssertFalse(delegate.reallyQuitting, "default — only the menu-bar Quit ever flips this")
 
         let reply = delegate.applicationShouldTerminate(NSApp)
 
         XCTAssertEqual(reply, .terminateCancel)
         XCTAssertTrue(delegate.detachedWindows.isEmpty, "⌘Q/dock-quit must close the main windows, not just cancel silently")
-        XCTAssertEqual(NSApp.activationPolicy(), .accessory, "⌘Q/dock-quit must demote the dock icon back to accessory")
+        // Two demotions, deliberately: the closed window's own `onClosed` → `syncDockPresence`
+        // applies one, then the cancel branch's explicit belt-and-suspenders `hideDockIcon()`
+        // (for the nothing-was-open edge) applies another. The duplicate IS the machinery.
+        XCTAssertEqual(applied, [.regular, .accessory, .accessory], "⌘Q/dock-quit must demote the dock icon back to accessory")
     }
 
     func testApplicationShouldTerminateAllowsTerminationAndLeavesWindowsAloneWhenReallyQuitting() {
@@ -151,7 +165,7 @@ final class AppLifecycleTests: XCTestCase {
 
         XCTAssertEqual(reply, .terminateNow)
         XCTAssertFalse(delegate.detachedWindows.isEmpty, "a real quit must not run the cancel-path window teardown — AppKit's own termination handles that")
-        XCTAssertEqual(NSApp.activationPolicy(), .regular, "a real quit doesn't demote — the app is exiting")
+        XCTAssertEqual(applied, [.regular], "a real quit doesn't demote — the register's promotion stands and no demotion was ever applied; the app is exiting")
     }
 
     /// T3 review fix: a system LOGOUT/RESTART/SHUTDOWN quit (the Apple Event carries a system
