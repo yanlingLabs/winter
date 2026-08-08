@@ -23,12 +23,31 @@ final class PanelMetricsTests: XCTestCase {
     /// `testTabPillWidthCompressesForATwoTabRowAtDefaultWidth` below proves the cap actually gets
     /// exercised. The 156pt figure itself is unchanged: it is still what ONE tab occupies in the
     /// reference, which is exactly why it stays the cap rather than being replaced.
+    ///
+    /// panel-shell T13: `panelTabPillRadius` moved OUT of this list — it is no longer measured, it
+    /// is DERIVED from `shellSidebarRowCornerRadius` (`testTabPillRadiusMatchesTheSharedRowRadius`
+    /// above owns that pin now), and asserting a derivation against its own definition here would
+    /// be this branch's "compared a count against itself" shape. `panelTabSpacing` is pinned below
+    /// INSTEAD, with the caveat its own doc comment carries: 6pt is a controller choice, not a
+    /// measurement — the reference shows exactly one tab, so there is no tab-to-tab gap in it.
     func testTabPillMatchesTheMeasuredReference() {
         XCTAssertEqual(panelTabPillSize, CGSize(width: 156, height: 28))
         XCTAssertEqual(panelTabPillInset, 9)
-        XCTAssertEqual(panelTabPillRadius, panelTabPillSize.height / 2)  // capsule
         XCTAssertEqual(panelNewTabButtonGap, 18)
         XCTAssertEqual(panelTabPillMinWidth, 64)
+        XCTAssertEqual(panelTabSpacing, 6, "controller's choice, not measured — see its own doc comment")
+    }
+
+    /// panel-shell T13 RED confirmed pre-implementation (14 != 6, the capsule vs. the shared row
+    /// radius). The tab's fill/hit-target radius must match the app's ONE hover/selection
+    /// vocabulary (`shellSidebarRowCornerRadius` — every sidebar row, every titlebar button)
+    /// instead of living as its own capsule. Derived, so a future edit to one can never silently
+    /// leave the pill's highlight and the rest of the app's rounded-rects disagreeing. (An
+    /// `XCTAssertEqual` cannot itself distinguish a real derivation from a coincidentally-equal
+    /// second literal — that half is a source read, not a test: `panelTabPillRadius`'s
+    /// declaration is `= shellSidebarRowCornerRadius`, not `= 6`.)
+    func testTabPillRadiusMatchesTheSharedRowRadius() {
+        XCTAssertEqual(panelTabPillRadius, shellSidebarRowCornerRadius)
     }
 
     /// panel-shell T10: Task 8's own honest 102pt trailing-cluster reservation (borrowed from the
@@ -47,6 +66,13 @@ final class PanelMetricsTests: XCTestCase {
     /// ignores `availableWidth` and always returns the cap, which is exactly the bug this test
     /// exists to catch (mutation-verified by hand: a fixed-`panelTabPillSize.width` stub fails the
     /// first assertion; restored, both pass).
+    ///
+    /// panel-shell T13 re-verified under the split-gap arithmetic (still mutation-verified by hand,
+    /// same stub, same failure on the first assertion — 156 is not less than 156). What T13 does
+    /// NOT re-verify is covered by `testTabPillWidthAtTwoTabsUsesTheSplitGapArithmetic` below: this
+    /// inequality alone cannot tell 140.5 (pre-T13) from 146.5 (post-T13) apart, so it is silent on
+    /// whether `panelTabSpacing` is actually wired in — margin shrank from 15.5pt to 9.5pt below
+    /// the cap, still a real gap either way.
     func testTabPillWidthCompressesForATwoTabRowAtDefaultWidth() {
         let width = panelTabPillWidth(tabCount: 2, availableWidth: panelDefaultWidth)
         XCTAssertLessThan(width, panelTabPillSize.width,
@@ -55,9 +81,35 @@ final class PanelMetricsTests: XCTestCase {
                              "and still fit without hitting the floor (which is where scrolling starts)")
     }
 
+    /// panel-shell T13 RED confirmed pre-implementation (today's arithmetic returns 140.5, this
+    /// asserts 146.5).
+    ///
+    /// The inequality test above CANNOT see the split-gap change: both the pre-T13 share (140.5)
+    /// and the post-T13 share (146.5) sit strictly inside the (64, 156) window it checks, so it
+    /// stays green whichever overhead arithmetic is live — confirmed by hand: reverting
+    /// `panelTabPillWidth`'s overhead to the old `(tabCount + 1) * panelNewTabButtonGap` leaves
+    /// EVERY other test in this file green, including that one; only this test catches it (140.5
+    /// != 146.5). Restored, all pass. The expected value is a LITERAL, not a recomputed expression
+    /// of the same constants — asserting a formula against its own definition is this branch's
+    /// "compared a count against itself" defect, and would pass no matter what the formula said.
+    ///
+    /// Derivation (hand-computed, not code): overhead = panelTabPillInset(9)
+    /// + (tabCount-1)*panelTabSpacing = 1*6 + 2*panelNewTabButtonGap(18, pill->"+" AND the
+    /// ScrollView-frame->trailing-cluster gap, both unchanged by T13) + panelTabPillSize.height(28,
+    /// the "+" button) + panelTrailingClusterWidth(108) = 9+6+36+28+108 = 187.
+    /// share = (panelDefaultWidth(480) - 187) / 2 = 146.5.
+    func testTabPillWidthAtTwoTabsUsesTheSplitGapArithmetic() {
+        XCTAssertEqual(panelTabPillWidth(tabCount: 2, availableWidth: panelDefaultWidth), 146.5)
+    }
+
     /// The other end of the same function: enough tabs that even the floor doesn't fit. The pill
     /// width must clamp there rather than go negative or keep shrinking — `PanelTabStrip`'s own
     /// `ScrollView` is what absorbs the rest (not unit-testable here; this pins the pure half).
+    ///
+    /// panel-shell T13 re-verified under the split-gap arithmetic (mutation-verified by hand:
+    /// dropping the `max(panelTabPillMinWidth, …)` floor returns the raw share — 0.1 here, since 50
+    /// tabs' tighter `panelTabSpacing` gaps leave 5pt of nominal room over 50 tabs — instead of 64;
+    /// restored, both pass). Still deep in floor territory either way: 0.1 and 64 are worlds apart.
     func testTabPillWidthNeverGoesBelowTheFloorNoMatterHowManyTabs() {
         XCTAssertEqual(panelTabPillWidth(tabCount: 50, availableWidth: panelDefaultWidth),
                        panelTabPillMinWidth)
@@ -70,6 +122,10 @@ final class PanelMetricsTests: XCTestCase {
     /// is the only thing enforcing. Deleting that `min(...)` left the WHOLE suite green before this
     /// test existed (mutation-verified by hand: one tab in a huge available width returns the raw,
     /// uncapped `share` — 1819 here — instead of 156 without it; restored, both pass).
+    ///
+    /// panel-shell T13 re-verified under the split-gap arithmetic (still mutation-verified by hand,
+    /// same 1819 — `tabCount == 1` has zero tab-to-tab gaps, so the split changes nothing here,
+    /// which is also why this number needed no edit for T13).
     func testTabPillWidthCapsAtTheMeasuredSizeWhenThereIsRoomToSpare() {
         XCTAssertEqual(panelTabPillWidth(tabCount: 1, availableWidth: 2000), panelTabPillSize.width)
     }

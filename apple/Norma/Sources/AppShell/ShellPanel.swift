@@ -7,12 +7,27 @@ import SwiftUI
 let panelChromeBandHeight: CGFloat = 85
 
 /// panel-shell T8: MEASURED at @2x from the reference
-/// (docs/research/reference/chatgpt-panel-titlebar-band-2026-08-08.png). The pill is a capsule —
-/// the radius is DERIVED from the height so the two can never drift apart.
+/// (docs/research/reference/chatgpt-panel-titlebar-band-2026-08-08.png).
 let panelTabPillSize = CGSize(width: 156, height: 28)
 let panelTabPillInset: CGFloat = 9
-let panelTabPillRadius: CGFloat = panelTabPillSize.height / 2
+
+/// panel-shell T13: SQUARED, not a capsule — matches the app's ONE hover/selection vocabulary
+/// (`shellSidebarRowCornerRadius`, `ShellSidebar.swift`), which already governs every sidebar row
+/// and every titlebar button (`ShellTitlebarButton` wears `ShellSidebarRowStyle` at that radius).
+/// Derived rather than a second `6` literal, so the pill's highlight and the rest of the app's
+/// rounded-rects can never drift into two different radii for what reads as one visual language.
+/// Was `panelTabPillSize.height / 2` (a capsule, 14) until the user's live gate asked for square.
+let panelTabPillRadius: CGFloat = shellSidebarRowCornerRadius
+
+/// The gap from the LAST pill to the "+" button — the only adjacency the reference has anything to
+/// measure, since it shows exactly one tab. `panelTabSpacing` below is the other, unmeasured, gap.
 let panelNewTabButtonGap: CGFloat = 18
+
+/// panel-shell T13: between ADJACENT tabs. NOT the measured 18pt above — a controller choice (not
+/// a measurement: the reference's one tab has no tab-to-tab gap to measure), tighter than the
+/// pill->"+" distance so a run of tabs reads as one group sitting apart from "+". Easy to change if
+/// a denser strip makes a different value obviously better.
+let panelTabSpacing: CGFloat = 6
 
 /// panel-shell T10: the pill's width above is a MAXIMUM, not a fixed rendered width — tabs
 /// compress below it as more open, so the strip always fits inside the panel (`panelTabPillWidth`
@@ -36,18 +51,32 @@ let panelTrailingClusterWidth: CGFloat = 3 * panelExpandButtonSize
 
 /// PURE: the width one pill renders at, given how many tabs are open and how much width the strip
 /// has to lay them out in — capped at `panelTabPillSize.width`, floored at `panelTabPillMinWidth`.
-/// Every pill shares whatever is left after the fixed overhead: the leading inset, one
-/// `panelNewTabButtonGap` after every pill (including after the "+"), the "+" button itself
-/// (`panelTabPillSize.height` square), and the trailing cluster. `PanelTabStrip`'s own layout below
-/// uses the IDENTICAL named constants for that overhead, so this function's answer and what
-/// actually renders can never drift apart.
+/// Every pill shares whatever is left after the fixed overhead:
+///   - the leading inset (`panelTabPillInset`)
+///   - panel-shell T13: `(tabCount - 1)` gaps of `panelTabSpacing` BETWEEN pills — zero for a
+///     single tab, which is why splitting this out changes nothing for `tabCount == 1`
+///   - one `panelNewTabButtonGap`, the LAST pill to the "+" button
+///   - the "+" button itself (`panelTabPillSize.height` square)
+///   - one more `panelNewTabButtonGap` — `PanelTabStrip`'s OUTER `HStack` spacing, between the
+///     scrollable group's own frame and the trailing cluster. Unrelated to tab-to-tab spacing (it
+///     separates the scroll box from the cluster, not one pill from another), so T13's split does
+///     NOT touch this term — it stays the measured pill->"+" figure, same as before T13.
+///   - the trailing cluster (`panelTrailingClusterWidth`)
+/// `PanelTabStrip`'s own layout below uses the IDENTICAL named constants for every one of these
+/// terms, so this function's answer and what actually renders can never drift apart. In particular
+/// the `ScrollView`'s own `.frame(width:)` subtracts exactly the LAST two terms (the outer gap and
+/// the cluster) from `availableWidth` — the first three terms are spent INSIDE that frame, on the
+/// pills themselves — which is what keeps the two subtractions equal by construction rather than by
+/// two call sites agreeing to use the same numbers. (`testTabPillWidthAtTwoTabsUsesTheSplitGapArithmetic`
+/// pins the arithmetic itself; this comment is the proof the two sides still agree.)
 ///
 /// Always returns a value — even floored, this never "fails". Below the floor there is nothing
 /// left for THIS function to do; `PanelTabStrip`'s own `ScrollView` is what takes over from there.
 func panelTabPillWidth(tabCount: Int, availableWidth: CGFloat) -> CGFloat {
     guard tabCount > 0 else { return panelTabPillSize.width }
     let overhead = panelTabPillInset
-        + CGFloat(tabCount + 1) * panelNewTabButtonGap
+        + CGFloat(tabCount - 1) * panelTabSpacing
+        + 2 * panelNewTabButtonGap
         + panelTabPillSize.height
         + panelTrailingClusterWidth
     let share = (availableWidth - overhead) / CGFloat(tabCount)
@@ -201,7 +230,12 @@ struct PanelTabStrip: View {
 
             HStack(spacing: panelNewTabButtonGap) {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: panelNewTabButtonGap) {
+                    // panel-shell T13: `spacing:` here is the TAB-TO-TAB gap (`panelTabSpacing`,
+                    // tighter than the pill->"+" distance). SwiftUI's `HStack` has no per-pair
+                    // spacing, so the one gap that must stay at `panelNewTabButtonGap` — the LAST
+                    // pill to "+" — is made up on `newTabButton`'s own leading edge below instead
+                    // of by a second `spacing:`.
+                    HStack(spacing: panelTabSpacing) {
                         ForEach(store.tabs) { tab in
                             PanelTabPill(
                                 tab: tab,
@@ -212,6 +246,11 @@ struct PanelTabStrip: View {
                             )
                         }
                         newTabButton
+                            // Zero tabs: "+" sits right after the leading inset, exactly as before
+                            // T13 — there is no preceding pill for `panelNewTabButtonGap` to be
+                            // measured FROM, so applying this unconditionally would shift "+" on a
+                            // fresh, empty panel for no reason.
+                            .padding(.leading, store.tabs.isEmpty ? 0 : panelNewTabButtonGap - panelTabSpacing)
                     }
                     .padding(.leading, panelTabPillInset)
                 }
@@ -305,11 +344,14 @@ struct PanelTabStrip: View {
     }
 }
 
-/// One tab pill. Only the ACTIVE tab is filled — `Theme.rowHover`, the brief's "RowHover register"
-/// — so there is exactly one filled pill at a time; an inactive tab sits flush on the strip's own
-/// background. Every offset below is measured from the PILL's own leading or trailing edge (the
-/// brief's "+9.5pt from the pill's leading edge" etc.), not from a neighbouring element, which is
-/// why each piece is positioned by its own absolute padding inside a leading-aligned `ZStack`
+/// One tab pill. The ACTIVE tab stays filled and, since panel-shell T13, an INACTIVE tab also
+/// fills on hover — both through `ShellSidebarRowStyle` (see the `.buttonStyle` below), both
+/// landing on `Theme.rowHover` (the brief's "RowHover register"; that style's
+/// `selectedUsesHoverTone` is what makes selection use the same token as hover here instead of
+/// `SelectionPill`). "Filled" therefore always means the same fill regardless of which of the two
+/// reasons caused it. Every offset below is measured from the PILL's own leading or trailing edge
+/// (the brief's "+9.5pt from the pill's leading edge" etc.), not from a neighbouring element, which
+/// is why each piece is positioned by its own absolute padding inside a leading-aligned `ZStack`
 /// (favicon, label) or a trailing `.overlay` (the close button) rather than by `HStack` spacing.
 ///
 /// panel-shell T10: `width` is `PanelTabStrip`'s computed `panelTabPillWidth`, not always
@@ -332,10 +374,6 @@ private struct PanelTabPill: View {
     var body: some View {
         Button(action: onActivate) {
             ZStack(alignment: .leading) {
-                if isActive {
-                    RoundedRectangle(cornerRadius: panelTabPillRadius, style: .continuous)
-                        .fill(Theme.rowHover)
-                }
                 Image(systemName: panelTabFaviconSystemImage(tab.kind))
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.textMuted)
@@ -350,7 +388,18 @@ private struct PanelTabPill: View {
             .frame(width: width, height: panelTabPillSize.height, alignment: .leading)
             .contentShape(RoundedRectangle(cornerRadius: panelTabPillRadius, style: .continuous))
         }
-        .buttonStyle(.plain)
+        // panel-shell T13: the app's ONE row treatment, not a second hover mechanism beside it —
+        // same pure fill decision (`shellSidebarRowFill`), same `@State isHovered` + `.onHover`,
+        // same `shellSidebarRowCornerRadius` background every sidebar row and titlebar button
+        // renders through. `selectedUsesHoverTone: true` is the sole, named deviation: it swaps
+        // WHICH token `.selected` resolves to (`RowHover` here, not `SelectionPill`), because the
+        // plan's Global Constraints assign panel tabs the `RowHover` token specifically. Passing
+        // `isSelected: isActive` into the style UNCHANGED would have silently repainted the active
+        // tab `SelectionPill` — a recolor this task never asked for — which is why this is a
+        // one-flag generalization of the shared style rather than either that silent recolor or a
+        // hand-rolled fill block living beside it that happens to agree only because both target
+        // the same color today.
+        .buttonStyle(ShellSidebarRowStyle(isSelected: isActive, selectedUsesHoverTone: true))
         .overlay(alignment: .trailing) {
             Button(action: onClose) {
                 Image(systemName: "xmark")

@@ -1297,17 +1297,30 @@ struct ShellSidebar: View {
 /// rest is bare). A `ButtonStyle` so every row is a real `Button` (keyboard/accessibility for
 /// free) while the hover tracking lives in exactly one place. A press reads as hover-strength
 /// feedback on an unselected row — quiet, custom, nothing native.
+///
+/// panel-shell T13: also worn by the panel's tab pills (`PanelTabPill`, `ShellPanel.swift`) — same
+/// mechanism, not a second one, via `selectedUsesHoverTone` below.
 struct ShellSidebarRowStyle: ButtonStyle {
     var isSelected: Bool
+    /// panel-shell T13: the ONE deviation a caller can ask for. Every existing call site (sidebar
+    /// rows, `ShellTitlebarButton`) leaves this at its default `false` and is byte-identical to
+    /// before T13. Only `PanelTabPill` passes `true`: the plan's Global Constraints assign panel
+    /// tabs the `RowHover` token specifically, not `SelectionPill` like a selected sidebar row, so
+    /// wearing this style unmodified would have silently recolored the active tab on adoption.
+    /// Named for the EFFECT, not the mechanism — this does not add a second fill source, it swaps
+    /// which one token `.selected` resolves to, below.
+    var selectedUsesHoverTone: Bool = false
 
     func makeBody(configuration: Configuration) -> some View {
-        RowBody(configuration: configuration, isSelected: isSelected)
+        RowBody(configuration: configuration, isSelected: isSelected,
+                selectedUsesHoverTone: selectedUsesHoverTone)
     }
 
     /// The `@State` hover flag needs a `View` to live on — `ButtonStyle` itself is not one.
     private struct RowBody: View {
         let configuration: Configuration
         let isSelected: Bool
+        let selectedUsesHoverTone: Bool
         @State private var isHovered = false
 
         var body: some View {
@@ -1333,7 +1346,9 @@ struct ShellSidebarRowStyle: ButtonStyle {
         private var fill: AnyShapeStyle {
             switch shellSidebarRowFill(isSelected: isSelected,
                                        isHovered: isHovered || configuration.isPressed) {
-            case .selected: return AnyShapeStyle(Theme.selectionPill)
+            case .selected:
+                return selectedUsesHoverTone ? AnyShapeStyle(Theme.rowHover)
+                                              : AnyShapeStyle(Theme.selectionPill)
             case .hover: return AnyShapeStyle(Theme.rowHover)
             case .none: return AnyShapeStyle(.clear)
             }
