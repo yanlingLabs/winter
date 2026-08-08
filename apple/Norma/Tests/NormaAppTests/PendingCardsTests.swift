@@ -363,6 +363,17 @@ final class PendingCardsTests: XCTestCase {
     @MainActor
     func testPendingCardDraftSurvivesSimulatedViewReconstruction() {
         let adapter = FieldStateAdapter(session: SessionModel())
+
+        // Review fix (Minor 1): folded in from the deleted
+        // testPendingCardDraftBindingDefaultsEmptyForAnUnseenCallId, which passed even with
+        // `pendingCardDraftBinding` replaced by `.constant(PendingCardDraft())` — a stub that
+        // holds nothing can trivially "default empty" for anything. Checked here, against this
+        // SAME real adapter, the claim has to hold across the reconstruction below: a stub would
+        // fail THAT half, which is what makes this half meaningful now. A pure read — the getter
+        // below never inserts an entry — so this cannot pollute the "q1" checks that follow.
+        XCTAssertEqual(adapter.pendingCardDraftBinding(for: "never-seen").wrappedValue, PendingCardDraft(),
+            "a callId with no draft yet must read as a fresh, empty PendingCardDraft — never a crash or an implicit optional the view would have to unwrap")
+
         // Simulate the FIRST PendingQuestionBody instance: the user types Other text — exactly
         // what its onOtherTextChange closure does once wired to `pendingCardDraftBinding(for:)`.
         adapter.pendingCardDraftBinding(for: "q1").wrappedValue.setOtherText("SQLite", forQuestion: 0)
@@ -377,7 +388,10 @@ final class PendingCardsTests: XCTestCase {
     }
 
     /// `pendingInteractions` is a LIST — more than one card can be open — so drafts must be kept
-    /// strictly per-callId, never shared or cross-contaminated.
+    /// strictly per-callId, never shared or cross-contaminated. Unaffected by the review's
+    /// composite-session-keying fix below: both callIds are written under the SAME (unwired,
+    /// defaulting-empty) session namespace here, so this is still a same-session isolation proof,
+    /// distinct from `testPendingCardDraftDoesNotCollideAcrossSessions`'s cross-session one.
     @MainActor
     func testPendingCardDraftIsPerCallIdNeverSharedAcrossCards() {
         let adapter = FieldStateAdapter(session: SessionModel())
@@ -387,12 +401,65 @@ final class PendingCardsTests: XCTestCase {
         XCTAssertEqual(adapter.pendingCardDraftBinding(for: "q2").wrappedValue.otherTexts[0], "B")
     }
 
-    /// A callId with no draft yet reads as a fresh, empty `PendingCardDraft()` — never a crash or
-    /// an implicit optional the view would have to unwrap.
+    /// panel-shell T10b review fix (Important 1+2): callIds are provider-minted with no
+    /// cross-session uniqueness guarantee (the daemon's own `imageKey(sessionId, threadId,
+    /// callId)` precedent, packages/core/src/agent/engine.ts, on the identical image-staging
+    /// problem) — a bare-callId key risks draining session A's draft into session B's card the
+    /// moment both sessions' entries ever coexist in this one dictionary. Proves BOTH halves of
+    /// that fix: session B must never see session A's entry (the collision), AND session A's own
+    /// entry must still be there when the adapter re-binds back to it (proving this is a real
+    /// composite key, not merely session-scoped deletion masquerading as isolation).
     @MainActor
-    func testPendingCardDraftBindingDefaultsEmptyForAnUnseenCallId() {
+    func testPendingCardDraftDoesNotCollideAcrossSessions() {
         let adapter = FieldStateAdapter(session: SessionModel())
-        XCTAssertEqual(adapter.pendingCardDraftBinding(for: "never-seen").wrappedValue, PendingCardDraft())
+
+        adapter.boundSessionId = { "session-a" }
+        adapter.pendingCardDraftBinding(for: "q1").wrappedValue.setOtherText("Postgres", forQuestion: 0)
+
+        adapter.boundSessionId = { "session-b" }
+        XCTAssertEqual(adapter.pendingCardDraftBinding(for: "q1").wrappedValue, PendingCardDraft(),
+            "a different session must never inherit another session's draft just because the callId happens to repeat")
+
+        adapter.boundSessionId = { "session-a" }
+        XCTAssertEqual(adapter.pendingCardDraftBinding(for: "q1").wrappedValue.otherTexts[0], "Postgres",
+            "switching back to session A must still find its own draft — proving this is a real composite key, not an accidental delete")
+    }
+
+    /// panel-shell T10b review fix (Minor 3): `pendingCardDrafts` is bounded across a SESSION
+    /// switch by the explicit clears in `ShellSessionHost.hop`/`DetachedWindowController.
+    /// selectSession`/`OrbWindowController.updateIsChatSession` — but nothing previously bounded
+    /// it across an ORDINARY same-session resolve (a question answered, a plan approved). On the
+    /// orb's own `fieldAdapter` — app-lifetime, never hopped, never torn down — that grew the
+    /// dictionary by one entry per card, forever. Proves the resolve-path sweep: once a callId
+    /// leaves `pendingInteractions` (simulated the same way `SessionReducer`'s own respond-path
+    /// tests do, via `applyForTesting`), its draft is pruned; a DIFFERENT callId that is still
+    /// genuinely open is untouched. `boundSessionId` is wired to a real, non-empty id here
+    /// (unlike most of this file's other tests) so this is a genuine proof of the composite-keyed
+    /// production shape, not an artifact of the `?? ""` fallback namespace.
+    @MainActor
+    func testPendingCardDraftIsPrunedWhenItsCardResolves() {
+        let session = SessionModel()
+        let adapter = FieldStateAdapter(session: session)
+        adapter.boundSessionId = { "session-a" }
+
+        session.applyForTesting { s in
+            s.pendingInteractions = [
+                .approval(callId: "q1", toolName: "t", summary: "d"),
+                .approval(callId: "q2", toolName: "t", summary: "d")
+            ]
+        }
+        adapter.pendingCardDraftBinding(for: "q1").wrappedValue.setOtherText("A", forQuestion: 0)
+        adapter.pendingCardDraftBinding(for: "q2").wrappedValue.setOtherText("B", forQuestion: 0)
+
+        // q1 resolves (the reducer's own removeAll-by-callId path) — q2 is still open.
+        session.applyForTesting { s in
+            s.pendingInteractions.removeAll { $0.callId == "q1" }
+        }
+
+        XCTAssertEqual(adapter.pendingCardDraftBinding(for: "q1").wrappedValue, PendingCardDraft(),
+            "a resolved card's draft must be pruned — it can never be shown again for that callId")
+        XCTAssertEqual(adapter.pendingCardDraftBinding(for: "q2").wrappedValue.otherTexts[0], "B",
+            "a STILL-OPEN card's draft must survive the sweep that pruned its resolved sibling")
     }
 
     // MARK: - panel-shell T10b: PendingQuestionBody / PendingPlanBody hold no view-local @State
@@ -409,16 +476,24 @@ final class PendingCardsTests: XCTestCase {
     // unreachable (there is nothing constructible to reflect on). Once fixed, this becomes a
     // permanent tripwire: a future edit that reintroduces even one local `@State` var on either
     // view (bypassing the externally-owned draft) fails the suite forever after.
-    /// Catches BOTH `@State` (`"State<...>"`) and `@StateObject` (`"StateObject<...>"`) — a locally
-    /// OWNED reference-type store would be the identical bug in a different property-wrapper
-    /// costume (still destroyed on `detail`'s teardown; SwiftUI-owned storage keyed to view
-    /// identity either way). The two checks are independent substring tests rather than one
-    /// `.contains("State")`, so this never accidentally flags an unrelated type that merely
-    /// contains the letters "State" somewhere in its name (`OrbSessionState`, etc.).
+    /// Catches BOTH `@State` and `@StateObject` — a locally OWNED reference-type store would be
+    /// the identical bug in a different property-wrapper costume (still destroyed on `detail`'s
+    /// teardown; SwiftUI-owned storage keyed to view identity either way).
+    ///
+    /// Review fix (Minor 2): EXACT-matches the wrapper name (the component before the first `<`,
+    /// with any module qualifier stripped) rather than substring-testing `"State<"` /
+    /// `"StateObject<"` — the substring form also matched `FocusState<…>` and `GestureState<…>`,
+    /// so a future, entirely correct `@FocusState private var isFieldFocused` (loses nothing on
+    /// teardown — SwiftUI itself re-derives focus state) would have failed this guard spuriously.
+    /// `"State<...>"` and `"SwiftUI.State<...>"` both reduce to the bare name `"State"` here, so
+    /// this is not narrower than the substring version for the two wrappers it actually targets —
+    /// only narrower for the ones it was never supposed to catch.
     private func hasAnyStateBackedStorage<T>(_ value: T) -> Bool {
-        Mirror(reflecting: value).children.contains {
-            let typeName = String(describing: type(of: $0.value))
-            return typeName.contains("State<") || typeName.contains("StateObject<")
+        Mirror(reflecting: value).children.contains { child in
+            let typeName = String(describing: type(of: child.value))
+            guard let generic = typeName.split(separator: "<").first else { return false }
+            let bareName = generic.split(separator: ".").last.map(String.init) ?? String(generic)
+            return bareName == "State" || bareName == "StateObject"
         }
     }
 

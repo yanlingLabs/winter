@@ -186,6 +186,30 @@ final class OrbWindowController: ObservableObject {
     /// `DetachedWindowController` fix.
     func updateIsChatSession(for sessionId: String, rows: [SessionSummary]) {
         fieldAdapter.isChatSession = DetachedWindowController.isChatSession(sessionId, in: rows)
+        // panel-shell T10b review fix (Important 1): this method is the THIRD
+        // in-place-session-switch site, sibling to `ShellSessionHost.hop`/
+        // `DetachedWindowController.selectSession` (both already clear their own adapter's
+        // `pendingCardDrafts` on switch) — named directly by this method's own doc above ("a
+        // SEPARATE FieldStateAdapter instance", "mirroring DetachedWindowController.selectSession's
+        // identical in-place re-derivation").
+        // Doubly important here, not merely symmetrical: `fieldAdapter` is a `let`, constructed
+        // once and living for the WHOLE APP LIFETIME — unlike a `DetachedWindowController` (which
+        // dies on window close) or a `ShellSessionAttachment` (bounded by the shell's own
+        // lifetime), nothing else ever tears this adapter down. A forgotten clear here would not
+        // just leak one switch's worth of entries; it would accumulate for as long as the app
+        // runs. (`FieldStateAdapter`'s own resolve-path sweep is a second, independent backstop
+        // against exactly that unbounded growth — see its doc — but the explicit clear stays: it
+        // fires the instant a switch is chosen, not on the next state tick.)
+        //
+        // Composite keying (`FieldStateAdapter.pendingCardDraftBinding`) already prevents a
+        // cross-session collision even without this clear, so — same as its two siblings — this
+        // is hygiene, not a correctness fix for a visible bug. One timing note for a future
+        // reader: this fires SYNCHRONOUSLY here, while the caller (`AppDelegate`'s
+        // `sidebars.onSelect`) starts `AppModel.focusSession(sid)` right after in a separate
+        // `Task`, asynchronously. For one beat after a click, `fieldAdapter` can render the OLD
+        // session's still-visible cards against an already-emptied draft store — harmless, since
+        // those drafts were about to be discarded the instant the switch was chosen either way.
+        fieldAdapter.pendingCardDrafts = [:]
     }
 
     /// Task 4: fired by `requestWindowDetach()` with the panel's CURRENT frame (spawn the detached

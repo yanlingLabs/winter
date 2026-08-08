@@ -1000,9 +1000,17 @@ final class AppShellTests: XCTestCase {
         let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
         let nav = ShellNavigationModel()
         let page = NewChatPage(nav: nav, host: host)
+        // Review fix (Minor 2, applied proactively here too for consistency —
+        // PendingCardsTests.hasAnyStateBackedStorage's own doc comment has the full rationale):
+        // exact-matches the wrapper name instead of substring-testing "State<", which also
+        // matches FocusState<…>/GestureState<…> and would fail this pin spuriously the day a
+        // correct @FocusState var is added.
         let stateBackedLabels = Set(Mirror(reflecting: page).children.compactMap { child -> String? in
-            guard let label = child.label,
-                  String(describing: type(of: child.value)).contains("State<") else { return nil }
+            guard let label = child.label else { return nil }
+            let typeName = String(describing: type(of: child.value))
+            guard let generic = typeName.split(separator: "<").first else { return nil }
+            let bareName = generic.split(separator: ".").last.map(String.init) ?? String(generic)
+            guard bareName == "State" || bareName == "StateObject" else { return nil }
             return label
         })
         XCTAssertFalse(stateBackedLabels.contains("_draft"),

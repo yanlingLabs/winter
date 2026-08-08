@@ -829,9 +829,23 @@ final class ShellSessionHost: ObservableObject {
         live.adapter.activityRefusal = nil
         // panel-shell T10b: same "about the session it was about" discipline as the two resets
         // just above — a pending card's typed-but-unsubmitted answer belongs to the callId it was
-        // typed for, and callIds don't cross sessions, so a stale entry here is never wrongly
-        // displayed; this clear is hygiene (an unbounded dictionary otherwise), not a correctness
-        // fix for a visible bug.
+        // typed for.
+        //
+        // Review fix (Important 2): the ORIGINAL version of this comment claimed "callIds don't
+        // cross sessions, so a stale entry here is never wrongly displayed" — FALSE, and
+        // contradicted by the daemon's own design: callIds are provider-minted with no
+        // cross-session uniqueness guarantee (`packages/core/src/agent/engine.ts`'s `imageKey`
+        // comment, on the identical image-staging problem). A bare-callId key here risked
+        // draining session A's draft into session B's card the moment both sessions' entries ever
+        // coexisted in this one dictionary. Fixed structurally, not per-site:
+        // `FieldStateAdapter.pendingCardDraftBinding` now composite-keys by `boundSessionId()`
+        // (mirroring the daemon's `imageKey(sessionId, threadId, callId)`), so a same-callId
+        // collision across sessions can no longer alias.
+        //
+        // THIS clear is now genuinely hygiene-only — it bounds the dictionary's size across a
+        // switch, which was always its real justification even when the comment's correctness
+        // claim was wrong. The rest of the time (an ordinary same-session resolve), the adapter's
+        // own resolve-path sweep (`FieldStateAdapter`'s `session.$state` sink) bounds it instead.
         live.adapter.pendingCardDrafts = [:]
         // T2 fix round 1: the first-message carry on the HOP path too — a departed new-chat
         // session opened from Recents while the shell shows another session arrives HERE, not

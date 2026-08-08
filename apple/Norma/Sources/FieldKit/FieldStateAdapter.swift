@@ -49,6 +49,38 @@ final class FieldStateAdapter: ObservableObject {
         session.$state
             .sink { [weak self] newState in
                 guard let self else { return }
+
+                // panel-shell T10b review fix (Minor 3): prune `pendingCardDrafts` to exactly
+                // what's still live — the resolve-path sweep `pendingCardDrafts`'s own doc points
+                // to. An entry survives only if its composite key still names a callId present in
+                // `newState.pendingInteractions`; everything else is stale, whether from THIS
+                // session's own resolve (the reducer's `removeAll` on respond, or its wholesale
+                // clear on `turnCompleted`/`agentError` — SessionModel.swift) or a leftover from a
+                // session this adapter no longer names (a structural backstop for the explicit
+                // per-site clears, not a replacement for them).
+                //
+                // Safe against pruning a still-genuinely-open card: `pendingInteractions` is
+                // append-once/remove-once per callId (SessionModel.swift's `.append` on a new
+                // interaction, `.removeAll { $0.callId == callId }` on resolve) and only ever
+                // wholesale-reset via `session.reset()` (called ONLY from `SessionFeed.repin`/
+                // `AppModel.refocus`, both session-SWITCH paths with idempotency guards against a
+                // same-session no-op) — it never transiently empties and refills for a callId that
+                // is still open. And every switch path that calls `session.reset()` runs one of
+                // the three explicit `pendingCardDrafts = [:]` clears above no later than — in two
+                // of three call sites, strictly before — that reset's own synchronous publish, so
+                // by the time THIS sink turn sees the switch, the dictionary this sweep would
+                // prune is already empty. Neither race destroys a live draft; verified by tracing
+                // every `session.reset()` call site, not assumed.
+                let liveKeys = Set(newState.pendingInteractions.map {
+                    self.pendingCardDraftKey(sessionId: self.boundSessionId() ?? "", callId: $0.callId)
+                })
+                if !self.pendingCardDrafts.isEmpty {
+                    let pruned = self.pendingCardDrafts.filter { liveKeys.contains($0.key) }
+                    if pruned.count != self.pendingCardDrafts.count {
+                        self.pendingCardDrafts = pruned
+                    }
+                }
+
                 if newState.turnRunning {
                     let c = newState.taskCounts
                     self.lastWorkingLevel = c.total > 0 ? Double(c.done) / Double(c.total) : 0.5
@@ -485,26 +517,58 @@ final class FieldStateAdapter: ObservableObject {
     @Published var interactionErrors: [String: String] = [:]
 
     /// panel-shell T10b: a pending question/plan card's typed-but-unsubmitted answer, keyed by
-    /// callId (`pendingInteractions` is a list — more than one card can be open at once). Lives
-    /// HERE, mirroring `composerDraft` above (the "MARK: - Composer draft" section), so it
-    /// survives `ShellRootView`'s `if mode != .maximized { detail }` teardown —
-    /// `PendingQuestionBody`/`PendingPlanBody` used to hold this as view-local `@State`, which
-    /// does not survive `detail` being torn down and rebuilt. Cleared per-session in
-    /// `ShellSessionHost.hop(to:)` (the "about the session it was about" discipline that hop
-    /// already applies to `dirsRefusal`/`activityRefusal`); dies with the whole adapter on detach,
-    /// same as everything else on it.
+    /// `pendingCardDraftKey(sessionId:callId:)` — NOT bare callId (`pendingInteractions` is a
+    /// list — more than one card can be open at once, and callIds can repeat across sessions; see
+    /// that key helper's own doc). Lives HERE, mirroring `composerDraft` above (the "MARK: -
+    /// Composer draft" section), so it survives `ShellRootView`'s `if mode != .maximized { detail
+    /// }` teardown — `PendingQuestionBody`/`PendingPlanBody` used to hold this as view-local
+    /// `@State`, which does not survive `detail` being torn down and rebuilt.
+    ///
+    /// Bounded two ways, both genuinely hygiene now that composite keying (not callId uniqueness)
+    /// is what prevents a cross-session mis-display: (1) explicit per-site clears on a SESSION
+    /// switch — `ShellSessionHost.hop`, `DetachedWindowController.selectSession`,
+    /// `OrbWindowController.updateIsChatSession` — each wipe this wholesale, which also bounds
+    /// growth across a switch; (2) the resolve-path sweep in `init`'s `session.$state` sink below,
+    /// which prunes an entry the moment its callId leaves `pendingInteractions` (an ordinary
+    /// same-session resolve, or the reducer's own wholesale clear on `turnCompleted`/
+    /// `agentError`) — this is what bounds the orb's `fieldAdapter` (Important 1: app-lifetime,
+    /// never hops, never torn down — the one surface (1) alone cannot bound). Dies with the whole
+    /// adapter on detach, same as everything else on it.
     @Published var pendingCardDrafts: [String: PendingCardDraft] = [:]
 
-    /// A live `Binding` into `pendingCardDrafts[callId]`, defaulting a fresh `PendingCardDraft()`
-    /// for a callId with no entry yet — mirrors `draftBinding` above exactly (same file, the
-    /// "MARK: - Composer draft" section). The getter/setter close over `self`, so every Binding
-    /// this mints — however many times a caller asks for the SAME callId across however many
-    /// separately-constructed views — reads and writes the one live dictionary on this adapter,
-    /// never a value captured at construction time.
+    /// review fix (Important 1+2): composite key, mirroring the daemon's own
+    /// `imageKey(sessionId, threadId, callId)` precedent (`packages/core/src/agent/engine.ts`) for
+    /// the identical reason — callIds are provider-minted with no cross-session uniqueness
+    /// guarantee, so a bare-callId key risks draining one session's draft into another session's
+    /// card the moment both sessions' entries ever coexist here. No `threadId` component, unlike
+    /// the daemon's three-part key: `PendingInteraction` (`SessionModel.swift`) carries no
+    /// threadId in any of its cases, and `PendingCardsView`'s own `ForEach(interactions, id:
+    /// \.callId)` already assumes callId-uniqueness WITHIN one session's list — a pre-existing
+    /// invariant this key reuses rather than adds a new dimension to.
+    ///
+    /// `sessionId` defaults `""` via `boundSessionId() ?? ""` at both call sites (this key helper
+    /// takes it as a plain parameter and stores nothing itself) — the resolve-path sweep in
+    /// `init`'s `session.$state` sink above, and `pendingCardDraftBinding` right below. Never
+    /// defaulted here — every PRODUCTION adapter wires `boundSessionId` (`GlassRootView`,
+    /// `ShellSessionHost`, `DetachedWindowController`); it is only ever unwired in a test that
+    /// constructs a bare `FieldStateAdapter` directly, where a stable shared `""` namespace, used
+    /// identically by both call sites, keeps every such
+    /// existing test's read-your-own-write behavior unchanged.
+    private func pendingCardDraftKey(sessionId: String, callId: String) -> String {
+        "\(sessionId)|\(callId)"
+    }
+
+    /// A live `Binding` into `pendingCardDrafts[pendingCardDraftKey(...)]`, defaulting a fresh
+    /// `PendingCardDraft()` for a callId with no entry yet — mirrors `draftBinding` above exactly
+    /// (same file, the "MARK: - Composer draft" section). The getter/setter close over `self`, so
+    /// every Binding this mints — however many times a caller asks for the SAME callId across
+    /// however many separately-constructed views — reads and writes the one live dictionary on
+    /// this adapter, never a value captured at construction time.
     func pendingCardDraftBinding(for callId: String) -> Binding<PendingCardDraft> {
-        Binding(
-            get: { self.pendingCardDrafts[callId] ?? PendingCardDraft() },
-            set: { self.pendingCardDrafts[callId] = $0 }
+        let key = pendingCardDraftKey(sessionId: boundSessionId() ?? "", callId: callId)
+        return Binding(
+            get: { self.pendingCardDrafts[key] ?? PendingCardDraft() },
+            set: { self.pendingCardDrafts[key] = $0 }
         )
     }
 

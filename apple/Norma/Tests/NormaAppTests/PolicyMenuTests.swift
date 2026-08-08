@@ -191,8 +191,18 @@ final class PolicyMenuTests: XCTestCase {
         let orb = OrbWindowController(session: SessionModel())
         XCTAssertFalse(orb.fieldAdapter.isChatSession, "a fresh orb adapter starts non-chat")
 
+        // panel-shell T10b review fix (Important 1): this method is the orb's own
+        // in-place-session-switch site — same sibling as `ShellSessionHost.hop`/
+        // `DetachedWindowController.selectSession`, both of which already clear
+        // `pendingCardDrafts` on switch. Doubly important here: `fieldAdapter` lives for the
+        // WHOLE APP LIFETIME (a `let`, never torn down), so a forgotten clear on this one path
+        // doesn't just leak one switch's entries — it accumulates for as long as the app runs.
+        orb.fieldAdapter.pendingCardDrafts["stale"] = PendingCardDraft(feedback: "leftover")
+
         orb.updateIsChatSession(for: "s_chat", rows: model.directory.rows)
         XCTAssertTrue(orb.fieldAdapter.isChatSession, "selecting a REAL chat row (from an actual directory round trip) must flip the orb's OWN adapter")
+        XCTAssertTrue(orb.fieldAdapter.pendingCardDrafts.isEmpty,
+            "switching session in place must clear pendingCardDrafts — same discipline as the other two switch sites, and the ONE adapter that never dies to bound it any other way")
 
         orb.updateIsChatSession(for: "s_a", rows: model.directory.rows)
         XCTAssertFalse(orb.fieldAdapter.isChatSession, "switching back to a non-chat row must flip it back off")

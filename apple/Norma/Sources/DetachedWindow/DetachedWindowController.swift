@@ -361,7 +361,11 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // panel-shell T10b: same "about the session it was about" discipline as the resets just
         // above — this window mounts the shared `WindowContentView`/`PendingCardsView` too, so an
         // in-place session switch here is the identical sibling case `ShellSessionHost.hop(to:)`
-        // already covers for the shell's own attachment (same reasoning, same adapter field).
+        // already covers for the shell's own attachment (same reasoning, same adapter field). See
+        // that clear's own comment (review fix, Important 2) for why this is hygiene-only, not a
+        // correctness fix: composite keying (`FieldStateAdapter.pendingCardDraftBinding`) is what
+        // actually prevents a cross-session collision now, not callId uniqueness — this clear
+        // only bounds the dictionary's size across the switch.
         adapter.pendingCardDrafts = [:]
         Task { @MainActor [weak self] in
             await self?.feed.repin(to: sessionId)
