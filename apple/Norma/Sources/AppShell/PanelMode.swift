@@ -16,7 +16,11 @@ let panelDefaultWidth: CGFloat = 480
 let panelMinWidth: CGFloat = 360
 
 /// The composer and transcript need this to read correctly.
-let panelMinChatWidth: CGFloat = 420
+///
+/// panel-shell T2 review round 2: revised 420 → 300 (user-decided scope change) — 420 left too
+/// little room for the panel on an ordinary window; `panelMinContentWidth` derives from this, so
+/// the threshold moved with it (780 → 660) with no separate edit.
+let panelMinChatWidth: CGFloat = 300
 
 /// Narrower than this and both minimums cannot be satisfied at once.
 let panelMinContentWidth: CGFloat = panelMinWidth + panelMinChatWidth

@@ -9,7 +9,9 @@ final class PanelModeTests: XCTestCase {
     func testClampHonoursBothBounds() {
         // below the panel's own minimum -> raised
         XCTAssertEqual(panelClampWidth(100, contentWidth: 1200), panelMinWidth)
-        // above the max -> lowered, chat keeps 420
+        // above the max -> lowered, chat keeps panelMinChatWidth (300 as of review round 2;
+        // written symbolically below rather than as a second literal so this line cannot drift
+        // from the constant the way the comment alone already had)
         XCTAssertEqual(panelClampWidth(1190, contentWidth: 1200), 1200 - panelMinChatWidth)
         // inside the range -> untouched
         XCTAssertEqual(panelClampWidth(600, contentWidth: 1200), 600)
@@ -24,8 +26,11 @@ final class PanelModeTests: XCTestCase {
     func testNarrowWindowForcesHidden() {
         XCTAssertFalse(panelFitsInContent(panelMinContentWidth - 1))
         XCTAssertTrue(panelFitsInContent(panelMinContentWidth))
-        XCTAssertEqual(panelResolvedMode(requested: .side, contentWidth: 700), .hidden)
-        XCTAssertEqual(panelResolvedMode(requested: .maximized, contentWidth: 700), .hidden)
+        // review round 2: 700 moved to 600 — `panelMinChatWidth` (420 -> 300, user-decided scope
+        // change) raised the fitting threshold to 660, so 700 now fits and no longer demonstrates
+        // "too narrow"; 600 still sits below it.
+        XCTAssertEqual(panelResolvedMode(requested: .side, contentWidth: 600), .hidden)
+        XCTAssertEqual(panelResolvedMode(requested: .maximized, contentWidth: 600), .hidden)
         XCTAssertEqual(panelResolvedMode(requested: .side, contentWidth: 1200), .side)
     }
 
@@ -34,8 +39,8 @@ final class PanelModeTests: XCTestCase {
     }
 
     /// Closes the finding carried from Task 1: `panelClampWidth` inverts its own bounds when
-    /// `contentWidth < panelMinContentWidth` (at 700, `panelMaxWidth` is 280 while `panelMinWidth`
-    /// is 360 — `min(max(w, 360), 280)` returns 280, below the documented minimum). Task 2 closes
+    /// `contentWidth < panelMinContentWidth` (at 600, `panelMaxWidth` is 300 while `panelMinWidth`
+    /// is 360 — `min(max(w, 360), 300)` returns 300, below the documented minimum). Task 2 closes
     /// it by construction rather than by changing `panelClampWidth` itself: in `ShellRootView`,
     /// the divider renders only `if mode == .side`, and `ShellPanel`'s own clamped width is only
     /// ever COMPUTED (not just gated) in that same branch — and `mode == .side` is reachable only
@@ -47,11 +52,15 @@ final class PanelModeTests: XCTestCase {
     /// `panelClampWidth` in the regime where it misbehaves. (The view-level wiring itself is not
     /// unit-testable here — this codebase deliberately does not exercise SwiftUI bodies — so the
     /// comment at the call site in `ShellSidebar.swift` points back to this test by name.)
+    ///
+    /// review round 2: the literal moved from 700 to 600 — `panelMinChatWidth` (420 -> 300,
+    /// user-decided scope change) raised the fitting threshold to 660, so 700 now fits and no
+    /// longer demonstrates an inversion; 600 still sits below it and still does.
     func testClampBoundsAreNeverInvertedWhenThePanelFits() {
         // Documents the known inversion below the threshold: it must stay UNREACHABLE from the
         // shell, not fixed here — fixing `panelClampWidth` itself is Task 2's other allowed route,
         // and this repo took the gating route instead.
-        XCTAssertLessThan(panelMaxWidth(contentWidth: 700), panelMinWidth)
+        XCTAssertLessThan(panelMaxWidth(contentWidth: 600), panelMinWidth)
 
         // The guarantee: for every contentWidth that fits (panelResolvedMode would not force
         // .hidden), the clamp's own max never falls below its own min.

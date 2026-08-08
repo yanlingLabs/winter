@@ -219,10 +219,25 @@ final class SidebarBrandTests: XCTestCase {
         XCTAssertEqual(Set(shellTitlebarTrailingGlyphs).count, 3)
     }
 
-    /// Every trailing placeholder says it is not wired, so hovering one cannot promise a feature
+    /// Every trailing PLACEHOLDER says it is not wired, so hovering one cannot promise a feature
     /// that does not exist — and the mapping is TOTAL, so an added glyph still gets a label.
+    ///
+    /// review round 2, Important 3: this used to iterate `shellTitlebarTrailingGlyphs` (the WHOLE
+    /// cluster) and assert "not wired" of every one of them — true when written, but it became a
+    /// pin on a falsehood the moment `sidebar.right` was wired (panel-shell T2) without this test
+    /// noticing, since it stayed green for the wrong reason (the stale switch case it was calling
+    /// still happened to say "not wired yet"). Iterating `shellTitlebarTrailingPlaceholderGlyphs`
+    /// — the subset that is STILL a placeholder — makes the assertion true again and keeps it
+    /// that way: a glyph leaving that list is the only thing that can silence this check for it.
     func testTrailingPlaceholderLabelsDiscloseTheyAreNotWired() {
-        for glyph in shellTitlebarTrailingGlyphs {
+        // The split itself: every placeholder is still a real trailing glyph, and the one glyph
+        // that stopped being a placeholder must not sneak back into the placeholder list.
+        XCTAssertTrue(shellTitlebarTrailingPlaceholderGlyphs.allSatisfy(shellTitlebarTrailingGlyphs.contains),
+                      "every placeholder must still be one of the trailing cluster's own glyphs")
+        XCTAssertFalse(shellTitlebarTrailingPlaceholderGlyphs.contains("sidebar.right"),
+                       "sidebar.right is wired (panel-shell T2) — it must not be claimed as a placeholder")
+
+        for glyph in shellTitlebarTrailingPlaceholderGlyphs {
             let label = shellTitlebarTrailingLabel(glyph)
             XCTAssertTrue(label.contains("not wired"), "\(glyph)'s label must disclose: \(label)")
         }

@@ -37,11 +37,22 @@ struct ShellPanel: View {
             Color.clear
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        // `Theme.cardSurface`/`Theme.hairline` ARE `Color("CardSurface")`/`Color("Hairline")` (see
-        // `Theme.swift`) — going through the named layer rather than a raw asset lookup, matching
-        // every other consumer of these two tokens in `ShellSidebar.swift`.
-        .background(Theme.cardSurface)
-        .clipShape(panelShape)
+        // review round 2, Important 2 (plan-mandated fix — the reviewer's Task 2 Step 3 code was
+        // the defect, adjudicated by the user): a BACKGROUND LAYER that ignores the safe area,
+        // not a clip on the content. `ShellSidebar.swift` documents this exact trap on `detail`'s
+        // own card: clipping the content leaves it inset by the titlebar's safe area (only the
+        // sidebar opts out of that), so the plane starts short of the true window edge — here
+        // that meant the top-trailing corner floating mid-window and the chrome band (measured
+        // from the window top) landing low. Same treatment as `detail`, one pattern not two.
+        //
+        // `Theme.cardSurface` IS `Color("CardSurface")` (see `Theme.swift`) — going through the
+        // named layer rather than a raw asset lookup, matching every other consumer of it in
+        // `ShellSidebar.swift`.
+        .background {
+            panelShape
+                .fill(Theme.cardSurface)
+                .ignoresSafeArea()
+        }
     }
 }
 
@@ -68,7 +79,14 @@ struct PanelDivider: View {
             .gesture(
                 DragGesture(coordinateSpace: .global)
                     .onChanged { value in
-                        let base = dragStartWidth ?? width
+                        // review round 2, Important 1: anchor on the CLAMPED (on-screen) width,
+                        // not the raw stored `width`. `width` can be stale relative to the
+                        // current `contentWidth` — e.g. after the window narrows without a drag
+                        // happening — and `ShellPanel`'s own render already clamps on read
+                        // (`ShellSidebar.swift`), so anchoring on the unclamped value would start
+                        // the drag from a point that is not where the divider is actually drawn,
+                        // making it dead until a compensating drag closes the gap.
+                        let base = dragStartWidth ?? panelClampWidth(width, contentWidth: contentWidth)
                         dragStartWidth = base
                         width = panelClampWidth(base - value.translation.width,
                                                 contentWidth: contentWidth)

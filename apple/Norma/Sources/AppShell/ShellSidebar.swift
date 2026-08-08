@@ -58,6 +58,19 @@ struct ShellRootView: View {
             let mode = panelResolvedMode(requested: panelMode, contentWidth: contentWidth)
 
             shellBody(contentWidth: contentWidth, mode: mode)
+                // review round 2, Important 1, belt-and-braces half: keep the STORED `panelWidth`
+                // from drifting far from what is actually on screen (the render path already
+                // clamps on read, but the divider's next drag anchors on the stored value — see
+                // `PanelDivider.onChanged` — so stored and rendered should not be allowed to
+                // diverge for long). Guarded on `panelFitsInContent` so this can NEVER become a
+                // second caller of `panelClampWidth` outside the zone
+                // `PanelModeTests.testClampBoundsAreNeverInvertedWhenThePanelFits` requires (Task
+                // 1's carried finding) — below the threshold the render path already forces
+                // `.hidden` and touches `panelWidth` not at all, and this must not either.
+                .onChange(of: contentWidth) { _, newContentWidth in
+                    guard panelFitsInContent(newContentWidth) else { return }
+                    panelWidth = panelClampWidth(panelWidth, contentWidth: newContentWidth)
+                }
         }
     }
 
@@ -209,28 +222,40 @@ struct ShellRootView: View {
                 ForEach(shellTitlebarTrailingGlyphs, id: \.self) { glyph in
                     if glyph == "sidebar.right" {
                         // panel-shell T2: the placeholder named in `shellTitlebarTrailingLabel`
-                        // becomes the real toggle — `shellTitlebarTrailingLabel("sidebar.right")`
-                        // is left untouched (still says "not wired yet"): it is no longer CALLED
-                        // for this glyph, but `SidebarBrandTests` still calls it directly for
-                        // every glyph in `shellTitlebarTrailingGlyphs`, so changing its answer
-                        // would fail that pin for no behavioural gain.
+                        // becomes the real toggle. `shellTitlebarTrailingGlyphs` still lists this
+                        // glyph (the cluster still shows three icons), but as of review round 2
+                        // it is no longer in `shellTitlebarTrailingPlaceholderGlyphs` — and the
+                        // `"sidebar.right"` case was REMOVED from `shellTitlebarTrailingLabel`'s
+                        // switch (round 1 had left it in, unreferenced; the reviewer called that
+                        // a pin one call away from asserting a falsehood, since nothing stopped a
+                        // future caller from asking this genuinely-wired glyph for its stale
+                        // "not wired yet" text and getting a lie back).
                         //
                         // The label tracks `panelMode` (the REQUESTED state, same variable the
                         // action mutates below) rather than the resolved `mode` — mirrors
                         // `shellSidebarToggleLabel(isVisible:)`, the sibling toggle immediately
-                        // above, which keys its own label off the state IT mutates too.
+                        // above, which keys its own label off the state IT mutates too. Below the
+                        // width threshold it EXPLAINS the disabled state instead (review round 2):
+                        // a disabled control with no reason given reads as broken, not as a
+                        // constraint. The window's own `minSize` (820, `AppWindowController`) is
+                        // always wide enough on its own (>= `panelMinContentWidth`), so whenever
+                        // this fires the sidebar is necessarily the reason — "hide the sidebar" is
+                        // therefore always a valid suggestion here, never a wrong one.
                         //
                         // Disabled rather than hidden when the window is too narrow — a control
                         // that vanishes reads as a bug, one that greys out reads as a constraint.
+                        let fits = panelFitsInContent(contentWidth)
                         ShellTitlebarButton(
                             systemImage: glyph,
-                            label: panelMode == .hidden ? "Show panel" : "Hide panel"
+                            label: fits
+                                ? (panelMode == .hidden ? "Show panel" : "Hide panel")
+                                : "Widen the window or hide the sidebar to use the panel."
                         ) {
                             withAnimation(.snappy) {
                                 panelMode = panelMode == .hidden ? .side : .hidden
                             }
                         }
-                        .disabled(!panelFitsInContent(contentWidth))
+                        .disabled(!fits)
                     } else {
                         ShellTitlebarButton(systemImage: glyph,
                                             label: shellTitlebarTrailingLabel(glyph),
@@ -585,21 +610,33 @@ let shellTitlebarClusterSpacing: CGFloat = 8
 let shellTitlebarTrailingInset: CGFloat = 8
 
 /// The TRAILING cluster's glyphs, read off the reference's top-right corner (2026-08-07):
-/// a dashed circle, a docked-window rectangle, and a right-hand panel.
-///
-/// **PLACEHOLDERS**, like the navigation arrows — Norma has no feature behind any of them yet.
-/// `sidebar.right` is the one with an obvious future: the side-browser panel from the app vision.
+/// a dashed circle, a docked-window rectangle, and a right-hand panel. The CLUSTER — still three
+/// icons, still this order — not "what is still a placeholder": see
+/// `shellTitlebarTrailingPlaceholderGlyphs` below for that, now that `sidebar.right` is wired
+/// (panel-shell T2).
 let shellTitlebarTrailingGlyphs: [String] = ["circle.dashed", "dock.rectangle", "sidebar.right"]
+
+/// The subset of `shellTitlebarTrailingGlyphs` that is STILL a placeholder. Split out (review
+/// round 2, Important 3) because the two questions — "what's in the cluster" and "what's still
+/// unwired" — used to be answered by the same list, and the moment `sidebar.right` was wired
+/// that conflation made `SidebarBrandTests.testTrailingPlaceholderLabelsDiscloseTheyAreNotWired`
+/// assert something false of it. This list is what that pin now iterates.
+let shellTitlebarTrailingPlaceholderGlyphs: [String] = ["circle.dashed", "dock.rectangle"]
 
 /// PURE: a trailing placeholder's help text. Names what the affordance will BE, not what the glyph
 /// looks like — and says it is not wired, so hovering one does not promise a feature that is not
 /// there. Total by construction: an unknown glyph gets the generic label rather than crashing or
 /// silently rendering an empty tooltip.
+///
+/// No `"sidebar.right"` case (review round 2): that glyph is wired now (panel-shell T2), and its
+/// real label lives inline at its `ShellTitlebarButton` call site, keyed off live state this pure
+/// function has no access to. Leaving a stale case here — reachable only if some future caller
+/// asked this function about a glyph it has no business asking about — was exactly the "pin that
+/// can assert a lie" risk the reviewer flagged, one level down from the test itself.
 func shellTitlebarTrailingLabel(_ glyph: String) -> String {
     switch glyph {
     case "circle.dashed": return "Temporary chat (not wired yet)"
     case "dock.rectangle": return "Compact window (not wired yet)"
-    case "sidebar.right": return "Side panel (not wired yet)"
     default: return "Not wired yet"
     }
 }

@@ -279,6 +279,25 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(window.isOpaque, "the shell is an opaque window — the detached windows' clear shell is NOT this recipe")
     }
 
+    /// panel-shell T2 review round 2: the panel toggle's disabled help text ("Widen the window or
+    /// hide the sidebar to use the panel.", `ShellSidebar.swift`) is only ALWAYS true if hiding
+    /// the sidebar can alone always restore enough content width — which needs the window's own
+    /// floor to never itself be narrower than the panel requires. This is a cross-file invariant
+    /// that lived only in a comment; pinning it here means a future change to either side (this
+    /// `minSize`, or `panelMinContentWidth`) fails a test instead of quietly making that help
+    /// text a lie.
+    func testWindowMinimumSizeCanAlwaysFitThePanelWithoutTheSidebar() {
+        let controller = makeController()
+        defer { controller.hide() }
+        controller.summon()
+        guard let window = controller.windowForTesting else {
+            return XCTFail("summon() must construct a real window")
+        }
+
+        XCTAssertGreaterThanOrEqual(window.minSize.width, panelMinContentWidth,
+            "the window's floor must fit the panel once the sidebar is hidden, or the disabled toggle's help text can be wrong")
+    }
+
     /// A plain re-summon PRESERVES the current destination (the `openDashboard` plain-refocus
     /// precedent); a targeted summon retargets it.
     func testSummonNavigatesOnlyWhenGivenADestination() {
