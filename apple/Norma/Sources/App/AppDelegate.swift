@@ -139,16 +139,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Promotes the app to `.regular` — the dock icon appears. `NSApp.activate` right after the
     /// policy flip works around a known macOS quirk: flipping activation policy alone doesn't
-    /// reliably bring the newly-promoted app's window forward.
+    /// reliably bring the newly-promoted app's window forward. Dock seam: the policy write goes
+    /// through `DockPolicy.apply` (see its type doc — under test the applier is a recorder, so a
+    /// test host can never really promote); the `activate` call stays raw, it moves key focus,
+    /// never the Dock.
     func showDockIcon() {
-        NSApp.setActivationPolicy(.regular)
+        DockPolicy.apply(.regular)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     /// Demotes back to `.accessory` — `applicationDidFinishLaunching`'s launch-time base state
     /// below. The dock icon disappears; the menu bar and daemon are untouched.
     func hideDockIcon() {
-        NSApp.setActivationPolicy(.accessory)
+        DockPolicy.apply(.accessory)
     }
 
     /// True while at least one dock-promoting window is open. Deliberately excludes the orb
@@ -558,7 +561,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        // Dock seam: routed like every other policy write (one vocabulary — see `DockPolicy`).
+        // Under the xctest host this real launch-time demote still happens for real: the app
+        // launches BEFORE the test bundle loads, so `HarnessTeardownObserver` hasn't swapped the
+        // applier yet — which is exactly why the observer's captured launch policy is `.accessory`.
+        DockPolicy.apply(.accessory)
         guard !Self.isRunningUnitTests else { return }
         // DD-T4: stamp NORMA_HOME + NORMA_PROFILE into this process's env BEFORE the first
         // `NormaPaths` read (which happens inside `boot()` — `supervisor.start()`'s socket probe,

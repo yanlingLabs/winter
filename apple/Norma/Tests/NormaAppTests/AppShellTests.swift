@@ -10,6 +10,12 @@ import AppKit
 /// exercised here, per this codebase's convention (see `DashboardTests`' own file doc).
 @MainActor
 final class AppShellTests: XCTestCase {
+
+    /// Dock seam: the policies production applied since this case started (the observer clears it
+    /// after every case) — same case-local reading as `AppLifecycleTests.applied`. The dock pins
+    /// below assert transition sequences off this; the REAL policy never moves under test.
+    private var applied: [NSApplication.ActivationPolicy] { HarnessTeardownObserver.recordedPolicies }
+
     // MARK: - SessionMode: the iOS nav mirror (PURE)
 
     /// RETRUED (chatgpt-ui T1, spec R1): the mode rows are now Chats-first — the ChatGPT-desktop
@@ -421,10 +427,10 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(delegate.boot())
 
         delegate.summonAppWindow()
-        XCTAssertEqual(NSApp.activationPolicy(), .regular, "the shell is a real main window — must show the dock icon")
+        XCTAssertEqual(applied, [.regular], "the shell is a real main window — its summon must apply the dock-icon promotion (via onVisibilityChange → syncDockPresence)")
 
         delegate.appWindow?.hide()
-        XCTAssertEqual(NSApp.activationPolicy(), .accessory, "hiding the shell with no other main window open must hide the dock icon")
+        XCTAssertEqual(applied, [.regular, .accessory], "hiding the shell with no other main window open must apply the demotion")
     }
 
     /// ⌘Q / dock-tile quit (the intercepted lifecycle): the shell HIDES like every other main
@@ -443,7 +449,10 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(reply, .terminateCancel)
         XCTAssertFalse(controller.isVisible, "⌘Q must close (hide) the shell like any other main window")
         XCTAssertTrue(delegate.appWindow === controller, "…without destroying the singleton")
-        XCTAssertEqual(NSApp.activationPolicy(), .accessory)
+        // Two demotions, deliberately: the hidden shell's `onVisibilityChange` → `syncDockPresence`
+        // applies one, then the cancel branch's explicit belt-and-suspenders `hideDockIcon()`
+        // applies another (same duplicate `AppLifecycleTests`' terminate-cancel pin documents).
+        XCTAssertEqual(applied, [.regular, .accessory, .accessory])
     }
 
     /// The dock-icon summon path: a Finder/dock reopen with no main window open summons the shell
