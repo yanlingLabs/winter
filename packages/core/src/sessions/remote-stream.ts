@@ -56,7 +56,7 @@ const STREAM_CONTROL_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<Se
  *  UPSTREAM of the phone client that was just fixed to accept them, silently restoring the
  *  no-streaming-on-iOS bug with a fully green suite, because nothing else covers a transient
  *  traversing this seam. The live policy is therefore history's allowlist PLUS
- *  `TRANSIENT_EVENT_TYPES` (the canonical eight, hoisted into `@norma/protocol` so the daemon and
+ *  `TRANSIENT_EVENT_TYPES` (the canonical nine, hoisted into `@norma/protocol` so the daemon and
  *  both Swift clients derive from ONE definition) PLUS the three stream-control types above.
  *
  *  The transient half is SPREAD, never re-listed: that is what discharges CLAUDE.md's

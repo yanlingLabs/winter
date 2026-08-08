@@ -93,6 +93,16 @@ const TRANSCRIPT_INCLUDE = {
   workflow_progress: false,
   workflow_completed: false,
   workflow_failed: false,
+  // panel-shell T3: all five are SESSION-scoped (`Base.extend`, no `threadId`), so like the
+  // `session_activity: false` above they never reach the engine's emit() chokepoint —
+  // `engine.ts:1389` early-returns on any event without a `threadId`. A `true` here could not
+  // fire. The agent learns what page is on screen in Plan B, via the browser tool's own
+  // thread-scoped `tool_result`.
+  panel_tab_opened: false,
+  panel_tab_closed: false,
+  panel_tab_activated: false,
+  panel_tab_navigated: false,
+  panel_command: false,
 } satisfies Record<SessionEvent["type"], boolean>;
 
 /**
