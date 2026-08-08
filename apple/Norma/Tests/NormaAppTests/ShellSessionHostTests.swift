@@ -1181,16 +1181,130 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(host.attachedSessionId, "S1", "receiving the responses doesn't disturb the attachment")
     }
 
-    /// No attached session (nothing selected, or the shell is hidden) → all three are silent
-    /// no-ops — never a crash, and never a call on the wire.
-    func testPanelTabControlsAreNoOpsWithNoAttachedSession() async {
+    /// No attached session (nothing selected, or the shell is hidden) → `activatePanelTab`/
+    /// `closePanelTab` are still silent no-ops — never a crash, and never a call on the wire.
+    /// Unlike `openPanelTab` (panel-shell T12: auto-creates a session and opens a tab in it — see
+    /// the tests just above), there is no session-less "activate the nth tab" or "close this
+    /// tabId" to perform: both verbs act on a tab that would have to already exist, and with no
+    /// attached session there is no tab list to look one up in. This is NOT the same test the
+    /// pre-T12 code had — `openPanelTab` deliberately dropped out of this assertion; folding it
+    /// back in would silently start testing "hasn't gotten far enough within 150ms" instead of
+    /// "no-op", since the auto-create path leaves an unanswered `session.create` in flight rather
+    /// than returning early.
+    func testActivateAndCloseTabControlsAreNoOpsWithNoAttachedSession() async {
         let (host, _, mgmt) = await makeHostWithManagement()
-        host.openPanelTab(kind: .web)
         host.activatePanelTab("t1")
         host.closePanelTab("t1")
         try? await Task.sleep(nanoseconds: 150_000_000)
         XCTAssertTrue(mgmt.methods.filter { $0.hasPrefix("panel.") }.isEmpty,
-                      "no session attached — nothing should fire: \(mgmt.methods)")
+                      "no session attached — activate/close should still fire nothing: \(mgmt.methods)")
+    }
+
+    // MARK: - panel-shell T12 (bug found at the live gate, 2026-08-08): "+" with no attached
+    // session used to be exactly the silent no-op the test just above pins — `openPanelTab`'s own
+    // `guard let sessionId = attachedSessionId else { return }` returned before firing anything.
+    // User ruling: auto-create — the button always works. These two tests are written and run
+    // against the OLD (pre-fix) code first to capture real RED, then the fix lands and the test
+    // just above is split (activate/close keep their no-op contract; openPanelTab does not).
+
+    /// Test 1 (the task's own requirement, literally): "+" with no attached session results in a
+    /// session AND a tab. Uses the EXISTING call shape (no trailing closure) so RED against the
+    /// pre-fix code is BEHAVIORAL — a timeout waiting for a `session.create` that never arrives,
+    /// asserted via the file's own `guard let ... else { XCTFail }` idiom — never a compile error.
+    ///
+    /// The create shape mirrors `sendFirstChatMessage`'s own exactly
+    /// (`testFirstSendCreatesOnceThenAttachesThenSendsInWireOrder` above): scope global,
+    /// approvalPolicy auto, mode chat, cwd ABSENT. This reuses the app's ONE
+    /// create-a-session-with-nothing-else-required mechanism rather than inventing a second one —
+    /// `mode: "code"` would need a cwd (or the "no folder" default), dragging
+    /// `WorkingDirPickerSheetController` into a `+` click and breaking "the button always works".
+    func testOpenPanelTabWithNoAttachedSessionStillCreatesASessionAndOpensATab() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        XCTAssertNil(host.attachedSessionId, "nothing attached yet — the exact bug's precondition")
+
+        host.openPanelTab(kind: .web)
+
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("'+' with no attached session must still create one: \(mgmt.methods)")
+        }
+        let params = create["params"] as? [String: Any]
+        XCTAssertEqual(params?["mode"] as? String, "chat")
+        XCTAssertEqual(params?["scope"] as? String, "global")
+        XCTAssertEqual(params?["approvalPolicy"] as? String, "auto")
+        XCTAssertNil(params?["cwd"], "no cwd — the sendFirstChatMessage shape, reused verbatim")
+
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_panel_new","trusted":true}}"#)
+
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("the freshly created session must have its tab opened: \(mgmt.methods)")
+        }
+        let openParams = open["params"] as? [String: Any]
+        XCTAssertEqual(openParams?["sessionId"] as? String, "s_panel_new", "the tab opens in the session JUST created")
+        XCTAssertEqual(openParams?["kind"] as? String, "web")
+        XCTAssertNil(openParams?["tabId"], "the daemon mints tabId — the caller must never send one, even on this path")
+    }
+
+    /// Test 1's ordering half, plus the full round trip through attach and `PanelStore`. Uses the
+    /// NEW `onSessionCreated` callback, so RED against the pre-fix code is a COMPILE error
+    /// (`openPanelTab` has no such parameter yet) — accepted, per this plan's own convention
+    /// elsewhere (Task 1 Step 2: "cannot find 'panelMaxWidth' in scope").
+    ///
+    /// Deliberately deviates from the bug report's literal word order ("create a session, attach to
+    /// it, then open the tab in it"): the fix opens the tab and awaits its ACK **before** firing
+    /// `onSessionCreated` (which drives the navigate → attach chain). `panel.openTab` is a bare
+    /// `managementClient` RPC that never requires attachment (this file's own T8/T9 doc), so
+    /// nothing requires waiting for the harness; doing it this way instead GUARANTEES the
+    /// `panel.list` snapshot `attachFresh` fires next (Task 9) already reflects the tab, because
+    /// its request cannot be sent on the SAME `managementClient` connection until the openTab
+    /// response has already been received. Attaching first and racing `panel.openTab` against
+    /// `attachFresh`'s own `panel.list` fetch (a SEPARATE in-flight call on the same connection)
+    /// would leave a narrow window where the very first snapshot misses the tab — this ordering
+    /// closes that window by construction instead of by luck.
+    func testOpenPanelTabWithNoAttachedSessionOpensTheTabBeforeAttachingThenNavigates() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+
+        var navigatedTo: [String] = []
+        host.openPanelTab(kind: .web) { sessionId in
+            navigatedTo.append(sessionId)
+            host.apply(destination: .session(sessionId)) // the host's own navigate seam (line ~874's precedent)
+        }
+
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("must create: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_panel_new2","trusted":true}}"#)
+
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("must open the tab: \(mgmt.methods)")
+        }
+
+        // The ordering pin: nothing navigates or attaches while the tab-open call is still in flight.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertTrue(navigatedTo.isEmpty, "must not navigate before the tab-open ack lands")
+        XCTAssertTrue(factory.made.isEmpty, "must not attach before the tab-open ack lands")
+
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(open["id"] as! Int),"result":{"ok":true,"tabId":"minted-1"}}"#)
+
+        await feedWaitUntil { !navigatedTo.isEmpty }
+        XCTAssertEqual(navigatedTo, ["s_panel_new2"], "navigates onto the created session exactly once")
+        XCTAssertEqual(host.attachedSessionId, "s_panel_new2", "the button's whole promise: a session ends up attached")
+
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "s_panel_new2")
+
+        await feedWaitUntil { mgmt.methods.contains("panel.list") }
+        guard let list = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.list" }) else {
+            return XCTFail("attach must fetch panel.list, same as any other attach (Task 9)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(list["id"] as! Int),"result":{"tabs":[{"tabId":"minted-1","kind":"web","url":null,"title":null}],"activeTabId":"minted-1"}}"#)
+        await feedWaitUntil { !host.panelStore.tabs.isEmpty }
+        XCTAssertEqual(host.panelStore.tabs.map(\.tabId), ["minted-1"], "the panel actually shows the tab — the whole point of the bug report")
     }
 
     // MARK: - panel-shell T9: the live pump + the panel.list fetch on attach/hop

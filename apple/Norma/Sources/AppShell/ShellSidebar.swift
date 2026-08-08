@@ -201,7 +201,7 @@ struct ShellRootView: View {
                 if mode == .side {
                     PanelDivider(width: $presentation.sideWidth, contentWidth: contentWidth)
                 }
-                ShellPanel(store: panelStore, presentation: $presentation, host: host)
+                ShellPanel(store: panelStore, presentation: $presentation, host: host, nav: nav)
                     .frame(width: mode == .maximized
                            ? nil
                            : panelRenderedWidth(mode: mode, sideWidth: presentation.sideWidth,

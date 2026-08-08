@@ -93,8 +93,16 @@ struct ShellPanel: View {
     @Binding var presentation: PanelPresentation
     /// `nil` for a shell built without one (`ShellSidebar`'s own `host` property takes the
     /// identical fallback posture) — the strip's controls then fire nothing (each host method's
-    /// own `attachedSessionId` guard).
+    /// own `attachedSessionId`/`managementClient` guard).
     var host: ShellSessionHost? = nil
+    /// panel-shell T12: the navigate door for `openPanelTab`'s auto-create path — `+` with no
+    /// attached session creates a session and needs to land the shell ON it (`ShellRootView`'s own
+    /// `nav`, threaded down here the SAME way `NewChatPage(nav: nav, host: host)` already gets it
+    /// for the identical create-then-navigate shape). Plain, not `@ObservedObject`: this view never
+    /// needs to re-render off `nav`'s state, only to call `navigate(to:)` imperatively. `nil` for a
+    /// shell built without one (same fallback posture as `host`) — the auto-created session still
+    /// exists on the daemon; only the UI's navigation onto it is skipped.
+    var nav: ShellNavigationModel? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -105,7 +113,14 @@ struct ShellPanel: View {
                 PanelTabStrip(
                     store: store,
                     presentation: $presentation,
-                    onOpenTab: { host?.openPanelTab(kind: .web) },
+                    onOpenTab: {
+                        // panel-shell T12: `onSessionCreated` fires ONLY on the auto-create path
+                        // (`ShellSessionHost.openPanelTab`'s own doc) — an ordinary open with a
+                        // session already attached never calls this closure at all.
+                        host?.openPanelTab(kind: .web) { sessionId in
+                            nav?.navigate(to: .session(sessionId))
+                        }
+                    },
                     onActivateTab: { tabId in host?.activatePanelTab(tabId) },
                     onCloseTab: { tabId in host?.closePanelTab(tabId) }
                 )

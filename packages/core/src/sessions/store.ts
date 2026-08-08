@@ -648,28 +648,38 @@ export class SessionStore {
     };
   }
 
-  /** session-activity-hygiene T6 (spec §2): candidate ids for the empty-session reaper — sessions
-   *  with zero user/assistant messages, old enough that composing a first message is implausible,
-   *  and not currently attached to any harness. The dispatch session (if one exists) is excluded
-   *  outright: it is the daemon's one long-lived coordinator, driven by tool calls rather than chat
-   *  messages, so it normally carries no main-thread `user_message` at all — without this exclusion
-   *  it would look permanently empty. `deleteSession` below refuses it too (belt, not suspenders:
-   *  every future caller gets the same protection independent of this exclusion).
+  /** session-activity-hygiene T6 (spec §2), narrowed by panel-shell T12: candidate ids for the
+   *  empty-session reaper — sessions with zero user/assistant messages AND no open panel tab, old
+   *  enough that composing a first message is implausible, and not currently attached to any
+   *  harness. The dispatch session (if one exists) is excluded outright: it is the daemon's one
+   *  long-lived coordinator, driven by tool calls rather than chat messages, so it normally carries
+   *  no main-thread `user_message` at all — without this exclusion it would look permanently empty.
+   *  `deleteSession` below refuses it too (belt, not suspenders: every future caller gets the same
+   *  protection independent of this exclusion).
    *
    *  `first_message IS NULL` (set by `append`/`appendSynced`'s `user_message` derivation) is the
    *  cheap SQL pre-filter — a full table scan (the `sessions` table carries no index beyond its
    *  primary key), same as `cleanerCandidateIds` below — narrowing to a small candidate set in the
    *  common case — most sessions get a first message within seconds of creation. It is NOT trusted
    *  alone: it only ever tracks main-thread USER messages, so it says nothing about assistant
-   *  output, and `recoverAll`'s skip-bad-lines repair (a corrupt line is dropped, not stopped at —
-   *  see `readGoodLines`) can
+   *  output or an open panel tab, and `recoverAll`'s skip-bad-lines repair (a corrupt line is
+   *  dropped, not stopped at — see `readGoodLines`) can
    *  leave a log whose `user_message` line was corrupted-and-dropped while a LATER `assistant_message`
    *  line survived — `first_message` would then read NULL on a session that plainly produced real
    *  output (reaper.test.ts's "recovered log" case reproduces exactly this). So every
    *  first_message-IS-NULL candidate that survives the attached-check below gets a real scan of its
-   *  parsed log (`read()`, already skip-bad-lines-safe) for ANY `user_message`/`assistant_message`
-   *  event before being called empty — cheap, because the SQL filter already narrowed the set this
-   *  scan ever runs against.
+   *  parsed log (`read()`, already skip-bad-lines-safe) for ANY `user_message`/`assistant_message`/
+   *  `panel_tab_opened` event before being called empty — cheap, because the SQL filter already
+   *  narrowed the set this scan ever runs against. The SQL pre-filter itself is untouched: it only
+   *  ever admits too many candidates (never too few), so narrowing what counts as "content" is
+   *  sound to do entirely in this JS scan.
+   *
+   *  panel-shell T12 (bug found at the live gate, 2026-08-08): `+` with no attached session now
+   *  auto-creates a session and opens a tab in it (`ShellSessionHost.openPanelTab`) — a
+   *  browse-only session that never carries a chat message. Without `panel_tab_opened` in the scan
+   *  above, that session (and its open tabs) would be reaped 10 minutes after detach. This is the
+   *  conservative direction (narrows what gets deleted) and consistent with the standing "sessions
+   *  are never deleted except by the empty-reaper" rule.
    *
    *  `attachedCount` is injected rather than read off a stored `SessionHub`: the store has never
    *  held a hub reference (hub depends on store, never the reverse) — mirrors
@@ -685,7 +695,8 @@ export class SessionStore {
     const candidates: string[] = [];
     for (const { session_id: sessionId } of rows) {
       if (attachedCount(sessionId) !== 0) continue;
-      const hasContent = this.read(sessionId).some((e) => e.type === "user_message" || e.type === "assistant_message");
+      const hasContent = this.read(sessionId).some((e) =>
+        e.type === "user_message" || e.type === "assistant_message" || e.type === "panel_tab_opened");
       if (!hasContent) candidates.push(sessionId);
     }
     return candidates;

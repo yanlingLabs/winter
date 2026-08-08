@@ -356,9 +356,52 @@ final class ShellSessionHost: ObservableObject {
     /// The strip's `+`. Sends no `tabId` — the daemon mints one (`PanelOpenTabResult.tabId`),
     /// which this deliberately discards: nothing here needs it, and seeding it anywhere would be
     /// exactly the second, optimistic code path the design forbids.
-    func openPanelTab(kind: PanelTabKind = .web, url: String? = nil, title: String? = nil) {
-        guard let client = managementClient, let sessionId = attachedSessionId else { return }
+    ///
+    /// panel-shell T12 (bug found at the live gate, 2026-08-08): with NO attached session this used
+    /// to return here, silently — no tab, no error, no explanation (`managementClient` is always
+    /// wired once the app has booted at all; it was `attachedSessionId` that was nil). User ruling:
+    /// auto-create — the button always works, so there is nothing left to disable (Task 8 tried a
+    /// disabled/dim gate for exactly this case; its own review deleted it as non-reactive, and the
+    /// EXPLANATION went with it — this fix restores the explanation by removing the silence).
+    ///
+    /// The create call mirrors `sendFirstChatMessage`'s own shape EXACTLY (scope global,
+    /// approvalPolicy auto, mode chat, cwd ABSENT) — the app's one create-a-session-with-nothing-
+    /// else-required mechanism, reused rather than duplicated. `mode: "code"` would need a cwd (or
+    /// the explicit "no folder" default), dragging `WorkingDirPickerSheetController` into a `+`
+    /// click — exactly the friction "the button always works" rules out.
+    ///
+    /// `onSessionCreated` fires ONLY on this auto-create path (never when a session was already
+    /// attached — that path had nothing to create) — the caller uses it to navigate the shell onto
+    /// the fresh session, the SAME `onCreated`-then-`nav.navigate(to:)` contract
+    /// `sendFirstChatMessage` establishes (`NewChatPage.submit`'s call site). It fires
+    /// UNCONDITIONALLY once create succeeds, even if the openTab call below fails (`try?`,
+    /// unchanged from the attached-session branch) — a session that now exists should still be
+    /// navigated to; the alternative (stranding the user on whatever they were looking at, with a
+    /// real session sitting unopened) is worse than an occasionally-empty one.
+    ///
+    /// **Ordering is deliberately create → open-tab (awaited) → `onSessionCreated`, NOT the literal
+    /// create → attach → open-tab order the bug report describes.** `panel.openTab` is a bare
+    /// `managementClient` RPC that never requires the session to be ATTACHED (this section's own
+    /// doc above), so nothing here needs to wait for a harness. Opening the tab and awaiting its ack
+    /// BEFORE calling `onSessionCreated` (which drives navigate → `apply` → `select` →
+    /// `attachFresh`, and so `attachFresh`'s own `refreshPanelTabs`/`panel.list` fetch — Task 9)
+    /// GUARANTEES that first snapshot already reflects the tab: both RPCs ride the SAME
+    /// `managementClient` connection, so `panel.list` cannot even be SENT until `panel.openTab`'s
+    /// response has already been received. Attaching first and letting the two race as independent
+    /// in-flight calls on that one connection would leave a narrow window where the very first
+    /// `panel.list` snapshot misses the tab — closed here by construction, not by luck.
+    func openPanelTab(kind: PanelTabKind = .web, url: String? = nil, title: String? = nil,
+                       onSessionCreated: ((String) -> Void)? = nil) {
+        guard let client = managementClient else { return }
         let kindRaw = kind.rawValue
+        guard let sessionId = attachedSessionId else {
+            Task { @MainActor in
+                guard let created = try? await client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat") else { return }
+                _ = try? await client.openPanelTab(sessionId: created.sessionId, kind: kindRaw, url: url, title: title)
+                onSessionCreated?(created.sessionId)
+            }
+            return
+        }
         Task { @MainActor in
             _ = try? await client.openPanelTab(sessionId: sessionId, kind: kindRaw, url: url, title: title)
         }

@@ -163,6 +163,24 @@ describe("SessionStore.emptySessionIds (session-activity-hygiene T6)", () => {
     expect(store.emptySessionIds(NOBODY_ATTACHED, agedNow(store, id, 1))).toEqual([]);
     store.close();
   });
+
+  // panel-shell T12 (bug found at the live gate, 2026-08-08): "+" with no attached session now
+  // auto-creates a session and opens a tab in it (ShellSessionHost.openPanelTab) — but
+  // `panel_tab_opened` is a SESSION-scoped event, invisible to the user_message/assistant_message
+  // content test above. Without this, a browse-only session (no chat message, ever) is
+  // indistinguishable from a truly empty one and gets reaped 10 minutes after detach, taking its
+  // open tabs with it. Both halves are pinned in ONE assertion — a "fix" that made emptySessionIds
+  // return nothing at all would pass a one-sided "has a tab -> not reaped" test without actually
+  // narrowing anything.
+  test("a session with an open panel tab is not reaped, but a truly empty sibling still is", () => {
+    const store = freshStore();
+    const withTab = store.createSession("global");
+    store.append(withTab, { type: "panel_tab_opened", sessionId: withTab, tabId: "t1", kind: "web" });
+    const trulyEmpty = store.createSession("global");
+    const nowMs = Math.max(agedNow(store, withTab, 1), agedNow(store, trulyEmpty, 1));
+    expect(store.emptySessionIds(NOBODY_ATTACHED, nowMs)).toEqual([trulyEmpty]);
+    store.close();
+  });
 });
 
 describe("SessionStore.deleteSession (session-activity-hygiene T6)", () => {
