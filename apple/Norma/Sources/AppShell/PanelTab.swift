@@ -1,0 +1,99 @@
+import SwiftUI
+import NormaProtocol
+
+/// panel-shell T7: UI-drawn categories for a panel tab. A separate type from the wire's
+/// `SessionEvent.PanelTabKind` (NormaProtocol) — same four cases, deliberately not reused directly
+/// so the tab-content boundary below never depends on the protocol module. `init(_:)` converts the
+/// wire type to this one with an EXHAUSTIVE SWITCH, never a `rawValue` force-unwrap: the wire type
+/// is CLOSED by design (its own doc comment, `SessionEvent.swift`, explains why a tab's kind picks
+/// the rendering view and so can't have a reasonable fallback), so a future case added there must
+/// fail THIS switch to compile rather than crash at runtime on an un-mapped raw string.
+enum PanelTabKind: String, Codable, Equatable {
+    case web, document, code, note
+
+    init(_ wire: SessionEvent.PanelTabKind) {
+        switch wire {
+        case .web: self = .web
+        case .document: self = .document
+        case .code: self = .code
+        case .note: self = .note
+        }
+    }
+}
+
+/// One tab in the panel — folded from the daemon's persisted `panel_tab_*` events (`foldPanelTabs`
+/// below), never constructed by a local UI action directly. `tabId` (never `id` on the wire,
+/// matching NormaProtocol/`packages/protocol/src/methods.ts`) is the daemon-minted identity; `id`
+/// is a computed alias so this can be `Identifiable` for SwiftUI lists without a second stored
+/// property to keep in sync with it.
+struct PanelTab: Identifiable, Equatable {
+    let tabId: String
+    let kind: PanelTabKind
+    var url: String?
+    var title: String?
+    var id: String { tabId }
+}
+
+/// panel-shell T7: the tab-content boundary. Written ONCE — LibreOffice, Monaco and markdown all
+/// slot in behind it without touching the frame. In this plan the only implementation is a
+/// placeholder; Plan B replaces `.web` with CEF.
+protocol PanelTabContent {
+    var kind: PanelTabKind { get }
+    var title: String { get }
+    var icon: Image { get }
+    @ViewBuilder func makeChrome() -> AnyView
+    @ViewBuilder func makeContent() -> AnyView
+}
+
+/// The fold's result — mirrors the TS `PanelTabState` (`packages/core/src/panel/store.ts`) field
+/// for field: an ordered tab list plus an optional active id.
+struct PanelTabState: Equatable {
+    var tabs: [PanelTab] = []
+    var activeTabId: String?
+}
+
+/// PURE: rebuild tab state by replaying persisted panel events in order. Mirrors `foldPanelTabs`
+/// (`packages/core/src/panel/store.ts`) case for case:
+///
+///  - `panelTabOpened` — appended UNLESS `tabId` is already open (a daemon-minted id should never
+///    repeat, but the dedupe costs nothing and matches the TS guard exactly).
+///  - `panelTabClosed` — removes the tab; clears `activeTabId` only when the closed tab WAS active.
+///  - `panelTabActivated` — ignored for an unknown `tabId` rather than activating a tab that
+///    doesn't exist.
+///  - `panelTabNavigated` — an UNKNOWN tab is ignored rather than created: navigation is a fact
+///    ABOUT a tab, and resurrecting a closed one would let a stale in-flight report undo a close.
+///
+/// `panelCommand` is deliberately absent from this switch, exactly as `panel_command` is absent
+/// from the TS switch — it is TRANSIENT (`SessionEvent.transientTypes`/`.isTransient`,
+/// NormaProtocol), never persisted, and carries no tab state; folding it would record the same
+/// navigation twice, once as intent and once as the reported fact. Every other `SessionEvent` case
+/// (including every OTHER transient — `assistantDelta`, `sessionActivity`, etc.) falls through the
+/// same `default` — this fold never needs to ASK "is this transient": it simply doesn't recognize
+/// anything but the four panel-lifecycle cases it lists explicitly, the same case-omission the TS
+/// fold uses (it never consults `TRANSIENT_EVENT_TYPES` either).
+func foldPanelTabs(_ events: [SessionEvent]) -> PanelTabState {
+    var tabs: [PanelTab] = []
+    var activeTabId: String?
+
+    for event in events {
+        switch event {
+        case .panelTabOpened(let v):
+            if !tabs.contains(where: { $0.tabId == v.tabId }) {
+                tabs.append(PanelTab(tabId: v.tabId, kind: PanelTabKind(v.kind), url: v.url, title: v.title))
+            }
+        case .panelTabClosed(let v):
+            tabs.removeAll { $0.tabId == v.tabId }
+            if activeTabId == v.tabId { activeTabId = nil }
+        case .panelTabActivated(let v):
+            if tabs.contains(where: { $0.tabId == v.tabId }) { activeTabId = v.tabId }
+        case .panelTabNavigated(let v):
+            if let i = tabs.firstIndex(where: { $0.tabId == v.tabId }) {
+                tabs[i].url = v.url
+                tabs[i].title = v.title
+            }
+        default:
+            break // panelCommand (transient, no state) and every non-panel event type
+        }
+    }
+    return PanelTabState(tabs: tabs, activeTabId: activeTabId)
+}
