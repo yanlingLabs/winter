@@ -41,10 +41,26 @@ struct ShellRootView: View {
     /// window outlives every hide/re-summon (`AppWindowController` owns it forever), so the user's
     /// choice survives exactly as long as the window itself does.
     @State private var sidebarVisible = true
-    /// panel-shell T2: the REQUESTED mode. `panelResolvedMode` may render `.hidden` on a narrow
-    /// window while this stays `.side`, so widening the window restores what the user asked for.
-    @State private var panelMode: PanelMode = .hidden
-    @State private var panelWidth: CGFloat = panelDefaultWidth
+    /// panel-shell T10: mode and width together — replaces the two separate `@State` values Task 2
+    /// added (`panelMode`/`panelWidth`, one comment below this one until this task). `.mode` is
+    /// still the REQUESTED mode (`panelResolvedMode` may render `.hidden` on a narrow window while
+    /// this stays `.side`/`.maximized`, so widening the window restores what the user asked for —
+    /// unchanged from Task 2's own doc comment, now also true of `.maximized` for free, since
+    /// `panelResolvedMode` already treats every non-`.hidden` request identically); `.maximized`
+    /// ignores `.sideWidth` structurally rather than overwriting it (`PanelPresentation`'s own doc
+    /// comment, `PanelMode.swift`), which is what makes leaving `.maximized` restore the dragged
+    /// width with no second "previous width" to keep in step.
+    ///
+    /// Plain `@State`, not `@SceneStorage`: this window is AppKit-owned and hosted directly via
+    /// `NSHostingView` (`AppWindowController.swift:215`) — `NormaApp`'s only `Scene` is an empty
+    /// `Settings {}` (`NormaApp.swift`), so there is no SwiftUI window-restoration scene for
+    /// `@SceneStorage` to key off. Apple's own documented fallback for that case is to behave
+    /// exactly like `@State` — so the wrapper would be inert here, and `PanelPresentation` (a plain
+    /// struct) has no existing `RawRepresentable` bridging to invent one for just to carry it.
+    /// `@State` means exactly what it already means for `sidebarVisible` above: the value survives
+    /// for as long as the window does, and `AppWindowController` keeps this window alive for the
+    /// app's whole lifetime.
+    @State private var presentation = PanelPresentation()
     /// panel-shell T9: Task 8's `@StateObject private var panelStore = PanelStore()` here is
     /// REJECTED, not ratified. `ShellSessionHost` is constructed in `AppDelegate.summonAppWindow`
     /// BEFORE this view exists at all, and it is `ShellSessionHost.attachFresh`/`hop` that know,
@@ -73,21 +89,21 @@ struct ShellRootView: View {
         // recomputed in two places.
         GeometryReader { geo in
             let contentWidth = geo.size.width - (sidebarVisible ? shellSidebarWidth : 0)
-            let mode = panelResolvedMode(requested: panelMode, contentWidth: contentWidth)
+            let mode = panelResolvedMode(requested: presentation.mode, contentWidth: contentWidth)
 
             shellBody(contentWidth: contentWidth, mode: mode)
-                // review round 2, Important 1, belt-and-braces half: keep the STORED `panelWidth`
-                // from drifting far from what is actually on screen (the render path already
-                // clamps on read, but the divider's next drag anchors on the stored value — see
-                // `PanelDivider.onChanged` — so stored and rendered should not be allowed to
-                // diverge for long). Guarded on `panelFitsInContent` so this can NEVER become a
-                // second caller of `panelClampWidth` outside the zone
+                // review round 2, Important 1, belt-and-braces half: keep the STORED
+                // `presentation.sideWidth` from drifting far from what is actually on screen (the
+                // render path already clamps on read, but the divider's next drag anchors on the
+                // stored value — see `PanelDivider.onChanged` — so stored and rendered should not
+                // be allowed to diverge for long). Guarded on `panelFitsInContent` so this can
+                // NEVER become a second caller of `panelClampWidth` outside the zone
                 // `PanelModeTests.testClampBoundsAreNeverInvertedWhenThePanelFits` requires (Task
                 // 1's carried finding) — below the threshold the render path already forces
-                // `.hidden` and touches `panelWidth` not at all, and this must not either.
+                // `.hidden` and touches `sideWidth` not at all, and this must not either.
                 .onChange(of: contentWidth) { _, newContentWidth in
                     guard panelFitsInContent(newContentWidth) else { return }
-                    panelWidth = panelClampWidth(panelWidth, contentWidth: newContentWidth)
+                    presentation.sideWidth = panelClampWidth(presentation.sideWidth, contentWidth: newContentWidth)
                 }
         }
     }
@@ -111,6 +127,27 @@ struct ShellRootView: View {
             }
             // panel-shell T2: absent entirely in `.maximized` — the panel owns the whole content
             // area then, and `detail` would have nothing left to show beside it.
+            //
+            // panel-shell T10 (this branch is REACHABLE now — T2 wrote it before anything could
+            // set `.maximized`; the rest of this note is what changes now that it can be taken):
+            // entering/leaving `.maximized` fully tears down and rebuilds whatever `detail` is
+            // currently showing, identically to navigating to a different destination. Judged
+            // ACCEPTABLE rather than fixed here — investigated case by case (task-10-report.md):
+            // `ShellSessionView`'s composer draft is safe (it lives on the externally-owned
+            // `FieldStateAdapter`, not on this subtree), so no live conversation's typed-but-unsent
+            // message is ever lost. What IS lost: the transcript's scroll position on an idle
+            // session (an actively streaming one self-corrects within one token), any open menu
+            // popover, and — the two real, non-cosmetic losses, NOT fixed here — the New Chat
+            // page's own draft (`NewChatPage.swift`'s `draft`, already documented there as
+            // dropping on navigate-away; maximizing the panel is a second trigger for the
+            // identical drop) and an unsubmitted answer on a pending question/plan card
+            // (`PendingCards.swift`'s `PendingQuestionBody`/`PendingPlanBody`). Both are shaped
+            // like candidates for the SAME fix the composer draft already has — external, not
+            // view-local, storage — but that is a scoped change of its own, not this task's; a
+            // "hide rather than remove" alternative was considered and rejected (see the report)
+            // because it would mount `detail` at a width that ANIMATES to/from zero on every
+            // maximize toggle, fighting `WindowContentView`'s own `measuredWidth` remeasurement
+            // rather than avoiding it.
             if mode != .maximized {
                 detail
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -157,15 +194,18 @@ struct ShellRootView: View {
             // holds — that is what keeps the clamp's own bounds from inverting (Task 1's carried
             // finding; the guarantee is pinned by
             // `PanelModeTests.testClampBoundsAreNeverInvertedWhenThePanelFits`). Nothing here ever
-            // calls it below the threshold where it could.
+            // calls it below the threshold where it could — panel-shell T10: that includes
+            // `panelRenderedWidth` below, which only calls `panelClampWidth` for `.side` and is
+            // itself only ever called from inside this SAME `mode != .hidden` branch.
             if mode != .hidden {
                 if mode == .side {
-                    PanelDivider(width: $panelWidth, contentWidth: contentWidth)
+                    PanelDivider(width: $presentation.sideWidth, contentWidth: contentWidth)
                 }
-                ShellPanel(store: panelStore, host: host)
+                ShellPanel(store: panelStore, presentation: $presentation, host: host)
                     .frame(width: mode == .maximized
                            ? nil
-                           : panelClampWidth(panelWidth, contentWidth: contentWidth))
+                           : panelRenderedWidth(mode: mode, sideWidth: presentation.sideWidth,
+                                                 contentWidth: contentWidth))
                     .frame(maxWidth: mode == .maximized ? .infinity : nil,
                            maxHeight: .infinity)
                     // Mirrors the sidebar's own leading-edge slide (`sidebarVisible` above) —
@@ -235,55 +275,95 @@ struct ShellRootView: View {
         // sidebar-chrome-2: the TRAILING cluster, mirroring the reference's top-right corner. Same
         // button, same metrics, same top inset as the leading cluster — so the two clusters share
         // one centre line across the window by construction, not by two numbers agreeing.
+        //
+        // panel-shell T10: this cluster shows all THREE glyphs only while the panel is `.hidden`.
+        // The moment it opens, `dock.rectangle` and `sidebar.right` move INTO the panel's own
+        // trailing cluster (`ShellPanel.swift`'s `PanelTabStrip.trailingButtonCluster`) — the
+        // user's layout sketch settled this (`docs/superpowers/specs/2026-08-08-panel-shell-design.md`
+        // §"The panel's chrome layout") — and only `circle.dashed` stays up here, relocated to just
+        // outside the panel's leading edge so it keeps travelling with the chat column rather than
+        // the panel that swallowed its neighbours.
+        //
+        // The relocated button renders ONLY for `mode == .side`, not `.maximized` (review
+        // self-catch, T10): "just outside the panel's leading edge, staying with the chat column"
+        // presumes a chat column to stay with, and `.maximized` has none (`detail` is absent — see
+        // its own comment above). Naively reusing the same trailing-padding formula there would
+        // place the button using `panelRenderedWidth == contentWidth`: with the sidebar hidden that
+        // pushes it PAST the window's own leading edge (negative x), and with the sidebar showing
+        // it lands inside the SIDEBAR's own pane instead of beside anything panel-adjacent — neither
+        // is "outside the panel's leading edge" in any sense the spec line means. `.maximized`
+        // simply shows nothing here; nothing in the spec asks for a `.maximized`-specific placement.
         .overlay(alignment: .topTrailing) {
-            HStack(spacing: shellTitlebarClusterSpacing) {
-                ForEach(shellTitlebarTrailingGlyphs, id: \.self) { glyph in
-                    if glyph == "sidebar.right" {
-                        // panel-shell T2: the placeholder named in `shellTitlebarTrailingLabel`
-                        // becomes the real toggle. `shellTitlebarTrailingGlyphs` still lists this
-                        // glyph (the cluster still shows three icons), but as of review round 2
-                        // it is no longer in `shellTitlebarTrailingPlaceholderGlyphs` — and the
-                        // `"sidebar.right"` case was REMOVED from `shellTitlebarTrailingLabel`'s
-                        // switch (round 1 had left it in, unreferenced; the reviewer called that
-                        // a pin one call away from asserting a falsehood, since nothing stopped a
-                        // future caller from asking this genuinely-wired glyph for its stale
-                        // "not wired yet" text and getting a lie back).
-                        //
-                        // The label tracks `panelMode` (the REQUESTED state, same variable the
-                        // action mutates below) rather than the resolved `mode` — mirrors
-                        // `shellSidebarToggleLabel(isVisible:)`, the sibling toggle immediately
-                        // above, which keys its own label off the state IT mutates too. Below the
-                        // width threshold it EXPLAINS the disabled state instead (review round 2):
-                        // a disabled control with no reason given reads as broken, not as a
-                        // constraint. The window's own `minSize` (820, `AppWindowController`) is
-                        // always wide enough on its own (>= `panelMinContentWidth`), so whenever
-                        // this fires the sidebar is necessarily the reason — "hide the sidebar" is
-                        // therefore always a valid suggestion here, never a wrong one.
-                        //
-                        // Disabled rather than hidden when the window is too narrow — a control
-                        // that vanishes reads as a bug, one that greys out reads as a constraint.
-                        let fits = panelFitsInContent(contentWidth)
-                        ShellTitlebarButton(
-                            systemImage: glyph,
-                            label: fits
-                                ? (panelMode == .hidden ? "Show panel" : "Hide panel")
-                                : "Widen the window or hide the sidebar to use the panel."
-                        ) {
-                            withAnimation(.snappy) {
-                                panelMode = panelMode == .hidden ? .side : .hidden
+            if mode == .hidden {
+                HStack(spacing: shellTitlebarClusterSpacing) {
+                    ForEach(shellTitlebarTrailingGlyphs, id: \.self) { glyph in
+                        if glyph == "sidebar.right" {
+                            // panel-shell T2: the placeholder named in `shellTitlebarTrailingLabel`
+                            // becomes the real toggle. `shellTitlebarTrailingGlyphs` still lists this
+                            // glyph (the cluster still shows three icons), but as of review round 2
+                            // it is no longer in `shellTitlebarTrailingPlaceholderGlyphs` — and the
+                            // `"sidebar.right"` case was REMOVED from `shellTitlebarTrailingLabel`'s
+                            // switch (round 1 had left it in, unreferenced; the reviewer called that
+                            // a pin one call away from asserting a falsehood, since nothing stopped a
+                            // future caller from asking this genuinely-wired glyph for its stale
+                            // "not wired yet" text and getting a lie back).
+                            //
+                            // The label tracks `presentation.mode` (the REQUESTED state, same value
+                            // the action mutates below) rather than the resolved `mode` — mirrors
+                            // `shellSidebarToggleLabel(isVisible:)`, the sibling toggle immediately
+                            // above, which keys its own label off the state IT mutates too. Below the
+                            // width threshold it EXPLAINS the disabled state instead (review round 2):
+                            // a disabled control with no reason given reads as broken, not as a
+                            // constraint. The window's own `minSize` (820, `AppWindowController`) is
+                            // always wide enough on its own (>= `panelMinContentWidth`), so whenever
+                            // this fires the sidebar is necessarily the reason — "hide the sidebar" is
+                            // therefore always a valid suggestion here, never a wrong one.
+                            //
+                            // Disabled rather than hidden when the window is too narrow — a control
+                            // that vanishes reads as a bug, one that greys out reads as a constraint.
+                            //
+                            // This instance renders ONLY while `mode == .hidden` (this whole branch's
+                            // own gate), so `presentation.mode == .hidden` always holds here too and
+                            // the label is therefore always "Show panel" — the ternary is kept anyway
+                            // (rather than hand-simplified to the literal) so this stays correct by
+                            // construction if that gate ever changes, not by an editor remembering to
+                            // revisit a dropped branch.
+                            let fits = panelFitsInContent(contentWidth)
+                            ShellTitlebarButton(
+                                systemImage: glyph,
+                                label: fits
+                                    ? (presentation.mode == .hidden ? "Show panel" : "Hide panel")
+                                    : "Widen the window or hide the sidebar to use the panel."
+                            ) {
+                                withAnimation(.snappy) { presentation.toggleVisible() }
                             }
+                            .disabled(!fits)
+                        } else {
+                            ShellTitlebarButton(systemImage: glyph,
+                                                label: shellTitlebarTrailingLabel(glyph),
+                                                isPlaceholder: true)
                         }
-                        .disabled(!fits)
-                    } else {
-                        ShellTitlebarButton(systemImage: glyph,
-                                            label: shellTitlebarTrailingLabel(glyph),
-                                            isPlaceholder: true)
                     }
                 }
+                .padding(.trailing, shellTitlebarTrailingInset)
+                .padding(.top, shellSidebarToggleTopInset)
+                .ignoresSafeArea(.container, edges: .top)
+            } else if mode == .side {
+                ShellTitlebarButton(systemImage: "circle.dashed",
+                                    label: shellTitlebarTrailingLabel("circle.dashed"),
+                                    isPlaceholder: true)
+                    // Clears the panel itself (`panelRenderedWidth`, reachable here because this
+                    // branch already IS `mode == .side`) plus the divider hairline between panel
+                    // and chat, plus the same clearance the titlebar cluster already uses
+                    // everywhere else (`shellTitlebarTrailingInset`) — one consistent inset,
+                    // rather than a bespoke number invented for this one button.
+                    .padding(.trailing, panelRenderedWidth(mode: mode, sideWidth: presentation.sideWidth,
+                                                            contentWidth: contentWidth)
+                                         + panelDividerWidth
+                                         + shellTitlebarTrailingInset)
+                    .padding(.top, shellSidebarToggleTopInset)
+                    .ignoresSafeArea(.container, edges: .top)
             }
-            .padding(.trailing, shellTitlebarTrailingInset)
-            .padding(.top, shellSidebarToggleTopInset)
-            .ignoresSafeArea(.container, edges: .top)
         }
         // sidebar-brand T4: the search palette (spec R2) — an overlay on the WHOLE shell so it
         // centres over the window rather than over the detail pane, and so it survives whatever
@@ -700,6 +780,19 @@ struct ShellTitlebarButton: View {
     /// Placeholders read one step quieter than live controls, but still hover and still click —
     /// they are honestly not wired, not pretending to be disabled.
     var isPlaceholder: Bool = false
+    /// panel-shell T10: every EXISTING call site leaves this at its default — the main titlebar's
+    /// own 26pt hit box (`shellTitlebarButtonSize`) — so nothing already on screen changes. The
+    /// panel's own trailing cluster (`ShellPanel.swift`'s `trailingButtonCluster`) is the one
+    /// caller that passes `panelExpandButtonSize` (28pt): it sits in the tab row, where the pill
+    /// height and the "+" button are both 28pt, and this component's PREVIOUS hard-coded
+    /// `shellTitlebarButtonSize` frame would have rendered a visibly mismatched button there.
+    var size: CGFloat = shellTitlebarButtonSize
+    /// panel-shell T10: a persistent highlight (`ShellSidebarRowStyle`'s `.selected` fill) for a
+    /// control that reflects a MODE rather than only firing an action — the expand-to-fullscreen
+    /// button, filled while the panel actually IS maximized, mirroring how a selected nav row
+    /// stays filled without being hovered. Every existing call site leaves this at its default
+    /// `false` (hover remains the only fill), so nothing already on screen changes.
+    var isOn: Bool = false
     var action: () -> Void = {}
     /// panel-shell T2: read explicitly rather than trusted to dim on its own. `.disabled(...)`
     /// (first real caller: the panel toggle, greyed rather than hidden on a too-narrow window)
@@ -717,10 +810,10 @@ struct ShellTitlebarButton: View {
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle((isPlaceholder || !isEnabled) ? AnyShapeStyle(.tertiary)
                                                                 : AnyShapeStyle(Theme.textMuted))
-                .frame(width: shellTitlebarButtonSize, height: shellTitlebarButtonSize)
+                .frame(width: size, height: size)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(ShellSidebarRowStyle(isSelected: false))
+        .buttonStyle(ShellSidebarRowStyle(isSelected: isOn))
         .help(label)
         .accessibilityLabel(label)
     }

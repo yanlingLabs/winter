@@ -14,6 +14,46 @@ let panelTabPillInset: CGFloat = 9
 let panelTabPillRadius: CGFloat = panelTabPillSize.height / 2
 let panelNewTabButtonGap: CGFloat = 18
 
+/// panel-shell T10: the pill's width above is a MAXIMUM, not a fixed rendered width — tabs
+/// compress below it as more open, so the strip always fits inside the panel (`panelTabPillWidth`
+/// below is the formula). Below THIS floor there is nothing left to shrink: the label truncates to
+/// nothing and only the favicon and close control remain legible, and the strip scrolls instead.
+let panelTabPillMinWidth: CGFloat = 64
+
+/// panel-shell T10: the panel's own trailing cluster (expand / bottom-bar placeholder / sidebar
+/// toggle) — three `panelExpandButtonSize` buttons, the two gaps between them, and its own
+/// trailing inset. `trailingButtonCluster` below wears this SAME constant as an explicit
+/// `.frame(width:)`, so this and the cluster's actual rendered content can never silently measure
+/// two different numbers for the same three buttons.
+///
+/// This supersedes Task 8's `102pt` reservation (`shellTitlebarTrailingInset + 3 *
+/// shellTitlebarButtonSize + 2 * shellTitlebarClusterSpacing`) — that borrowed the MAIN titlebar's
+/// 26pt buttons as its best available guess before this task built the real ones, which turned out
+/// to want the tab row's own 28pt rhythm (`panelExpandButtonSize`) instead.
+let panelTrailingClusterWidth: CGFloat = 3 * panelExpandButtonSize
+    + 2 * shellTitlebarClusterSpacing
+    + panelExpandButtonInset
+
+/// PURE: the width one pill renders at, given how many tabs are open and how much width the strip
+/// has to lay them out in — capped at `panelTabPillSize.width`, floored at `panelTabPillMinWidth`.
+/// Every pill shares whatever is left after the fixed overhead: the leading inset, one
+/// `panelNewTabButtonGap` after every pill (including after the "+"), the "+" button itself
+/// (`panelTabPillSize.height` square), and the trailing cluster. `PanelTabStrip`'s own layout below
+/// uses the IDENTICAL named constants for that overhead, so this function's answer and what
+/// actually renders can never drift apart.
+///
+/// Always returns a value — even floored, this never "fails". Below the floor there is nothing
+/// left for THIS function to do; `PanelTabStrip`'s own `ScrollView` is what takes over from there.
+func panelTabPillWidth(tabCount: Int, availableWidth: CGFloat) -> CGFloat {
+    guard tabCount > 0 else { return panelTabPillSize.width }
+    let overhead = panelTabPillInset
+        + CGFloat(tabCount + 1) * panelNewTabButtonGap
+        + panelTabPillSize.height
+        + panelTrailingClusterWidth
+    let share = (availableWidth - overhead) / CGFloat(tabCount)
+    return min(panelTabPillSize.width, max(panelTabPillMinWidth, share))
+}
+
 /// panel-shell T8: the window's top band, SHARED by every column — the panel's slice of it holds
 /// the tab strip, at the window top, level with the traffic lights (not below a titlebar). See
 /// `ShellPanel`'s `.ignoresSafeArea` for what makes that literally true rather than aspirational.
@@ -45,6 +85,12 @@ let panelShape = UnevenRoundedRectangle(
 /// later work.
 struct ShellPanel: View {
     @ObservedObject var store: PanelStore
+    /// panel-shell T10: the shared mode/width state. This view both READS it (the expand button's
+    /// glyph/label, which side of `.maximized` it currently is) and MUTATES it (the expand and
+    /// sidebar-toggle buttons in its own trailing cluster, `PanelTabStrip.trailingButtonCluster`),
+    /// so it needs a binding, not a value. `ShellSidebar.swift` owns the source of truth
+    /// (`@State private var presentation`) and passes `$presentation` down at its one call site.
+    @Binding var presentation: PanelPresentation
     /// `nil` for a shell built without one (`ShellSidebar`'s own `host` property takes the
     /// identical fallback posture) — the strip's controls then fire nothing (each host method's
     /// own `attachedSessionId` guard).
@@ -58,6 +104,7 @@ struct ShellPanel: View {
             VStack(spacing: 0) {
                 PanelTabStrip(
                     store: store,
+                    presentation: $presentation,
                     onOpenTab: { host?.openPanelTab(kind: .web) },
                     onActivateTab: { tabId in host?.activatePanelTab(tabId) },
                     onCloseTab: { tabId in host?.closePanelTab(tabId) }
@@ -109,44 +156,64 @@ struct ShellPanel: View {
 
 // MARK: - panel-shell T8: the tab strip
 
-/// The chrome band's top 45pt (`panelTitlebarBandHeight`) — every open tab as a pill, then `+`.
-/// Tabs come from `PanelStore` (Task 7): this view only ever READS `store.tabs`/`store.activeTabId`
-/// and reports taps outward through its three closures — see the type's own doc below for why it
-/// never mutates the store itself.
+/// The chrome band's top 45pt (`panelTitlebarBandHeight`) — every open tab as a pill, then `+`,
+/// then panel-shell T10's own trailing cluster (expand / bottom-bar placeholder / sidebar toggle).
+/// Tabs come from `PanelStore` (Task 7): this view only ever READS `store.tabs`/`store
+/// .activeTabId` and reports taps outward through its three closures — see the type's own doc
+/// below for why it never mutates the store itself.
 ///
-/// Reserves trailing space (a flexible `Spacer`) for Task 10's expand/bottom-bar/sidebar cluster —
-/// this task lays the row out to fit them but does not add, move or restyle any of the three.
+/// panel-shell T10: the tabs+`+` group is WIDTH-LIMITED to whatever is left after the trailing
+/// cluster (`panelTrailingClusterWidth`) and its own leading gap — a plain `HStack` has no notion
+/// of "shrink these children but not those", so this reads its own width via `GeometryReader` and
+/// computes the shared pill width itself (`panelTabPillWidth`) rather than leaving it to SwiftUI's
+/// layout to guess. Wrapping that group in a `ScrollView` is what absorbs the case compression
+/// alone cannot solve — enough tabs that even the floor (`panelTabPillMinWidth`) does not fit:
+/// `panelTabPillWidth` still returns a (floored) value, the content built from it overflows the
+/// fixed frame below, and the `ScrollView` simply scrolls rather than clipping or overlapping the
+/// cluster. When content is narrower than the frame (the common case) nothing scrolls — the
+/// content just sits left-aligned with blank space before the cluster, exactly like a browser tab
+/// bar with room to spare.
 struct PanelTabStrip: View {
     @ObservedObject var store: PanelStore
+    @Binding var presentation: PanelPresentation
     var onOpenTab: () -> Void = {}
     var onActivateTab: (String) -> Void = { _ in }
     var onCloseTab: (String) -> Void = { _ in }
 
     var body: some View {
-        HStack(spacing: panelNewTabButtonGap) {
-            ForEach(store.tabs) { tab in
-                PanelTabPill(
-                    tab: tab,
-                    isActive: tab.tabId == store.activeTabId,
-                    onActivate: { onActivateTab(tab.tabId) },
-                    onClose: { onCloseTab(tab.tabId) }
-                )
+        GeometryReader { geo in
+            let pillWidth = panelTabPillWidth(tabCount: store.tabs.count, availableWidth: geo.size.width)
+
+            HStack(spacing: panelNewTabButtonGap) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: panelNewTabButtonGap) {
+                        ForEach(store.tabs) { tab in
+                            PanelTabPill(
+                                tab: tab,
+                                width: pillWidth,
+                                isActive: tab.tabId == store.activeTabId,
+                                onActivate: { onActivateTab(tab.tabId) },
+                                onClose: { onCloseTab(tab.tabId) }
+                            )
+                        }
+                        newTabButton
+                    }
+                    .padding(.leading, panelTabPillInset)
+                }
+                // The scrollable group's own fixed frame — everything else on this line
+                // (`panelNewTabButtonGap` before the cluster, then the cluster itself) is fixed
+                // width, so this is geometry's whole width minus theirs. `panelTabPillWidth` above
+                // is computed against this SAME subtraction (its own `overhead`), which is what
+                // keeps "how much room the pills get" and "how much room this frame grants them"
+                // from ever being two different numbers.
+                .frame(width: geo.size.width - panelNewTabButtonGap - panelTrailingClusterWidth,
+                       alignment: .leading)
+
+                trailingButtonCluster
             }
-            newTabButton
-            // Task 10's three buttons land here — reserved, not built. The minimum is DERIVED
-            // from the existing trailing cluster's own metrics (`ShellSidebar.swift`), never a
-            // literal: the inset from the panel's trailing edge plus three buttons plus the two
-            // gaps between them. Review fix (round 1, Important 1): `minLength: 0` reserved
-            // nothing at all — a comment claiming space was reserved when the code reserved zero
-            // is the same "asserts a property the code doesn't have" class this file is careful
-            // about elsewhere.
-            Spacer(minLength: shellTitlebarTrailingInset
-                             + 3 * shellTitlebarButtonSize
-                             + 2 * shellTitlebarClusterSpacing)
+            .padding(.top, panelTabPillInset)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .padding(.leading, panelTabPillInset)
-        .padding(.top, panelTabPillInset)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var newTabButton: some View {
@@ -161,6 +228,54 @@ struct PanelTabStrip: View {
         .help("New tab")
         .accessibilityLabel("New tab")
     }
+
+    /// panel-shell T10: the panel's own trailing cluster — moved out of the window's titlebar the
+    /// moment the panel opens (`ShellSidebar.swift`'s own trailing overlay renders only
+    /// `circle.dashed`, and only while `.side`, once a panel is showing — see its doc comment for
+    /// the other half of this move and why `.maximized` renders neither). Same order the user's
+    /// layout sketch settled on: expand, the still-cut bottom bar, the sidebar toggle. Every button
+    /// wears `panelExpandButtonSize` — the tab row's own 28pt rhythm, not the main titlebar's
+    /// 26pt — via `ShellTitlebarButton`'s `size` parameter, which every OTHER call site in the app
+    /// leaves at its default, so nothing already on screen changes.
+    ///
+    /// The explicit trailing `.frame(width:)` matches `panelTrailingClusterWidth`'s own derivation
+    /// exactly (three `panelExpandButtonSize` buttons, two `shellTitlebarClusterSpacing` gaps, one
+    /// `panelExpandButtonInset`) — an intentional no-op today, and what makes that constant's own
+    /// doc comment ("can never measure two different numbers") an enforced property rather than a
+    /// hopeful one: a future change to this HStack that forgets to update the constant would clip
+    /// or misalign visibly, not drift silently.
+    private var trailingButtonCluster: some View {
+        HStack(spacing: shellTitlebarClusterSpacing) {
+            ShellTitlebarButton(
+                systemImage: panelExpandButtonSystemImage(mode: presentation.mode),
+                label: panelExpandButtonLabel(mode: presentation.mode),
+                size: panelExpandButtonSize,
+                isOn: presentation.mode == .maximized
+            ) {
+                withAnimation(.snappy) { presentation.toggleMaximized() }
+            }
+
+            ShellTitlebarButton(
+                systemImage: "dock.rectangle",
+                label: shellTitlebarTrailingLabel("dock.rectangle"),
+                isPlaceholder: true,
+                size: panelExpandButtonSize
+            )
+
+            ShellTitlebarButton(
+                systemImage: "sidebar.right",
+                // Always "Hide panel" — this instance only ever renders while the panel IS
+                // showing (`presentation.mode != .hidden`), unlike the titlebar's own copy of
+                // this glyph, which still needs both labels and the too-narrow-window caveat.
+                label: "Hide panel",
+                size: panelExpandButtonSize
+            ) {
+                withAnimation(.snappy) { presentation.toggleVisible() }
+            }
+        }
+        .padding(.trailing, panelExpandButtonInset)
+        .frame(width: panelTrailingClusterWidth, alignment: .trailing)
+    }
 }
 
 /// One tab pill. Only the ACTIVE tab is filled — `Theme.rowHover`, the brief's "RowHover register"
@@ -170,11 +285,19 @@ struct PanelTabStrip: View {
 /// why each piece is positioned by its own absolute padding inside a leading-aligned `ZStack`
 /// (favicon, label) or a trailing `.overlay` (the close button) rather than by `HStack` spacing.
 ///
+/// panel-shell T10: `width` is `PanelTabStrip`'s computed `panelTabPillWidth`, not always
+/// `panelTabPillSize.width` — the favicon/label/close offsets above are still absolute from the
+/// pill's own edges, unchanged, so as `width` shrinks toward `panelTabPillMinWidth` the label's own
+/// available room (`width - 33 - 30`) shrinks with it and truncates first; the favicon and close
+/// control, both anchored to an edge rather than sized from the middle, stay legible longest —
+/// exactly the degradation `panelTabPillMinWidth`'s own doc comment describes.
+///
 /// **Fires two RPCs, applies neither locally.** Both closures only report the tap outward
 /// (`onActivate`/`onClose`); see `ShellSessionHost`'s panel-tab-strip section for why they end at
 /// the wire and never touch `PanelStore` themselves.
 private struct PanelTabPill: View {
     let tab: PanelTab
+    let width: CGFloat
     let isActive: Bool
     let onActivate: () -> Void
     let onClose: () -> Void
@@ -197,7 +320,7 @@ private struct PanelTabPill: View {
                     .padding(.leading, 33)
                     .padding(.trailing, 30) // stop clear of the close button, overlaid below
             }
-            .frame(width: panelTabPillSize.width, height: panelTabPillSize.height, alignment: .leading)
+            .frame(width: width, height: panelTabPillSize.height, alignment: .leading)
             .contentShape(RoundedRectangle(cornerRadius: panelTabPillRadius, style: .continuous))
         }
         .buttonStyle(.plain)

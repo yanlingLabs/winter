@@ -71,4 +71,69 @@ final class PanelModeTests: XCTestCase {
                 "contentWidth \(contentWidth) fits, so the clamp's max must not fall below its own min")
         }
     }
+
+    // MARK: - panel-shell T10: PanelPresentation — mode and width survive every mode change
+
+    func testLeavingMaximizedRestoresTheDraggedWidth() {
+        var p = PanelPresentation(mode: .side, sideWidth: 640)
+        p.toggleMaximized()
+        XCTAssertEqual(p.mode, .maximized)
+        p.toggleMaximized()
+        XCTAssertEqual(p.mode, .side)
+        // the whole point: 640, not panelDefaultWidth
+        XCTAssertEqual(p.sideWidth, 640)
+    }
+
+    func testVisibilityToggleAlsoPreservesWidth() {
+        var p = PanelPresentation(mode: .side, sideWidth: 640)
+        p.toggleVisible()
+        XCTAssertEqual(p.mode, .hidden)
+        p.toggleVisible()
+        XCTAssertEqual(p.mode, .side)
+        XCTAssertEqual(p.sideWidth, 640)
+    }
+
+    func testExpandFromHiddenGoesStraightToMaximized() {
+        var p = PanelPresentation(mode: .hidden, sideWidth: 640)
+        p.toggleMaximized()
+        XCTAssertEqual(p.mode, .maximized)
+    }
+
+    func testExpandButtonMatchesTheMeasuredReference() {
+        XCTAssertEqual(panelExpandButtonSize, 28)
+        XCTAssertEqual(panelExpandButtonInset, 8)
+    }
+
+    /// Mirrors `testSidebarToggleGlyphDiffersBetweenStates` (`SidebarBrandTests`) for the expand
+    /// button's own pure glyph function — the two states must be visually distinguishable, not
+    /// just internally different strings.
+    func testExpandButtonGlyphDiffersBetweenStates() {
+        XCTAssertNotEqual(panelExpandButtonSystemImage(mode: .side),
+                           panelExpandButtonSystemImage(mode: .maximized))
+    }
+
+    /// The label names the ACTION, complementing the glyph's state — same convention as
+    /// `shellSidebarToggleLabel`.
+    func testExpandButtonLabelNamesTheAction() {
+        XCTAssertEqual(panelExpandButtonLabel(mode: .side), "Expand panel")
+        XCTAssertEqual(panelExpandButtonLabel(mode: .maximized), "Restore panel")
+    }
+
+    // MARK: - panel-shell T10: panelRenderedWidth — the one formula for "how wide is the panel"
+
+    /// `.maximized` needs no clamp at all — `detail` isn't even rendered then, so the panel simply
+    /// takes the whole content area. Extracted into its own pure function (review self-catch, T10):
+    /// a hoisted `let` at the call site would evaluate `panelClampWidth` even while `.hidden`
+    /// (harmless in isolation, but it would violate the documented guarantee that nothing in this
+    /// file reaches `panelClampWidth` outside the regime where its own bounds cannot invert —
+    /// `testClampBoundsAreNeverInvertedWhenThePanelFits` above). Calling this function only from
+    /// inside an already-`mode != .hidden`-gated branch (`ShellSidebar.swift`) keeps that true.
+    func testPanelRenderedWidthUsesFullContentWidthWhenMaximized() {
+        XCTAssertEqual(panelRenderedWidth(mode: .maximized, sideWidth: 999, contentWidth: 1200), 1200)
+    }
+
+    func testPanelRenderedWidthClampsTheDraggedWidthWhenSide() {
+        XCTAssertEqual(panelRenderedWidth(mode: .side, sideWidth: 600, contentWidth: 1200), 600)
+        XCTAssertEqual(panelRenderedWidth(mode: .side, sideWidth: 50, contentWidth: 1200), panelMinWidth)
+    }
 }
