@@ -46,22 +46,11 @@ let panelShape = UnevenRoundedRectangle(
 struct ShellPanel: View {
     @ObservedObject var store: PanelStore
     /// `nil` for a shell built without one (`ShellSidebar`'s own `host` property takes the
-    /// identical fallback posture) — the strip's controls then fire nothing, and render disabled
-    /// (see `sessionAttached` below).
+    /// identical fallback posture) — the strip's controls then fire nothing (each host method's
+    /// own `attachedSessionId` guard).
     var host: ShellSessionHost? = nil
 
     var body: some View {
-        // panel-shell T8: read FRESH on every body evaluation — the same "no separate cache to go
-        // stale" posture the sidebar's own inline `let fits = panelFitsInContent(contentWidth)`
-        // takes a few lines up this same call chain (`ShellSidebar.swift`). Correct for every
-        // nav-driven attach/hop/detach, which is how this app reaches almost all of them (the
-        // navigation model IS observed further up, so its change is what re-invokes this body).
-        // The one known gap — a detach fired purely by the window going off-screen
-        // (`ShellSessionHost.setShellVisible`), with no navigation change alongside it — is a
-        // disclosed, narrow staleness window: the strip stays enabled until the next unrelated
-        // re-render. See the task report.
-        let sessionAttached = host?.attachedSessionId != nil
-
         VStack(spacing: 0) {
             // The chrome band: one continuous surface, no internal divider. Two vertical slices —
             // the tab strip (top `panelTitlebarBandHeight`) and Plan B's blank URL row below it —
@@ -74,13 +63,6 @@ struct ShellPanel: View {
                     onCloseTab: { tabId in host?.closePanelTab(tabId) }
                 )
                 .frame(height: panelTitlebarBandHeight)
-                .disabled(!sessionAttached)
-                // Honesty of affordance (`ShellTitlebarButton`'s own placeholder posture, quoted
-                // in its doc comment): `.disabled` alone stops clicks but changes nothing to look
-                // at, so a `+` with no attached session to open a tab ON would still invite a tap
-                // that silently does nothing. A quiet dim says "not right now" the way the rest of
-                // this app's disabled/placeholder controls already do.
-                .opacity(sessionAttached ? 1 : 0.35)
 
                 Color.clear
                     .frame(height: panelUrlRowHeight)
@@ -151,8 +133,16 @@ struct PanelTabStrip: View {
                 )
             }
             newTabButton
-            // Task 10's three buttons land here — reserved, not built.
-            Spacer(minLength: 0)
+            // Task 10's three buttons land here — reserved, not built. The minimum is DERIVED
+            // from the existing trailing cluster's own metrics (`ShellSidebar.swift`), never a
+            // literal: the inset from the panel's trailing edge plus three buttons plus the two
+            // gaps between them. Review fix (round 1, Important 1): `minLength: 0` reserved
+            // nothing at all — a comment claiming space was reserved when the code reserved zero
+            // is the same "asserts a property the code doesn't have" class this file is careful
+            // about elsewhere.
+            Spacer(minLength: shellTitlebarTrailingInset
+                             + 3 * shellTitlebarButtonSize
+                             + 2 * shellTitlebarClusterSpacing)
         }
         .padding(.leading, panelTabPillInset)
         .padding(.top, panelTabPillInset)

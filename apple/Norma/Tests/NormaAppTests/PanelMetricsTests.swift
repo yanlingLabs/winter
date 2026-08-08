@@ -30,8 +30,10 @@ final class PanelMetricsTests: XCTestCase {
     func testChromeBandDecomposesIntoTitlebarAndUrlRow() {
         XCTAssertEqual(panelTitlebarBandHeight, 45)
         XCTAssertEqual(panelUrlRowHeight, panelChromeBandHeight - panelTitlebarBandHeight)  // 40
-        // the pill is vertically centred in the titlebar band: 9 + 28 + 8 = 45
-        XCTAssertEqual(panelTabPillInset + panelTabPillSize.height + panelTabPillInset,
-                       panelTitlebarBandHeight + 1)
+        // The pill is NOT centred — it sits 9pt below the band's top, leaving 8pt beneath.
+        // Assert that asymmetry directly; an earlier version of this test hid it behind a
+        // `+ 1` fudge, which made the numbers agree while describing a layout that is not built.
+        XCTAssertEqual(panelTabPillInset + panelTabPillSize.height, 37)
+        XCTAssertEqual(panelTitlebarBandHeight - (panelTabPillInset + panelTabPillSize.height), 8)
     }
 }

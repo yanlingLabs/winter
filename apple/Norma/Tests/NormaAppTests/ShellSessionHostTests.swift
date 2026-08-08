@@ -1088,17 +1088,22 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(host.newChatCreate, .idle, "the page starts clean on every entry")
     }
 
-    // MARK: - panel-shell T8: the tab strip's mutation RPCs — bare, on the ATTACHED session, and
-    // (the whole point) applying NOTHING locally
+    // MARK: - panel-shell T8: the tab strip's mutation RPCs — bare, on the ATTACHED session
 
     /// The strip's three controls (`+`/click/`×`) each fire exactly one bare RPC on the management
-    /// connection, targeted at the session the shell is currently ATTACHED to. `openPanelTab` sends
-    /// no `tabId` — the daemon mints it (methods.ts's own doc on `PanelOpenTabParams`) — and
-    /// feeding every result back confirms there is nothing HERE for a result to mutate:
-    /// `ShellSessionHost` holds no `PanelStore` reference at all, so these calls have nowhere to
-    /// apply their result even if they wanted to (`PanelStore.apply(_:)` is the one path, fed by
-    /// Task 9's pump — this host never reaches past the `try?`).
-    func testPanelTabControlsFireBareRPCsOnTheAttachedSessionAndApplyNothingLocally() async {
+    /// connection, targeted at the session the shell is currently ATTACHED to. What actually bites
+    /// if wrong — and what this pins — is the WIRE SHAPE: the method names, the `sessionId`/
+    /// `tabId` params, and above all that `openPanelTab` sends no `tabId` key at all (the daemon
+    /// mints it, methods.ts's own doc on `PanelOpenTabParams`) — a caller-supplied `tabId` there
+    /// would be exactly the bug that makes an agent-opened and a user-opened tab distinguishable
+    /// downstream.
+    ///
+    /// Review fix (round 1): this test does NOT prove "applies nothing locally", and its name no
+    /// longer claims to — `ShellSessionHost` holds no `PanelStore` reference at all, so there is
+    /// structurally nothing here for a result to mutate; that guarantee comes from the type
+    /// signatures (see `ShellSessionHost`'s own panel-tab-strip section), not from anything this
+    /// test could observe failing.
+    func testPanelTabControlsFireBareRPCsOnTheAttachedSession() async {
         let (host, factory, mgmt) = await makeHostWithManagement()
         defer { host.deselect() }
         host.setShellVisible(true)
@@ -1135,13 +1140,13 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(closeParams?["sessionId"] as? String, "S1")
         XCTAssertEqual(closeParams?["tabId"] as? String, "t1")
 
-        // Feed every result back. The point: nothing OBSERVABLE on the host reacts to them — there
-        // is no local mutator for any of these three to have reached.
+        // Feed every result back — a smoke check that receiving them doesn't crash or disturb the
+        // attachment, not a mutation pin: there is nothing on this host that COULD react to them.
         mgmt.feed(#"{"jsonrpc":"2.0","id":\#(open["id"] as! Int),"result":{"ok":true,"tabId":"minted-1"}}"#)
         mgmt.feed(#"{"jsonrpc":"2.0","id":\#(activate["id"] as! Int),"result":{"ok":true}}"#)
         mgmt.feed(#"{"jsonrpc":"2.0","id":\#(close["id"] as! Int),"result":{"ok":true}}"#)
         try? await Task.sleep(nanoseconds: 150_000_000)
-        XCTAssertEqual(host.attachedSessionId, "S1", "the responses land and change nothing else about the host")
+        XCTAssertEqual(host.attachedSessionId, "S1", "receiving the responses doesn't disturb the attachment")
     }
 
     /// No attached session (nothing selected, or the shell is hidden) → all three are silent
