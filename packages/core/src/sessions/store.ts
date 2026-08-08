@@ -678,8 +678,12 @@ export class SessionStore {
    *  auto-creates a session and opens a tab in it (`ShellSessionHost.openPanelTab`) — a
    *  browse-only session that never carries a chat message. Without `panel_tab_opened` in the scan
    *  above, that session (and its open tabs) would be reaped 10 minutes after detach. This is the
-   *  conservative direction (narrows what gets deleted) and consistent with the standing "sessions
-   *  are never deleted except by the empty-reaper" rule.
+   *  conservative direction (narrows what gets deleted). It closes only ONE of the system's TWO
+   *  sanctioned auto-delete doors, not the only one — the LLM cleaner (`cleaner.ts`'s
+   *  `SessionCleaner.railFor`) is the other, and judges from a session's event transcript
+   *  independently of this reaper. A browse-only session is exactly what the cleaner's judge would
+   *  see as empty, worthless junk, so it carries its OWN rail (`hasOpenPanelTabs`, panel-shell T14)
+   *  rather than relying on this fix — this reaper narrowing alone would not have been enough.
    *
    *  `attachedCount` is injected rather than read off a stored `SessionHub`: the store has never
    *  held a hub reference (hub depends on store, never the reverse) — mirrors

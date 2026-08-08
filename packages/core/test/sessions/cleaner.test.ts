@@ -486,6 +486,33 @@ describe("SessionCleaner rails — a railed session survives a delete-voting jud
     store.close();
   });
 
+  // panel-shell T14: the cleaner's own door onto the loss Task 12 closed on the reaper. A
+  // browse-only session (no user_message/assistant_message ever) has an EMPTY rendered transcript —
+  // exactly what a delete-voting judge sees as worthless junk. Both halves in ONE test, the
+  // reaper.test.ts "open tab / truly empty sibling" shape: a fix that railed everything would spare
+  // `trulyEmpty` too and pass a one-sided version of this.
+  test("rail: a session holding an open panel tab is spared — even with no chat messages at all — while a truly empty sibling is still judged and deleted", async () => {
+    const { home, store } = freshStore();
+    const withTab = store.createSession("global");
+    store.append(withTab, { type: "panel_tab_opened", sessionId: withTab, tabId: "t1", kind: "web" });
+    backdateCreatedAt(store, withTab, DAY + 60_000);
+    const trulyEmpty = store.createSession("global");
+    backdateCreatedAt(store, trulyEmpty, DAY + 60_000);
+    const provider = deleteVotingJudge();
+
+    await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+
+    expect(store.list().some((r) => r.sessionId === withTab)).toBe(true);
+    expect(store.judgedAt(withTab)).toBeNull();
+    expect(store.list().some((r) => r.sessionId === trulyEmpty)).toBe(false);
+    // Only the truly-empty one ever reached the judge — the tab-holder was railed BEFORE any call.
+    expect(provider.requests).toHaveLength(1);
+    expect(cleanerLines(home)).toEqual([
+      { sessionId: trulyEmpty, reason: "trivial exchange", date: new Date(agedNow()).toISOString() },
+    ]);
+    store.close();
+  });
+
   // NOTE: the user-set-title rail has NO test here, deliberately — see the "the title rail is
   // vacuous today" describe block below. It is the one rail that cannot fire, because no user-set
   // title exists in this system to fire it.
@@ -577,6 +604,24 @@ describe("SessionCleaner — what is NOT railed (each rail's negative)", () => {
     store.append(id, { type: "tool_result", sessionId: id, threadId: "main", callId: "c1", output: "contents", isError: false });
     const provider = deleteVotingJudge();
     await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+    expect(store.list().some((r) => r.sessionId === id)).toBe(false);
+    store.close();
+  });
+
+  // panel-shell T14: the trap named in the task brief. A rail keyed off the raw event's mere
+  // PRESENCE ("ever opened one") would make this session permanently un-judgeable even though it
+  // holds zero tabs right now — the reaper's own emptySessionIds still has exactly this shape. The
+  // rail must fold (Task 5's foldPanelTabs), not scan, so a session that closed every tab it ever
+  // opened is genuinely empty again and stays eligible.
+  test("a panel tab that was opened and later CLOSED holds none — not railed by 'ever opened', still judged and deletable", async () => {
+    const { home, store } = freshStore();
+    const id = store.createSession("global");
+    store.append(id, { type: "panel_tab_opened", sessionId: id, tabId: "t1", kind: "web" });
+    store.append(id, { type: "panel_tab_closed", sessionId: id, tabId: "t1" });
+    backdateCreatedAt(store, id, DAY + 60_000);
+    const provider = deleteVotingJudge();
+    await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+    expect(provider.requests).toHaveLength(1); // reached the judge — not railed
     expect(store.list().some((r) => r.sessionId === id)).toBe(false);
     store.close();
   });
@@ -859,6 +904,24 @@ describe("SessionCleaner — the pre-delete re-check (the session can change mid
     const provider = new MutatingJudge(() => {
       store.append(id, { type: "tool_call", sessionId: id, threadId: "main", callId: "c9", name: "write", argsJson: "{}" });
       store.append(id, { type: "tool_result", sessionId: id, threadId: "main", callId: "c9", output: "ok", isError: false });
+    });
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await makeCleaner(store, home, provider, { now: agedNow }).runPass();
+      expect(store.list().some((r) => r.sessionId === id)).toBe(true);
+      expect(store.judgedAt(id)).toBeNull();
+    } finally { errSpy.mockRestore(); }
+    store.close();
+  });
+
+  // panel-shell T14: proves the open-tabs rail participates in the PRE-DELETE re-check, not only
+  // the pre-judge gate — a user can open a panel tab while the judge is mid-thought exactly as they
+  // can attach, archive, or write a file (the four precedents above).
+  test("a panel tab opened while the judge is thinking is not deleted — the open-tabs rail applies mid-cycle too", async () => {
+    const { home, store } = freshStore();
+    const id = junkSession(store);
+    const provider = new MutatingJudge(() => {
+      store.append(id, { type: "panel_tab_opened", sessionId: id, tabId: "t1", kind: "web" });
     });
     const errSpy = spyOn(console, "error").mockImplementation(() => {});
     try {
