@@ -290,7 +290,10 @@ struct PanelTabStrip: View {
                 .frame(width: panelTabPillSize.height, height: panelTabPillSize.height)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        // panel-shell T13 follow-up: the same hover treatment every tab and every titlebar button
+        // wears. `ShellSidebarRowStyle` renders a BACKGROUND behind the label, not padding around
+        // it, so the 28pt footprint `panelTabPillWidth`'s overhead arithmetic assumes is unchanged.
+        .buttonStyle(ShellSidebarRowStyle(isSelected: false))
         .help("New tab")
         .accessibilityLabel("New tab")
     }
