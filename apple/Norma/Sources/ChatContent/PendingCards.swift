@@ -50,8 +50,10 @@ struct PendingCardsView: View {
 /// detail }` silently destroys every time the panel is maximized or un-maximized (`detail` — and
 /// everything inside it — is torn down and rebuilt, and `@State`'s storage does not survive a
 /// view's identity leaving the hierarchy). Stored externally instead
-/// (`FieldStateAdapter.pendingCardDrafts`, keyed by callId — `pendingInteractions` is a list, so
-/// more than one card can be open at once), which is what makes it survive.
+/// (`FieldStateAdapter.pendingCardDrafts`, keyed by the composite `sessionId|callId` key —
+/// `pendingCardDraftKey(sessionId:callId:)` — since `pendingInteractions` is a list, so more
+/// than one card can be open at once, and a bare callId has no cross-session uniqueness
+/// guarantee), which is what makes it survive.
 ///
 /// Mutation lives HERE as methods, not scattered across the view's closures, so the
 /// mutual-exclusion rules — selecting an option clears that question's Other text; typing Other

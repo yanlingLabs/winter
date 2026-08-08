@@ -63,14 +63,25 @@ final class FieldStateAdapter: ObservableObject {
                 // append-once/remove-once per callId (SessionModel.swift's `.append` on a new
                 // interaction, `.removeAll { $0.callId == callId }` on resolve) and only ever
                 // wholesale-reset via `session.reset()` (called ONLY from `SessionFeed.repin`/
-                // `AppModel.refocus`, both session-SWITCH paths with idempotency guards against a
-                // same-session no-op) — it never transiently empties and refills for a callId that
-                // is still open. And every switch path that calls `session.reset()` runs one of
-                // the three explicit `pendingCardDrafts = [:]` clears above no later than — in two
-                // of three call sites, strictly before — that reset's own synchronous publish, so
-                // by the time THIS sink turn sees the switch, the dictionary this sweep would
-                // prune is already empty. Neither race destroys a live draft; verified by tracing
-                // every `session.reset()` call site, not assumed.
+                // `AppModel.refocus`) — it never transiently empties and refills for a callId
+                // that is still open. Review round 3 correction: the idempotency guard against a
+                // same-session no-op does NOT live inside `repin` itself (its only internal guard
+                // is `guard case .pinned = mode else { return }` — a MODE check, not a session
+                // check; it unconditionally resets on every call it doesn't bounce). The guard
+                // lives one level up, in `repin`'s two callers — `DetachedWindowController.
+                // selectSession`'s `guard sessionId != self.sessionId else { return }` and
+                // `ShellSessionHost.hop`'s upstream `shellAttachmentAction` gate (`attached ==
+                // selection ? .none : .hop(...)`) — both of which stop a redundant same-session
+                // call before it ever reaches `repin`. `AppModel.refocus` is the one of the two
+                // that DOES guard internally (`sessionId == focusedSessionId && attachedSession
+                // == sessionId`). Either way, `session.reset()` is never reached for a
+                // same-session no-op — verified by reading `repin` and both its callers directly,
+                // not assumed from the outcome. And every switch path that calls
+                // `session.reset()` runs one of the three explicit `pendingCardDrafts = [:]`
+                // clears above no later than — in two of three call sites, strictly before —
+                // that reset's own synchronous publish, so by the time THIS sink turn sees the
+                // switch, the dictionary this sweep would prune is already empty. Neither race
+                // destroys a live draft.
                 let liveKeys = Set(newState.pendingInteractions.map {
                     self.pendingCardDraftKey(sessionId: self.boundSessionId() ?? "", callId: $0.callId)
                 })
