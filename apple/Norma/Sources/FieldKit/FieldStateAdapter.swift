@@ -484,6 +484,30 @@ final class FieldStateAdapter: ObservableObject {
     /// `pendingInteractions` via the reducer; there is no optimistic dismiss.
     @Published var interactionErrors: [String: String] = [:]
 
+    /// panel-shell T10b: a pending question/plan card's typed-but-unsubmitted answer, keyed by
+    /// callId (`pendingInteractions` is a list — more than one card can be open at once). Lives
+    /// HERE, mirroring `composerDraft` above (the "MARK: - Composer draft" section), so it
+    /// survives `ShellRootView`'s `if mode != .maximized { detail }` teardown —
+    /// `PendingQuestionBody`/`PendingPlanBody` used to hold this as view-local `@State`, which
+    /// does not survive `detail` being torn down and rebuilt. Cleared per-session in
+    /// `ShellSessionHost.hop(to:)` (the "about the session it was about" discipline that hop
+    /// already applies to `dirsRefusal`/`activityRefusal`); dies with the whole adapter on detach,
+    /// same as everything else on it.
+    @Published var pendingCardDrafts: [String: PendingCardDraft] = [:]
+
+    /// A live `Binding` into `pendingCardDrafts[callId]`, defaulting a fresh `PendingCardDraft()`
+    /// for a callId with no entry yet — mirrors `draftBinding` above exactly (same file, the
+    /// "MARK: - Composer draft" section). The getter/setter close over `self`, so every Binding
+    /// this mints — however many times a caller asks for the SAME callId across however many
+    /// separately-constructed views — reads and writes the one live dictionary on this adapter,
+    /// never a value captured at construction time.
+    func pendingCardDraftBinding(for callId: String) -> Binding<PendingCardDraft> {
+        Binding(
+            get: { self.pendingCardDrafts[callId] ?? PendingCardDraft() },
+            set: { self.pendingCardDrafts[callId] = $0 }
+        )
+    }
+
     /// Wired by whichever surface owns this adapter (see `interactionInFlight`'s doc) to reach
     /// the daemon's `approval.respond` — callId, approved, optionId (SP-approvals T6: the allow-rule
     /// choice tapped, `nil` for the plain Approve/Deny buttons), childSessionId (Dispatch, Phase 7:

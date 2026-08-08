@@ -978,6 +978,35 @@ final class AppShellTests: XCTestCase {
         XCTAssertEqual(newChatUnreachableMessage, "couldn't reach the daemon — try again")
     }
 
+    // MARK: - panel-shell T10b: the page's draft must survive `.maximized` teardown
+
+    /// `ShellRootView`'s `if mode != .maximized { detail }` (`ShellSidebar.swift`) tears `detail`
+    /// — and everything inside it, including `NewChatPage` — down and rebuilds it on every panel
+    /// maximize/un-maximize toggle. `@State`'s own contract (SwiftUI allocates fresh storage the
+    /// first time a view's IDENTITY is added to the hierarchy, which a torn-down-and-reinserted
+    /// subtree triggers again) means a `@State`-backed draft is silently lost on that round trip.
+    ///
+    /// This constructs `NewChatPage` directly — a plain struct init, no `.body` ever evaluated,
+    /// consistent with this file's own "SwiftUI bodies are deliberately NOT exercised" convention
+    /// (see the type doc at the top of this file) — and inspects its stored properties via
+    /// `Mirror`, which reflects the compiler-synthesized `_draft` backing storage regardless of
+    /// `draft`'s `private` access (`Mirror` walks runtime type metadata, which carries no notion
+    /// of Swift's compile-time access control). This is a genuine RUNTIME check of the exact
+    /// mechanism behind the bug — not a stand-in, not a compile-time symbol check — and it fails
+    /// against today's code before any implementation change: `NewChatPage` currently declares
+    /// `@State private var draft = ""`, so `_draft` of type `State<String>` is present.
+    func testNewChatPageDraftIsNotViewLocalState() {
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        let nav = ShellNavigationModel()
+        let page = NewChatPage(nav: nav, host: host)
+        let hasDraftState = Mirror(reflecting: page).children.contains { $0.label == "_draft" }
+        XCTAssertFalse(hasDraftState,
+            "NewChatPage's draft must not be view-local @State — it needs to live on `host` " +
+            "(mirroring FieldStateAdapter.composerDraft's precedent) so it survives ShellRootView's " +
+            "`.maximized` teardown of `detail`")
+    }
+
     // MARK: - chatgpt-ui T3: the page's in-flight feedback (c-m3 — PURE send-state mapping)
 
     /// The T2 review's routed minor, root cause of both send-race windows: a create in flight

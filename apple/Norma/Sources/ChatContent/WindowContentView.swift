@@ -155,6 +155,13 @@ struct WindowContentView<Accessory: View>: View {
                     interactions: adapter.pendingInteractions,
                     inFlight: adapter.interactionInFlight,
                     errorLines: adapter.interactionErrors,
+                    // panel-shell T10b: `adapter.pendingCardDraftBinding` closes over `adapter`
+                    // itself (an `@ObservedObject` this view already holds live), so every Binding
+                    // it mints — across however many times SwiftUI reconstructs this whole call
+                    // site — reads/writes the SAME externally-owned dictionary. That external
+                    // ownership is what lets a card's typed-but-unsubmitted answer survive
+                    // `ShellRootView`'s `.maximized` teardown of `detail`.
+                    draftBinding: { callId in adapter.pendingCardDraftBinding(for: callId) },
                     onApproval: adapter.onApprovalRespond,
                     onQuestion: adapter.onQuestionRespond,
                     onPlan: adapter.onPlanRespond

@@ -1088,6 +1088,38 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(host.newChatCreate, .idle, "the page starts clean on every entry")
     }
 
+    /// panel-shell T10b: the SAME "starts clean on every entry" contract as `newChatCreate`
+    /// directly above, now covering the page's own draft. `NewChatPage.draft` is hoisted onto
+    /// `host.newChatDraft` so it survives `ShellRootView`'s `.maximized` teardown of `detail` (see
+    /// `testNewChatPageDraftIsNotViewLocalState` in `AppShellTests.swift` for the structural half
+    /// of this proof). Hoisting alone would silently overturn `NewChatPage`'s own pre-existing,
+    /// documented "drops on navigate-away" ruling as an unintended side effect — this pins that the
+    /// clear still fires on a GENUINE arrival at the page, driven by `apply(destination:)` exactly
+    /// like `newChatCreate`'s reset, so the pre-existing contract survives unchanged. (The OTHER
+    /// half of that contract — that the `.maximized` toggle never reaches `apply` at all, so a
+    /// redundant re-navigation or hide/re-summon never clears it — is a structural fact of
+    /// `ShellRootView`/`PanelPresentation`'s wiring, verified by reading `ShellPanel.swift`'s and
+    /// `ShellSidebar.swift`'s `toggleMaximized`/`toggleVisible` call sites: both mutate only the
+    /// panel's own local `@State`, never `nav`/`host`. There is no view-mounting harness in this
+    /// suite to drive that half as its own XCTest — see `CardWiringTests`' own doc for the same
+    /// posture on mounting `PendingCardsView`.)
+    func testApplyNewChatClearsAStaleDraftOnEveryEntry() async {
+        let (host, factory) = makeHost()
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "S1")
+
+        host.apply(destination: .newChat)
+        host.newChatDraft = "half-typed idea"
+
+        host.apply(destination: .mode(.chat)) // leave the page — a genuine navigate-away
+        host.apply(destination: .newChat)     // …and a genuine fresh entry
+        XCTAssertEqual(host.newChatDraft, "",
+                       "a stale draft from a previous visit clears on re-entry, exactly like newChatCreate")
+    }
+
     // MARK: - panel-shell T8: the tab strip's mutation RPCs — bare, on the ATTACHED session
 
     /// The strip's three controls (`+`/click/`×`) each fire exactly one bare RPC on the management

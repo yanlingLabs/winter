@@ -342,10 +342,20 @@ struct NewChatControlChip: View {
 /// own), and it sits inside a card with two control rows. The TRANSCRIPT's restyle is still a
 /// later pass; this one reshaped the new-chat page only.
 ///
-/// Draft semantics (decided-and-disclosed, T2 report): the draft is view-local `@State`. It
+/// Draft semantics (decided-and-disclosed, T2 report; RE-HOMED panel-shell T10b): the draft
 /// SURVIVES a hide/re-summon (the shell hides, never closes — the view stays mounted) and DROPS
-/// on navigate-away (the detail switch tears the page down) — the honest simple choice: no
-/// second draft store to drift, and the page is one keystroke away from anywhere.
+/// on navigate-away (the detail switch tears the page down) — unchanged from T2's original
+/// ruling. What changed is WHERE it lives: T2's `@State private var draft` did not survive
+/// `ShellRootView`'s `.maximized` teardown of `detail` (a THIRD trigger for "the view gets torn
+/// down and rebuilt", one T2 never had to consider), so the draft is hoisted onto
+/// `host.newChatDraft` instead — mirroring `FieldStateAdapter.composerDraft`'s own precedent for
+/// the live composer. `host` outlives `detail` entirely (it's constructed before `ShellRootView`
+/// even exists — see `ShellSessionHost`'s own type doc), so the draft now survives ALL THREE
+/// triggers; `ShellSessionHost.apply(destination:)`'s `.newChat` case clears it on a genuine fresh
+/// arrival, which is what still makes it drop on navigate-away — "no second draft store to drift"
+/// no longer applies verbatim (there IS a second store now, `host` itself), but "the page is one
+/// keystroke away from anywhere" still holds, and drop-on-navigate-away is unchanged behavior,
+/// not a new one.
 struct NewChatPage: View {
     @ObservedObject var nav: ShellNavigationModel
     @ObservedObject var host: ShellSessionHost
@@ -355,7 +365,12 @@ struct NewChatPage: View {
     /// it — a settings key, a release note, the daemon.
     var announcement: String? = nil
 
-    @State private var draft = ""
+    /// panel-shell T10b: no longer `@State` — see the type doc above and `host.newChatDraft`'s
+    /// own doc. `draftBinding` below is the Binding-compatible wrapper the composer actually
+    /// consumes, mirroring `FieldStateAdapter.draftBinding`'s identical shape.
+    private var draftBinding: Binding<String> {
+        Binding(get: { host.newChatDraft }, set: { host.newChatDraft = $0 })
+    }
     /// The card's mode segment. View-local: it selects nothing real yet (the create is always a
     /// chat), which is exactly why sending is refused while it sits on an unbuilt mode rather than
     /// quietly creating something else — `newChatSendBlockedReason`.
@@ -381,7 +396,7 @@ struct NewChatPage: View {
             // The suggestions step aside the moment there is a draft (user call, 2026-08-07) —
             // in BOTH modes. They exist to get you started; once you have started they are just
             // something else on the page.
-            if draft.isEmpty {
+            if host.newChatDraft.isEmpty {
                 starters
                     .transition(.opacity)
             }
@@ -410,7 +425,7 @@ struct NewChatPage: View {
                 announcementLine = newChatAnnouncementLines.randomElement() ?? ""
             }
         }
-        .animation(.easeOut(duration: 0.15), value: draft.isEmpty)
+        .animation(.easeOut(duration: 0.15), value: host.newChatDraft.isEmpty)
     }
 
     /// The greeting — the reference's shape (brand mark + a serif line), Norma's own words.
@@ -460,7 +475,7 @@ struct NewChatPage: View {
         } else {
             HStack(spacing: 10) {
                 ForEach(newChatStarters, id: \.title) { starter in
-                    NewChatStarterChip(starter: starter) { draft = starter.prefill }
+                    NewChatStarterChip(starter: starter) { host.newChatDraft = starter.prefill }
                 }
             }
         }
@@ -475,7 +490,7 @@ struct NewChatPage: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, 6)
             ForEach(newChatCoworkIdeas, id: \.title) { idea in
-                NewChatIdeaRow(idea: idea) { draft = idea.prefill }
+                NewChatIdeaRow(idea: idea) { host.newChatDraft = idea.prefill }
             }
         }
         .frame(width: newChatCardWidth, alignment: .leading)
@@ -488,14 +503,14 @@ struct NewChatPage: View {
     private var composerCard: some View {
         let ui = newChatSendUI(host.newChatCreate)
         return NormaComposerCard(
-            text: $draft,
+            text: draftBinding,
             onSubmit: submit,
             mode: $mode,
             stripEdge: .below,
             announcement: newChatAnnouncement(announcement, fallback: announcementLine),
             isEnabled: ui.composerEnabled,
             showsWorkingIndicator: ui.showsWorkingIndicator,
-            sendBlockedReason: newChatSendBlockedReason(draft: draft, mode: mode)
+            sendBlockedReason: newChatSendBlockedReason(draft: host.newChatDraft, mode: mode)
         )
     }
 
@@ -505,7 +520,7 @@ struct NewChatPage: View {
     /// live session (the composer content carries — the host seeds the attached adapter's draft
     /// until the send lands, so there is no empty-composer flicker and no lost text).
     private func submit() {
-        host.sendFirstChatMessage(draft) { sessionId in
+        host.sendFirstChatMessage(host.newChatDraft) { sessionId in
             nav.navigate(to: .session(sessionId))
         }
     }

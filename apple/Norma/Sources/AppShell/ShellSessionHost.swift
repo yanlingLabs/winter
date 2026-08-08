@@ -454,6 +454,19 @@ final class ShellSessionHost: ObservableObject {
 
     @Published private(set) var newChatCreate: NewChatCreateState = .idle
 
+    /// panel-shell T10b: the new-chat page's own draft, hoisted here from `NewChatPage`'s old
+    /// `@State private var draft` — that storage does not survive `ShellRootView`'s `if mode !=
+    /// .maximized { detail }` teardown (`detail`, and `NewChatPage` inside it, is torn down and
+    /// rebuilt on every panel maximize/un-maximize), mirroring exactly the reason
+    /// `FieldStateAdapter.composerDraft` already lives off the view for the live composer. Cleared
+    /// in `apply(destination:)`'s `.newChat` case, right alongside `newChatCreate`'s own reset —
+    /// this is NOT a new behavior: `NewChatPage`'s own doc comment already ruled the draft "drops
+    /// on navigate-away", and clearing it on a genuine fresh arrival (as opposed to the
+    /// `.maximized` toggle, which never calls `apply` at all — see `PanelPresentation.
+    /// toggleMaximized`'s call sites, both of which touch only the panel's own local `@State`)
+    /// reproduces that exact contract rather than silently overturning it.
+    @Published var newChatDraft: String = ""
+
     /// The typed first messages, parked between each create's success and delivery on the created
     /// session's OWN attach (`deliverPendingFirstMessage` — fired from the pinned feed's
     /// post-attach `onConnected` on a fresh attach, and after `repin`'s attach on a hop;
@@ -601,6 +614,10 @@ final class ShellSessionHost: ObservableObject {
             dispatchResolutionToken += 1
             dispatchResolution = .idle
             if newChatCreate != .creating { newChatCreate = .idle }
+            // panel-shell T10b: same "starts clean on every entry" contract as `newChatCreate`
+            // just above, now covering the draft too — see `newChatDraft`'s own doc for why this
+            // is a preservation of the pre-existing "drops on navigate-away" ruling, not a new one.
+            newChatDraft = ""
             deselect()
         default:
             dispatchResolutionToken += 1
@@ -810,6 +827,12 @@ final class ShellSessionHost: ObservableObject {
         // A refusal is about the session it was refused FOR — "session is archived — resume it
         // first" rendered over a different session is a lie about a rule (the `dirsRefusal` lesson).
         live.adapter.activityRefusal = nil
+        // panel-shell T10b: same "about the session it was about" discipline as the two resets
+        // just above — a pending card's typed-but-unsubmitted answer belongs to the callId it was
+        // typed for, and callIds don't cross sessions, so a stale entry here is never wrongly
+        // displayed; this clear is hygiene (an unbounded dictionary otherwise), not a correctness
+        // fix for a visible bug.
+        live.adapter.pendingCardDrafts = [:]
         // T2 fix round 1: the first-message carry on the HOP path too — a departed new-chat
         // session opened from Recents while the shell shows another session arrives HERE, not
         // through `attachFresh`; the seed and the post-attach delivery must ride along or the
