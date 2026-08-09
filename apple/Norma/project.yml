@@ -39,6 +39,23 @@ targets:
       - package: Sparkle
       - target: NormaHelper
         embed: false
+      # panel-cef Task 4: build-order dependencies only (embed: false), matching the NormaHelper
+      # entry directly above — xcodegen's automatic app-embedding machinery has no first-class
+      # notion of "a full nested .app bundle inside Contents/Frameworks/" (that shape is CEF/
+      # Chromium's own convention, not a recognized product type like an extension or XPC service),
+      # so the "Embed CEF helpers" postCompileScript below does the copy by hand, exactly like
+      # "Embed NormaHelper" already does for NormaHelper's bare executable. These five just need to
+      # finish building before that script runs.
+      - target: CEFHelperBase
+        embed: false
+      - target: CEFHelperAlerts
+        embed: false
+      - target: CEFHelperGPU
+        embed: false
+      - target: CEFHelperPlugin
+        embed: false
+      - target: CEFHelperRenderer
+        embed: false
     # panel-cef Task 2: CEF is vendored (fetched, SHA1-verified, gitignored — scripts/fetch-cef.ts)
     # rather than committed (332MB uncompressed). preBuildScripts runs before Compile Sources so a
     # missing framework fails FAST with the fix command, instead of surfacing later as a confusing
@@ -85,6 +102,28 @@ targets:
           HELPER_LABEL="com.norma.helper"
           if [ "${CONFIGURATION}" != "Release" ]; then HELPER_LABEL="com.norma.helper.dev"; fi
           sed "s/com\.norma\.helper/${HELPER_LABEL}/g" "${SRCROOT}/HelperResources/com.norma.helper.plist" > "${DEST_LAUNCHD}/com.norma.helper.plist"
+      - name: Embed CEF helpers
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # panel-cef Task 4: CEF looks for these five bundles at this EXACT nested path — the path
+          # is not a preference (Task 4 brief) — so this copies each already-built helper .app from
+          # ${BUILT_PRODUCTS_DIR} (where every target in this scheme's products land, Norma
+          # included) into Contents/Frameworks/. ditto, not cp -R: preserves bundle structure
+          # exactly, matching every other app-bundle copy in this codebase (fetch-cef.ts,
+          # release.ts, fetch-iroh.sh — see fetch-cef.ts's own comment on why).
+          DEST_FRAMEWORKS="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Frameworks"
+          mkdir -p "${DEST_FRAMEWORKS}"
+          for NAME in "Norma Helper" "Norma Helper (Alerts)" "Norma Helper (GPU)" "Norma Helper (Plugin)" "Norma Helper (Renderer)"; do
+            SRC="${BUILT_PRODUCTS_DIR}/${NAME}.app"
+            if [ ! -d "${SRC}" ]; then
+              echo "error: expected built CEF helper bundle not found at ${SRC}" >&2
+              echo "error: check that all five CEFHelper* targets are in this scheme's build list." >&2
+              exit 1
+            fi
+            rm -rf "${DEST_FRAMEWORKS}/${NAME}.app"
+            ditto "${SRC}" "${DEST_FRAMEWORKS}/${NAME}.app"
+          done
       - name: Embed norma-core
         basedOnDependencyAnalysis: false
         script: |
@@ -278,12 +317,305 @@ targets:
           DEPLOYMENT_POSTPROCESSING: YES
           STRIP_INSTALLED_PRODUCT: YES
           STRIP_STYLE: debugging
+  # panel-cef Task 4 — CEF's own generated C++/C-API translation layer ("libcef_dll_wrapper" in
+  # CEF's own CMakeLists.txt, vendored verbatim alongside include/ and Release/ by fetch-cef.ts).
+  # CefExecuteProcess / CefScopedLibraryLoader / CefScopedSandboxContext — what the five helper
+  # mains below call — are NOT header-only, unlike NormaApplication.mm's CefAppProtocol
+  # conformance (Task 3, which needed zero CEF linkage): they're real translation units that live
+  # here, and CefExecuteProcess alone pulls in a dozen more (app_cpptoc.h and friends) transitively.
+  # Rather than hand-picking files and fighting CEF's own generated-code dependency web, this
+  # target compiles the SAME file set CEF's own libcef_dll/CMakeLists.txt does — read directly
+  # (it's vendored, not guessed): `add_library(libcef_dll_wrapper ...)` at CMakeLists.txt:818
+  # compiles ALL of base/ + cpptoc/ (including cpptoc/test/ and cpptoc/views/) + ctocpp/ (including
+  # ctocpp/test/ and ctocpp/views/) + wrapper/ — CEF does NOT trim test/views for a minimal embed,
+  # measured by reading the file rather than assumed. `path: vendor/cef/libcef_dll` below is one
+  # recursive glob for exactly that reason: it IS CEF's own file list, not a subset of it.
+  CefDllWrapper:
+    type: library.static
+    platform: macOS
+    sources:
+      - path: vendor/cef/libcef_dll
+        excludes:
+          - CMakeLists.txt
+    settings:
+      base:
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/vendor/cef
+        # Same requirement as NormaApplication.mm (Task 3): CEF 151's public headers need C++20
+        # (std::same_as in cef_scoped_refptr.h:101; gnu++17 fails identically to the gnu++14
+        # default). This target compiles far more of those headers than Task 3's did.
+        CLANG_CXX_LANGUAGE_STANDARD: gnu++20
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        # CEF's own libcef_dll/CMakeLists.txt:842 — "Creating the CEF wrapper library. Do not
+        # define this for dependent targets." PRIVATE to this target only: Xcode/xcodegen build
+        # settings do not propagate across a target dependency edge (unlike CMake's PUBLIC/
+        # INTERFACE), so simply not repeating this on the five helper targets below already
+        # matches CMake's PRIVATE semantic — nothing extra to do to keep it scoped.
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - $(inherited)
+          - WRAPPING_CEF_SHARED=1
+      configs:
+        Release:
+          # C++ half of the Norma/NormaHelper targets' Release privacy-scrub block (their
+          # OTHER_SWIFT_FLAGS -file-prefix-map has no effect on this target — it has no Swift).
+          # LOAD-BEARING, not belt-and-suspenders: libcef_dll/base/cef_logging.cc and other
+          # wrapper sources bake __FILE__ into string literals, which STRIP_STYLE cannot remove
+          # after the fact — only the compiler flag stops the builder's home path from ever being
+          # written into the object file in the first place.
+          # No OTHER_LDFLAGS -oso_prefix here: a static library has no link step of its own — the
+          # .a's member objects' OSO stabs get resolved at the LINKING target's link step (the
+          # five helper targets below, which each set it), not here.
+          OTHER_CPLUSPLUSFLAGS: -ffile-prefix-map=$(HOME)=/builder
+  # panel-cef Task 4 — the five out-of-process helper bundles. CEF's own
+  # cmake/cef_variables.cmake:398-404 defines CEF_HELPER_APP_SUFFIXES as base, Alerts, GPU, Plugin,
+  # Renderer (docs/research/2026-08-09-cef-spike.md, correction #1 — an earlier plan draft said
+  # four; wrong). All five share ONE source file (CEFHelperSources/process_helper_mac.cc — CEF's
+  # own build does the same: one process_helper_mac.cc compiled five times) and differ ONLY in
+  # PRODUCT_NAME / PRODUCT_BUNDLE_IDENTIFIER. Xcode preserves spaces AND parentheses verbatim in
+  # PRODUCT_NAME for the actual Contents/MacOS/ executable filename (confirmed real-world
+  # precedent: shipped Chromium-family apps ship exactly "...Helper (GPU).app/Contents/MacOS/
+  # ...Helper (GPU)") — the brief's path is exact and this reproduces it exactly, not
+  # approximately. The xcodegen TARGET NAMEs below stay plain identifiers on purpose (no spaces/
+  # parens) — deliberately decoupled from PRODUCT_NAME, which carries the required display/path
+  # string instead — and deliberately NOT "NormaHelper*", to avoid the exact near-namesake
+  # confusion Task 3 called out for NSPrincipalClass: this is unrelated to NormaHelper (the
+  # SMAppService launchd daemon target above) and unrelated to NormaCEF (Task 6's planned bridge
+  # target name).
+  #
+  # Info.plist: ONE shared generated-but-tracked file (Support/CEFHelperInfo.plist — a NEW
+  # instance of the "Info.plist keys live in two tracked places" pattern Task 3 carried forward:
+  # project.yml here, the generated file there), referenced by all five targets. This works
+  # because xcodegen's `info.properties` values are build-setting REFERENCES ($(PRODUCT_NAME),
+  # $(PRODUCT_BUNDLE_IDENTIFIER)) resolved per-target at Info.plist preprocessing time — exactly
+  # how the main Norma target's own Info.plist already resolves $(NORMA_APP_NAME) — so one file
+  # legitimately produces five different compiled Info.plists. Keys match the REAL helper
+  # Info.plist docs/research/2026-08-09-cef-spike.md measured (Q3) on CEF's own built
+  # "cefsimple Helper.app" byte-for-byte, not invented: CFBundleIdentifier, LSMinimumSystemVersion,
+  # LSUIElement, LSFileQuarantineEnabled, NSSupportsAutomaticGraphicsSwitching, and
+  # LSEnvironment.MallocNanoZone=0 (a known Chromium-on-macOS allocator requirement for helper
+  # processes — nothing exercises it yet since nothing runs CEF in this task, but getting it right
+  # now avoids leaving a landmine for Task 6, which does). CFBundleExecutable is deliberately
+  # absent — Xcode auto-derives it from PRODUCT_NAME regardless, matching the main Norma target's
+  # own Info.plist, which also never lists it.
+  CEFHelperBase:
+    type: application
+    platform: macOS
+    sources:
+      - path: CEFHelperSources/process_helper_mac.cc
+    dependencies:
+      - target: CefDllWrapper
+    info:
+      path: Support/CEFHelperInfo.plist
+      properties:
+        CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
+        LSMinimumSystemVersion: "26.0"
+        LSUIElement: true
+        LSFileQuarantineEnabled: true
+        NSSupportsAutomaticGraphicsSwitching: true
+        LSEnvironment:
+          MallocNanoZone: "0"
+    settings:
+      base:
+        PRODUCT_NAME: "Norma Helper"
+        PRODUCT_BUNDLE_IDENTIFIER: com.norma.app.cefhelper
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 37N77U9RSZ
+        CODE_SIGN_STYLE: Manual
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/vendor/cef
+        CLANG_CXX_LANGUAGE_STANDARD: gnu++20
+        # Client-side-only (grepped: absent from every vendored CEF header and every libcef_dll
+        # source), so this can be defined here without affecting the wrapper library's own build.
+        # Gates CefScopedSandboxContext in process_helper_mac.cc exactly as CEF's own upstream
+        # source gates it — see that file's header comment.
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - $(inherited)
+          - CEF_USE_SANDBOX=1
+      configs:
+        Release:
+          # Same privacy-scrub reasoning as CefDllWrapper's Release config above, plus the half
+          # that only applies to a target with an actual link step: OTHER_LDFLAGS -oso_prefix
+          # strips OSO stabs recorded at THIS link (covering both this target's own object file and
+          # every object CefDllWrapper.a contributes), and DEPLOYMENT_POSTPROCESSING +
+          # STRIP_INSTALLED_PRODUCT + STRIP_STYLE match Norma/NormaHelper's own Release blocks
+          # exactly — these five are shipped binaries too.
+          OTHER_CPLUSPLUSFLAGS: -ffile-prefix-map=$(HOME)=/builder
+          OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
+  # The remaining four are CEFHelperBase with only PRODUCT_NAME / PRODUCT_BUNDLE_IDENTIFIER
+  # changed — see CEFHelperBase above for every comment that would otherwise repeat four times.
+  CEFHelperAlerts:
+    type: application
+    platform: macOS
+    sources:
+      - path: CEFHelperSources/process_helper_mac.cc
+    dependencies:
+      - target: CefDllWrapper
+    info:
+      path: Support/CEFHelperInfo.plist
+      properties:
+        CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
+        LSMinimumSystemVersion: "26.0"
+        LSUIElement: true
+        LSFileQuarantineEnabled: true
+        NSSupportsAutomaticGraphicsSwitching: true
+        LSEnvironment:
+          MallocNanoZone: "0"
+    settings:
+      base:
+        PRODUCT_NAME: "Norma Helper (Alerts)"
+        PRODUCT_BUNDLE_IDENTIFIER: com.norma.app.cefhelper.alerts
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 37N77U9RSZ
+        CODE_SIGN_STYLE: Manual
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/vendor/cef
+        CLANG_CXX_LANGUAGE_STANDARD: gnu++20
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - $(inherited)
+          - CEF_USE_SANDBOX=1
+      configs:
+        Release:
+          OTHER_CPLUSPLUSFLAGS: -ffile-prefix-map=$(HOME)=/builder
+          OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
+  CEFHelperGPU:
+    type: application
+    platform: macOS
+    sources:
+      - path: CEFHelperSources/process_helper_mac.cc
+    dependencies:
+      - target: CefDllWrapper
+    info:
+      path: Support/CEFHelperInfo.plist
+      properties:
+        CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
+        LSMinimumSystemVersion: "26.0"
+        LSUIElement: true
+        LSFileQuarantineEnabled: true
+        NSSupportsAutomaticGraphicsSwitching: true
+        LSEnvironment:
+          MallocNanoZone: "0"
+    settings:
+      base:
+        PRODUCT_NAME: "Norma Helper (GPU)"
+        PRODUCT_BUNDLE_IDENTIFIER: com.norma.app.cefhelper.gpu
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 37N77U9RSZ
+        CODE_SIGN_STYLE: Manual
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/vendor/cef
+        CLANG_CXX_LANGUAGE_STANDARD: gnu++20
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - $(inherited)
+          - CEF_USE_SANDBOX=1
+      configs:
+        Release:
+          OTHER_CPLUSPLUSFLAGS: -ffile-prefix-map=$(HOME)=/builder
+          OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
+  CEFHelperPlugin:
+    type: application
+    platform: macOS
+    sources:
+      - path: CEFHelperSources/process_helper_mac.cc
+    dependencies:
+      - target: CefDllWrapper
+    info:
+      path: Support/CEFHelperInfo.plist
+      properties:
+        CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
+        LSMinimumSystemVersion: "26.0"
+        LSUIElement: true
+        LSFileQuarantineEnabled: true
+        NSSupportsAutomaticGraphicsSwitching: true
+        LSEnvironment:
+          MallocNanoZone: "0"
+    settings:
+      base:
+        PRODUCT_NAME: "Norma Helper (Plugin)"
+        PRODUCT_BUNDLE_IDENTIFIER: com.norma.app.cefhelper.plugin
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 37N77U9RSZ
+        CODE_SIGN_STYLE: Manual
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/vendor/cef
+        CLANG_CXX_LANGUAGE_STANDARD: gnu++20
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - $(inherited)
+          - CEF_USE_SANDBOX=1
+      configs:
+        Release:
+          OTHER_CPLUSPLUSFLAGS: -ffile-prefix-map=$(HOME)=/builder
+          OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
+  CEFHelperRenderer:
+    type: application
+    platform: macOS
+    sources:
+      - path: CEFHelperSources/process_helper_mac.cc
+    dependencies:
+      - target: CefDllWrapper
+    info:
+      path: Support/CEFHelperInfo.plist
+      properties:
+        CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
+        LSMinimumSystemVersion: "26.0"
+        LSUIElement: true
+        LSFileQuarantineEnabled: true
+        NSSupportsAutomaticGraphicsSwitching: true
+        LSEnvironment:
+          MallocNanoZone: "0"
+    settings:
+      base:
+        PRODUCT_NAME: "Norma Helper (Renderer)"
+        PRODUCT_BUNDLE_IDENTIFIER: com.norma.app.cefhelper.renderer
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 37N77U9RSZ
+        CODE_SIGN_STYLE: Manual
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/vendor/cef
+        CLANG_CXX_LANGUAGE_STANDARD: gnu++20
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - $(inherited)
+          - CEF_USE_SANDBOX=1
+      configs:
+        Release:
+          OTHER_CPLUSPLUSFLAGS: -ffile-prefix-map=$(HOME)=/builder
+          OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
 schemes:
   Norma:
     build:
       targets:
         Norma: all
         NormaHelper: all
+        CEFHelperBase: all
+        CEFHelperAlerts: all
+        CEFHelperGPU: all
+        CEFHelperPlugin: all
+        CEFHelperRenderer: all
         NormaAppTests: [test]
     test:
       targets: [NormaAppTests]
