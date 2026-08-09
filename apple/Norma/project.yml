@@ -51,9 +51,16 @@ targets:
         script: |
           set -euo pipefail
           CEF_DIR="${SRCROOT}/vendor/cef"
+          # The stamp check matters as much as the directory checks: fetch-cef.ts only writes
+          # .vendored-version AFTER all three dirs finish copying, so a run killed mid-copy can
+          # leave Release/+include/ complete and libcef_dll/ partial with no stamp. Directory
+          # existence alone would false-pass that state (Task 2 whole-branch review, Important) —
+          # the exact "confusing error instead of a clear one" failure mode this gate exists to
+          # prevent, just moved one step later (a partial-tree compile error instead of nothing).
           if [ ! -d "${CEF_DIR}/Release/Chromium Embedded Framework.framework" ] || \
              [ ! -d "${CEF_DIR}/include" ] || \
-             [ ! -d "${CEF_DIR}/libcef_dll" ]; then
+             [ ! -d "${CEF_DIR}/libcef_dll" ] || \
+             [ ! -f "${CEF_DIR}/.vendored-version" ]; then
             echo "error: CEF framework not vendored at ${CEF_DIR}." >&2
             echo "error: from the repo root, run: bun run scripts/fetch-cef.ts" >&2
             echo "error: (or: bun run cef:fetch) — then rebuild." >&2

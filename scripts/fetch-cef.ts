@@ -62,14 +62,30 @@ import { ROOT } from "./version-lib";
 const CEF_VERSION = "151.3.16+gbe1e15d+chromium-151.0.7922.109";
 const PLATFORM = "macosarm64";
 const ARTIFACT_TYPE = "minimal";
+// Pinned independently of the live index.json fetch below -- belt AND braces (Task 2 whole-
+// branch review, Minor): index.json alone would let a CDN-level compromise able to swap the
+// tarball also swap the manifest's sha1 to match, defeating that check silently. Recorded from
+// docs/research/2026-08-09-cef-spike.md's own verified download of this exact artifact; matches
+// apple/NormaKit/vendor/fetch-iroh.sh's IROH_ZIP_SHA256 convention (a literal, not a live fetch).
+// Checked against index.json's live value BEFORE downloading (the "belt"); the actual download
+// is then checked against index.json's value same as before (the "braces") -- two independent
+// layers, not collapsed into one, so a mismatch names which layer disagreed.
+const PINNED_SHA1 = "9686f8f6ef1343aa813af2c200db29f8b95abe7f";
 const BASE_URL = "https://cef-builds.spotifycdn.com";
 const INDEX_URL = `${BASE_URL}/index.json`;
 
 const VENDOR_DIR = join(ROOT, "apple", "Norma", "vendor", "cef");
 const STAMP_PATH = join(VENDOR_DIR, ".vendored-version");
-// Top-level dirs copied verbatim from the extracted distribution into VENDOR_DIR. This is the
-// ONE list that decides what "vendored" means -- the idempotency check, the build-gate script
-// in project.yml, and the extraction step below all key off it, so they can't drift apart.
+// Top-level dirs copied verbatim from the extracted distribution into VENDOR_DIR: the
+// idempotency check (vendoredPathsPresent, below) and the extraction step key off this same
+// list, so they can't drift apart from EACH OTHER. "Vendored" as a whole concept is stricter
+// than this list, though: it's these dirs present AND STAMP_PATH present with a matching
+// version/type (see alreadyVendored) -- a run killed mid-copy can leave dirs complete-looking
+// but no stamp, and only the stamp proves the copy that produced them finished and was
+// verified. apple/Norma/project.yml's build-gate script is hand-kept in sync with BOTH halves
+// of that (dirs + stamp) since YAML can't import this list directly -- if either list changes,
+// update the other by hand (Task 2 whole-branch review, Important: the gate originally checked
+// dirs only and false-passed exactly this partial-tree state).
 const COPY_DIRS = ["Release", "include", "libcef_dll"];
 const COPY_FILES = ["LICENSE.txt"];
 // The specific marker inside Release/ that proves the framework itself (not just an empty
@@ -172,6 +188,21 @@ if (fileEntry.name !== expectedFileName()) {
       `"${expectedFileName()}" -- naming scheme may have changed upstream.`,
   );
 }
+// The "belt": index.json's LIVE sha1 must agree with the pin recorded from the original,
+// independently-verified download (see PINNED_SHA1 above) before we trust it enough to even
+// download the tarball it names. The download-vs-index.json comparison below (the "braces")
+// is a separate, later check -- this one exists so the two never collapse into a single point
+// of failure that a compromised/rotated CDN response could satisfy by itself.
+if (fileEntry.sha1 !== PINNED_SHA1) {
+  fail(
+    `index.json's sha1 for ${fileEntry.name} does not match the pinned value\n` +
+      `  pinned (this script, from the spike's verified download): ${PINNED_SHA1}\n` +
+      `  index.json (live, just fetched):                          ${fileEntry.sha1}\n` +
+      `Refusing to trust a manifest that disagrees with the recorded pin. If CEF genuinely\n` +
+      `re-published this exact version's bytes, investigate before updating PINNED_SHA1 to match\n` +
+      `-- don't chase this error by blindly copying the new value in.`,
+  );
+}
 console.log(
   `Resolved: ${fileEntry.name}\n  size: ${(fileEntry.size / 1e6).toFixed(1)} MB\n  sha1: ${fileEntry.sha1}`,
 );
@@ -189,13 +220,25 @@ const failTmp = (msg: string): never => {
   rmSync(tmp, { recursive: true, force: true });
   fail(msg);
 };
+// Wraps an external command so a failure gets this script's own curated message (+ tmp
+// cleanup via failTmp) instead of a raw Node stack trace -- same reasoning as failTmp itself,
+// applied to the download/extract/copy calls below that didn't already have a custom check
+// (Task 2 whole-branch review, Minor: these were the only calls in the happy path still
+// unwrapped once the sha1-mismatch and missing-subdirectory checks were added).
+function execOrFail(context: string, cmd: string, args: string[], inheritStdio = false): void {
+  try {
+    execFileSync(cmd, args, inheritStdio ? { stdio: "inherit" } : undefined);
+  } catch (e) {
+    failTmp(`${context}\n  command: ${cmd} ${args.map((a) => `"${a}"`).join(" ")}\n  ${e}`);
+  }
+}
 try {
   const archivePath = join(tmp, fileEntry.name);
   const url = `${BASE_URL}/${encodeURIComponent(fileEntry.name)}`;
   console.log(`Downloading ${url}\n  -> ${archivePath}`);
   // stdio: inherit -- this is a ~125MB download (spike measured ~18s); let curl's own
   // progress meter and any error output reach the terminal directly rather than buffering it.
-  execFileSync("curl", ["-fL", "-o", archivePath, url], { stdio: "inherit" });
+  execOrFail("download failed -- check your network connection and try again", "curl", ["-fL", "-o", archivePath, url], true);
 
   console.log("Verifying sha1 against the manifest...");
   const actualSha1 = createHash("sha1").update(readFileSync(archivePath)).digest("hex");
@@ -212,7 +255,11 @@ try {
   console.log("Extracting...");
   const extractDir = join(tmp, "extract");
   mkdirSync(extractDir, { recursive: true });
-  execFileSync("tar", ["-xf", archivePath, "-C", extractDir]);
+  execOrFail(
+    "extraction failed -- the archive already passed sha1 verification, so this is more likely disk space or permissions than corruption",
+    "tar",
+    ["-xf", archivePath, "-C", extractDir],
+  );
   const topLevel = readdirSync(extractDir);
   if (topLevel.length !== 1) {
     failTmp(`expected exactly one top-level directory in the archive, found: ${topLevel.join(", ") || "(none)"}`);
@@ -238,11 +285,21 @@ try {
   // structure (Versions/Current -> A, etc.) exactly, the same reason release.ts and
   // fetch-iroh.sh use it for every app-bundle/framework copy in this codebase.
   for (const d of COPY_DIRS) {
-    execFileSync("ditto", [join(distRoot, d), join(VENDOR_DIR, d)]);
+    execOrFail(
+      `failed to copy "${d}/" into the vendored tree -- check disk space and permissions at ${VENDOR_DIR}`,
+      "ditto",
+      [join(distRoot, d), join(VENDOR_DIR, d)],
+    );
   }
   for (const f of COPY_FILES) {
     const src = join(distRoot, f);
-    if (existsSync(src)) execFileSync("ditto", [src, join(VENDOR_DIR, f)]);
+    if (existsSync(src)) {
+      execOrFail(
+        `failed to copy "${f}" into the vendored tree -- check disk space and permissions at ${VENDOR_DIR}`,
+        "ditto",
+        [src, join(VENDOR_DIR, f)],
+      );
+    }
   }
 
   const stamp: Stamp = {
