@@ -436,7 +436,8 @@ for (const pin of HARDENING_PINS) {
 console.log(
   "Signatures verified: codesign --verify --deep --strict PASS; TeamIdentifier + secure timestamp confirmed on " +
     "app + norma-core + NormaHelper + Sparkle.framework + its nested helpers + CEF framework + its 5 libraries + " +
-    `the 5 CEF helpers; ${JIT} present on the Renderer helper and absent from the other four.`,
+    `the 5 CEF helpers; hardened-runtime entitlements pinned across all ${HARDENING_PINS.length} components this ` +
+    `repo signs — exactly ${JIT} on the Renderer helper, exactly none on the other ${HARDENING_PINS.length - 1}.`,
 );
 
 // ---------------------------------------------------------------------------
