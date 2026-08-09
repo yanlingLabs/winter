@@ -38,6 +38,43 @@ final class NormaApplicationTests: XCTestCase {
         )
     }
 
+    /// The `CefAppProtocol` half: `NSApp` must actually answer CEF's two selectors.
+    ///
+    /// CEF checks CONFORMANCE, not class identity — `CefScopedSendingEvent` casts `NSApp` to
+    /// `NSApplication<CefAppProtocol>*` and messages `-isHandlingSendEvent` /
+    /// `-setHandlingSendEvent:` on it. So conformance is what this asserts, resolved through the
+    /// ObjC runtime by name: the test bundle cannot import `include/cef_application_mac.h` (it is
+    /// C++, and deliberately confined to `NormaApplication.mm` so no CEF type reaches Swift), and
+    /// `NSProtocolFromString` needs no header. A nil protocol here means the conformance was
+    /// dropped from the class extension — clang only emits the protocol record because something
+    /// declares it.
+    ///
+    /// Note what this does NOT require: CEF being present, loaded or initialised.
+    /// `CefScopedSendingEvent` is header-inline and compiles to plain ObjC message sends, so the
+    /// conformance is live in every build, Debug included.
+    func testNSAppConformsToCefAppProtocolSoCefScopedSendingEventCanDriveIt() {
+        let cefAppProtocol = NSProtocolFromString("CefAppProtocol")
+        XCTAssertNotNil(
+            cefAppProtocol,
+            "the CefAppProtocol runtime record is missing — nothing in the app declares conformance "
+                + "to it any more (NormaApplication.mm's class extension)"
+        )
+        XCTAssertTrue(
+            NSApp!.conforms(to: cefAppProtocol!),
+            "NSApp does not conform to CefAppProtocol; CefScopedSendingEvent would message a class "
+                + "that cannot answer it"
+        )
+        XCTAssertTrue(
+            NSApp!.responds(to: Selector(("isHandlingSendEvent"))),
+            "CrAppProtocol's -isHandlingSendEvent is missing from NSApp"
+        )
+        XCTAssertTrue(
+            NSApp!.responds(to: Selector(("setHandlingSendEvent:"))),
+            "CrAppControlProtocol's -setHandlingSendEvent: is missing from NSApp — this is the "
+                + "selector CefScopedSendingEvent's constructor and destructor both call"
+        )
+    }
+
     /// The deleted key stays deleted.
     ///
     /// Re-adding `NSPrincipalClass` would be worse than useless here: pointed at

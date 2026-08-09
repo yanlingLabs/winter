@@ -176,6 +176,20 @@ targets:
         SWIFT_VERSION: "5.9"
         MACOSX_DEPLOYMENT_TARGET: "26.0"
         SWIFT_OBJC_BRIDGING_HEADER: Support/NormaBridge.h
+        # panel-cef Task 3: NormaApplication.mm's CefAppProtocol conformance imports the vendored
+        # CEF headers. The search path is the DISTRIBUTION ROOT (vendor/cef), not vendor/cef/include
+        # — CEF's headers include their siblings as "include/cef_base.h", i.e. relative to the root.
+        # Array form rather than a space-joined string ON PURPOSE: this checkout's SRCROOT contains
+        # a space, and each array element reaches Xcode as one already-quoted path (the same class
+        # of quoting trap the Release OTHER_SWIFT_FLAGS comment below records being bitten by).
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/vendor/cef
+        # CEF 151's public headers require C++20 — measured, not assumed: cef_scoped_refptr.h:101
+        # uses std::same_as (a C++20 concept), and a probe compile at gnu++17 fails there with 20
+        # errors. xcodegen's setting preset leaves the project on gnu++14, which fails identically.
+        # Scoped to this target: it is the only one with C++ (NormaHelper is pure Swift).
+        CLANG_CXX_LANGUAGE_STANDARD: gnu++20
         # DD-T4: dist identity is the base; the Debug config overrides all three for dev. Info.plist
         # keys above reference these ($(NORMA_APP_NAME)/$(NORMA_APP_ICON)/$(PRODUCT_BUNDLE_IDENTIFIER)).
         PRODUCT_BUNDLE_IDENTIFIER: com.norma.app
