@@ -20,7 +20,7 @@
  *
  * Whole-branch review fix (F1/F2, see .superpowers/sdd/progress-release.md): the appcast
  * `<item>` insert decision is `appcastInsertPlan` (release-lib.ts, unit-tested) — under
- * --dry-run it writes ONLY a preview at out/release/<v>/appcast-preview.xml, mirroring the
+ * --dry-run it writes ONLY a preview at out/release/<v>-dryrun/appcast-preview.xml, mirroring
  * cask's out/ render; the TRACKED releases/appcast.xml is written only from inside the
  * publish tail's `if (!DRY_RUN)` block, never before. The insert is also idempotent: an
  * `<item>` whose `<sparkle:version>` already matches the release version is skipped rather than
@@ -53,10 +53,13 @@
  */
 import { execSync } from "node:child_process";
 import {
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   rmSync,
   statSync,
@@ -253,9 +256,29 @@ const version = readCanonical();
 console.log(`Releasing version ${version}${BETA ? " (beta)" : ""}`);
 
 // ---------------------------------------------------------------------------
-// 3. Build — T1's canonical override invocation, -derivedDataPath out/release/<v>/dd.
+// 3. Build — T1's canonical override invocation, -derivedDataPath <OUT>/dd (OUT is
+//    out/release/<v>, or out/release/<v>-dryrun under --dry-run; see below).
 // ---------------------------------------------------------------------------
-const OUT = join(ROOT, "out", "release", version);
+// A dry run builds into `<version>-dryrun`, NEVER `<version>` (panel-cef Task 5 review, Important).
+// The next line wipes this directory, and under `--no-bump` `version` is the version this repo has
+// already RELEASED — so with both flags, the command CLAUDE.md advertises as "full rehearsal, never
+// publishes" would silently replace a shipped release's zip, DMG, cask and appcast preview with
+// same-version artifacts built from whatever branch is checked out. Nothing downstream needs the
+// canonical path for a rehearsal: a dry run exits at section 12 before publishing anything, and a
+// real release rebuilds OUT from scratch regardless.
+//
+// This path became reachable in this same task: the preflight tag check (section 1) used to abort
+// `--dry-run --no-bump` before it could ever get here, and section 1's dry-run downgrade removed
+// that accidental protection. A change that makes a destructive path reachable owes the guard.
+//
+// The condition is `DRY_RUN` alone, deliberately broader than the reviewer's suggested
+// `DRY_RUN && !RESUME_PUBLISH`: `publishGuard` resolves dry-run FIRST, so `--dry-run
+// --resume-publish` is still a rehearsal that publishes nothing, and it would otherwise be the one
+// remaining flag combination that still wipes the released directory. Checked before widening it:
+// `RESUME_PUBLISH` is read at exactly three places (its definition, the preflight tag check, and
+// `publishGuard`) and gates neither the build nor this `rmSync` — every resume run rebuilds OUT
+// itself, so no resume path depends on artifacts surviving here.
+const OUT = join(ROOT, "out", "release", DRY_RUN ? `${version}-dryrun` : version);
 rmSync(OUT, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
 const dd = join(OUT, "dd");
@@ -367,21 +390,46 @@ const CEF_HELPERS = [
 for (const name of CEF_HELPERS) {
   assertSigned(join(app, "Contents", "Frameworks", `${name}.app`), `CEF helper (${name})`);
 }
-// The one entitlement this branch adds, pinned where it ships rather than only where it is
-// declared: project.yml can hand CODE_SIGN_ENTITLEMENTS to the wrong target, or to four of five,
-// without anything failing to build. Checked in BOTH directions — present on Renderer, absent
-// everywhere else — because "applied too widely" is the failure that silently weakens hardening.
+// "Start from nothing" pinned where it SHIPS, across every component this repo signs — not just
+// where entitlements are declared. project.yml can hand CODE_SIGN_ENTITLEMENTS to the wrong
+// target, or to four of five, without anything failing to build.
+//
+// The rule is scoped to the HARDENED-RUNTIME family (`com.apple.security.cs.*`), which is the set
+// that actually trades away protection, and it is asserted in BOTH directions: exactly
+// `allow-jit` on the Renderer, and exactly nothing on everything else. "Applied too widely" is
+// checked as carefully as "missing", because that is the direction that silently weakens
+// hardening — and `com.apple.security.cs.disable-library-validation` is the specific creep this
+// exists to stop. Norma.app is in the list deliberately (Task 5 review, Minor): it `dlopen`s the
+// same CEF framework via `LoadInMain` from Task 6 onward, so it is the most plausible place for
+// that entitlement to be added "just to make it work" — Task 5 measured that it does not need it.
+//
+// Non-`cs.*` keys are tolerated: Xcode injects `com.apple.application-identifier` into NormaHelper
+// (measured: `37N77U9RSZ.com.norma.helper`), which is identity bookkeeping, not a hardening
+// relaxation. Sparkle's own nested helpers are deliberately OUT of scope — they are third-party
+// and `resignPreservingEntitlements` preserves whatever they ship with, by design.
 const JIT = "com.apple.security.cs.allow-jit";
-for (const name of CEF_HELPERS) {
-  const helper = join(app, "Contents", "Frameworks", `${name}.app`);
-  const ents = probe(`codesign -d --entitlements - --xml "${helper}" 2>/dev/null`).stdout;
-  const hasJit = ents.includes(JIT);
-  const wantJit = name === "Norma Helper (Renderer)";
-  if (hasJit !== wantJit) {
+const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
+  { path: app, label: "Norma.app", expect: [] },
+  { path: join(app, "Contents", "MacOS", "NormaHelper"), label: "NormaHelper", expect: [] },
+  { path: join(app, "Contents", "Resources", "norma-core"), label: "norma-core", expect: [] },
+  ...CEF_HELPERS.map((name) => ({
+    path: join(app, "Contents", "Frameworks", `${name}.app`),
+    label: `CEF helper (${name})`,
+    expect: name === "Norma Helper (Renderer)" ? [JIT] : [],
+  })),
+];
+for (const pin of HARDENING_PINS) {
+  const ents = probe(`codesign -d --entitlements - --xml "${pin.path}" 2>/dev/null`).stdout;
+  const found = [...ents.matchAll(/<key>(com\.apple\.security\.cs\.[^<]+)<\/key>/g)].map((m) => m[1]!).sort();
+  const want = [...pin.expect].sort();
+  if (found.join(",") !== want.join(",")) {
     fail(
-      wantJit
-        ? `CEF helper (${name}): expected ${JIT} and it is absent — V8 cannot JIT under the hardened runtime without it`
-        : `CEF helper (${name}): carries ${JIT} and must not — only the Renderer needs it (see project.yml)`,
+      `${pin.label}: hardened-runtime entitlements are not what this branch decided.\n` +
+        `  expected: ${want.length ? want.join(", ") : "(none)"}\n` +
+        `  found:    ${found.length ? found.join(", ") : "(none)"}\n` +
+        `  Every com.apple.security.cs.* entitlement is a deliberate, evidence-backed decision here —\n` +
+        `  see apple/Norma/project.yml's CEFHelperRenderer block. Do not "fix" this by editing the\n` +
+        `  expectation; justify the entitlement or remove it.`,
     );
   }
 }
@@ -435,8 +483,14 @@ for (const n of NOTICES) {
   }
   const bytes = statSync(p).size;
   if (bytes < n.minBytes) fail(`${n.label} at ${p} is ${bytes} bytes — expected at least ${n.minBytes} (truncated copy?)`);
-  // Read only the head: CREDITS.html is ~19.6MB and nothing here needs the whole file.
-  const head = readFileSync(p).subarray(0, 65536).toString("utf8");
+  // Read only the head, for real: CREDITS.html is ~19.6MB and nothing here needs the whole file.
+  // (`readFileSync(p).subarray(0, N)` would read all 19.6MB and then throw most of it away — the
+  // comment described code that had not been written. Task 5 review, Minor.)
+  const fd = openSync(p, "r");
+  const buf = Buffer.alloc(65536);
+  const read = readSync(fd, buf, 0, buf.length, 0);
+  closeSync(fd);
+  const head = buf.subarray(0, read).toString("utf8");
   if (!head.includes(n.mustContain)) fail(`${n.label} at ${p} does not contain ${JSON.stringify(n.mustContain)} — wrong file?`);
   console.log(`  ${n.file}: ${bytes} bytes, content check OK`);
 }
