@@ -344,7 +344,28 @@ struct ShellRootView: View {
                                     ? (presentation.mode == .hidden ? "Show panel" : "Hide panel")
                                     : "Widen the window or hide the sidebar to use the panel."
                             ) {
+                                let wasHidden = presentation.mode == .hidden
                                 withAnimation(.snappy) { presentation.toggleVisible() }
+                                // 2026-08-09 live gate (user): "the sidebar should open with a tab
+                                // already" — an empty panel has nothing to show and no reason to be
+                                // open. Only on the HIDDEN -> visible transition, and only when the
+                                // strip is genuinely empty, so re-opening a panel that already has
+                                // tabs never mints a spurious one.
+                                //
+                                // Routed through the SAME two doors "+" uses (`ShellPanel`'s own
+                                // `onOpenTab`), not a third path: the new-chat page BINDS so the
+                                // page's draft survives, every other landing keeps Task 12's
+                                // create-then-navigate. Both are re-entrancy-gated, so a rapid
+                                // toggle cannot double-create.
+                                if wasHidden, panelStore.tabs.isEmpty {
+                                    if nav.destination == .newChat {
+                                        host?.openPanelTabForNewChatPage(kind: .web)
+                                    } else {
+                                        host?.openPanelTab(kind: .web) { sessionId in
+                                            nav.navigate(to: .session(sessionId))
+                                        }
+                                    }
+                                }
                             }
                             .disabled(!fits)
                         } else {

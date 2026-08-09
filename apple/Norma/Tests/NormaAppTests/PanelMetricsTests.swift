@@ -73,12 +73,38 @@ final class PanelMetricsTests: XCTestCase {
     /// inequality alone cannot tell 140.5 (pre-T13) from 146.5 (post-T13) apart, so it is silent on
     /// whether `panelTabSpacing` is actually wired in — margin shrank from 15.5pt to 9.5pt below
     /// the cap, still a real gap either way.
-    func testTabPillWidthCompressesForATwoTabRowAtDefaultWidth() {
-        let width = panelTabPillWidth(tabCount: 2, availableWidth: panelDefaultWidth)
+    /// 2026-08-09 live gate: `panelDefaultWidth` went 480 -> 600 (user: the panel should start
+    /// wider). This test and the arithmetic one below were both pinned to `panelDefaultWidth`, and
+    /// both went red — correctly: at 600pt two tabs no longer NEED to compress (share 206.5, capped
+    /// to 156), so "the default width forces compression" simply stopped being a true statement.
+    ///
+    /// Neither test was ever ABOUT the default, though — one proves compression happens at all, the
+    /// other proves `panelTabSpacing` is wired into the overhead. So both now take an explicit
+    /// `compressingWidth` chosen to sit strictly inside the (floor, cap) window, and the new
+    /// `…AtTheDefaultWidth` test below covers what the default actually does now. Retargeting the
+    /// vehicle, not weakening the assertion: both bounds here are still STRICT, so a stub that
+    /// ignores `availableWidth` and returns the cap still fails the first one.
+    ///
+    /// 480 is deliberately the old default — the arithmetic it exercises is unchanged, so the
+    /// hand-derived 146.5 below stays valid and stays checkable against this file's own history.
+    static let compressingWidth: CGFloat = 480
+
+    func testTabPillWidthCompressesForATwoTabRowWhenWidthIsTight() {
+        let width = panelTabPillWidth(tabCount: 2, availableWidth: Self.compressingWidth)
         XCTAssertLessThan(width, panelTabPillSize.width,
-                          "two tabs at the default width must actually compress, not sit at the cap")
+                          "two tabs at a tight width must actually compress, not sit at the cap")
         XCTAssertGreaterThan(width, panelTabPillMinWidth,
                              "and still fit without hitting the floor (which is where scrolling starts)")
+    }
+
+    /// What the NEW default buys, and the reason the user asked for it: at 600pt a two-tab row has
+    /// room to spare, so both pills render at full measured width instead of compressed.
+    /// `panelDefaultWidth` appears here deliberately — this is the one test that SHOULD track it,
+    /// so a future width change surfaces here rather than in the arithmetic pins.
+    func testTwoTabsDoNotNeedToCompressAtTheDefaultWidth() {
+        XCTAssertEqual(panelTabPillWidth(tabCount: 2, availableWidth: panelDefaultWidth),
+                       panelTabPillSize.width,
+                       "the widened default should leave a two-tab row uncompressed")
     }
 
     /// panel-shell T13 RED confirmed pre-implementation (today's arithmetic returns 140.5, this
@@ -97,9 +123,14 @@ final class PanelMetricsTests: XCTestCase {
     /// + (tabCount-1)*panelTabSpacing = 1*6 + 2*panelNewTabButtonGap(18, pill->"+" AND the
     /// ScrollView-frame->trailing-cluster gap, both unchanged by T13) + panelTabPillSize.height(28,
     /// the "+" button) + panelTrailingClusterWidth(108) = 9+6+36+28+108 = 187.
-    /// share = (panelDefaultWidth(480) - 187) / 2 = 146.5.
+    /// share = (compressingWidth(480) - 187) / 2 = 146.5.
+    ///
+    /// 2026-08-09: the input was `panelDefaultWidth` until it moved 480 -> 600, at which point the
+    /// share caps and this pin can no longer see the overhead arithmetic at all. Now takes the
+    /// explicit `compressingWidth` (still 480), so the hand-derivation above and the mutation
+    /// evidence in this comment remain exactly as verified.
     func testTabPillWidthAtTwoTabsUsesTheSplitGapArithmetic() {
-        XCTAssertEqual(panelTabPillWidth(tabCount: 2, availableWidth: panelDefaultWidth), 146.5)
+        XCTAssertEqual(panelTabPillWidth(tabCount: 2, availableWidth: Self.compressingWidth), 146.5)
     }
 
     /// The other end of the same function: enough tabs that even the floor doesn't fit. The pill

@@ -29,6 +29,16 @@ let panelNewTabButtonGap: CGFloat = 18
 /// a denser strip makes a different value obviously better.
 let panelTabSpacing: CGFloat = 6
 
+/// The close control's hit box, and how far its trailing edge sits from the pill's. Measured at the
+/// 2026-08-09 live gate as visibly loose at 15pt — the user asked for it tighter.
+let panelTabCloseBoxSize: CGFloat = 16
+let panelTabCloseInset: CGFloat = 8
+
+/// Where the label must stop so it never runs under the close control, which is an OVERLAY and so
+/// does not reserve its own space. DERIVED from the two constants above plus one pill-inset of
+/// breathing room, rather than a hand-tuned literal that has to be re-tuned whenever either moves.
+let panelTabLabelTrailingInset: CGFloat = panelTabCloseInset + panelTabCloseBoxSize + panelTabPillInset
+
 /// panel-shell T10: the pill's width above is a MAXIMUM, not a fixed rendered width — tabs
 /// compress below it as more open, so the strip always fits inside the panel (`panelTabPillWidth`
 /// below is the formula). Below THIS floor there is nothing left to shrink: the label truncates to
@@ -398,7 +408,9 @@ private struct PanelTabPill: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .padding(.leading, 33)
-                    .padding(.trailing, 30) // stop clear of the close button, overlaid below
+                    // DERIVED from the close button's own inset and box below, so tightening one
+                    // can never leave the label running under the other.
+                    .padding(.trailing, panelTabLabelTrailingInset)
             }
             .frame(width: width, height: panelTabPillSize.height, alignment: .leading)
             .contentShape(RoundedRectangle(cornerRadius: panelTabPillRadius, style: .continuous))
@@ -420,11 +432,11 @@ private struct PanelTabPill: View {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(Theme.textMuted)
-                    .frame(width: 16, height: 16)
+                    .frame(width: panelTabCloseBoxSize, height: panelTabCloseBoxSize)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .padding(.trailing, 15)
+            .padding(.trailing, panelTabCloseInset)
             .accessibilityLabel("Close \(panelTabDisplayTitle(tab))")
         }
         .help(panelTabDisplayTitle(tab))

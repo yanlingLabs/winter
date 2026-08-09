@@ -10,7 +10,7 @@ enum PanelMode: String, Equatable, Codable {
 
 /// Default `.side` width. Deliberately NOT the reference's 49% — a percentage rescales the panel on
 /// every window resize, which is not what dragging a divider promises. Points, persisted.
-let panelDefaultWidth: CGFloat = 480
+let panelDefaultWidth: CGFloat = 600
 
 /// Below this a browser is not usable.
 let panelMinWidth: CGFloat = 360
