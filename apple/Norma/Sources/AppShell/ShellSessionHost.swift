@@ -350,14 +350,12 @@ final class ShellSessionHost: ObservableObject {
         }
     }
 
-    // MARK: - panel-shell T8/T9: the panel's tab-strip mutation RPCs (bare, ATTACHED-session-targeted)
+    // MARK: - panel-shell T8/T9/T15: the panel's tab-strip mutation RPCs (bare, session-targeted)
     //
     // Same `managementClient` reasoning as the roster verbs just above: `panel.openTab`/`closeTab`/
     // `activateTab` all take `sessionId` directly, and the daemon appends straight to that
     // session's hub (`hub.append(sessionId, …)`, `ipc/server.ts`) — the calling connection never
-    // needs to be ATTACHED to it. Targeted at `attachedSessionId` rather than an arbitrary roster
-    // row because these three represent a tap on the strip the user is CURRENTLY LOOKING AT — the
-    // one session `panelStore` is presently publishing (`currentSessionId`, `PanelStore.swift`).
+    // needs to be ATTACHED to it.
     //
     // **None of these apply anything locally, even though this host now holds `panelStore`
     // (T9).** `PanelStore.apply(_:)` is the ONE path that may ever change `tabs`/`activeTabId` (its
@@ -365,7 +363,29 @@ final class ShellSessionHost: ObservableObject {
     // `onEvent` hook `attachFresh` wires below, never by these three. They fire the RPC and stop;
     // the resulting `panel_tab_opened`/`closed`/`activated` event reaches `panelStore` (and so the
     // strip) live, through that hook — this is what makes the round trip "tap → daemon → strip
-    // updates" rather than an optimistic local mutation racing the daemon's own answer.
+    // updates" rather than an optimistic local mutation racing the daemon's own answer. panel-shell
+    // T15 is the ONE exception: a bound-but-unattached session has no live harness to pump FROM at
+    // all, so `openPanelTabForNewChatPage`/`closePanelTab`/`activatePanelTab` below explicitly
+    // `refreshPanelTabs` after firing, rather than waiting on a pump that will never arrive.
+
+    /// panel-shell T15: which session `closePanelTab`/`activatePanelTab` act on — the ATTACHED
+    /// session if there is one (T8/T9's original target: "a tap on the strip the user is CURRENTLY
+    /// LOOKING AT"), else the new-chat page's BOUND session (`newChatBoundSessionId`,
+    /// `openPanelTabForNewChatPage` below) if the page has one. `nil` when neither — the pre-T15
+    /// "nothing to act on" no-op is unchanged for that case
+    /// (`testActivateAndCloseTabControlsAreNoOpsWithNoAttachedSession`).
+    ///
+    /// This is what makes closing/activating the bound session's tab LIVE while un-navigated —
+    /// before this task `closePanelTab` guarded on `attachedSessionId` alone, so the strip's "×"
+    /// silently no-opped on an un-navigated new-chat page (Requirement 4's own naming of this exact
+    /// line). `openPanelTab` itself does NOT use this: it is reached from every OTHER landing's
+    /// auto-create too (`ShellPanel`'s "+" only routes to the bound-aware door on `.newChat`
+    /// specifically), and widening its target would let a stale binding from an abandoned `.newChat`
+    /// visit silently redirect an unrelated landing's "+" — see `openPanelTab`'s own doc for the
+    /// fork.
+    private var panelTargetSessionId: String? {
+        attachedSessionId ?? newChatBoundSessionId
+    }
 
     /// The strip's `+`. Sends no `tabId` — the daemon mints one (`PanelOpenTabResult.tabId`),
     /// which this deliberately discards: nothing here needs it, and seeding it anywhere would be
@@ -392,6 +412,13 @@ final class ShellSessionHost: ObservableObject {
     /// unchanged from the attached-session branch) — a session that now exists should still be
     /// navigated to; the alternative (stranding the user on whatever they were looking at, with a
     /// real session sitting unopened) is worse than an occasionally-empty one.
+    ///
+    /// panel-shell T15: this is no longer the ONLY door onto "+ with no attached session" — on the
+    /// new-chat page specifically, `ShellPanel`'s "+" calls `openPanelTabForNewChatPage` below
+    /// instead, which BINDS rather than navigating (the page's draft must survive). This method is
+    /// unchanged and still reached from every OTHER landing's auto-create (the dashboard, a mode
+    /// list, dispatch) — navigating on create-then-open remains correct there, since none of those
+    /// pages carry state a navigate would strand.
     ///
     /// **Ordering is deliberately create → open-tab (awaited) → `onSessionCreated`, NOT the literal
     /// create → attach → open-tab order the bug report describes.** `panel.openTab` is a bare
@@ -431,19 +458,91 @@ final class ShellSessionHost: ObservableObject {
         }
     }
 
-    /// A tab's `×`.
+    /// A tab's `×`. panel-shell T15: targets `panelTargetSessionId` (attached, else the new-chat
+    /// page's bound session) — see that property's own doc for why this specific widening is what
+    /// makes closing a bound session's LAST tab live (the path Task 16's reaper eventually acts on).
+    /// Re-fetches after the ack ONLY while unattached: an attached close is already reflected by the
+    /// live pump (`attachFresh`'s `onEvent` hook), but a bound-but-unattached session has no such
+    /// pump — without this the strip would show a stale, already-closed tab until the next real
+    /// attach.
     func closePanelTab(_ tabId: String) {
-        guard let client = managementClient, let sessionId = attachedSessionId else { return }
-        Task { @MainActor in
+        guard let client = managementClient, let sessionId = panelTargetSessionId else { return }
+        Task { @MainActor [weak self] in
             _ = try? await client.closePanelTab(sessionId: sessionId, tabId: tabId)
+            if self?.attachedSessionId == nil { self?.refreshPanelTabs(for: sessionId) }
         }
     }
 
-    /// A tab click.
+    /// A tab click. Same `panelTargetSessionId` widening and unattached-refetch as `closePanelTab`
+    /// just above, for the identical reason — leaving this one behind while fixing only the "×"
+    /// would be a visible, confusing half-fix: a tab the panel shows while bound-but-unattached that
+    /// silently refuses to respond to a click.
     func activatePanelTab(_ tabId: String) {
-        guard let client = managementClient, let sessionId = attachedSessionId else { return }
-        Task { @MainActor in
+        guard let client = managementClient, let sessionId = panelTargetSessionId else { return }
+        Task { @MainActor [weak self] in
             _ = try? await client.activatePanelTab(sessionId: sessionId, tabId: tabId)
+            if self?.attachedSessionId == nil { self?.refreshPanelTabs(for: sessionId) }
+        }
+    }
+
+    /// panel-shell T15: the new-chat page's OWN "+" — creates (once) and BINDS rather than
+    /// navigating (Requirement 1), so `NewChatPage`'s draft survives. `ShellPanel`'s "+" calls this
+    /// instead of `openPanelTab` ONLY while `nav.destination == .newChat`; every other landing's "+"
+    /// is unchanged (`openPanelTab`'s own doc, above).
+    ///
+    /// **Requirement 3 — a SECOND "+" while already bound opens a tab in the SAME session, never a
+    /// second create.** This is the SEQUENTIAL counterpart to `panelAutoCreateInFlight`'s
+    /// CONCURRENT guard below: that one only spans a single in-flight round trip, this spans the
+    /// whole page visit, keyed by `newChatBoundSessionId` rather than a boolean.
+    ///
+    /// **Requirement 4 — a bound session that has been deleted underneath (cleaner/reaper) must not
+    /// dead-end the button.** A silent no-op here would be exactly the "click that does nothing
+    /// with no explanation" class Task 12 existed to kill. On failure, the stale binding is cleared
+    /// and control falls through to an ordinary auto-create, as if this were the page's first "+".
+    /// `try?` conflates "the session is gone" with "some other transient failure" — accepted, the
+    /// same bounded trade `sendFirstChatMessage`'s own existence check makes (see its doc): on a
+    /// local Unix-socket daemon a spurious retry is rare and merely wasteful, never data-losing.
+    ///
+    /// **Panel priming is EXPLICIT**, unlike the attached case: the page is deliberately NOT
+    /// attaching, so `attachFresh`'s own `panelStore.switchSession`/`refreshPanelTabs` priming
+    /// (Task 9) never runs for it. Guarded by `newChatPageEpoch`, captured before the create's async
+    /// gap — mirroring `sendFirstChatMessage`'s own epoch guard: the session and its tab are still
+    /// created for a departed page instance (a commitment, once the create is in flight — the same
+    /// precedent), but the BINDING and the panel priming are skipped so a departed instance's
+    /// browse-only session cannot hijack whatever the shell is showing by the time it lands.
+    func openPanelTabForNewChatPage(kind: PanelTabKind = .web) {
+        guard let client = managementClient else { return }
+        let kindRaw = kind.rawValue
+        if let bound = newChatBoundSessionId {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if (try? await client.openPanelTab(sessionId: bound, kind: kindRaw)) != nil {
+                    self.refreshPanelTabs(for: bound)
+                } else {
+                    self.newChatBoundSessionId = nil
+                    self.autoCreateForNewChatPage(client: client, kindRaw: kindRaw)
+                }
+            }
+            return
+        }
+        autoCreateForNewChatPage(client: client, kindRaw: kindRaw)
+    }
+
+    /// The auto-create half of `openPanelTabForNewChatPage` — split out so the "bound session is
+    /// gone" fallback (above) and the "never bound yet" first click both run the identical sequence
+    /// rather than two copies of it drifting apart.
+    private func autoCreateForNewChatPage(client: NormaClient, kindRaw: String) {
+        guard !panelAutoCreateInFlight else { return }
+        panelAutoCreateInFlight = true
+        let epoch = newChatPageEpoch
+        Task { @MainActor [weak self] in
+            defer { self?.panelAutoCreateInFlight = false }
+            guard let self, let created = try? await client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat") else { return }
+            _ = try? await client.openPanelTab(sessionId: created.sessionId, kind: kindRaw)
+            guard epoch == self.newChatPageEpoch else { return } // a departed page instance: create/tab are a commitment, the bind and priming are not
+            self.newChatBoundSessionId = created.sessionId
+            self.panelStore.switchSession(to: created.sessionId)
+            self.refreshPanelTabs(for: created.sessionId)
         }
     }
 
@@ -534,6 +633,19 @@ final class ShellSessionHost: ObservableObject {
     /// reproduces that exact contract rather than silently overturning it.
     @Published var newChatDraft: String = ""
 
+    /// panel-shell T15: the new-chat page's own BOUND session — set once `openPanelTabForNewChatPage`
+    /// auto-creates, so the page can offer the panel a tab without navigating away (Requirement 1).
+    /// Lives here for the SAME reason `newChatDraft` does, right above: `detail` (and `NewChatPage`
+    /// inside it) is torn down on `.maximized` (Task 10b), so a binding kept in view `@State` would
+    /// be lost exactly there. `private(set)`: only this host writes it (`openPanelTabForNewChatPage`,
+    /// `sendFirstChatMessage`'s consume-on-send, `apply(destination:)`'s fresh-entry reset) — no view
+    /// needs to set it, only to exist alongside `newChatDraft` for whatever the page shows.
+    ///
+    /// Cleared on a fresh `.newChat` arrival, the identical "starts clean on every entry" contract as
+    /// `newChatDraft`/`newChatCreate` — a previous, abandoned visit's binding must never be silently
+    /// adopted by a later one (`testApplyNewChatClearsAStaleBindingAndThePanelDisplayOnEveryEntry`).
+    @Published private(set) var newChatBoundSessionId: String?
+
     /// The typed first messages, parked between each create's success and delivery on the created
     /// session's OWN attach (`deliverPendingFirstMessage` — fired from the pinned feed's
     /// post-attach `onConnected` on a fresh attach, and after `repin`'s attach on a hop;
@@ -582,6 +694,17 @@ final class ShellSessionHost: ObservableObject {
     ///   Recents and the parked message delivers on that session's own attach (fresh or hop);
     ///   only the CURRENT page instance's create navigates (the `newChatPageEpoch` gate below).
     ///   The send is still a commitment — it delivers whenever the session is next opened.
+    ///
+    /// panel-shell T15 (Requirement 2): if "+" already bound the page to a session
+    /// (`newChatBoundSessionId`), reuse it instead of creating a second one — a second create would
+    /// orphan the tab-holding original every send, and Task 12 R2 makes an orphan with an open tab
+    /// permanently reaper-immune. Requirement 4: verify the bound session still exists FIRST, via
+    /// `panel.list` (the same bare RPC `refreshPanelTabs` already rides) — the cleaner/reaper can
+    /// have deleted a bound-but-unattached session out from under an idle page; a bound id that no
+    /// longer resolves falls back to an ordinary create rather than sending into nothing. `try?`
+    /// conflates "gone" with "some other transient failure" — accepted: on a local Unix-socket
+    /// daemon that is a bounded, rare cost (an occasional redundant session), and the one thing this
+    /// requirement forbids — losing the message outright — cannot happen either way.
     func sendFirstChatMessage(_ text: String, onCreated: @escaping (String) -> Void) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -592,21 +715,37 @@ final class ShellSessionHost: ObservableObject {
         }
         newChatCreate = .creating
         let epoch = newChatPageEpoch // T2 fix round 1: which page instance this send belongs to
+        // panel-shell T15: captured BEFORE the async gap, mirroring `epoch` just above — a bind
+        // that lands WHILE this send is already in flight must not be adopted mid-flight, and a
+        // fresh `.newChat` entry clearing the binding mid-flight must not un-bind a reuse already
+        // under way.
+        let bound = newChatBoundSessionId
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let created = try await client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat")
+                let sessionId: String
+                if let bound, (try? await client.listPanelTabs(sessionId: bound)) != nil {
+                    sessionId = bound // verified to still exist — reuse it, no second create
+                } else {
+                    let created = try await client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat")
+                    sessionId = created.sessionId
+                }
+                // The binding's job ends here either way — reused (about to attach) or abandoned
+                // (confirmed gone/never set). Unconditional, matching `newChatCreate = .idle`
+                // just below rather than an epoch guard: the same "a departed instance's create is
+                // still allowed to settle" precedent that write already establishes.
+                self.newChatBoundSessionId = nil
                 // Parked BEFORE `onCreated`: the navigate inside it drives apply → select →
                 // attachFresh SYNCHRONOUSLY, and attachFresh must already see the pending text
                 // to seed the adapter's composer. Do not reorder. Keyed to THIS create's session
                 // — a later create writes its own entry, never this one (fix round 1).
-                self.pendingFirstMessages[created.sessionId] = trimmed
+                self.pendingFirstMessages[sessionId] = trimmed
                 self.newChatCreate = .idle
                 // Navigation fires only for the CURRENT page instance's create (fix round 1):
                 // a departed create delivers quietly — its session sits in Recents, its message
                 // lands on that session's own eventual attach, and nothing yanks the user.
                 if epoch == self.newChatPageEpoch {
-                    onCreated(created.sessionId)
+                    onCreated(sessionId)
                 }
             } catch let error as RpcError {
                 self.newChatCreate = .failed(error.message)
@@ -665,6 +804,22 @@ final class ShellSessionHost: ObservableObject {
     /// destination keeps the old rule (a landing, never a session).
     func apply(destination: ShellDestination) {
         newChatPageEpoch += 1 // T2 fix round 1: every navigation is a page-instance boundary
+        // panel-shell T15: a bound-but-unattached session's tab was primed onto the panel MANUALLY
+        // (`openPanelTabForNewChatPage`), never through a real attach — so unlike an attached
+        // session's departure (already un-shown by `detachCurrent`'s own `panelStore.detach()`),
+        // nothing else clears this one when the shell leaves `.newChat` without sending. Decision,
+        // disclosed in the T15 report rather than implied by the task text: the panel shows the
+        // CURRENT destination's tabs and nothing else — a bound-but-abandoned session's tab
+        // disappears from view the instant the page is left, even though the session and its tab
+        // persist durably in the daemon and stay reachable from Recents (Requirement 4 is what
+        // keeps that reachable). Runs for EVERY destination, not just `.newChat`, because
+        // `.mode`/`.dashboard` leave the shell just as unattached as `.newChat` does; harmless when
+        // the destination turns out to be the bound session itself — `select` → `attachFresh`'s own
+        // `switchSession`/`refreshPanelTabs` runs synchronously right after, in the same call
+        // stack, so there is no visible flicker.
+        if newChatBoundSessionId != nil, attachedSessionId == nil {
+            panelStore.detach()
+        }
         switch destination {
         case .session(let sessionId):
             dispatchResolutionToken += 1 // invalidate any dispatch resolution the shell moved on from
@@ -685,6 +840,9 @@ final class ShellSessionHost: ObservableObject {
             // just above, now covering the draft too — see `newChatDraft`'s own doc for why this
             // is a preservation of the pre-existing "drops on navigate-away" ruling, not a new one.
             newChatDraft = ""
+            // panel-shell T15: same "starts clean on every entry" contract — a previous, abandoned
+            // visit's binding must never be silently adopted by a fresh one's "+".
+            newChatBoundSessionId = nil
             deselect()
         default:
             dispatchResolutionToken += 1

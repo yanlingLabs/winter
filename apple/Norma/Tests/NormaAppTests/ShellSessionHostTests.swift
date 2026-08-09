@@ -1341,6 +1341,327 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(mgmt.methods.filter { $0 == "panel.openTab" }.count, 1, "and exactly one tab, not two")
     }
 
+    // MARK: - panel-shell T15: "+" on the new-chat page BINDS rather than navigating
+    //
+    // Today (pre-fix) `ShellPanel`'s "+" always calls `openPanelTab(kind:onSessionCreated:)`, whose
+    // completion navigates — on the new-chat page that yanks the user onto the fresh session and
+    // strands `newChatDraft`. `openPanelTabForNewChatPage` does not exist on the pre-fix host at
+    // all, so every test below is a COMPILE-ERROR RED against unmodified code — the same accepted
+    // convention Task 12's own tests use (Task 1 Step 2: "cannot find … in scope").
+
+    /// Requirement 1 + 2, the task's own headline test: "+" binds — creates the session and opens
+    /// the tab, but never attaches — and the FIRST SEND reuses that exact session (one create,
+    /// ever) rather than minting a second and orphaning the tab-holding original.
+    func testBindThenSendProducesExactlyOneSessionAndSendsIntoTheTabsSession() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        host.openPanelTabForNewChatPage(kind: .web)
+
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("'+' must still create a session: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_bound","trusted":true}}"#)
+
+        // The bind's own tab-open — `newChatBoundSessionId` is set only AFTER this acks.
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("'+' must open the tab: \(mgmt.methods)")
+        }
+        XCTAssertEqual((open["params"] as? [String: Any])?["sessionId"] as? String, "s_bound")
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(open["id"] as! Int),"result":{"ok":true,"tabId":"t1"}}"#)
+
+        // The bind's own panel-priming panel.list (no live pump while unattached — see
+        // `openPanelTabForNewChatPage`'s doc) — this is the FIRST of two panel.list calls this
+        // test will see; the second comes from the send's existence-verify below.
+        await feedWaitUntil { mgmt.methods.contains("panel.list") }
+        guard let primeList = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.list" }) else {
+            return XCTFail("binding must prime the panel via panel.list: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(primeList["id"] as! Int),"result":{"tabs":[{"tabId":"t1","kind":"web","url":null,"title":null}],"activeTabId":"t1"}}"#)
+        await feedWaitUntil { !host.panelStore.tabs.isEmpty }
+        XCTAssertEqual(host.panelStore.tabs.map(\.tabId), ["t1"], "the panel shows the tab without ever attaching")
+        XCTAssertNil(host.attachedSessionId, "binding must NOT attach — the whole point of the task")
+
+        var navigatedTo: [String] = []
+        host.sendFirstChatMessage("hello there") { id in
+            navigatedTo.append(id)
+            host.apply(destination: .session(id))
+        }
+
+        // Send's own existence-verify panel.list — the SECOND one.
+        await feedWaitUntil { mgmt.methods.filter { $0 == "panel.list" }.count == 2 }
+        guard let verifyList = mgmt.sent.map({ feedLineJSON($0) }).filter({ $0["method"] as? String == "panel.list" }).last else {
+            return XCTFail("send must verify the bound session still exists: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(verifyList["id"] as! Int),"result":{"tabs":[{"tabId":"t1","kind":"web","url":null,"title":null}],"activeTabId":"t1"}}"#)
+
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(mgmt.methods.filter { $0 == "session.create" }.count, 1,
+                       "send must reuse the bound session, not mint a second one")
+
+        await feedWaitUntil { !navigatedTo.isEmpty }
+        XCTAssertEqual(navigatedTo, ["s_bound"], "navigates onto the SAME session the tab is in")
+
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "s_bound")
+        await feedWaitUntil { t.methods.contains("session.send") }
+        guard let send = t.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.send" }) else {
+            return XCTFail("must send into the bound session: \(t.methods)")
+        }
+        XCTAssertEqual((send["params"] as? [String: Any])?["sessionId"] as? String, "s_bound",
+                       "the message lands in the session the tab is in")
+        XCTAssertEqual((send["params"] as? [String: Any])?["text"] as? String, "hello there")
+    }
+
+    /// Requirement 3: a SECOND "+" while still bound (the sequential case — Task 12's
+    /// `panelAutoCreateInFlight` only covers concurrent double-clicks during one round trip) opens
+    /// a tab in the SAME session, never a second create.
+    func testSecondBindWhileBoundOpensATabInTheSameSessionNotASecondCreate() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        host.openPanelTabForNewChatPage(kind: .web)
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("must create: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_bound2","trusted":true}}"#)
+
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open1 = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("must open the first tab: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(open1["id"] as! Int),"result":{"ok":true,"tabId":"t1"}}"#)
+
+        // `newChatBoundSessionId` is set synchronously right after the openTab ack, immediately
+        // before the priming `panel.list` is sent — waiting for that call to be SENT (not
+        // necessarily answered) is enough to know the second "+" will see the binding.
+        await feedWaitUntil { mgmt.methods.contains("panel.list") }
+
+        host.openPanelTabForNewChatPage(kind: .web)
+        await feedWaitUntil { mgmt.methods.filter { $0 == "panel.openTab" }.count == 2 }
+
+        XCTAssertEqual(mgmt.methods.filter { $0 == "session.create" }.count, 1,
+                       "a second '+' while bound must NOT mint a second session")
+        let opens = mgmt.sent.map({ feedLineJSON($0) }).filter { $0["method"] as? String == "panel.openTab" }
+        XCTAssertEqual(opens.count, 2)
+        for open in opens {
+            XCTAssertEqual((open["params"] as? [String: Any])?["sessionId"] as? String, "s_bound2",
+                           "both opens target the SAME bound session")
+        }
+        XCTAssertNil(host.attachedSessionId, "still not attached — binding never navigates")
+    }
+
+    /// Requirement 4, the acceptance case: the bound session was deleted underneath the page (the
+    /// cleaner/reaper, per Task 14/16's own semantics) — send must not throw the message away. This
+    /// pins the "re-create" half of the task's offered pair ("re-create, or attach while bound").
+    func testSendWithBoundSessionDeletedUnderneathDoesNotLoseTheMessage() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        host.openPanelTabForNewChatPage(kind: .web)
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("must create: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_gone","trusted":true}}"#)
+
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("must open the tab: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(open["id"] as! Int),"result":{"ok":true,"tabId":"t1"}}"#)
+
+        // The bind's own priming panel.list — answered so it can't be confused with the verify call.
+        await feedWaitUntil { mgmt.methods.contains("panel.list") }
+        guard let primeList = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.list" }) else {
+            return XCTFail("bind must prime the panel: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(primeList["id"] as! Int),"result":{"tabs":[{"tabId":"t1","kind":"web","url":null,"title":null}],"activeTabId":"t1"}}"#)
+        await feedWaitUntil { !host.panelStore.tabs.isEmpty }
+
+        // Simulate the cleaner/reaper having deleted "s_gone" in the background — send now.
+        var navigatedTo: [String] = []
+        host.sendFirstChatMessage("don't lose me") { id in
+            navigatedTo.append(id)
+            host.apply(destination: .session(id))
+        }
+
+        await feedWaitUntil { mgmt.methods.filter { $0 == "panel.list" }.count == 2 }
+        guard let verifyList = mgmt.sent.map({ feedLineJSON($0) }).filter({ $0["method"] as? String == "panel.list" }).last else {
+            return XCTFail("send must verify the bound session still exists: \(mgmt.methods)")
+        }
+        // The daemon's own NOT_FOUND mapping for an unknown/deleted session (server.ts's panel.list
+        // handler — the same ERR.NOT_FOUND every panel RPC throws for a vanished sessionId).
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(verifyList["id"] as! Int),"error":{"code":-32004,"message":"unknown session: s_gone"}}"#)
+
+        // Falls back to a fresh create — the message must still land somewhere.
+        await feedWaitUntil { mgmt.methods.filter { $0 == "session.create" }.count == 2 }
+        guard let create2 = mgmt.sent.map({ feedLineJSON($0) }).filter({ $0["method"] as? String == "session.create" }).last else {
+            return XCTFail("must fall back to a fresh create when the bound session is gone: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create2["id"] as! Int),"result":{"sessionId":"s_fresh","trusted":true}}"#)
+
+        await feedWaitUntil { !navigatedTo.isEmpty }
+        XCTAssertEqual(navigatedTo, ["s_fresh"], "falls back to the freshly created session")
+
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "s_fresh")
+        await feedWaitUntil { t.methods.contains("session.send") }
+        guard let send = t.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.send" }) else {
+            return XCTFail("the message must still be sent, into the fresh session: \(t.methods)")
+        }
+        XCTAssertEqual((send["params"] as? [String: Any])?["text"] as? String, "don't lose me",
+                       "the message is never thrown away")
+    }
+
+    /// Requirement 4's OTHER half: "+" itself, not just send, must survive the bound session having
+    /// vanished — a second "+" against a gone session must not silently dead-end (the exact "click
+    /// that does nothing with no explanation" class Task 12 existed to kill). Falls back to an
+    /// ordinary auto-create, as if this were the page's first "+".
+    func testSecondBindWithTheBoundSessionGoneFallsBackToANewCreateRatherThanADeadClick() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        host.openPanelTabForNewChatPage(kind: .web)
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("must create: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_will_vanish","trusted":true}}"#)
+
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open1 = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("must open the first tab: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(open1["id"] as! Int),"result":{"ok":true,"tabId":"t1"}}"#)
+        await feedWaitUntil { mgmt.methods.contains("panel.list") } // the bind has committed
+
+        // Second "+" — but the bound session is gone by the time this lands.
+        host.openPanelTabForNewChatPage(kind: .web)
+        await feedWaitUntil { mgmt.methods.filter { $0 == "panel.openTab" }.count == 2 }
+        guard let open2 = mgmt.sent.map({ feedLineJSON($0) }).filter({ $0["method"] as? String == "panel.openTab" }).last else {
+            return XCTFail("must attempt the second open: \(mgmt.methods)")
+        }
+        XCTAssertEqual((open2["params"] as? [String: Any])?["sessionId"] as? String, "s_will_vanish")
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(open2["id"] as! Int),"error":{"code":-32004,"message":"unknown session: s_will_vanish"}}"#)
+
+        // Must fall back to a fresh create rather than dead-ending.
+        await feedWaitUntil { mgmt.methods.filter { $0 == "session.create" }.count == 2 }
+        guard let create2 = mgmt.sent.map({ feedLineJSON($0) }).filter({ $0["method"] as? String == "session.create" }).last else {
+            return XCTFail("a gone bound session must fall back to auto-create, not dead-end: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create2["id"] as! Int),"result":{"sessionId":"s_replacement","trusted":true}}"#)
+
+        await feedWaitUntil { mgmt.methods.filter { $0 == "panel.openTab" }.count == 3 }
+        let opens = mgmt.sent.map({ feedLineJSON($0) }).filter { $0["method"] as? String == "panel.openTab" }
+        XCTAssertEqual((opens[2]["params"] as? [String: Any])?["sessionId"] as? String, "s_replacement",
+                       "the replacement tab opens in the freshly created session")
+    }
+
+    /// Requirement 4 / mutation guard: `closePanelTab` must reach the BOUND session while nothing
+    /// is attached — today it guards on `attachedSessionId` alone, so the "×" no-ops on an
+    /// un-navigated new-chat page (the exact dead path the task names). This is what makes closing
+    /// the last tab of a bound session live — the path Task 16's reaper eventually acts on.
+    func testClosePanelTabTargetsTheBoundSessionWhileUnattached() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        host.openPanelTabForNewChatPage(kind: .web)
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("must create: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_close_bound","trusted":true}}"#)
+
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("must open the tab: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(open["id"] as! Int),"result":{"ok":true,"tabId":"t1"}}"#)
+        await feedWaitUntil { mgmt.methods.contains("panel.list") } // the bind has committed
+
+        XCTAssertNil(host.attachedSessionId, "the precondition this test exists for: bound, not attached")
+        host.closePanelTab("t1")
+
+        await feedWaitUntil { mgmt.methods.contains("panel.closeTab") }
+        guard let close = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.closeTab" }) else {
+            return XCTFail("the × must fire panel.closeTab against the BOUND session, not no-op: \(mgmt.methods)")
+        }
+        XCTAssertEqual((close["params"] as? [String: Any])?["sessionId"] as? String, "s_close_bound")
+        XCTAssertEqual((close["params"] as? [String: Any])?["tabId"] as? String, "t1")
+    }
+
+    /// Mutation guard for the OTHER two mechanisms the three headline tests never exercise on their
+    /// own: (a) leaving `.newChat` for a bound-but-unattached session hides its tab from the panel
+    /// (the disclosed decision — see `apply(destination:)`'s own T15 doc comment for the "why"),
+    /// and (b) a fresh `.newChat` entry starts clean, so a stale binding from an abandoned visit is
+    /// never silently reused by a later "+".
+    func testApplyNewChatClearsAStaleBindingAndThePanelDisplayOnEveryEntry() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        host.openPanelTabForNewChatPage(kind: .web)
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("must create: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_stale_bound","trusted":true}}"#)
+
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("must open the tab: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(open["id"] as! Int),"result":{"ok":true,"tabId":"t1"}}"#)
+
+        await feedWaitUntil { mgmt.methods.contains("panel.list") }
+        guard let list = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.list" }) else {
+            return XCTFail("bind must prime the panel: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(list["id"] as! Int),"result":{"tabs":[{"tabId":"t1","kind":"web","url":null,"title":null}],"activeTabId":"t1"}}"#)
+        await feedWaitUntil { !host.panelStore.tabs.isEmpty }
+
+        host.apply(destination: .mode(.chat)) // leave WITHOUT sending — a genuine navigate-away
+        XCTAssertEqual(host.panelStore.tabs, [],
+                       "leaving an unattached bound session's page hides its tab from the panel (T15's disclosed decision)")
+
+        host.apply(destination: .newChat) // a genuine fresh entry
+        XCTAssertNil(host.attachedSessionId)
+
+        // A fresh "+" here must auto-create again — the abandoned session must never be silently
+        // reused by a page instance that never bound to it. Asserting the COUNT directly (not
+        // merely that a create exists) matters: this branch's own history includes a test that
+        // compared a count against itself — `.last` over "every session.create ever sent" would
+        // find the FIRST bind's create and pass vacuously even if the stale binding were reused.
+        host.openPanelTabForNewChatPage(kind: .web)
+        await feedWaitUntil { mgmt.methods.filter { $0 == "session.create" }.count == 2 }
+        XCTAssertEqual(mgmt.methods.filter { $0 == "session.create" }.count, 2,
+                       "a fresh page instance's '+' must create anew, not silently adopt the stale binding: \(mgmt.methods)")
+        guard let create2 = mgmt.sent.map({ feedLineJSON($0) }).filter({ $0["method"] as? String == "session.create" }).last else {
+            return XCTFail("must create a second time: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create2["id"] as! Int),"result":{"sessionId":"s_fresh_visit","trusted":true}}"#)
+
+        await feedWaitUntil { mgmt.methods.filter { $0 == "panel.openTab" }.count == 2 }
+        let openSessionIds = mgmt.sent.map({ feedLineJSON($0) })
+            .filter { $0["method"] as? String == "panel.openTab" }
+            .compactMap { ($0["params"] as? [String: Any])?["sessionId"] as? String }
+        XCTAssertEqual(openSessionIds.count, 2, "one open per bind — this one must NOT reuse s_stale_bound: \(mgmt.methods)")
+        XCTAssertEqual(openSessionIds.first, "s_stale_bound")
+        XCTAssertEqual(openSessionIds.last, "s_fresh_visit",
+                       "the fresh instance's open must target its OWN new session, not the abandoned one")
+    }
+
     // MARK: - panel-shell T9: the live pump + the panel.list fetch on attach/hop
 
     /// The two landmines Task 7's review carried into this task, proven end to end (not just at the

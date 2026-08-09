@@ -128,9 +128,15 @@ struct ShellPanel: View {
     /// attached session creates a session and needs to land the shell ON it (`ShellRootView`'s own
     /// `nav`, threaded down here the SAME way `NewChatPage(nav: nav, host: host)` already gets it
     /// for the identical create-then-navigate shape). Plain, not `@ObservedObject`: this view never
-    /// needs to re-render off `nav`'s state, only to call `navigate(to:)` imperatively. `nil` for a
-    /// shell built without one (same fallback posture as `host`) — the auto-created session still
-    /// exists on the daemon; only the UI's navigation onto it is skipped.
+    /// needs to re-render off `nav`'s state — it reads `nav.destination` once, imperatively, at the
+    /// moment "+" is tapped (panel-shell T15: to choose bind vs. navigate), and otherwise only calls
+    /// `navigate(to:)`. `nil` for a shell built without one (same fallback posture as `host`) — the
+    /// auto-created session still exists on the daemon; only the UI's navigation onto it is skipped.
+    ///
+    /// panel-shell T15: on `.newChat` specifically, "+" no longer reads this navigate door at all —
+    /// it calls `host.openPanelTabForNewChatPage` instead, which binds without navigating so the
+    /// page's draft survives (`onOpenTab` below). Every OTHER destination's auto-create still
+    /// navigates through here, unchanged.
     var nav: ShellNavigationModel? = nil
 
     var body: some View {
@@ -143,11 +149,17 @@ struct ShellPanel: View {
                     store: store,
                     presentation: $presentation,
                     onOpenTab: {
-                        // panel-shell T12: `onSessionCreated` fires ONLY on the auto-create path
-                        // (`ShellSessionHost.openPanelTab`'s own doc) — an ordinary open with a
-                        // session already attached never calls this closure at all.
-                        host?.openPanelTab(kind: .web) { sessionId in
-                            nav?.navigate(to: .session(sessionId))
+                        // panel-shell T15: the new-chat page's own "+" BINDS rather than navigating
+                        // (user ruling — the page's draft must survive). Every OTHER "+", including
+                        // auto-create from any other landing with nothing attached, keeps Task 12's
+                        // create-then-navigate behavior verbatim (`ShellSessionHost.openPanelTab`'s
+                        // own doc: `onSessionCreated` fires ONLY on that auto-create path).
+                        if nav?.destination == .newChat {
+                            host?.openPanelTabForNewChatPage(kind: .web)
+                        } else {
+                            host?.openPanelTab(kind: .web) { sessionId in
+                                nav?.navigate(to: .session(sessionId))
+                            }
                         }
                     },
                     onActivateTab: { tabId in host?.activatePanelTab(tabId) },
