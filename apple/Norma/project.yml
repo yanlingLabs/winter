@@ -39,6 +39,15 @@ targets:
       - package: Sparkle
       - target: NormaHelper
         embed: false
+      # panel-cef Task 6a: the app now LINKS CEF's C++/C-API translation layer, which Task 4 built
+      # for the helper targets alone. `Sources/CEF/NormaCEF.mm` calls CefInitialize /
+      # CefDoMessageLoopWork / CefBrowserHost::CreateBrowser / CefShutdown — none of them
+      # header-only, unlike Task 3's CefAppProtocol conformance (which added zero CEF linkage and
+      # is why the app could carry it with no dependency at all). The framework ITSELF is still
+      # never linked: `libcef_dll_dylib.cc` in this static library is what resolves every one of
+      # those entry points through the runtime `dlopen` that `CefScopedLibraryLoader::LoadInMain`
+      # performs — a macOS sandbox requirement CEF documents, not a style choice.
+      - target: CefDllWrapper
       # panel-cef Task 4: build-order dependencies only (embed: false), matching the NormaHelper
       # entry directly above — xcodegen's automatic app-embedding machinery has no first-class
       # notion of "a full nested .app bundle inside Contents/Frameworks/" (that shape is CEF/
@@ -555,18 +564,60 @@ targets:
     templateAttributes:
       productName: "Norma Helper (Alerts)"
       bundleId: com.norma.app.cefhelper.alerts
+  # panel-cef Task 6a: `allow-jit` ADDED HERE, on the evidence Task 5 said it would take.
+  #
+  # Task 5 gave the Renderer `allow-jit` and deliberately withheld it from GPU despite Chrome
+  # shipping it on both, naming GPU "the FIRST suspect if Task 6's GPU process dies". Task 5's own
+  # review then pointed out that this Mac could never produce that evidence: the JIT user in
+  # Chromium's GPU process is **SwiftShader** (`libvk_swiftshader.dylib`, which this build ships),
+  # and an Apple Silicon Mac with a working Metal path never reaches it. So Task 6a forced the
+  # software path deliberately and measured all four cells:
+  #
+  #   hardened runtime + Metal (default)   -> gpu-process runs in `Norma Helper.app` (BASE), 0 crashes
+  #   hardened runtime + --use-angle=swiftshader
+  #                                        -> gpu-process moves to `Norma Helper (GPU).app` and
+  #                                           CRASH-LOOPS: repeated
+  #                                           "GPU process exited unexpectedly: exit_code=9", and the
+  #                                           crash report reads
+  #                                           "termination": {"namespace":"CODESIGNING",
+  #                                                           "indicator":"Invalid Page"}
+  #                                           — the kernel killing it for executing a page it is not
+  #                                           entitled to map. That is precisely MAP_JIT without
+  #                                           `com.apple.security.cs.allow-jit`.
+  #   Debug (no hardened runtime) + swiftshader -> survives; proves nothing, because the entitlement
+  #                                           is only enforced under the hardened runtime.
+  #
+  # The routing is the part that makes this invisible without forcing it: Chromium sends the GPU
+  # process to the `(GPU)` helper bundle ONLY when it needs the JIT-capable variant. On a Mac with a
+  # working Metal path that bundle is never launched at all, so the missing entitlement cannot be
+  # observed — it lands on a user with a blocklisted GPU, in a VM, or on a software-fallback page.
+  #
+  # `com.apple.security.cs.allow-jit` and nothing else, matching what Chrome 151 ships on its own
+  # GPU helper (measured locally in Task 5). Both JIT-needing helpers share ONE entitlements file
+  # (`Support/CEFHelperJit.entitlements`) rather than carrying two identical copies — the same
+  # anti-drift reasoning as the `CEFHelper` targetTemplate below: two files with the same content
+  # is exactly the shape where one gets edited and the other does not.
+  #
+  # SECOND FILE, NOT OPTIONAL: `scripts/release.ts`'s `HARDENING_PINS` asserts the entitlement set
+  # of every signed component in BOTH directions, so an entitlement added here and not there fails
+  # the release gate closed. That pin is the reason this is a two-file change.
   CEFHelperGPU:
     templates: [CEFHelper]
     templateAttributes:
       productName: "Norma Helper (GPU)"
       bundleId: com.norma.app.cefhelper.gpu
+    entitlements:
+      path: Support/CEFHelperJit.entitlements
+      properties:
+        com.apple.security.cs.allow-jit: true
   CEFHelperPlugin:
     templates: [CEFHelper]
     templateAttributes:
       productName: "Norma Helper (Plugin)"
       bundleId: com.norma.app.cefhelper.plugin
-  # The ONLY helper with an entitlement, and the only entitlement this branch adds anywhere
-  # (panel-cef Task 5). Everything else — the app, the other four helpers, NormaHelper — ships
+  # One of TWO helpers with an entitlement (panel-cef Task 6a added GPU's — see its block above for
+  # the measurement that earned it). `com.apple.security.cs.allow-jit` remains the only entitlement
+  # this branch adds anywhere: the app, the other three helpers and NormaHelper all ship
   # entitlement-free under the hardened runtime, which is where Task 5 deliberately started.
   #
   # `com.apple.security.cs.allow-jit` — V8 compiles JavaScript to native code at runtime, which
@@ -586,17 +637,18 @@ targets:
   # did not add one (see the "Embed CEF framework" script's comment for the measured A/B that
   # confirms same-Team-ID nested signing is sufficient).
   #
-  # GPU is deliberately NOT given allow-jit here even though Chrome ships it, because nothing in
-  # this repo runs a GPU process yet and Task 5's standing rule is "only what a signed run proves
-  # necessary". It is, however, the FIRST suspect if Task 6's GPU process dies on startup —
-  # SwiftShader/WebGPU are the JIT users there. Add it then, with the crash as the evidence.
+  # Task 5 withheld `allow-jit` from GPU under its "only what a signed run proves necessary" rule,
+  # naming it the first suspect if Task 6's GPU process died. **It died, and it now has one** —
+  # Task 6a forced the software-rendering path and got the crash as evidence (CEFHelperGPU above).
+  # The discipline worked exactly as intended: the entitlement was added when, and only when, a
+  # measurement demanded it.
   CEFHelperRenderer:
     templates: [CEFHelper]
     templateAttributes:
       productName: "Norma Helper (Renderer)"
       bundleId: com.norma.app.cefhelper.renderer
     entitlements:
-      path: Support/CEFHelperRenderer.entitlements
+      path: Support/CEFHelperJit.entitlements
       properties:
         com.apple.security.cs.allow-jit: true
 targetTemplates:

@@ -105,6 +105,28 @@ struct ShellRootView: View {
                     guard panelFitsInContent(newContentWidth) else { return }
                     presentation.sideWidth = panelClampWidth(presentation.sideWidth, contentWidth: newContentWidth)
                 }
+                #if DEBUG
+                // panel-cef Task 6a — a DEBUG-ONLY door for driving the panel from outside the UI.
+                //
+                // The panel starts `.hidden` and is shown only by a titlebar button, and a web tab
+                // exists only after someone presses "+". Both are mouse clicks, and synthesising a
+                // click needs Accessibility TCC that this development environment does not have —
+                // so without this there is no way to reach a rendered page for the CDP proof, or
+                // for the forced-software-rendering run the plan requires.
+                //
+                // It drives the REAL path and adds no second one: the same `presentation.mode` the
+                // button toggles, and the same `ShellSessionHost.openPanelTab` "+" calls, which
+                // goes to the daemon and comes back as a `panel_tab_opened` event folded by
+                // `PanelStore`. `#if DEBUG` keeps it out of every shipped build, and it is inert
+                // unless the variable is set.
+                .onAppear {
+                    guard ProcessInfo.processInfo.environment["NORMA_PANEL_SMOKE"] == "1" else { return }
+                    presentation.mode = .side
+                    host?.openPanelTab(kind: .web) { sessionId in
+                        nav.navigate(to: .session(sessionId))
+                    }
+                }
+                #endif
         }
     }
 

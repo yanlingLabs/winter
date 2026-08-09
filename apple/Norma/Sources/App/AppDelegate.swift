@@ -575,6 +575,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Placed AFTER the unit-test guard so the xctest host launch never stamps `~/.norma-dev`.
         AppProfile.bootstrapEnvironment()
         _ = boot()
+        #if DEBUG
+        // panel-cef Task 6a: the window half of the panel smoke door (`ShellRootView`'s `.onAppear`
+        // owns the panel + tab half; read its comment for why the door exists at all — no
+        // Accessibility TCC in the development environment, so no click can be synthesised, and
+        // Norma is `LSUIElement`: it opens NO window at launch and the only ways to get one are the
+        // menu-bar item and a Finder reopen, both of which are clicks). Deferred one run-loop turn
+        // so `boot()`'s window-less state is fully settled first, exactly as a real summon would be.
+        if ProcessInfo.processInfo.environment["NORMA_PANEL_SMOKE"] == "1" {
+            DispatchQueue.main.async { [weak self] in self?.summonAppWindow(navigatingTo: .newChat) }
+        }
+        #endif
     }
 
     /// Everything after activation policy. Split out so tests can drive it without

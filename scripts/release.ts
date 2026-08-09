@@ -408,14 +408,25 @@ for (const name of CEF_HELPERS) {
 // relaxation. Sparkle's own nested helpers are deliberately OUT of scope — they are third-party
 // and `resignPreservingEntitlements` preserves whatever they ship with, by design.
 const JIT = "com.apple.security.cs.allow-jit";
+/// The helpers that legitimately carry `allow-jit` — the two Chromium runs a JIT in. Kept in
+/// lockstep with `apple/Norma/project.yml`'s `CEFHelperRenderer`/`CEFHelperGPU` blocks, both of
+/// which point at the SAME `Support/CEFHelperJit.entitlements` for the same anti-drift reason.
+const CEF_JIT_HELPERS = ["Norma Helper (Renderer)", "Norma Helper (GPU)"];
 const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   { path: app, label: "Norma.app", expect: [] },
   { path: join(app, "Contents", "MacOS", "NormaHelper"), label: "NormaHelper", expect: [] },
   { path: join(app, "Contents", "Resources", "norma-core"), label: "norma-core", expect: [] },
+  // panel-cef Task 6a: the GPU helper joined the Renderer. Chromium routes the GPU process to the
+  // `(GPU)` bundle only when it needs the JIT-capable variant — SwiftShader — which a Mac with a
+  // working Metal path never reaches, so this was invisible until Task 6a forced the software path
+  // with `--use-angle=swiftshader`. Under the hardened runtime and without `allow-jit` it
+  // crash-looped, `exit_code=9`, with the crash report reading
+  // `"termination": {"namespace":"CODESIGNING","indicator":"Invalid Page"}`. Chrome 151 ships
+  // `allow-jit` on both of these helpers and on neither of the other three; so does Norma.
   ...CEF_HELPERS.map((name) => ({
     path: join(app, "Contents", "Frameworks", `${name}.app`),
     label: `CEF helper (${name})`,
-    expect: name === "Norma Helper (Renderer)" ? [JIT] : [],
+    expect: CEF_JIT_HELPERS.includes(name) ? [JIT] : [],
   })),
 ];
 for (const pin of HARDENING_PINS) {
@@ -428,8 +439,8 @@ for (const pin of HARDENING_PINS) {
         `  expected: ${want.length ? want.join(", ") : "(none)"}\n` +
         `  found:    ${found.length ? found.join(", ") : "(none)"}\n` +
         `  Every com.apple.security.cs.* entitlement is a deliberate, evidence-backed decision here —\n` +
-        `  see apple/Norma/project.yml's CEFHelperRenderer block. Do not "fix" this by editing the\n` +
-        `  expectation; justify the entitlement or remove it.`,
+        `  see apple/Norma/project.yml's CEFHelperRenderer / CEFHelperGPU blocks. Do not "fix" this by\n` +
+        `  editing the expectation; justify the entitlement or remove it.`,
     );
   }
 }
@@ -437,7 +448,12 @@ console.log(
   "Signatures verified: codesign --verify --deep --strict PASS; TeamIdentifier + secure timestamp confirmed on " +
     "app + norma-core + NormaHelper + Sparkle.framework + its nested helpers + CEF framework + its 5 libraries + " +
     `the 5 CEF helpers; hardened-runtime entitlements pinned across all ${HARDENING_PINS.length} components this ` +
-    `repo signs — exactly ${JIT} on the Renderer helper, exactly none on the other ${HARDENING_PINS.length - 1}.`,
+    // Both halves derived from HARDENING_PINS rather than typed, so this sentence cannot go stale
+    // the way its predecessor did when the pin widened (Task 5 caught that one; Task 6a widened it
+    // again by giving the GPU helper allow-jit).
+    `repo signs — exactly ${JIT} on ${HARDENING_PINS.filter((p) => p.expect.length).length} of them ` +
+    `(${HARDENING_PINS.filter((p) => p.expect.length).map((p) => p.label).join(", ")}), exactly none on ` +
+    `the other ${HARDENING_PINS.filter((p) => !p.expect.length).length}.`,
 );
 
 // ---------------------------------------------------------------------------

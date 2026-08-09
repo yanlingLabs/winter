@@ -1,5 +1,6 @@
 #import "NormaApplication.h"
 
+#import "NormaCEF.h"
 #import "include/cef_application_mac.h"
 
 // panel-cef Task 3, commit 2 of 2 — the CEF conformance, and nothing else.
@@ -50,6 +51,34 @@
 - (void)sendEvent:(NSEvent *)event {
   CefScopedSendingEvent sendingEventScoper;
   [super sendEvent:event];
+}
+
+// panel-cef Task 6a — the override Task 3 deliberately deferred, now that CEF actually runs.
+//
+// cefsimple overrides `-terminate:` because Cocoa's default calls `exit()` and skips the rest of
+// the run loop, which would bypass CEF's orderly shutdown entirely. Norma needs the same hook, but
+// NOT the same body, and the difference is a real defect in the literal instruction ("`-terminate:`
+// -> `CefShutdown`") this task inherited:
+//
+//   **A terminate can be CANCELLED here.** `AppDelegate.applicationShouldTerminate` answers
+//   `.terminateCancel` for ⌘Q and for a dock-tile quit — only the menu bar's "Quit Norma" and a
+//   system-initiated logout/shutdown are real quits (`terminateDecision`, Lifecycle T3). And
+//   `CefShutdown` is TERMINAL for a process: CEF cannot be initialised again afterwards. Calling it
+//   from here would leave a perfectly alive Norma with a browser panel that can never work again
+//   until relaunch, after a keystroke the user expects to be harmless.
+//
+// So the irreversible half moved to the actual point of no return —
+// `NSApplicationWillTerminateNotification`, which `NormaCEFInitialize` subscribes to itself so the
+// guarantee cannot be deleted from `AppDelegate` without deleting CEF's startup with it. What is
+// left here is the reversible half: close the browsers, then let AppKit ask the delegate. That
+// costs nothing if the quit is cancelled, because every cancel path already runs
+// `closeMainWindows()`, which tears the panel down and closes those same browsers anyway.
+//
+// `NormaCEFCloseAllBrowsers` is a no-op when CEF was never initialised, which is every Debug and
+// unit-test launch — so this override changes nothing about how the suite's host terminates.
+- (void)terminate:(id)sender {
+  NormaCEFCloseAllBrowsers();
+  [super terminate:sender];
 }
 
 @end

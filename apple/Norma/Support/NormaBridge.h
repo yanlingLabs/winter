@@ -9,6 +9,11 @@
 // `NormaApplication.mm`, so nothing here pulls a CEF type into a Swift compile.
 #import "NormaApplication.h"
 
+// panel-cef Task 6a: the CEF embed's entire Swift-facing surface. Kept CEF-free by the same
+// construction as `NormaApplication.h` above — plain Objective-C plus an `extern "C"` block, with
+// every CEF type confined to `Sources/CEF/NormaCEF.mm`.
+#import "NormaCEF.h"
+
 typedef struct { float x; float y; } MTPoint;
 typedef struct { MTPoint pos; MTPoint vel; } MTReadout;
 

@@ -149,6 +149,18 @@ struct ShellPanel: View {
     /// navigates through here, unchanged.
     var nav: ShellNavigationModel? = nil
 
+    /// panel-cef Task 6a: which tab the panel actually SHOWS — `nil` only when there are no tabs at
+    /// all. One lookup, read by both slots below, so the chrome row and the content area can never
+    /// disagree about which tab they are rendering. The rule (and why it is not simply
+    /// `activeTabId`) lives with the pure function it delegates to, `panelShownTab`.
+    private var shownTab: PanelTab? {
+        panelShownTab(tabs: store.tabs, activeTabId: store.activeTabId)
+    }
+
+    private var activeTabContent: PanelTabContent? {
+        shownTab.map(panelTabContent(for:))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // The chrome band: one continuous surface, no internal divider. Two vertical slices —
@@ -177,8 +189,18 @@ struct ShellPanel: View {
                 )
                 .frame(height: panelTitlebarBandHeight)
 
-                Color.clear
-                    .frame(height: panelUrlRowHeight)
+                // panel-cef Task 6a: the active tab's own chrome slot. `.web` renders `Color.clear`
+                // here today — identical to the blank row Plan A drew — so this wiring changes
+                // nothing visually and leaves Task 6b (back/forward/reload, the URL field, the `⋮`
+                // overflow) purely additive.
+                Group {
+                    if let content = activeTabContent {
+                        content.makeChrome()
+                    } else {
+                        Color.clear
+                    }
+                }
+                .frame(height: panelUrlRowHeight)
             }
             .frame(height: panelChromeBandHeight)
 
@@ -186,8 +208,18 @@ struct ShellPanel: View {
                 .frame(height: panelDividerWidth)
                 .overlay(Theme.hairline)
 
-            Color.clear
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // panel-cef Task 6a: the content slot Plan A left as `Color.clear`. `.id(tabId)` is
+            // load-bearing rather than tidy — it is what makes SwiftUI dismantle one tab's
+            // `PanelCEFView` and build the next tab's, instead of reusing a single representable
+            // and silently leaving the first tab's browser parented in the visible container.
+            Group {
+                if let tab = shownTab, let content = activeTabContent {
+                    content.makeContent().id(tab.tabId)
+                } else {
+                    Color.clear
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         // review round 2, Important 2 (Task 2, plan-mandated fix, adjudicated by the user): a
         // BACKGROUND LAYER that ignores the safe area, not a clip on the content — `ShellSidebar
