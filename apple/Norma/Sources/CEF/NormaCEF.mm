@@ -313,6 +313,54 @@ class NormaClient : public CefClient,
     Log("browser created (id=%d, live browsers=%zu)", browser->GetIdentifier(), g_browsers.size());
   }
 
+  /// **`true` — and the default of `false` closes NORMA'S OWN WINDOW.**
+  ///
+  /// Found at the user's live gate: closing a panel tab, or clicking Cowork in the sidebar with a
+  /// tab open, made the whole app window vanish. The process survived (menu-bar orb still working,
+  /// no crash report) — it was the window dying, not the app, and both triggers are the same event:
+  /// SwiftUI dismantles `PanelCEFView`, which calls `CloseBrowser(true)`.
+  ///
+  /// `include/cef_life_span_handler.h` states the mechanism outright, and this is quoted rather
+  /// than inferred:
+  ///
+  ///   "When windowed rendering is enabled CEF will create an internal child window/view to host
+  ///    the browser. In that case returning false from DoClose() will send the standard close
+  ///    notification to the browser's TOP-LEVEL PARENT WINDOW (e.g. WM_CLOSE on Windows,
+  ///    **performClose: on OS X** ...)"
+  ///
+  /// The top-level parent window of a browser parented into `ShellPanel` is Norma's app window. So
+  /// CEF was faithfully doing what an embedder that OWNS a window per browser wants — `cefsimple`
+  /// and `cefclient` both return `false` for exactly that reason — and what an embedder hosting a
+  /// browser inside a shared window it owns must never allow.
+  ///
+  /// The same header gives the escape and its obligation:
+  ///
+  ///   "If the browser's top-level parent window requires a non-standard close notification then
+  ///    send that notification from DoClose() and return true. You are STILL REQUIRED to complete
+  ///    the browser close as soon as possible (either by calling [Try]CloseBrowser() or by
+  ///    proceeding with window/view hierarchy tear-down), otherwise the browser will be left in a
+  ///    partially closed state that interferes with proper functioning."
+  ///
+  /// Norma needs no notification at all — the tab is already gone from the UI by the time this
+  /// runs; the close was initiated BY that tear-down. The obligation is discharged by
+  /// `NormaCEFCloseBrowser`, which calls `CloseBrowser(true)` and then removes CEF's host view from
+  /// the container, so the view hierarchy tear-down the header names as the second acceptable
+  /// completion always happens and never depends on SwiftUI's release timing.
+  ///
+  /// `OnBeforeClose` still fires after this (the header: "will be called after DoClose() ... and
+  /// immediately before the browser object is destroyed"), which is what keeps `g_browsers`
+  /// draining and the renderer process exiting. Verified by measurement, not assumed — returning
+  /// `true` without completing the close would trade a window-close bug for a renderer leak.
+  bool DoClose(CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    // The literal below is load-bearing: `CEFRuntimeTests
+    // .testTheBrowserClientOverridesDoCloseSoCEFCannotCloseNormasWindow` searches the built binary
+    // for "DoClose->true" to pin that this override still exists. Nothing about deleting it fails
+    // to compile — the base class supplies a `false` that quietly closes the user's window.
+    Log("browser close handled by the host (DoClose->true, id=%d)", browser->GetIdentifier());
+    return true;
+  }
+
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     for (auto it = g_browsers.begin(); it != g_browsers.end(); ++it) {
@@ -582,7 +630,30 @@ void NormaCEFCloseBrowser(NSView *parent) {
     return;
   }
   if (auto browser = BrowserForParent(parent)) {
+    // Order matters, and `DoClose` returning true is what makes this order safe.
+    //
+    // 1. `CloseBrowser(true)` starts CEF's close sequence. `DoClose` answers true, so CEF does NOT
+    //    send `performClose:` to Norma's app window — the defect this pair of changes fixes.
+    // 2. Returning true means CEF hands the completion back to us: "you are still required to
+    //    complete the browser close as soon as possible ... or by proceeding with window/view
+    //    hierarchy tear-down" (`cef_life_span_handler.h`). Detaching CEF's own host view IS that
+    //    tear-down.
+    //
+    //    MEASURED, so the comment does not overclaim: this detach is NOT required on the panel-tab
+    //    path. With `DoClose` alone and this block deleted, `OnBeforeClose` still fires,
+    //    `g_browsers` still drains to 0 and the renderer still exits — SwiftUI's own release of the
+    //    container discharges the obligation. It is kept for the two cases where nothing else will:
+    //    `NormaCEFCloseAllBrowsers` (from `-terminate:`) has no SwiftUI dismantle behind it at all,
+    //    and the header makes completion the CALLER's duty once DoClose answers true rather than
+    //    something to infer from another framework's release timing.
+    //
+    // The view is fetched BEFORE the close call — `GetWindowHandle()` is not guaranteed to answer
+    // once the close is under way.
+    NSView *hostView = CAST_CEF_WINDOW_HANDLE_TO_NSVIEW(browser->GetHost()->GetWindowHandle());
     browser->GetHost()->CloseBrowser(true);
+    if (hostView != nil && [hostView superview] != nil) {
+      [hostView removeFromSuperview];
+    }
   }
 }
 
@@ -596,7 +667,13 @@ void NormaCEFCloseAllBrowsers(void) {
   // Iterate a COPY: OnBeforeClose can land during this loop and mutate g_browsers.
   std::vector<CefRefPtr<CefBrowser>> browsers = g_browsers;
   for (auto &browser : browsers) {
+    // Same two-step as NormaCEFCloseBrowser, and for the same reason: `DoClose` returns true, so
+    // completing the close is ours to do. See its comment.
+    NSView *hostView = CAST_CEF_WINDOW_HANDLE_TO_NSVIEW(browser->GetHost()->GetWindowHandle());
     browser->GetHost()->CloseBrowser(true);
+    if (hostView != nil && [hostView superview] != nil) {
+      [hostView removeFromSuperview];
+    }
   }
 }
 

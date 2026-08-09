@@ -113,6 +113,45 @@ final class CEFRuntimeTests: XCTestCase {
         }
     }
 
+    // MARK: - Pin 3b: DoClose, or CEF closes Norma's own window
+
+    /// The browser client must override `CefLifeSpanHandler::DoClose` and answer `true`.
+    ///
+    /// Found at the user's live gate, and it is the worst shape a default can have: the base class
+    /// supplies `return false`, which compiles, links, runs — and, per
+    /// `include/cef_life_span_handler.h`, "will send the standard close notification to the
+    /// browser's top-level parent window (... **performClose: on OS X** ...)". For a browser
+    /// parented into `ShellPanel`, that window is Norma's own. Closing a panel tab, or clicking
+    /// Cowork with a tab open, made the entire app window vanish while the process stayed alive.
+    ///
+    /// Pinned through a **string literal in the override's log line** rather than a symbol: the
+    /// class lives in an anonymous namespace, and Release strips debugging symbols, so a `nm`-based
+    /// pin would be fragile in exactly the configuration that ships. The literal is in `__cstring`
+    /// and survives stripping — the same technique the `CEF_USE_SANDBOX` pin above uses, and the
+    /// same reason: assert on the BUILT PRODUCT, not on source that might not be linked.
+    ///
+    /// If you change that log message, change this needle with it — that coupling is deliberate and
+    /// is written at the call site too.
+    func testTheBrowserClientOverridesDoCloseSoCEFCannotCloseNormasWindow() throws {
+        let needle = Data("DoClose->true".utf8)
+        let macOS = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
+        let candidates = [
+            macOS.appendingPathComponent("Norma.debug.dylib"),  // Debug puts the real code here
+            macOS.appendingPathComponent("Norma"),              // Release
+        ].filter { FileManager.default.fileExists(atPath: $0.path) }
+        XCTAssertFalse(candidates.isEmpty, "no app binary found to scan")
+
+        let found = candidates.contains { url in
+            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return false }
+            return data.range(of: needle) != nil
+        }
+        XCTAssertTrue(
+            found,
+            "NormaClient no longer overrides DoClose. CefLifeSpanHandler's default returns false, "
+                + "which makes CEF send performClose: to the browser's top-level parent window — "
+                + "Norma's app window. Closing a panel tab would close the whole window.")
+    }
+
     // MARK: - Pin 3: the termination path
 
     /// `NormaApplication` must override `-terminate:`.
