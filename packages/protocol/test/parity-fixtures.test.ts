@@ -6,8 +6,10 @@ import { buildCleanerVectorsFixture, buildDangerousDomainsFixture, CLEANER_VECTO
 /**
  * Chat Slice D, Task 4 — the freshness/drift tripwire for the two cross-language parity fixtures
  * (`fixtures/dangerous-domains.json`, `fixtures/cleaner-vectors.json`), mirroring the shape of the
- * existing Swift-side fixture-count tripwire (`RoundTripTests.fixtureURLs()`'s `count == 57`
- * assertion): both call the SAME `parity-fixtures.ts` functions the generator itself calls, so a
+ * existing Swift-side fixture-count tripwire (`RoundTripTests.fixtureURLs()`'s exact-count
+ * assertion — 63 as of panel-shell; check that file rather than trusting a number restated here,
+ * it has drifted twice): both call the SAME `parity-fixtures.ts` functions the generator itself
+ * calls, so a
  * fixture on disk that disagrees with what those functions compute RIGHT NOW means real drift —
  * `packages/core`'s `SHIPPED_DANGEROUS_DOMAINS`/`htmlToText` changed (or the vector list changed)
  * without a `pnpm protocol:generate` re-run — never two hand-maintained copies quietly disagreeing

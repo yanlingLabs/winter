@@ -171,7 +171,8 @@ for (const [name, value] of Object.entries(fixtures)) {
 // Written into the SAME fixtures/ directory as the SessionEvent fixtures above, but deliberately
 // NOT added to the `fixtures` map itself and NOT swept into the Swift NormaProtocol test bundle
 // below: RoundTripTests.swift decodes EVERY .json file it finds under Fixtures/ as a SessionEvent
-// and asserts an exact count of 58 — these two are a different shape entirely, so the sync step
+// and asserts an exact count (63 as of panel-shell) — these two are a different shape entirely, so
+// the sync step
 // below now copies the SessionEvent set explicitly (never a blanket directory copy) to keep that
 // gate byte-for-byte unchanged. A later task wires these two into their own Swift consumer.
 writeFileSync(join(fixDir, "dangerous-domains.json"), JSON.stringify(buildDangerousDomainsFixture(), null, 2));
@@ -181,7 +182,9 @@ writeFileSync(join(fixDir, "cleaner-vectors.json"), JSON.stringify(cleanerVector
 // 3. Sync fixtures into the Swift test bundle — the SessionEvent per-variant fixtures ONLY (see
 // the comment above): a blanket directory copy would also carry dangerous-domains.json/
 // cleaner-vectors.json into RoundTripTests.swift's Fixtures/, which decodes every file there as a
-// SessionEvent and hard-asserts a count of 58.
+// SessionEvent and hard-asserts an exact count (63 as of panel-shell). Both counts here are
+// deliberately written as "the count RoundTripTests asserts" rather than restated numbers — they
+// have drifted twice; check `RoundTripTests.swift` rather than trusting a figure in this comment.
 const swiftFixDir = join(import.meta.dir, "..", "..", "..", "apple", "NormaProtocol", "Tests", "NormaProtocolTests", "Fixtures");
 rmSync(swiftFixDir, { recursive: true, force: true }); // delete-then-copy: no orphaned fixtures after variant renames
 mkdirSync(swiftFixDir, { recursive: true });
