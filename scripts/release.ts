@@ -101,16 +101,26 @@ function fail(msg: string): never {
   process.exit(1);
 }
 
+// execSync's default maxBuffer is 1MB, and the Release build blew straight through it once this
+// branch added CEF: `xcodebuild` now compiles CEF's ~700-file libcef_dll wrapper on top of
+// everything else, and its output measured **4.33MB** — so the pipeline died with
+// `spawnSync /bin/sh ENOBUFS` at the BUILD step, before signing anything, on the first dry run
+// after the embed landed. Raised well past that rather than to it: a CEF bump, an added target or
+// a warning-heavy compiler release all push this number up, and the failure mode is a confusing
+// crash in a 10-minute step rather than anything that names the real cause. Applied to `probe`
+// too — same class of trap, and `probe` is what runs `codesign -dvv` on a 224MB Mach-O.
+const MAX_BUFFER = 64 * 1024 * 1024;
+
 // Throwing shell helper for steps that should abort the whole run on any nonzero exit —
 // mirrors scripts/sparkle-feed-gate.ts's `sh` idiom.
 const sh = (cmd: string, cwd = ROOT): string =>
-  execSync(cmd, { cwd, stdio: "pipe", encoding: "utf8" });
+  execSync(cmd, { cwd, stdio: "pipe", encoding: "utf8", maxBuffer: MAX_BUFFER });
 
 // Non-throwing probe — used ONLY by preflight checks, which must run to completion and
 // aggregate every failure rather than aborting on the first shell error.
 function probe(cmd: string, cwd = ROOT): { ok: boolean; stdout: string } {
   try {
-    return { ok: true, stdout: execSync(cmd, { cwd, stdio: "pipe", encoding: "utf8" }) };
+    return { ok: true, stdout: execSync(cmd, { cwd, stdio: "pipe", encoding: "utf8", maxBuffer: MAX_BUFFER }) };
   } catch (e) {
     const err = e as { stdout?: string; stderr?: string };
     return { ok: false, stdout: `${err.stdout ?? ""}${err.stderr ?? ""}` };
@@ -452,7 +462,7 @@ interface NotarizeResult {
 function notarizeSubmit(path: string): NotarizeResult {
   const cmd = `xcrun notarytool submit "${path}" --keychain-profile ${NOTARY_PROFILE} --wait --output-format json`;
   try {
-    const raw = execSync(cmd, { cwd: ROOT, stdio: "pipe", encoding: "utf8" });
+    const raw = execSync(cmd, { cwd: ROOT, stdio: "pipe", encoding: "utf8", maxBuffer: MAX_BUFFER });
     return JSON.parse(raw) as NotarizeResult;
   } catch (e) {
     const err = e as { stdout?: string; stderr?: string };
