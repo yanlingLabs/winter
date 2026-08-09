@@ -63,6 +63,18 @@ const char *NormaCEFLastError(void);
 /// a view torn down before then simply drops out.
 void NormaCEFCreateBrowser(NSView *parent, const char *url);
 
+/// The ONE answer `CefLifeSpanHandler::DoClose` gives, exported so a test can read the VALUE rather
+/// than infer it from a log string.
+///
+/// It must be YES. CEF's default is `false`, which means "proceed with the default close behaviour"
+/// — and `include/cef_life_span_handler.h` spells that out: "returning false from DoClose() will
+/// send the standard close notification to the browser's top-level parent window (... performClose:
+/// on OS X ...)". `cefsimple` and `cefclient` both return false because each OWNS an NSWindow per
+/// browser. Norma hosts the browser inside a window it owns and shares with the whole shell, so CEF
+/// must never be allowed near it: at the user's live gate, closing a panel tab closed the app's
+/// window and demoted it out of the Dock, leaving only the menu-bar orb.
+BOOL NormaCEFDoCloseIsHandledByHost(void);
+
 /// Close the browser hosted by `parent` (and drop any queued request for it). Called from
 /// `NSViewRepresentable.dismantleNSView`.
 void NormaCEFCloseBrowser(NSView *parent);

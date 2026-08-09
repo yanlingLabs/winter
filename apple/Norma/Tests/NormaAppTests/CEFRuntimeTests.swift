@@ -124,11 +124,19 @@ final class CEFRuntimeTests: XCTestCase {
     /// parented into `ShellPanel`, that window is Norma's own. Closing a panel tab, or clicking
     /// Cowork with a tab open, made the entire app window vanish while the process stayed alive.
     ///
-    /// Pinned through a **string literal in the override's log line** rather than a symbol: the
-    /// class lives in an anonymous namespace, and Release strips debugging symbols, so a `nm`-based
-    /// pin would be fragile in exactly the configuration that ships. The literal is in `__cstring`
-    /// and survives stripping — the same technique the `CEF_USE_SANDBOX` pin above uses, and the
-    /// same reason: assert on the BUILT PRODUCT, not on source that might not be linked.
+    /// **This half pins only that the override still EXISTS**, through a string literal in its log
+    /// line. A symbol-based pin would be fragile in the configuration that ships (the client class
+    /// is in an anonymous namespace and Release strips debugging symbols); the literal is in
+    /// `__cstring` and survives stripping — the same technique, and the same reason, as the
+    /// `CEF_USE_SANDBOX` pin above: assert on the BUILT PRODUCT.
+    ///
+    /// **It deliberately does NOT pin the answer**, and must not be mistaken for doing so: the
+    /// literal is emitted by a `Log(...)` statement with zero coupling to the `return`, so changing
+    /// only the return would leave this green with the Critical restored. That half is
+    /// `testDoCloseAnswersThatTheHostHandlesTheCloseSoCEFNeverTouchesNormasWindow` below, which
+    /// reads the returned VALUE. Both are needed: this one catches the body being replaced (pasting
+    /// `cefsimple`'s, which returns false and carries no such log line), that one catches the answer
+    /// being flipped.
     ///
     /// If you change that log message, change this needle with it — that coupling is deliberate and
     /// is written at the call site too.
@@ -150,6 +158,28 @@ final class CEFRuntimeTests: XCTestCase {
             "NormaClient no longer overrides DoClose. CefLifeSpanHandler's default returns false, "
                 + "which makes CEF send performClose: to the browser's top-level parent window — "
                 + "Norma's app window. Closing a panel tab would close the whole window.")
+    }
+
+    /// `DoClose` must ANSWER `true` — the half a binary string scan structurally cannot cover.
+    ///
+    /// The override returns `NormaCEFDoCloseIsHandledByHost()` rather than a bare literal precisely
+    /// so this test can read the value it yields instead of inferring it from a log message. Flip
+    /// that function to `NO` and this reds; flip it and the app silently goes back to closing its
+    /// own window whenever a panel tab closes.
+    ///
+    /// Why the value matters, from `include/cef_life_span_handler.h`: `false` means "proceed with
+    /// the default close behaviour", which "will send the standard close notification to the
+    /// browser's top-level parent window (... **performClose: on OS X** ...)". Measured at the live
+    /// gate — with `false`, closing a tab took `mainWindowVisible` true→false and the activation
+    /// policy regular→accessory, so the window vanished and the Dock icon with it.
+    func testDoCloseAnswersThatTheHostHandlesTheCloseSoCEFNeverTouchesNormasWindow() {
+        XCTAssertTrue(
+            NormaCEFRuntime.doCloseIsHandledByHost,
+            "DoClose now answers false. CEF will send performClose: to the browser's top-level "
+                + "parent window — Norma's own — so closing a panel tab, or leaving the session "
+                + "with one open, will close the app's window and demote it out of the Dock. "
+                + "cefsimple and cefclient return false because each OWNS a window per browser; "
+                + "Norma does not. See NormaCEF.h.")
     }
 
     // MARK: - Pin 3: the termination path

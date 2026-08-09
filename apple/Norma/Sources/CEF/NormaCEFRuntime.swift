@@ -92,6 +92,12 @@ enum NormaCEFRuntime {
     /// Whether `CefShutdown` has run. Terminal: CEF cannot be initialised again afterwards.
     static var didShutdown: Bool { NormaCEFDidShutdown() }
 
+    /// The answer `CefLifeSpanHandler::DoClose` gives — see `NormaCEF.h` for why it must be `true`
+    /// and what happens to the user's window when it is not. Exposed here for the same reason as
+    /// the two above: a bridging header is not a module interface, so the test bundle cannot name
+    /// the C function directly.
+    static var doCloseIsHandledByHost: Bool { NormaCEFDoCloseIsHandledByHost() }
+
     /// `CefShutdown`, at the point of no return. Safe no-op if CEF was never initialised — which is
     /// what lets `NormaCEFInitialize`'s own `NSApplicationWillTerminateNotification` subscription be
     /// unconditional, and what lets the unit-test host run the termination path at all.

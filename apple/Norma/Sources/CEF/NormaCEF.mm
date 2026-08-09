@@ -351,14 +351,28 @@ class NormaClient : public CefClient,
   /// immediately before the browser object is destroyed"), which is what keeps `g_browsers`
   /// draining and the renderer process exiting. Verified by measurement, not assumed — returning
   /// `true` without completing the close would trade a window-close bug for a renderer leak.
+  /// TWO PINS GUARD THIS, because one alone left the Critical re-openable:
+  ///
+  ///   * The body must not be REPLACED (e.g. pasted from `cefsimple`/`cefclient`, both of which
+  ///     return false). The log literal below is what a replacement would take with it, and
+  ///     `testTheBrowserClientOverridesDoCloseSoCEFCannotCloseNormasWindow` scans the built binary
+  ///     for it.
+  ///   * The ANSWER must not be FLIPPED. That is why this returns
+  ///     `NormaCEFDoCloseIsHandledByHost()` — an exported single source of truth a test can call
+  ///     and read directly — rather than a bare `true`. A string scan cannot see a return value:
+  ///     the first version of this pin searched for "DoClose->true", which is emitted by a `Log`
+  ///     statement with zero coupling to the `return`, so changing only the return kept the test
+  ///     green while restoring the bug.
+  ///
+  /// One case is still not covered and is named rather than papered over: surgically editing this
+  /// one line to `return false;` while leaving the log call intact. Nothing a test can observe
+  /// distinguishes that, because no test can call a C++ virtual method it cannot construct a
+  /// `CefBrowser` for. It is also the least likely edit — the named regression vector is pasting a
+  /// sample's body, which brings its own body and no such log line, and the string scan catches it.
   bool DoClose(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
-    // The literal below is load-bearing: `CEFRuntimeTests
-    // .testTheBrowserClientOverridesDoCloseSoCEFCannotCloseNormasWindow` searches the built binary
-    // for "DoClose->true" to pin that this override still exists. Nothing about deleting it fails
-    // to compile — the base class supplies a `false` that quietly closes the user's window.
     Log("browser close handled by the host (DoClose->true, id=%d)", browser->GetIdentifier());
-    return true;
+    return NormaCEFDoCloseIsHandledByHost();
   }
 
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
@@ -611,6 +625,13 @@ void NormaCEFCreateBrowser(NSView *parent, const char *url) {
   request.url = [NSString stringWithUTF8String:target.c_str()];
   [g_pending addObject:request];
   Log("queued browser for %s (context not up yet)", target.c_str());
+}
+
+BOOL NormaCEFDoCloseIsHandledByHost(void) {
+  // Flipping this to NO re-opens the live-gate Critical: CEF would send `performClose:` to the
+  // browser's top-level parent window, which is Norma's own app window. `CEFRuntimeTests
+  // .testDoCloseAnswersThatTheHostHandlesTheCloseSoCEFNeverTouchesNormasWindow` reads this value.
+  return YES;
 }
 
 void NormaCEFCloseBrowser(NSView *parent) {
