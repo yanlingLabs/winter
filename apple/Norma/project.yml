@@ -121,7 +121,19 @@ targets:
         CFBundleVersion: "0.2.010"
         LSUIElement: true
         LSMinimumSystemVersion: "26.0"
-        NSPrincipalClass: NSApplication
+        # panel-cef Task 3: NSPrincipalClass is DELIBERATELY ABSENT. `NSPrincipalClass:
+        # NSApplication` sat here for the app's entire life and never did anything — SwiftUI's
+        # `App.main()` does not route through `NSApplicationMain`'s principal-class lookup; it
+        # constructs its own private `SwiftUI.AppKitApplication` and ignores the key (measured:
+        # docs/research/2026-08-09-cef-pump.md). Deleted rather than re-pointed at
+        # `NormaApplication`: an inert key that LOOKS like it installs the CEF subclass is
+        # exactly what fooled both the spike and this plan into believing the job was already
+        # done. The real installation is `Sources/App/main.swift` claiming the singleton before
+        # `NormaApp.main()`, pinned at runtime by `NormaApplicationTests` (nothing about it fails
+        # to compile, so a test is the only guard). NOTE the near-namesake below that IS live and
+        # IS honoured: the TEST BUNDLE's `INFOPLIST_KEY_NSPrincipalClass: HarnessTeardownObserver`
+        # — a different mechanism (XCTest instantiates a test bundle's principal class at bundle
+        # load), untouched by any of this.
         # Computer use (Phase 5 CU): screen-recording purpose string shown in the TCC prompt when
         # Norma first captures the screen for a computer-use screenshot.
         NSScreenCaptureUsageDescription: "Norma captures your screen for computer-use screenshots you explicitly ask it to take."

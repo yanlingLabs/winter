@@ -26,8 +26,6 @@
 	<string>26.0</string>
 	<key>LSUIElement</key>
 	<true/>
-	<key>NSPrincipalClass</key>
-	<string>NSApplication</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>Norma captures your screen for computer-use screenshots you explicitly ask it to take.</string>
 	<key>SUAutomaticallyUpdate</key>
