@@ -1201,4 +1201,67 @@ extension NormaClient {
             clientEfforts: (r["clientEfforts"]?.arrayValue ?? []).compactMap { $0.stringValue }.filter { !$0.isEmpty }
         )
     }
+
+    // MARK: - panel-shell T6/T8: the panel tab-strip mutation RPCs
+    //
+    // Bare, sessionId-targeted — like `interrupt`/`setActivity` above, never requiring the calling
+    // connection to be ATTACHED to `sessionId` (`ipc/server.ts`'s handlers append straight to that
+    // session's hub). `kind` is a plain `String`, not `SessionEvent.PanelTabKind`: this package has
+    // no reason to depend on the App target's own UI-side `PanelTabKind`, and the wire values are
+    // already plain strings (`methods.ts`'s `PanelTabKind` zod enum).
+
+    /// `panel.openTab {sessionId, kind, url?, title?}` (methods.ts `PanelOpenTabParams`). The
+    /// daemon MINTS `tabId` (`PanelOpenTabResult.tabId`, returned here) — there is no way to pass
+    /// one in, on purpose: that is what makes an agent-opened tab and a user-opened tab
+    /// indistinguishable downstream (methods.ts's own doc comment on this RPC).
+    public func openPanelTab(sessionId: String, kind: String, url: String? = nil, title: String? = nil) async throws -> String {
+        let r = try await request("panel.openTab", params: obj([
+            "sessionId": .string(sessionId), "kind": .string(kind),
+            "url": url.map { .string($0) }, "title": title.map { .string($0) },
+        ]))
+        guard let tabId = r["tabId"]?.stringValue else {
+            throw RpcError(code: -3, message: "invalid result from server for panel.openTab")
+        }
+        return tabId
+    }
+
+    /// `panel.closeTab {sessionId, tabId}` (methods.ts `PanelCloseTabParams`).
+    public func closePanelTab(sessionId: String, tabId: String) async throws {
+        _ = try await request("panel.closeTab", params: obj(["sessionId": .string(sessionId), "tabId": .string(tabId)]))
+    }
+
+    /// `panel.activateTab {sessionId, tabId}` (methods.ts `PanelActivateTabParams`).
+    public func activatePanelTab(sessionId: String, tabId: String) async throws {
+        _ = try await request("panel.activateTab", params: obj(["sessionId": .string(sessionId), "tabId": .string(tabId)]))
+    }
+
+    /// panel-shell T9: `panel.list {sessionId}` (methods.ts `PanelListParams`/`PanelListResult`) —
+    /// the CURRENT fold, re-read fresh by the daemon on every call (Task 6's reviewer signed off on
+    /// that cost — bounded by tab count, never the phone transport). The app's instant-display seed
+    /// on a session switch, ahead of whatever the slower full replay eventually redelivers.
+    public func listPanelTabs(sessionId: String) async throws -> (tabs: [PanelTabInfo], activeTabId: String?) {
+        let r = try await request("panel.list", params: obj(["sessionId": .string(sessionId)]))
+        let tabs: [PanelTabInfo] = (r["tabs"]?.arrayValue ?? []).compactMap { t in
+            guard let tabId = t["tabId"]?.stringValue, let kind = t["kind"]?.stringValue else { return nil }
+            return PanelTabInfo(tabId: tabId, kind: kind, url: t["url"]?.stringValue, title: t["title"]?.stringValue)
+        }
+        return (tabs, r["activeTabId"]?.stringValue)
+    }
+}
+
+/// `panel.list`'s per-tab wire shape (`PanelTabSchema`, methods.ts). `kind` stays a plain `String`
+/// here, not the App target's UI-side `PanelTabKind` — this package has no reason to depend on it,
+/// same reasoning as `openPanelTab(kind:)`'s own doc comment just above.
+public struct PanelTabInfo: Equatable, Sendable {
+    public let tabId: String
+    public let kind: String
+    public let url: String?
+    public let title: String?
+
+    public init(tabId: String, kind: String, url: String?, title: String?) {
+        self.tabId = tabId
+        self.kind = kind
+        self.url = url
+        self.title = title
+    }
 }

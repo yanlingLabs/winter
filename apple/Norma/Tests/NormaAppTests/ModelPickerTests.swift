@@ -378,7 +378,9 @@ final class ModelPickerTests: XCTestCase {
     ///
     /// The orb reaches this state on the plain path: pick an effort on chat session A (RPC succeeds,
     /// probation armed), A is idle so no turn boundary fires, click session B in the sidebar — the
-    /// orb's only session-switch hook (`OrbWindowController.updateIsChatSession`) clears nothing.
+    /// orb's only session-switch hook (`OrbWindowController.updateIsChatSession`) clears no
+    /// PROBATION state. (panel-shell T16: it does clear `pendingCardDrafts` since T10b — narrowed
+    /// from the original "clears nothing", which stopped being true then. This test is unaffected.)
     @MainActor
     func testAProbationNeverProducesAVerdictForADifferentSession() {
         var bound = "A"

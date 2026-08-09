@@ -285,7 +285,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
   // The correction the plan itself nearly got wrong: transients must SURVIVE this filter
   // ---------------------------------------------------------------------------------------------
 
-  test("all eight TRANSIENT types reach a remote client — the live policy is history's allowlist PLUS these", async () => {
+  test("all nine TRANSIENT types reach a remote client — the live policy is history's allowlist PLUS these", async () => {
     const { store, hub, socketPath, remoteToken } = await boot();
     const sessionId = store.createSession("global", { mode: "code" });
 
@@ -302,11 +302,15 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     hub.broadcastTransient(sessionId, { type: "plugin_tool_invoke", sessionId, threadId: "main", requestId: "r2", tool: "t", argsJson: "{}" });
     hub.broadcastTransient(sessionId, { type: "hardware_requested", sessionId, threadId: "main", requestId: "r3", verb: "v", argsJson: "{}" });
     hub.broadcastTransient(sessionId, { type: "plugin_tile_updated", sessionId, pluginId: "p1", tile: null });
+    // panel-shell T3: accepted onto the remote stream rather than excluded (events.ts's
+    // TRANSIENT_EVENT_TYPES comment on `panel_command`) — the phone has no panel and skips the
+    // variant, so this is a reach-the-wire proof, not an endorsement of phone-side rendering.
+    hub.broadcastTransient(sessionId, { type: "panel_command", sessionId, commandId: "c1", tabId: "t1", action: "navigate", url: "https://example.com", deadlineMs: 15000 });
     hub.broadcastTransient(sessionId, { type: "session_activity", sessionId, activity: "background" });
 
     // Keyed to this broadcast's own VALUE, not just its type: since T5 the attach above emits a
     // `session_activity` of its own ("active"), so a type-only wait would already be satisfied
-    // before any of the eight broadcasts had crossed the socket.
+    // before any of the nine broadcasts had crossed the socket.
     await waitFor(() => phone.ofType("session_activity").some((e: any) => e.activity === "background"), "the last transient");
     for (const t of TRANSIENT_EVENT_TYPES) {
       expect(phone.types()).toContain(t);
@@ -382,7 +386,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
   // The policy itself
   // ---------------------------------------------------------------------------------------------
 
-  test("REMOTE_STREAM_EVENT_TYPES is EXACTLY history's allowlist + the seven transients + the three stream-control types", () => {
+  test("REMOTE_STREAM_EVENT_TYPES is EXACTLY history's allowlist + the nine transients + the three stream-control types", () => {
     const expected = new Set<string>([
       ...HISTORY_EVENT_TYPES,
       ...TRANSIENT_EVENT_TYPES,
@@ -393,30 +397,35 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     // toEqual won't accept against a plain string[].
     expect([...REMOTE_STREAM_EVENT_TYPES].sort() as string[]).toEqual([...expected].sort());
     // Growth log: 20 → 21 (session-activity-hygiene T4, `session_activity` — via the transients).
-    expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(21);
+    // 21 → 22 (panel-shell T3, `panel_command` — via the transients). Unlike every prior growth
+    // line here, this one is DELIBERATE rather than incidental: panel_command reaching the remote
+    // stream is accepted, not worked around (see events.ts's TRANSIENT_EVENT_TYPES comment on it).
+    expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(22);
     // The one exclusion the whole first half of this file is about.
     expect(REMOTE_STREAM_EVENT_TYPES.has("reasoning_item" as SessionEvent["type"])).toBe(false);
     // ...and the ones that would have quietly reverted the phone-client streaming fix.
     for (const t of TRANSIENT_EVENT_TYPES) expect(REMOTE_STREAM_EVENT_TYPES.has(t)).toBe(true);
   });
 
-  test("TRANSIENT_EVENT_TYPES is EXACTLY the eight — the Swift mirror pins the same literals", () => {
+  test("TRANSIENT_EVENT_TYPES is EXACTLY the nine — the Swift mirror pins the same literals", () => {
     // Parity, remote-allowlist style: neither side imports the other, each pins its own copy to
     // these literal strings, so editing one alone fails here or in
     // `apple/NormaProtocol/.../SessionEventTransientTests.swift` (SessionEvent.transientTypes).
     //
     // Growth log: 7 → 8 (session-activity-hygiene T4, `session_activity`).
+    // 8 → 9 (panel-shell T3, `panel_command`).
     expect([...TRANSIENT_EVENT_TYPES].sort()).toEqual([
       "assistant_delta",
       "hardware_requested",
       "lease_granted",
       "lease_lost",
+      "panel_command",
       "peripheral_call_requested",
       "plugin_tile_updated",
       "plugin_tool_invoke",
       "session_activity",
     ]);
-    expect(TRANSIENT_EVENT_TYPES.size).toBe(8);
+    expect(TRANSIENT_EVENT_TYPES.size).toBe(9);
   });
 
   // ---------------------------------------------------------------------------------------------

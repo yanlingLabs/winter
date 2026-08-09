@@ -1,6 +1,7 @@
 import type { SessionEvent } from "@norma/protocol";
 import type { Provider, TurnInputItem } from "../providers/types";
 import { DREAM_MODEL } from "../agent/dreamer";
+import { hasOpenPanelTabs } from "../panel/store";
 import { activityFor, type ActivityRow } from "./activity";
 import { appendCleanerLog } from "./cleaner-log";
 import { SYNCED_SESSION_ID_RE } from "./store";
@@ -61,6 +62,7 @@ export type CleanerRail =
   | "activity"
   | "not-idle-24h"
   | "file-write"
+  | "open-tabs"
   | "titled";
 
 /** The exact slice of `SessionStore` the cleaner needs — a narrow structural interface (the
@@ -285,9 +287,26 @@ export class SessionCleaner {
     // direction this gate is allowed to err in.
     if (lastEventTs > nowMs - CLEANER_MIN_IDLE_MS) return "not-idle-24h";
 
-    // ---- the two transcript rails, one parse ----
+    // ---- the three transcript rails, one parse ----
     const events = this.deps.store.read(sessionId);
     if (hasFileWrite(events)) return "file-write";
+    // panel-shell T14: the cleaner's own door onto the loss Task 12 closed on the reaper
+    // (`SessionStore.emptySessionIds`). A browse-only session — a panel tab opened with no chat
+    // message ever sent — renders to an EMPTY transcript (`renderTranscript` only reads
+    // user/assistant/tool_call lines), which is exactly what a delete-voting judge sees as
+    // worthless junk. `hasOpenPanelTabs` FOLDS the panel events (Task 5's `foldPanelTabs`, the same
+    // replay `panel.list` uses) rather than scanning for a bare `panel_tab_opened` event — a tab
+    // that was opened and later closed holds nothing, and railing on the raw event's mere presence
+    // would make that session permanently un-judgeable even though it is genuinely empty again. A
+    // railed session is never judged (see the class doc), so it is not stamped either — the pass
+    // after its last tab closes, this rail no longer fires and the session re-qualifies normally.
+    //
+    // panel-shell T16: `hasOpenPanelTabs` itself now lives in `panel/store.ts`, beside
+    // `foldPanelTabs` — imported here, not defined here — so the reaper's `emptySessionIds`
+    // (sessions/store.ts) can share this EXACT function instead of its own hand-copied scan. Before
+    // T16 the two disagreed (reaper: "ever opened one"; here: "holds one now"), which made a
+    // closed-tab session reaper-immune but cleaner-eligible — permanent litter with zero content.
+    if (hasOpenPanelTabs(events)) return "open-tabs";
     // The user-set-title rail. VACUOUS TODAY — see `hasUserSetTitle` for the verification and the
     // standing obligation. Kept as a live slot (not deleted) so the rail's place in this order
     // survives and there is exactly ONE line to re-engage the day user titles ship.

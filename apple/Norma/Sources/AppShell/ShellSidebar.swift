@@ -41,8 +41,77 @@ struct ShellRootView: View {
     /// window outlives every hide/re-summon (`AppWindowController` owns it forever), so the user's
     /// choice survives exactly as long as the window itself does.
     @State private var sidebarVisible = true
+    /// panel-shell T10: mode and width together — replaces the two separate `@State` values Task 2
+    /// added (`panelMode`/`panelWidth`, one comment below this one until this task). `.mode` is
+    /// still the REQUESTED mode (`panelResolvedMode` may render `.hidden` on a narrow window while
+    /// this stays `.side`/`.maximized`, so widening the window restores what the user asked for —
+    /// unchanged from Task 2's own doc comment, now also true of `.maximized` for free, since
+    /// `panelResolvedMode` already treats every non-`.hidden` request identically); `.maximized`
+    /// ignores `.sideWidth` structurally rather than overwriting it (`PanelPresentation`'s own doc
+    /// comment, `PanelMode.swift`), which is what makes leaving `.maximized` restore the dragged
+    /// width with no second "previous width" to keep in step.
+    ///
+    /// Plain `@State`, not `@SceneStorage`: this window is AppKit-owned and hosted directly via
+    /// `NSHostingView` (`AppWindowController.swift:215`) — `NormaApp`'s only `Scene` is an empty
+    /// `Settings {}` (`NormaApp.swift`), so there is no SwiftUI window-restoration scene for
+    /// `@SceneStorage` to key off. Apple's own documented fallback for that case is to behave
+    /// exactly like `@State` — so the wrapper would be inert here, and `PanelPresentation` (a plain
+    /// struct) has no existing `RawRepresentable` bridging to invent one for just to carry it.
+    /// `@State` means exactly what it already means for `sidebarVisible` above: the value survives
+    /// for as long as the window does, and `AppWindowController` keeps this window alive for the
+    /// app's whole lifetime.
+    @State private var presentation = PanelPresentation()
+    /// panel-shell T9: Task 8's `@StateObject private var panelStore = PanelStore()` here is
+    /// REJECTED, not ratified. `ShellSessionHost` is constructed in `AppDelegate.summonAppWindow`
+    /// BEFORE this view exists at all, and it is `ShellSessionHost.attachFresh`/`hop` that know,
+    /// synchronously and at the exact right moment, which session just became current — a
+    /// `@StateObject` privately owned by this view has no way to be reached from a controller
+    /// object that predates it; there is no channel back INTO a view's private state. `host` above
+    /// (line 20) is also a plain, UNOBSERVED `var`, not `@ObservedObject` — this view could not
+    /// have driven the feed reactively off it even if it tried, which is exactly why Task 8's own
+    /// review deleted a gate in this file's sibling `ShellPanel.swift` that read `host`'s published
+    /// state the same non-reactive way (progress.md, Task 8 Important 2). `PanelStore` now lives on
+    /// `ShellSessionHost` itself (`let panelStore`, fed by its per-attachment `onEvent` hook) — this
+    /// is a plain pass-through read of it.
+    ///
+    /// `fallbackPanelStore` exists only for a shell built WITHOUT a host (the pure window tests,
+    /// same posture as `shellLandingPlaceholderText`'s host-less cases) — `ShellPanel.store` is
+    /// non-optional, so something must always be handed to it.
+    @StateObject private var fallbackPanelStore = PanelStore()
+    private var panelStore: PanelStore { host?.panelStore ?? fallbackPanelStore }
 
     var body: some View {
+        // panel-shell T2: the whole body moved inside a `GeometryReader` — `contentWidth` (the
+        // window minus the sidebar, NOT the whole window: the panel's minimums are about the
+        // content area, so a collapsed sidebar legitimately gives it more room) and the RESOLVED
+        // `mode` are needed both by the HStack's third column below and by the trailing titlebar
+        // cluster further down this same modifier chain, so both live here rather than being
+        // recomputed in two places.
+        GeometryReader { geo in
+            let contentWidth = geo.size.width - (sidebarVisible ? shellSidebarWidth : 0)
+            let mode = panelResolvedMode(requested: presentation.mode, contentWidth: contentWidth)
+
+            shellBody(contentWidth: contentWidth, mode: mode)
+                // review round 2, Important 1, belt-and-braces half: keep the STORED
+                // `presentation.sideWidth` from drifting far from what is actually on screen (the
+                // render path already clamps on read, but the divider's next drag anchors on the
+                // stored value — see `PanelDivider.onChanged` — so stored and rendered should not
+                // be allowed to diverge for long). Guarded on `panelFitsInContent` so this can
+                // NEVER become a second caller of `panelClampWidth` outside the zone
+                // `PanelModeTests.testClampBoundsAreNeverInvertedWhenThePanelFits` requires (Task
+                // 1's carried finding) — below the threshold the render path already forces
+                // `.hidden` and touches `sideWidth` not at all, and this must not either.
+                .onChange(of: contentWidth) { _, newContentWidth in
+                    guard panelFitsInContent(newContentWidth) else { return }
+                    presentation.sideWidth = panelClampWidth(presentation.sideWidth, contentWidth: newContentWidth)
+                }
+        }
+    }
+
+    /// The shell's actual content — split out of `body` only so the `GeometryReader` above has a
+    /// single expression to return; no behaviour differs from having written it all inline.
+    @ViewBuilder
+    private func shellBody(contentWidth: CGFloat, mode: PanelMode) -> some View {
         HStack(spacing: 0) {
             // The sidebar carries the host (Move to CLI on Recents rows) and the injected New chat
             // door — both optional, same fallback posture as `detail` below. It owns its own fixed
@@ -56,41 +125,102 @@ struct ShellRootView: View {
                     // surface, and a fade reads as dissolving rather than closing.
                     .transition(.move(edge: .leading))
             }
-            detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                // sidebar-brand T5: the RAISED plane (`docs/brand.md` § the plane mapping).
-                // REQUIRED, not cosmetic: the sidebar's cream only reads correctly against a
-                // painted content plane — against the window's default system grey it looks
-                // wrong rather than warm. Painted here, at the shell level, so every destination
-                // inherits it and none has to remember.
-                // The CARD — the phone's own treatment brought over (user call, 2026-08-07): iOS
-                // masks its reveal card with a continuous rounded rect, traces that exact shape
-                // with a hairline rim, and floats it on the warm base. Only the LEADING corners
-                // round — the other two meet the window's own edge, which already has the
-                // system's rounding, and doubling it would read as a card inside a card.
-                //
-                // Drawn as a BACKGROUND LAYER that ignores the safe area, not as a clip on the
-                // content. `detail`'s content is inset by the titlebar's safe area (only the
-                // sidebar opts out), so clipping the content produced a ~23 pt gap above the card
-                // — invisible before only because the window's own `CardSurface` fill was quietly
-                // covering that band, and revealed the moment `canvas` went behind it. A
-                // background layer reaches the window's top edge without moving any content.
-                //
-                // This REPLACED the full-height boundary hairline between pane and detail: a
-                // straight line cannot follow a rounded corner, so it would have run past the
-                // card's edge. The rim is the separator now, which is also how the phone does it.
-                .background {
-                    shellDetailCardShape
-                        .fill(Theme.cardSurface)
-                        .overlay(
-                            shellDetailCardShape
-                                .strokeBorder(Theme.hairline,
-                                              lineWidth: shellSidebarHairlineWidth)
-                        )
-                        .shadow(color: .black.opacity(0.05), radius: 10, x: -2)
-                        .ignoresSafeArea()
+            // panel-shell T2: absent entirely in `.maximized` — the panel owns the whole content
+            // area then, and `detail` would have nothing left to show beside it.
+            //
+            // panel-shell T10 (this branch is REACHABLE now — T2 wrote it before anything could
+            // set `.maximized`; the rest of this note is what changes now that it can be taken):
+            // entering/leaving `.maximized` fully tears down and rebuilds whatever `detail` is
+            // currently showing, identically to navigating to a different destination. Judged
+            // ACCEPTABLE rather than fixed here — investigated case by case (task-10-report.md):
+            // `ShellSessionView`'s composer draft is safe (it lives on the externally-owned
+            // `FieldStateAdapter`, not on this subtree), so no live conversation's typed-but-unsent
+            // message is ever lost. What IS lost: the transcript's scroll position on an idle
+            // session (an actively streaming one self-corrects within one token), any open menu
+            // popover, and — the two real, non-cosmetic losses, NOT fixed here — the New Chat
+            // page's own draft (`NewChatPage.swift`'s `draft`, already documented there as
+            // dropping on navigate-away; maximizing the panel is a second trigger for the
+            // identical drop) and an unsubmitted answer on a pending question/plan card
+            // (`PendingCards.swift`'s `PendingQuestionBody`/`PendingPlanBody`). Both are shaped
+            // like candidates for the SAME fix the composer draft already has — external, not
+            // view-local, storage — but that is a scoped change of its own, not this task's; a
+            // "hide rather than remove" alternative was considered and rejected (see the report)
+            // because it would mount `detail` at a width that ANIMATES to/from zero on every
+            // maximize toggle, fighting `WindowContentView`'s own `measuredWidth` remeasurement
+            // rather than avoiding it.
+            if mode != .maximized {
+                detail
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // sidebar-brand T5: the RAISED plane (`docs/brand.md` § the plane mapping).
+                    // REQUIRED, not cosmetic: the sidebar's cream only reads correctly against a
+                    // painted content plane — against the window's default system grey it looks
+                    // wrong rather than warm. Painted here, at the shell level, so every destination
+                    // inherits it and none has to remember.
+                    // The CARD — the phone's own treatment brought over (user call, 2026-08-07): iOS
+                    // masks its reveal card with a continuous rounded rect, traces that exact shape
+                    // with a hairline rim, and floats it on the warm base. Only the LEADING corners
+                    // round — the other two meet the window's own edge, which already has the
+                    // system's rounding, and doubling it would read as a card inside a card.
+                    //
+                    // Drawn as a BACKGROUND LAYER that ignores the safe area, not as a clip on the
+                    // content. `detail`'s content is inset by the titlebar's safe area (only the
+                    // sidebar opts out), so clipping the content produced a ~23 pt gap above the card
+                    // — invisible before only because the window's own `CardSurface` fill was quietly
+                    // covering that band, and revealed the moment `canvas` went behind it. A
+                    // background layer reaches the window's top edge without moving any content.
+                    //
+                    // This REPLACED the full-height boundary hairline between pane and detail: a
+                    // straight line cannot follow a rounded corner, so it would have run past the
+                    // card's edge. The rim is the separator now, which is also how the phone does it.
+                    .background {
+                        shellDetailCardShape
+                            .fill(Theme.cardSurface)
+                            .overlay(
+                                shellDetailCardShape
+                                    .strokeBorder(Theme.hairline,
+                                                  lineWidth: shellSidebarHairlineWidth)
+                            )
+                            .shadow(color: .black.opacity(0.05), radius: 10, x: -2)
+                            .ignoresSafeArea()
+                    }
+            }
+
+            // panel-shell T2: the third column. The divider renders ONLY in `.side` — there is
+            // nothing to divide when the panel owns the whole content area (`.maximized`), and
+            // neither it nor the panel renders at all in `.hidden`.
+            //
+            // Every `panelClampWidth` call below is reachable ONLY when `mode == .side`, which
+            // `panelResolvedMode` guarantees means `panelFitsInContent(contentWidth)` already
+            // holds — that is what keeps the clamp's own bounds from inverting (Task 1's carried
+            // finding; the guarantee is pinned by
+            // `PanelModeTests.testClampBoundsAreNeverInvertedWhenThePanelFits`). Nothing here ever
+            // calls it below the threshold where it could — panel-shell T10: that includes
+            // `panelRenderedWidth` below, which only calls `panelClampWidth` for `.side` and is
+            // itself only ever called from inside this SAME `mode != .hidden` branch.
+            if mode != .hidden {
+                if mode == .side {
+                    PanelDivider(width: $presentation.sideWidth, contentWidth: contentWidth)
                 }
+                ShellPanel(store: panelStore, presentation: $presentation, host: host, nav: nav)
+                    .frame(width: mode == .maximized
+                           ? nil
+                           : panelRenderedWidth(mode: mode, sideWidth: presentation.sideWidth,
+                                                 contentWidth: contentWidth))
+                    .frame(maxWidth: mode == .maximized ? .infinity : nil,
+                           maxHeight: .infinity)
+                    // Mirrors the sidebar's own leading-edge slide (`sidebarVisible` above) —
+                    // a physical surface sliding in from its own edge, not fading.
+                    .transition(.move(edge: .trailing))
+            }
         }
+        // ONE brand tint for the whole shell (user call, 2026-08-07: every cursor in the app the
+        // same colour). `.tint` is what drives a SwiftUI `TextField`'s caret and selection, and it
+        // cascades — so setting it here covers the search palette, the Dashboard panes, the
+        // pending cards and anything added later, rather than each field remembering to opt in.
+        //
+        // Deliberately NOT `ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME`: that would retint
+        // every system control in the app process, including surfaces this pass does not own.
+        .tint(Theme.accent)
         // The base plane behind everything, so the card's rounded corners reveal warm canvas
         // rather than the window's own fill. The sidebar paints its own `canvas` too; this is what
         // covers the sliver the corners cut out of the detail side.
@@ -145,17 +275,125 @@ struct ShellRootView: View {
         // sidebar-chrome-2: the TRAILING cluster, mirroring the reference's top-right corner. Same
         // button, same metrics, same top inset as the leading cluster — so the two clusters share
         // one centre line across the window by construction, not by two numbers agreeing.
+        //
+        // panel-shell T10: this cluster shows all THREE glyphs only while the panel is `.hidden`.
+        // The moment it opens, `dock.rectangle` and `sidebar.right` move INTO the panel's own
+        // trailing cluster (`ShellPanel.swift`'s `PanelTabStrip.trailingButtonCluster`) — the
+        // user's layout sketch settled this (`docs/superpowers/specs/2026-08-08-panel-shell-design.md`
+        // §"The panel's chrome layout") — and only `circle.dashed` stays up here, relocated to just
+        // outside the panel's leading edge so it keeps travelling with the chat column rather than
+        // the panel that swallowed its neighbours.
+        //
+        // The relocated button renders ONLY for `mode == .side`, not `.maximized` (review
+        // self-catch, T10): "just outside the panel's leading edge, staying with the chat column"
+        // presumes a chat column to stay with, and `.maximized` has none (`detail` is absent — see
+        // its own comment above). Naively reusing the same trailing-padding formula there would
+        // place the button using `panelRenderedWidth == contentWidth`: with the sidebar hidden that
+        // pushes it PAST the window's own leading edge (negative x), and with the sidebar showing
+        // it lands inside the SIDEBAR's own pane instead of beside anything panel-adjacent — neither
+        // is "outside the panel's leading edge" in any sense the spec line means. `.maximized`
+        // simply shows nothing here; nothing in the spec asks for a `.maximized`-specific placement.
         .overlay(alignment: .topTrailing) {
-            HStack(spacing: shellTitlebarClusterSpacing) {
-                ForEach(shellTitlebarTrailingGlyphs, id: \.self) { glyph in
-                    ShellTitlebarButton(systemImage: glyph,
-                                        label: shellTitlebarTrailingLabel(glyph),
-                                        isPlaceholder: true)
+            if mode == .hidden {
+                HStack(spacing: shellTitlebarClusterSpacing) {
+                    ForEach(shellTitlebarTrailingGlyphs, id: \.self) { glyph in
+                        if glyph == "sidebar.right" {
+                            // panel-shell T2: the placeholder named in `shellTitlebarTrailingLabel`
+                            // becomes the real toggle. `shellTitlebarTrailingGlyphs` still lists this
+                            // glyph (the cluster still shows three icons), but as of review round 2
+                            // it is no longer in `shellTitlebarTrailingPlaceholderGlyphs` — and the
+                            // `"sidebar.right"` case was REMOVED from `shellTitlebarTrailingLabel`'s
+                            // switch (round 1 had left it in, unreferenced; the reviewer called that
+                            // a pin one call away from asserting a falsehood, since nothing stopped a
+                            // future caller from asking this genuinely-wired glyph for its stale
+                            // "not wired yet" text and getting a lie back).
+                            //
+                            // The label tracks `presentation.mode` (the REQUESTED state, same value
+                            // the action mutates below) rather than the resolved `mode` — mirrors
+                            // `shellSidebarToggleLabel(isVisible:)`, the sibling toggle immediately
+                            // above, which keys its own label off the state IT mutates too. Below the
+                            // width threshold it EXPLAINS the disabled state instead (review round 2):
+                            // a disabled control with no reason given reads as broken, not as a
+                            // constraint. The window's own `minSize` (820, `AppWindowController`) is
+                            // always wide enough on its own (>= `panelMinContentWidth`), so whenever
+                            // this fires the sidebar is necessarily the reason — "hide the sidebar" is
+                            // therefore always a valid suggestion here, never a wrong one.
+                            //
+                            // Disabled rather than hidden when the window is too narrow — a control
+                            // that vanishes reads as a bug, one that greys out reads as a constraint.
+                            //
+                            // review round 1, Minor 3: this branch's own gate is the RESOLVED
+                            // `mode == .hidden`, which is not the same as the REQUESTED
+                            // `presentation.mode` being `.hidden` too — `panelResolvedMode` also
+                            // forces `.hidden` when the window is too narrow, whatever was
+                            // requested, which is exactly the "Widen the window…" case ten lines
+                            // above. That forced case requires `!fits`; so `fits == true` here can
+                            // only be the OTHER way resolved `.hidden` happens — the user actually
+                            // requested `.hidden` — which is what makes `presentation.mode ==
+                            // .hidden` hold whenever the inner ternary is reached at all. When
+                            // `fits == false`, `presentation.mode` really could be `.side`/
+                            // `.maximized` (the forced case) — but the OUTER ternary has already
+                            // picked the "Widen the window…" arm by then, so the inner one is never
+                            // evaluated either way, and the ternary is kept (rather than
+                            // hand-simplified to the literal) so it stays correct by construction
+                            // if that no-longer-coincidental relationship ever changes.
+                            let fits = panelFitsInContent(contentWidth)
+                            ShellTitlebarButton(
+                                systemImage: glyph,
+                                label: fits
+                                    ? (presentation.mode == .hidden ? "Show panel" : "Hide panel")
+                                    : "Widen the window or hide the sidebar to use the panel."
+                            ) {
+                                let wasHidden = presentation.mode == .hidden
+                                withAnimation(.snappy) { presentation.toggleVisible() }
+                                // 2026-08-09 live gate (user): "the sidebar should open with a tab
+                                // already" — an empty panel has nothing to show and no reason to be
+                                // open. Only on the HIDDEN -> visible transition, and only when the
+                                // strip is genuinely empty, so re-opening a panel that already has
+                                // tabs never mints a spurious one.
+                                //
+                                // Routed through the SAME two doors "+" uses (`ShellPanel`'s own
+                                // `onOpenTab`), not a third path: the new-chat page BINDS so the
+                                // page's draft survives, every other landing keeps Task 12's
+                                // create-then-navigate. Both are re-entrancy-gated, so a rapid
+                                // toggle cannot double-create.
+                                if wasHidden, panelStore.tabs.isEmpty {
+                                    if nav.destination == .newChat {
+                                        host?.openPanelTabForNewChatPage(kind: .web)
+                                    } else {
+                                        host?.openPanelTab(kind: .web) { sessionId in
+                                            nav.navigate(to: .session(sessionId))
+                                        }
+                                    }
+                                }
+                            }
+                            .disabled(!fits)
+                        } else {
+                            ShellTitlebarButton(systemImage: glyph,
+                                                label: shellTitlebarTrailingLabel(glyph),
+                                                isPlaceholder: true)
+                        }
+                    }
                 }
+                .padding(.trailing, shellTitlebarTrailingInset)
+                .padding(.top, shellSidebarToggleTopInset)
+                .ignoresSafeArea(.container, edges: .top)
+            } else if mode == .side {
+                ShellTitlebarButton(systemImage: "circle.dashed",
+                                    label: shellTitlebarTrailingLabel("circle.dashed"),
+                                    isPlaceholder: true)
+                    // Clears the panel itself (`panelRenderedWidth`, reachable here because this
+                    // branch already IS `mode == .side`) plus the divider hairline between panel
+                    // and chat, plus the same clearance the titlebar cluster already uses
+                    // everywhere else (`shellTitlebarTrailingInset`) — one consistent inset,
+                    // rather than a bespoke number invented for this one button.
+                    .padding(.trailing, panelRenderedWidth(mode: mode, sideWidth: presentation.sideWidth,
+                                                            contentWidth: contentWidth)
+                                         + panelDividerWidth
+                                         + shellTitlebarTrailingInset)
+                    .padding(.top, shellSidebarToggleTopInset)
+                    .ignoresSafeArea(.container, edges: .top)
             }
-            .padding(.trailing, shellTitlebarTrailingInset)
-            .padding(.top, shellSidebarToggleTopInset)
-            .ignoresSafeArea(.container, edges: .top)
         }
         // sidebar-brand T4: the search palette (spec R2) — an overlay on the WHOLE shell so it
         // centres over the window rather than over the detail pane, and so it survives whatever
@@ -170,8 +408,16 @@ struct ShellRootView: View {
         .overlay {
             if searchPalette.isPresented {
                 SidebarSearchPalette(nav: nav, directory: directory, presentation: searchPalette)
+                    // A plain FADE (user call, 2026-08-07 — the drop-in-from-above read as too
+                    // much motion for something this quick). The palette is top-pinned, so it
+                    // already appears where it belongs; arriving there is not information the
+                    // animation needs to carry.
+                    .transition(.opacity)
             }
         }
+        // Ease, not a spring: a spring's overshoot is motion, and there is no motion left to
+        // shape once the transition is a fade.
+        .animation(.easeOut(duration: 0.16), value: searchPalette.isPresented)
         // ⌘K, the palette's other door (the wordmark row's ⌕ is the first). A zero-size hidden
         // button is how a SwiftUI view registers a chord with no menu-bar item behind it; it
         // TOGGLES so the same chord closes what it opened.
@@ -492,21 +738,33 @@ let shellTitlebarClusterSpacing: CGFloat = 8
 let shellTitlebarTrailingInset: CGFloat = 8
 
 /// The TRAILING cluster's glyphs, read off the reference's top-right corner (2026-08-07):
-/// a dashed circle, a docked-window rectangle, and a right-hand panel.
-///
-/// **PLACEHOLDERS**, like the navigation arrows — Norma has no feature behind any of them yet.
-/// `sidebar.right` is the one with an obvious future: the side-browser panel from the app vision.
+/// a dashed circle, a docked-window rectangle, and a right-hand panel. The CLUSTER — still three
+/// icons, still this order — not "what is still a placeholder": see
+/// `shellTitlebarTrailingPlaceholderGlyphs` below for that, now that `sidebar.right` is wired
+/// (panel-shell T2).
 let shellTitlebarTrailingGlyphs: [String] = ["circle.dashed", "dock.rectangle", "sidebar.right"]
+
+/// The subset of `shellTitlebarTrailingGlyphs` that is STILL a placeholder. Split out (review
+/// round 2, Important 3) because the two questions — "what's in the cluster" and "what's still
+/// unwired" — used to be answered by the same list, and the moment `sidebar.right` was wired
+/// that conflation made `SidebarBrandTests.testTrailingPlaceholderLabelsDiscloseTheyAreNotWired`
+/// assert something false of it. This list is what that pin now iterates.
+let shellTitlebarTrailingPlaceholderGlyphs: [String] = ["circle.dashed", "dock.rectangle"]
 
 /// PURE: a trailing placeholder's help text. Names what the affordance will BE, not what the glyph
 /// looks like — and says it is not wired, so hovering one does not promise a feature that is not
 /// there. Total by construction: an unknown glyph gets the generic label rather than crashing or
 /// silently rendering an empty tooltip.
+///
+/// No `"sidebar.right"` case (review round 2): that glyph is wired now (panel-shell T2), and its
+/// real label lives inline at its `ShellTitlebarButton` call site, keyed off live state this pure
+/// function has no access to. Leaving a stale case here — reachable only if some future caller
+/// asked this function about a glyph it has no business asking about — was exactly the "pin that
+/// can assert a lie" risk the reviewer flagged, one level down from the test itself.
 func shellTitlebarTrailingLabel(_ glyph: String) -> String {
     switch glyph {
     case "circle.dashed": return "Temporary chat (not wired yet)"
     case "dock.rectangle": return "Compact window (not wired yet)"
-    case "sidebar.right": return "Side panel (not wired yet)"
     default: return "Not wired yet"
     }
 }
@@ -552,18 +810,40 @@ struct ShellTitlebarButton: View {
     /// Placeholders read one step quieter than live controls, but still hover and still click —
     /// they are honestly not wired, not pretending to be disabled.
     var isPlaceholder: Bool = false
+    /// panel-shell T10: every EXISTING call site leaves this at its default — the main titlebar's
+    /// own 26pt hit box (`shellTitlebarButtonSize`) — so nothing already on screen changes. The
+    /// panel's own trailing cluster (`ShellPanel.swift`'s `trailingButtonCluster`) is the one
+    /// caller that passes `panelExpandButtonSize` (28pt): it sits in the tab row, where the pill
+    /// height and the "+" button are both 28pt, and this component's PREVIOUS hard-coded
+    /// `shellTitlebarButtonSize` frame would have rendered a visibly mismatched button there.
+    var size: CGFloat = shellTitlebarButtonSize
+    /// panel-shell T10: a persistent highlight (`ShellSidebarRowStyle`'s `.selected` fill) for a
+    /// control that reflects a MODE rather than only firing an action — the expand-to-fullscreen
+    /// button, filled while the panel actually IS maximized, mirroring how a selected nav row
+    /// stays filled without being hovered. Every existing call site leaves this at its default
+    /// `false` (hover remains the only fill), so nothing already on screen changes.
+    var isOn: Bool = false
     var action: () -> Void = {}
+    /// panel-shell T2: read explicitly rather than trusted to dim on its own. `.disabled(...)`
+    /// (first real caller: the panel toggle, greyed rather than hidden on a too-narrow window)
+    /// only guarantees non-interactivity — `ShellSidebarRowStyle` is a fully custom `ButtonStyle`
+    /// that renders `configuration.label` verbatim, and this label's `foregroundStyle` below is an
+    /// explicit concrete colour, so nothing dims it automatically. Reuses the SAME quiet tone
+    /// `isPlaceholder` already wears rather than inventing a second one — a disabled control and a
+    /// placeholder now share a look (both honestly read as "not clickable right now"), though only
+    /// the placeholder still hovers and clicks.
+    @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(isPlaceholder ? AnyShapeStyle(.tertiary)
-                                               : AnyShapeStyle(Theme.textMuted))
-                .frame(width: shellTitlebarButtonSize, height: shellTitlebarButtonSize)
+                .foregroundStyle((isPlaceholder || !isEnabled) ? AnyShapeStyle(.tertiary)
+                                                                : AnyShapeStyle(Theme.textMuted))
+                .frame(width: size, height: size)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(ShellSidebarRowStyle(isSelected: false))
+        .buttonStyle(ShellSidebarRowStyle(isSelected: isOn))
         .help(label)
         .accessibilityLabel(label)
     }
@@ -829,7 +1109,15 @@ struct ShellSidebar: View {
         Button {
             nav.navigate(to: .session(row.sessionId))
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 10) {
+                // The session's OWN mode glyph (user call, 2026-08-07 — this pass first left it
+                // off as ChatGPT-faithful). `SessionMode(wire:)` is the shell's one mode table, so
+                // this is the same glyph set the mode rows above and the search palette already
+                // wear; there is no second table here to drift.
+                Image(systemName: SessionMode(wire: row.mode).systemImage)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textMuted)
+                    .frame(width: 16)
                 Text(sessionDisplayTitle(row.title))
                     .font(.system(size: 13))
                     .lineLimit(1)
@@ -940,7 +1228,7 @@ struct ShellSidebar: View {
                 // PLACEHOLDER (user call: "the downloads icon on the corner we shall deal with it
                 // later"). Disabled for the same reason the navigation arrows are — an affordance
                 // that looks live and does nothing is worse than one that admits it isn't ready.
-                Image(systemName: "arrow.down.circle")
+                Image(systemName: "arrow.down.to.line.compact")
                     .font(.system(size: 14))
                     .foregroundStyle(.tertiary)
                     .accessibilityHidden(true)
@@ -1030,17 +1318,30 @@ struct ShellSidebar: View {
 /// rest is bare). A `ButtonStyle` so every row is a real `Button` (keyboard/accessibility for
 /// free) while the hover tracking lives in exactly one place. A press reads as hover-strength
 /// feedback on an unselected row — quiet, custom, nothing native.
+///
+/// panel-shell T13: also worn by the panel's tab pills (`PanelTabPill`, `ShellPanel.swift`) — same
+/// mechanism, not a second one, via `selectedUsesHoverTone` below.
 struct ShellSidebarRowStyle: ButtonStyle {
     var isSelected: Bool
+    /// panel-shell T13: the ONE deviation a caller can ask for. Every existing call site (sidebar
+    /// rows, `ShellTitlebarButton`) leaves this at its default `false` and is byte-identical to
+    /// before T13. Only `PanelTabPill` passes `true`: the plan's Global Constraints assign panel
+    /// tabs the `RowHover` token specifically, not `SelectionPill` like a selected sidebar row, so
+    /// wearing this style unmodified would have silently recolored the active tab on adoption.
+    /// Named for the EFFECT, not the mechanism — this does not add a second fill source, it swaps
+    /// which one token `.selected` resolves to, below.
+    var selectedUsesHoverTone: Bool = false
 
     func makeBody(configuration: Configuration) -> some View {
-        RowBody(configuration: configuration, isSelected: isSelected)
+        RowBody(configuration: configuration, isSelected: isSelected,
+                selectedUsesHoverTone: selectedUsesHoverTone)
     }
 
     /// The `@State` hover flag needs a `View` to live on — `ButtonStyle` itself is not one.
     private struct RowBody: View {
         let configuration: Configuration
         let isSelected: Bool
+        let selectedUsesHoverTone: Bool
         @State private var isHovered = false
 
         var body: some View {
@@ -1066,7 +1367,9 @@ struct ShellSidebarRowStyle: ButtonStyle {
         private var fill: AnyShapeStyle {
             switch shellSidebarRowFill(isSelected: isSelected,
                                        isHovered: isHovered || configuration.isPressed) {
-            case .selected: return AnyShapeStyle(Theme.selectionPill)
+            case .selected:
+                return selectedUsesHoverTone ? AnyShapeStyle(Theme.rowHover)
+                                              : AnyShapeStyle(Theme.selectionPill)
             case .hover: return AnyShapeStyle(Theme.rowHover)
             case .none: return AnyShapeStyle(.clear)
             }

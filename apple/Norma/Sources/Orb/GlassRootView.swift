@@ -141,10 +141,17 @@ struct GlassRootView: View {
                 if let snapshot = await controller.onFetchModelCatalogue?() { adapter.modelCatalogue = snapshot }
             }
         }
-        // I1 (review): the orb has its OWN adapter and its only session-switch hook
-        // (`OrbWindowController.updateIsChatSession`) touches nothing else — so the probation's own
-        // session stamp, not a per-site clear, is what keeps a verdict off the wrong session. Read
-        // fresh through the sidebar wiring, which AppDelegate points at `AppModel.focusedSessionId`.
+        // I1 (review): the orb has its OWN adapter, so the probation's own session stamp — not a
+        // per-site clear — is what keeps a verdict off the wrong session. Read fresh through the
+        // sidebar wiring, which AppDelegate points at `AppModel.focusedSessionId`.
+        //
+        // panel-shell T16 (whole-branch review) CORRECTION: this comment used to add "and its only
+        // session-switch hook (`OrbWindowController.updateIsChatSession`) touches nothing else".
+        // That stopped being true when T10b gave that hook a guarded `pendingCardDrafts` clear —
+        // and this very comment is the prior art that fix's own review cited as the warning it
+        // should have heeded. The probation argument above is unaffected: `updateIsChatSession`
+        // still never touches `selectionProbation`. Anything NEW added there is a per-call side
+        // effect on a hook that fires on redundant reselects too, so it needs its own guard.
         adapter.boundSessionId = { [controller] in controller.sidebars?.currentSessionId() }
         // I2 (review): NO NETWORK I/O HERE. This function is called unconditionally from `body`, and
         // every other line in it is an idempotent closure assignment. A fetch here fanned out into a

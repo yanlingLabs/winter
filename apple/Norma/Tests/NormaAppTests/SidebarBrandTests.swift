@@ -201,12 +201,16 @@ final class SidebarBrandTests: XCTestCase {
         XCTAssertEqual(shellTitlebarNavigationGlyphs, ["arrow.left", "arrow.right"])
     }
 
-    /// Every titlebar glyph — both clusters — must resolve, or it renders as a blank box with no
-    /// error anywhere.
+    /// Every titlebar glyph — both clusters, plus panel-shell T10's own expand button (a NEW glyph
+    /// that no existing list covers — `shellTitlebarTrailingGlyphs` is unchanged, still the
+    /// original three, per `testTrailingClusterIsThreeDistinctGlyphs` below — so it needs its own
+    /// listing here) — must resolve, or it renders as a blank box with no error anywhere.
     func testEveryTitlebarGlyphResolvesAsARealSymbol() {
         let all = shellTitlebarNavigationGlyphs + shellTitlebarTrailingGlyphs
             + [shellSidebarToggleSystemImage(isVisible: true),
-               shellSidebarToggleSystemImage(isVisible: false)]
+               shellSidebarToggleSystemImage(isVisible: false),
+               panelExpandButtonSystemImage(mode: .side),
+               panelExpandButtonSystemImage(mode: .maximized)]
         for name in all {
             XCTAssertNotNil(NSImage(systemSymbolName: name, accessibilityDescription: nil),
                             "\(name) is not a real SF Symbol on this OS")
@@ -219,10 +223,25 @@ final class SidebarBrandTests: XCTestCase {
         XCTAssertEqual(Set(shellTitlebarTrailingGlyphs).count, 3)
     }
 
-    /// Every trailing placeholder says it is not wired, so hovering one cannot promise a feature
+    /// Every trailing PLACEHOLDER says it is not wired, so hovering one cannot promise a feature
     /// that does not exist — and the mapping is TOTAL, so an added glyph still gets a label.
+    ///
+    /// review round 2, Important 3: this used to iterate `shellTitlebarTrailingGlyphs` (the WHOLE
+    /// cluster) and assert "not wired" of every one of them — true when written, but it became a
+    /// pin on a falsehood the moment `sidebar.right` was wired (panel-shell T2) without this test
+    /// noticing, since it stayed green for the wrong reason (the stale switch case it was calling
+    /// still happened to say "not wired yet"). Iterating `shellTitlebarTrailingPlaceholderGlyphs`
+    /// — the subset that is STILL a placeholder — makes the assertion true again and keeps it
+    /// that way: a glyph leaving that list is the only thing that can silence this check for it.
     func testTrailingPlaceholderLabelsDiscloseTheyAreNotWired() {
-        for glyph in shellTitlebarTrailingGlyphs {
+        // The split itself: every placeholder is still a real trailing glyph, and the one glyph
+        // that stopped being a placeholder must not sneak back into the placeholder list.
+        XCTAssertTrue(shellTitlebarTrailingPlaceholderGlyphs.allSatisfy(shellTitlebarTrailingGlyphs.contains),
+                      "every placeholder must still be one of the trailing cluster's own glyphs")
+        XCTAssertFalse(shellTitlebarTrailingPlaceholderGlyphs.contains("sidebar.right"),
+                       "sidebar.right is wired (panel-shell T2) — it must not be claimed as a placeholder")
+
+        for glyph in shellTitlebarTrailingPlaceholderGlyphs {
             let label = shellTitlebarTrailingLabel(glyph)
             XCTAssertTrue(label.contains("not wired"), "\(glyph)'s label must disclose: \(label)")
         }
@@ -342,6 +361,28 @@ final class SidebarBrandTests: XCTestCase {
         // The two sets are for different modes and must not be the same content in two shapes.
         XCTAssertTrue(Set(newChatCoworkIdeas.map(\.title))
             .isDisjoint(with: Set(newChatStarters.map(\.title))))
+    }
+
+    /// The results list grows with its rows and then STOPS, after which it scrolls. Both halves
+    /// matter: a fixed height leaves dead space under three results, and an uncapped one grows
+    /// past the window on a long history.
+    func testSearchResultsHeightGrowsWithRowsThenCaps() {
+        XCTAssertEqual(searchPaletteResultsHeight(rowCount: 0), 0, "no rows, no list")
+        let one = searchPaletteResultsHeight(rowCount: 1)
+        let three = searchPaletteResultsHeight(rowCount: 3)
+        XCTAssertGreaterThan(one, 0)
+        XCTAssertGreaterThan(three, one, "it must actually follow the row count")
+        XCTAssertEqual(searchPaletteResultsHeight(rowCount: 500),
+                       searchPaletteMaxResultsHeight, "capped, then it scrolls")
+        // Monotonic up to the cap — a height that dipped as rows were added would be a layout bug
+        // nobody would think to look for.
+        var previous: CGFloat = 0
+        for count in 1...40 {
+            let height = searchPaletteResultsHeight(rowCount: count)
+            XCTAssertGreaterThanOrEqual(height, previous, "height dipped at \(count) rows")
+            XCTAssertLessThanOrEqual(height, searchPaletteMaxResultsHeight)
+            previous = height
+        }
     }
 
     /// Every rim the shell draws is ONE device pixel on Retina, not two. Pinned because "borders

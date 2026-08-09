@@ -1,0 +1,10 @@
+{
+  "seq": 7,
+  "sessionId": "s_fixture",
+  "ts": 1781270000000,
+  "type": "panel_tab_opened",
+  "tabId": "tab_1",
+  "kind": "web",
+  "url": "https://example.com",
+  "title": "Example Domain"
+}

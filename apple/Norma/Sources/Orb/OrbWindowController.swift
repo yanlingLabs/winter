@@ -186,6 +186,65 @@ final class OrbWindowController: ObservableObject {
     /// `DetachedWindowController` fix.
     func updateIsChatSession(for sessionId: String, rows: [SessionSummary]) {
         fieldAdapter.isChatSession = DetachedWindowController.isChatSession(sessionId, in: rows)
+        // panel-shell T10b review fix (Important 1): this method is the THIRD
+        // in-place-session-switch site, sibling to `ShellSessionHost.hop`/
+        // `DetachedWindowController.selectSession` (both already clear their own adapter's
+        // `pendingCardDrafts` on switch) — named directly by this method's own doc above ("a
+        // SEPARATE FieldStateAdapter instance", "mirroring DetachedWindowController.selectSession's
+        // identical in-place re-derivation").
+        // Doubly important here, not merely symmetrical: `fieldAdapter` is a `let`, constructed
+        // once and living for the WHOLE APP LIFETIME — unlike a `DetachedWindowController` (which
+        // dies on window close) or a `ShellSessionAttachment` (bounded by the shell's own
+        // lifetime), nothing else ever tears this adapter down. A forgotten clear here would not
+        // just leak one switch's worth of entries; it would accumulate for as long as the app
+        // runs. (`FieldStateAdapter`'s own resolve-path sweep is a second, independent backstop
+        // against exactly that unbounded growth — see its doc — but the explicit clear stays: it
+        // fires the instant a switch is chosen, not on the next state tick.)
+        //
+        // Composite keying (`FieldStateAdapter.pendingCardDraftBinding`) already prevents a
+        // cross-session collision even without this clear, so — same as its two siblings — this
+        // is hygiene, not a correctness fix for a visible bug. One timing note for a future
+        // reader: this fires SYNCHRONOUSLY here, while the caller (`AppDelegate`'s
+        // `sidebars.onSelect`) starts `AppModel.focusSession(sid)` right after in a separate
+        // `Task`, asynchronously — for one beat after a GENUINE switch, `fieldAdapter` can render
+        // the OLD session's still-visible cards against an already-emptied draft store, harmless
+        // because a real switch was chosen and those drafts are about to stop being displayed
+        // regardless of when the clear lands. (A redundant reselect is a DIFFERENT case, and the
+        // guard right below is what keeps this paragraph's reasoning from covering it too.)
+        //
+        // Review round 3 fix: this line MUST be guarded — both siblings already are
+        // (`ShellSessionHost.hop` is reachable only via `shellAttachmentAction`'s `attached ==
+        // selection ? .none : .hop(...)`; `DetachedWindowController.selectSession` opens with
+        // `guard sessionId != self.sessionId else { return }`), and this method had no such
+        // guard. `SessionSidebarRow.onTapGesture` calls `onSelect(row.sessionId)`
+        // UNCONDITIONALLY — no `isCurrent` check — so re-clicking the row already displayed
+        // reaches this line on every tap. `AppModel.refocus`'s own idempotency guard
+        // (`sessionId == focusedSessionId && attachedSession == sessionId`) makes the caller's
+        // FOLLOWING `focusSession` a genuine no-op in that case: `session.reset()` never runs,
+        // `pendingInteractions` is untouched, nothing about the session changes — but this line
+        // still wiped a live, typed-but-unsubmitted draft anyway. There was prior art warning
+        // against exactly this: in `GlassRootView.swift`, the "I1 (review)" comment sitting
+        // directly above the line that wires `boundSessionId` (see below) already records that
+        // THIS call site was deliberately kept free of non-idempotent per-call side effects, for
+        // the same reason.
+        //
+        // `fieldAdapter.boundSessionId()` is the comparison — not a new stored property —
+        // verified from the source, not assumed: it resolves to `AppModel.focusedSessionId` via
+        // `SidebarWiring.currentSessionId` (a plain `() -> String?`, `GlassRootView`'s wiring,
+        // `AppDelegate.boot()`'s own), re-read fresh on every call with no caching anywhere in
+        // the chain. `refocus` is documented as "the ONE place `focusedSessionId` is ever
+        // assigned" (`AppModel.swift`), and `fieldAdapter` itself was constructed with
+        // `model.session` DIRECTLY (`AppDelegate.swift`'s `OrbWindowController(session:
+        // model.session)`) — the SAME object `refocus` mutates (`SessionModel` is a `final
+        // class`) — so `boundSessionId()` and `fieldAdapter.pendingInteractions` can never name
+        // two different sessions. At the moment this method runs — synchronously, BEFORE the
+        // caller's separate `Task { focusSession(sid) }` even starts — `boundSessionId()` still
+        // reads the PRE-switch value: correctly "different" for a genuine switch (the switch
+        // hasn't landed yet), correctly "same" for a settled redundant reselect (the realistic
+        // case: enough real time has passed since the original switch for ITS OWN async refocus
+        // to have long since completed and updated `focusedSessionId`).
+        guard sessionId != fieldAdapter.boundSessionId() else { return }
+        fieldAdapter.pendingCardDrafts = [:]
     }
 
     /// Task 4: fired by `requestWindowDetach()` with the panel's CURRENT frame (spawn the detached

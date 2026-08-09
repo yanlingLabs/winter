@@ -163,6 +163,41 @@ describe("SessionStore.emptySessionIds (session-activity-hygiene T6)", () => {
     expect(store.emptySessionIds(NOBODY_ATTACHED, agedNow(store, id, 1))).toEqual([]);
     store.close();
   });
+
+  // panel-shell T12 (bug found at the live gate, 2026-08-08): "+" with no attached session now
+  // auto-creates a session and opens a tab in it (ShellSessionHost.openPanelTab) — but
+  // `panel_tab_opened` is a SESSION-scoped event, invisible to the user_message/assistant_message
+  // content test above. Without this, a browse-only session (no chat message, ever) is
+  // indistinguishable from a truly empty one and gets reaped 10 minutes after detach, taking its
+  // open tabs with it. Both halves are pinned in ONE assertion — a "fix" that made emptySessionIds
+  // return nothing at all would pass a one-sided "has a tab -> not reaped" test without actually
+  // narrowing anything.
+  test("a session with an open panel tab is not reaped, but a truly empty sibling still is", () => {
+    const store = freshStore();
+    const withTab = store.createSession("global");
+    store.append(withTab, { type: "panel_tab_opened", sessionId: withTab, tabId: "t1", kind: "web" });
+    const trulyEmpty = store.createSession("global");
+    const nowMs = Math.max(agedNow(store, withTab, 1), agedNow(store, trulyEmpty, 1));
+    expect(store.emptySessionIds(NOBODY_ATTACHED, nowMs)).toEqual([trulyEmpty]);
+    store.close();
+  });
+
+  // panel-shell T16 (alignment ruling from Task 14's review): this query and the cleaner's own
+  // `hasOpenPanelTabs` rail (sessions/cleaner.ts) used to disagree. This method checked the bare
+  // `panel_tab_opened` event's PRESENCE ("ever opened one"); the cleaner FOLDS the panel events
+  // ("holds one now"). A session that opened a tab and later closed it was therefore reaper-immune
+  // but cleaner-eligible — permanent litter with zero content, invisible to this reaper forever
+  // (the earlier `panel_tab_opened` line never leaves the JSONL). Both doors now call the exact
+  // same shared `hasOpenPanelTabs` (`panel/store.ts`, beside `foldPanelTabs`), so this reaper reaps
+  // it too, on the same 10-minute clock as any other content-free session.
+  test("a session whose only tab was opened then closed IS reaped — closing counts as empty again", () => {
+    const store = freshStore();
+    const id = store.createSession("global");
+    store.append(id, { type: "panel_tab_opened", sessionId: id, tabId: "t1", kind: "web" });
+    store.append(id, { type: "panel_tab_closed", sessionId: id, tabId: "t1" });
+    expect(store.emptySessionIds(NOBODY_ATTACHED, agedNow(store, id, 1))).toEqual([id]);
+    store.close();
+  });
 });
 
 describe("SessionStore.deleteSession (session-activity-hygiene T6)", () => {

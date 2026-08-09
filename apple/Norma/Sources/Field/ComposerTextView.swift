@@ -88,13 +88,20 @@ struct ComposerTextView: NSViewRepresentable {
             .font: textView.font ?? .systemFont(ofSize: fontSize),
             .foregroundColor: usesAdaptiveColors ? NSColor.labelColor : NSColor.white
         ]
-        // The caret follows the TEXT, not the system accent (user call, 2026-08-07).
-        // `.controlAccentColor` is whatever the user picked in System Settings — Norma has its own
-        // brand colour and no reason to inherit an unrelated one, and a caret in a stranger's
-        // accent (yellow, in the report that prompted this) reads as a bug rather than a theme.
-        // The same rule the typing attributes above already follow: label colour when adaptive,
-        // white on the dark field.
-        textView.insertionPointColor = usesAdaptiveColors ? .labelColor : .white
+        // The caret is NORMA'S accent (user call, 2026-08-07 — every cursor in the app one colour),
+        // never `.controlAccentColor`: that is whatever the user picked in System Settings, so it
+        // rendered in an unrelated colour (yellow, in the report that prompted this) and read as a
+        // bug rather than a theme. SwiftUI text fields get the same colour from the shell's
+        // `.tint(Theme.accent)`.
+        //
+        // The FIELD (`usesAdaptiveColors == false`) is the one exception, and not by preference:
+        // that surface renders under `GlassForegroundLegibility`'s `.blendMode(.difference)` (see
+        // `textColor` above), which inverts whatever colour is set — an accent caret there would
+        // come out as its inverse, i.e. a different colour from every other caret, which is the
+        // opposite of what was asked. White is what survives that blend, so it stays.
+        textView.insertionPointColor = usesAdaptiveColors
+            ? (NSColor(named: "AccentColor") ?? .labelColor)
+            : .white
         textView.string = text
         textView.onSubmit = onSubmit
         textView.onFocusKey = onFocusKey

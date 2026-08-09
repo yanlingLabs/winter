@@ -6,8 +6,10 @@ import { buildCleanerVectorsFixture, buildDangerousDomainsFixture, CLEANER_VECTO
 /**
  * Chat Slice D, Task 4 — the freshness/drift tripwire for the two cross-language parity fixtures
  * (`fixtures/dangerous-domains.json`, `fixtures/cleaner-vectors.json`), mirroring the shape of the
- * existing Swift-side fixture-count tripwire (`RoundTripTests.fixtureURLs()`'s `count == 57`
- * assertion): both call the SAME `parity-fixtures.ts` functions the generator itself calls, so a
+ * existing Swift-side fixture-count tripwire (`RoundTripTests.fixtureURLs()`'s exact-count
+ * assertion — 63 as of panel-shell; check that file rather than trusting a number restated here,
+ * it has drifted twice): both call the SAME `parity-fixtures.ts` functions the generator itself
+ * calls, so a
  * fixture on disk that disagrees with what those functions compute RIGHT NOW means real drift —
  * `packages/core`'s `SHIPPED_DANGEROUS_DOMAINS`/`htmlToText` changed (or the vector list changed)
  * without a `pnpm protocol:generate` re-run — never two hand-maintained copies quietly disagreeing
@@ -60,13 +62,14 @@ describe("cross-language parity fixtures (Chat Slice D, Task 4): regeneration fr
   });
 
   // Guards the generate.ts sync-selectivity fix (see its own comment): these two new fixtures live
-  // in the SAME fixDir as the 58 SessionEvent fixtures, but must never be swept into the Swift
+  // in the SAME fixDir as the 63 SessionEvent fixtures, but must never be swept into the Swift
   // NormaProtocol test bundle — RoundTripTests.swift decodes EVERY .json file it finds there as a
-  // SessionEvent and hard-asserts an exact count of 58.
-  test("did not leak into the Swift-synced fixture bundle, which still has exactly 58 files", () => {
+  // SessionEvent and hard-asserts an exact count of 63 (panel-shell T3: 58 → 63, five panel
+  // variants — that Swift-side assertion is Task 4's to update, not this one's).
+  test("did not leak into the Swift-synced fixture bundle, which still has exactly 63 files", () => {
     const swiftFixDir = join(import.meta.dir, "..", "..", "..", "apple", "NormaProtocol", "Tests", "NormaProtocolTests", "Fixtures");
     const swiftFiles = readdirSync(swiftFixDir).filter((f) => f.endsWith(".json"));
-    expect(swiftFiles.length).toBe(58);
+    expect(swiftFiles.length).toBe(63);
     expect(swiftFiles).not.toContain("dangerous-domains.json");
     expect(swiftFiles).not.toContain("cleaner-vectors.json");
   });

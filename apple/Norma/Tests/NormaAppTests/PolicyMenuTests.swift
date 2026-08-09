@@ -191,8 +191,18 @@ final class PolicyMenuTests: XCTestCase {
         let orb = OrbWindowController(session: SessionModel())
         XCTAssertFalse(orb.fieldAdapter.isChatSession, "a fresh orb adapter starts non-chat")
 
+        // panel-shell T10b review fix (Important 1): this method is the orb's own
+        // in-place-session-switch site — same sibling as `ShellSessionHost.hop`/
+        // `DetachedWindowController.selectSession`, both of which already clear
+        // `pendingCardDrafts` on switch. Doubly important here: `fieldAdapter` lives for the
+        // WHOLE APP LIFETIME (a `let`, never torn down), so a forgotten clear on this one path
+        // doesn't just leak one switch's entries — it accumulates for as long as the app runs.
+        orb.fieldAdapter.pendingCardDrafts["stale"] = PendingCardDraft(feedback: "leftover")
+
         orb.updateIsChatSession(for: "s_chat", rows: model.directory.rows)
         XCTAssertTrue(orb.fieldAdapter.isChatSession, "selecting a REAL chat row (from an actual directory round trip) must flip the orb's OWN adapter")
+        XCTAssertTrue(orb.fieldAdapter.pendingCardDrafts.isEmpty,
+            "switching session in place must clear pendingCardDrafts — same discipline as the other two switch sites, and the ONE adapter that never dies to bound it any other way")
 
         orb.updateIsChatSession(for: "s_a", rows: model.directory.rows)
         XCTAssertFalse(orb.fieldAdapter.isChatSession, "switching back to a non-chat row must flip it back off")
@@ -206,5 +216,33 @@ final class PolicyMenuTests: XCTestCase {
         let orb = OrbWindowController(session: SessionModel())
         orb.updateIsChatSession(for: "s_missing", rows: [])
         XCTAssertFalse(orb.fieldAdapter.isChatSession)
+    }
+
+    /// Review round 3 (new Important): the clear above had no same-session guard, so a REDUNDANT
+    /// reselect silently discarded a live draft even though nothing about the session actually
+    /// changed. Reachable end-to-end: `SessionSidebarRow.onTapGesture`
+    /// (`SessionSidebar.swift`) calls `onSelect(row.sessionId)` UNCONDITIONALLY — no `isCurrent`
+    /// check — so re-clicking the already-highlighted row reaches `updateIsChatSession` again
+    /// with the SAME sessionId; `AppModel.refocus`'s own idempotency guard then makes the
+    /// subsequent `focusSession` call a genuine no-op, so `session.reset()` never runs and
+    /// `pendingInteractions` is untouched — the ONLY thing that changed was the (now-guarded)
+    /// clear itself. `boundSessionId` is wired to a fixed value here (unlike this file's other
+    /// two `updateIsChatSession` tests, which leave it at the default `{ nil }`) because the
+    /// guard compares against it — an unwired `{ nil }` would make every call read as
+    /// "different" (`nil` never equals a real sessionId string) and this test would pass even
+    /// against a still-broken, unguarded implementation.
+    @MainActor
+    func testUpdateIsChatSessionOnTheAlreadyDisplayedSessionNeverClearsALiveDraft() {
+        let orb = OrbWindowController(session: SessionModel())
+        orb.fieldAdapter.boundSessionId = { "s_chat" }
+
+        orb.updateIsChatSession(for: "s_chat", rows: [])
+        orb.fieldAdapter.pendingCardDraftBinding(for: "q1").wrappedValue.setOtherText("Postgres", forQuestion: 0)
+
+        // The redundant reselect: same sessionId, nothing about the session changed.
+        orb.updateIsChatSession(for: "s_chat", rows: [])
+
+        XCTAssertEqual(orb.fieldAdapter.pendingCardDraftBinding(for: "q1").wrappedValue.otherTexts[0], "Postgres",
+            "a redundant reselect of the session already displayed must never discard a live, typed-but-unsubmitted draft")
     }
 }

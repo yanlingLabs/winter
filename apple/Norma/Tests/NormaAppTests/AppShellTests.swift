@@ -285,6 +285,25 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(window.isOpaque, "the shell is an opaque window — the detached windows' clear shell is NOT this recipe")
     }
 
+    /// panel-shell T2 review round 2: the panel toggle's disabled help text ("Widen the window or
+    /// hide the sidebar to use the panel.", `ShellSidebar.swift`) is only ALWAYS true if hiding
+    /// the sidebar can alone always restore enough content width — which needs the window's own
+    /// floor to never itself be narrower than the panel requires. This is a cross-file invariant
+    /// that lived only in a comment; pinning it here means a future change to either side (this
+    /// `minSize`, or `panelMinContentWidth`) fails a test instead of quietly making that help
+    /// text a lie.
+    func testWindowMinimumSizeCanAlwaysFitThePanelWithoutTheSidebar() {
+        let controller = makeController()
+        defer { controller.hide() }
+        controller.summon()
+        guard let window = controller.windowForTesting else {
+            return XCTFail("summon() must construct a real window")
+        }
+
+        XCTAssertGreaterThanOrEqual(window.minSize.width, panelMinContentWidth,
+            "the window's floor must fit the panel once the sidebar is hidden, or the disabled toggle's help text can be wrong")
+    }
+
     /// A plain re-summon PRESERVES the current destination (the `openDashboard` plain-refocus
     /// precedent); a targeted summon retargets it.
     func testSummonNavigatesOnlyWhenGivenADestination() {
@@ -966,6 +985,56 @@ final class AppShellTests: XCTestCase {
     /// failure.
     func testNewChatUnreachableMessageMatchesTheHouseFallback() {
         XCTAssertEqual(newChatUnreachableMessage, "couldn't reach the daemon — try again")
+    }
+
+    // MARK: - panel-shell T10b: the page's draft must survive `.maximized` teardown
+
+    /// `ShellRootView`'s `if mode != .maximized { detail }` (`ShellSidebar.swift`) tears `detail`
+    /// — and everything inside it, including `NewChatPage` — down and rebuilds it on every panel
+    /// maximize/un-maximize toggle. `@State`'s own contract (SwiftUI allocates fresh storage the
+    /// first time a view's IDENTITY is added to the hierarchy, which a torn-down-and-reinserted
+    /// subtree triggers again) means a `@State`-backed draft is silently lost on that round trip.
+    ///
+    /// This constructs `NewChatPage` directly — a plain struct init, no `.body` ever evaluated,
+    /// consistent with this file's own "SwiftUI bodies are deliberately NOT exercised" convention
+    /// (see the type doc at the top of this file) — and inspects its stored properties via
+    /// `Mirror`, which reflects the compiler-synthesized `_draft` backing storage regardless of
+    /// `draft`'s `private` access (`Mirror` walks runtime type metadata, which carries no notion
+    /// of Swift's compile-time access control). This is a genuine RUNTIME check of the exact
+    /// mechanism behind the bug — not a stand-in, not a compile-time symbol check — and it fails
+    /// against today's code before any implementation change: `NewChatPage` currently declares
+    /// `@State private var draft = ""`, so `_draft` of type `State<String>` is present.
+    func testNewChatPageDraftIsNotViewLocalState() {
+        let directory = SessionDirectory(lister: { [] })
+        let host = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
+        let nav = ShellNavigationModel()
+        let page = NewChatPage(nav: nav, host: host)
+        // Review fix (Minor 2, applied proactively here too for consistency —
+        // PendingCardsTests.hasAnyStateBackedStorage's own doc comment has the full rationale):
+        // exact-matches the wrapper name instead of substring-testing "State<", which also
+        // matches FocusState<…>/GestureState<…> and would fail this pin spuriously the day a
+        // correct @FocusState var is added.
+        let stateBackedLabels = Set(Mirror(reflecting: page).children.compactMap { child -> String? in
+            guard let label = child.label else { return nil }
+            let typeName = String(describing: type(of: child.value))
+            guard let generic = typeName.split(separator: "<").first else { return nil }
+            let bareName = generic.split(separator: ".").last.map(String.init) ?? String(generic)
+            guard bareName == "State" || bareName == "StateObject" else { return nil }
+            return label
+        })
+        XCTAssertFalse(stateBackedLabels.contains("_draft"),
+            "NewChatPage's draft must not be view-local @State — it needs to live on `host` " +
+            "(mirroring FieldStateAdapter.composerDraft's precedent) so it survives ShellRootView's " +
+            "`.maximized` teardown of `detail`")
+        // Exhaustive, house-style pin, not just "no _draft": everything else here is still
+        // legitimately @State (a mode-picker selection, a hover flag, two picked-once display
+        // strings — none of it user-entered data; see the task-10b report's "Scope guards"
+        // section). Pinning the exact set means a FUTURE @State var that holds real typed input
+        // fails this test too, not only a second property literally renamed `draft`.
+        XCTAssertEqual(stateBackedLabels, ["_mode", "_composerHovered", "_greetingLine", "_announcementLine"],
+            "an unexpected @State property appeared on NewChatPage — if it holds user-entered " +
+            "data, it needs the same host-hoisting treatment `draft` got; if not, add it to this " +
+            "pin's allowed set deliberately")
     }
 
     // MARK: - chatgpt-ui T3: the page's in-flight feedback (c-m3 — PURE send-state mapping)

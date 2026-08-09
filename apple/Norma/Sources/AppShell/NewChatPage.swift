@@ -342,10 +342,20 @@ struct NewChatControlChip: View {
 /// own), and it sits inside a card with two control rows. The TRANSCRIPT's restyle is still a
 /// later pass; this one reshaped the new-chat page only.
 ///
-/// Draft semantics (decided-and-disclosed, T2 report): the draft is view-local `@State`. It
+/// Draft semantics (decided-and-disclosed, T2 report; RE-HOMED panel-shell T10b): the draft
 /// SURVIVES a hide/re-summon (the shell hides, never closes — the view stays mounted) and DROPS
-/// on navigate-away (the detail switch tears the page down) — the honest simple choice: no
-/// second draft store to drift, and the page is one keystroke away from anywhere.
+/// on navigate-away (the detail switch tears the page down) — unchanged from T2's original
+/// ruling. What changed is WHERE it lives: T2's `@State private var draft` did not survive
+/// `ShellRootView`'s `.maximized` teardown of `detail` (a THIRD trigger for "the view gets torn
+/// down and rebuilt", one T2 never had to consider), so the draft is hoisted onto
+/// `host.newChatDraft` instead — mirroring `FieldStateAdapter.composerDraft`'s own precedent for
+/// the live composer. `host` outlives `detail` entirely (it's constructed before `ShellRootView`
+/// even exists — see `ShellSessionHost`'s own type doc), so the draft now survives ALL THREE
+/// triggers; `ShellSessionHost.apply(destination:)`'s `.newChat` case clears it on a genuine fresh
+/// arrival, which is what still makes it drop on navigate-away — "no second draft store to drift"
+/// no longer applies verbatim (there IS a second store now, `host` itself), but "the page is one
+/// keystroke away from anywhere" still holds, and drop-on-navigate-away is unchanged behavior,
+/// not a new one.
 struct NewChatPage: View {
     @ObservedObject var nav: ShellNavigationModel
     @ObservedObject var host: ShellSessionHost
@@ -355,7 +365,12 @@ struct NewChatPage: View {
     /// it — a settings key, a release note, the daemon.
     var announcement: String? = nil
 
-    @State private var draft = ""
+    /// panel-shell T10b: no longer `@State` — see the type doc above and `host.newChatDraft`'s
+    /// own doc. `draftBinding` below is the Binding-compatible wrapper the composer actually
+    /// consumes, mirroring `FieldStateAdapter.draftBinding`'s identical shape.
+    private var draftBinding: Binding<String> {
+        Binding(get: { host.newChatDraft }, set: { host.newChatDraft = $0 })
+    }
     /// The card's mode segment. View-local: it selects nothing real yet (the create is always a
     /// chat), which is exactly why sending is refused while it sits on an unbuilt mode rather than
     /// quietly creating something else — `newChatSendBlockedReason`.
@@ -381,7 +396,7 @@ struct NewChatPage: View {
             // The suggestions step aside the moment there is a draft (user call, 2026-08-07) —
             // in BOTH modes. They exist to get you started; once you have started they are just
             // something else on the page.
-            if draft.isEmpty {
+            if host.newChatDraft.isEmpty {
                 starters
                     .transition(.opacity)
             }
@@ -410,7 +425,7 @@ struct NewChatPage: View {
                 announcementLine = newChatAnnouncementLines.randomElement() ?? ""
             }
         }
-        .animation(.easeOut(duration: 0.15), value: draft.isEmpty)
+        .animation(.easeOut(duration: 0.15), value: host.newChatDraft.isEmpty)
     }
 
     /// The greeting — the reference's shape (brand mark + a serif line), Norma's own words.
@@ -460,7 +475,7 @@ struct NewChatPage: View {
         } else {
             HStack(spacing: 10) {
                 ForEach(newChatStarters, id: \.title) { starter in
-                    NewChatStarterChip(starter: starter) { draft = starter.prefill }
+                    NewChatStarterChip(starter: starter) { host.newChatDraft = starter.prefill }
                 }
             }
         }
@@ -475,278 +490,28 @@ struct NewChatPage: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, 6)
             ForEach(newChatCoworkIdeas, id: \.title) { idea in
-                NewChatIdeaRow(idea: idea) { draft = idea.prefill }
+                NewChatIdeaRow(idea: idea) { host.newChatDraft = idea.prefill }
             }
         }
         .frame(width: newChatCardWidth, alignment: .leading)
     }
 
-    /// The existing composer, in a quiet bordered card so it reads as THE affordance on an
-    /// otherwise-empty page (framing only — the component inside is untouched).
-    ///
-    /// chatgpt-ui T3 (c-m3, the in-flight feedback): while a create is in flight
-    /// (`newChatSendUI`'s `.creating` row) the live composer is SWAPPED for a non-editable
-    /// held-draft rendering of the same text in the same card — the honest disable:
-    /// `.disabled()` is a no-op on the `NSViewRepresentable` composer (its `NSTextView` never
-    /// reads the SwiftUI environment, and the component itself is fenced — Global Constraints:
-    /// hosted unchanged), so unmounting it is the one way keyboard input actually stops. The
-    /// draft is view-local `@State`, so the text survives the swap in BOTH directions: shown
-    /// (secondary, visibly held) while creating, restored verbatim into the live composer on
-    /// failure. A small spinner rides the card's corner as the subtle working indicator. On
-    /// success the whole page navigates away in the create-ack's own beat, so the re-enabled
-    /// composer never flashes.
+    /// The composer — now the SHARED `NormaComposerCard`, the same component the live chat page
+    /// renders (user call, 2026-08-07). This page owns only what is specific to it: the deferred
+    /// create's in-flight state, and the mode segment being interactive because no session exists
+    /// yet to have a fixed mode.
     private var composerCard: some View {
         let ui = newChatSendUI(host.newChatCreate)
-        let box = VStack(spacing: 0) {
-            Group {
-                if ui.composerEnabled {
-                    ComposerTextView(
-                        text: $draft,
-                        onSubmit: { submit() },
-                        usesAdaptiveColors: true,
-                        fontSize: newChatComposerFontSize
-                    )
-                    // The composer component has no placeholder parameter (its own doc notes the
-                    // v1 shape never had one), so the placeholder is an overlay that steps aside
-                    // the moment there is text. Non-hit-testing, or it would eat the click that
-                    // focuses the field underneath it.
-                    .overlay(alignment: .topLeading) {
-                        if draft.isEmpty {
-                            Text(newChatComposerPlaceholder)
-                                .font(.system(size: newChatComposerFontSize))
-                                .foregroundStyle(Theme.textMuted)
-                                .padding(.horizontal, ComposerTextView.textContainerInset.width)
-                                .padding(.vertical, ComposerTextView.textContainerInset.height)
-                                .allowsHitTesting(false)
-                        }
-                    }
-                } else {
-                    // The held draft — same type size, same top-leading start as the live composer
-                    // (its `textContainerInset`/zero line-fragment padding, mirrored) so the swap
-                    // doesn't visibly jump; secondary color is what reads as "disabled" here.
-                    Text(draft)
-                        .font(.system(size: newChatComposerFontSize))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, ComposerTextView.textContainerInset.width)
-                        .padding(.vertical, ComposerTextView.textContainerInset.height)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                }
-            }
-            .frame(height: 54)
-            .padding(.horizontal, 16)
-            .padding(.top, 20)
-
-            controlRow
-        }
-        .frame(height: newChatComposerHeight)
-        // The composer keeps its OWN complete face and border — all four corners, always. That is
-        // what makes the Cowork strip read as a second surface BEHIND it rather than as this card
-        // growing a section (user correction, 2026-08-07).
-        .background(
-            RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                .fill(Theme.composerSurface)
+        return NormaComposerCard(
+            text: draftBinding,
+            onSubmit: submit,
+            mode: $mode,
+            stripEdge: .below,
+            announcement: newChatAnnouncement(announcement, fallback: announcementLine),
+            isEnabled: ui.composerEnabled,
+            showsWorkingIndicator: ui.showsWorkingIndicator,
+            sendBlockedReason: newChatSendBlockedReason(draft: host.newChatDraft, mode: mode)
         )
-        // The rim STRENGTHENS on hover — the composer is the page's main affordance and should
-        // answer when the pointer is over it. Only the RIM moves, never the fill: a card that
-        // changed colour under the pointer would read as selected rather than as ready.
-        //
-        // Hover only, NOT focus. The composer is `ComposerTextView`, an `NSViewRepresentable`
-        // hosted unchanged under the Global Constraints, and it exposes no first-responder
-        // callback — so "focused to type" cannot be observed without either changing that
-        // component or KVO-ing `NSWindow.firstResponder`, which is not documented as observable.
-        // Wiring focus properly means giving the component a focus callback; that is a real
-        // change to a fenced file rather than something to sneak in here.
-        .overlay(
-            RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                .strokeBorder(composerHovered ? AnyShapeStyle(Color.primary.opacity(0.30))
-                                              : AnyShapeStyle(Theme.hairline),
-                              lineWidth: shellSidebarHairlineWidth)
-        )
-        .shadow(color: .black.opacity(0.05), radius: 16, y: 4)
-        .animation(.easeOut(duration: 0.14), value: composerHovered)
-        .onHover { composerHovered = $0 }
-        .overlay(alignment: .bottomTrailing) {
-            if ui.showsWorkingIndicator {
-                ProgressView()
-                    .controlSize(.small)
-                    .padding(10)
-                    .accessibilityLabel("Starting chat")
-            }
-        }
-
-        // How far the strip protrudes below the composer. Animating THIS is the whole effect: the
-        // strip is a full-height rounded rect sitting behind the composer, and growing it downward
-        // slides its band out from underneath.
-        let band = newChatShowsCoworkControls(mode: mode) ? newChatCoworkStripHeight : 0
-
-        return ZStack(alignment: .top) {
-            // The second surface, BEHIND. It spans the composer's whole height plus the band, so
-            // its side borders and bottom corners are the only parts that ever show — the composer
-            // is opaque and covers the rest. Two earlier attempts got this wrong in opposite ways:
-            // one let the strip bleed through as a ghost, the other wrapped both in a single
-            // border, which is exactly the "expansion" look being corrected here.
-            RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                .fill(Theme.canvas)
-                // FAINTER than the composer's own rim (user call, 2026-08-07). It should — the
-                // strip is a surface BEHIND the composer, and a background object tracing itself
-                // as strongly as the thing in front competes with it for the same edge.
-                .overlay(
-                    RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                        .strokeBorder(Theme.hairline.opacity(0.5),
-                                      lineWidth: shellSidebarHairlineWidth)
-                )
-                .frame(height: newChatComposerHeight + band)
-                .overlay(alignment: .bottom) {
-                    // Pinned to the growing edge and clipped, so the row travels DOWN with the
-                    // band instead of being uncovered in place — that is the difference between
-                    // "slides out from beneath" and "fades in".
-                    announcementRow
-                        .frame(height: newChatCoworkStripHeight)
-                        .frame(height: band, alignment: .bottom)
-                        .clipped()
-                }
-                .opacity(band > 0 ? 1 : 0)
-
-            box
-        }
-        .frame(maxWidth: newChatCardWidth)
-    }
-
-    /// The card's first control row — the reference's anatomy: attach, the mode picker, the model
-    /// and effort, dictation, send.
-    ///
-    /// Everything but SEND is a **placeholder** (labelled "not wired yet" in its help text, the
-    /// same honest posture the titlebar cluster takes). They are not fake for want of a backend —
-    /// Norma has real models, efforts and approval policies — but because this page has NO SESSION
-    /// yet: these controls would have to set DEFAULTS for the session about to be created, and
-    /// that concept does not exist. Wiring them is its own piece of work.
-    private var controlRow: some View {
-        HStack(spacing: 8) {
-            NewChatControlButton(systemImage: "plus", label: "Attach (not wired yet)", size: 17)
-            modePicker
-            Spacer(minLength: 12)
-            // The model reads PRIMARY, like the reference's — it is the thing you would click,
-            // not a caption. The chevron says so even while the picker itself is unwired.
-            HStack(spacing: 4) {
-                Text(newChatModelPlaceholder)
-                    .font(.system(size: 14))
-                    .foregroundStyle(.primary)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Theme.textMuted)
-            }
-            .help("Model and effort (not wired yet)")
-            NewChatControlButton(systemImage: "mic", label: "Dictate (not wired yet)", size: 15)
-            sendButton
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 13)
-    }
-
-    /// Chat / Cowork, the reference's segmented pair. Cowork renders but never selects — it has no
-    /// daemon mode at all (`SessionMode.isAvailable`), the same "visible but honest" treatment the
-    /// sidebar's Cowork row gets rather than hiding a mode the user knows is coming.
-    private var modePicker: some View {
-        HStack(spacing: 2) {
-            ForEach(newChatModeOptions, id: \.self) { option in
-                let isSelected = option == mode
-                Button {
-                    // Animated so the Cowork strip visibly SLIDES out from under the composer
-                    // rather than snapping into existence.
-                    withAnimation(.easeInOut(duration: 0.24)) { mode = option }
-                } label: {
-                    Text(option.title)
-                        .font(.system(size: 14, weight: isSelected ? .medium : .regular))
-                        .foregroundStyle(isSelected ? AnyShapeStyle(.primary)
-                                                    : AnyShapeStyle(Theme.textMuted))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(isSelected ? AnyShapeStyle(Theme.composerSurface)
-                                         : AnyShapeStyle(Color.clear))
-                )
-                // Cowork IS selectable, so the design it unlocks (the second control row) can
-                // actually be seen — but it cannot send. See `newChatSendBlockedReason`: the
-                // alternative was either hiding a mode the user knows is coming, or letting a
-                // Cowork send quietly mint a chat session.
-                .help(option.isAvailable ? option.title : "\(option.title) — not built yet")
-            }
-        }
-        .padding(2)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.controlSurface)
-        )
-    }
-
-    /// The send affordance — the ONE live control in the row. Accent-tinted like the reference's,
-    /// which is the single place the brand teal earns its way onto this surface.
-    private var sendButton: some View {
-        let blocked = newChatSendBlockedReason(draft: draft, mode: mode)
-        return Group {
-            if blocked == nil {
-                // Ready: the accent-tinted arrow — the one place the brand teal earns its way
-                // onto this surface, exactly as the reference tints its own send.
-                Button(action: submit) {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Theme.canvas)
-                        .frame(width: newChatSendButtonSize, height: newChatSendButtonSize)
-                        // A rounded RECT, not a circle — the reference's send is a squircle, and a
-                        // circle read visibly different beside it.
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Theme.accent)
-                        )
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Send")
-                .accessibilityLabel("Send")
-            } else {
-                // Not ready: the reference's waveform sits here until there is something to send.
-                // A blocked send shows WHY on hover when there is a reason worth giving (Cowork);
-                // an empty draft is the ordinary resting state and explains itself.
-                Image(systemName: "waveform")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(Theme.textMuted)
-                    .frame(width: newChatSendButtonSize, height: newChatSendButtonSize)
-                    .help(blocked!.isEmpty ? "Type a message to send" : blocked!)
-                    .accessibilityLabel(blocked!.isEmpty ? "Send — type a message first" : blocked!)
-            }
-        }
-    }
-
-    /// The card's second row: the working-folder and approval-mode pickers (both placeholders, for
-    /// the no-session-yet reason above), and the ANNOUNCEMENT strip at the trailing edge.
-    ///
-    /// The announcement slot replaces the reference's usage promotion (user call: keep the slot,
-    /// drop the promotion). It is a place for Norma to say something occasionally — and when there
-    /// is nothing to say it shows the day's tip rather than sitting empty or congratulating itself.
-    private var announcementRow: some View {
-        HStack(spacing: 10) {
-            NewChatControlChip(systemImage: "folder", title: "Project or folder",
-                               label: "Working folder (not wired yet)")
-            NewChatControlChip(systemImage: "hand.raised", title: "Ask",
-                               label: "Approval mode (not wired yet)")
-            Spacer(minLength: 12)
-            HStack(spacing: 6) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 12))
-                Text(newChatAnnouncement(announcement, fallback: announcementLine))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .font(.system(size: 13))
-            .foregroundStyle(Theme.textMuted)
-        }
-        // Matches the control row's own inset, so the folder glyph lands on the same column as the
-        // plus directly above it — the reference aligns those two.
-        .padding(.horizontal, 18)
-        .frame(height: newChatCoworkStripHeight)
     }
 
     /// First send = the create-on-send flow (spec §2): exactly ONE `session.create` (mode chat,
@@ -755,7 +520,7 @@ struct NewChatPage: View {
     /// live session (the composer content carries — the host seeds the attached adapter's draft
     /// until the send lands, so there is no empty-composer flicker and no lost text).
     private func submit() {
-        host.sendFirstChatMessage(draft) { sessionId in
+        host.sendFirstChatMessage(host.newChatDraft) { sessionId in
             nav.navigate(to: .session(sessionId))
         }
     }

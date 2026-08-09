@@ -14,6 +14,13 @@ struct PendingCardsView: View {
     let interactions: [PendingInteraction]
     let inFlight: Set<String>                       // callIds with an RPC awaiting
     let errorLines: [String: String]                // callId → inline error text
+    /// panel-shell T10b: a live `Binding` onto callId's `PendingCardDraft`, mirroring how
+    /// `WindowContentView` hands the composer `adapter.draftBinding` rather than the adapter
+    /// itself — same "value/closure, not the object" shape this view's other parameters already
+    /// keep. Built by the caller off `FieldStateAdapter.pendingCardDraftBinding(for:)`, so the
+    /// getter/setter always dereference the LIVE adapter (never a snapshot taken at this view's
+    /// own construction time) — see that method's own doc.
+    let draftBinding: (String) -> Binding<PendingCardDraft>
     let onApproval: (String, Bool, String?, String?) -> Void  // callId, approved, optionId, childSessionId
     let onQuestion: (String, [String: String], [String: String], String?) -> Void  // callId, answers, notes (both keyed by question text), childSessionId
     let onPlan: (String, Bool, Bool, String?) -> Void   // callId, approved, autoAccept, feedback
@@ -25,12 +32,69 @@ struct PendingCardsView: View {
                     interaction: interaction,
                     isInFlight: inFlight.contains(interaction.callId),
                     errorLine: errorLines[interaction.callId],
+                    draft: draftBinding(interaction.callId),
                     onApproval: onApproval,
                     onQuestion: onQuestion,
                     onPlan: onPlan
                 )
             }
         }
+    }
+}
+
+// MARK: - panel-shell T10b: PendingCardDraft — the hoisted, externally-owned per-card answer
+
+/// A pending question/plan card's typed-but-unsubmitted answer. Mirrors
+/// `FieldStateAdapter.composerDraft`'s precedent exactly: `PendingQuestionBody`/`PendingPlanBody`
+/// used to hold this as view-local `@State`, which `ShellRootView`'s `if mode != .maximized {
+/// detail }` silently destroys every time the panel is maximized or un-maximized (`detail` — and
+/// everything inside it — is torn down and rebuilt, and `@State`'s storage does not survive a
+/// view's identity leaving the hierarchy). Stored externally instead
+/// (`FieldStateAdapter.pendingCardDrafts`, keyed by the composite `sessionId|callId` key —
+/// `pendingCardDraftKey(sessionId:callId:)` — since `pendingInteractions` is a list, so more
+/// than one card can be open at once, and a bare callId has no cross-session uniqueness
+/// guarantee), which is what makes it survive.
+///
+/// Mutation lives HERE as methods, not scattered across the view's closures, so the
+/// mutual-exclusion rules — selecting an option clears that question's Other text; typing Other
+/// text clears that question's selection — are independently unit-testable
+/// (`PendingCardsTests`) without mounting any view, the same "PURE logic, tested directly"
+/// convention this file's own `questionAnswers`/`questionCardComplete` already follow.
+struct PendingCardDraft: Equatable {
+    var selections: [Int: Set<Int>] = [:]
+    var otherTexts: [Int: String] = [:]
+    var otherExpanded: Set<Int> = []
+    var notes: [Int: String] = [:]
+    /// The plan card's own two fields — untouched by anything above, which only questions read.
+    var isRequestingChanges: Bool = false
+    var feedback: String = ""
+
+    /// Single-select an option — mirrors `PendingQuestionBody`'s old `onSelectSingle` closure.
+    mutating func selectSingle(_ optionIndex: Int, forQuestion index: Int) {
+        selections[index] = [optionIndex]
+        otherTexts[index] = ""
+    }
+
+    /// Multi-select toggle — same Other-clearing rule as `selectSingle`.
+    mutating func toggleMulti(_ optionIndex: Int, forQuestion index: Int) {
+        var current = selections[index] ?? []
+        if current.contains(optionIndex) { current.remove(optionIndex) } else { current.insert(optionIndex) }
+        selections[index] = current
+        otherTexts[index] = ""
+    }
+
+    mutating func expandOther(forQuestion index: Int) {
+        otherExpanded.insert(index)
+    }
+
+    /// Typing Other text clears that question's selection — the reverse mutual exclusion.
+    mutating func setOtherText(_ text: String, forQuestion index: Int) {
+        otherTexts[index] = text
+        selections[index] = []
+    }
+
+    mutating func setNote(_ text: String, forQuestion index: Int) {
+        notes[index] = text
     }
 }
 
@@ -229,6 +293,9 @@ private struct PendingCard: View {
     let interaction: PendingInteraction
     let isInFlight: Bool
     let errorLine: String?
+    /// panel-shell T10b: forwarded to whichever body needs it (`.question`/`.plan`) — untouched by
+    /// `.approval`, which has no typed-but-unsubmitted input to preserve.
+    @Binding var draft: PendingCardDraft
     let onApproval: (String, Bool, String?, String?) -> Void
     let onQuestion: (String, [String: String], [String: String], String?) -> Void
     let onPlan: (String, Bool, Bool, String?) -> Void
@@ -266,9 +333,9 @@ private struct PendingCard: View {
         case .approval(let callId, _, let summary, let reviewerReason, let childSessionId, let options):
             PendingApprovalBody(callId: callId, summary: summary, reviewerReason: reviewerReason, childSessionId: childSessionId, options: options, isInFlight: isInFlight, onApproval: onApproval)
         case .question(let callId, let questions, let childSessionId):
-            PendingQuestionBody(callId: callId, questions: questions, childSessionId: childSessionId, isInFlight: isInFlight, onQuestion: onQuestion)
+            PendingQuestionBody(callId: callId, questions: questions, childSessionId: childSessionId, isInFlight: isInFlight, onQuestion: onQuestion, draft: $draft)
         case .plan(let callId, let plan):
-            PendingPlanBody(callId: callId, plan: plan, isInFlight: isInFlight, onPlan: onPlan)
+            PendingPlanBody(callId: callId, plan: plan, isInFlight: isInFlight, onPlan: onPlan, draft: $draft)
         }
     }
 }
@@ -380,7 +447,13 @@ private struct PendingApprovalBody: View {
 /// whole-card Submit button below, disabled until `questionCardComplete` says every question has
 /// an answer, which calls `onQuestion` once with the full, current `questionAnswers` dict.
 /// Single-question cards go through the same gate — no divergent single-vs-multi submit path.
-private struct PendingQuestionBody: View {
+/// panel-shell T10b: widened from `private` to internal — the SAME reason
+/// `WindowContentView.showingDirsMenu`/`showingActivityMenu` were widened (see those properties'
+/// own doc): a cross-file consumer needs to reach this type directly. There it was
+/// `WorkingDirsMenu.swift`'s extension; here it is `PendingCardsTests`, which constructs this view
+/// directly to prove — via `Mirror` — that it holds no view-local `@State` for the answer any
+/// more (`testPendingQuestionBodyHoldsNoViewLocalState`).
+struct PendingQuestionBody: View {
     let callId: String
     let questions: [SessionEvent.Question]
     /// Dispatch relay (Phase 7): see `PendingApprovalBody.childSessionId`'s doc — same meaning,
@@ -388,18 +461,12 @@ private struct PendingQuestionBody: View {
     let childSessionId: String?
     let isInFlight: Bool
     let onQuestion: (String, [String: String], [String: String], String?) -> Void
-
-    @State private var selections: [Int: Set<Int>] = [:]
-    @State private var otherTexts: [Int: String] = [:]
-    @State private var otherExpanded: Set<Int> = []
-    /// CC AskUserQuestion parity: per-question free-text note, index-keyed like `selections`/
-    /// `otherTexts` above — independent of both (a note rides ALONGSIDE whatever answer the
-    /// question already has; it never substitutes for one, so it plays no part in
-    /// `questionCardComplete`'s gate).
-    @State private var notes: [Int: String] = [:]
+    /// panel-shell T10b: the answer lives HERE now, not in local `@State` — see `PendingCardDraft`'s
+    /// own doc for why (it must survive `ShellRootView`'s `.maximized` teardown of `detail`).
+    @Binding var draft: PendingCardDraft
 
     private var isComplete: Bool {
-        questionCardComplete(questions: questions, selections: selections, otherTexts: otherTexts)
+        questionCardComplete(questions: questions, selections: draft.selections, otherTexts: draft.otherTexts)
     }
 
     var body: some View {
@@ -409,27 +476,16 @@ private struct PendingQuestionBody: View {
                     index: index,
                     question: question,
                     showsHeader: questionShowsHeaderChip(question, questionCount: questions.count),
-                    selected: selections[index] ?? [],
-                    otherText: otherTexts[index] ?? "",
-                    isOtherExpanded: otherExpanded.contains(index),
-                    noteText: notes[index] ?? "",
+                    selected: draft.selections[index] ?? [],
+                    otherText: draft.otherTexts[index] ?? "",
+                    isOtherExpanded: draft.otherExpanded.contains(index),
+                    noteText: draft.notes[index] ?? "",
                     isInFlight: isInFlight,
-                    onSelectSingle: { optionIndex in
-                        selections[index] = [optionIndex]
-                        otherTexts[index] = ""
-                    },
-                    onToggleMulti: { optionIndex in
-                        var current = selections[index] ?? []
-                        if current.contains(optionIndex) { current.remove(optionIndex) } else { current.insert(optionIndex) }
-                        selections[index] = current
-                        otherTexts[index] = ""
-                    },
-                    onExpandOther: { otherExpanded.insert(index) },
-                    onOtherTextChange: { text in
-                        otherTexts[index] = text
-                        selections[index] = []
-                    },
-                    onNoteTextChange: { text in notes[index] = text }
+                    onSelectSingle: { optionIndex in draft.selectSingle(optionIndex, forQuestion: index) },
+                    onToggleMulti: { optionIndex in draft.toggleMulti(optionIndex, forQuestion: index) },
+                    onExpandOther: { draft.expandOther(forQuestion: index) },
+                    onOtherTextChange: { text in draft.setOtherText(text, forQuestion: index) },
+                    onNoteTextChange: { text in draft.setNote(text, forQuestion: index) }
                 )
             }
 
@@ -443,8 +499,8 @@ private struct PendingQuestionBody: View {
     private func submit() {
         onQuestion(
             callId,
-            questionAnswers(for: questions, selections: selections, otherTexts: otherTexts),
-            questionNotes(for: questions, notes: notes),
+            questionAnswers(for: questions, selections: draft.selections, otherTexts: draft.otherTexts),
+            questionNotes(for: questions, notes: draft.notes),
             childSessionId
         )
     }
@@ -612,14 +668,17 @@ private struct QuestionBlock: View {
 /// (`ChatContent/TranscriptMessageViews.swift`) rather than duplicating it — `isStreaming: true`
 /// suppresses that view's trailing per-message copy affordance (not part of this card's spec),
 /// capped at ~260pt in a `ScrollView` since a plan can run long.
-private struct PendingPlanBody: View {
+/// panel-shell T10b: widened from `private` to internal — see `PendingQuestionBody`'s own doc for
+/// why (the `showingDirsMenu` precedent; here `PendingCardsTests` constructs this view directly
+/// via `Mirror` in `testPendingPlanBodyHoldsNoViewLocalState`).
+struct PendingPlanBody: View {
     let callId: String
     let plan: String
     let isInFlight: Bool
     let onPlan: (String, Bool, Bool, String?) -> Void
-
-    @State private var isRequestingChanges = false
-    @State private var feedback = ""
+    /// panel-shell T10b: the "Request changes" toggle and its typed feedback live HERE now, not in
+    /// local `@State` — see `PendingCardDraft`'s own doc.
+    @Binding var draft: PendingCardDraft
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -633,19 +692,19 @@ private struct PendingPlanBody: View {
                     .buttonStyle(.borderedProminent)
                 Button("Approve + auto-accept") { onPlan(callId, true, true, nil) }
                     .buttonStyle(.bordered)
-                Button("Request changes") { isRequestingChanges = true }
+                Button("Request changes") { draft.isRequestingChanges = true }
                     .buttonStyle(.bordered)
             }
             .controlSize(.small)
             .disabled(isInFlight)
 
-            if isRequestingChanges {
+            if draft.isRequestingChanges {
                 HStack(spacing: 8) {
-                    TextField("What should change?", text: $feedback)
+                    TextField("What should change?", text: $draft.feedback)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 12))
                     Button("Send") {
-                        onPlan(callId, false, false, feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : feedback)
+                        onPlan(callId, false, false, draft.feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : draft.feedback)
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)

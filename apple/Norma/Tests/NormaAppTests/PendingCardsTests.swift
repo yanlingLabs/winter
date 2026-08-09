@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import NormaProtocol
 import NormaKit
 @testable import Norma
@@ -250,5 +251,273 @@ final class PendingCardsTests: XCTestCase {
         XCTAssertEqual(approvalAdditionalOptions(options(#"[{"id":"allow_once","label":"Allow once","rule":null,"scope":null},{"id":"deny","label":"Deny","rule":null,"scope":null}]"#)), [],
                        "a card carrying only the two primaries renders no quiet row at all")
         XCTAssertEqual(approvalAdditionalOptions(nil), [], "no options at all is the pre-T6 card, byte-identical")
+    }
+
+    // MARK: - panel-shell T10b: PendingCardDraft — the hoisted, externally-owned per-card answer
+    //
+    // Mirrors `FieldStateAdapter.composerDraft`'s precedent: `PendingQuestionBody`/
+    // `PendingPlanBody` used to hold a question/plan card's typed-but-unsubmitted answer as
+    // view-local `@State`, destroyed whenever `ShellRootView`'s `detail` subtree is torn down and
+    // rebuilt (the panel's `.maximized` toggle — see `ShellSidebar.swift`'s own comment on the
+    // `if mode != .maximized` branch). Mutation now lives on `PendingCardDraft` itself, not buried
+    // in view closures, so the mutual-exclusion rules (selecting an option clears that question's
+    // Other text, and typing Other text clears that question's selection) are independently
+    // unit-testable without mounting any view — the same "PURE logic, tested directly" convention
+    // this whole file already follows for `questionAnswers`/`questionCardComplete` etc. above.
+    //
+    // `PendingCardDraft` itself is a brand-new type as of this task — every test below fails to
+    // compile against unmodified code (`Cannot find 'PendingCardDraft' in scope`), which is the
+    // RED evidence for this half of the fix (Task 10's own TDD evidence in
+    // `task-10-report.md` establishes a "cannot find X in scope" compile failure as legitimate RED
+    // in this plan; runtime RED is unreachable here pre-fix because `PendingQuestionBody`/
+    // `PendingPlanBody` are `private` to `PendingCards.swift` today — see the Mirror-based tests
+    // further below, and this file's own task-10b report for the full reasoning).
+
+    func testSelectSingleClearsThatQuestionsOtherText() {
+        var draft = PendingCardDraft()
+        draft.otherTexts[0] = "typed something"
+        draft.selectSingle(1, forQuestion: 0)
+        XCTAssertEqual(draft.selections[0], [1])
+        XCTAssertEqual(draft.otherTexts[0], "", "selecting an option clears that question's Other text")
+    }
+
+    func testToggleMultiAddsAndRemovesClearingOtherTextEachTime() {
+        var draft = PendingCardDraft()
+        draft.otherTexts[0] = "typed something"
+        draft.toggleMulti(1, forQuestion: 0)
+        XCTAssertEqual(draft.selections[0], [1])
+        XCTAssertEqual(draft.otherTexts[0], "", "toggling an option on also clears Other text")
+
+        draft.otherTexts[0] = "typed again"
+        draft.toggleMulti(2, forQuestion: 0)
+        XCTAssertEqual(draft.selections[0], [1, 2])
+
+        draft.toggleMulti(1, forQuestion: 0)
+        XCTAssertEqual(draft.selections[0], [2], "toggling an already-selected option removes it")
+    }
+
+    func testSetOtherTextClearsThatQuestionsSelection() {
+        var draft = PendingCardDraft()
+        draft.selections[0] = [1]
+        draft.setOtherText("SQLite", forQuestion: 0)
+        XCTAssertEqual(draft.otherTexts[0], "SQLite")
+        XCTAssertEqual(draft.selections[0], [], "typing Other text clears that question's selection")
+    }
+
+    func testExpandOtherOnlyAffectsTheGivenQuestion() {
+        var draft = PendingCardDraft()
+        draft.expandOther(forQuestion: 1)
+        XCTAssertEqual(draft.otherExpanded, [1])
+        XCTAssertFalse(draft.otherExpanded.contains(0))
+    }
+
+    func testSetNoteIsIndependentOfSelectionAndOtherText() {
+        var draft = PendingCardDraft()
+        draft.selections[0] = [1]
+        draft.setNote("prefer the managed one", forQuestion: 0)
+        XCTAssertEqual(draft.notes[0], "prefer the managed one")
+        XCTAssertEqual(draft.selections[0], [1], "a note never disturbs the selection")
+    }
+
+    /// The per-question dictionaries are genuinely keyed by question index — a mutation on one
+    /// question in a multi-question card must never leak onto another's entry. (Self-caught while
+    /// running this test for the first time: an earlier draft of it asserted `nil` on the SAME
+    /// question each call had just cleared as its own mutual-exclusion side effect — e.g.
+    /// `selectSingle(forQuestion: 0)` legitimately leaves `otherTexts[0] == ""`, not absent — which
+    /// is correct behavior, not cross-contamination. Rewritten to check question 1 BEFORE it is
+    /// ever touched, and question 0's earlier answer AFTER a later mutation on question 1.)
+    func testMutationsOnOneQuestionNeverTouchAnother() {
+        var draft = PendingCardDraft()
+        draft.selectSingle(0, forQuestion: 0)
+        XCTAssertEqual(draft.selections[0], [0])
+        XCTAssertNil(draft.selections[1], "a mutation on question 0 must never create an entry for question 1")
+        XCTAssertNil(draft.otherTexts[1])
+
+        draft.setOtherText("custom", forQuestion: 1)
+        XCTAssertEqual(draft.otherTexts[1], "custom")
+        XCTAssertEqual(draft.selections[0], [0], "question 0's earlier answer survives a later mutation on question 1")
+    }
+
+    /// The plan card's own two fields — independent of the question fields above (a `PendingCardDraft`
+    /// is one shape shared by both card kinds; `PendingPlanBody` only ever touches these two).
+    func testPlanDraftFieldsDefaultEmptyAndAreIndependentlySettable() {
+        var draft = PendingCardDraft()
+        XCTAssertFalse(draft.isRequestingChanges)
+        XCTAssertEqual(draft.feedback, "")
+        draft.isRequestingChanges = true
+        draft.feedback = "use postgres instead"
+        XCTAssertTrue(draft.isRequestingChanges)
+        XCTAssertEqual(draft.feedback, "use postgres instead")
+    }
+
+    // MARK: - panel-shell T10b: FieldStateAdapter.pendingCardDraftBinding — the survive-teardown proof
+
+    /// The direct proof of the actual requirement: an in-progress answer, written through the
+    /// EXACT mechanism the real view will use (`adapter.pendingCardDraftBinding(for:)`, mirroring
+    /// `FieldStateAdapter.draftBinding` for the composer), must still be there when a SECOND,
+    /// independently-constructed Binding is pulled from the SAME adapter — which is precisely what
+    /// happens when `ShellRootView` rebuilds `detail` (and so `PendingCardsView` → `PendingCard` →
+    /// `PendingQuestionBody`) after leaving `.maximized`: a brand-new view struct, the same
+    /// long-lived `FieldStateAdapter` underneath it (`WindowContentView`'s `@ObservedObject var
+    /// adapter`, itself owned by `ShellSessionAttachment`, outside `detail` entirely).
+    @MainActor
+    func testPendingCardDraftSurvivesSimulatedViewReconstruction() {
+        let adapter = FieldStateAdapter(session: SessionModel())
+
+        // Review fix (Minor 1): folded in from the deleted
+        // testPendingCardDraftBindingDefaultsEmptyForAnUnseenCallId, which passed even with
+        // `pendingCardDraftBinding` replaced by `.constant(PendingCardDraft())` — a stub that
+        // holds nothing can trivially "default empty" for anything. Checked here, against this
+        // SAME real adapter, the claim has to hold across the reconstruction below: a stub would
+        // fail THAT half, which is what makes this half meaningful now. A pure read — the getter
+        // below never inserts an entry — so this cannot pollute the "q1" checks that follow.
+        XCTAssertEqual(adapter.pendingCardDraftBinding(for: "never-seen").wrappedValue, PendingCardDraft(),
+            "a callId with no draft yet must read as a fresh, empty PendingCardDraft — never a crash or an implicit optional the view would have to unwrap")
+
+        // Simulate the FIRST PendingQuestionBody instance: the user types Other text — exactly
+        // what its onOtherTextChange closure does once wired to `pendingCardDraftBinding(for:)`.
+        adapter.pendingCardDraftBinding(for: "q1").wrappedValue.setOtherText("SQLite", forQuestion: 0)
+
+        // Simulate `.maximized` tearing `detail` down and `ShellRootView` rebuilding a BRAND NEW
+        // PendingQuestionBody when the panel returns to `.side` — a fresh Binding pulled from the
+        // SAME adapter, exactly what WindowContentView's call site constructs on every re-render.
+        let rebuilt = adapter.pendingCardDraftBinding(for: "q1")
+
+        XCTAssertEqual(rebuilt.wrappedValue.otherTexts[0], "SQLite",
+                       "typed-but-unsubmitted card input must survive the view being torn down and rebuilt")
+    }
+
+    /// `pendingInteractions` is a LIST — more than one card can be open — so drafts must be kept
+    /// strictly per-callId, never shared or cross-contaminated. Unaffected by the review's
+    /// composite-session-keying fix below: both callIds are written under the SAME (unwired,
+    /// defaulting-empty) session namespace here, so this is still a same-session isolation proof,
+    /// distinct from `testPendingCardDraftDoesNotCollideAcrossSessions`'s cross-session one.
+    @MainActor
+    func testPendingCardDraftIsPerCallIdNeverSharedAcrossCards() {
+        let adapter = FieldStateAdapter(session: SessionModel())
+        adapter.pendingCardDraftBinding(for: "q1").wrappedValue.setOtherText("A", forQuestion: 0)
+        adapter.pendingCardDraftBinding(for: "q2").wrappedValue.setOtherText("B", forQuestion: 0)
+        XCTAssertEqual(adapter.pendingCardDraftBinding(for: "q1").wrappedValue.otherTexts[0], "A")
+        XCTAssertEqual(adapter.pendingCardDraftBinding(for: "q2").wrappedValue.otherTexts[0], "B")
+    }
+
+    /// panel-shell T10b review fix (Important 1+2): callIds are provider-minted with no
+    /// cross-session uniqueness guarantee (the daemon's own `imageKey(sessionId, threadId,
+    /// callId)` precedent, packages/core/src/agent/engine.ts, on the identical image-staging
+    /// problem) — a bare-callId key risks draining session A's draft into session B's card the
+    /// moment both sessions' entries ever coexist in this one dictionary. Proves BOTH halves of
+    /// that fix: session B must never see session A's entry (the collision), AND session A's own
+    /// entry must still be there when the adapter re-binds back to it (proving this is a real
+    /// composite key, not merely session-scoped deletion masquerading as isolation).
+    @MainActor
+    func testPendingCardDraftDoesNotCollideAcrossSessions() {
+        let adapter = FieldStateAdapter(session: SessionModel())
+
+        adapter.boundSessionId = { "session-a" }
+        adapter.pendingCardDraftBinding(for: "q1").wrappedValue.setOtherText("Postgres", forQuestion: 0)
+
+        adapter.boundSessionId = { "session-b" }
+        XCTAssertEqual(adapter.pendingCardDraftBinding(for: "q1").wrappedValue, PendingCardDraft(),
+            "a different session must never inherit another session's draft just because the callId happens to repeat")
+
+        adapter.boundSessionId = { "session-a" }
+        XCTAssertEqual(adapter.pendingCardDraftBinding(for: "q1").wrappedValue.otherTexts[0], "Postgres",
+            "switching back to session A must still find its own draft — proving this is a real composite key, not an accidental delete")
+    }
+
+    /// panel-shell T10b review fix (Minor 3): `pendingCardDrafts` is bounded across a SESSION
+    /// switch by the explicit clears in `ShellSessionHost.hop`/`DetachedWindowController.
+    /// selectSession`/`OrbWindowController.updateIsChatSession` — but nothing previously bounded
+    /// it across an ORDINARY same-session resolve (a question answered, a plan approved). On the
+    /// orb's own `fieldAdapter` — app-lifetime, never hopped, never torn down — that grew the
+    /// dictionary by one entry per card, forever. Proves the resolve-path sweep: once a callId
+    /// leaves `pendingInteractions` (simulated the same way `SessionReducer`'s own respond-path
+    /// tests do, via `applyForTesting`), its draft is pruned; a DIFFERENT callId that is still
+    /// genuinely open is untouched. `boundSessionId` is wired to a real, non-empty id here
+    /// (unlike most of this file's other tests) so this is a genuine proof of the composite-keyed
+    /// production shape, not an artifact of the `?? ""` fallback namespace.
+    @MainActor
+    func testPendingCardDraftIsPrunedWhenItsCardResolves() {
+        let session = SessionModel()
+        let adapter = FieldStateAdapter(session: session)
+        adapter.boundSessionId = { "session-a" }
+
+        session.applyForTesting { s in
+            s.pendingInteractions = [
+                .approval(callId: "q1", toolName: "t", summary: "d"),
+                .approval(callId: "q2", toolName: "t", summary: "d")
+            ]
+        }
+        adapter.pendingCardDraftBinding(for: "q1").wrappedValue.setOtherText("A", forQuestion: 0)
+        adapter.pendingCardDraftBinding(for: "q2").wrappedValue.setOtherText("B", forQuestion: 0)
+
+        // q1 resolves (the reducer's own removeAll-by-callId path) — q2 is still open.
+        session.applyForTesting { s in
+            s.pendingInteractions.removeAll { $0.callId == "q1" }
+        }
+
+        XCTAssertEqual(adapter.pendingCardDraftBinding(for: "q1").wrappedValue, PendingCardDraft(),
+            "a resolved card's draft must be pruned — it can never be shown again for that callId")
+        XCTAssertEqual(adapter.pendingCardDraftBinding(for: "q2").wrappedValue.otherTexts[0], "B",
+            "a STILL-OPEN card's draft must survive the sweep that pruned its resolved sibling")
+    }
+
+    // MARK: - panel-shell T10b: PendingQuestionBody / PendingPlanBody hold no view-local @State
+    //
+    // Structural regression guard, the same technique as `AppShellTests.
+    // testNewChatPageDraftIsNotViewLocalState`: construct the view directly (a plain struct init —
+    // no `.body` ever evaluated) and inspect its stored properties via `Mirror`, which reflects
+    // the compiler-synthesized backing storage for any `@State` property regardless of Swift's
+    // compile-time access control. UNLIKE that test, this pair can only compile once
+    // `PendingQuestionBody`/`PendingPlanBody` stop being `private` to `PendingCards.swift` and
+    // accept the externally-owned `draft` Binding — so today, the whole file fails to compile
+    // against these two ("'PendingQuestionBody' initializer is inaccessible due to 'private'
+    // protection level"), which IS this pair's RED evidence; a genuine pre-fix RUNTIME failure is
+    // unreachable (there is nothing constructible to reflect on). Once fixed, this becomes a
+    // permanent tripwire: a future edit that reintroduces even one local `@State` var on either
+    // view (bypassing the externally-owned draft) fails the suite forever after.
+    /// Catches BOTH `@State` and `@StateObject` — a locally OWNED reference-type store would be
+    /// the identical bug in a different property-wrapper costume (still destroyed on `detail`'s
+    /// teardown; SwiftUI-owned storage keyed to view identity either way).
+    ///
+    /// Review fix (Minor 2): EXACT-matches the wrapper name (the component before the first `<`,
+    /// with any module qualifier stripped) rather than substring-testing `"State<"` /
+    /// `"StateObject<"` — the substring form also matched `FocusState<…>` and `GestureState<…>`,
+    /// so a future, entirely correct `@FocusState private var isFieldFocused` (loses nothing on
+    /// teardown — SwiftUI itself re-derives focus state) would have failed this guard spuriously.
+    /// `"State<...>"` and `"SwiftUI.State<...>"` both reduce to the bare name `"State"` here, so
+    /// this is not narrower than the substring version for the two wrappers it actually targets —
+    /// only narrower for the ones it was never supposed to catch.
+    private func hasAnyStateBackedStorage<T>(_ value: T) -> Bool {
+        Mirror(reflecting: value).children.contains { child in
+            let typeName = String(describing: type(of: child.value))
+            guard let generic = typeName.split(separator: "<").first else { return false }
+            let bareName = generic.split(separator: ".").last.map(String.init) ?? String(generic)
+            return bareName == "State" || bareName == "StateObject"
+        }
+    }
+
+    @MainActor
+    func testPendingQuestionBodyHoldsNoViewLocalState() {
+        let qs = questions(#"[{"question":"Which db?","header":"DB","options":[{"label":"A","description":null}],"multiSelect":false}]"#)
+        var stored = PendingCardDraft()
+        let binding = Binding<PendingCardDraft>(get: { stored }, set: { stored = $0 })
+        let view = PendingQuestionBody(callId: "q1", questions: qs, childSessionId: nil, isInFlight: false,
+                                        onQuestion: { _, _, _, _ in }, draft: binding)
+        XCTAssertFalse(hasAnyStateBackedStorage(view),
+            "PendingQuestionBody must hold no view-local @State for the answer — it must read/write " +
+            "through the externally-owned `draft` Binding so an in-progress answer survives detail's " +
+            ".maximized teardown")
+    }
+
+    @MainActor
+    func testPendingPlanBodyHoldsNoViewLocalState() {
+        var stored = PendingCardDraft()
+        let binding = Binding<PendingCardDraft>(get: { stored }, set: { stored = $0 })
+        let view = PendingPlanBody(callId: "p1", plan: "the plan", isInFlight: false,
+                                    onPlan: { _, _, _, _ in }, draft: binding)
+        XCTAssertFalse(hasAnyStateBackedStorage(view),
+            "PendingPlanBody must hold no view-local @State for its feedback — same externally-owned " +
+            "draft requirement as PendingQuestionBody")
     }
 }

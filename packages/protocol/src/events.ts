@@ -496,6 +496,54 @@ export const SessionActivityEvent = Base.extend({
   activity: SessionActivity,
 });
 
+export const PanelTabKind = z.enum(["web", "document", "code", "note"]);
+
+export const PanelTabOpenedEvent = Base.extend({
+  type: z.literal("panel_tab_opened"),
+  tabId: z.string().min(1),
+  kind: PanelTabKind,
+  url: z.string().optional(),
+  title: z.string().optional(),
+});
+
+export const PanelTabClosedEvent = Base.extend({
+  type: z.literal("panel_tab_closed"),
+  tabId: z.string().min(1),
+});
+
+export const PanelTabActivatedEvent = Base.extend({
+  type: z.literal("panel_tab_activated"),
+  tabId: z.string().min(1),
+});
+
+/** Committed TOP-LEVEL navigations only — no subframes, no in-flight redirects, no fragment
+ *  changes. That bound is what keeps a browsing session at ~10-50 events instead of thousands,
+ *  in a JSONL that is replayed on every session open. */
+export const PanelTabNavigatedEvent = Base.extend({
+  type: z.literal("panel_tab_navigated"),
+  tabId: z.string().min(1),
+  url: z.string().min(1),
+  title: z.string(),
+});
+
+/** TRANSIENT — the daemon's only push channel to the app for verbs needing CEF execution.
+ *
+ *  Why transient rather than persisted: a persisted command is REPLAYED on every future attach,
+ *  and unlike a replayed `ask_user` (which renders a stale card) a replayed `navigate` is an
+ *  ACTION. Transient removes the hazard by construction rather than by a rule someone has to
+ *  remember — transients are never persisted, so they can never be replayed.
+ *
+ *  Tab lifecycle mutations are NOT commands: the daemon mints the id and appends the persisted
+ *  event, and the app reacts to it. Commands carry only verbs whose value is the RESULT. */
+export const PanelCommandEvent = Base.extend({
+  type: z.literal("panel_command"),
+  commandId: z.string().min(1),
+  tabId: z.string().min(1).optional(),
+  action: z.enum(["navigate"]),
+  url: z.string().optional(),
+  deadlineMs: z.number().int().positive(),
+});
+
 export const SessionEvent = z.discriminatedUnion("type", [
   SessionCreatedEvent,
   HarnessAttachedEvent,
@@ -543,10 +591,15 @@ export const SessionEvent = z.discriminatedUnion("type", [
   WorkflowCompletedEvent,
   WorkflowFailedEvent,
   SessionActivityEvent,
+  PanelTabOpenedEvent,
+  PanelTabClosedEvent,
+  PanelTabActivatedEvent,
+  PanelTabNavigatedEvent,
+  PanelCommandEvent,
 ]);
 export type SessionEvent = z.infer<typeof SessionEvent>;
 
-/** The eight BROADCAST-ONLY TRANSIENT event types — the canonical, cross-language definition.
+/** The nine BROADCAST-ONLY TRANSIENT event types — the canonical, cross-language definition.
  *
  *  A transient is fanned out to attached clients by `SessionHub.broadcastTransient` and is NEVER
  *  appended to the session log: absent from the JSONL, absent from attach replay, absent from
@@ -563,7 +616,7 @@ export type SessionEvent = z.infer<typeof SessionEvent>;
  *  daemon but missing from a client's copy is dropped 100% of the time, silently, with a green
  *  suite (exactly the iOS-streaming bug — the phone's client was missing the whole list). The
  *  Swift mirror is `SessionEvent.transientTypes` in `apple/NormaProtocol`; both sides are pinned to
- *  the same literal eight by parity tests (`packages/core/test/ipc/remote-live-stream.test.ts`
+ *  the same literal nine by parity tests (`packages/core/test/ipc/remote-live-stream.test.ts`
  *  and `SessionEventTransientTests`), so editing one side alone fails a test rather than silently
  *  diverging.
  *
@@ -582,6 +635,15 @@ export const TRANSIENT_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<
   "plugin_tile_updated",
   // session-activity-hygiene T4: the lifecycle's live signal (7 → 8).
   "session_activity",
+  // panel-shell T3: the daemon->app command channel. See PanelCommandEvent for why transient.
+  //
+  // This membership ALSO puts it on the remote stream — `REMOTE_STREAM_EVENT_TYPES` spreads this
+  // set wholesale rather than listing it — and that is accepted rather than worked around. The
+  // phone has no panel and skips the variant (`NormaKit` decodes with `try?`), and the agent's
+  // browsing URLs already reach it via `tool_call`, which is in `HISTORY_EVENT_TYPES` with its
+  // arguments. Panel STATE stays Mac-only the real way: the four persisted panel variants are
+  // absent from `HISTORY_EVENT_TYPES`.
+  "panel_command",
 ]);
 
 /** Event payload before the store assigns seq/ts (distributes Omit over the union). */

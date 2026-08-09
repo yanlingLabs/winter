@@ -42,7 +42,7 @@ final class NormaSessionClientTests: XCTestCase {
     }
 
     /// `type` is the event's wire discriminator and it is NOT decoration: the client exempts the
-    /// eight TRANSIENT types from seq dedupe/cursor advance, so a frame's type decides which half of
+    /// nine TRANSIENT types from seq dedupe/cursor advance, so a frame's type decides which half of
     /// `applyEvent` it exercises. Anything testing dedupe/gap/replay must therefore use a PERSISTED
     /// type (the `assistant_message` default); the transient tests pass their own.
     private func eventFrame(
@@ -163,19 +163,21 @@ final class NormaSessionClientTests: XCTestCase {
     private func types(_ envs: [SessionEnvelope]) -> [String] { envs.map { $0.json["type"]?.stringValue ?? "<untyped>" } }
     private func deltas(_ envs: [SessionEnvelope]) -> [String] { envs.compactMap { $0.json["delta"]?.stringValue } }
 
-    /// The eight broadcast-only TRANSIENT event types — the list this suite drives the phone client
+    /// The nine broadcast-only TRANSIENT event types — the list this suite drives the phone client
     /// with. An INDEPENDENT literal, deliberately not read from `SessionEvent.transientTypes`: the
     /// remote-allowlist parity pattern, where each copy pins itself to the same literal names so
     /// editing one alone fails a test (`testTransientListMatchesTheProtocolConstant` just below)
     /// instead of silently diverging.
     ///
-    /// Growth log: 7 → 8 (session-activity-hygiene T4, `session_activity`).
+    /// Growth log: 7 → 8 (session-activity-hygiene T4, `session_activity`); 8 → 9 (panel-shell T3,
+    /// `panel_command`).
     private static let transientTypes = [
         "assistant_delta", "lease_granted", "lease_lost", "peripheral_call_requested",
         "plugin_tool_invoke", "hardware_requested", "plugin_tile_updated", "session_activity",
+        "panel_command",
     ]
 
-    /// Parity: this suite's literal eight ARE the protocol's canonical eight. Without this, a type
+    /// Parity: this suite's literal nine ARE the protocol's canonical nine. Without this, a type
     /// added to `SessionEvent.transientTypes` (and therefore honoured by the shipped client) would
     /// silently go untested here, and a type dropped from it would leave these tests passing
     /// against a list the client no longer uses.
@@ -498,7 +500,7 @@ final class NormaSessionClientTests: XCTestCase {
                        "only the two PERSISTED events moved the cursor")
     }
 
-    /// The same drop killed all EIGHT transient types, not just streaming: the peripheral-lease v1
+    /// The same drop killed all NINE transient types, not just streaming: the peripheral-lease v1
     /// events, `plugin_tool_invoke`, `hardware_requested` and `plugin_tile_updated` are broadcast
     /// with the same borrowed seq. Pins the phone's exemption list against the Mac client's
     /// (`NormaClient.swift`) — membership drift in either direction fails here.

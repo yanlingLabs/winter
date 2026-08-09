@@ -1,0 +1,11 @@
+{
+  "seq": 7,
+  "sessionId": "s_fixture",
+  "ts": 1781270000000,
+  "type": "panel_command",
+  "commandId": "cmd_1",
+  "tabId": "tab_1",
+  "action": "navigate",
+  "url": "https://example.com/pricing",
+  "deadlineMs": 15000
+}

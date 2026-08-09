@@ -16,13 +16,14 @@ import XCTest
 /// drifting — from the TypeScript side, and from its own case-level twin `isTransient`.
 final class SessionEventTransientTests: XCTestCase {
 
-    /// The canonical eight, as literals. Deliberately NOT read from `transientTypes` — this is the
+    /// The canonical nine, as literals. Deliberately NOT read from `transientTypes` — this is the
     /// remote-allowlist parity pattern: each side pins its own copy to the same literal list, so
     /// editing one side alone fails a test instead of silently diverging. The TypeScript half is
-    /// `packages/core/test/ipc/remote-live-stream.test.ts`, which pins the identical eight strings.
+    /// `packages/core/test/ipc/remote-live-stream.test.ts`, which pins the identical nine strings.
     ///
-    /// Growth log: 7 → 8 (session-activity-hygiene T4, `session_activity`).
-    private static let eight: Set<String> = [
+    /// Growth log: 7 → 8 (session-activity-hygiene T4, `session_activity`); 8 → 9 (panel-shell T3,
+    /// `panel_command`).
+    private static let nine: Set<String> = [
         "assistant_delta",
         "lease_granted",
         "lease_lost",
@@ -31,12 +32,13 @@ final class SessionEventTransientTests: XCTestCase {
         "hardware_requested",
         "plugin_tile_updated",
         "session_activity",
+        "panel_command",
     ]
 
-    func testTransientTypesIsExactlyTheEight() {
-        XCTAssertEqual(SessionEvent.transientTypes, Self.eight,
+    func testTransientTypesIsExactlyTheNine() {
+        XCTAssertEqual(SessionEvent.transientTypes, Self.nine,
                        "SessionEvent.transientTypes must stay in lockstep with TRANSIENT_EVENT_TYPES in packages/protocol/src/events.ts")
-        XCTAssertEqual(SessionEvent.transientTypes.count, 8)
+        XCTAssertEqual(SessionEvent.transientTypes.count, 9)
     }
 
     /// `isTransient` (the case switch, used by `NormaClient` on decoded events) and
@@ -90,5 +92,17 @@ final class SessionEventTransientTests: XCTestCase {
         let activity = SessionEvent.sessionActivity(.init(seq: 2, sessionId: "s1", ts: 0, activity: "background"))
         XCTAssertTrue(activity.isTransient)
         XCTAssertTrue(SessionEvent.transientTypes.contains("session_activity"))
+
+        // panel-shell T3: a command is transient for the same reason — see `PanelCommand`'s own
+        // doc comment for why a replayed navigate would be an unwanted ACTION, not a stale card.
+        // A tab lifecycle event (panelTabOpened here) is the opposite: PERSISTED, like
+        // harnessAttached above, because the tab itself is durable session state.
+        let command = SessionEvent.panelCommand(.init(seq: 2, sessionId: "s1", ts: 0, commandId: "cmd_1", tabId: nil, action: "navigate", url: "https://example.com", deadlineMs: 5000))
+        XCTAssertTrue(command.isTransient)
+        XCTAssertTrue(SessionEvent.transientTypes.contains("panel_command"))
+
+        let tabOpened = SessionEvent.panelTabOpened(.init(seq: 2, sessionId: "s1", ts: 0, tabId: "tab_1", kind: .web, url: nil, title: nil))
+        XCTAssertFalse(tabOpened.isTransient, "panel_tab_opened is PERSISTED — it consumes a real seq slot, unlike panel_command")
+        XCTAssertFalse(SessionEvent.transientTypes.contains("panel_tab_opened"))
     }
 }
