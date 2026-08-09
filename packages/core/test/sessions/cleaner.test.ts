@@ -610,9 +610,14 @@ describe("SessionCleaner — what is NOT railed (each rail's negative)", () => {
 
   // panel-shell T14: the trap named in the task brief. A rail keyed off the raw event's mere
   // PRESENCE ("ever opened one") would make this session permanently un-judgeable even though it
-  // holds zero tabs right now — the reaper's own emptySessionIds still has exactly this shape. The
-  // rail must fold (Task 5's foldPanelTabs), not scan, so a session that closed every tab it ever
-  // opened is genuinely empty again and stays eligible.
+  // holds zero tabs right now. The rail must fold (Task 5's foldPanelTabs), not scan, so a session
+  // that closed every tab it ever opened is genuinely empty again and stays eligible.
+  //
+  // T16 update: the reaper's `emptySessionIds` used to have exactly the presence-scan shape this
+  // comment warned about — the two doors disagreed. They now share ONE predicate
+  // (`hasOpenPanelTabs`, `panel/store.ts`), so both fold. Note the reaper ORs that predicate with
+  // its own message scan rather than replacing it: an assistant-only session holds no tab but is
+  // not empty, and swapping the check wholesale would have made it reapable.
   test("a panel tab that was opened and later CLOSED holds none — not railed by 'ever opened', still judged and deletable", async () => {
     const { home, store } = freshStore();
     const id = store.createSession("global");
