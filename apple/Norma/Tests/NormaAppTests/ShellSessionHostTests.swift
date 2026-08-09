@@ -1606,6 +1606,16 @@ final class ShellSessionHostTests: XCTestCase {
     /// (the disclosed decision — see `apply(destination:)`'s own T15 doc comment for the "why"),
     /// and (b) a fresh `.newChat` entry starts clean, so a stale binding from an abandoned visit is
     /// never silently reused by a later "+".
+    ///
+    /// Whole-branch review Minor 4: also pins that `newChatBoundSessionId` ITSELF clears
+    /// IMMEDIATELY on leaving to ANY unattached destination — not only, eventually, on the next
+    /// `.newChat` entry. Pre-fix, only `panelStore.detach()` ran on the `.mode(.chat)` hop
+    /// (asserted just below); the binding stayed live-but-stale until whatever LATER touched
+    /// `.newChat` cleared it, which the rest of this test's own flow couldn't distinguish from
+    /// "cleared immediately" — both produce the same eventual outcome after returning to
+    /// `.newChat`. The direct assertion right after the `.mode(.chat)` hop is what closes that gap:
+    /// it fails pre-fix (the binding is still `"s_stale_bound"` there) even though every assertion
+    /// later in this same test already passed.
     func testApplyNewChatClearsAStaleBindingAndThePanelDisplayOnEveryEntry() async {
         let (host, _, mgmt) = await makeHostWithManagement()
         host.setShellVisible(true)
@@ -1634,6 +1644,12 @@ final class ShellSessionHostTests: XCTestCase {
         host.apply(destination: .mode(.chat)) // leave WITHOUT sending — a genuine navigate-away
         XCTAssertEqual(host.panelStore.tabs, [],
                        "leaving an unattached bound session's page hides its tab from the panel (T15's disclosed decision)")
+        // Minor 4: the BINDING itself, not just the panel's display, must clear here — immediately,
+        // on THIS destination change, not deferred until some later `.newChat` entry. Left live
+        // on an unrelated landing, it is inert only because the panel is empty (no tabs to close
+        // against it) — a two-mechanism invariant with no test of its own until this line.
+        XCTAssertNil(host.newChatBoundSessionId,
+                     "the binding must clear on ANY unattached destination change, not only on returning to .newChat")
 
         host.apply(destination: .newChat) // a genuine fresh entry
         XCTAssertNil(host.attachedSessionId)
@@ -1660,6 +1676,83 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(openSessionIds.first, "s_stale_bound")
         XCTAssertEqual(openSessionIds.last, "s_fresh_visit",
                        "the fresh instance's open must target its OWN new session, not the abandoned one")
+    }
+
+    // MARK: - panel-shell T15, whole-branch review Important 1: "+" and send raced each other's
+    // in-flight create — two independent booleans (`panelAutoCreateInFlight`,
+    // `newChatCreate != .creating`) that never cross-checked. Both directions below double-created:
+    // the orphan carries an open tab (permanently immune to both auto-delete doors, Task 12 R2 /
+    // Task 14) with no binding pointing at it, so it is also unreachable to close from the panel —
+    // worse than the pre-existing double-click race Task 12's own `panelAutoCreateInFlight` guard
+    // already covers, which only ever produced a session with NO tab attached to it.
+
+    /// Direction A: "+" first — its create is still in flight (unanswered) when Enter fires. Fixed
+    /// by `autoCreateForNewChatPage` ALSO setting `newChatCreate = .creating` for its own duration,
+    /// so `sendFirstChatMessage`'s EXISTING guard (`newChatCreate != .creating`) blocks the send —
+    /// Task 2's own double-Enter ruling, reused rather than a new mechanism, per the review.
+    func testPlusThenSendWhileThePlusCreateIsInFlightBlocksTheSendRatherThanDoubleCreating() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        host.openPanelTabForNewChatPage(kind: .web) // "+" — its create is now in flight, unanswered
+        var navigatedTo: [String] = []
+        host.sendFirstChatMessage("don't double-create me") { id in
+            navigatedTo.append(id)
+            host.apply(destination: .session(id))
+        }
+
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(mgmt.methods.filter { $0 == "session.create" }.count, 1,
+                       "the send must be BLOCKED while the '+' create is in flight, not mint its own: \(mgmt.methods)")
+        XCTAssertTrue(navigatedTo.isEmpty, "the blocked send must never navigate")
+        XCTAssertTrue(factory.made.isEmpty, "the blocked send must never attach")
+
+        // The "+"'s own create still resolves normally — the block is on SEND, not on the "+".
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("must have created exactly once: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_plus_first","trusted":true}}"#)
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("must open the tab: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(open["id"] as! Int),"result":{"ok":true,"tabId":"t1"}}"#)
+        await feedWaitUntil { host.newChatBoundSessionId != nil }
+        XCTAssertEqual(host.newChatBoundSessionId, "s_plus_first", "the '+' completes its own bind, unaffected by the blocked send")
+    }
+
+    /// Direction B: Enter first — send's create is still in flight (unanswered) when "+" fires.
+    /// Fixed by `autoCreateForNewChatPage`'s OWN guard widening to `newChatCreate != .creating` —
+    /// the two doors now share ONE gate rather than two independent ones.
+    func testSendThenPlusWhileTheSendCreateIsInFlightBlocksThePlusRatherThanDoubleCreating() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        var navigatedTo: [String] = []
+        host.sendFirstChatMessage("first") { id in
+            navigatedTo.append(id)
+            host.apply(destination: .session(id))
+        }
+        host.openPanelTabForNewChatPage(kind: .web) // "+" — send's create is already in flight
+
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(mgmt.methods.filter { $0 == "session.create" }.count, 1,
+                       "the '+' must be BLOCKED while send's create is in flight, not mint its own: \(mgmt.methods)")
+        XCTAssertTrue(mgmt.methods.filter { $0 == "panel.openTab" }.isEmpty,
+                      "no tab must open for a session that was never created")
+        XCTAssertNil(host.newChatBoundSessionId, "the blocked '+' must not bind to anything")
+
+        // Send's own create still resolves normally — the block is on "+", not on SEND.
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("must have created exactly once: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_send_first","trusted":true}}"#)
+        await feedWaitUntil { !navigatedTo.isEmpty }
+        XCTAssertEqual(navigatedTo, ["s_send_first"], "send completes its own create+navigate, unaffected by the blocked '+'")
     }
 
     // MARK: - panel-shell T9: the live pump + the panel.list fetch on attach/hop

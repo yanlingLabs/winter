@@ -531,12 +531,33 @@ final class ShellSessionHost: ObservableObject {
     /// The auto-create half of `openPanelTabForNewChatPage` — split out so the "bound session is
     /// gone" fallback (above) and the "never bound yet" first click both run the identical sequence
     /// rather than two copies of it drifting apart.
+    ///
+    /// Whole-branch review Important 1: shares `sendFirstChatMessage`'s `newChatCreate` gate, not
+    /// just `panelAutoCreateInFlight` — before this fix the two doors were independent booleans
+    /// that never cross-checked, so "+" then Enter (or Enter then "+") while the OTHER's create was
+    /// still in flight minted TWO sessions. The second one is worse litter than the pre-existing
+    /// same-door race `panelAutoCreateInFlight` alone already covered: it carries an open tab (Task
+    /// 12 R2 / Task 14 make that permanently immune to both auto-delete doors) with nothing ever
+    /// bound to it, so it is also unreachable to close from the panel — an orphan, not merely a
+    /// duplicate. Setting `newChatCreate = .creating` here reuses Task 2's own double-Enter ruling
+    /// (`sendFirstChatMessage`'s existing `guard newChatCreate != .creating`) rather than inventing
+    /// a second cross-door mechanism: a "+" now reads as an in-flight create to BOTH doors, and an
+    /// Enter that lands mid-"+" no-ops with the text still in the composer, the same contract a
+    /// double-Enter already has.
     private func autoCreateForNewChatPage(client: NormaClient, kindRaw: String) {
-        guard !panelAutoCreateInFlight else { return }
+        guard !panelAutoCreateInFlight, newChatCreate != .creating else { return }
         panelAutoCreateInFlight = true
+        newChatCreate = .creating
         let epoch = newChatPageEpoch
         Task { @MainActor [weak self] in
-            defer { self?.panelAutoCreateInFlight = false }
+            defer {
+                self?.panelAutoCreateInFlight = false
+                // Reset only if still ours to reset — nothing else can write `.creating` while this
+                // runs (the guard above makes the two doors mutually exclusive), but guarding on the
+                // read rather than writing unconditionally costs nothing and matches this file's
+                // existing caution around shared published state.
+                if self?.newChatCreate == .creating { self?.newChatCreate = .idle }
+            }
             guard let self, let created = try? await client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat") else { return }
             _ = try? await client.openPanelTab(sessionId: created.sessionId, kind: kindRaw)
             guard epoch == self.newChatPageEpoch else { return } // a departed page instance: create/tab are a commitment, the bind and priming are not
@@ -817,8 +838,18 @@ final class ShellSessionHost: ObservableObject {
         // the destination turns out to be the bound session itself — `select` → `attachFresh`'s own
         // `switchSession`/`refreshPanelTabs` runs synchronously right after, in the same call
         // stack, so there is no visible flicker.
+        //
+        // Whole-branch review Minor 4: `newChatBoundSessionId` clears HERE too, not only in the
+        // `.newChat` case below — the original version cleared the PANEL DISPLAY on every
+        // unattached destination change but left the binding VARIABLE itself live-but-stale until
+        // whatever later destination happened to be `.newChat`. Inert today only because the empty
+        // panel (just cleared) leaves no `×`/click target to misdirect — a two-mechanism invariant
+        // that a future path repopulating `panelStore.tabs` while unattached could silently break.
+        // Clearing both together, in the one place that already knows "bound but no longer
+        // attached", removes the second mechanism instead of relying on the first one alone.
         if newChatBoundSessionId != nil, attachedSessionId == nil {
             panelStore.detach()
+            newChatBoundSessionId = nil
         }
         switch destination {
         case .session(let sessionId):
@@ -840,9 +871,11 @@ final class ShellSessionHost: ObservableObject {
             // just above, now covering the draft too — see `newChatDraft`'s own doc for why this
             // is a preservation of the pre-existing "drops on navigate-away" ruling, not a new one.
             newChatDraft = ""
-            // panel-shell T15: same "starts clean on every entry" contract — a previous, abandoned
-            // visit's binding must never be silently adopted by a fresh one's "+".
-            newChatBoundSessionId = nil
+            // panel-shell T15: `newChatBoundSessionId` needs NO reset here (unlike `newChatDraft`
+            // just above) — the top-level guard above already clears it on every unattached
+            // destination change, `.newChat` included (whole-branch review Minor 4). Kept out of
+            // this case specifically so there is exactly one place that does it, not two that must
+            // agree.
             deselect()
         default:
             dispatchResolutionToken += 1
