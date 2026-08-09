@@ -1,7 +1,7 @@
 import type { SessionEvent } from "@norma/protocol";
 import type { Provider, TurnInputItem } from "../providers/types";
 import { DREAM_MODEL } from "../agent/dreamer";
-import { foldPanelTabs } from "../panel/store";
+import { hasOpenPanelTabs } from "../panel/store";
 import { activityFor, type ActivityRow } from "./activity";
 import { appendCleanerLog } from "./cleaner-log";
 import { SYNCED_SESSION_ID_RE } from "./store";
@@ -300,6 +300,12 @@ export class SessionCleaner {
     // would make that session permanently un-judgeable even though it is genuinely empty again. A
     // railed session is never judged (see the class doc), so it is not stamped either — the pass
     // after its last tab closes, this rail no longer fires and the session re-qualifies normally.
+    //
+    // panel-shell T16: `hasOpenPanelTabs` itself now lives in `panel/store.ts`, beside
+    // `foldPanelTabs` — imported here, not defined here — so the reaper's `emptySessionIds`
+    // (sessions/store.ts) can share this EXACT function instead of its own hand-copied scan. Before
+    // T16 the two disagreed (reaper: "ever opened one"; here: "holds one now"), which made a
+    // closed-tab session reaper-immune but cleaner-eligible — permanent litter with zero content.
     if (hasOpenPanelTabs(events)) return "open-tabs";
     // The user-set-title rail. VACUOUS TODAY — see `hasUserSetTitle` for the verification and the
     // standing obligation. Kept as a live slot (not deleted) so the rail's place in this order
@@ -391,18 +397,6 @@ export function hasFileWrite(events: SessionEvent[]): boolean {
     else if (e.type === "tool_result" && e.isError) failed.add(e.callId);
   }
   return writeCalls.some((callId) => !failed.has(callId));
-}
-
-/** The panel-tab rail: does this session currently HOLD an open tab?
- *
- *  Deliberately a FOLD (`foldPanelTabs`, Task 5's replay — the same one `panel.list` reads), never a
- *  scan for the raw `panel_tab_opened` event. A session that opened a tab and later closed it holds
- *  none, and a presence check cannot see that: it would rail the session forever, on the transcript
- *  it carried the DAY it closed its last tab, with no future event able to lift the rail (closing a
- *  tab does not remove the earlier `panel_tab_opened` line from history). Folding reads what the
- *  session holds NOW, so the rail lifts the moment there is nothing left to lose. */
-export function hasOpenPanelTabs(events: SessionEvent[]): boolean {
-  return foldPanelTabs(events).tabs.length > 0;
 }
 
 /**

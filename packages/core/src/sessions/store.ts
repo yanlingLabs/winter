@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { SessionEvent, SESSION_TITLE_MAX_CHARS, type NewSessionEvent } from "@norma/protocol";
 import type { SessionApprovalPolicy } from "../agent/gate";
+import { hasOpenPanelTabs } from "../panel/store";
 import type { SessionDirs } from "./dirs";
 import { outdirPath } from "./outdir";
 
@@ -668,15 +669,16 @@ export class SessionStore {
    *  line survived — `first_message` would then read NULL on a session that plainly produced real
    *  output (reaper.test.ts's "recovered log" case reproduces exactly this). So every
    *  first_message-IS-NULL candidate that survives the attached-check below gets a real scan of its
-   *  parsed log (`read()`, already skip-bad-lines-safe) for ANY `user_message`/`assistant_message`/
-   *  `panel_tab_opened` event before being called empty — cheap, because the SQL filter already
-   *  narrowed the set this scan ever runs against. The SQL pre-filter itself is untouched: it only
+   *  parsed log (`read()`, already skip-bad-lines-safe) for a `user_message`/`assistant_message`,
+   *  OR'd with the shared `hasOpenPanelTabs` fold (see panel-shell T16 below) for whether it
+   *  currently holds an open tab, before being called empty — cheap, because the SQL filter already
+   *  narrowed the set this check ever runs against. The SQL pre-filter itself is untouched: it only
    *  ever admits too many candidates (never too few), so narrowing what counts as "content" is
-   *  sound to do entirely in this JS scan.
+   *  sound to do entirely in this JS check.
    *
    *  panel-shell T12 (bug found at the live gate, 2026-08-08): `+` with no attached session now
    *  auto-creates a session and opens a tab in it (`ShellSessionHost.openPanelTab`) — a
-   *  browse-only session that never carries a chat message. Without `panel_tab_opened` in the scan
+   *  browse-only session that never carries a chat message. Without accounting for an open panel tab
    *  above, that session (and its open tabs) would be reaped 10 minutes after detach. This is the
    *  conservative direction (narrows what gets deleted). It closes only ONE of the system's TWO
    *  sanctioned auto-delete doors, not the only one — the LLM cleaner (`cleaner.ts`'s
@@ -684,6 +686,16 @@ export class SessionStore {
    *  independently of this reaper. A browse-only session is exactly what the cleaner's judge would
    *  see as empty, worthless junk, so it carries its OWN rail (`hasOpenPanelTabs`, panel-shell T14)
    *  rather than relying on this fix — this reaper narrowing alone would not have been enough.
+   *
+   *  panel-shell T16 (alignment, not a defect in either T12 or T14 — each was correct in its own
+   *  scope): T12's check here originally READ differently from T14's cleaner rail — this method
+   *  checked the bare `panel_tab_opened` event's PRESENCE ("ever opened one"), while
+   *  `hasOpenPanelTabs` FOLDS ("holds one now"). A session that opened a tab and later closed it was
+   *  therefore reaper-immune but cleaner-eligible — permanent litter with zero content, invisible to
+   *  this reaper forever (the earlier `panel_tab_opened` line never leaves the JSONL) yet a standing
+   *  candidate for the cleaner. This method now calls the exact same `hasOpenPanelTabs`
+   *  (`panel/store.ts`, beside `foldPanelTabs`) the cleaner's `railFor` calls, so "has tabs" has
+   *  exactly one definition in the codebase and the two doors can no longer drift apart on it.
    *
    *  `attachedCount` is injected rather than read off a stored `SessionHub`: the store has never
    *  held a hub reference (hub depends on store, never the reverse) — mirrors
@@ -699,8 +711,9 @@ export class SessionStore {
     const candidates: string[] = [];
     for (const { session_id: sessionId } of rows) {
       if (attachedCount(sessionId) !== 0) continue;
-      const hasContent = this.read(sessionId).some((e) =>
-        e.type === "user_message" || e.type === "assistant_message" || e.type === "panel_tab_opened");
+      const events = this.read(sessionId);
+      const hasContent = events.some((e) => e.type === "user_message" || e.type === "assistant_message")
+        || hasOpenPanelTabs(events);
       if (!hasContent) candidates.push(sessionId);
     }
     return candidates;

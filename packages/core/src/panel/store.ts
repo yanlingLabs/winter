@@ -39,3 +39,25 @@ export function foldPanelTabs(events: readonly SessionEvent[]): PanelTabState {
   }
   return { tabs, activeTabId };
 }
+
+/** PURE: does this session currently HOLD an open tab? Shared by both auto-delete doors — the
+ *  reaper's `emptySessionIds` (sessions/store.ts) and the cleaner's `railFor` (sessions/cleaner.ts)
+ *  — so "has tabs" has exactly one definition (panel-shell T16). Before this the two disagreed: the
+ *  reaper scanned for the bare `panel_tab_opened` event's presence ("ever opened one") while the
+ *  cleaner folded ("holds one now"), so a session that opened a tab and later closed it was
+ *  reaper-immune but cleaner-eligible — permanent litter with zero content.
+ *
+ *  Deliberately a FOLD (`foldPanelTabs` above — the same replay `panel.list` reads), never a scan
+ *  for the raw `panel_tab_opened` event. A session that opened a tab and later closed it holds none,
+ *  and a presence check cannot see that: it would spare/rail the session forever, on the transcript
+ *  it carried the DAY it closed its last tab, with no future event able to lift that (closing a tab
+ *  does not remove the earlier `panel_tab_opened` line from history). Folding reads what the session
+ *  holds NOW, so eligibility resumes the moment there is nothing left to lose.
+ *
+ *  Lives here rather than in either door's own file so the two can share ONE definition without a
+ *  cycle: this file imports only `SessionEvent` from `@norma/protocol`, so both `sessions/store.ts`
+ *  and `sessions/cleaner.ts` (which already imports `SYNCED_SESSION_ID_RE` from `./store`) can import
+ *  from here with no path back. */
+export function hasOpenPanelTabs(events: readonly SessionEvent[]): boolean {
+  return foldPanelTabs(events).tabs.length > 0;
+}
