@@ -39,6 +39,26 @@ targets:
       - package: Sparkle
       - target: NormaHelper
         embed: false
+    # panel-cef Task 2: CEF is vendored (fetched, SHA1-verified, gitignored — scripts/fetch-cef.ts)
+    # rather than committed (332MB uncompressed). preBuildScripts runs before Compile Sources so a
+    # missing framework fails FAST with the fix command, instead of surfacing later as a confusing
+    # missing-header/link error once Tasks 3-6 add code that actually consumes vendor/cef/. Applies
+    # to every configuration (not Release-only like the norma-core embed below) — CEF is exercised
+    # in Debug too (dev testing), per docs/research/2026-08-09-cef-pump.md finding 1.
+    preBuildScripts:
+      - name: Check CEF framework vendored
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          CEF_DIR="${SRCROOT}/vendor/cef"
+          if [ ! -d "${CEF_DIR}/Release/Chromium Embedded Framework.framework" ] || \
+             [ ! -d "${CEF_DIR}/include" ] || \
+             [ ! -d "${CEF_DIR}/libcef_dll" ]; then
+            echo "error: CEF framework not vendored at ${CEF_DIR}." >&2
+            echo "error: from the repo root, run: bun run scripts/fetch-cef.ts" >&2
+            echo "error: (or: bun run cef:fetch) — then rebuild." >&2
+            exit 1
+          fi
     postCompileScripts:
       - name: Embed NormaHelper
         basedOnDependencyAnalysis: false
