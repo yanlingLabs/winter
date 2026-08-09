@@ -87,7 +87,20 @@ const STAMP_PATH = join(VENDOR_DIR, ".vendored-version");
 // update the other by hand (Task 2 whole-branch review, Important: the gate originally checked
 // dirs only and false-passed exactly this partial-tree state).
 const COPY_DIRS = ["Release", "include", "libcef_dll"];
-const COPY_FILES = ["LICENSE.txt"];
+// Top-level FILES copied verbatim, and REQUIRED -- an absent one aborts the vendor rather than
+// being skipped. Both are licence obligations, not conveniences (panel-cef Task 5): CEF and
+// Chromium are BSD-3-Clause, whose binary-redistribution clause requires the copyright notice
+// and disclaimer to travel "with the distribution", so apple/Norma/project.yml copies both of
+// these into Norma.app/Contents/Resources/Licenses/ and scripts/release.ts gates their presence
+// in the built artifact. LICENSE.txt was previously copied best-effort (`if (existsSync(src))`);
+// a silently-skipped licence file is exactly the failure a licence gate must not have, so the
+// copy below now fails closed for every entry here.
+//   LICENSE.txt  -- CEF's own BSD-3-Clause notice (Marshall A. Greenblatt / Google Inc.).
+//   CREDITS.html -- Chromium's full third-party attribution list (~19.6MB), at the minimal
+//                   tarball's top level. Task 5's brief corrected an earlier plan claim that it
+//                   "does not ship in the CEF distribution": it does, right here, and it is one
+//                   COPY_FILES entry rather than an external hunt.
+const COPY_FILES = ["LICENSE.txt", "CREDITS.html"];
 // The specific marker inside Release/ that proves the framework itself (not just an empty
 // directory) is present -- what Tasks 3-6's Xcode build will actually link/embed against.
 const FRAMEWORK_REL = join("Release", "Chromium Embedded Framework.framework");
@@ -103,7 +116,13 @@ function expectedFileName(): string {
 
 function vendoredPathsPresent(): boolean {
   if (!existsSync(join(VENDOR_DIR, FRAMEWORK_REL))) return false;
-  return COPY_DIRS.every((d) => existsSync(join(VENDOR_DIR, d)));
+  if (!COPY_DIRS.every((d) => existsSync(join(VENDOR_DIR, d)))) return false;
+  // COPY_FILES too (panel-cef Task 5): the licence notices are as load-bearing as the dirs now
+  // that project.yml embeds them and release.ts gates them. Without this line, a tree vendored
+  // by an OLDER revision of this script -- correct stamp, all dirs, no CREDITS.html -- would
+  // report "already vendored" and never re-fetch, and the missing notice would only surface as
+  // an app-bundle build failure with no hint that `bun run cef:fetch` is the fix.
+  return COPY_FILES.every((f) => existsSync(join(VENDOR_DIR, f)));
 }
 
 interface Stamp {
@@ -293,13 +312,22 @@ try {
   }
   for (const f of COPY_FILES) {
     const src = join(distRoot, f);
-    if (existsSync(src)) {
-      execOrFail(
-        `failed to copy "${f}" into the vendored tree -- check disk space and permissions at ${VENDOR_DIR}`,
-        "ditto",
-        [src, join(VENDOR_DIR, f)],
+    // Fail closed, not best-effort: these are the BSD-3-Clause notices Norma.app must ship
+    // (see COPY_FILES). A missing one here would otherwise surface as an app-bundle build
+    // failure much later, or -- worse, before Task 5 added the downstream gates -- as a
+    // silently unattributed release.
+    if (!existsSync(src)) {
+      failTmp(
+        `extracted ${ARTIFACT_TYPE} distribution is missing "${f}" -- Norma.app is required to\n` +
+          `ship this notice (BSD-3-Clause binary redistribution). CEF's top-level layout may have\n` +
+          `changed upstream; do not work around this by dropping the file from COPY_FILES.`,
       );
     }
+    execOrFail(
+      `failed to copy "${f}" into the vendored tree -- check disk space and permissions at ${VENDOR_DIR}`,
+      "ditto",
+      [src, join(VENDOR_DIR, f)],
+    );
   }
 
   const stamp: Stamp = {

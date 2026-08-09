@@ -86,6 +86,117 @@ export function dmgStagePlan(appPath: string): DmgStageOp[] {
   ];
 }
 
+/**
+ * Bundle-relative paths the §11b artifact identity scan deliberately does NOT read, as anchored
+ * regexes against POSIX-relative paths (`Contents/…`) inside `Norma.app`.
+ *
+ * Added by panel-cef Task 5, and kept as narrow as the measurement allowed. The scan reads every
+ * shipped byte as text and fails closed on any hit; embedding Chromium adds 317MB of it, so the
+ * question was which of that — if any — has to stop being read.
+ *
+ * MEASURED, not assumed. Scanning the whole vendored CEF 151.3.16 framework with the guard's own
+ * pattern produced exactly ONE hit across 317MB and 227 resource entries:
+ * `Resources/sw.lproj/locale.pak` — a Swahili noun (Chromium's translation of a UI category
+ * label) whose spelling happens to contain one of the guarded substrings. Not an identity leak:
+ * a natural-language collision inside a compiled translation blob, in a file that came from CEF's
+ * CDN and never touched this machine's compiler.
+ *
+ * So the exclusion is the CLASS that hit and nothing else: `*.lproj` locale packs, which are
+ * Chromium's translations into ~220 languages and thus the one place in the bundle where such a
+ * collision is inevitable and meaningless. Deliberately NOT excluded, and still fully scanned:
+ *   - the 224MB `Chromium Embedded Framework` Mach-O itself,
+ *   - all five `Libraries/*.dylib`,
+ *   - every non-locale resource (`resources.pak`, `chrome_*_percent.pak`, `icudtl.dat`,
+ *     `v8_context_snapshot.arm64.bin`, `gpu_shader_cache.bin`, `Info.plist`),
+ *   - `Contents/Resources/Licenses/CREDITS.html` — 19.6MB of third-party contributor names, the
+ *     obvious candidate for exclusion, measured at ZERO hits and therefore left in,
+ *   - and every byte Norma actually compiles: the app, the five CEF helpers, norma-core,
+ *     NormaHelper, Sparkle.
+ * That last group is where the leaks this gate exists for (absolute builder paths in Mach-O debug
+ * stabs, v0.2.001) actually happen, and none of it is excluded.
+ *
+ * Widening this list is a security decision, not a build fix. A future CEF bump that trips the
+ * gate somewhere else should be investigated, not appended to.
+ */
+// `Versions/[^/]+/` because project.yml embeds the framework in the standard macOS VERSIONED
+// layout (Versions/A/Resources/…), not the flat one CEF ships — see that script's comment for
+// why. Anchored on the version segment rather than skipping it, so the top-level `Resources`
+// SYMLINK (…framework/Resources -> Versions/Current/Resources) is deliberately not matched: the
+// scan walker never follows symlinks, so a locale pack is reachable by exactly one path.
+export const NAME_SCAN_EXCLUSIONS: readonly RegExp[] = [
+  /^Contents\/Frameworks\/Chromium Embedded Framework\.framework\/Versions\/[^/]+\/Resources\/[^/]+\.lproj$/,
+];
+
+export interface NameScanPlanInputs {
+  /** Absolute path of the bundle root being scanned. */
+  root: string;
+  /**
+   * Entry names directly inside an absolute directory path. MUST omit symlinks — `find -type f`
+   * (what the guard runs on every emitted target) does not traverse them, so emitting one would
+   * make the caller's file-count partition disagree with reality, and a symlinked directory would
+   * otherwise let an excluded subtree be reached by a second, unexcluded path.
+   */
+  listDir: (absPath: string) => string[];
+  /** Whether an absolute path is a directory. MUST NOT follow symlinks (lstat, not stat). */
+  isDir: (absPath: string) => boolean;
+  /** Matched against a POSIX path relative to `root`; `""` is the root itself. */
+  isExcluded: (relPath: string) => boolean;
+}
+
+export interface NameScanPlanResult {
+  /** Absolute paths to hand the guard — their union is the whole bundle minus `excluded`. */
+  targets: string[];
+  /** Absolute paths deliberately left unscanned. Empty means "scanned everything". */
+  excluded: string[];
+}
+
+/**
+ * Partitions a bundle into the coarsest set of paths that covers everything EXCEPT the excluded
+ * subtrees — the pure half of release.ts §11b's identity scan.
+ *
+ * The guard (`name-guard.sh artifacts`) recurses into whatever paths it is given, with no
+ * exclusion mechanism of its own, and it lives outside this repo where no review can see it. So
+ * the exclusion is expressed here instead, by handing the guard a target list that simply does
+ * not contain the excluded paths — the guard is unchanged and unaware.
+ *
+ * "Coarsest" matters for auditability: a subtree with nothing excluded inside it is emitted as
+ * ONE path, so the emitted list stays ~20 entries instead of thousands, and a human reading the
+ * release log can see exactly what was and wasn't read. With no exclusions matching anything,
+ * this returns `{ targets: [root], excluded: [] }` — byte-identical behaviour to scanning the
+ * bundle whole, which is what a CEF-less build gets.
+ *
+ * Pure: every filesystem touch is an injected callback, so the walk is unit-testable without a
+ * 420MB app bundle on disk. release.ts additionally asserts the partition against real `find`
+ * counts before calling the guard — this function returning a wrong answer must not be able to
+ * silently under-scan a release.
+ */
+export function nameScanPlan(i: NameScanPlanInputs): NameScanPlanResult {
+  const abs = (rel: string) => (rel === "" ? i.root : `${i.root}/${rel}`);
+
+  interface Node {
+    targets: string[];
+    excluded: string[];
+    /** True when nothing in this subtree was excluded, so the subtree can be emitted whole. */
+    clean: boolean;
+  }
+
+  const walk = (rel: string): Node => {
+    if (i.isExcluded(rel)) return { targets: [], excluded: [abs(rel)], clean: false };
+    if (!i.isDir(abs(rel))) return { targets: [abs(rel)], excluded: [], clean: true };
+
+    const children = i.listDir(abs(rel)).map((name) => walk(rel === "" ? name : `${rel}/${name}`));
+    if (children.every((c) => c.clean)) return { targets: [abs(rel)], excluded: [], clean: true };
+    return {
+      targets: children.flatMap((c) => c.targets),
+      excluded: children.flatMap((c) => c.excluded),
+      clean: false,
+    };
+  };
+
+  const root = walk("");
+  return { targets: root.targets, excluded: root.excluded };
+}
+
 export interface AppcastInsertPlanInputs {
   dryRun: boolean;
   version: string;

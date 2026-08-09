@@ -52,17 +52,29 @@
  * changed nested content.
  */
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { FORMAT, ROOT, readCanonical } from "./version-lib";
 import {
   GH_REPO,
+  NAME_SCAN_EXCLUSIONS,
   appcastInsertPlan,
   appcastItem,
   caskFrom,
   catalogueStaleness,
   dmgStagePlan,
   preflight,
+  nameScanPlan,
   publishGuard,
   resolveSigningIdentity,
 } from "./release-lib";
@@ -166,7 +178,22 @@ const pre = preflight({
       const releasing =
         NO_BUMP || !m ? preVersion : `${m[1]}.${m[2]}.${String(Number(m[3]) + 1).padStart(3, "0")}`;
       const out = probe(`git tag -l v${releasing}`).stdout.trim();
-      return out === "" ? null : `tag v${releasing} already exists — bump the version or delete the stale tag`;
+      if (out === "") return null;
+      const line = `tag v${releasing} already exists — bump the version or delete the stale tag`;
+      // Downgraded to a warning under --dry-run ONLY, exactly like `prodKey` and `gh` above
+      // (panel-cef Task 5). `--dry-run --no-bump` is the documented rehearsal command, and on a
+      // tree sitting at the last-released version — the normal state between releases — this
+      // check aborted it before a single byte was built, making the rehearsal unreachable
+      // precisely when it is most wanted (verifying an unreleased change against the real
+      // pipeline). Safe because a dry run never tags anything: it exits inside section 12's
+      // `if (DRY_RUN)` before the publish tail, and section 12 independently re-checks
+      // `tagExists` against the post-bump version for real releases. The non-dry-run path is
+      // unchanged and still hard-fails here.
+      if (DRY_RUN) {
+        console.warn(`WARNING: ${line}\n  (dry-run: downgraded to a warning — a real release still aborts on this)`);
+        return null;
+      }
+      return line;
     },
   },
 });
@@ -301,9 +328,109 @@ assertSigned(sparkleFramework, "Sparkle.framework");
 for (const target of nestedSparkleHelpers) {
   if (existsSync(target)) assertSigned(target, `Sparkle.framework nested helper (${target.split("/").pop()})`);
 }
+
+// --- CEF (panel-cef Task 5) -------------------------------------------------
+// The framework, its five dlopen'd dylibs, and the five helper bundles. `--deep --strict` above
+// already proves the seals nest correctly; this roster proves the two things it does NOT check
+// and that notarization rejects outright — a Developer ID TEAM identity and a secure timestamp
+// on every one of them. Both matter beyond notarization here: the Team ID is exactly what lets
+// the hardened runtime's library validation permit the app and the helpers to dlopen this
+// framework at all (see project.yml's "Embed CEF framework"), and libcef_sandbox.dylib is
+// dlopen'd separately by every helper's CefScopedSandboxContext, so it needs its own identity
+// rather than inheriting the framework's seal.
+//
+// `existsSync`-tolerant loops are deliberately NOT used here, unlike the Sparkle nested helpers
+// above (whose set legitimately varies by Sparkle version): every path below is produced by this
+// repo's own build, so a missing one is a broken build, and assertSigned fails closed on it.
+const cefFramework = join(app, "Contents", "Frameworks", "Chromium Embedded Framework.framework");
+assertSigned(cefFramework, "Chromium Embedded Framework.framework");
+for (const lib of ["libEGL.dylib", "libGLESv2.dylib", "libcef_sandbox.dylib", "libvk_swiftshader.dylib", "libvulkan.dylib"]) {
+  assertSigned(join(cefFramework, "Libraries", lib), `CEF framework library (${lib})`);
+}
+const CEF_HELPERS = [
+  "Norma Helper",
+  "Norma Helper (Alerts)",
+  "Norma Helper (GPU)",
+  "Norma Helper (Plugin)",
+  "Norma Helper (Renderer)",
+];
+for (const name of CEF_HELPERS) {
+  assertSigned(join(app, "Contents", "Frameworks", `${name}.app`), `CEF helper (${name})`);
+}
+// The one entitlement this branch adds, pinned where it ships rather than only where it is
+// declared: project.yml can hand CODE_SIGN_ENTITLEMENTS to the wrong target, or to four of five,
+// without anything failing to build. Checked in BOTH directions — present on Renderer, absent
+// everywhere else — because "applied too widely" is the failure that silently weakens hardening.
+const JIT = "com.apple.security.cs.allow-jit";
+for (const name of CEF_HELPERS) {
+  const helper = join(app, "Contents", "Frameworks", `${name}.app`);
+  const ents = probe(`codesign -d --entitlements - --xml "${helper}" 2>/dev/null`).stdout;
+  const hasJit = ents.includes(JIT);
+  const wantJit = name === "Norma Helper (Renderer)";
+  if (hasJit !== wantJit) {
+    fail(
+      wantJit
+        ? `CEF helper (${name}): expected ${JIT} and it is absent — V8 cannot JIT under the hardened runtime without it`
+        : `CEF helper (${name}): carries ${JIT} and must not — only the Renderer needs it (see project.yml)`,
+    );
+  }
+}
 console.log(
-  "Signatures verified: codesign --verify --deep --strict PASS; TeamIdentifier + secure timestamp confirmed on app + norma-core + NormaHelper + Sparkle.framework + its nested helpers.",
+  "Signatures verified: codesign --verify --deep --strict PASS; TeamIdentifier + secure timestamp confirmed on " +
+    "app + norma-core + NormaHelper + Sparkle.framework + its nested helpers + CEF framework + its 5 libraries + " +
+    `the 5 CEF helpers; ${JIT} present on the Renderer helper and absent from the other four.`,
 );
+
+// ---------------------------------------------------------------------------
+// 4b. Licence notices (panel-cef Task 5). CEF and Chromium are BSD-3-Clause, whose second
+//     condition requires a BINARY redistribution to reproduce the copyright notice and
+//     disclaimer "in the documentation and/or other materials provided with the distribution".
+//     Norma is Apache-2.0 and stays cleanly so by shipping theirs inside the app bundle.
+//
+//     This gate exists because the alternative is trusting that a postCompileScript ran. That
+//     script is `basedOnDependencyAnalysis: false` and its copy is easy to break silently — a
+//     renamed vendored file, a reordered phase, a `mkdir -p` racing a clean — and the failure is
+//     invisible: the app builds, launches, notarizes, and ships out of compliance. So the check
+//     is on the BUILT ARTIFACT, and it is a hard fail, not a warning.
+//
+//     Content sanity, not bare existence: a zero-byte or truncated file satisfies existsSync and
+//     satisfies nothing else. CREDITS.html is ~19.6MB and the floor is set well below that (a
+//     partial ditto is the realistic failure, not a shrunken upstream); the licence text is
+//     checked for the BSD clause it exists to reproduce.
+// ---------------------------------------------------------------------------
+console.log("Gate: licence notices present in the built app...");
+const licensesDir = join(app, "Contents", "Resources", "Licenses");
+const NOTICES: { file: string; label: string; minBytes: number; mustContain: string }[] = [
+  {
+    file: "CEF-LICENSE.txt",
+    label: "CEF BSD-3-Clause notice",
+    minBytes: 1000,
+    mustContain: "Redistributions in binary form must reproduce",
+  },
+  {
+    file: "CREDITS.html",
+    label: "Chromium third-party attributions",
+    minBytes: 5_000_000,
+    mustContain: "<html",
+  },
+];
+for (const n of NOTICES) {
+  const p = join(licensesDir, n.file);
+  if (!existsSync(p)) {
+    fail(
+      `${n.label} missing from the built app at ${p}\n` +
+        `  This is a BSD-3-Clause redistribution obligation, not an optional resource.\n` +
+        `  Check apple/Norma/project.yml's "Embed CEF + Chromium licence notices" phase.`,
+    );
+  }
+  const bytes = statSync(p).size;
+  if (bytes < n.minBytes) fail(`${n.label} at ${p} is ${bytes} bytes — expected at least ${n.minBytes} (truncated copy?)`);
+  // Read only the head: CREDITS.html is ~19.6MB and nothing here needs the whole file.
+  const head = readFileSync(p).subarray(0, 65536).toString("utf8");
+  if (!head.includes(n.mustContain)) fail(`${n.label} at ${p} does not contain ${JSON.stringify(n.mustContain)} — wrong file?`);
+  console.log(`  ${n.file}: ${bytes} bytes, content check OK`);
+}
+console.log("Licence notices verified in Contents/Resources/Licenses.");
 
 // ---------------------------------------------------------------------------
 // 5. ditto zip for notarization submission.
@@ -591,8 +718,61 @@ if (!existsSync(nameGuard)) {
       `  (It is intentionally not in this repo — see the comment above this check.)`,
   );
 }
-console.log("Gate: identity scan of built artifacts...");
-sh(`"${nameGuard}" artifacts "${app}" "${caskOutPath}"`);
+// panel-cef Task 5 — the app is no longer a ~90MB tree of things this repo compiled; it now
+// contains 317MB of prebuilt Chromium, including its translations into ~220 languages. The guard
+// reads every byte as text and fails closed on any hit, and Chromium's translations contain a
+// natural-language collision with one guarded substring (measured: exactly one file, a Swahili
+// UI label in sw.lproj/locale.pak).
+//
+// The exclusion is expressed HERE, in the repo, rather than in the guard — the guard is
+// deliberately local-only and outside every repository, so an exclusion added there would be
+// invisible to review and would differ per machine. Instead the guard is handed a target list
+// that simply omits the excluded paths; it is unchanged and unaware. What is and is not excluded
+// (and why it is this narrow) is documented on NAME_SCAN_EXCLUSIONS in release-lib.ts.
+//
+// The walk that builds that list is the new risk: a bug in it under-scans the release silently,
+// and this repo has already shipped one gate that false-passed on a partial tree. So the
+// partition is ASSERTED against the filesystem before the guard runs — every regular file under
+// the app must be under exactly one of (emitted targets, excluded paths). `find -type f` matches
+// the guard's own traversal exactly, so the counts are comparable by construction.
+// lstat + symlink-filtered listing, NOT stat + plain readdir: `find -type f` neither counts
+// symlinks nor traverses them, and the embedded CEF framework is a versioned bundle whose root
+// is three symlinks into Versions/Current. Following them would walk the same locale packs by a
+// second path — one that the exclusion regex (anchored on the Versions segment) does not match —
+// and would emit targets the partition assertion below then cannot reconcile.
+const scan = nameScanPlan({
+  root: app,
+  listDir: (p) => readdirSync(p, { withFileTypes: true }).filter((e) => !e.isSymbolicLink()).map((e) => e.name),
+  isDir: (p) => lstatSync(p).isDirectory(),
+  isExcluded: (rel) => NAME_SCAN_EXCLUSIONS.some((re) => re.test(rel)),
+});
+const countFiles = (paths: string[]): number =>
+  paths.reduce((n, p) => n + Number(sh(`find "${p}" -type f | wc -l`).trim()), 0);
+const totalFiles = countFiles([app]);
+const scannedFiles = countFiles(scan.targets);
+const skippedFiles = scan.excluded.length === 0 ? 0 : countFiles(scan.excluded);
+if (scannedFiles + skippedFiles !== totalFiles) {
+  fail(
+    `identity scan partition is wrong — refusing to run a gate that may not cover the artifact.\n` +
+      `  files under the app:        ${totalFiles}\n` +
+      `  files under scan targets:   ${scannedFiles}\n` +
+      `  files under exclusions:     ${skippedFiles}\n` +
+      `  (targets + exclusions must equal the whole bundle; see nameScanPlan in release-lib.ts)`,
+  );
+}
+// Reported per RULE, not per path: the shipped exclusion legitimately matches 220 locale
+// directories, and 220 log lines would bury the one number a human should actually check —
+// whether a rule started matching more than it was written for.
+console.log(
+  `Gate: identity scan of built artifacts — ${scannedFiles}/${totalFiles} files scanned across ` +
+    `${scan.targets.length} paths, ${skippedFiles} deliberately excluded:`,
+);
+for (const re of NAME_SCAN_EXCLUSIONS) {
+  const hits = scan.excluded.filter((e) => re.test(e.slice(app.length + 1)));
+  console.log(`  rule ${re.source} -> ${hits.length} path(s) not scanned`);
+  for (const h of hits.slice(0, 3)) console.log(`    e.g. ${h.slice(app.length + 1)}`);
+}
+sh([`"${nameGuard}" artifacts`, ...scan.targets.map((t) => `"${t}"`), `"${caskOutPath}"`].join(" "));
 
 // ---------------------------------------------------------------------------
 // 11c. Provider-catalogue staleness nudge — WARN ONLY, never a gate (T2 review M2).
