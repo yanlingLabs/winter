@@ -7,7 +7,7 @@ windowed CEF browser survives having its container `NSView` moved between a hidd
 and a visible one, repeatedly, both directions, with audio playing, input working and the page
 correctly sized. Does it?
 
-**Short answer: yes, on every axis, with zero failures in 138 reparents across seven runs — and the
+**Short answer: yes, on every axis, with zero failures in 138 reparents across nine runs — and the
 spec's stated *mechanism* is wrong.** Parking a browser in a hidden `NSWindow` does **not** make
 Chromium think the page is hidden and does **not** throttle anything: `requestAnimationFrame`,
 `setInterval` and CPU are *identical* parked and visible, and `document.visibilityState` stays
@@ -36,16 +36,17 @@ against. Three further findings change what Task 5 has to write:
 | Launch | the raw executable from a terminal (never `open`), stderr to a file |
 | Page | a file:// page the spike writes, instrumenting itself (see "the page" below) |
 
-Seven runs, 138 reparents, **not one failure of any kind** — no crash, no blank browser, no lost
-page, no reload, no geometry error:
+Nine runs, 138 reparents (42+42+10+12+6+18+8), **not one failure of any kind** — no crash, no blank
+browser, no lost page, no reload, no geometry error:
 
 | run | park mode | shape | what it answered |
 |---|---|---|---|
 | 1, 2 | never ordered in | 20 cycles + 40 s park / 40 s show | the brief's 20-each-direction; audio, resize, callbacks, CPU |
 | 3 | never | 4 cycles, synthetic click before keys | input works at all |
 | 4 | never | 5 cycles, **no** click | is `makeFirstResponder` alone enough? |
-| 5–7 | never / ordered-out / offscreen | 2 cycles + 40 s park / 40 s show, sliced at 5 s, back to back | occlusion throttling, per-mode CPU, where audio drift lives |
-| 8 | never | 3 cycles + window screenshots at ~11 Hz | white flash / stale layer |
+| 5 | ordered-out | 2 cycles + 40 s park / 40 s show, unsliced | first look at a non-`never` park mode; produced the 565 ms wobble §1 cites, and is why 6–8 are sliced |
+| 6–8 | never / ordered-out / offscreen | 2 cycles + 40 s park / 40 s show, sliced at 5 s, back to back | occlusion throttling, per-mode CPU, where audio drift lives |
+| 9 | never | 3 cycles + window screenshots at ~11 Hz | white flash / stale layer |
 
 `NORMA_SPIKE_PARK_MODE` covers the three plausible parking shapes: **never** ordered in at all (the
 spec's literal wording), **ordered-out** (ordered front once, then `orderOut:`), and **offscreen**
@@ -73,14 +74,14 @@ available).
 | 1 | 42 | **129 – 134 ms** over 235 s |
 | 2 | 42 | **124 – 133 ms** over 235 s (reproduced) |
 
-Five milliseconds of spread across 235 seconds and 42 reparents. In the 5-second-sliced runs 5–7
+Five milliseconds of spread across 235 seconds and 42 reparents. In the 5-second-sliced runs 6–8
 the per-slice delta is **±3 ms** in every phase of every park mode. **No reparent, in any run,
 produced a step in either clock.**
 
 Two wobbles were seen and neither is a reparent artefact. Both happened in the *middle of a long
-park*, nowhere near a move: 72 ms + 88 ms lost across two consecutive 5-second slices (run 5,
-`never`), and ~565 ms accumulated across one 40-second park (an earlier `ordered-out` run, sampled
-too coarsely to localise, which is why the later runs are sliced). Both are bounded, non-recurring,
+park*, nowhere near a move: 72 ms + 88 ms lost across two consecutive 5-second slices (run 6,
+`never`), and ~565 ms accumulated across one 40-second park (run 5, `ordered-out`, sampled
+too coarsely to localise — which is why runs 6–8 are sliced). Both are bounded, non-recurring,
 sub-1.5 % clock wobbles with both clocks still advancing — CoreAudio wobble, not a dropout. Six
 long parks, two wobbles, zero long-show wobbles; too small a sample to call it park-related, and
 too small an effect to matter if it is.
@@ -184,10 +185,10 @@ Consequences worth carrying into Task 5 / §4:
 sampler used it and produced numbers that cannot answer a phase question at all. The figures above
 come from differencing cumulative `ps -o time` at 1 Hz.
 
-**Environment note:** runs 1–2 recorded 30.0 fps in *both* phases and runs 5–7 recorded 120.0 fps in
+**Environment note:** runs 1–2 recorded 30.0 fps in *both* phases and runs 6–8 recorded 120.0 fps in
 *both* phases. The absolute number tracks the display's refresh state, which is outside the spike's
 control; only the within-run parked-vs-visible comparison is used anywhere in this document, and it
-is flat in all five runs that measured it.
+is flat in all six runs that measured it.
 
 ## 5. CEF callbacks fired by a reparent — none, in 42 reparents
 
@@ -207,7 +208,7 @@ cannot flip `isLoading`, cannot make the URL field flash, and cannot re-enter th
 ## 6. Window-server behaviour — the first frame after attach is already live and current
 
 The page paints its background a different colour every 250 ms and reports that colour in its
-payload, so a screenshot decodes to *the frame the window server is actually showing*. Run 8
+payload, so a screenshot decodes to *the frame the window server is actually showing*. Run 9
 captured the visible window at ~11 Hz (87–105 ms apart) through three attaches; 286 frames, decoded
 after converting each PNG from the display profile to sRGB (raw pixels do **not** match the CSS
 values — max residual after conversion 2.2/255, mean 0.7).
