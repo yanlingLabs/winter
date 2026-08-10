@@ -165,7 +165,13 @@ struct PanelCEFView: NSViewRepresentable {
         DispatchQueue.main.async {
             guard NormaCEFRuntime.ensureInitialized() else {
                 if case .failed(let reason) = NormaCEFRuntime.state {
-                    container.showUnavailable(reason, retry: NormaCEFRuntime.isRetryable ? {
+                    // `[weak container]`: this closure is STORED ON the container as
+                    // `retryAction`, so a strong capture is a cycle — container → closure →
+                    // container. `didTapRetry` nils it, so it is broken the moment the button is
+                    // pressed, but a user who reads "unavailable" and never clicks would leak that
+                    // container and its whole view tree for the life of the process.
+                    container.showUnavailable(reason, retry: NormaCEFRuntime.isRetryable ? { [weak container] in
+                        guard let container else { return }
                         NormaCEFRuntime.clearFailure()
                         startBrowser(in: container)
                     } : nil)

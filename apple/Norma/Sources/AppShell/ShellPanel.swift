@@ -98,9 +98,9 @@ func panelTabPillWidth(tabCount: Int, availableWidth: CGFloat) -> CGFloat {
 /// `ShellPanel`'s `.ignoresSafeArea` for what makes that literally true rather than aspirational.
 let panelTitlebarBandHeight: CGFloat = 45
 
-/// The rest of the chrome band, below the tab strip. This is Plan B's URL row (CEF's browser
-/// chrome) — rendered blank here. Still no hairline between the two rows; see
-/// `panelChromeBandHeight`'s own doc comment.
+/// The rest of the chrome band, below the tab strip: the URL row. panel-cef Task 6b fills it with
+/// `PanelWebChrome` for a `.web` tab (blank for every other kind, which has no browser chrome).
+/// Still no hairline between the two rows; see `panelChromeBandHeight`'s own doc comment.
 let panelUrlRowHeight: CGFloat = panelChromeBandHeight - panelTitlebarBandHeight
 
 /// The panel mirrors the detail card: that card rounds its LEADING corners, this rounds its
@@ -119,9 +119,9 @@ let panelShape = UnevenRoundedRectangle(
 )
 
 /// The panel column. Owns the chrome band and the content area. panel-shell T8 fills the chrome
-/// band's top 45pt (`panelTitlebarBandHeight`) with the tab strip; the rest of the band
-/// (`panelUrlRowHeight`, Plan B's URL row) and the per-kind content slot below the hairline are
-/// later work.
+/// band's top 45pt (`panelTitlebarBandHeight`) with the tab strip; panel-cef Task 6b fills the rest
+/// of the band (`panelUrlRowHeight`) with the shown tab's own chrome, and Task 6a filled the
+/// per-kind content slot below the hairline — for `.web`, a real Chromium browser.
 struct ShellPanel: View {
     @ObservedObject var store: PanelStore
     /// panel-shell T10: the shared mode/width state. This view both READS it (the expand button's
@@ -198,10 +198,12 @@ struct ShellPanel: View {
                 )
                 .frame(height: panelTitlebarBandHeight)
 
-                // panel-cef Task 6a: the active tab's own chrome slot. `.web` renders `Color.clear`
-                // here today — identical to the blank row Plan A drew — so this wiring changes
-                // nothing visually and leaves Task 6b (back/forward/reload, the URL field, the `⋮`
-                // overflow) purely additive.
+                // panel-cef Task 6a wired the shown tab's own chrome slot; Task 6b FILLED it. A
+                // `.web` tab renders `PanelWebChrome` here — back / forward / reload-or-stop, the
+                // centred URL field, the `⋮` overflow — inside the same 85pt band as the tab strip
+                // above, with no hairline between them (`PanelWebChrome`'s own metrics doc). Every
+                // other kind still renders `Color.clear` (`PanelPlaceholderTab.makeChrome`), which
+                // is the blank row Plan A drew.
                 Group {
                     if let content = activeTabContent {
                         content.makeChrome()
@@ -283,9 +285,21 @@ struct ShellPanel: View {
 struct PanelTabStrip: View {
     @ObservedObject var store: PanelStore
     /// panel-cef Task 6b: which tab is HIGHLIGHTED — the one the panel renders, passed in rather
-    /// than re-derived here, so the strip and the content slot can never disagree. Defaulted to
-    /// `nil` for the direct-construction call sites in tests, which then highlight nothing.
-    var shownTabId: String? = nil
+    /// than re-derived here, so the strip and the content slot can never disagree.
+    ///
+    /// **Required, deliberately.** It carried a `= nil` default, justified as "for the direct-
+    /// construction call sites in tests" — there are none: `PanelTabStrip` is constructed in
+    /// exactly one place, which already passes this. A defaulted `nil` bought nothing and cost the
+    /// compiler's help, since a future call site that forgot it would silently highlight NOTHING,
+    /// which reads as a broken tab strip rather than as a missing argument.
+    ///
+    /// **`let`, not `var`, and that is the whole mechanism** (measured, not assumed): Swift's
+    /// memberwise initializer gives a `var` of OPTIONAL type an implicit `nil` default, so simply
+    /// deleting `= nil` would have changed nothing at all — the omission would still compile. Only
+    /// a `let` optional is a required parameter. Turning this back into a `var` silently re-opens
+    /// the hole. The closures below keep their defaults on purpose: omitting a callback is a real
+    /// choice (a strip that reports no taps); omitting the shown tab is not.
+    let shownTabId: String?
     @Binding var presentation: PanelPresentation
     var onOpenTab: () -> Void = {}
     var onActivateTab: (String) -> Void = { _ in }

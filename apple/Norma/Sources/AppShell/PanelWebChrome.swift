@@ -286,7 +286,12 @@ struct PanelWebChrome: View {
     }
 
     private var urlField: some View {
-        TextField("Search or enter address", text: $text)
+        // **Not "Search or enter address".** This field does not search: free text with no scheme
+        // becomes `https://<text>` and fails to resolve (`PanelURLPolicy.normalizeTypedInput`'s own
+        // doc — which search engine a user's typing goes to, and what it learns about them, is a
+        // product decision this task deliberately declined to make on their behalf). A placeholder
+        // advertising a feature that was not built is worse than a narrower true one.
+        TextField("Enter a web address", text: $text)
             .textFieldStyle(.plain)
             .font(.system(size: 12))
             .multilineTextAlignment(.center)   // the spec's measured "centre-aligned, not leading"
