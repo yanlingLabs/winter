@@ -202,9 +202,9 @@ final class PanelWebChromeTests: XCTestCase {
     /// put the policy in two places while leaving the runtime's own path guarded by a view that
     /// never runs for it. **The door is pinned where it now lives** — `BrowserRuntimeTests
     /// .testTheRestoreDoorRefusesEveryDisallowedSchemeAndSeedsNothingForOne` at the runtime, and
-    /// `PanelViewportTests.testAStoredHostileURLNeverReachesCEFThroughTheViewport` for this path
-    /// reaching it — so what is left to assert here is the wiring: the right tab, carried through
-    /// verbatim, to a viewport.
+    /// `BrowserSignalsTests.testAStoredHostileURLNeverReachesCEFThroughTheFoldThatRestoresIt` for
+    /// this path reaching it — so what is left to assert here is the wiring: the right tab, carried
+    /// through verbatim, to a viewport.
     ///
     /// `makeContent()` returns `AnyView`, so its content is not readable from outside — the view is
     /// recovered by reflecting through `AnyView`'s storage (`firstDescendant` below). That is

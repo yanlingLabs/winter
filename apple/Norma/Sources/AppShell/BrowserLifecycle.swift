@@ -18,7 +18,9 @@ import Foundation
 /// the daemon's four-state activity LABEL: chat and dispatch modes do not participate in
 /// `activityFor` (`packages/core/src/sessions/activity.ts`)
 /// and the panel's auto-created sessions are mode *chat*, so the label is unavailable exactly where
-/// the panel needs it. The underlying signals exist for every session.
+/// the panel needs it. The underlying signals exist for every session **at the daemon** — this app
+/// sees only the derived label, so that guarantee does not reach here; see the spec's §4 T5
+/// correction note for exactly what degrades as a result.
 struct BrowserSignals: Equatable {
     /// Shown in this Mac app's shell — the session whose tabs the panel is displaying.
     var attachedHere: Bool

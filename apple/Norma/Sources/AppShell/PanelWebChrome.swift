@@ -90,8 +90,11 @@ final class PanelWebTabModel: ObservableObject {
     @Published private(set) var canGoBack = false
     @Published private(set) var canGoForward = false
 
-    /// The container CEF's view is parented into — the handle every verb needs. Weak: the view's
-    /// owner is SwiftUI, and a tab switched away from must not be kept alive by this.
+    /// The container CEF's view is parented into — the handle every verb needs. Weak: the strong
+    /// owner is `BrowserRuntime.containers` now, not SwiftUI, and a tab switched away from is
+    /// DELIBERATELY kept alive by that registry — this reference must not become a second, competing
+    /// owner that outlives what the runtime decides. It goes nil exactly when the runtime actually
+    /// releases the container (`stop`), never merely on a tab switch.
     weak var container: PanelCEFContainerView?
 
     init(tabId: String) {

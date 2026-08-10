@@ -14,7 +14,7 @@ import Foundation
 /// in the order given, naively — no reordering, no deduping, no inference. The engine's own header
 /// states the two orderings that are hard contracts (detach before every stop; create before
 /// attach) precisely so a naive executor is sufficient, and staying naive is what keeps that true.
-/// Two documented departures, and neither is a decision about whether a browser should exist.
+/// Three documented departures, and none is a decision about whether a browser should exist.
 /// **(1)** `scheduleStop`'s "keep or re-arm the timer until you actually see
 /// `cancelScheduledStop`" — an obligation the engine imposes on its executor (see `lingerFired`).
 /// **(2)** Application is NOT fully synchronous: `create` parks and wires its container inline but
@@ -23,7 +23,12 @@ import Foundation
 /// holds in the sense the engine's contract needs — there is a container to mount — but it is
 /// inverted in the CEF sense, and that inversion is load-bearing: it is why the responder restore
 /// runs a second time after the create, and why the hop re-checks that the runtime still owns the
-/// container it was handed.
+/// container it was handed. **(3)** (arrived in T5, after this inventory was first written)
+/// `.attachViewport` can be silently DEFERRED rather than applied: `apply`'s case for it guards on
+/// the remembered `viewportHost` being both non-nil and actually in a window, and skips the mount
+/// when it is not — logging rather than asserting. Nothing is lost by the skip: the viewport stays
+/// unclaimed, so the next plan still sees the mismatch and re-emits the same action, and a live
+/// host re-attaches directly the moment it joins a window (full rationale at that case, below).
 ///
 /// What it owns:
 ///   * `tabId → PanelCEFContainerView`, strongly — the registry that outlives every view update;
@@ -309,9 +314,9 @@ final class BrowserRuntime {
                 // discharged here — obligation #7 — in the same commit that first gives `apply` a
                 // caller). `viewportHost` is weak and the panel's host view belongs to SwiftUI, so
                 // between `PanelViewport.dismantleNSView` and ARC releasing that view the reference
-                // is non-nil while the view is in no window at all. Mounting into it would break
-                // spike Fact 5 (a container is in a window at all times — the invariant the whole
-                // reparenting design rests on) and put the page in a rectangle nothing shows.
+                // is non-nil while the view is in no window at all. Mounting into it would durably
+                // break spike Fact 5 (a container is in a window at all times — the invariant the
+                // whole reparenting design rests on) and put the page in a rectangle nothing shows.
                 //
                 // The window check lives HERE, on the action path, and not inside `mountViewport`:
                 // the view's own `attachViewport(tabId:into:)` deliberately mounts before its host

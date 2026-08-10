@@ -1757,9 +1757,12 @@ void NormaCEFCreateBrowser(NSView *parent, const char *url) {
 void NormaCEFSetStateObserver(NSView *parent, void (^observer)(NormaCEFBrowserState *state)) {
   NormaCEFTabBridge *bridge = BridgeFor(parent);
   bridge.stateObserver = observer;
-  // Deliver the current snapshot immediately rather than waiting for the next CEF callback. A tab
-  // switched away from and back to re-registers against a container whose state is already known,
-  // and without this the chrome would sit blank until the page happened to change something.
+  // Deliver the current snapshot immediately rather than waiting for the next CEF callback. A plain
+  // tab switch does not re-register this any more — since browser-runtime T4 the observers stay
+  // wired for the browser's whole life, cleared only in `stop` — so what re-registers against a
+  // container whose state is already known is the rarer case: a session hop, a relaunch, or a tab
+  // the lifecycle engine stopped and has now recreated. Without this the chrome would sit blank
+  // until the page happened to change something.
   if (observer != nil) {
     NotifyState(bridge);
   }
