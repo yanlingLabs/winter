@@ -3,6 +3,17 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 
+// panel-cef Task 3: this is how `main.swift` can name `NormaApplication` at all — the
+// Objective-C++ subclass that owns `NSApp`. Kept CEF-free by construction: the header declares
+// nothing but the class, and the `CefAppProtocol` conformance lives in a class extension inside
+// `NormaApplication.mm`, so nothing here pulls a CEF type into a Swift compile.
+#import "NormaApplication.h"
+
+// panel-cef Task 6a: the CEF embed's entire Swift-facing surface. Kept CEF-free by the same
+// construction as `NormaApplication.h` above — plain Objective-C plus an `extern "C"` block, with
+// every CEF type confined to `Sources/CEF/NormaCEF.mm`.
+#import "NormaCEF.h"
+
 typedef struct { float x; float y; } MTPoint;
 typedef struct { MTPoint pos; MTPoint vel; } MTReadout;
 

@@ -491,14 +491,26 @@ final class SurfaceWindowTests: XCTestCase {
 
     /// Same polling helper as `MorphTimerReentrancyTests`/`MorphRetargetTests` — the 60Hz morph
     /// timer's settle time isn't deterministic under test-host scheduling load.
+    /// FAILS LOUDLY on timeout, deliberately. It used to return quietly, which is why an
+    /// intermittent flake in this class has three times presented as a *cascade* of five downstream
+    /// state mismatches (`("orb") is not equal to ("window")`) rather than the one fact that
+    /// actually happened: the morph never settled inside the deadline. Three separate reviewers
+    /// spent effort re-deriving that from the cascade, and once it was nearly misattributed to an
+    /// unrelated app-entry-point change. Same red either way — this one is diagnosable.
     private func pollUntil(
         timeout: TimeInterval,
         interval: TimeInterval = 0.02,
+        _ message: @autoclosure () -> String = "condition never became true",
+        file: StaticString = #filePath,
+        line: UInt = #line,
         _ condition: () -> Bool
     ) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition(), Date() < deadline {
             try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+        }
+        if !condition() {
+            XCTFail("pollUntil timed out after \(timeout)s — \(message())", file: file, line: line)
         }
     }
 }

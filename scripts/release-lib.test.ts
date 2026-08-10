@@ -5,6 +5,8 @@ import {
   caskFrom,
   catalogueStaleness,
   dmgStagePlan,
+  NAME_SCAN_EXCLUSIONS,
+  nameScanPlan,
   preflight,
   publishGuard,
   resolveSigningIdentity,
@@ -127,6 +129,137 @@ describe("dmgStagePlan", () => {
   test("tolerates a trailing slash on the app path", () => {
     const ops = dmgStagePlan("/tmp/Norma.app/");
     expect(ops[0]).toEqual({ kind: "copy", source: "/tmp/Norma.app/", destName: "Norma.app" });
+  });
+});
+
+describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the repo)", () => {
+  // A miniature Norma.app: two locally-compiled bits, one third-party framework in the VERSIONED
+  // layout project.yml actually embeds (Versions/A + Current + top-level symlinks), and the
+  // licence notices. Keys are POSIX-relative paths; a value of null is a file, and names listed
+  // in SYMLINKS are symlinks — which release.ts's real callbacks filter out, because `find
+  // -type f` neither counts nor traverses them.
+  const SYMLINKS = new Set([
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework",
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Libraries",
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Resources",
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/Current",
+  ]);
+  const tree: Record<string, string[] | null> = {
+    "": ["Contents"],
+    Contents: ["MacOS", "Resources", "Frameworks"],
+    "Contents/MacOS": ["Norma", "NormaHelper"],
+    "Contents/MacOS/Norma": null,
+    "Contents/MacOS/NormaHelper": null,
+    "Contents/Resources": ["norma-core", "Licenses"],
+    "Contents/Resources/norma-core": null,
+    "Contents/Resources/Licenses": ["CEF-LICENSE.txt", "CREDITS.html"],
+    "Contents/Resources/Licenses/CEF-LICENSE.txt": null,
+    "Contents/Resources/Licenses/CREDITS.html": null,
+    Frameworks: null, // unreachable; present only to prove absolute paths are used, not names
+    "Contents/Frameworks": ["Sparkle.framework", "Chromium Embedded Framework.framework"],
+    "Contents/Frameworks/Sparkle.framework": ["Sparkle"],
+    "Contents/Frameworks/Sparkle.framework/Sparkle": null,
+    // Framework root: the three top-level symlinks plus the real Versions/ dir.
+    "Contents/Frameworks/Chromium Embedded Framework.framework": ["Chromium Embedded Framework", "Libraries", "Resources", "Versions"],
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework": null,
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Libraries": null,
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Resources": null,
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions": ["A", "Current"],
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/Current": null,
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A": ["Chromium Embedded Framework", "Libraries", "Resources", "_CodeSignature"],
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Chromium Embedded Framework": null,
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/_CodeSignature": ["CodeResources"],
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/_CodeSignature/CodeResources": null,
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Libraries": ["libcef_sandbox.dylib"],
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Libraries/libcef_sandbox.dylib": null,
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources": ["resources.pak", "en.lproj", "sw.lproj"],
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/resources.pak": null,
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/en.lproj": ["locale.pak"],
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/en.lproj/locale.pak": null,
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/sw.lproj": ["locale.pak"],
+    "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/sw.lproj/locale.pak": null,
+  };
+  const ROOT = "/out/Norma.app";
+  const rel = (absPath: string) => (absPath === ROOT ? "" : absPath.slice(ROOT.length + 1));
+  // Mirrors release.ts's real callbacks: symlink-filtered listing + lstat-style isDir.
+  const io = {
+    root: ROOT,
+    listDir: (absPath: string) =>
+      (tree[rel(absPath)] ?? []).filter((name) => !SYMLINKS.has(rel(absPath) === "" ? name : `${rel(absPath)}/${name}`)),
+    isDir: (absPath: string) =>
+      !SYMLINKS.has(rel(absPath)) && tree[rel(absPath)] !== null && tree[rel(absPath)] !== undefined,
+  };
+  const isExcluded = (relPath: string) => NAME_SCAN_EXCLUSIONS.some((re) => re.test(relPath));
+
+  test("no exclusions matching -> scans the bundle whole, exactly as before Task 5", () => {
+    const plan = nameScanPlan({ ...io, isExcluded: () => false });
+    expect(plan).toEqual({ targets: [ROOT], excluded: [] });
+  });
+
+  test("the shipped exclusion list removes the .lproj packs and NOTHING else", () => {
+    const plan = nameScanPlan({ ...io, isExcluded });
+    const fw = `${ROOT}/Contents/Frameworks/Chromium Embedded Framework.framework`;
+    expect(plan.excluded).toEqual([`${fw}/Versions/A/Resources/en.lproj`, `${fw}/Versions/A/Resources/sw.lproj`]);
+    // Every real (non-symlink) leaf file except the two locale packs must be covered.
+    const files = Object.entries(tree)
+      .filter(([k, v]) => v === null && k !== "Frameworks" && !SYMLINKS.has(k))
+      .map(([k]) => `${ROOT}/${k}`);
+    const covered = files.filter((f) => plan.targets.some((t) => f === t || f.startsWith(`${t}/`)));
+    expect(covered.sort()).toEqual(files.filter((f) => !f.includes(".lproj")).sort());
+  });
+
+  test("symlinks are never emitted, so no path is reachable twice and find -type f agrees", () => {
+    const plan = nameScanPlan({ ...io, isExcluded });
+    for (const link of SYMLINKS) {
+      const abs = `${ROOT}/${link}`;
+      expect(plan.targets).not.toContain(abs);
+      // Nor reachable THROUGH an emitted directory target: the framework root itself is only
+      // ever emitted piecemeal here, and the top-level `Resources` symlink would otherwise be a
+      // second, unexcluded route to the locale packs.
+      expect(plan.targets.some((t) => abs.startsWith(`${t}/`))).toBe(false);
+    }
+  });
+
+  test("subtrees with nothing excluded are emitted whole, so the target list stays auditable", () => {
+    const plan = nameScanPlan({ ...io, isExcluded });
+    // Sparkle and MacOS are untouched by the exclusion: one path each, not one per file.
+    expect(plan.targets).toContain(`${ROOT}/Contents/Frameworks/Sparkle.framework`);
+    expect(plan.targets).toContain(`${ROOT}/Contents/MacOS`);
+    // The CEF Mach-O, its dylibs and the non-locale resources are all still scanned.
+    const fw = `${ROOT}/Contents/Frameworks/Chromium Embedded Framework.framework`;
+    expect(plan.targets).toContain(`${fw}/Versions/A/Chromium Embedded Framework`);
+    expect(plan.targets).toContain(`${fw}/Versions/A/Libraries`);
+    expect(plan.targets).toContain(`${fw}/Versions/A/Resources/resources.pak`);
+    // CREDITS.html measured ZERO hits, so it is deliberately still scanned.
+    expect(plan.targets.some((t) => `${ROOT}/Contents/Resources/Licenses/CREDITS.html`.startsWith(t))).toBe(true);
+    expect(plan.targets.length).toBeLessThan(12);
+  });
+
+  test("targets and exclusions never overlap", () => {
+    const plan = nameScanPlan({ ...io, isExcluded });
+    for (const e of plan.excluded) {
+      expect(plan.targets.some((t) => e === t || e.startsWith(`${t}/`))).toBe(false);
+    }
+  });
+
+  test("NAME_SCAN_EXCLUSIONS matches locale dirs only — not the framework, its binary, or CREDITS", () => {
+    const fw = "Contents/Frameworks/Chromium Embedded Framework.framework";
+    const m = (p: string) => NAME_SCAN_EXCLUSIONS.some((re) => re.test(p));
+    expect(m(`${fw}/Versions/A/Resources/sw.lproj`)).toBe(true);
+    expect(m(`${fw}/Versions/A/Resources/zh-TW.lproj`)).toBe(true);
+    expect(m(fw)).toBe(false);
+    expect(m(`${fw}/Versions/A/Chromium Embedded Framework`)).toBe(false);
+    expect(m(`${fw}/Versions/A/Resources/resources.pak`)).toBe(false);
+    expect(m(`${fw}/Versions/A/Libraries/libcef_sandbox.dylib`)).toBe(false);
+    expect(m("Contents/Resources/Licenses/CREDITS.html")).toBe(false);
+    expect(m("Contents/MacOS/Norma")).toBe(false);
+    // Not a blanket "any .lproj anywhere" — Norma's own resources stay scanned.
+    expect(m("Contents/Resources/en.lproj")).toBe(false);
+    // Nor a subdirectory sneaking past the anchor.
+    expect(m(`${fw}/Versions/A/Resources/sw.lproj/locale.pak`)).toBe(false);
+    // The top-level `Resources` SYMLINK route is deliberately unmatched — the walker never
+    // follows it, so matching it too would be dead policy hiding a walker regression.
+    expect(m(`${fw}/Resources/sw.lproj`)).toBe(false);
   });
 });
 

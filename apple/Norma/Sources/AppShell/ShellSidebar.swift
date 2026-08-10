@@ -105,6 +105,49 @@ struct ShellRootView: View {
                     guard panelFitsInContent(newContentWidth) else { return }
                     presentation.sideWidth = panelClampWidth(presentation.sideWidth, contentWidth: newContentWidth)
                 }
+                #if DEBUG
+                // panel-cef Task 6a — a DEBUG-ONLY door for driving the panel from outside the UI.
+                //
+                // The panel starts `.hidden` and is shown only by a titlebar button, and a web tab
+                // exists only after someone presses "+". Both are mouse clicks, and synthesising a
+                // click needs Accessibility TCC that this development environment does not have —
+                // so without this there is no way to reach a rendered page for the CDP proof, or
+                // for the forced-software-rendering run the plan requires.
+                //
+                // It drives the REAL path and adds no second one: the same `presentation.mode` the
+                // button toggles, and the same `ShellSessionHost.openPanelTab` "+" calls, which
+                // goes to the daemon and comes back as a `panel_tab_opened` event folded by
+                // `PanelStore`. `#if DEBUG` keeps it out of every shipped build, and it is inert
+                // unless the variable is set.
+                .onAppear {
+                    let env = ProcessInfo.processInfo.environment
+                    guard env["NORMA_PANEL_SMOKE"] == "1" else { return }
+                    presentation.mode = .side
+                    host?.openPanelTab(kind: .web) { sessionId in
+                        nav.navigate(to: .session(sessionId))
+                    }
+                    // Task 6a fix pass: reproduce the LIVE-GATE DEFECT without a click. Closing a
+                    // tab (and switching destination with one open — the same dismantle) was making
+                    // Norma's whole window disappear, because CEF's default `DoClose` sends
+                    // `performClose:` to the browser's top-level parent window. `closePanelTab` is
+                    // the identical door the pill's × uses, so this exercises the real path.
+                    if let after = env["NORMA_PANEL_SMOKE_CLOSE_AFTER"].flatMap(Double.init) {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + after) {
+                            guard let tabId = panelStore.tabs.first?.tabId else { return }
+                            host?.closePanelTab(tabId)
+                        }
+                    }
+                    // The user's SECOND reported trigger: clicking Cowork in the sidebar with a tab
+                    // open. It reaches the same dismantle by a different route — the panel's tab
+                    // list is per-session, so leaving the session empties it and the content slot
+                    // tears down — which is why one `DoClose` fix covers both.
+                    if let after = env["NORMA_PANEL_SMOKE_NAV_AFTER"].flatMap(Double.init) {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + after) {
+                            nav.navigate(to: .mode(.cowork))
+                        }
+                    }
+                }
+                #endif
         }
     }
 

@@ -498,12 +498,59 @@ export const SessionActivityEvent = Base.extend({
 
 export const PanelTabKind = z.enum(["web", "document", "code", "note"]);
 
+/** panel-cef Task 6b: the field-size caps on every panel `url`/`title`, carried from Plan A (which
+ *  surfaced them and owned none) and made LIVE by this task — Task 6b builds the first producer of
+ *  either field, so until now nothing on earth could set them.
+ *
+ *  **Why this is a security bound and not tidiness.** A page `<title>` is chosen by whatever site
+ *  the user visits, and it lands in a session JSONL that is APPEND-ONLY, NEVER DELETED, replayed on
+ *  every session open, and re-read WHOLE by `panel.list` on every attach/hop. Unbounded, one hostile
+ *  page could park megabytes in a file the daemon re-reads forever.
+ *
+ *  **These caps bind on READ as well as on write**, and that is deliberate rather than incidental:
+ *  `SessionStore` parses every log line through `SessionEvent` (`sessions/store.ts`) exactly as
+ *  `hub.append` parses every write, so a value that cannot be written can never be read either.
+ *
+ *  **The corollary if these numbers are ever LOWERED is DATA LOSS, not a loud failure.** An
+ *  already-written longer event becomes unparseable — and `readGoodLines` (`sessions/store.ts`)
+ *  SKIPS unparseable lines rather than stopping at them, so the session still opens and simply has
+ *  fewer events in it. Worse, `recoverAll` runs on every daemon open, sees `sawBad`, and REWRITES
+ *  the log file without the offending lines (temp+rename). A shrunk cap therefore silently and
+ *  PERMANENTLY deletes already-recorded panel navigations from a JSONL that is append-only,
+ *  never-deleted and user-delete-only — at the next daemon start, with nothing anywhere saying so.
+ *  Raising them is always safe; lowering them is a data migration, and the reason is destruction
+ *  rather than a failed read.
+ *
+ *  Present tense, same mechanism: these caps were ADDED to pre-existing event types, so any
+ *  `panel_tab_opened` already on disk with an over-cap `url`/`title` is skipped on read and dropped
+ *  from the log at the next open. Unreachable through the shipped path (no producer of either field
+ *  existed before this task — the panel "+" always passed `nil`), reachable by anyone who called
+ *  `panel.openTab` over the socket directly since Plan A.
+ *
+ *  Sized to be unreachable by honest content rather than tight:
+ *   - **2048 chars for a URL** — the de-facto interop ceiling (IE's 2083; most servers cap headers
+ *     near 8 KiB). Only `http`/`https` URLs are ever persisted (see `PanelReportNavigationParams`
+ *     in methods.ts), so the unbounded shapes — `data:` and `javascript:` — cannot reach here at all.
+ *   - **256 chars for a title** — far above any real `<title>` and above what the tab pill can show
+ *     at `panelTabPillSize.width`.
+ *
+ *  The APP's producer truncates a title to this and DROPS an over-long URL rather than truncating it
+ *  (a truncated URL is a different, wrong URL that would later be restored into a web view), so a
+ *  real page never reaches these limits from the shipped path. Mirrored in Swift by
+ *  `PanelURLPolicy.urlMaxLength`/`.titleMaxLength` (`apple/Norma/Sources/AppShell/PanelURLPolicy
+ *  .swift`), with a literal pin test on each side naming the other — two hand-mirrored numbers in
+ *  two languages with no compile-time coupling is this repo's worst known drift class
+ *  (`TRANSIENT_EVENT_TYPES`), and drift here is SILENT in both directions because the app's
+ *  `try?`-wrapped RPC swallows the rejection. */
+export const PANEL_URL_MAX_LENGTH = 2048;
+export const PANEL_TITLE_MAX_LENGTH = 256;
+
 export const PanelTabOpenedEvent = Base.extend({
   type: z.literal("panel_tab_opened"),
   tabId: z.string().min(1),
   kind: PanelTabKind,
-  url: z.string().optional(),
-  title: z.string().optional(),
+  url: z.string().max(PANEL_URL_MAX_LENGTH).optional(),
+  title: z.string().max(PANEL_TITLE_MAX_LENGTH).optional(),
 });
 
 export const PanelTabClosedEvent = Base.extend({
@@ -518,12 +565,20 @@ export const PanelTabActivatedEvent = Base.extend({
 
 /** Committed TOP-LEVEL navigations only — no subframes, no in-flight redirects, no fragment
  *  changes. That bound is what keeps a browsing session at ~10-50 events instead of thousands,
- *  in a JSONL that is replayed on every session open. */
+ *  in a JSONL that is replayed on every session open.
+ *
+ *  panel-cef Task 6b built the sole producer and resolved that bound in CEF's own terms:
+ *  `CefLoadHandler::OnLoadEnd` gated on `frame->IsMain()`. `include/cef_load_handler.h` states the
+ *  exclusions verbatim — the callback comes "after a navigation has been committed", and "will not
+ *  be called for same page navigations (fragments, history state, etc.) or for navigations that
+ *  fail or are canceled before commit" — so all three exclusions are CEF's contract rather than a
+ *  filter the app maintains. Live address changes (which DO include fragments) drive the URL field
+ *  only and are never reported. */
 export const PanelTabNavigatedEvent = Base.extend({
   type: z.literal("panel_tab_navigated"),
   tabId: z.string().min(1),
-  url: z.string().min(1),
-  title: z.string(),
+  url: z.string().min(1).max(PANEL_URL_MAX_LENGTH),
+  title: z.string().max(PANEL_TITLE_MAX_LENGTH),
 });
 
 /** TRANSIENT — the daemon's only push channel to the app for verbs needing CEF execution.
@@ -540,7 +595,11 @@ export const PanelCommandEvent = Base.extend({
   commandId: z.string().min(1),
   tabId: z.string().min(1).optional(),
   action: z.enum(["navigate"]),
-  url: z.string().optional(),
+  // Capped for consistency with the persisted variants above, though the reasoning differs: this
+  // one is TRANSIENT and never enters a JSONL, so the cap here bounds a FRAME rather than a file.
+  // It is still the right default — B2's agent-authored navigate is the producer, and a model can
+  // emit an arbitrarily long string.
+  url: z.string().max(PANEL_URL_MAX_LENGTH).optional(),
   deadlineMs: z.number().int().positive(),
 });
 

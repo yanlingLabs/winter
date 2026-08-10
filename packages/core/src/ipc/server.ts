@@ -2468,6 +2468,31 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           hub.append(p.sessionId, {
             type: "panel_tab_opened", sessionId: p.sessionId, tabId, kind: p.kind, url: p.url, title: p.title,
           });
+          // panel-cef Task 6b — THE WIRE DECISION Plan A left open and Task 6a could not make.
+          //
+          // Opening a tab ACTIVATES it. Before this, `panel.openTab` appended `panel_tab_opened`
+          // and nothing else, while both folds (`foldPanelTabs` here and its Swift mirror) set
+          // `activeTabId` ONLY from `panel_tab_activated` — so a freshly opened tab was open but
+          // never active, and with `activeTabId` undefined the panel had no active tab at all.
+          // Plan A could not see it (every tab rendered `Color.clear`, so "nothing is active" and
+          // "the active tab is blank" were the same picture); Task 6a felt it as a rendering
+          // problem and resolved it at the rendering boundary. Its real symptom is worse than that
+          // report said: with nothing active, pressing "+" a second time leaves the panel showing
+          // tab 1, so the button appears to do nothing at all.
+          //
+          // Fixed HERE rather than in either fold or with a second RPC from the app, for the reason
+          // this handler's own doc gives about minting the id: exactly one code path creates a tab,
+          // and it always runs here. An agent-opened tab and a user-opened tab must be
+          // indistinguishable downstream — an app-side follow-up `panel.activateTab` would have
+          // been true only for tabs the app opened, and every client would have had to remember to
+          // send it. Two appends, not one, is the whole cost: ~2 events per tab open, against a
+          // budget the navigation cap measures in the tens.
+          //
+          // The Swift `panelShownTab` fallback ("no active tab -> show the first") is NOT retired by
+          // this: it still covers legacy sessions written before today (including the ~19 the 6a
+          // smoke door left on the dev daemon) and the moment after the ACTIVE tab is closed, where
+          // `foldPanelTabs` clears `activeTabId` by design.
+          hub.append(p.sessionId, { type: "panel_tab_activated", sessionId: p.sessionId, tabId });
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }

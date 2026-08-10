@@ -4,39 +4,32 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
-	<key>CFBundleDisplayName</key>
-	<string>$(NORMA_APP_NAME)</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
-	<key>CFBundleIconFile</key>
-	<string>$(NORMA_APP_ICON)</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>$(NORMA_APP_NAME)</string>
+	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.2.010</string>
+	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>0.2.010</string>
+	<string>1</string>
+	<key>LSEnvironment</key>
+	<dict>
+		<key>MallocNanoZone</key>
+		<string>0</string>
+	</dict>
+	<key>LSFileQuarantineEnabled</key>
+	<true/>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
 	<key>LSUIElement</key>
 	<true/>
-	<key>NSScreenCaptureUsageDescription</key>
-	<string>Norma captures your screen for computer-use screenshots you explicitly ask it to take.</string>
-	<key>SUAutomaticallyUpdate</key>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
-	<key>SUEnableAutomaticChecks</key>
-	<true/>
-	<key>SUFeedURL</key>
-	<string>https://updates.yanlinglabs.com/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>mmce2Wik1c09oXqBvWp+DjsfwtSAdpaCCDkJ98sgAtg=</string>
-	<key>SUScheduledCheckInterval</key>
-	<integer>3600</integer>
 </dict>
 </plist>

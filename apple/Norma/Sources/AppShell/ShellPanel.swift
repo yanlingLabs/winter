@@ -98,9 +98,9 @@ func panelTabPillWidth(tabCount: Int, availableWidth: CGFloat) -> CGFloat {
 /// `ShellPanel`'s `.ignoresSafeArea` for what makes that literally true rather than aspirational.
 let panelTitlebarBandHeight: CGFloat = 45
 
-/// The rest of the chrome band, below the tab strip. This is Plan B's URL row (CEF's browser
-/// chrome) — rendered blank here. Still no hairline between the two rows; see
-/// `panelChromeBandHeight`'s own doc comment.
+/// The rest of the chrome band, below the tab strip: the URL row. panel-cef Task 6b fills it with
+/// `PanelWebChrome` for a `.web` tab (blank for every other kind, which has no browser chrome).
+/// Still no hairline between the two rows; see `panelChromeBandHeight`'s own doc comment.
 let panelUrlRowHeight: CGFloat = panelChromeBandHeight - panelTitlebarBandHeight
 
 /// The panel mirrors the detail card: that card rounds its LEADING corners, this rounds its
@@ -119,9 +119,9 @@ let panelShape = UnevenRoundedRectangle(
 )
 
 /// The panel column. Owns the chrome band and the content area. panel-shell T8 fills the chrome
-/// band's top 45pt (`panelTitlebarBandHeight`) with the tab strip; the rest of the band
-/// (`panelUrlRowHeight`, Plan B's URL row) and the per-kind content slot below the hairline are
-/// later work.
+/// band's top 45pt (`panelTitlebarBandHeight`) with the tab strip; panel-cef Task 6b fills the rest
+/// of the band (`panelUrlRowHeight`) with the shown tab's own chrome, and Task 6a filled the
+/// per-kind content slot below the hairline — for `.web`, a real Chromium browser.
 struct ShellPanel: View {
     @ObservedObject var store: PanelStore
     /// panel-shell T10: the shared mode/width state. This view both READS it (the expand button's
@@ -149,6 +149,18 @@ struct ShellPanel: View {
     /// navigates through here, unchanged.
     var nav: ShellNavigationModel? = nil
 
+    /// panel-cef Task 6a: which tab the panel actually SHOWS — `nil` only when there are no tabs at
+    /// all. One lookup, read by both slots below, so the chrome row and the content area can never
+    /// disagree about which tab they are rendering. The rule (and why it is not simply
+    /// `activeTabId`) lives with the pure function it delegates to, `panelShownTab`.
+    private var shownTab: PanelTab? {
+        panelShownTab(tabs: store.tabs, activeTabId: store.activeTabId)
+    }
+
+    private var activeTabContent: PanelTabContent? {
+        shownTab.map { panelTabContent(for: $0, host: host, sessionId: host?.panelSessionId) }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // The chrome band: one continuous surface, no internal divider. Two vertical slices —
@@ -157,6 +169,15 @@ struct ShellPanel: View {
             VStack(spacing: 0) {
                 PanelTabStrip(
                     store: store,
+                    // panel-cef Task 6b: the strip highlights the tab the panel is actually
+                    // SHOWING, not `store.activeTabId` directly. The two are the same in the
+                    // ordinary case now that `panel.openTab` activates what it opens — but they
+                    // diverge for a session written before that (an open tab that was never
+                    // activated) and for the instant after the ACTIVE tab is closed, where
+                    // `foldPanelTabs` clears `activeTabId` by design. Deriving both from one lookup
+                    // is what retires Task 6a's named cost: "the shown tab is not the highlighted
+                    // one" cannot happen, because there is only one answer to which tab that is.
+                    shownTabId: shownTab?.tabId,
                     presentation: $presentation,
                     onOpenTab: {
                         // panel-shell T15: the new-chat page's own "+" BINDS rather than navigating
@@ -177,8 +198,30 @@ struct ShellPanel: View {
                 )
                 .frame(height: panelTitlebarBandHeight)
 
-                Color.clear
-                    .frame(height: panelUrlRowHeight)
+                // panel-cef Task 6a wired the shown tab's own chrome slot; Task 6b FILLED it. A
+                // `.web` tab renders `PanelWebChrome` here — back / forward / reload-or-stop, the
+                // centred URL field, the `⋮` overflow — inside the same 85pt band as the tab strip
+                // above, with no hairline between them (`PanelWebChrome`'s own metrics doc). Every
+                // other kind still renders `Color.clear` (`PanelPlaceholderTab.makeChrome`), which
+                // is the blank row Plan A drew.
+                Group {
+                    if let content = activeTabContent {
+                        content.makeChrome()
+                    } else {
+                        Color.clear
+                    }
+                }
+                // `.id(tabId)` for the same reason the content slot below carries one, and it is
+                // load-bearing here too (whole-branch review F8). `PanelWebChrome` holds the typed
+                // address and the refusal flash as local `@State`; without this the chrome view is
+                // REUSED across a tab switch, `.onAppear` fires once, and
+                // `.onChange(of: model.displayURL)` does not fire when the two tabs happen to share
+                // a `displayURL` — two fresh tabs both show "". Concretely: type into tab A's
+                // address bar without submitting, switch to tab B, press Return, and tab B
+                // navigates to what was typed for tab A. The cost is losing in-progress typing on a
+                // tab switch, which is the correct trade and the one the content slot already makes.
+                .id(shownTab?.tabId)
+                .frame(height: panelUrlRowHeight)
             }
             .frame(height: panelChromeBandHeight)
 
@@ -186,8 +229,18 @@ struct ShellPanel: View {
                 .frame(height: panelDividerWidth)
                 .overlay(Theme.hairline)
 
-            Color.clear
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // panel-cef Task 6a: the content slot Plan A left as `Color.clear`. `.id(tabId)` is
+            // load-bearing rather than tidy — it is what makes SwiftUI dismantle one tab's
+            // `PanelCEFView` and build the next tab's, instead of reusing a single representable
+            // and silently leaving the first tab's browser parented in the visible container.
+            Group {
+                if let tab = shownTab, let content = activeTabContent {
+                    content.makeContent().id(tab.tabId)
+                } else {
+                    Color.clear
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         // review round 2, Important 2 (Task 2, plan-mandated fix, adjudicated by the user): a
         // BACKGROUND LAYER that ignores the safe area, not a clip on the content — `ShellSidebar
@@ -241,6 +294,22 @@ struct ShellPanel: View {
 /// bar with room to spare.
 struct PanelTabStrip: View {
     @ObservedObject var store: PanelStore
+    /// panel-cef Task 6b: which tab is HIGHLIGHTED — the one the panel renders, passed in rather
+    /// than re-derived here, so the strip and the content slot can never disagree.
+    ///
+    /// **Required, deliberately.** It carried a `= nil` default, justified as "for the direct-
+    /// construction call sites in tests" — there are none: `PanelTabStrip` is constructed in
+    /// exactly one place, which already passes this. A defaulted `nil` bought nothing and cost the
+    /// compiler's help, since a future call site that forgot it would silently highlight NOTHING,
+    /// which reads as a broken tab strip rather than as a missing argument.
+    ///
+    /// **`let`, not `var`, and that is the whole mechanism** (measured, not assumed): Swift's
+    /// memberwise initializer gives a `var` of OPTIONAL type an implicit `nil` default, so simply
+    /// deleting `= nil` would have changed nothing at all — the omission would still compile. Only
+    /// a `let` optional is a required parameter. Turning this back into a `var` silently re-opens
+    /// the hole. The closures below keep their defaults on purpose: omitting a callback is a real
+    /// choice (a strip that reports no taps); omitting the shown tab is not.
+    let shownTabId: String?
     @Binding var presentation: PanelPresentation
     var onOpenTab: () -> Void = {}
     var onActivateTab: (String) -> Void = { _ in }
@@ -262,7 +331,7 @@ struct PanelTabStrip: View {
                             PanelTabPill(
                                 tab: tab,
                                 width: pillWidth,
-                                isActive: tab.tabId == store.activeTabId,
+                                isActive: tab.tabId == shownTabId,
                                 onActivate: { onActivateTab(tab.tabId) },
                                 onClose: { onCloseTab(tab.tabId) }
                             )
