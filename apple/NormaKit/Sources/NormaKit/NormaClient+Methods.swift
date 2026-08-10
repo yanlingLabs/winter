@@ -1235,6 +1235,23 @@ extension NormaClient {
         _ = try await request("panel.activateTab", params: obj(["sessionId": .string(sessionId), "tabId": .string(tabId)]))
     }
 
+    /// panel-cef Task 6b: `panel.reportNavigation {sessionId, tabId, url, title}` (methods.ts
+    /// `PanelReportNavigationParams`). The RPC has existed since Plan A with no producer; the panel's
+    /// CEF browser is the first, and the only possible, one — a committed top-level navigation is a
+    /// FACT only the app witnesses, never a request, which is why there is no `panel.navigate`
+    /// counterpart (that verb travels the other way, as a transient `panel_command`).
+    ///
+    /// **The daemon refuses a `url` that is not `http`/`https`, or either field over its cap.** The
+    /// caller is expected to have filtered already (`PanelURLPolicy`, app side) — this is defence in
+    /// depth, not the primary gate — and because every call site wraps this in `try?`, a rejection
+    /// is SILENT. Anything that changes the policy on one side must change it on the other.
+    public func reportPanelNavigation(sessionId: String, tabId: String, url: String, title: String) async throws {
+        _ = try await request("panel.reportNavigation", params: obj([
+            "sessionId": .string(sessionId), "tabId": .string(tabId),
+            "url": .string(url), "title": .string(title),
+        ]))
+    }
+
     /// panel-shell T9: `panel.list {sessionId}` (methods.ts `PanelListParams`/`PanelListResult`) —
     /// the CURRENT fold, re-read fresh by the daemon on every call (Task 6's reviewer signed off on
     /// that cost — bounded by tab count, never the phone transport). The app's instant-display seed

@@ -6,20 +6,29 @@ import SwiftUI
 /// frame was written against. The frame does not change: `ShellPanel` renders `makeContent()` in
 /// the slot that used to hold `Color.clear`.
 ///
-/// **`makeChrome()` is deliberately empty.** Back/forward/reload, the centre-aligned URL field and
-/// the `⋮` overflow are Task 6b; wiring the slot here (rather than in 6b) means 6b is purely
-/// additive and today's rendering is byte-identical to Plan A's — the URL row stays blank.
+/// panel-cef Task 6b fills the chrome slot (`PanelWebChrome` — back/forward/reload, the
+/// centre-aligned URL field, the `⋮` overflow) and applies **enforcement point 3 of the URL scheme
+/// policy** below.
 struct PanelWebTab: PanelTabContent {
     let tab: PanelTab
+    /// Shared by both slots — the thing that makes the URL field and the browser it describes the
+    /// same tab. Looked up once, in `panelTabContent(for:host:)`.
+    let model: PanelWebTabModel
 
     var kind: PanelTabKind { .web }
     var title: String { panelTabDisplayTitle(tab) }
     var icon: Image { Image(systemName: panelTabFaviconSystemImage(.web)) }
 
-    func makeChrome() -> AnyView { AnyView(Color.clear) }
+    func makeChrome() -> AnyView { AnyView(PanelWebChrome(model: model)) }
 
+    /// **Enforcement point 3 — restore.** `PanelURLPolicy.restorableURL` stands between whatever is
+    /// stored on the tab and a real Chromium browser, and it is the last mile of the whole policy:
+    /// every other door can be bypassed by data that predates it or arrives from a producer that
+    /// does not exist yet, but this one is on the path of *every* load. A stored `javascript:` URL
+    /// would otherwise be re-executed against the page on each restore, for as long as the session
+    /// exists — which is forever, since sessions are user-delete-only.
     func makeContent() -> AnyView {
-        AnyView(PanelCEFView(url: tab.url ?? panelWebTabStartPageURL))
+        AnyView(PanelCEFView(tab: tab, model: model, url: PanelURLPolicy.restorableURL(tab.url)))
     }
 }
 
@@ -40,10 +49,21 @@ struct PanelPlaceholderTab: PanelTabContent {
 }
 
 /// The one place a `PanelTab` becomes a rendered surface. Exhaustive, no `default:`.
-func panelTabContent(for tab: PanelTab) -> PanelTabContent {
+///
+/// panel-cef Task 6b threads the host and its session through, for one reason each: the host is how
+/// a committed navigation reaches `panel.reportNavigation`, and the session id is CAPTURED here
+/// (rather than read at the moment a page finishes loading) so a session hop mid-load cannot file
+/// one session's browsing into another's log. Both are optional — a shell built without a host
+/// renders exactly as before, with a chrome row whose verbs work and whose reports go nowhere.
+@MainActor
+func panelTabContent(for tab: PanelTab, host: ShellSessionHost? = nil,
+                     sessionId: String? = nil) -> PanelTabContent {
     switch tab.kind {
-    case .web: return PanelWebTab(tab: tab)
-    case .document, .code, .note: return PanelPlaceholderTab(tab: tab)
+    case .web:
+        return PanelWebTab(tab: tab,
+                           model: PanelWebTabModels.model(for: tab, host: host, sessionId: sessionId))
+    case .document, .code, .note:
+        return PanelPlaceholderTab(tab: tab)
     }
 }
 
@@ -101,10 +121,42 @@ let panelWebTabStartPageURL: String = {
 /// registry keyed by `tabId` and a close hook wired to `panel_tab_closed`, which is more lifecycle
 /// than "a page renders in the panel" is scoped to carry.
 struct PanelCEFView: NSViewRepresentable {
+    let tab: PanelTab
+    let model: PanelWebTabModel
     let url: String
 
     func makeNSView(context: Context) -> PanelCEFContainerView {
         let container = PanelCEFContainerView()
+        model.container = container
+
+        // panel-cef Task 6b: both channels are registered BEFORE the browser exists — that is why
+        // the bridge keys them on the container view rather than on a browser id. Creation is
+        // asynchronous and can queue behind `OnContextInitialized`, so there is no later moment
+        // that is guaranteed to come.
+        NormaCEFSetStateObserver(container) { [weak model] state in
+            guard let state else { return }
+            model?.apply(state)
+        }
+        NormaCEFSetNavigationObserver(container) { [weak model] committedURL, committedTitle in
+            model?.reportCommittedNavigation(url: committedURL ?? "", title: committedTitle ?? "")
+        }
+        // Prime the dedupe memory AND the displayed address with what the daemon already knows, so
+        // a tab switched away from and back to neither re-reports its own stored URL nor flashes an
+        // empty field. Seeded with the URL actually being loaded — if scheme policy refused the
+        // stored one, this is empty rather than the refused value.
+        NormaCEFSeedTabState(container,
+                             PanelURLPolicy.isAllowed(url) ? url : "",
+                             tab.title ?? "")
+
+        startBrowser(in: container)
+        return container
+    }
+
+    /// Bring CEF up if needed and create the browser. Split out of `makeNSView` because the
+    /// unavailable placeholder's **Try again** button runs this exact path again — the retry has to
+    /// re-do the whole sequence, not merely clear a flag, since the async block below has long since
+    /// run by the time a user reads the message and clicks.
+    private func startBrowser(in container: PanelCEFContainerView) {
         // NOT synchronous. `makeNSView` runs inside a SwiftUI view update, and `CefInitialize`
         // stands up a process tree, runs `OnContextInitialized` re-entrantly and starts a run-loop
         // timer. Hopping one turn keeps all of that out of the update pass, and it is also what
@@ -113,20 +165,36 @@ struct PanelCEFView: NSViewRepresentable {
         DispatchQueue.main.async {
             guard NormaCEFRuntime.ensureInitialized() else {
                 if case .failed(let reason) = NormaCEFRuntime.state {
-                    container.showUnavailable(reason)
+                    container.showUnavailable(reason, retry: NormaCEFRuntime.isRetryable ? {
+                        NormaCEFRuntime.clearFailure()
+                        startBrowser(in: container)
+                    } : nil)
                 }
                 return
             }
             NormaCEFCreateBrowser(container, url)
         }
-        return container
     }
 
+    /// **Deliberately empty, and it must stay that way.** SwiftUI calls this whenever a stored
+    /// property changes — including `url`, which changes the moment a committed navigation is
+    /// reported, folded by the daemon and replayed back into `PanelStore`. Loading `url` here would
+    /// therefore close a loop: navigate → report → fold → `updateNSView` → navigate to where the
+    /// browser already is. Navigation is driven by the user through `PanelWebTabModel`'s verbs, and
+    /// by nothing else. (The `.id(tabId)` in `ShellPanel` means a genuinely different tab arrives as
+    /// a rebuild, not as an update, so there is no case this method needs to handle.)
     func updateNSView(_ nsView: PanelCEFContainerView, context: Context) {}
 
     /// Closing here — rather than leaking the browser and letting the container's `deinit` decide —
     /// is what keeps a closed or switched-away tab from leaving a live renderer process behind.
+    ///
+    /// Task 6b: the observers are cleared FIRST. Both blocks capture the model weakly, so a late
+    /// callback would be harmless — but a `panel_tab_navigated` filed by a tab the user has already
+    /// closed is not harmless, it is a permanent line in a log describing something that is no
+    /// longer on screen.
     static func dismantleNSView(_ nsView: PanelCEFContainerView, coordinator: ()) {
+        NormaCEFSetStateObserver(nsView, nil)
+        NormaCEFSetNavigationObserver(nsView, nil)
         NormaCEFCloseBrowser(nsView)
     }
 }
@@ -138,24 +206,47 @@ struct PanelCEFView: NSViewRepresentable {
 /// fire for every live-resize step, so the resize is handled here where AppKit actually reports it.
 final class PanelCEFContainerView: NSView {
     private var unavailableLabel: NSTextField?
+    private var retryButton: NSButton?
+    private var retryAction: (() -> Void)?
+
+    /// Every subview that is NOT part of the unavailable placeholder — i.e. CEF's own view.
+    private var isPlaceholder: (NSView) -> Bool {
+        { [weak self] view in view === self?.unavailableLabel || view === self?.retryButton }
+    }
 
     override func resizeSubviews(withOldSize oldSize: NSSize) {
         super.resizeSubviews(withOldSize: oldSize)
-        for subview in subviews where subview !== unavailableLabel {
+        let placeholder = isPlaceholder
+        for subview in subviews where !placeholder(subview) {
             subview.frame = bounds
         }
     }
 
     override func layout() {
         super.layout()
-        if let label = unavailableLabel {
-            label.frame = bounds.insetBy(dx: 16, dy: 16)
-        }
+        guard let label = unavailableLabel else { return }
+        let button = retryButton
+        let buttonHeight: CGFloat = button == nil ? 0 : 24
+        let box = bounds.insetBy(dx: 16, dy: 16)
+        label.frame = NSRect(x: box.minX, y: box.midY, width: box.width,
+                             height: max(0, box.height / 2))
+        button?.frame = NSRect(x: box.midX - 50, y: box.midY - buttonHeight - 8,
+                               width: 100, height: buttonHeight)
     }
 
     /// CEF could not start. The panel says so instead of showing a permanently blank rectangle —
     /// and Norma keeps running, which is the whole reason none of the bridge's entry points abort.
-    func showUnavailable(_ reason: String) {
+    ///
+    /// **Task 6b adds the retry door, and it is not cosmetic.** `NormaCEFRuntime.ensureInitialized`
+    /// returns early on `.failed` and nothing ever reset that state, so ONE transient startup
+    /// failure disabled the browser panel for the rest of the process's life — and the failures
+    /// that actually happen are transient by nature: Chromium's profile lock (exit code 24) when a
+    /// second copy of the app holds the same `root_cache_path`, and a stale `SingletonLock` left by
+    /// a `kill -9`. Both are fixed by quitting the other copy and trying again, which until now
+    /// meant relaunching Norma. `retry` is `nil` for failures that genuinely cannot be retried
+    /// (`CefShutdown` has run; the helper bundle is missing from the build), so the button is not
+    /// offered where it would only fail again.
+    func showUnavailable(_ reason: String, retry: (() -> Void)? = nil) {
         guard unavailableLabel == nil else { return }
         let label = NSTextField(labelWithString: "The browser panel is unavailable.\n\(reason)")
         label.alignment = .center
@@ -164,6 +255,28 @@ final class PanelCEFContainerView: NSView {
         label.font = .systemFont(ofSize: 12)
         addSubview(label)
         unavailableLabel = label
+
+        if let retry {
+            retryAction = retry
+            let button = NSButton(title: "Try Again", target: self, action: #selector(didTapRetry))
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            addSubview(button)
+            retryButton = button
+        }
         needsLayout = true
+    }
+
+    @objc private func didTapRetry() {
+        let action = retryAction
+        // Tear the placeholder down first: a retry that succeeds must leave a browser behind, not a
+        // browser with "unavailable" still written across it, and a retry that fails calls
+        // `showUnavailable` again — which no-ops unless the previous label is gone.
+        unavailableLabel?.removeFromSuperview()
+        retryButton?.removeFromSuperview()
+        unavailableLabel = nil
+        retryButton = nil
+        retryAction = nil
+        action?()
     }
 }

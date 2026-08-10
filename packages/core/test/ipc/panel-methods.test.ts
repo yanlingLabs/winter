@@ -2,7 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@norma/protocol";
+import {
+  LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, SessionEvent,
+  PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH, type WritableSocket,
+} from "@norma/protocol";
 import { startIpcServer, REMOTE_ALLOWED_METHODS } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
@@ -375,6 +378,180 @@ describe("panel RPC methods (panel-shell T6)", () => {
     });
     expect(res.error).toBeTruthy();
     expect(res.error.code).toBe(ERR.NOT_FOUND);
+    c.close();
+  });
+
+  // -------------------------------------------------------------------------------------------
+  // panel-cef Task 6b: THE URL SCHEME POLICY — an allowlist (`http`/`https` only), enforced at the
+  // daemon as the fourth of four points (`isPersistablePanelWebUrl`, methods.ts, names all four).
+  //
+  // What it prevents is not "an odd string in a file": a tab's `url` is LOADED into a real Chromium
+  // browser on every restore, so a persisted `javascript:` would be re-executed against the page
+  // every time the session is reopened — forever, since sessions are user-delete-only.
+  // -------------------------------------------------------------------------------------------
+  for (const bad of [
+    "javascript:alert(document.cookie)",
+    "JavaScript:alert(1)",                       // scheme match is case-insensitive
+    "file:///Users/someone/.ssh/id_rsa",
+    "data:text/html,<script>fetch('//evil')</script>",
+    "blob:https://example.com/9d5b",             // an allowlist refuses what a denylist would miss
+    "about:blank",
+    "chrome://settings",
+    "not-a-url-at-all",                          // unparseable is refused too, not just wrong-scheme
+  ]) {
+    test(`panel.reportNavigation refuses ${bad.slice(0, 28)} — INVALID_PARAMS, nothing appended`, async () => {
+      const { store, socketPath, harnessToken } = await boot();
+      const c = await TestClient.connect(socketPath);
+      await c.hello(harnessToken, "panel-tester");
+      const sessionId = store.createSession("global");
+      const opened = await c.request(METHODS.panelOpenTab, { sessionId, kind: "web" });
+
+      const res = await c.request(METHODS.panelReportNavigation, {
+        sessionId, tabId: opened.result.tabId, url: bad, title: "T",
+      });
+      expect(res.error).toBeTruthy();
+      expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+      // The point of the whole policy: nothing reached the permanent log.
+      expect(store.read(sessionId).some((e) => e.type === "panel_tab_navigated")).toBe(false);
+      c.close();
+    });
+  }
+
+  test("panel.openTab refuses a non-http(s) url for a WEB tab", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "panel-tester");
+    const sessionId = store.createSession("global");
+
+    const res = await c.request(METHODS.panelOpenTab, { sessionId, kind: "web", url: "javascript:alert(1)" });
+    expect(res.error?.code).toBe(ERR.INVALID_PARAMS);
+    expect(store.read(sessionId).some((e) => e.type === "panel_tab_opened")).toBe(false);
+    c.close();
+  });
+
+  // The deliberate exemption, pinned so nobody "tightens" it into a regression: the guard is
+  // KIND-CONDITIONAL because a document/code/note tab legitimately carries a local path — the
+  // spec's LibreOffice and Monaco slots are exactly that. Restore-side filtering in the app
+  // (`PanelWebTab.makeContent`) is what makes the never-loaded guarantee hold regardless.
+  test("panel.openTab ALLOWS a file:// url for a non-web kind (the kind-conditional exemption)", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "panel-tester");
+    const sessionId = store.createSession("global");
+
+    const res = await c.request(METHODS.panelOpenTab, {
+      sessionId, kind: "document", url: "file:///Users/someone/report.odt",
+    });
+    expect(res.error).toBeUndefined();
+    const listed = await c.request(METHODS.panelList, { sessionId });
+    expect(listed.result.tabs[0].url).toBe("file:///Users/someone/report.odt");
+    c.close();
+  });
+
+  // -------------------------------------------------------------------------------------------
+  // panel-cef Task 6b: FIELD SIZE CAPS. A page <title> is chosen by whatever site the user visits
+  // and lands in an append-only, never-deleted JSONL that `panel.list` re-reads whole.
+  // -------------------------------------------------------------------------------------------
+  test("panel.reportNavigation refuses an over-cap title, and accepts one exactly AT the cap", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "panel-tester");
+    const sessionId = store.createSession("global");
+    const opened = await c.request(METHODS.panelOpenTab, { sessionId, kind: "web" });
+    const tabId = opened.result.tabId;
+
+    const over = await c.request(METHODS.panelReportNavigation, {
+      sessionId, tabId, url: "https://a.example", title: "x".repeat(PANEL_TITLE_MAX_LENGTH + 1),
+    });
+    expect(over.error?.code).toBe(ERR.INVALID_PARAMS);
+    expect(store.read(sessionId).some((e) => e.type === "panel_tab_navigated")).toBe(false);
+
+    const at = await c.request(METHODS.panelReportNavigation, {
+      sessionId, tabId, url: "https://a.example", title: "x".repeat(PANEL_TITLE_MAX_LENGTH),
+    });
+    expect(at.error).toBeUndefined();
+    c.close();
+  });
+
+  test("panel.reportNavigation refuses an over-cap url, and accepts one exactly AT the cap", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "panel-tester");
+    const sessionId = store.createSession("global");
+    const opened = await c.request(METHODS.panelOpenTab, { sessionId, kind: "web" });
+    const tabId = opened.result.tabId;
+
+    const prefix = "https://a.example/";
+    const atCap = prefix + "p".repeat(PANEL_URL_MAX_LENGTH - prefix.length);
+    expect(atCap.length).toBe(PANEL_URL_MAX_LENGTH);
+
+    const over = await c.request(METHODS.panelReportNavigation, {
+      sessionId, tabId, url: atCap + "p", title: "T",
+    });
+    expect(over.error?.code).toBe(ERR.INVALID_PARAMS);
+
+    const at = await c.request(METHODS.panelReportNavigation, { sessionId, tabId, url: atCap, title: "T" });
+    expect(at.error).toBeUndefined();
+    c.close();
+  });
+
+  // The caps bind on READ as well as on write — `SessionStore` parses every log line through the
+  // same `SessionEvent` schema `hub.append` writes through. That symmetry is what makes the cap a
+  // guarantee rather than a request, and it is also the reason LOWERING either number later is a
+  // data migration rather than an edit. Pinned so the coupling is visible.
+  test("the cap that bounds the write also bounds the read (one schema, both directions)", () => {
+    const base = { sessionId: "s1", seq: 1, ts: 0 };
+    const overLong = {
+      ...base, type: "panel_tab_navigated", tabId: "t1",
+      url: "https://a.example", title: "x".repeat(PANEL_TITLE_MAX_LENGTH + 1),
+    };
+    expect(SessionEvent.safeParse(overLong).success).toBe(false);
+    expect(SessionEvent.safeParse({ ...overLong, title: "x".repeat(PANEL_TITLE_MAX_LENGTH) }).success).toBe(true);
+  });
+
+  // The Swift half of the same two numbers lives in `PanelURLPolicy` (apple/Norma/Sources/AppShell/
+  // PanelURLPolicy.swift) with its own literal pin naming this one. Two hand-mirrored constants in
+  // two languages with no compile-time coupling is this repo's worst known drift class, and drift
+  // here is SILENT in both directions: the app's `try?`-wrapped RPC swallows the rejection, so a
+  // too-generous Swift cap simply stops recording navigations with no error anywhere.
+  test("the caps are the exact values the Swift mirror pins", () => {
+    expect(PANEL_URL_MAX_LENGTH).toBe(2048);
+    expect(PANEL_TITLE_MAX_LENGTH).toBe(256);
+  });
+
+  // -------------------------------------------------------------------------------------------
+  // panel-cef Task 6b: opening a tab ACTIVATES it (the wire decision Plan A left open).
+  // -------------------------------------------------------------------------------------------
+  test("panel.openTab appends panel_tab_activated too, so the new tab is the active one", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "panel-tester");
+    const sessionId = store.createSession("global");
+
+    const opened = await c.request(METHODS.panelOpenTab, { sessionId, kind: "web" });
+    const listed = await c.request(METHODS.panelList, { sessionId });
+    expect(listed.result.activeTabId).toBe(opened.result.tabId);
+
+    const activated = store.read(sessionId).filter((e) => e.type === "panel_tab_activated") as any[];
+    expect(activated.length).toBe(1);
+    expect(activated[0].tabId).toBe(opened.result.tabId);
+    c.close();
+  });
+
+  // The symptom this fixes, end to end: before it, opening a SECOND tab left the panel showing the
+  // first one, so pressing "+" again appeared to do nothing at all.
+  test("opening a second tab makes the SECOND one active", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "panel-tester");
+    const sessionId = store.createSession("global");
+
+    const first = await c.request(METHODS.panelOpenTab, { sessionId, kind: "web" });
+    const second = await c.request(METHODS.panelOpenTab, { sessionId, kind: "web" });
+
+    const listed = await c.request(METHODS.panelList, { sessionId });
+    expect(listed.result.tabs.map((t: any) => t.tabId)).toEqual([first.result.tabId, second.result.tabId]);
+    expect(listed.result.activeTabId).toBe(second.result.tabId);
     c.close();
   });
 

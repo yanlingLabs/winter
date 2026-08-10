@@ -4,7 +4,7 @@ import { z } from "zod";
 // from this file — methods.ts already imports from events.ts, so the reverse edge would be a module
 // cycle whose `z.enum(...)` const would be in the TDZ at events.ts's evaluation. Re-exported by the
 // package index either way, so `@norma/protocol` consumers see no difference.
-import { SessionEvent, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind } from "./events";
+import { SessionEvent, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind, PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH } from "./events";
 
 export const PROTOCOL_VERSION = 0;
 
@@ -1431,9 +1431,49 @@ export type SyncMemoryResult = z.infer<typeof SyncMemoryResult>;
 export const PanelTabSchema = z.object({
   tabId: z.string().min(1),
   kind: PanelTabKind,
-  url: z.string().optional(),
-  title: z.string().optional(),
+  url: z.string().max(PANEL_URL_MAX_LENGTH).optional(),
+  title: z.string().max(PANEL_TITLE_MAX_LENGTH).optional(),
 });
+
+/** panel-cef Task 6b — the URL SCHEME POLICY, and the one place it is expressed on the wire.
+ *
+ *  **Only `http` and `https` may be persisted as a web tab's address.** An ALLOWLIST, never a
+ *  denylist — the same discipline `HISTORY_EVENT_TYPES` is held to, and for the same reason: the
+ *  named hazards (`javascript:`, `file:`, `data:`) are the ones known TODAY, and a denylist silently
+ *  admits whatever Chromium adds next (`blob:`, `filesystem:`, `chrome:`, a custom scheme a plugin
+ *  registers). Anything not on the list is refused, so the set of dangerous schemes never has to be
+ *  enumerated correctly.
+ *
+ *  **What it prevents, concretely.** A tab's `url` is not just a label: `PanelWebTab.makeContent()`
+ *  (`apple/Norma/Sources/AppShell/PanelWebTab.swift`) loads it into a REAL Chromium browser on every
+ *  restore. A persisted `javascript:…` would therefore be re-executed against whatever page is
+ *  loaded, every time the session is reopened — for as long as the session exists, which is forever
+ *  (sessions are user-delete-only). `file://` would turn a stored string into a local-file read, and
+ *  `data:` into arbitrary attacker-authored markup with a persistent home.
+ *
+ *  **Where it is enforced — four places, one meaning.** Enforcement is deliberately not concentrated
+ *  here, because the guarantee that matters is "never LOADED", not "never stored":
+ *   1. **type-in** — the URL field refuses to navigate to anything else (`PanelURLPolicy
+ *      .normalizeTypedInput`, Swift);
+ *   2. **report** — the app never reports a committed navigation whose URL fails the policy, which
+ *      is also what keeps the built-in `data:` New Tab page out of the log entirely;
+ *   3. **restore** — `PanelWebTab.makeContent()` loads the start page instead of a stored URL that
+ *      fails the policy, so even an already-persisted bad value can never reach a web view;
+ *   4. **here** — the daemon refuses to record one, so the app is not the only thing standing
+ *      between a hostile URL and a permanent file.
+ *
+ *  **Deliberately NOT applied to `PanelOpenTabParams.url` unconditionally.** That parameter is
+ *  kind-generic, and a `.document`/`.code`/`.note` tab plausibly carries a local path or `file://`
+ *  URL — the spec's LibreOffice and Monaco slots are exactly that. The refinement below is therefore
+ *  KIND-CONDITIONAL: `web` tabs are held to the allowlist, other kinds are not. Restore-side
+ *  filtering (3) is what makes the guarantee hold regardless of how a value got into the log. */
+export function isPersistablePanelWebUrl(url: string): boolean {
+  // Scheme grammar per RFC 3986: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":". Matched on the raw
+  // string rather than via `new URL()` — a parser that throws on malformed input would make
+  // "unparseable" indistinguishable from "wrong scheme", and both must be refused anyway.
+  const scheme = /^([A-Za-z][A-Za-z0-9+\-.]*):/.exec(url)?.[1]?.toLowerCase();
+  return scheme === "http" || scheme === "https";
+}
 
 export const PanelListParams = z.object({ sessionId: z.string().min(1) });
 /** Mirrors `PanelTabState` (core/src/panel/store.ts) field-for-field — this IS the fold, verbatim. */
@@ -1449,8 +1489,20 @@ export const PanelListResult = z.object({
 export const PanelOpenTabParams = z.object({
   sessionId: z.string().min(1),
   kind: PanelTabKind,
-  url: z.string().optional(),
-  title: z.string().optional(),
+  url: z.string().max(PANEL_URL_MAX_LENGTH).optional(),
+  title: z.string().max(PANEL_TITLE_MAX_LENGTH).optional(),
+}).superRefine((p, ctx) => {
+  // Kind-conditional, for the reason `isPersistablePanelWebUrl`'s own doc gives: a `.document` or
+  // `.code` tab legitimately carries a local path, a `.web` tab never does. Written as a
+  // `superRefine` on the object rather than a `refine` on the field because the decision needs
+  // BOTH fields. B2's agent-facing browser tool reaches this same door, so it inherits the guard
+  // without a second policy of its own.
+  if (p.kind === "web" && p.url !== undefined && !isPersistablePanelWebUrl(p.url)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom, path: ["url"],
+      message: "a web tab's url must be http or https",
+    });
+  }
 });
 export const PanelOpenTabResult = z.object({ ok: z.literal(true), tabId: z.string().min(1) });
 
@@ -1463,12 +1515,18 @@ export const PanelActivateTabResult = z.object({ ok: z.literal(true) });
 /** The app is the SOLE witness of a committed top-level navigation (CEF fired it) — this is a FACT
  *  report, never a request, and has no `panel.navigate` counterpart (see this section's own doc
  *  comment above). `url` is required non-empty; `title` is required but MAY be empty (a page with no
- *  `<title>`), mirroring `PanelTabNavigatedEvent` (events.ts) exactly. */
+ *  `<title>`), mirroring `PanelTabNavigatedEvent` (events.ts) exactly.
+ *
+ *  panel-cef Task 6b: unconditionally scheme-checked, unlike `PanelOpenTabParams` above — a
+ *  navigation report can only ever come from a web view, so there is no `.document`-shaped exception
+ *  to preserve here. This is enforcement point (4) of the four `isPersistablePanelWebUrl` names. */
 export const PanelReportNavigationParams = z.object({
   sessionId: z.string().min(1),
   tabId: z.string().min(1),
-  url: z.string().min(1),
-  title: z.string(),
+  url: z.string().min(1).max(PANEL_URL_MAX_LENGTH).refine(isPersistablePanelWebUrl, {
+    message: "a reported navigation's url must be http or https",
+  }),
+  title: z.string().max(PANEL_TITLE_MAX_LENGTH),
 });
 export const PanelReportNavigationResult = z.object({ ok: z.literal(true) });
 

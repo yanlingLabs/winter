@@ -387,6 +387,38 @@ final class ShellSessionHost: ObservableObject {
         attachedSessionId ?? newChatBoundSessionId
     }
 
+    /// panel-cef Task 6b: the same target, readable from outside.
+    ///
+    /// Exposed — unlike `panelTargetSessionId`, which stays private — because the web tab's
+    /// navigation reporter must CAPTURE the session when its model is wired rather than read it
+    /// when a page finishes loading. A user who hops sessions mid-load would otherwise have the
+    /// report filed against whatever session had become current by then, cross-posting one
+    /// session's browsing into another's permanent log.
+    var panelSessionId: String? { panelTargetSessionId }
+
+    /// panel-cef Task 6b: `panel.reportNavigation` — **the RPC's first caller since Plan A defined
+    /// it.** A committed top-level navigation is a FACT that only the app can witness (CEF fired
+    /// it), which is why this method reports rather than requests and why no `panel.navigate`
+    /// exists as its counterpart.
+    ///
+    /// `sessionId` is passed in, not read from `panelTargetSessionId` here — see `panelSessionId`
+    /// just above for why that distinction is the whole point. Fire-and-forget like every other
+    /// panel verb: the daemon appends, the event comes back through the live pump, and `PanelStore`
+    /// applies it. Nothing is applied locally, so there is no optimistic second path to disagree
+    /// with the daemon's own answer.
+    ///
+    /// **Everything upstream has already been filtered** (`PanelURLPolicy.persistableNavigation` —
+    /// scheme allowlist, field caps), so a rejection here means the two sides have drifted. The
+    /// `try?` is deliberate and matches every other panel call, but it does make that drift silent:
+    /// the daemon-side pin test and the Swift-side pin test each name the other for this reason.
+    func reportPanelNavigation(sessionId: String, tabId: String, url: String, title: String) {
+        guard let client = managementClient else { return }
+        Task {
+            _ = try? await client.reportPanelNavigation(
+                sessionId: sessionId, tabId: tabId, url: url, title: title)
+        }
+    }
+
     /// The strip's `+`. Sends no `tabId` — the daemon mints one (`PanelOpenTabResult.tabId`),
     /// which this deliberately discards: nothing here needs it, and seeding it anywhere would be
     /// exactly the second, optimistic code path the design forbids.
@@ -467,6 +499,9 @@ final class ShellSessionHost: ObservableObject {
     /// attach.
     func closePanelTab(_ tabId: String) {
         guard let client = managementClient, let sessionId = panelTargetSessionId else { return }
+        // panel-cef Task 6b: the tab's chrome model goes with it. See `PanelWebTabModels.discard`
+        // for the bounded case this does NOT cover (a tab closed by some other producer).
+        PanelWebTabModels.discard(tabId: tabId)
         Task { @MainActor [weak self] in
             _ = try? await client.closePanelTab(sessionId: sessionId, tabId: tabId)
             if self?.attachedSessionId == nil { self?.refreshPanelTabs(for: sessionId) }

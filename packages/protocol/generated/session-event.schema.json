@@ -2411,10 +2411,12 @@
           ]
         },
         "url": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 2048
         },
         "title": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 256
         }
       },
       "required": [
@@ -2524,10 +2526,12 @@
         },
         "url": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 2048
         },
         "title": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 256
         }
       },
       "required": [
@@ -2577,7 +2581,8 @@
           ]
         },
         "url": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 2048
         },
         "deadlineMs": {
           "type": "integer",

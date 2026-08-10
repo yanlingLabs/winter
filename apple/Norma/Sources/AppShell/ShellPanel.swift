@@ -158,7 +158,7 @@ struct ShellPanel: View {
     }
 
     private var activeTabContent: PanelTabContent? {
-        shownTab.map(panelTabContent(for:))
+        shownTab.map { panelTabContent(for: $0, host: host, sessionId: host?.panelSessionId) }
     }
 
     var body: some View {
@@ -169,6 +169,15 @@ struct ShellPanel: View {
             VStack(spacing: 0) {
                 PanelTabStrip(
                     store: store,
+                    // panel-cef Task 6b: the strip highlights the tab the panel is actually
+                    // SHOWING, not `store.activeTabId` directly. The two are the same in the
+                    // ordinary case now that `panel.openTab` activates what it opens — but they
+                    // diverge for a session written before that (an open tab that was never
+                    // activated) and for the instant after the ACTIVE tab is closed, where
+                    // `foldPanelTabs` clears `activeTabId` by design. Deriving both from one lookup
+                    // is what retires Task 6a's named cost: "the shown tab is not the highlighted
+                    // one" cannot happen, because there is only one answer to which tab that is.
+                    shownTabId: shownTab?.tabId,
                     presentation: $presentation,
                     onOpenTab: {
                         // panel-shell T15: the new-chat page's own "+" BINDS rather than navigating
@@ -273,6 +282,10 @@ struct ShellPanel: View {
 /// bar with room to spare.
 struct PanelTabStrip: View {
     @ObservedObject var store: PanelStore
+    /// panel-cef Task 6b: which tab is HIGHLIGHTED — the one the panel renders, passed in rather
+    /// than re-derived here, so the strip and the content slot can never disagree. Defaulted to
+    /// `nil` for the direct-construction call sites in tests, which then highlight nothing.
+    var shownTabId: String? = nil
     @Binding var presentation: PanelPresentation
     var onOpenTab: () -> Void = {}
     var onActivateTab: (String) -> Void = { _ in }
@@ -294,7 +307,7 @@ struct PanelTabStrip: View {
                             PanelTabPill(
                                 tab: tab,
                                 width: pillWidth,
-                                isActive: tab.tabId == store.activeTabId,
+                                isActive: tab.tabId == shownTabId,
                                 onActivate: { onActivateTab(tab.tabId) },
                                 onClose: { onCloseTab(tab.tabId) }
                             )

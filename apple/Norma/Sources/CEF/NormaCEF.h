@@ -63,6 +63,92 @@ const char *NormaCEFLastError(void);
 /// a view torn down before then simply drops out.
 void NormaCEFCreateBrowser(NSView *parent, const char *url);
 
+#pragma mark - Task 6b: the browser chrome's two channels
+
+/// panel-cef Task 6b — a LIVE snapshot of one browser's chrome-relevant state.
+///
+/// This is the channel that feeds the URL field and the back/forward/reload buttons, and it is
+/// deliberately SEPARATE from the navigation channel below. The two answer different questions and
+/// must not be conflated:
+///
+///   * this one is what the user is looking at RIGHT NOW. It fires for same-page navigations
+///     (fragments, `history.pushState`) and for every loading-state flip, because a URL field that
+///     did not follow a `#section` jump would be visibly wrong;
+///   * the other is what gets WRITTEN DOWN, forever, in a session log — and that is bounded to
+///     committed top-level navigations precisely so it does NOT include the above.
+@interface NormaCEFBrowserState : NSObject
+/// The main frame's current address — including same-page changes. NEVER persisted from here.
+@property(nonatomic, readonly, copy) NSString *url;
+/// The page's current title. May be empty (a page with no `<title>`).
+@property(nonatomic, readonly, copy) NSString *title;
+@property(nonatomic, readonly) BOOL isLoading;
+@property(nonatomic, readonly) BOOL canGoBack;
+@property(nonatomic, readonly) BOOL canGoForward;
+@end
+
+/// Observe the live state of the browser hosted by `parent`. Called on the MAIN thread (CEF's UI
+/// thread IS the main thread under the external pump). Pass `nil` to stop observing.
+///
+/// Registered against the CONTAINER VIEW rather than a browser id, because the container exists
+/// before the browser does — creation is asynchronous and may be queued behind
+/// `OnContextInitialized` — so a registration made at `makeNSView` time is already in place
+/// whenever the browser finally arrives.
+void NormaCEFSetStateObserver(NSView *parent, void (^observer)(NormaCEFBrowserState *state));
+
+/// Observe COMMITTED TOP-LEVEL NAVIGATIONS of the browser hosted by `parent` — the producer behind
+/// `panel.reportNavigation`, which had no caller at all from Plan A until this task.
+///
+/// **What "committed top-level navigation" resolves to in CEF, and why it is not a filter we
+/// maintain:** this fires from `CefLoadHandler::OnLoadEnd` gated on `frame->IsMain()`.
+/// `include/cef_load_handler.h` states the exclusions itself — the callback arrives "after a
+/// navigation has been committed", and "will not be called for same page navigations (fragments,
+/// history state, etc.) or for navigations that fail or are canceled before commit". So:
+///
+///   * **no subframes** — `IsMain()`. An ad iframe navigating itself 40 times is invisible here;
+///   * **no in-flight redirects** — a server redirect never commits an intermediate URL, so only
+///     the final destination is ever seen. (A *JavaScript* or `<meta>` redirect genuinely does
+///     commit an intermediate page, and is correctly reported as its own navigation — it is a real
+///     page the user visited, however briefly.);
+///   * **no fragment changes** — CEF's own documented exclusion, above.
+///
+/// That bound is the whole reason a browsing session costs ~10-50 events rather than thousands in a
+/// JSONL that is replayed on every session open and re-read whole by `panel.list`.
+///
+/// Consecutive duplicates are suppressed: a reload, or any commit landing on the same url+title as
+/// the last one reported, does not fire again. `NormaCEFSeedTabState` below is what extends that
+/// suppression across a browser's whole lifetime rather than just one instance of it.
+void NormaCEFSetNavigationObserver(NSView *parent, void (^observer)(NSString *url, NSString *title));
+
+/// Prime a tab with what the daemon ALREADY knows about it, before its browser is created. Two
+/// effects, both of which exist because **one browser per tab is created and destroyed on every tab
+/// SWITCH** (`PanelCEFView` is `.id`'d by tab):
+///
+///  1. **It suppresses the restore re-report.** A fresh browser has an empty dedupe memory, so
+///     loading the tab's own persisted URL commits, fires `OnLoadEnd`, and reports a
+///     `panel_tab_navigated` byte-identical to the one already in the log. A session spent flipping
+///     between two tabs would append an event per flip — quietly erasing the ~10-50 bound the
+///     navigation channel exists to hold, and doing it invisibly.
+///  2. **It stops the URL field flashing empty.** The state observer publishes the current snapshot
+///     the moment it is registered, and for a brand-new container that snapshot is blank; seeding
+///     means the chrome shows the tab's known address from the first frame instead of going empty
+///     and refilling a second later.
+///
+/// Pass the URL the browser is actually being created at — not the tab's raw stored value, if the
+/// two differ because scheme policy refused it.
+void NormaCEFSeedTabState(NSView *parent, const char *url, const char *title);
+
+#pragma mark - Task 6b: the chrome's verbs
+
+/// Back / forward / reload / stop, and "go to what the user typed". All are no-ops when `parent`
+/// hosts no browser, and none of them validate `url` — **scheme policy lives in Swift**
+/// (`PanelURLPolicy`), in one place, applied before anything reaches here. A C seam that silently
+/// second-guessed its caller would make the real policy impossible to locate.
+void NormaCEFGoBack(NSView *parent);
+void NormaCEFGoForward(NSView *parent);
+void NormaCEFReload(NSView *parent);
+void NormaCEFStopLoad(NSView *parent);
+void NormaCEFLoadURL(NSView *parent, const char *url);
+
 /// The ONE answer `CefLifeSpanHandler::DoClose` gives, exported so a test can read the VALUE rather
 /// than infer it from a log string.
 ///

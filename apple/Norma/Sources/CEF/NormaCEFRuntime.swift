@@ -36,6 +36,39 @@ enum NormaCEFRuntime {
 
     private(set) static var state: State = .notStarted
 
+    /// panel-cef Task 6b: is it worth offering the panel's **Try again** button?
+    ///
+    /// `.failed` was STICKY for the whole process lifetime — `ensureInitialized` returns early on
+    /// it and nothing ever cleared it — so a single transient startup failure disabled the browser
+    /// until the app was relaunched. The failures that actually occur are exactly the transient
+    /// kind: Chromium takes an exclusive lock on `root_cache_path`, so `CefInitialize` fails with
+    /// **exit code 24** whenever a second copy of the app is running, and a `kill -9` leaves a stale
+    /// `SingletonLock` behind. Both are cured by closing the other copy and trying again.
+    ///
+    /// Two failures are NOT retryable and must not offer a button that can only fail again:
+    ///  - **after `CefShutdown`** — terminal for the process by CEF's own design, and
+    ///    `NormaCEFInitialize` refuses outright;
+    ///  - **under XCTest** — the structural guard that keeps Chromium out of the suite; a retry door
+    ///    that could re-enter it would defeat the guard's whole purpose.
+    /// A missing helper bundle is retryable in principle but never in practice (it is a property of
+    /// the build); it is left retryable rather than special-cased, since one extra failed attempt
+    /// costs nothing and the alternative is a list of strings to keep in step.
+    @MainActor
+    static var isRetryable: Bool {
+        guard case .failed = state else { return false }
+        return !didShutdown && !AppDelegate.isRunningUnitTests
+    }
+
+    /// Clear a `.failed` state so the next `ensureInitialized()` genuinely tries again. A no-op in
+    /// every other state — in particular it can never un-ready a running CEF or resurrect one that
+    /// has been shut down (`isRetryable` gates the caller, and `NormaCEFInitialize` refuses after
+    /// shutdown regardless, so this cannot be misused into a crash inside CEF).
+    @MainActor
+    static func clearFailure() {
+        guard isRetryable else { return }
+        state = .notStarted
+    }
+
     /// Bring CEF up if it is not up already. Main thread only. Returns `true` when a browser may
     /// be created. NEVER traps and never exits — every failure lands in `.failed` and the panel
     /// renders that string.

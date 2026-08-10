@@ -1,6 +1,7 @@
 #import "NormaCEF.h"
 
 #import <Cocoa/Cocoa.h>
+#import <objc/runtime.h>
 
 #include <climits>
 #include <cstdarg>
@@ -49,9 +50,11 @@
 //   3. THE RE-ENTRANCY REPOST. `CefDoMessageLoopWork()` re-enters this pump through paint and IPC
 //      callbacks; a discarded call must be REPOSTED, never dropped (`PerformMessageLoopWork`).
 //
-// WHAT THIS FILE DELIBERATELY DOES NOT DO: navigate. Task 6a is "a page renders in the panel".
-// Back/forward/reload, the URL field, `panel.reportNavigation`, field-size caps and URL-scheme
-// policy are all Task 6b. A page that renders and cannot yet be navigated is the correct end state.
+// TASK 6b ADDS: the two observer channels behind the browser chrome (live state for the URL field
+// and the buttons; committed top-level navigations for `panel.reportNavigation`), the chrome's
+// verbs, and the logging-privacy treatment below. URL-SCHEME POLICY AND FIELD CAPS DELIBERATELY DO
+// NOT LIVE HERE — they are Swift's (`PanelURLPolicy`), expressed once, because a C seam that
+// silently second-guessed its caller would make the real policy impossible to locate.
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -59,10 +62,18 @@
 
 namespace {
 
-// stderr, unconditionally. Launched by LaunchServices this goes nowhere; launched by explicit path
-// from a terminal — the only way this branch's dev app is ever started — it is the diagnostic
-// channel for `LoadInMain`, `CefInitialize` and the versioned-framework resource paths, none of
-// which had ever run inside Norma before this task.
+// stderr. Launched by LaunchServices this goes nowhere; launched by explicit path from a terminal —
+// the only way this branch's dev app is ever started — it is the diagnostic channel for
+// `LoadInMain`, `CefInitialize` and the versioned-framework resource paths, none of which had ever
+// run inside Norma before Task 6a.
+//
+// **Task 6b: URLs are logged in DEBUG BUILDS ONLY, and never in a shipped one.** Every call site
+// below that would name a page splits into a `#if DEBUG` arm carrying the URL and a release arm
+// that does not. "stderr goes nowhere under LaunchServices" is a true statement about a default,
+// not a privacy guarantee — it is one `open -W` or one crash-reporter capture away from being
+// false — and a user's browsing history is exactly the class of data this repo keeps off disk by
+// construction (provider `encrypted_content` has the same rule). Chromium's own logging is closed
+// off separately, at `CefSettings.log_severity`/`log_file` in `NormaCEFInitialize`.
 void Log(const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
@@ -114,6 +125,111 @@ std::vector<CefRefPtr<CefBrowser>> g_browsers;
 @end
 
 static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
+
+// ---------------------------------------------------------------------------
+// Task 6b: the per-tab bridge — live state, the two observers, and the dedupe memory
+// ---------------------------------------------------------------------------
+
+@interface NormaCEFBrowserState ()
+@property(nonatomic, copy) NSString *url;
+@property(nonatomic, copy) NSString *title;
+@property(nonatomic) BOOL isLoading;
+@property(nonatomic) BOOL canGoBack;
+@property(nonatomic) BOOL canGoForward;
+@end
+
+@implementation NormaCEFBrowserState
+@end
+
+/// Everything Task 6b tracks about one panel tab's browser, hung off the CONTAINER VIEW rather
+/// than the browser.
+///
+/// Keyed by the container for three reasons, each of which the browser-keyed alternative gets
+/// wrong: the container exists BEFORE the browser (creation is async and can queue behind
+/// `OnContextInitialized`, so observers registered at `makeNSView` time have nowhere else to live);
+/// the container OUTLIVES a close, so a late callback has somewhere to land harmlessly; and the
+/// dedupe memory below has to survive the browser entirely — `PanelCEFView` is `.id`'d by tab, so
+/// every tab SWITCH destroys one browser and builds another, and a per-browser memory would forget
+/// what was already reported on every single flip.
+///
+/// Attached with `objc_setAssociatedObject`, so its lifetime is the view's and there is no global
+/// table to leak or to sweep.
+@interface NormaCEFTabBridge : NSObject
+@property(nonatomic, copy) void (^stateObserver)(NormaCEFBrowserState *);
+@property(nonatomic, copy) void (^navigationObserver)(NSString *, NSString *);
+@property(nonatomic, copy) NSString *url;
+@property(nonatomic, copy) NSString *title;
+@property(nonatomic) BOOL isLoading;
+@property(nonatomic) BOOL canGoBack;
+@property(nonatomic) BOOL canGoForward;
+/// The last (url, title) pair handed to `navigationObserver`, or seeded from the daemon's own
+/// record by `NormaCEFSeedReportedNavigation`. Consecutive duplicates are suppressed against this.
+@property(nonatomic, copy) NSString *lastReportedURL;
+@property(nonatomic, copy) NSString *lastReportedTitle;
+@end
+
+@implementation NormaCEFTabBridge
+- (instancetype)init {
+  if ((self = [super init])) {
+    _url = @"";
+    _title = @"";
+  }
+  return self;
+}
+@end
+
+namespace {
+
+const char kTabBridgeKey = 'n';
+
+/// The bridge for `container`, created on first use. `nil` only for a nil view.
+NormaCEFTabBridge *BridgeFor(NSView *container) {
+  if (container == nil) {
+    return nil;
+  }
+  NormaCEFTabBridge *bridge = objc_getAssociatedObject(container, &kTabBridgeKey);
+  if (bridge == nil) {
+    bridge = [[NormaCEFTabBridge alloc] init];
+    objc_setAssociatedObject(container, &kTabBridgeKey, bridge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  }
+  return bridge;
+}
+
+/// The bridge for a browser — CEF's own view is a SUBVIEW of the container (`SetAsChild`), so the
+/// relation is descendancy and the walk goes upward. Returns `nil` (never creates) when no ancestor
+/// carries one: a browser whose panel tab has already been dismantled is exactly that case, and it
+/// must be silent rather than resurrecting state for a view nobody is watching.
+NormaCEFTabBridge *BridgeForBrowser(CefRefPtr<CefBrowser> browser) {
+  if (!browser || !browser->GetHost()) {
+    return nil;
+  }
+  NSView *view = CAST_CEF_WINDOW_HANDLE_TO_NSVIEW(browser->GetHost()->GetWindowHandle());
+  for (NSView *v = view; v != nil; v = [v superview]) {
+    NormaCEFTabBridge *bridge = objc_getAssociatedObject(v, &kTabBridgeKey);
+    if (bridge != nil) {
+      return bridge;
+    }
+  }
+  return nil;
+}
+
+/// Push the live snapshot to whoever is watching. Main thread by construction — CEF's UI thread IS
+/// the main thread under the external pump — so the observer runs synchronously and SwiftUI's
+/// `@Published` writes stay on the main actor.
+void NotifyState(NormaCEFTabBridge *bridge) {
+  if (bridge == nil || bridge.stateObserver == nil) {
+    return;
+  }
+  NormaCEFBrowserState *state = [[NormaCEFBrowserState alloc] init];
+  state.url = bridge.url ?: @"";
+  state.title = bridge.title ?: @"";
+  state.isLoading = bridge.isLoading;
+  state.canGoBack = bridge.canGoBack;
+  state.canGoForward = bridge.canGoForward;
+  bridge.stateObserver(state);
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // The external message pump
@@ -300,16 +416,23 @@ void ReplayPendingBrowsers();
 /// Here they log; Task 6b is where a visible retry belongs, alongside the chrome that would host it.
 class NormaClient : public CefClient,
                     public CefLifeSpanHandler,
-                    public CefLoadHandler {
+                    public CefLoadHandler,
+                    public CefDisplayHandler {
  public:
   NormaClient() = default;
 
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
+  // Task 6b: address and title, for the URL field. NOT for the log — see OnLoadEnd.
+  CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     g_browsers.push_back(browser);
+    // Task 6b: a browser that exists but has not navigated yet still has chrome to draw (both
+    // arrows disabled, no address). Pushing the empty snapshot now means the chrome's state comes
+    // from exactly one channel from the very first frame, instead of a default it invents itself.
+    NotifyState(BridgeForBrowser(browser));
     Log("browser created (id=%d, live browsers=%zu)", browser->GetIdentifier(), g_browsers.size());
   }
 
@@ -386,13 +509,82 @@ class NormaClient : public CefClient,
     Log("browser closed (id=%d, live browsers=%zu)", browser->GetIdentifier(), g_browsers.size());
   }
 
+  /// Task 6b: the ONE signal the chrome's buttons need, delivered by CEF already computed — "will
+  /// be called before any calls to OnLoadStart and after all calls to OnLoadError and/or
+  /// OnLoadEnd" (`cef_load_handler.h`). Browser-wide, not per-frame, which is exactly right for a
+  /// toolbar.
+  void OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
+                            bool isLoading,
+                            bool canGoBack,
+                            bool canGoForward) override {
+    CEF_REQUIRE_UI_THREAD();
+    NormaCEFTabBridge *bridge = BridgeForBrowser(browser);
+    if (bridge == nil) {
+      return;
+    }
+    bridge.isLoading = isLoading;
+    bridge.canGoBack = canGoBack;
+    bridge.canGoForward = canGoForward;
+    NotifyState(bridge);
+  }
+
+  /// Task 6b: the commit point. Used ONLY to forget the outgoing page's title — not to report.
+  ///
+  /// Without this clear, a page with no `<title>` of its own inherits whatever the PREVIOUS page
+  /// was called: `OnTitleChange` simply never fires for it, so the cache would still hold the old
+  /// value when `OnLoadEnd` reads it, and the wrong title would be written to the session log
+  /// permanently. Chromium fires an early `OnTitleChange` carrying a URL-derived placeholder for
+  /// most navigations, which is what fills the gap in the ordinary case.
+  void OnLoadStart(CefRefPtr<CefBrowser> browser,
+                   CefRefPtr<CefFrame> frame,
+                   TransitionType transition_type) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (!frame->IsMain()) {
+      return;
+    }
+    NormaCEFTabBridge *bridge = BridgeForBrowser(browser);
+    if (bridge == nil) {
+      return;
+    }
+    bridge.title = @"";
+    NotifyState(bridge);
+  }
+
+  /// **THE PRODUCER `panel.reportNavigation` never had.** See `NormaCEFSetNavigationObserver`'s
+  /// header doc for why `OnLoadEnd` + `IsMain()` is precisely "committed top-level navigation" in
+  /// CEF's own words, and which three classes of event it excludes by contract rather than by a
+  /// filter maintained here.
   void OnLoadEnd(CefRefPtr<CefBrowser> browser,
                  CefRefPtr<CefFrame> frame,
                  int httpStatusCode) override {
     CEF_REQUIRE_UI_THREAD();
-    if (frame->IsMain()) {
-      Log("load end (status=%d) %s", httpStatusCode, frame->GetURL().ToString().c_str());
+    if (!frame->IsMain()) {
+      return;
     }
+    NSString *url = [NSString stringWithUTF8String:frame->GetURL().ToString().c_str()] ?: @"";
+    NormaCEFTabBridge *bridge = BridgeForBrowser(browser);
+    if (bridge != nil) {
+      bridge.url = url;
+      NSString *title = bridge.title ?: @"";
+      // Consecutive-duplicate suppression, seeded across browser lifetimes by
+      // `NormaCEFSeedReportedNavigation`. A reload, or a re-created browser landing back on the
+      // page the daemon already recorded, adds nothing to the log.
+      const BOOL isRepeat = [url isEqualToString:bridge.lastReportedURL ?: @""] &&
+                            [title isEqualToString:bridge.lastReportedTitle ?: @""];
+      if (!isRepeat && bridge.navigationObserver != nil && url.length > 0) {
+        bridge.lastReportedURL = url;
+        bridge.lastReportedTitle = title;
+        bridge.navigationObserver(url, title);
+      }
+      NotifyState(bridge);
+    }
+#if DEBUG
+    Log("load end (status=%d) %s", httpStatusCode, url.UTF8String);
+#else
+    // Task 6b: the page's address is a browsing-history fact and never reaches a shipped build's
+    // stderr. The status code alone still says whether the load worked.
+    Log("load end (status=%d)", httpStatusCode);
+#endif
   }
 
   void OnLoadError(CefRefPtr<CefBrowser> browser,
@@ -404,8 +596,42 @@ class NormaClient : public CefClient,
     if (errorCode == ERR_ABORTED) {
       return;  // a superseded navigation, not a failure — Task 1 nearly misdiagnosed exactly this
     }
+#if DEBUG
     Log("LOAD ERROR %d (%s) for %s", errorCode, errorText.ToString().c_str(),
         failedUrl.ToString().c_str());
+#else
+    Log("LOAD ERROR %d (%s)", errorCode, errorText.ToString().c_str());
+#endif
+  }
+
+  // MARK: CefDisplayHandler — Task 6b's LIVE channel (never the persisted one)
+
+  /// Fires for same-page navigations too (a `#fragment` jump, `history.pushState`), which is
+  /// exactly why the URL field reads from here and the session log does not: a field that did not
+  /// follow a fragment would be visibly wrong, and a log that did would be thousands of entries.
+  void OnAddressChange(CefRefPtr<CefBrowser> browser,
+                       CefRefPtr<CefFrame> frame,
+                       const CefString &url) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (!frame->IsMain()) {
+      return;
+    }
+    NormaCEFTabBridge *bridge = BridgeForBrowser(browser);
+    if (bridge == nil) {
+      return;
+    }
+    bridge.url = [NSString stringWithUTF8String:url.ToString().c_str()] ?: @"";
+    NotifyState(bridge);
+  }
+
+  void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString &title) override {
+    CEF_REQUIRE_UI_THREAD();
+    NormaCEFTabBridge *bridge = BridgeForBrowser(browser);
+    if (bridge == nil) {
+      return;
+    }
+    bridge.title = [NSString stringWithUTF8String:title.ToString().c_str()] ?: @"";
+    NotifyState(bridge);
   }
 
  private:
@@ -565,6 +791,32 @@ BOOL NormaCEFInitialize(int argc,
   // base path it is given, so the four suffixed bundles are still reached from this one setting.
   CefString(&settings.browser_subprocess_path).FromString(subprocessPath);
 
+  // Task 6b — CHROMIUM'S OWN LOGGING, set deliberately rather than inherited.
+  //
+  // Both fields matter and neither default is acceptable here:
+  //
+  //   * `log_file` empty means Chromium writes `debug.log` **into the process's current working
+  //     directory** — for an app launched from a terminal that is wherever the developer happened
+  //     to be, and for a LaunchServices launch it is `/`. A file of network errors (each naming a
+  //     URL) landing in an arbitrary directory is not something to leave to a default. It is
+  //     pointed inside the CEF profile directory, which is already bundle-id-scoped and already
+  //     where Chromium's other state lives.
+  //   * `log_severity` defaults to INFO, which is chatty and URL-bearing. A SHIPPED build gets
+  //     `LOGSEVERITY_DISABLE`: no Chromium log file is created at all and nothing reaches stderr,
+  //     which is the only form of "browsing history is not written down" that does not depend on
+  //     where stderr happens to be pointed. Debug keeps WARNING — enough to see the GPU-process and
+  //     resource-loading failures Task 6a needed, without INFO's per-request noise.
+  //
+  // Explicit command-line switches still win: `--enable-logging=stderr --v=1`, the diagnostic
+  // channel every task on this branch has used, is unaffected in Debug (verified by running it).
+  const std::string logPath = std::string(rootCachePath) + "/chromium-debug.log";
+  CefString(&settings.log_file).FromString(logPath);
+#if DEBUG
+  settings.log_severity = LOGSEVERITY_WARNING;
+#else
+  settings.log_severity = LOGSEVERITY_DISABLE;
+#endif
+
   g_app = new NormaApp();
   g_client = new NormaClient();
 
@@ -624,7 +876,76 @@ void NormaCEFCreateBrowser(NSView *parent, const char *url) {
   request.parent = parent;
   request.url = [NSString stringWithUTF8String:target.c_str()];
   [g_pending addObject:request];
+#if DEBUG
   Log("queued browser for %s (context not up yet)", target.c_str());
+#else
+  Log("queued a browser (context not up yet)");
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Task 6b: the observers, the dedupe seed, and the chrome's verbs
+// ---------------------------------------------------------------------------
+
+void NormaCEFSetStateObserver(NSView *parent, void (^observer)(NormaCEFBrowserState *state)) {
+  NormaCEFTabBridge *bridge = BridgeFor(parent);
+  bridge.stateObserver = observer;
+  // Deliver the current snapshot immediately rather than waiting for the next CEF callback. A tab
+  // switched away from and back to re-registers against a container whose state is already known,
+  // and without this the chrome would sit blank until the page happened to change something.
+  if (observer != nil) {
+    NotifyState(bridge);
+  }
+}
+
+void NormaCEFSetNavigationObserver(NSView *parent, void (^observer)(NSString *url, NSString *title)) {
+  BridgeFor(parent).navigationObserver = observer;
+}
+
+void NormaCEFSeedTabState(NSView *parent, const char *url, const char *title) {
+  NormaCEFTabBridge *bridge = BridgeFor(parent);
+  NSString *seedURL = url != nullptr ? [NSString stringWithUTF8String:url] : @"";
+  NSString *seedTitle = title != nullptr ? [NSString stringWithUTF8String:title] : @"";
+  // The dedupe memory (effect 1) and the displayed values (effect 2) — see the header doc.
+  bridge.lastReportedURL = seedURL;
+  bridge.lastReportedTitle = seedTitle;
+  bridge.url = seedURL;
+  bridge.title = seedTitle;
+}
+
+void NormaCEFGoBack(NSView *parent) {
+  if (auto browser = BrowserForParent(parent)) {
+    browser->GoBack();
+  }
+}
+
+void NormaCEFGoForward(NSView *parent) {
+  if (auto browser = BrowserForParent(parent)) {
+    browser->GoForward();
+  }
+}
+
+void NormaCEFReload(NSView *parent) {
+  if (auto browser = BrowserForParent(parent)) {
+    browser->Reload();
+  }
+}
+
+void NormaCEFStopLoad(NSView *parent) {
+  if (auto browser = BrowserForParent(parent)) {
+    browser->StopLoad();
+  }
+}
+
+void NormaCEFLoadURL(NSView *parent, const char *url) {
+  if (url == nullptr || *url == '\0') {
+    return;
+  }
+  if (auto browser = BrowserForParent(parent)) {
+    // No validation here on purpose — `PanelURLPolicy` (Swift) is the one place the scheme
+    // allowlist is expressed, and it has already run at the field. See this function's header doc.
+    browser->GetMainFrame()->LoadURL(CefString(url));
+  }
 }
 
 BOOL NormaCEFDoCloseIsHandledByHost(void) {
