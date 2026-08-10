@@ -330,8 +330,9 @@ void NormaCEFCloseAllBrowsers(void);
 /// outcome and the renderer was reclaimed by process exit rather than by the close.
 ///
 /// browser-runtime T7 measured that at the runtime's full world — 8 browsers, 7 of them parked with
-/// their containers still held by `BrowserRuntime.containers`, every one playing audio — and at a
-/// quit racing creations still inside CEF's queue. **N = 0 in both, and the drain used `0/50` of its
+/// their containers still held by `BrowserRuntime.containers` (and playing: `playing=7 refused=0`,
+/// sampled per tab, under `--autoplay-policy=no-user-gesture-required`) — and at a quit racing
+/// creations still inside CEF's queue. **N = 0 in both, and the drain used `0/50` of its
 /// turns in both**, because the pool's `dealloc`s complete the closes synchronously before the loop
 /// is reached. The implementation states the whole contract, including the one nonzero that is
 /// reachable in principle and has never been observed; expect 0 on every healthy quit.

@@ -2045,8 +2045,13 @@ void NormaCEFShutdown(void) {
   // `-removeFromSuperview` FIRST: the container's retain on CEF's view is severed whether or not the
   // container itself ever dies.
   //
-  // Measured with 8 live browsers, 7 of them parked and every one of them playing audio
-  // (`SpikeCloseLeak`, `NORMA_SPIKE_CLOSE_BROWSERS=8`): all eight closes completed —
+  // Measured with 8 live browsers, 7 of them parked (`SpikeCloseLeak`,
+  // `NORMA_SPIKE_CLOSE_BROWSERS=8`), and the parked pages' playback SAMPLED rather than assumed —
+  // `PARK-AUDIO parked=7 playing=7 refused=0`, read off each tab's own model at quit, with
+  // `--autoplay-policy=no-user-gesture-required` on the command line (without it a parked page in a
+  // hidden window is the likeliest thing in the app to be refused autoplay, and the run says so
+  // either way: nothing here depends on playback, which is why it is reported rather than required).
+  // All eight closes completed —
   // `browser closed (id=1, live browsers=0)` ahead of `shutting down (0 browser(s) still open)` —
   // **in `0/50` drain turns.** Zero is not a rounding: `g_browsers` was already empty at the loop's
   // first check, because the `dealloc`s the pool pops run `WindowDestroyed()` → `DestroyBrowser()` →
