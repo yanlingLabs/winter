@@ -122,7 +122,8 @@ enum NormaCEFRuntime {
     /// three members are that door, and they are ordinary API rather than test-only hooks.
     static var isInitialized: Bool { NormaCEFIsInitialized() }
 
-    /// Whether `CefShutdown` has run. Terminal: CEF cannot be initialised again afterwards.
+    /// Whether `CefShutdown` has actually run. Terminal: CEF cannot be initialised again
+    /// afterwards. Never true for the never-initialised no-op below — see `NormaCEF.h`.
     static var didShutdown: Bool { NormaCEFDidShutdown() }
 
     /// The answer `CefLifeSpanHandler::DoClose` gives — see `NormaCEF.h` for why it must be `true`
@@ -131,8 +132,10 @@ enum NormaCEFRuntime {
     /// the C function directly.
     static var doCloseIsHandledByHost: Bool { NormaCEFDoCloseIsHandledByHost() }
 
-    /// `CefShutdown`, at the point of no return. Safe no-op if CEF was never initialised — which is
-    /// what lets `NormaCEFInitialize`'s own `NSApplicationWillTerminateNotification` subscription be
+    /// `CefShutdown`, at the point of no return. Safe no-op if CEF was never initialised — and a
+    /// no-op that leaves `didShutdown` false, so running it in the unit-test host does not latch
+    /// every later test into "CEF is finished" (whole-branch F10). That is what lets
+    /// `NormaCEFInitialize`'s own `NSApplicationWillTerminateNotification` subscription be
     /// unconditional, and what lets the unit-test host run the termination path at all.
     static func shutdown() { NormaCEFShutdown() }
 

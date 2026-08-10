@@ -1,6 +1,5 @@
 #import "NormaApplication.h"
 
-#import "NormaCEF.h"
 #import "include/cef_application_mac.h"
 
 // panel-cef Task 3, commit 2 of 2 — the CEF conformance, and nothing else.
@@ -21,7 +20,10 @@
 //   1. It does not touch `-terminate:`. The pump report's scratch subclass overrode it to call
 //      `CefShutdown` first; there is no CEF to shut down yet, and Norma's termination path is
 //      already non-trivial (`AppDelegate.applicationShouldTerminate`, the updater's idle gate).
-//      That override is OWED TO THE TASK THAT CALLS `CefInitialize`, and belongs with it.
+//      That override was OWED TO THE TASK THAT CALLS `CefInitialize` — Task 6a took it, and the
+//      whole-branch review took it back out. **This file still has no `-terminate:` override, now
+//      as a RULING rather than a deferral**; see the block at the bottom for why, and for the test
+//      that keeps it that way.
 //
 //   2. It does not require CEF to be present, loaded, or initialised. Verified rather than
 //      assumed: `CefScopedSendingEvent` is defined inline in the header and compiles to nothing
@@ -53,32 +55,43 @@
   [super sendEvent:event];
 }
 
-// panel-cef Task 6a — the override Task 3 deliberately deferred, now that CEF actually runs.
+// **THERE IS DELIBERATELY NO `-terminate:` OVERRIDE, and re-adding one is a regression.**
+// `CEFRuntimeTests.testTerminateIsNotOverriddenBecauseAQuitHereCanBeCANCELLED` is the tripwire.
 //
+// Task 6a added one — `NormaCEFCloseAllBrowsers(); [super terminate:sender];` — reasoning that
 // cefsimple overrides `-terminate:` because Cocoa's default calls `exit()` and skips the rest of
-// the run loop, which would bypass CEF's orderly shutdown entirely. Norma needs the same hook, but
-// NOT the same body, and the difference is a real defect in the literal instruction ("`-terminate:`
-// -> `CefShutdown`") this task inherited:
+// the run loop, so an embedder needs a hook there. Two-thirds of that reasoning survives and the
+// conclusion does not:
 //
-//   **A terminate can be CANCELLED here.** `AppDelegate.applicationShouldTerminate` answers
-//   `.terminateCancel` for ⌘Q and for a dock-tile quit — only the menu bar's "Quit Norma" and a
-//   system-initiated logout/shutdown are real quits (`terminateDecision`, Lifecycle T3). And
-//   `CefShutdown` is TERMINAL for a process: CEF cannot be initialised again afterwards. Calling it
-//   from here would leave a perfectly alive Norma with a browser panel that can never work again
-//   until relaunch, after a keystroke the user expects to be harmless.
+//   1. `CefShutdown` genuinely must not be called from here. **A terminate can be CANCELLED.**
+//      `AppDelegate.applicationShouldTerminate` answers `.terminateCancel` for ⌘Q and for a
+//      dock-tile quit — only the menu bar's "Quit Norma", a Sparkle install and a system-initiated
+//      logout/shutdown are real quits (`terminateDecision`, Lifecycle T3). `CefShutdown` is TERMINAL
+//      for a process, so calling it here would leave a perfectly alive Norma whose browser panel can
+//      never work again, after a keystroke the user expects to be harmless.
 //
-// So the irreversible half moved to the actual point of no return —
-// `NSApplicationWillTerminateNotification`, which `NormaCEFInitialize` subscribes to itself so the
-// guarantee cannot be deleted from `AppDelegate` without deleting CEF's startup with it. What is
-// left here is the reversible half: close the browsers, then let AppKit ask the delegate. That
-// costs nothing if the quit is cancelled, because every cancel path already runs
-// `closeMainWindows()`, which tears the panel down and closes those same browsers anyway.
+//   2. So the shutdown lives at the actual point of no return: `NSApplicationWillTerminateNotification`,
+//      which `NormaCEFInitialize` subscribes to itself (`NormaCEF.mm`), so the guarantee cannot be
+//      deleted from `AppDelegate` without deleting CEF's startup with it. AppKit posts that
+//      notification from inside `[NSApplication terminate:]` once the delegate has answered
+//      `.terminateNow` — the override was never what carried it.
 //
-// `NormaCEFCloseAllBrowsers` is a no-op when CEF was never initialised, which is every Debug and
-// unit-test launch — so this override changes nothing about how the suite's host terminates.
-- (void)terminate:(id)sender {
-  NormaCEFCloseAllBrowsers();
-  [super terminate:sender];
-}
+//   3. **Closing the browsers here was NOT the harmless reversible half it was documented as.**
+//      That claim rested on "every cancel path already runs `closeMainWindows()`, which tears the
+//      panel down and closes those same browsers anyway". It does not: `closeMainWindows()` ends in
+//      `AppWindowController.hide()`, which is `window.orderOut(nil)` — the `NSHostingView` and its
+//      whole SwiftUI tree, `PanelCEFView`'s container included, survive it. The teardown that does
+//      happen comes from a different chain (hide -> `setShellVisible(false)` -> `applyPolicy` ->
+//      `.detach` -> `panelStore.detach()` -> `tabs = []` -> SwiftUI dismantles the view), and that
+//      chain requires something to be ATTACHED: `shellAttachmentAction` returns `.none`, not
+//      `.detach`, when `attached == nil`. On the new-chat page with a panel tab bound but no
+//      session attached (T15's `openPanelTabForNewChatPage`), ⌘Q therefore closed the live browser
+//      and removed CEF's host view while nothing ever rebuilt it — a permanently blank rectangle,
+//      no placeholder, no Try again, for the life of the process.
+//
+// Dropping the call rather than making the unattached case tear down on hide, because the call was
+// redundant on the one path where it worked (`NormaCEFShutdown` calls `NormaCEFCloseAllBrowsers`
+// itself, then drives the pump bounded, which is CEF's own external-pump sample shape) and harmful
+// on the path where it did not. Whole-branch review F7.
 
 @end

@@ -991,9 +991,9 @@ void NormaCEFCloseBrowser(NSView *parent) {
     //    path. With `DoClose` alone and this block deleted, `OnBeforeClose` still fires,
     //    `g_browsers` still drains to 0 and the renderer still exits — SwiftUI's own release of the
     //    container discharges the obligation. It is kept for the two cases where nothing else will:
-    //    `NormaCEFCloseAllBrowsers` (from `-terminate:`) has no SwiftUI dismantle behind it at all,
-    //    and the header makes completion the CALLER's duty once DoClose answers true rather than
-    //    something to infer from another framework's release timing.
+    //    `NormaCEFCloseAllBrowsers` (from `NormaCEFShutdown`, on the real-quit path) has no SwiftUI
+    //    dismantle behind it at all, and the header makes completion the CALLER's duty once DoClose
+    //    answers true rather than something to infer from another framework's release timing.
     //
     // The view is fetched BEFORE the close call — `GetWindowHandle()` is not guaranteed to answer
     // once the close is under way.
@@ -1026,11 +1026,20 @@ void NormaCEFCloseAllBrowsers(void) {
 }
 
 void NormaCEFShutdown(void) {
-  if (g_did_shutdown || !g_initialized) {
+  if (!g_initialized) {
     // Never initialised: there is nothing to shut down, and calling CefShutdown would dispatch
     // through a dylib stub that was never resolved. This no-op is what makes the termination
     // wiring safe in every build — including the unit-test host, which never starts CEF.
-    g_did_shutdown = true;
+    //
+    // **And it does NOT set `g_did_shutdown`** (whole-branch review F10). That flag is what makes
+    // `NormaCEFInitialize` refuse forever and `NormaCEFRuntime.isRetryable` answer false, so
+    // latching it here would mean a call that did nothing at all permanently closed the door on
+    // starting CEF. It is process-global and nothing resets it, so in the unit-test host the one
+    // test that exercises this path was silently changing `isRetryable` for every test that ran
+    // after it. A no-op that mutates state is not a no-op — and the header calls this one.
+    return;
+  }
+  if (g_did_shutdown) {
     return;
   }
   g_did_shutdown = true;

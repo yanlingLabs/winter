@@ -184,37 +184,83 @@ final class CEFRuntimeTests: XCTestCase {
 
     // MARK: - Pin 3: the termination path
 
-    /// `NormaApplication` must override `-terminate:`.
+    /// **`NormaApplication` must NOT override `-terminate:`** — the whole-branch review's F7, as a
+    /// tripwire.
     ///
-    /// Cocoa's default `terminate:` calls `exit()` and skips the rest of the run loop, so an
-    /// embedder that needs an orderly teardown has to intervene there — every CEF sample does.
-    /// Nothing fails to compile if the override is deleted.
+    /// Task 6a added `- (void)terminate: { NormaCEFCloseAllBrowsers(); [super terminate:sender]; }`
+    /// on cefsimple's reasoning (Cocoa's default `terminate:` calls `exit()`, so an embedder needs
+    /// a hook there). Norma does not: `NormaCEFInitialize` subscribes CEF's shutdown to
+    /// `NSApplicationWillTerminateNotification`, which AppKit posts from inside `terminate:` once
+    /// the delegate answers `.terminateNow` — so the real-quit path is covered without an override,
+    /// and `NormaCEFShutdown` closes every browser itself before `CefShutdown`.
+    ///
+    /// What the override added was damage on the OTHER path. **A terminate here can be CANCELLED**
+    /// — ⌘Q and a dock-tile quit both answer `.terminateCancel` (`terminateDecision`, Lifecycle
+    /// T3) — and the cancel path does not tear the panel's SwiftUI tree down unless a session is
+    /// attached (`closeMainWindows` ends in `orderOut(nil)`; the detach chain needs
+    /// `shellAttachmentAction` to see something attached). So on the new-chat page with a bound
+    /// panel tab, ⌘Q closed the live browser and nothing ever rebuilt the view: a permanently blank
+    /// panel, no placeholder, no Try again, for the life of the process.
     ///
     /// Compared by class NAME rather than `type(of: NSApp)` deliberately: the dynamic class of
     /// `NSApp` can be a KVO isa-swizzled subclass, which would make an identity comparison
     /// false-red for a reason unrelated to what this asserts (Task 3's carried minor).
-    func testNormaApplicationOverridesTerminateForCEFsOrderlyShutdown() throws {
+    func testTerminateIsNotOverriddenBecauseAQuitHereCanBeCANCELLED() throws {
         let normaApplication = try XCTUnwrap(NSClassFromString("NormaApplication"))
         let selector = #selector(NSApplication.terminate(_:))
-        XCTAssertNotEqual(
+        XCTAssertEqual(
             class_getMethodImplementation(normaApplication, selector),
             class_getMethodImplementation(NSApplication.self, selector),
-            "NormaApplication no longer overrides -terminate:; Cocoa's default exit() would bypass "
-                + "CEF's teardown entirely (see NormaApplication.mm for why the override closes "
-                + "browsers rather than calling CefShutdown — a terminate here can be CANCELLED).")
+            "NormaApplication overrides -terminate: again. A terminate here can be CANCELLED (⌘Q "
+                + "and dock-quit both do), and anything this override destroys is NOT rebuilt on "
+                + "the cancel path when nothing is attached — that is F7, a permanently blank "
+                + "browser panel. CEF's orderly shutdown does not need this hook: it rides "
+                + "NSApplicationWillTerminateNotification, subscribed by NormaCEFInitialize. See "
+                + "NormaApplication.mm.")
     }
 
-    /// `NormaCEFShutdown` must be a safe no-op before initialisation.
+    /// The carrier of that guarantee must still exist: the observer class CEF's shutdown hangs off.
     ///
-    /// This is the property that lets the shutdown be wired into the termination path
+    /// Honest about its reach — it pins that `NormaCEFTerminationObserver` exists and answers
+    /// `applicationWillTerminate:`, NOT that `NormaCEFInitialize` still subscribes it. The
+    /// subscription is made inside `CefInitialize`'s success path, which never runs here by design
+    /// (`testTheRuntimeRefusesToStartCEFUnderXCTest`), so no test in this host can reach it. The
+    /// class is registered with the ObjC runtime at load time, which is why this half is reachable
+    /// at all.
+    func testTheShutdownObserverCEFsTerminationPathHangsOffStillExists() throws {
+        let observer = try XCTUnwrap(
+            NSClassFromString("NormaCEFTerminationObserver") as? NSObject.Type,
+            "NormaCEFTerminationObserver is gone — CEF's shutdown has nothing to hang off. It is "
+                + "the ONLY thing that calls NormaCEFShutdown in production (NormaCEF.mm).")
+        XCTAssertTrue(observer.instancesRespond(to: Selector(("applicationWillTerminate:"))),
+                      "the observer no longer answers applicationWillTerminate: — the selector "
+                          + "NormaCEFInitialize registers against NSApplicationWillTerminateNotification")
+    }
+
+    /// `NormaCEFShutdown` must be a safe no-op before initialisation — and a no-op that changes
+    /// NOTHING, which is the half that was missing.
+    ///
+    /// The no-op property is what lets the shutdown be wired into the termination path
     /// unconditionally — `NSApplicationWillTerminateNotification`, subscribed by
     /// `NormaCEFInitialize` — and the reason the unit-test host, which never starts CEF, can run
     /// that path without touching a framework it never `dlopen`ed. `CefShutdown` on an unloaded
     /// library would dispatch through an unresolved dylib stub.
+    ///
+    /// **The `didShutdown` assertion is inverted from what it was, and that is the fix**
+    /// (whole-branch review F10). `NormaCEFShutdown` used to set `g_did_shutdown` even on this
+    /// path — process-global state that nothing resets, so this one test left `didShutdown` true
+    /// and `NormaCEFRuntime.isRetryable` false for every test that ran after it in the same host.
+    /// Nothing asserted `isRetryable` yet, so it was latent rather than live; the next test that
+    /// did would have been order-dependent. A no-op that latches the "CEF is finished forever"
+    /// flag is not a no-op, and the header called it one.
     func testShutdownIsASafeNoOpWhenCEFWasNeverInitialised() {
         XCTAssertFalse(NormaCEFRuntime.isInitialized, "CEF must not be initialised in the test host")
         NormaCEFRuntime.shutdown()  // must not trap
-        XCTAssertTrue(NormaCEFRuntime.didShutdown)
+        XCTAssertFalse(NormaCEFRuntime.didShutdown,
+                       "a shutdown that did nothing must not record itself as having shut CEF "
+                           + "down: didShutdown is process-global, nothing resets it, and it is "
+                           + "what makes NormaCEFInitialize refuse and isRetryable answer false "
+                           + "for every test that runs after this one")
         XCTAssertFalse(NormaCEFRuntime.isInitialized, "a no-op shutdown must not report CEF as up")
     }
 

@@ -165,20 +165,37 @@ BOOL NormaCEFDoCloseIsHandledByHost(void);
 /// `NSViewRepresentable.dismantleNSView`.
 void NormaCEFCloseBrowser(NSView *parent);
 
-/// Close every live browser. REVERSIBLE — this is what `-terminate:` calls, and a terminate can be
-/// CANCELLED by `AppDelegate.applicationShouldTerminate` (⌘Q and dock-quit both return
-/// `.terminateCancel` in Norma). Nothing here forecloses running CEF afterwards.
+/// Close every live browser. REVERSIBLE — nothing here forecloses running CEF afterwards.
+///
+/// **Called only from `NormaCEFShutdown` below.** Task 6a also called it from an
+/// `NSApplication -terminate:` override, on the reasoning that closing browsers is the harmless
+/// half of a quit; the whole-branch review (F7) found it is not. A terminate can be CANCELLED
+/// (⌘Q and a dock-tile quit both answer `.terminateCancel`), and the cancel path does NOT tear the
+/// panel's SwiftUI tree down when nothing is attached — so the browser was destroyed and its view
+/// never rebuilt, leaving a permanently blank panel. The override is gone; see
+/// `Sources/App/NormaApplication.mm` for the full ruling. Kept exported because it is one half of
+/// the lifecycle this header describes and a future embedder-side caller is plausible; it has no
+/// caller outside this file today.
 void NormaCEFCloseAllBrowsers(void);
 
-/// `CefShutdown`. The POINT OF NO RETURN — CEF cannot be initialised again in this process, which
-/// is exactly why this is not what `-terminate:` calls. `NormaCEFInitialize` registers this against
+/// `CefShutdown`, preceded by closing every browser and draining the pump. The POINT OF NO RETURN —
+/// CEF cannot be initialised again in this process, which is exactly why nothing calls it from
+/// `-terminate:` (a terminate can be cancelled). `NormaCEFInitialize` registers this against
 /// `NSApplicationWillTerminateNotification` itself, so the guarantee lives with the thing it
-/// guards rather than in a line of `AppDelegate` that could be dropped. Safe no-op if CEF was never
-/// initialised, and safe to call twice.
+/// guards rather than in a line of `AppDelegate` that could be dropped — and AppKit posts that
+/// notification from inside `[NSApplication terminate:]` once the delegate has answered
+/// `.terminateNow`, which is what makes this the whole of the real-quit path.
+///
+/// **A TRUE no-op if CEF was never initialised**: it does not run, and it does not record itself as
+/// having run — `NormaCEFDidShutdown` stays NO, so a process that merely passed through this call
+/// (a unit-test host; a quit before any web tab existed) is not latched into "CEF is finished" and
+/// `NormaCEFInitialize` will still start. Safe to call twice.
 void NormaCEFShutdown(void);
 
-/// YES once `NormaCEFShutdown` has run. Exists so a test can pin the no-op-before-init property
-/// (`CEFRuntimeTests`) — the property that makes it safe to wire into the termination path at all.
+/// YES once `NormaCEFShutdown` has actually shut CEF down. Never YES for the never-initialised
+/// no-op above — that asymmetry is what keeps this from being process-global state a test can
+/// leak into every test that runs after it (`CEFRuntimeTests`), and what keeps
+/// `NormaCEFRuntime.isRetryable` honest.
 BOOL NormaCEFDidShutdown(void);
 
 /// How many times `CefDoMessageLoopWork()` has been called. Diagnostics only: this is the counter
