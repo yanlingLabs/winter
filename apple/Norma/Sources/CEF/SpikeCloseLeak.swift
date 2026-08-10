@@ -240,7 +240,9 @@ final class SpikeCloseLeakHarness {
             // `data:` New Tab page: real browsers and real renderers, without the media element.
             log("PARK-NOSERVER — parked browsers will load the built-in New Tab page (no audio)")
         }
-        parkedTabIds = (1...count).map { "spike-park-\($0)" }
+        // Empty-safe: `NORMA_SPIKE_CLOSE_RACE=3` with no `NORMA_SPIKE_CLOSE_BROWSERS` reaches here
+        // with `count == 0`, and `(1...0)` is a range precondition failure, not an empty loop.
+        parkedTabIds = (0..<count).map { "spike-park-\($0 + 1)" }
         let tabs = ["spike": parkedTabIds.map {
             BrowserTabState(tabId: $0, url: url, isShown: false, title: "parked")
         }]
@@ -312,6 +314,7 @@ final class SpikeCloseLeakHarness {
         // A measurement that completes the thing it is trying to catch in flight measures nothing.
         // Everything from here to `NSApp.terminate` is `fputs` and pointer reads.
         let census = k > 0 ? "(skipped — the census spins the run loop)" : Self.helperCensus()
+        logParkedPlayback()
         log("PREQUIT cefHostViewAlive=\(cefHostView != nil) runtimeContainers=\(liveTabs) "
             + "helpers=\(census) — quitting with them ALL OPEN")
 
@@ -327,6 +330,40 @@ final class SpikeCloseLeakHarness {
             log("RACE-CREATE k=\(k) — quitting in this same turn, with the creations inside CEF's queue")
         }
         quit()
+    }
+
+    /// **Whether the PARKED pages are actually playing, sampled rather than assumed** (T7 review
+    /// round 1, Important). The first N=8 run reported "every one playing audio" on the strength of
+    /// seven `load end (status=200)` lines and ONE `title=audio playing` — the visible tab's. The
+    /// parked seven were never asked, and they are the likelier ones to refuse: a different origin,
+    /// in a hidden window, with no user activation anywhere near them
+    /// (`task-6-quit-before.log` has this same page answering `audio refused: NotAllowedError`).
+    ///
+    /// The page writes the answer into its own `document.title`, and CEF's state channel carries it
+    /// to the tab's `PanelWebTabModel` — the model `BrowserRuntime.wire` bound at create time, read
+    /// back here through the same registry call the runtime makes (`host: nil, sessionId: "spike"`
+    /// re-binds exactly what create bound, so the read cannot disturb what it is measuring).
+    ///
+    /// Nothing is gated on the answer: the close measurement never depended on playback. This exists
+    /// so the sentence in `NormaCEF.mm`'s shutdown comment is a number rather than an assumption.
+    private func logParkedPlayback() {
+        guard !parkedTabIds.isEmpty else { return }
+        var playing = 0, refused = 0, other: [String] = []
+        for tabId in parkedTabIds {
+            let model = PanelWebTabModels.model(
+                for: PanelTab(tabId: tabId, kind: .web, url: nil, title: nil),
+                host: nil, sessionId: "spike")
+            let title = model.title
+            if title.hasPrefix("audio playing") {
+                playing += 1
+            } else if title.hasPrefix("audio refused") {
+                refused += 1
+            } else {
+                other.append(title.isEmpty ? "(no title)" : title)
+            }
+        }
+        log("PARK-AUDIO parked=\(parkedTabIds.count) playing=\(playing) refused=\(refused) "
+            + "other=\(other.count)\(other.isEmpty ? "" : " \(other)")")
     }
 
     // MARK: The loopback page server
