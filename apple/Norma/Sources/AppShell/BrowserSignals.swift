@@ -75,6 +75,40 @@ final class BrowserSignalsCoordinator {
     /// `AppShellTests`' "no polling before the shell is ever summoned" pins.
     private var renderingActive = false
 
+    /// The session list, **as delivered to the subscription** rather than read back off
+    /// `SessionDirectory.rows`.
+    ///
+    /// `@Published` sends its value from `willSet`, so a sink that reads the property it is
+    /// subscribed to gets the OLD array — the new one has not been stored yet. Reading it that way
+    /// makes every activity change land exactly one publication late, which for this coordinator
+    /// means the plan that should stop a session's browsers is computed from the very signals that
+    /// were true before the change: the poll answers "the turn ended", the re-plan reads "the turn
+    /// is running", and nothing ever stops. (`ShellSessionHost.reconcileIsChatSession` takes its
+    /// rows as a parameter for the same reason.)
+    private var latestRows: [SessionSummary] = []
+
+    /// `host.attachedSessionId` as of the last pass, so a pass can notice that this shell has
+    /// stopped being some session's attachment.
+    private var previousAttachedSessionId: String?
+
+    /// Sessions whose row-level `"active"` this shell must NOT read as "another harness is here".
+    ///
+    /// `session.list`'s `activity` is derived from `SessionHub.attachedCount` — it counts THIS
+    /// shell's own harness like any other, so `"active"` on a row this shell was attached to when
+    /// the daemon answered is our own reflection, not the phone. While we are still attached that
+    /// is harmless (`attachedHere` says the same thing and the engine holds either way); the moment
+    /// we DETACH it is not, because a stale reflection then reads as `attachedElsewhere`, and
+    /// `attachedElsewhere` beats `stopImmediately` by design — a window closed on a playing page
+    /// would keep playing until the list happened to be re-read.
+    ///
+    /// Cleared wholesale by the next `session.list` answer: one answer re-describes every row, and
+    /// an answer taken after the detach genuinely does distinguish the phone from us. **The bound is
+    /// one refresh, not zero** — a response already in flight when the detach happened was computed
+    /// before it, so it can re-arm this for one more interval. That costs a few seconds of extra
+    /// playback in a rare race, never a wrong stop, and it is why this is a suppression of a signal
+    /// we cannot justify rather than an assertion that nobody else is attached.
+    private var ownAttachmentStillCountedIn: Set<String> = []
+
     /// What was last asked of `SessionDirectory.setPolling`. **The change-guard is load-bearing,
     /// not tidiness:** `setPolling(active: true)` cancels the outstanding loop and starts a fresh
     /// one, so calling it again on every re-plan would reset the 5-second wait every time and the
@@ -108,7 +142,17 @@ final class BrowserSignalsCoordinator {
         // once per tick even when nothing about the list changed — which is the point: it is the
         // heartbeat that re-examines a held session while the window is hidden.
         host.directory.$rows
-            .sink { [weak self] _ in self?.replan() }
+            .sink { [weak self] rows in
+                // The value comes from the SUBSCRIPTION, never from `directory.rows` — see
+                // `latestRows` for the `willSet` trap that makes the difference between a stop that
+                // happens and one that never does. Combine delivers the current value on subscribe,
+                // so this is populated before the first plan below.
+                self?.latestRows = rows
+                // A fresh answer describes every row, including the ones this shell's own
+                // attachment was being counted in — see `ownAttachmentStillCountedIn`.
+                self?.ownAttachmentStillCountedIn.removeAll()
+                self?.replan()
+            }
             .store(in: &cancellables)
 
         // Trigger 3. `$attachment` republishes on attach and detach but NOT on a hop (a hop keeps
@@ -175,11 +219,18 @@ final class BrowserSignalsCoordinator {
         let displayed = host.panelStore.currentSessionId
         if let displayed { lastPanelSessionId = displayed }
 
+        // This shell has stopped being some session's attachment (a hop, a detach, a window close).
+        // Its row's `"active"` was answered while we were still counted in it.
+        if previousAttachedSessionId != host.attachedSessionId {
+            if let departed = previousAttachedSessionId { ownAttachmentStillCountedIn.insert(departed) }
+            previousAttachedSessionId = host.attachedSessionId
+        }
+
         // Which sessions the daemon says are running a turn / attached elsewhere / archived, read
         // fresh off the sidebar's own rows. See `mapped(activity:)` below for the mapping and for
         // what it CANNOT answer.
         var activityBySession: [String: String] = [:]
-        for row in host.directory.rows {
+        for row in latestRows {
             if let activity = row.activity { activityBySession[row.sessionId] = activity }
         }
 
@@ -233,9 +284,14 @@ final class BrowserSignalsCoordinator {
 
             sessions[sessionId] = BrowserSignals(
                 attachedHere: attachedHere,
-                // "active" means the daemon counts at least one attached harness. If it is not this
-                // shell, it is somebody else — the phone, a detached window, the CLI.
-                attachedElsewhere: activity == "active" && !attachedHere,
+                // "active" means the daemon counts at least one attached harness — and it counts
+                // OURS. So it is evidence of somebody else (the phone, a detached window, the CLI)
+                // only when this shell is neither the attachment now nor the attachment the answer
+                // was taken during; see `ownAttachmentStillCountedIn` for why the second clause is
+                // needed and what it costs.
+                attachedElsewhere: activity == "active"
+                    && sessionId != host.attachedSessionId
+                    && !ownAttachmentStillCountedIn.contains(sessionId),
                 working: (sessionId == host.attachedSessionId && attachedTurnRunning)
                     || activity == "background",
                 archived: activity == "archived",

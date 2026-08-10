@@ -769,6 +769,57 @@ final class BrowserRuntimeTests: XCTestCase {
         XCTAssertTrue(runtime.container(forTabId: "t1")?.window === runtime.parkingWindow)
     }
 
+    /// **Ledger obligation #7 (T4 review Minor-3), discharged in the commit that first gave `apply`
+    /// a caller.** `viewportHost` is weak and the panel's host view belongs to SwiftUI: between
+    /// `PanelViewport.dismantleNSView` and ARC actually releasing that view, the reference is
+    /// non-nil while the view is in no window at all. An `.attachViewport` ACTION landing in that
+    /// window would mount the container into a rectangle nothing shows — breaking spike Fact 5's
+    /// "in a window at all times" invariant, which is what the whole reparenting design rests on.
+    ///
+    /// The check is on the ACTION path only. The view's own `attachViewport(tabId:into:)`
+    /// deliberately mounts before its host joins a window (SwiftUI runs `makeNSView` first, and T4
+    /// measured that ordering together with `viewDidMoveToWindow`'s re-attach), and only the action
+    /// path can reach a host SwiftUI has already finished with — so the row below asserts both
+    /// halves, or "guarded" would be indistinguishable from "broke the view path".
+    ///
+    /// The alternative Minor-3 offered — clearing `viewportHost` in `detachViewport` — is what the
+    /// SECOND half of this row rules out: a single plan legitimately emits `.detachViewport(A)` then
+    /// `.attachViewport(B)`, and a detach that cleared the host would leave that same-pass attach
+    /// with nowhere to mount.
+    func testAnAttachActionRefusesAHostThatIsInNoWindowButTheViewPathStillMounts() {
+        let runtime = makeRuntime()
+        let orphan = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+
+        // The view path: mounts even with no window, exactly as T4 measured it.
+        runtime.apply([.create(tabId: "t1", url: "https://example.com")],
+                      tabs: tabs("s1", tab("t1", shown: true)), sessionOf: { _ in "s1" })
+        runtime.attachViewport(tabId: "t1", into: orphan)
+        XCTAssertEqual(runtime.viewportTabId, "t1", "the view path must be untouched")
+        XCTAssertTrue(runtime.container(forTabId: "t1")?.superview === orphan)
+
+        // Now SwiftUI is done with that view — the container goes back to the parking window — and a
+        // later plan asks for it again through the ACTION, which has only the remembered host.
+        runtime.detachViewport(tabId: "t1")
+        runtime.apply([.attachViewport(tabId: "t1")],
+                      tabs: tabs("s1", tab("t1", shown: true)), sessionOf: { _ in "s1" })
+
+        XCTAssertNil(runtime.viewportTabId,
+                     "a container was mounted in a view that is in no window")
+        XCTAssertTrue(runtime.container(forTabId: "t1")?.window === runtime.parkingWindow,
+                      "and it must have stayed parked, not been dragged out of its window")
+        XCTAssertEqual(orphan.subviews.count, 0)
+
+        // The same-pass move the alternative fix would have broken: detach then attach, one plan.
+        let (window, host) = makeHostView()
+        _ = window
+        runtime.attachViewport(tabId: "t1", into: host)
+        runtime.apply([.create(tabId: "t2", url: "https://two.example"),
+                       .detachViewport(tabId: "t1"), .attachViewport(tabId: "t2")],
+                      tabs: tabs("s1", tab("t1"), tab("t2", shown: true)), sessionOf: { _ in "s1" })
+        XCTAssertEqual(runtime.viewportTabId, "t2",
+                       "a detach must not forget the host the same plan's attach needs")
+    }
+
     // MARK: - The linger timers
 
     /// `scheduleStop` arms at the engine's deadline — the engine's clock reading plus its own
