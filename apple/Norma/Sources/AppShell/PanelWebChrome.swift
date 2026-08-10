@@ -156,6 +156,26 @@ final class PanelWebTabModel: ObservableObject {
                                     url: allowed.url, title: allowed.title)
     }
 
+    /// **A popup the page asked for, arriving as a new panel tab.** CEF has already cancelled the
+    /// popup itself (it always does — `NormaCEF.h`), and only gestured ones reach this far.
+    ///
+    /// It goes through `ShellSessionHost.openPanelTab`, the app's existing tab door, rather than
+    /// anywhere new: that is what runs `PanelURLPolicy.mayOpenTab` on a URL the PAGE chose — the
+    /// untrusted input the policy exists for — and what makes the resulting tab daemon-minted, so a
+    /// popup tab is indistinguishable downstream from one the user or the agent opened, and
+    /// persists like one. A url the policy refuses opens nothing, silently; the popup was cancelled
+    /// either way, so there is nothing left to undo.
+    ///
+    /// **Filed against the session captured at wiring time**, exactly like
+    /// `reportCommittedNavigation` above and for a sharper version of the same reason: a tab is
+    /// created, not merely recorded, so a session hop between the click and this call would put a
+    /// real, visible tab in a session the user never browsed in. With no session captured (a model
+    /// that was never bound) there is nothing to open into and this does nothing.
+    func openPopupAsTab(url: String) {
+        guard let sessionId, let host else { return }
+        host.openPanelTab(kind: .web, url: url, sessionId: sessionId)
+    }
+
     // MARK: Intents
 
     func goBack() { container.map { NormaCEFGoBack($0) } }

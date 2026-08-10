@@ -121,6 +121,33 @@ void NormaCEFSetStateObserver(NSView *parent, void (^observer)(NormaCEFBrowserSt
 /// suppression across a browser's whole lifetime rather than just one instance of it.
 void NormaCEFSetNavigationObserver(NSView *parent, void (^observer)(NSString *url, NSString *title));
 
+/// Observe POPUPS the page asks for — `window.open`, a clicked `target="_blank"` — so the host can
+/// open each one as a NEW PANEL TAB. Pass `nil` to stop observing.
+///
+/// **This does not make CEF create anything.** `OnBeforePopup` still cancels every popup
+/// unconditionally (`NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow` below is that answer, and
+/// says what a `false` there would cost); this observer fires immediately BEFORE the cancel. So the
+/// popup CEF was asked for never exists, and what the user gets instead is an ordinary panel tab
+/// minted by the daemon — which is the only kind of tab that persists and the only kind the tab
+/// strip can close.
+///
+/// **Only GESTURED popups are reported.** `OnBeforePopup` receives `user_gesture`, and an
+/// automatic `window.open` (a timer, `DOMContentLoaded`) is reported to nobody and simply
+/// cancelled, exactly as before. The reason is stronger here than in an ordinary browser: a panel
+/// tab is written to an append-only session log that is never auto-deleted, so an unwanted popup
+/// tab is permanent, not merely an annoying window. See `OnBeforePopup` for the whole ruling and
+/// for the residual it does NOT bound.
+///
+/// Registered against the CONTAINER VIEW, like the two observers above and for the same reason —
+/// and here it carries a second meaning: the container is what identifies WHICH panel tab (and so
+/// which session) the popup came from, so a popup can never open a tab in a session other than the
+/// one whose browser asked for it.
+///
+/// Called on the MAIN thread, synchronously from inside CEF's own callback — CEF's UI thread IS
+/// the main thread under the external pump, which is what lets `NotifyState` and the navigation
+/// observer do the same.
+void NormaCEFSetPopupObserver(NSView *parent, void (^observer)(NSString *url));
+
 /// Prime a tab with what the daemon ALREADY knows about it, before its browser is created. Two
 /// effects, both of which exist because **one browser per tab is created and destroyed on every tab
 /// SWITCH** (`PanelCEFView` is `.id`'d by tab):
@@ -162,6 +189,20 @@ void NormaCEFLoadURL(NSView *parent, const char *url);
 /// must never be allowed near it: at the user's live gate, closing a panel tab closed the app's
 /// window and demoted it out of the Dock, leaving only the menu-bar orb.
 BOOL NormaCEFDoCloseIsHandledByHost(void);
+
+/// The ONE answer `CefLifeSpanHandler::OnBeforePopup` gives, exported for exactly the reason the
+/// function above is: a test can read the VALUE instead of inferring it from a log string, and no
+/// test can call a C++ virtual method it cannot construct a `CefBrowser` for.
+///
+/// It must be YES — `true` from `OnBeforePopup` is "cancel the popup" (`cef_life_span_handler.h`).
+/// Routing popups into panel tabs did NOT change this and must never change it: with `false`, and
+/// a native-hosted Alloy parent, CEF "creates a native popup window" of its own — a top-level
+/// Chromium window outside the panel, outside every chrome verb, and outside Norma's window
+/// management. `DoClose` answers `true`, i.e. the HOST completes every close, so for a window the
+/// host does not know exists nothing ever does: one `target="_blank"` would strand a window and its
+/// renderer process for the life of the app. The tab route is the popup's destination; the cancel
+/// is what keeps CEF out of the window business, and the two are independent.
+BOOL NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow(void);
 
 /// Close the browser hosted by `parent`, and cancel any creation still on its way to becoming one.
 /// Called from `NSViewRepresentable.dismantleNSView`.

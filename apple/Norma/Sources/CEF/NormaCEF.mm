@@ -220,6 +220,12 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 @interface NormaCEFTabBridge : NSObject
 @property(nonatomic, copy) void (^stateObserver)(NormaCEFBrowserState *);
 @property(nonatomic, copy) void (^navigationObserver)(NSString *, NSString *);
+/// Where a popup this browser asks for goes — a new panel tab, in THIS tab's session. Keyed on the
+/// container like everything else here, which is what makes "the session the popup came from"
+/// answerable at all: the block is created by the tab's own `makeNSView`, so it closes over that
+/// tab's model and its captured session id. `nil` for a container nobody wired one to, and that
+/// case cancels the popup exactly as this file did before the route existed.
+@property(nonatomic, copy) void (^popupObserver)(NSString *);
 @property(nonatomic, copy) NSString *url;
 @property(nonatomic, copy) NSString *title;
 /// **Which document `title` actually describes.** A title is not a property of a browser, it is a
@@ -515,19 +521,52 @@ class NormaClient : public CefClient,
   // Task 6b: address and title, for the URL field. NOT for the log — see OnLoadEnd.
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
 
-  /// **Popups are blocked outright**, and the alternative is not "a popup opens somewhere else" —
-  /// it is a window nothing can close. With no override, `CefLifeSpanHandler`'s default returns
-  /// `false`, which for a native-hosted Alloy parent "creates a native popup window" of CEF's own
-  /// (`cef_life_span_handler.h`) — a top-level Chromium window outside the panel, outside every
-  /// chrome verb, and outside Norma's window management. And `DoClose` answers `true`
-  /// unconditionally, which tells CEF the HOST completes every close; for a window the host does not
-  /// know exists, nothing ever does. So a single `target="_blank"` would strand a window and its
-  /// renderer process for the life of the app.
+  /// **A popup becomes a PANEL TAB — and CEF still never creates a window.** Those are two separate
+  /// decisions and only the first of them changed here.
   ///
-  /// Cancelling is the smallest correct answer, not the final one: routing a popup into a new panel
-  /// tab is a real feature (it needs a `panel.openTab` round trip and a tab to parent into) and is a
-  /// product decision, not this fix's to make. Until then a blocked popup is visible in the log and
-  /// costs the user a link that does not open, which is what every popup blocker does.
+  /// **The cancel is unconditional and must stay that way.** `true` means "cancel the popup". With
+  /// `false` — the base class's default — a native-hosted Alloy parent gets "a native popup window"
+  /// of CEF's own (`cef_life_span_handler.h`): a top-level Chromium window outside the panel,
+  /// outside every chrome verb, and outside Norma's window management. `DoClose` answers `true`,
+  /// i.e. the HOST completes every close, so for a window the host does not know exists nothing ever
+  /// does — a single `target="_blank"` would strand a window and its renderer process for the life
+  /// of the app. The return is `NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow()` rather than a
+  /// bare literal for the same reason `DoClose`'s is: a test can read the VALUE, which a binary
+  /// string scan structurally cannot.
+  ///
+  /// **What the user gets instead** is an ordinary daemon-minted panel tab, opened through the app's
+  /// existing door (`ShellSessionHost.openPanelTab` → `panel.openTab`), in the session THIS browser
+  /// belongs to. Nothing here decides that: the URL is handed to the container's `popupObserver`,
+  /// which is the tab's own block and therefore carries the tab's captured session. Scheme policy
+  /// (`PanelURLPolicy`) runs on the Swift side of that call, where it lives for every other panel
+  /// url — a page-supplied URL is exactly the untrusted input it exists for, and a C seam that
+  /// second-guessed its caller would make the real policy impossible to locate. A refusal there is
+  /// silent here by construction and costs the user a link that does not open, which is what a
+  /// popup blocker does.
+  ///
+  /// **Only a GESTURED popup is routed** — `user_gesture` is true for a clicked link or a
+  /// `window.open` inside a click handler, false for one fired by a timer or `DOMContentLoaded`,
+  /// which is the classic ad-popup shape. The ungestured case is cancelled and logged, i.e. exactly
+  /// today's behaviour. The reason to keep that line is stronger for Norma than for a browser: a
+  /// panel tab is APPEND-ONLY SESSION STATE (`panel_tab_opened` in a log that is never
+  /// auto-deleted), so an unwanted popup tab is permanent litter in the user's history rather than a
+  /// window they close and forget. The cost is the honest one — an OAuth-style `window.open` issued
+  /// after an `await` has lost its gesture and stays blocked — and it is not a regression, since
+  /// every popup was blocked until now.
+  ///
+  /// **What that does NOT bound, stated rather than implied:** one gesture can drive more than one
+  /// `window.open`, so a click handler opening ten tabs is not stopped by anything in this file.
+  /// Chromium's own popup blocker is what normally bounds that, and whether it is active for this
+  /// native-hosted Alloy embed was not verified by this change. The bound that IS held is the one
+  /// that matters for an unattended page: a popup with no gesture at all opens no tab, ever.
+  ///
+  /// `target_disposition` is deliberately not consulted: every popup becomes an ordinary foreground
+  /// tab, because `panel.openTab` activates what it mints. A ctrl-clicked "open in BACKGROUND tab"
+  /// therefore comes to the front — named, not hidden; the daemon has no background-open today.
+  ///
+  /// No per-popup state is kept, so `OnBeforePopupAborted` is not implemented and does not need to
+  /// be: it fires only for a popup that was ALLOWED and then failed (`cef_life_span_handler.h`), and
+  /// nothing here is ever allowed.
   bool OnBeforePopup(CefRefPtr<CefBrowser> browser,
                      CefRefPtr<CefFrame> frame,
                      int popup_id,
@@ -542,13 +581,40 @@ class NormaClient : public CefClient,
                      CefRefPtr<CefDictionaryValue> &extra_info,
                      bool *no_javascript_access) override {
     CEF_REQUIRE_UI_THREAD();
+    NSString *url = [NSString stringWithUTF8String:target_url.ToString().c_str()] ?: @"";
+    NormaCEFTabBridge *bridge = BridgeForBrowser(browser);
+    // `target_url` "may be empty if not specified with the request" (`cef_life_span_handler.h`) —
+    // `window.open()` with no argument. There is no address to open a tab at, so it is cancelled
+    // like any other unroutable popup rather than opening a blank one.
+    const BOOL routable = user_gesture && url.length > 0 && bridge != nil &&
+                          bridge.popupObserver != nil;
+    if (routable) {
 #if DEBUG
-    // Same privacy split as OnLoadEnd: a shipped build never writes the page's address anywhere.
-    Log("popup-blocked %s", target_url.ToString().c_str());
+      // Same privacy split as OnLoadEnd: a shipped build never writes the page's address anywhere.
+      // The literal is the needle `CEFRuntimeTests
+      // .testTheBrowserClientROUTESPopupsIntoPanelTabsRatherThanBlockingThem` scans the built
+      // product for — change this message and change that needle with it.
+      Log("popup-routed-to-panel-tab %s", target_url.ToString().c_str());
 #else
-    Log("popup-blocked");
+      Log("popup-routed-to-panel-tab");
 #endif
-    return true;  // true = cancel the popup
+      // SYNCHRONOUS, no thread hop — matching `navigationObserver`'s own call in `OnLoadEnd` and
+      // `NotifyState`, both of which rely on the same read fact: CEF's UI thread IS the main thread
+      // under the external pump, so the block is already where AppKit and the main actor want it.
+      // What it runs is a policy check and an RPC enqueue (`Task { @MainActor }`) — no published
+      // state is written before this returns, so nothing can tear this browser's view down inside
+      // CEF's own callback frame.
+      bridge.popupObserver(url);
+    } else {
+#if DEBUG
+      Log("popup-blocked (gesture=%d, observer=%d) %s", user_gesture ? 1 : 0,
+          (bridge != nil && bridge.popupObserver != nil) ? 1 : 0, target_url.ToString().c_str());
+#else
+      Log("popup-blocked (gesture=%d, observer=%d)", user_gesture ? 1 : 0,
+          (bridge != nil && bridge.popupObserver != nil) ? 1 : 0);
+#endif
+    }
+    return NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow();  // YES = cancel the popup
   }
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
@@ -1172,6 +1238,10 @@ void NormaCEFSetNavigationObserver(NSView *parent, void (^observer)(NSString *ur
   BridgeFor(parent).navigationObserver = observer;
 }
 
+void NormaCEFSetPopupObserver(NSView *parent, void (^observer)(NSString *url)) {
+  BridgeFor(parent).popupObserver = observer;
+}
+
 void NormaCEFSeedTabState(NSView *parent, const char *url, const char *title) {
   NormaCEFTabBridge *bridge = BridgeFor(parent);
   NSString *seedURL = url != nullptr ? [NSString stringWithUTF8String:url] : @"";
@@ -1221,6 +1291,15 @@ void NormaCEFLoadURL(NSView *parent, const char *url) {
     // allowlist is expressed, and it has already run at the field. See this function's header doc.
     browser->GetMainFrame()->LoadURL(CefString(url));
   }
+}
+
+BOOL NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow(void) {
+  // Flipping this to NO does NOT "let popups through to somewhere else" — it hands CEF a window
+  // Norma has no handle on and, because `DoClose` says the host completes every close, nothing can
+  // ever close it. Popups reach the user as PANEL TABS (see `OnBeforePopup`); this answer is what
+  // keeps CEF out of the window business while they do.
+  // `CEFRuntimeTests.testPopupsAreStillCANCELLEDSoCEFNeverCreatesAWindowOfItsOwn` reads this value.
+  return YES;
 }
 
 BOOL NormaCEFDoCloseIsHandledByHost(void) {

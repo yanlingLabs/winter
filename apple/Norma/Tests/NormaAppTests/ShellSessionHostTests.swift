@@ -1246,6 +1246,73 @@ final class ShellSessionHostTests: XCTestCase {
                        "file:///Users/someone/report.docx")
     }
 
+    /// **A popup opens a panel tab in the session ITS OWN browser belongs to** — the whole Swift
+    /// half of the popup route, from the model CEF drives down to the bytes on the socket.
+    ///
+    /// The three things it pins, each of which is a way the route can be wrong while compiling and
+    /// while leaving every other test green:
+    ///
+    ///  1. **It happens at all.** `openPopupAsTab` must reach `panel.openTab` — the daemon-minted
+    ///     door — rather than doing nothing (the pre-change behaviour: CEF cancelled the popup and
+    ///     that was the end of it) or opening a browser some other way.
+    ///  2. **The SESSION is the browser's, not whatever the shell is attached to.** The host here is
+    ///     attached to `S2` while the popup's tab belongs to `S1`, so an implementation that read
+    ///     `attachedSessionId` — the natural thing to write, and what every other caller of
+    ///     `openPanelTab` gets — files the tab in the wrong session and this reds. That divergence
+    ///     is exactly what the assertion is for: with both ids equal it would pass either way.
+    ///  3. **The url is the PAGE's, so the policy runs on it.** A `javascript:` popup must reach
+    ///     nothing at all; the allowed one immediately after is what stops that assertion passing
+    ///     for a route that is simply broken.
+    ///
+    /// **What it does not cover, stated rather than implied:** that `OnBeforePopup` actually calls
+    /// the observer, and that `PanelCEFView.makeNSView` actually registers one. CEF never starts
+    /// under XCTest (`CEFRuntimeTests.testTheRuntimeRefusesToStartCEFUnderXCTest` pins that refusal)
+    /// and `makeNSView` needs a SwiftUI `Context` no test can build, so the C++→model hop is
+    /// unreachable from this host. `CEFRuntimeTests` covers what is reachable of that half — the
+    /// cancel VALUE, and the routing block's presence in the built product — and is equally explicit
+    /// about its own limits. This is the same posture `PanelWebTabModel.apply(url:title:…)` was
+    /// split out for: test the entry point CEF drives, not a parallel one.
+    func testAPopupOpensAPanelTabInTheSessionItsOwnBrowserBelongsTo() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        PanelWebTabModels.removeAllForTesting()
+        defer { PanelWebTabModels.removeAllForTesting() }
+
+        host.setShellVisible(true)
+        host.select("S2")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S2")
+        XCTAssertEqual(host.attachedSessionId, "S2")
+
+        // The browser the popup comes from belongs to S1 — deliberately NOT the attached session.
+        let model = PanelWebTabModels.model(
+            for: PanelTab(tabId: "t1", kind: .web, url: "https://example.com", title: nil),
+            host: host, sessionId: "S1")
+
+        model.openPopupAsTab(url: "javascript:alert(document.cookie)")
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertTrue(mgmt.methods.filter { $0 == "panel.openTab" }.isEmpty,
+                      "a popup url outside the allowlist must never reach the wire — the URL is "
+                          + "chosen by the PAGE, which is the untrusted input PanelURLPolicy exists "
+                          + "for: \(mgmt.methods)")
+
+        model.openPopupAsTab(url: "https://example.com/popup")
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("a gestured popup must open a panel tab, not vanish: \(mgmt.methods)")
+        }
+        let params = open["params"] as? [String: Any]
+        XCTAssertEqual(params?["sessionId"] as? String, "S1",
+                       "the popup's tab belongs to the session ITS BROWSER is in (S1), not to "
+                           + "whatever the shell is attached to (S2) — reading attachedSessionId "
+                           + "here would put a real, visible tab in a session the user never "
+                           + "browsed in")
+        XCTAssertEqual(params?["kind"] as? String, "web")
+        XCTAssertEqual(params?["url"] as? String, "https://example.com/popup",
+                       "the popup's own destination is what the tab opens at")
+        XCTAssertNil(params?["tabId"], "the daemon mints tabId — the caller must never send one")
+    }
+
     // MARK: - panel-shell T12 (bug found at the live gate, 2026-08-08): "+" with no attached
     // session used to be exactly the silent no-op the test just above pins — `openPanelTab`'s own
     // `guard let sessionId = attachedSessionId else { return }` returned before firing anything.

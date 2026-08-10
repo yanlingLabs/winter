@@ -470,7 +470,17 @@ final class ShellSessionHost: ObservableObject {
     /// two rapid "+" clicks with nothing attached would each see `attachedSessionId == nil` and mint
     /// their own session — and the second one would be permanently immune to the empty-session
     /// reaper (Requirement 2 above), not just safe for 10 minutes.
+    ///
+    /// **`sessionId:` names the session EXPLICITLY, and is how a popup opens its tab in the session
+    /// its own browser belongs to** (`PanelWebTabModel.openPopupAsTab`). It bypasses both branches
+    /// below — the attached-session read and the auto-create — because neither is right for it: a
+    /// popup arrives FROM a live browser, so the session it belongs to already exists and is known,
+    /// while `attachedSessionId` is whatever the shell happens to be showing at the instant the page
+    /// fired `window.open`. Nothing else passes it; every existing caller keeps today's behaviour by
+    /// omitting it. The policy guard above still runs first, for this door as for the other two —
+    /// which is the whole point of putting the popup through this method rather than beside it.
     func openPanelTab(kind: PanelTabKind = .web, url: String? = nil, title: String? = nil,
+                       sessionId: String? = nil,
                        onSessionCreated: ((String) -> Void)? = nil) {
         guard let client = managementClient else { return }
         // panel-cef Task 6b review (Minor 6): the app's OTHER panel-url producer, and until now the
@@ -484,7 +494,21 @@ final class ShellSessionHost: ObservableObject {
         // (`try?`), leaving an orphan empty session behind. Refusing here costs nothing and cannot.
         guard PanelURLPolicy.mayOpenTab(kind: kind, url: url, title: title) else { return }
         let kindRaw = kind.rawValue
-        guard let sessionId = attachedSessionId else {
+        // The explicit door — see this method's doc. A named session needs neither the attach read
+        // nor the auto-create, and `onSessionCreated` is meaningless here (nothing is created).
+        if let sessionId {
+            Task { @MainActor [weak self] in
+                _ = try? await client.openPanelTab(sessionId: sessionId, kind: kindRaw, url: url, title: title)
+                // The same re-fetch `closePanelTab` makes while unattached, for the identical
+                // reason: only the ATTACHED session has a live event pump, so a tab opened in any
+                // other one — the new-chat page's BOUND session is the case that exists today, and
+                // it can host a browser — would sit in the daemon, real and persisted, with the tab
+                // strip never showing it.
+                if self?.attachedSessionId != sessionId { self?.refreshPanelTabs(for: sessionId) }
+            }
+            return
+        }
+        guard let attached = attachedSessionId else {
             guard !panelAutoCreateInFlight else { return }
             panelAutoCreateInFlight = true
             Task { @MainActor [weak self] in
@@ -496,7 +520,7 @@ final class ShellSessionHost: ObservableObject {
             return
         }
         Task { @MainActor in
-            _ = try? await client.openPanelTab(sessionId: sessionId, kind: kindRaw, url: url, title: title)
+            _ = try? await client.openPanelTab(sessionId: attached, kind: kindRaw, url: url, title: title)
         }
     }
 

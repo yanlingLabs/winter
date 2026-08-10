@@ -132,6 +132,14 @@ enum NormaCEFRuntime {
     /// the C function directly.
     static var doCloseIsHandledByHost: Bool { NormaCEFDoCloseIsHandledByHost() }
 
+    /// The answer `CefLifeSpanHandler::OnBeforePopup` gives — `true` is "cancel", and it must stay
+    /// `true` even though popups now open as panel tabs: the tab is the popup's DESTINATION, the
+    /// cancel is what stops CEF creating a top-level window of its own that nothing could close
+    /// (`DoClose` tells CEF the host completes every close). Exposed here for the same reason as the
+    /// three above: a bridging header is not a module interface, so the test bundle cannot name the
+    /// C function directly.
+    static var popupsAreCancelled: Bool { NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow() }
+
     /// `CefShutdown`, at the point of no return. Safe no-op if CEF was never initialised — and a
     /// no-op that leaves `didShutdown` false, so running it in the unit-test host does not latch
     /// every later test into "CEF is finished" (whole-branch F10). That is what lets

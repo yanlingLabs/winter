@@ -182,6 +182,79 @@ final class CEFRuntimeTests: XCTestCase {
                 + "Norma does not. See NormaCEF.h.")
     }
 
+    // MARK: - Pin 3c: popups — routed into panel tabs, and still never a window of CEF's own
+
+    /// `OnBeforePopup` must still ANSWER "cancel". Popups now open as PANEL TABS, and that changed
+    /// nothing about this: the tab is where the popup goes, the cancel is what keeps CEF from making
+    /// a window instead.
+    ///
+    /// The failure this guards is the natural "improvement" the feature invites — letting CEF host
+    /// the popup now that popups are wanted. `false` for a native-hosted Alloy parent "creates a
+    /// native popup window" of CEF's own (`include/cef_life_span_handler.h`): a top-level Chromium
+    /// window outside the panel and outside Norma's window management, which — because `DoClose`
+    /// answers `true`, i.e. the HOST completes every close — nothing can ever close. One
+    /// `target="_blank"` would strand a window and its renderer process for the life of the app.
+    ///
+    /// Reads the VALUE, through the exported single source of truth the override returns, for the
+    /// same reason `testDoCloseAnswersThatTheHostHandlesTheClose…` does: a binary string scan
+    /// structurally cannot see a return value, and no test in this host can call a C++ virtual
+    /// method it cannot construct a `CefBrowser` for.
+    func testPopupsAreStillCANCELLEDSoCEFNeverCreatesAWindowOfItsOwn() {
+        XCTAssertTrue(
+            NormaCEFRuntime.popupsAreCancelled,
+            "OnBeforePopup now answers false. That does not route popups anywhere better — it hands "
+                + "CEF a top-level native window Norma holds no handle on, and since DoClose says "
+                + "the host completes every close, nothing will ever close it or its renderer "
+                + "process. Popups reach the user as panel tabs (NormaCEFSetPopupObserver); the "
+                + "cancel is independent of that and must stay YES. See NormaCEF.h.")
+    }
+
+    /// The client must still ROUTE a popup into a panel tab rather than merely blocking it.
+    ///
+    /// The regression this catches is a revert: `OnBeforePopup` returning `true` with nothing else
+    /// in the body compiles, links, and leaves the whole suite green — including the value pin
+    /// directly above, which asserts the cancel and is *satisfied* by a blanket block — while every
+    /// `target="_blank"` on every page silently does nothing again. That is the shape this branch
+    /// has now produced nine times: a thing that is deleted without a single test noticing.
+    ///
+    /// Asserted on the BUILT PRODUCT via a `__cstring` literal, the same technique and the same
+    /// reason as the `CEF_USE_SANDBOX`, `DoClose` and termination-observer pins above: the client
+    /// class is in an anonymous namespace and Release strips debugging symbols, so a symbol-based
+    /// pin would be fragile in the configuration that ships.
+    ///
+    /// **Known limits, stated rather than implied.** The needle is a log literal that sits BESIDE
+    /// the `popupObserver` call, not the call itself, so this catches the routing block being
+    /// deleted or replaced wholesale (a revert to `Log("popup-blocked"); return true;`) and NOT a
+    /// surgical edit that keeps the log and drops the call — exactly the limit the `DoClose` pin
+    /// discloses about its own half. It also proves nothing about the observer ever FIRING: CEF
+    /// never starts under XCTest, so no test in this host reaches `OnBeforePopup` at all. The Swift
+    /// half of the route — model → policy → `panel.openTab`, in the browser's own session — is
+    /// pinned behaviourally by `ShellSessionHostTests
+    /// .testAPopupOpensAPanelTabInTheSessionItsOwnBrowserBelongsTo`.
+    ///
+    /// If you change that log message, change this needle with it — the coupling is deliberate and
+    /// is written at the call site too.
+    func testTheBrowserClientROUTESPopupsIntoPanelTabsRatherThanBlockingThem() throws {
+        let needle = Data("popup-routed-to-panel-tab".utf8)
+        let macOS = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
+        let candidates = [
+            macOS.appendingPathComponent("Norma.debug.dylib"),  // Debug puts the real code here
+            macOS.appendingPathComponent("Norma"),              // Release
+        ].filter { FileManager.default.fileExists(atPath: $0.path) }
+        XCTAssertFalse(candidates.isEmpty, "no app binary found to scan")
+
+        let found = candidates.contains { url in
+            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return false }
+            return data.range(of: needle) != nil
+        }
+        XCTAssertTrue(
+            found,
+            "OnBeforePopup no longer hands popups to the container's popupObserver. Popups are "
+                + "cancelled either way — so nothing crashes and nothing leaks — but every "
+                + "target=\"_blank\" link and every window.open in the panel silently does nothing "
+                + "again, which is the state this feature was built to end. See NormaCEF.mm.")
+    }
+
     // MARK: - Pin 3: the termination path
 
     /// **`NormaApplication` must NOT override `-terminate:`** — the whole-branch review's F7, as a

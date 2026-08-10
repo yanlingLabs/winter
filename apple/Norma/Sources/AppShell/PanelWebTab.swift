@@ -143,6 +143,14 @@ struct PanelCEFView: NSViewRepresentable {
         NormaCEFSetNavigationObserver(container) { [weak model] committedURL, committedTitle in
             model?.reportCommittedNavigation(url: committedURL ?? "", title: committedTitle ?? "")
         }
+        // A third channel, wired exactly like the two above and for the same structural reason: a
+        // popup can arrive before anything else would have had a chance to register. CEF cancels
+        // every popup regardless (`NormaCEF.h`); this is what turns the cancelled one into a real
+        // panel tab. `[weak model]` because the block is stored on the container, which the model
+        // does not own — and a popup from a tab already on its way out must open nothing.
+        NormaCEFSetPopupObserver(container) { [weak model] popupURL in
+            model?.openPopupAsTab(url: popupURL ?? "")
+        }
         // Prime the dedupe memory AND the displayed address with what the daemon already knows, so
         // a tab switched away from and back to neither re-reports its own stored URL nor flashes an
         // empty field. Seeded with the URL actually being loaded — if scheme policy refused the
@@ -197,13 +205,16 @@ struct PanelCEFView: NSViewRepresentable {
     /// Closing here — rather than leaking the browser and letting the container's `deinit` decide —
     /// is what keeps a closed or switched-away tab from leaving a live renderer process behind.
     ///
-    /// Task 6b: the observers are cleared FIRST. Both blocks capture the model weakly, so a late
+    /// Task 6b: the observers are cleared FIRST. Every block captures the model weakly, so a late
     /// callback would be harmless — but a `panel_tab_navigated` filed by a tab the user has already
     /// closed is not harmless, it is a permanent line in a log describing something that is no
-    /// longer on screen.
+    /// longer on screen. The popup channel is cleared here for the same reason and it is the
+    /// stronger case of the two: a tab OPENED by a page whose own tab is gone would be a visible,
+    /// permanent artefact of a browser the user already closed.
     static func dismantleNSView(_ nsView: PanelCEFContainerView, coordinator: ()) {
         NormaCEFSetStateObserver(nsView, nil)
         NormaCEFSetNavigationObserver(nsView, nil)
+        NormaCEFSetPopupObserver(nsView, nil)
         NormaCEFCloseBrowser(nsView)
     }
 }
