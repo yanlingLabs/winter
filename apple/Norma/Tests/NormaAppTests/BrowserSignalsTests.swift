@@ -192,6 +192,11 @@ final class BrowserSignalsTests: XCTestCase {
         frame(#"{"type":"panel_tab_closed","seq":\#(seq),"sessionId":"\#(sessionId)","ts":0,"tabId":"\#(tabId)"}"#)
     }
 
+    private func navigated(_ sessionId: String, _ tabId: String, seq: Int,
+                           url: String, title: String) -> String {
+        frame(#"{"type":"panel_tab_navigated","seq":\#(seq),"sessionId":"\#(sessionId)","ts":0,"tabId":"\#(tabId)","url":"\#(url)","title":"\#(title)"}"#)
+    }
+
     /// The ordinary opening move: a visible shell, attached to `sessionId`, with one active web tab
     /// whose browser is live. Returns the transport so the caller can keep feeding it.
     @discardableResult
@@ -401,13 +406,22 @@ final class BrowserSignalsTests: XCTestCase {
         w.clock.current += 30
         w.host.select("s1")
         await answerReattach(t, attachIndex: 3)
-        // The re-attach replays s1's COMPLETE history, one event at a time — the exact window in
-        // which a fold-from-empty would have reported s1 as having one tab, then two.
+        // The re-attach replays s1's COMPLETE history from `seq` 0 (`SessionFeed.repin`), one event
+        // at a time — the exact window in which a fold-from-EMPTY reports s1 as having one tab, then
+        // two, and the belt kills the sibling in between.
+        //
+        // The wait is on the LAST event's own effect, never on `tabs.count == 2`: `switchSession`
+        // republishes the cached fold synchronously, so a count assertion is already true before a
+        // single replayed event arrives and would wait for nothing at all. Events arrive in order on
+        // one stream, so a2 carrying its replayed title means the whole replay has been folded.
         t.feed(opened("s1", "a1", seq: 1, url: "https://a.example"))
         t.feed(activated("s1", "a1", seq: 2))
         t.feed(opened("s1", "a2", seq: 3, url: "https://b.example"))
         t.feed(activated("s1", "a2", seq: 4))
-        await waitUntil("s1's replay to land", { w.host.panelStore.tabs.count == 2 })
+        t.feed(navigated("s1", "a2", seq: 5, url: "https://b.example", title: "Replayed"))
+        await waitUntil("s1's whole replay to land", {
+            w.host.panelStore.tabs.first(where: { $0.tabId == "a2" })?.title == "Replayed"
+        })
 
         XCTAssertEqual(w.cef.log, transcript,
                        "a hop inside the linger must reach CEF not at all: \(w.cef.log)")
