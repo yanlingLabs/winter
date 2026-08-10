@@ -509,10 +509,23 @@ export const PanelTabKind = z.enum(["web", "document", "code", "note"]);
  *
  *  **These caps bind on READ as well as on write**, and that is deliberate rather than incidental:
  *  `SessionStore` parses every log line through `SessionEvent` (`sessions/store.ts`) exactly as
- *  `hub.append` parses every write, so a value that cannot be written can never be read either. The
- *  corollary is the hazard to respect if these numbers are ever LOWERED: a shrunk cap makes any
- *  already-written longer event unreadable, and an unreadable line fails the whole session read.
- *  Raising them is always safe; lowering them is a data migration.
+ *  `hub.append` parses every write, so a value that cannot be written can never be read either.
+ *
+ *  **The corollary if these numbers are ever LOWERED is DATA LOSS, not a loud failure.** An
+ *  already-written longer event becomes unparseable — and `readGoodLines` (`sessions/store.ts`)
+ *  SKIPS unparseable lines rather than stopping at them, so the session still opens and simply has
+ *  fewer events in it. Worse, `recoverAll` runs on every daemon open, sees `sawBad`, and REWRITES
+ *  the log file without the offending lines (temp+rename). A shrunk cap therefore silently and
+ *  PERMANENTLY deletes already-recorded panel navigations from a JSONL that is append-only,
+ *  never-deleted and user-delete-only — at the next daemon start, with nothing anywhere saying so.
+ *  Raising them is always safe; lowering them is a data migration, and the reason is destruction
+ *  rather than a failed read.
+ *
+ *  Present tense, same mechanism: these caps were ADDED to pre-existing event types, so any
+ *  `panel_tab_opened` already on disk with an over-cap `url`/`title` is skipped on read and dropped
+ *  from the log at the next open. Unreachable through the shipped path (no producer of either field
+ *  existed before this task — the panel "+" always passed `nil`), reachable by anyone who called
+ *  `panel.openTab` over the socket directly since Plan A.
  *
  *  Sized to be unreachable by honest content rather than tight:
  *   - **2048 chars for a URL** — the de-facto interop ceiling (IE's 2083; most servers cap headers

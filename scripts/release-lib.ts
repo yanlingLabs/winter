@@ -210,7 +210,9 @@ export interface AppcastInsertPlanInputs {
 
 export interface AppcastInsertPlanResult {
   /** Where release.ts should write `updatedXml` when `action` is "insert": "preview" ->
-   * out/release/<v>/appcast-preview.xml ONLY (dry-run — F1 fix: never the tracked file);
+   * out/release/<v>-dryrun/appcast-preview.xml ONLY (dry-run — F1 fix: never the tracked file;
+   * `d3054fa3` moved every dry-run artifact under the `-dryrun` suffix, and release.ts's own
+   * mirror of this sentence says the same);
    * "repo" -> releases/appcast.xml (real run — release.ts must do this write from inside its
    * `!DRY_RUN` publish tail, not before). */
   target: "preview" | "repo";

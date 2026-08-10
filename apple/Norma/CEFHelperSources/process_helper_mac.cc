@@ -26,12 +26,13 @@
 //      own command-line arguments assign it (renderer, GPU, utility, ...) and does not return
 //      until that subprocess exits.
 //
-// This file does not run yet, and cannot succeed if it did: Task 4 vendors CEF for HEADERS only —
-// the framework itself is not embedded into Contents/Frameworks/ until a later task, so step 2's
-// dlopen (and, if CEF_USE_SANDBOX fires first, step 1's dlopen of Libraries/libcef_sandbox.dylib)
-// will fail and this main() will return 1 the first time anything actually tries to launch one of
-// these bundles. Building the correct static shape — five bundles, at the exact path CEF looks
-// for them, with the correct three-step main — is Task 4's job. Making it live is not.
+// STATUS: LIVE. Task 4 built the static shape only — five bundles at the exact path CEF looks for
+// them, with the correct three-step main — and could not run: it vendored CEF for HEADERS, so
+// step 2's dlopen (and, if CEF_USE_SANDBOX fires first, step 1's dlopen of
+// Libraries/libcef_sandbox.dylib) had no framework to find and this main() would have returned 1.
+// Task 5's "Embed CEF framework" phase put the framework into Contents/Frameworks/ and Task 6a ran
+// the whole process tree against it: these bundles now launch and serve real renderer, GPU and
+// utility processes. The branch's headline result IS that they succeed.
 
 #include "include/cef_app.h"
 #include "include/wrapper/cef_library_loader.h"

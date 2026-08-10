@@ -169,7 +169,7 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 @property(nonatomic) BOOL canGoBack;
 @property(nonatomic) BOOL canGoForward;
 /// The last (url, title) pair handed to `navigationObserver`, or seeded from the daemon's own
-/// record by `NormaCEFSeedReportedNavigation`. Consecutive duplicates are suppressed against this.
+/// record by `NormaCEFSeedTabState`. Consecutive duplicates are suppressed against this.
 @property(nonatomic, copy) NSString *lastReportedURL;
 @property(nonatomic, copy) NSString *lastReportedTitle;
 @end
@@ -555,7 +555,7 @@ class NormaClient : public CefClient,
       // is what makes the cache safe; see `titleURL`.
       NSString *title = [bridge.titleURL isEqualToString:url] ? (bridge.title ?: @"") : @"";
       // Consecutive-duplicate suppression, seeded across browser lifetimes by
-      // `NormaCEFSeedReportedNavigation`. A reload, or a re-created browser landing back on the
+      // `NormaCEFSeedTabState`. A reload, or a re-created browser landing back on the
       // page the daemon already recorded, adds nothing to the log.
       const BOOL isRepeat = [url isEqualToString:bridge.lastReportedURL ?: @""] &&
                             [title isEqualToString:bridge.lastReportedTitle ?: @""];

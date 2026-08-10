@@ -69,18 +69,21 @@ func panelTabContent(for tab: PanelTab, host: ShellSessionHost? = nil,
 
 /// PURE: which tab the panel renders. The active one — or, when nothing is active, the FIRST tab.
 ///
-/// The fallback is what makes the panel show anything at all in the ordinary case, and it is a
-/// finding rather than a defensive habit: `panel.openTab` (`packages/core/src/ipc/server.ts`)
-/// appends `panel_tab_opened` and nothing else — never `panel_tab_activated` — and both folds (TS
+/// **The wire decision this fallback was born from has since been MADE, in the daemon.** Task 6a
+/// found that `panel.openTab` appended `panel_tab_opened` and nothing else, while both folds (TS
 /// `foldPanelTabs` and its Swift mirror in `PanelTab.swift`) set `activeTabId` ONLY from
-/// `panel_tab_activated`. So a tab that was just opened is open but not active. Plan A could not
-/// see this because it rendered `Color.clear` for every tab: "no active tab" and "the active tab is
-/// blank" were the same picture. Task 6a is where they stop being the same picture.
+/// `panel_tab_activated` — so a freshly opened tab was open but never active, and resolving that at
+/// the rendering boundary was all Task 6a could do. Task 6b fixed it at the one place tabs are
+/// minted: `panel.openTab` now appends `panel_tab_activated` too
+/// (`packages/core/src/ipc/server.ts`, "THE WIRE DECISION Plan A left open"), so an agent-opened
+/// tab and a user-opened tab are indistinguishable downstream. The cost Task 6a carried — the strip
+/// highlighting `activeTabId` while this rendered something else — went with it, and `ShellPanel`
+/// now passes `shownTabId` so the highlight follows THIS function rather than `activeTabId`.
 ///
-/// Whether opening a tab SHOULD activate it is a wire decision Plan A owns, carried to Task 6b.
-/// Until it is made, the visible cost of resolving it here is that `PanelTabStrip` highlights
-/// `activeTabId` while this renders the fallback, so with nothing active the shown tab is not the
-/// highlighted one.
+/// The fallback is still needed, for the two cases the daemon-side comment names: sessions written
+/// BEFORE that change (their logs carry `panel_tab_opened` alone, forever — sessions are
+/// user-delete-only), and the beat after the active tab is closed, where `foldPanelTabs` clears
+/// `activeTabId` by design.
 func panelShownTab(tabs: [PanelTab], activeTabId: String?) -> PanelTab? {
     if let activeTabId, let tab = tabs.first(where: { $0.tabId == activeTabId }) {
         return tab

@@ -244,9 +244,12 @@ final class CEFRuntimeTests: XCTestCase {
 
     /// The panel renders the active tab — and, when nothing is active, the first one.
     ///
-    /// The fallback is load-bearing rather than defensive: `panel.openTab` never emits
-    /// `panel_tab_activated`, so a freshly opened tab leaves `activeTabId` nil and the panel would
-    /// otherwise render nothing at all in the ordinary case. See `panelShownTab`'s own doc.
+    /// The fallback no longer covers the ORDINARY case: Task 6b made `panel.openTab` append
+    /// `panel_tab_activated` as well (`packages/core/src/ipc/server.ts`), so a freshly opened tab
+    /// arrives active. What it still covers is sessions written before that change — whose logs
+    /// carry `panel_tab_opened` alone forever, since sessions are user-delete-only — and the beat
+    /// after the active tab is closed, where the fold clears `activeTabId` by design. See
+    /// `panelShownTab`'s own doc.
     func testTheShownTabFallsBackToTheFirstTabWhenNothingIsActive() {
         let a = PanelTab(tabId: "a", kind: .web, url: nil, title: nil)
         let b = PanelTab(tabId: "b", kind: .web, url: nil, title: nil)
