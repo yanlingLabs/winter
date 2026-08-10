@@ -675,6 +675,90 @@ final class BrowserSignalsTests: XCTestCase {
         withExtendedLifetime(window) {}
     }
 
+    // MARK: - The cap, through the wiring (spec §4)
+
+    /// **The cap's LRU order, MAINTAINED by the real runtime rather than handed to `plan` as a
+    /// literal** — the one thing T2 and T3 between them could not pin.
+    ///
+    /// `BrowserLifecycleTests`' eleven `test_cap_*` rows own the decision (given an order, who is
+    /// evicted), and `BrowserRuntimeTests
+    /// .testLruOrderIsTouchedOnCreateAndOnAttachAndDroppedOnStop` owns the recording (create and
+    /// attach touch, stop drops). Both take the order as an input. What neither can see is whether
+    /// the order the ENGINE consults is the one the app's own traffic produced — that join is a
+    /// single expression, `lruOrder: runtime.lruOrder` (`BrowserSignals.swift`), and a wrong or
+    /// missing one is invisible everywhere else: the cap still fires, still evicts exactly one tab,
+    /// and still leaves the count at 8. It just takes the wrong tab — one the user was on two
+    /// clicks ago instead of one they abandoned nine tabs back.
+    ///
+    /// So this row is built so that **creation order and recency disagree**, and asserts the victim
+    /// by name. Nine web tabs across two sessions: `a1…a4` opened while `s1` is displayed, `b1…b4`
+    /// after a hop to `s2`, then a hop back (which re-shows `a4`) and a click on `a1` (which
+    /// re-shows the OLDEST tab in the app). Recency is then `a2, a3, b1…b4, a4, a1` while creation
+    /// order is still `a1, a2, a3, a4, b1…b4` — so the ninth tab landing must take **`a2`**, and
+    /// anything that reads creation order instead takes `a1`.
+    ///
+    /// `s2` is left quiet, inside its linger: a linger HOLDS a session's browsers, it does not
+    /// PROTECT them from the cap (`BrowserLifecycle.capEvictions`), which is what puts `b1…b4` in
+    /// the candidate list at all.
+    func testTheNinthWebTabEvictsTheGenuinelyLeastRECENTTabNotTheOldestOne() async {
+        let w = makeWorld()
+        let (window, panelHost) = makePanelHost()
+        var seq = 0
+        func next() -> Int { seq += 1; return seq }
+
+        // s1, displayed: four tabs, opened and shown one after another.
+        let t = await openOneWebTab(w, sessionId: "s1", tabId: "a1", url: "https://a1.example",
+                                    seq: next())
+        _ = next()                                   // `openOneWebTab` fed the activation itself
+        // Registering the panel's host is what makes the plan's `.attachViewport` actions land; the
+        // recency it records is the whole subject of this row.
+        w.runtime.attachViewport(tabId: "a1", into: panelHost)
+        for i in 2...4 {
+            t.feed(opened("s1", "a\(i)", seq: next(), url: "https://a\(i).example"))
+            t.feed(activated("s1", "a\(i)", seq: next()))
+            await waitUntil("a\(i)'s browser", { w.runtime.isLive(tabId: "a\(i)") })
+        }
+
+        // A hop to s2, and four more there. s1 goes quiet behind us (its linger is armed and never
+        // fires — the fake clock does not move), so all four of its browsers stay live.
+        w.host.select("s2")
+        await answerReattach(t, attachIndex: 2)
+        for i in 1...4 {
+            t.feed(opened("s2", "b\(i)", seq: next(), url: "https://b\(i).example"))
+            t.feed(activated("s2", "b\(i)", seq: next()))
+            await waitUntil("b\(i)'s browser", { w.runtime.isLive(tabId: "b\(i)") })
+        }
+        XCTAssertEqual(w.runtime.liveTabIds.count, 8, "the premise: exactly at the cap, nothing "
+                       + "evicted yet (\(w.cef.log))")
+
+        // Back to s1 — which re-shows a4, its last active tab — and then a click on a1, the OLDEST
+        // browser in the app. Both are attaches, and both are what make recency stop agreeing with
+        // creation order.
+        w.host.select("s1")
+        await answerReattach(t, attachIndex: 3)
+        await waitUntil("a4 back in the viewport", { w.runtime.viewportTabId == "a4" })
+        t.feed(activated("s1", "a1", seq: next()))
+        await waitUntil("a1 in the viewport", { w.runtime.viewportTabId == "a1" })
+        XCTAssertEqual(w.runtime.lruOrder, ["a2", "a3", "b1", "b2", "b3", "b4", "a4", "a1"],
+                       "the premise this row exists to exercise: recency no longer agrees with "
+                           + "creation order")
+
+        // The ninth tab.
+        t.feed(opened("s1", "a5", seq: next(), url: "https://a5.example"))
+        t.feed(activated("s1", "a5", seq: next()))
+        await waitUntil("a5's browser", { w.runtime.isLive(tabId: "a5") })
+
+        XCTAssertFalse(w.runtime.isLive(tabId: "a2"),
+                       "the cap took the wrong tab — the least-RECENT unprotected browser is a2: "
+                           + "\(w.runtime.lruOrder) / \(w.cef.log)")
+        XCTAssertTrue(w.runtime.isLive(tabId: "a1"),
+                      "a1 is the OLDEST browser in the app and the one the user is looking at — "
+                          + "evicting it is what reading creation order for recency does")
+        XCTAssertEqual(w.runtime.liveTabIds, ["a1", "a3", "a4", "a5", "b1", "b2", "b3", "b4"],
+                       "exactly one eviction, and exactly the cap: \(w.cef.log)")
+        withExtendedLifetime(window) {}
+    }
+
     // MARK: - Wiring (ledger obligation #6) and the new-chat page
 
     /// **Obligation #6: `host` is set before anything can be created, not merely by the end of
