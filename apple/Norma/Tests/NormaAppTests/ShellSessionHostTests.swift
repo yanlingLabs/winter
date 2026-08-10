@@ -1200,6 +1200,52 @@ final class ShellSessionHostTests: XCTestCase {
                       "no session attached — activate/close should still fire nothing: \(mgmt.methods)")
     }
 
+    /// panel-cef Task 6b review (Minor 6): **`openPanelTab(url:)` is a panel-url PRODUCER, and it
+    /// runs through `PanelURLPolicy` like every other one.**
+    ///
+    /// Every call site passes `nil` today, so nothing was broken — but "every call site happens to
+    /// pass nil" is a coincidence, not an invariant, and this repo has a recorded incident
+    /// (`turn_completed.contextTokens`) of a second producer emitting past an ungated consumer for
+    /// exactly that reason. The daemon refuses too (`PanelOpenTabParams`'s `superRefine`); this is
+    /// the producer-side half, not a replacement.
+    ///
+    /// All three directions, because a refuse-only assertion cannot tell a policy from a broken
+    /// method: `.web` + hostile url → nothing on the wire; `.web` + https → the RPC, carrying the
+    /// url; `.document` + a local path → the RPC, because the guard is KIND-CONDITIONAL exactly
+    /// like the daemon's (the spec's LibreOffice/Monaco slots legitimately carry a path).
+    func testOpenPanelTabRunsItsURLThroughTheSchemePolicy() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        defer { host.deselect() }
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+        XCTAssertEqual(host.attachedSessionId, "S1")
+
+        host.openPanelTab(kind: .web, url: "javascript:alert(document.cookie)")
+        host.openPanelTab(kind: .web, url: "file:///Users/someone/.ssh/id_rsa")
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertTrue(mgmt.methods.filter { $0 == "panel.openTab" }.isEmpty,
+                      "a url outside the allowlist must never reach the wire: \(mgmt.methods)")
+
+        host.openPanelTab(kind: .web, url: "https://example.com/docs")
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let allowed = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("an allowed url must still open a tab: \(mgmt.methods)")
+        }
+        XCTAssertEqual((allowed["params"] as? [String: Any])?["url"] as? String, "https://example.com/docs")
+
+        // Kind-conditional: a non-web tab's local path is NOT held to the web allowlist.
+        host.openPanelTab(kind: .document, url: "file:///Users/someone/report.docx")
+        await feedWaitUntil { mgmt.methods.filter { $0 == "panel.openTab" }.count == 2 }
+        guard let doc = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }),
+              (doc["params"] as? [String: Any])?["kind"] as? String == "document" else {
+            return XCTFail("a .document tab's path must not be refused by the WEB allowlist: \(mgmt.methods)")
+        }
+        XCTAssertEqual((doc["params"] as? [String: Any])?["url"] as? String,
+                       "file:///Users/someone/report.docx")
+    }
+
     // MARK: - panel-shell T12 (bug found at the live gate, 2026-08-08): "+" with no attached
     // session used to be exactly the silent no-op the test just above pins — `openPanelTab`'s own
     // `guard let sessionId = attachedSessionId else { return }` returned before firing anything.

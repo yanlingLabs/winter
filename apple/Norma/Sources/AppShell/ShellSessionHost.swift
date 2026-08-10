@@ -473,6 +473,16 @@ final class ShellSessionHost: ObservableObject {
     func openPanelTab(kind: PanelTabKind = .web, url: String? = nil, title: String? = nil,
                        onSessionCreated: ((String) -> Void)? = nil) {
         guard let client = managementClient else { return }
+        // panel-cef Task 6b review (Minor 6): the app's OTHER panel-url producer, and until now the
+        // only one with no policy on it. Every call site passes `nil` today — which is not an
+        // invariant, it is a coincidence, and this repo has already been bitten by exactly that
+        // reasoning (`turn_completed.contextTokens`: a second producer emitting the old shape past
+        // a consumer with no gate). Kind-conditional, mirroring the daemon's own `superRefine`.
+        //
+        // BEFORE the auto-create branch on purpose: with no session attached, a url the daemon
+        // would refuse used to mint a session first and then fail its `panel.openTab` silently
+        // (`try?`), leaving an orphan empty session behind. Refusing here costs nothing and cannot.
+        guard PanelURLPolicy.mayOpenTab(kind: kind, url: url) else { return }
         let kindRaw = kind.rawValue
         guard let sessionId = attachedSessionId else {
             guard !panelAutoCreateInFlight else { return }

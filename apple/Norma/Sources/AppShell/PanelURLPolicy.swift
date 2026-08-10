@@ -33,6 +33,16 @@ import Foundation
 ///
 /// A fourth lives in the daemon (`isPersistablePanelWebUrl`, `packages/protocol/src/methods.ts`),
 /// so the app is not the only thing between a hostile URL and a permanent file.
+///
+/// **`mayOpenTab` (below) is door "1b"** — the app's OTHER producer of a panel url,
+/// `ShellSessionHost.openPanelTab(url:)`, added by the Task 6b review. Deliberately not renumbered:
+/// "enforcement point 3" and "the four places" are named verbatim in `PanelWebTab.swift`,
+/// `methods.ts` and this file's tests, and renumbering would make every one of them wrong.
+///
+/// **Not every caller of `isAllowed` is one of these doors.** `PanelWebTabModel.displayURL` and the
+/// `⋮` menu ask the same question for PRESENTATION — what the address bar shows, whether Copy Link
+/// is enabled. Those change nothing about what may be loaded or stored, and removing one is a
+/// cosmetic defect, not a security one.
 enum PanelURLPolicy {
     /// The complete set of schemes that may be loaded into the panel's browser or persisted as a
     /// web tab's address. Lowercase; comparison is case-insensitive (`JavaScript:` is `javascript:`).
@@ -145,6 +155,31 @@ enum PanelURLPolicy {
     static func persistableNavigation(url: String, title: String) -> (url: String, title: String)? {
         guard isAllowed(url), !url.isEmpty, url.count <= urlMaxLength else { return nil }
         return (url, String(title.prefix(titleMaxLength)))
+    }
+
+    /// **Door 1b — opening a tab with a url already in hand.** May `ShellSessionHost.openPanelTab`
+    /// ask the daemon for this tab at all?
+    ///
+    /// The other Swift-side producer of a panel url, and until this it was ungated: every call site
+    /// happens to pass `nil` today, which is not an invariant — this repo has a recorded incident
+    /// (`turn_completed.contextTokens`) where a second producer kept emitting the old shape past a
+    /// consumer with no gate, for exactly that reason. With this, "every Swift-side panel-url
+    /// producer runs through `PanelURLPolicy`" is structurally true rather than accidentally true.
+    ///
+    /// **KIND-CONDITIONAL, mirroring `PanelOpenTabParams`'s own `superRefine`
+    /// (`packages/protocol/src/methods.ts`) exactly** — `web` is held to the allowlist, every other
+    /// kind is not, because a `.document`/`.code`/`.note` tab legitimately carries a local path
+    /// (the spec's LibreOffice and Monaco slots are precisely that). An unconditional refusal here
+    /// would foreclose a design that is already in the spec.
+    ///
+    /// **Refuses the CALL, not just the url** — it does not quietly drop the url and open a blank
+    /// tab. That mirrors what the daemon does with the same params (a failed `superRefine` rejects
+    /// the whole request), and it keeps this file's standing rule: refuse outright, never sanitise.
+    /// The daemon's own refusal stays where it is; this is the producer-side half of one guard, not
+    /// a replacement for it.
+    static func mayOpenTab(kind: PanelTabKind, url: String?) -> Bool {
+        guard let url, kind == .web else { return true }
+        return isAllowed(url) && url.count <= urlMaxLength
     }
 
     /// **Door 3 — what a restored tab actually loads.** Falls back to the local New Tab page for
