@@ -567,6 +567,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // applier yet — which is exactly why the observer's captured launch policy is `.accessory`.
         DockPolicy.apply(.accessory)
         guard !Self.isRunningUnitTests else { return }
+        #if DEBUG
+        // browser-runtime Task 1: the reparenting spike takes the launch over **INSTEAD OF**
+        // `boot()`, not after it — and that placement is the point. `boot()` performs
+        // account-global side effects from whatever bundle is executing (`SMAppService` helper
+        // registration, the login item, launchd migration, the updater, the global hotkey, a
+        // second menu-bar orb), and the spike runs from a throwaway bundle in a scratch
+        // `derivedDataPath` that gets deleted afterwards; none of that may be pointed at it. The
+        // spike needs `NSWindow`s and CEF and nothing else. Gated on `NORMA_SPIKE_REPARENT=1`, so
+        // with the variable unset this is one env read and the app behaves identically.
+        if SpikeReparent.isRequested {
+            SpikeReparent.start(delegate: self)
+            return
+        }
+        #endif
         // DD-T4: stamp NORMA_HOME + NORMA_PROFILE into this process's env BEFORE the first
         // `NormaPaths` read (which happens inside `boot()` — `supervisor.start()`'s socket probe,
         // `AppModel.production()`), so the app, NormaKit, and every spawned child (the bundled
