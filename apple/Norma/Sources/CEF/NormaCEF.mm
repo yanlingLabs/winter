@@ -1594,6 +1594,26 @@ BOOL NormaCEFDoCloseIsHandledByHost(void) {
   return YES;
 }
 
+BOOL NormaCEFClientInstallsTheClickAndMenuHandlers(void) {
+  // **The two lines this asks about are the whole feature's on-switch, and a string scan cannot
+  // see them.** Measured, not assumed: deleting only `GetRequestHandler` and
+  // `GetContextMenuHandler` — leaving every override, every literal and every menu label in the
+  // binary — makes ⌘-click and the whole context menu dead at runtime and left all 18 CEF pins
+  // GREEN. That is the exact "passes with the thing it protects deleted" shape this file exists to
+  // stop, so it is closed here rather than merely disclosed.
+  //
+  // A real instance is constructed and the real virtual methods are called THROUGH `CefClient`,
+  // which is how CEF itself asks. That is what makes this different from the two constant answers
+  // above: delete a getter and the base class's `nullptr` is what comes back.
+  //
+  // Safe with CEF down (the unit-test host, always). `NormaClient` and every CEF interface it
+  // derives from are header-only, abstract and inline — the app already links without the
+  // framework, which is `dlopen`ed — so nothing here reaches libcef, and the client is destroyed
+  // by `CefRefPtr` on return without ever having been handed to a browser.
+  CefRefPtr<CefClient> client = new NormaClient(nil);
+  return client->GetRequestHandler() != nullptr && client->GetContextMenuHandler() != nullptr;
+}
+
 void NormaCEFCloseBrowser(NSView *parent) {
   if (parent == nil) {
     return;

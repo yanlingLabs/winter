@@ -140,6 +140,14 @@ enum NormaCEFRuntime {
     /// C function directly.
     static var popupsAreCancelled: Bool { NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow() }
 
+    /// Whether the browser client actually INSTALLS its `CefRequestHandler` (⌘-click, middle-click)
+    /// and `CefContextMenuHandler` (the link/image menu). Unlike the four above this is not a
+    /// constant: it constructs a client and calls the real getters through `CefClient`, because the
+    /// question is whether two one-line overrides still EXIST — and deleting them leaves every log
+    /// literal and every menu label in the binary, so no built-product string scan can tell.
+    /// Measured: it left all 18 CEF pins green. See `NormaCEF.h`.
+    static var installsClickAndMenuHandlers: Bool { NormaCEFClientInstallsTheClickAndMenuHandlers() }
+
     /// `CefShutdown`, at the point of no return. Safe no-op if CEF was never initialised — and a
     /// no-op that leaves `didShutdown` false, so running it in the unit-test host does not latch
     /// every later test into "CEF is finished" (whole-branch F10). That is what lets

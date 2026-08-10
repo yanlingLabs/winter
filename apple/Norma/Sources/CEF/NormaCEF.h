@@ -216,6 +216,20 @@ BOOL NormaCEFDoCloseIsHandledByHost(void);
 /// is what keeps CEF out of the window business, and the two are independent.
 BOOL NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow(void);
 
+/// YES when the browser client actually INSTALLS the two handlers behind ⌘-click / middle-click
+/// (`CefRequestHandler`) and the context menu (`CefContextMenuHandler`).
+///
+/// **This is not a constant, and that is the point.** It constructs a real client and calls
+/// `GetRequestHandler()` / `GetContextMenuHandler()` through `CefClient` — the same two calls CEF
+/// makes — so the answer comes from the overrides themselves. The two functions above answer
+/// questions about a VALUE; this one answers a question about whether code EXISTS, which no string
+/// scan of the built product can: deleting the two one-line getters leaves every override, every log
+/// literal and every menu label in the binary while making both features completely dead at runtime.
+/// That was measured, and it left all 18 CEF pins green until this existed.
+///
+/// Safe to call with CEF down — see the implementation for why nothing here reaches the framework.
+BOOL NormaCEFClientInstallsTheClickAndMenuHandlers(void);
+
 /// Close the browser hosted by `parent`, and cancel any creation still on its way to becoming one.
 /// Called from `NSViewRepresentable.dismantleNSView`.
 ///

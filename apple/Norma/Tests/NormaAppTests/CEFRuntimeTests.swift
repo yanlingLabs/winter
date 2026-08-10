@@ -278,6 +278,36 @@ final class CEFRuntimeTests: XCTestCase {
         }
     }
 
+    /// **The client must actually INSTALL both new handlers** — the half every string scan is blind
+    /// to, and the reason this pin exists at all.
+    ///
+    /// Found by mutating, not by reasoning: deleting the two one-line getters
+    /// (`GetRequestHandler` / `GetContextMenuHandler`) while leaving every override, every log
+    /// literal and every menu label in place compiles, links, and left **all 18 CEF pins green** —
+    /// while making ⌘-click and the entire context menu completely dead, because a `CefClient` that
+    /// hands CEF no handler gets CEF's silent defaults for every method on it. That is exactly the
+    /// "green with the thing it protects deleted" shape this file exists to stop, and it is the
+    /// hole the three built-product scans below CANNOT close: their needles all survive the
+    /// deletion.
+    ///
+    /// **What this covers:** that `CefClient::GetRequestHandler()` and
+    /// `CefClient::GetContextMenuHandler()` both answer non-null on a real, freshly constructed
+    /// `NormaClient` — read through the `CefClient` interface, i.e. the same two calls CEF makes.
+    ///
+    /// **What it does NOT cover:** anything about what those handlers then DO. That is the three
+    /// scans below. The two halves are complements, exactly like the `DoClose` pair above: this one
+    /// is satisfied by handlers whose bodies were gutted, those are satisfied by bodies CEF is
+    /// never handed.
+    func testTheClientACTUALLYINSTALLSTheRequestAndContextMenuHandlers() {
+        XCTAssertTrue(
+            NormaCEFRuntime.installsClickAndMenuHandlers,
+            "NormaClient no longer returns its CefRequestHandler and/or CefContextMenuHandler. "
+                + "Both features are then dead at runtime — CEF never calls a handler it was not "
+                + "given — while every log literal and every menu label stays in the binary, so "
+                + "every built-product scan in this file stays green. ⌘-click goes back to being a "
+                + "plain click and the context menu goes back to CEF's stock model. See NormaCEF.mm.")
+    }
+
     /// **⌘-click and middle-click must OPEN A NEW PANEL TAB**, not perform an ordinary click.
     ///
     /// The regression this catches is the state the feature was built out of, and it is a *deletion*
@@ -293,10 +323,12 @@ final class CEFRuntimeTests: XCTestCase {
     /// its call — the literal is not reachable without the routing call having happened and
     /// succeeded. Deleting the route deletes the literal.
     ///
-    /// **What it does NOT cover, stated rather than implied:** that CEF ever calls the handler,
-    /// which dispositions the branch tests, or the `user_gesture` gate. CEF never starts under
-    /// XCTest (`testTheRuntimeRefusesToStartCEFUnderXCTest`), so no test in this host reaches
-    /// `OnOpenURLFromTab` at all. The Swift half of the route needs no new pin because there is no
+    /// **What it does NOT cover, stated rather than implied:** which dispositions the branch tests,
+    /// the `user_gesture` gate, or that the handler is INSTALLED — that last one is the test above,
+    /// and it is not a theoretical gap: this needle survives deleting `GetRequestHandler`. CEF
+    /// never starts under XCTest (`testTheRuntimeRefusesToStartCEFUnderXCTest`), so no test in this
+    /// host reaches `OnOpenURLFromTab` at all. The Swift half of the route needs no new pin because
+    /// there is no
     /// new Swift code: a routed click enters the SAME container observer a popup does
     /// (`NormaCEFSetPopupObserver` — one route, three producers), so
     /// `ShellSessionHostTests.testAPopupOpensAPanelTabInTheSessionItsOwnBrowserBelongsTo` is
@@ -328,8 +360,16 @@ final class CEFRuntimeTests: XCTestCase {
     /// from a binary scan. Removing an item removes its label from the binary.
     ///
     /// **What it does NOT cover:** the POSITION of the items, the separator, the conditions that
-    /// gate them (link vs. image), that the commands do anything when chosen, or that CEF ever
-    /// calls either method — none of which is reachable with CEF down, which it always is here.
+    /// gate them (link vs. image), that the commands do anything when chosen, or that the handler is
+    /// INSTALLED — none of the first four reachable with CEF down, which it always is here, and the
+    /// last one covered by `testTheClientACTUALLYINSTALLSTheRequestAndContextMenuHandlers` above,
+    /// which exists because this needle survives deleting `GetContextMenuHandler`.
+    ///
+    /// A behavioural pin — drive `OnBeforeContextMenu` with a fake model and assert the resulting
+    /// items — was considered and rejected: `CefMenuModel` has ~40 pure virtuals and
+    /// `CefContextMenuParams` ~20, so the fake would be ~200 lines of interface stubs that break on
+    /// every CEF upgrade, and `CefMenuModel::CreateMenuModel` is a library call that needs the
+    /// framework loaded, which never happens here.
     func testTheContextMenuOFFERSNormasOwnLinkAndImageItems() throws {
         for label in ["Open Link in New Tab", "Copy Link Address", "Copy Image Address"] {
             XCTAssertTrue(
