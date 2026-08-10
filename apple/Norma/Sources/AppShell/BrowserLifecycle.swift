@@ -87,7 +87,7 @@ struct BrowserLifecycleEngine {
     }
 
     /// Signals → actions. See the rule-by-rule commentary inline; the ORDER of the returned array
-    /// is a contract, documented at `assemble` below.
+    /// is a contract, documented at the `return` statement at the end of this function.
     ///
     /// - Parameters:
     ///   - sessions: sessionId → signals. A session present in `tabs` but absent here is treated as

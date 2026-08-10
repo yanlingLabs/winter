@@ -98,6 +98,10 @@ final class BrowserLifecycleTests: XCTestCase {
     /// Plans, applies, then plans again with the SAME inputs — rule 9. The second plan must be
     /// empty: a create of an already-live tab and a stop of an already-dead one are the two shapes
     /// that would make an executor do work twice.
+    ///
+    /// The FIRST plan is asserted non-empty on purpose. Every row below is built to produce work on
+    /// the first pass, and without this check "the second plan is empty" passes vacuously whenever a
+    /// mutation makes the first plan empty too — which is precisely a decorative test.
     private func assertIdempotent(sessions: [String: BrowserSignals],
                                   tabs: [String: [BrowserTabState]],
                                   sim: Sim,
@@ -107,6 +111,8 @@ final class BrowserLifecycleTests: XCTestCase {
         var state = sim
         let first = plan(sessions: sessions, tabs: tabs, live: state.live, viewport: state.viewport,
                          pendingStops: state.pendingStops, lruOrder: state.lruOrder, now: now)
+        XCTAssertFalse(first.isEmpty, "the first plan did no work — idempotence would be vacuous",
+                       file: file, line: line)
         state.apply(first)
         let second = plan(sessions: sessions, tabs: tabs, live: state.live, viewport: state.viewport,
                           pendingStops: state.pendingStops, lruOrder: state.lruOrder, now: now)
