@@ -35,9 +35,10 @@ final class BrowserRuntime {
     /// override is callable under XCTest, ever" — so the runtime's logic has to be reachable without
     /// CEF, and the only way to get there is a seam the tests can substitute.
     ///
-    /// `production` below is the whole of the un-substitutable half: ten one-line forwards to
-    /// `NormaCEF*` / `NormaCEFRuntime`, with no branch and no state, which is what "thin enough to
-    /// verify by reading" has to mean when reading is the only verification available.
+    /// `production` below is the whole of the un-substitutable half: ten forwards to `NormaCEF*` /
+    /// `NormaCEFRuntime`, one line each but for `failureReason`'s three-line unwrap of an enum, with
+    /// no branch and no state of their own — which is what "thin enough to verify by reading" has to
+    /// mean when reading is the only verification available.
     struct CEFDriver {
         var setStateObserver: (PanelCEFContainerView, ((NormaCEFBrowserState?) -> Void)?) -> Void
         var setNavigationObserver: (PanelCEFContainerView, ((String?, String?) -> Void)?) -> Void
@@ -98,7 +99,7 @@ final class BrowserRuntime {
             mainAsync: { work in
                 // `assumeIsolated` rather than a `Task`: the block is being run ON the main queue,
                 // so the assumption is a statement of fact, and it keeps the hop to exactly one
-                // turn — which is what `PanelWebTab.makeNSView` measured its behaviour against.
+                // turn — the same one-turn hop `PanelWebTab.makeNSView` documents.
                 DispatchQueue.main.async { MainActor.assumeIsolated { work() } }
             },
             timer: { fireAt, work in
@@ -309,10 +310,11 @@ final class BrowserRuntime {
 
     /// `create` = container into the parking window → wire the model → seed → `NormaCEFCreateBrowser`.
     ///
-    /// The whole sequence is `PanelWebTab.makeNSView`'s, moved here unchanged, **including its
-    /// order**: the state observer publishes the current snapshot the moment it is registered, and
-    /// the seed is what makes that first snapshot the tab's known address instead of blank
-    /// (`NormaCEF.h`). Observers, then seed, then create.
+    /// The CEF part of the sequence is `PanelWebTab.makeNSView`'s, **in its order**, and that order
+    /// is load-bearing: the state observer publishes the current snapshot the moment it is
+    /// registered, and the seed is what makes that first snapshot the tab's known address instead of
+    /// blank (`NormaCEF.h`). Observers, then seed, then create. The two steps BEFORE it — parking
+    /// the container and the LRU touch — are this task's, and had no equivalent in the view.
     private func create(tabId: String, url: String?, title: String?, sessionId: String?) {
         // **The double-create guard.** Rule 8 re-creates a held session's shown tab on every plan
         // where it is missing, so a create for a tab that already has one is ordinary traffic — and
@@ -417,6 +419,14 @@ final class BrowserRuntime {
                 return
             }
             self.driver.createBrowser(container, url)
+            // A plan may create and attach in the same pass (a session waking up on its shown tab),
+            // and attach ran BEFORE this hop — with no CEF view in the container, so nothing could
+            // be made first responder. Completing that same obligation now, for the one tab it can
+            // apply to. Not a second policy: `restoreFirstResponder` is idempotent and does nothing
+            // unless this tab is the mounted one.
+            if self.viewportTabId == tabId {
+                self.restoreFirstResponder(in: container, tabId: tabId)
+            }
         }
     }
 
@@ -440,11 +450,12 @@ final class BrowserRuntime {
         driver.setPopupObserver(container, nil)
         driver.closeBrowser(container)
 
-        // Only AFTER the close: CEF's own view is a subview of this container, and the spike's
-        // invariant is that a CEF view stays in a window at all times. By here the browser is gone,
-        // so what is being unparented is an empty container — and leaving it in a superview would
-        // both retain it forever and, if it were still mounted, leave a dead rectangle where the
-        // page was.
+        // Only AFTER the close, and the ordering is the same one the shipped `dismantleNSView` had.
+        // CEF's close is ASYNCHRONOUS — `OnBeforeClose` lands later — but `NormaCEFCloseBrowser`
+        // detaches CEF's own host view from this container before it returns, so what is unparented
+        // here is an empty container rather than one still carrying a live CEF view. Unparenting it
+        // matters both ways round: left in the parking window it is retained for the life of the
+        // process, and left in the PANEL's host it is a dead rectangle where the page used to be.
         container.removeFromSuperview()
 
         lru.removeAll { $0 == tabId }
@@ -469,8 +480,9 @@ final class BrowserRuntime {
 
     private func mountViewport(tabId: String, into host: NSView) {
         guard let container = containers[tabId] else {
-            // Nothing to mount, so nothing is claimed. Silent about the viewport on purpose: saying
-            // "t is shown" here would tell the next plan a lie it has no way to detect.
+            // Nothing to mount, so nothing is claimed — `viewportTabId` is deliberately left alone.
+            // Recording this tab as the viewport would tell the next plan the panel is showing a
+            // browser that does not exist, and the plan has no way to detect the lie.
             NSLog("[BrowserRuntime] attachViewport(\(tabId)): no live browser to mount")
             return
         }
@@ -497,10 +509,13 @@ final class BrowserRuntime {
     private func restoreFirstResponder(in container: PanelCEFContainerView, tabId: String) {
         let found = Self.findKeyboardResponder(in: container)
         if found.count != 1 {
-            // The loud log the spike asked for. Zero: nobody can type in the panel — most likely the
-            // browser has not been created into the container yet, which is benign and transient,
-            // or Chromium's view tree has changed shape, which is not. More than one: the choice
-            // below is a guess.
+            // The loud log the spike asked for. Zero: nobody can type in this tab. Two causes, and
+            // only one of them is a defect — CEF has not parented its view into the container yet
+            // (creation is asynchronous, so a plan that creates and attaches in one pass reaches
+            // here first; `startBrowser` calls this again once the create has been made, and a click
+            // into the page fixes it in any case, since Chromium's own focus machinery then runs),
+            // or Chromium's view tree has changed shape, which is. More than one: the choice below
+            // is a guess.
             NSLog("[BrowserRuntime] first-responder search for \(tabId) found \(found.count) "
                   + "candidates (matched by \(found.matchedBy.rawValue)) — expected exactly 1")
         }
@@ -527,7 +542,8 @@ final class BrowserRuntime {
         container.autoresizingMask = [.width, .height]
     }
 
-    /// Most-recently-used LAST — `lruOrder` hands the engine the reverse.
+    /// Appends, so the array reads least-recently-used FIRST — which is the order `plan(lruOrder:)`
+    /// documents and consumes, with no reversal anywhere.
     private func touch(_ tabId: String) {
         lru.removeAll { $0 == tabId }
         lru.append(tabId)

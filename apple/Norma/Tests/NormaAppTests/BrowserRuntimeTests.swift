@@ -60,8 +60,6 @@ final class BrowserRuntimeTests: XCTestCase {
             return fresh
         }
 
-        func label(of view: NSView) -> String? { marks[ObjectIdentifier(view)] }
-
         var driver: BrowserRuntime.CEFDriver {
             BrowserRuntime.CEFDriver(
                 setStateObserver: { [unowned self] container, block in
@@ -574,6 +572,32 @@ final class BrowserRuntimeTests: XCTestCase {
                       tabs: tabs("s1", tab("t1", shown: true)), sessionOf: { _ in "s1" })
 
         runtime.attachViewport(tabId: "t1", into: host)
+
+        XCTAssertNotNil(deep)
+        XCTAssertTrue(window.firstResponder === deep,
+                      "first responder was \(String(describing: window.firstResponder))")
+    }
+
+    /// **Create and attach in the same plan** — a session waking up on its shown tab. The attach
+    /// runs first (the engine's order: there is no container to mount before the browser exists, and
+    /// the container exists the instant `.create` is applied), but CEF's view arrives a turn later,
+    /// so the attach finds nothing to focus. Without the second restore after the create, that tab
+    /// takes no keystrokes until the user clicks into the page.
+    func testATabCreatedAndAttachedInOnePlanStillGetsItsFirstResponderOnceCEFArrives() {
+        var deep: FakeRenderWidgetHostView?
+        cef.onCreate = { [unowned self] container, _ in deep = self.installFakeCEFTree(in: container) }
+        clock.autoRun = false
+        let (window, host) = makeHostView()
+        let runtime = makeRuntime()
+        runtime.attachViewport(tabId: "t1", into: host)   // registers the panel's host; mounts nothing
+
+        runtime.apply([.create(tabId: "t1", url: "https://example.com"),
+                       .attachViewport(tabId: "t1")],
+                      tabs: tabs("s1", tab("t1", shown: true)), sessionOf: { _ in "s1" })
+        XCTAssertEqual(runtime.viewportTabId, "t1", "the container is mounted even though CEF is not in it")
+        XCTAssertNil(deep, "the create has not run yet")
+
+        clock.runPendingWork()
 
         XCTAssertNotNil(deep)
         XCTAssertTrue(window.firstResponder === deep,
