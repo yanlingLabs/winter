@@ -161,8 +161,12 @@ void NormaCEFSetNavigationObserver(NSView *parent, void (^observer)(NSString *ur
 void NormaCEFSetPopupObserver(NSView *parent, void (^observer)(NSString *url));
 
 /// Prime a tab with what the daemon ALREADY knows about it, before its browser is created. Two
-/// effects, both of which exist because **one browser per tab is created and destroyed on every tab
-/// SWITCH** (`PanelCEFView` is `.id`'d by tab):
+/// effects, both of which exist because **a tab's browser can be created more than once over that
+/// tab's life, each time with an empty dedupe memory**. Until browser-runtime T4 that happened on
+/// every tab SWITCH (the panel's content view was `.id`'d by tab and owned the browser); since T4
+/// the runtime owns it and a switch is a container swap, so the re-creations left are the ones that
+/// matter longest — a session hop, a relaunch, and a tab whose browser the lifecycle engine stopped
+/// coming back:
 ///
 ///  1. **It suppresses the restore re-report.** A fresh browser has an empty dedupe memory, so
 ///     loading the tab's own persisted URL commits, fires `OnLoadEnd`, and reports a

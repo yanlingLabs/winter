@@ -214,11 +214,12 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 ///
 /// Keyed by the container for three reasons, each of which the browser-keyed alternative gets
 /// wrong: the container exists BEFORE the browser (creation is async and can queue behind
-/// `OnContextInitialized`, so observers registered at `makeNSView` time have nowhere else to live);
-/// the container OUTLIVES a close, so a late callback has somewhere to land harmlessly; and the
-/// dedupe memory below has to survive the browser entirely — `PanelCEFView` is `.id`'d by tab, so
-/// every tab SWITCH destroys one browser and builds another, and a per-browser memory would forget
-/// what was already reported on every single flip.
+/// `OnContextInitialized`, so observers registered at create time have nowhere else to live); the
+/// container OUTLIVES a close, so a late callback has somewhere to land harmlessly; and the dedupe
+/// memory below has to survive the browser entirely — a tab's browser is created more than once
+/// over that tab's life (on every tab SWITCH until browser-runtime T4; on a session hop, a relaunch
+/// or a lifecycle-engine stop-then-return since), and a per-browser memory would forget what was
+/// already reported each time.
 ///
 /// Attached with `objc_setAssociatedObject`, so its lifetime is the view's and there is no global
 /// table to leak or to sweep.
@@ -227,8 +228,9 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 @property(nonatomic, copy) void (^navigationObserver)(NSString *, NSString *);
 /// Where a popup this browser asks for goes — a new panel tab, in THIS tab's session. Keyed on the
 /// container like everything else here, which is what makes "the session the popup came from"
-/// answerable at all: the block is created by the tab's own `makeNSView`, so it closes over that
-/// tab's model and its captured session id. `nil` for a container nobody wired one to, and that
+/// answerable at all: the block is created when the tab's browser is (`BrowserRuntime.wire`, and
+/// the view's own `makeNSView` before browser-runtime T4), so it closes over that tab's model and
+/// its captured session id. `nil` for a container nobody wired one to, and that
 /// case cancels the popup exactly as this file did before the route existed.
 @property(nonatomic, copy) void (^popupObserver)(NSString *);
 @property(nonatomic, copy) NSString *url;
@@ -969,7 +971,9 @@ class NormaClient : public CefClient,
   /// Found at the user's live gate: closing a panel tab, or clicking Cowork in the sidebar with a
   /// tab open, made the whole app window vanish. The process survived (menu-bar orb still working,
   /// no crash report) — it was the window dying, not the app, and both triggers are the same event:
-  /// SwiftUI dismantles `PanelCEFView`, which calls `CloseBrowser(true)`.
+  /// something calls `NormaCEFCloseBrowser`, which calls `CloseBrowser(true)`. (Then, SwiftUI
+  /// dismantling the panel's `PanelCEFView`; since browser-runtime T4, `BrowserRuntime.stop` — the
+  /// caller moved, the mechanism below did not.)
   ///
   /// `include/cef_life_span_handler.h` states the mechanism outright, and this is quoted rather
   /// than inferred:
@@ -1049,10 +1053,11 @@ class NormaClient : public CefClient,
   /// and crashed the app on the unlucky one (it started at a view the close had already freed).
   /// Landing them is the deliberate answer, for three reasons:
   ///
-  ///   * On the panel-tab path there is nothing to land on. `PanelCEFView.dismantleNSView` clears
-  ///     all three observers BEFORE it calls `NormaCEFCloseBrowser`, so a late update writes to an
-  ///     object nobody is watching — precisely the "somewhere to land harmlessly" the
-  ///     container-keyed bridge was designed for.
+  ///   * On the panel-tab path there is nothing to land on. `BrowserRuntime.stop` clears all three
+  ///     observers BEFORE it calls `NormaCEFCloseBrowser` (as `PanelCEFView.dismantleNSView` did
+  ///     before browser-runtime T4 moved that sequence, in the same order and for the same reason),
+  ///     so a late update writes to an object nobody is watching — precisely the "somewhere to land
+  ///     harmlessly" the container-keyed bridge was designed for.
   ///   * On the shutdown path the observers are still wired, and what a late callback reports is a
   ///     navigation that genuinely committed. Reporting a true thing during a quit is not a defect;
   ///     inventing one would be, and nothing here invents anything.
