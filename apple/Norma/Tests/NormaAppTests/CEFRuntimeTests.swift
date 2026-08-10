@@ -255,6 +255,123 @@ final class CEFRuntimeTests: XCTestCase {
                 + "again, which is the state this feature was built to end. See NormaCEF.mm.")
     }
 
+    // MARK: - Pin 3d: ⌘-click / middle-click, and the context menu
+
+    /// The built-product `__cstring` scan the four pins around here share.
+    ///
+    /// Same technique and same reason as `testTheBrowserClientOverridesDoClose…`: the client class
+    /// is in an anonymous namespace and Release strips debugging symbols, so a symbol-based pin
+    /// would be fragile in the configuration that ships, while a string literal survives stripping.
+    /// **Debug puts the real code in `Norma.debug.dylib`** and leaves a stub at `MacOS/Norma`;
+    /// Release has no such dylib. Both are searched and finding the needle in either passes.
+    private func appBinaryContains(_ needle: String) throws -> Bool {
+        let macOS = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
+        let candidates = [
+            macOS.appendingPathComponent("Norma.debug.dylib"),  // Debug puts the real code here
+            macOS.appendingPathComponent("Norma"),              // Release
+        ].filter { FileManager.default.fileExists(atPath: $0.path) }
+        XCTAssertFalse(candidates.isEmpty, "no app binary found to scan")
+        let bytes = Data(needle.utf8)
+        return candidates.contains { url in
+            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return false }
+            return data.range(of: bytes) != nil
+        }
+    }
+
+    /// **⌘-click and middle-click must OPEN A NEW PANEL TAB**, not perform an ordinary click.
+    ///
+    /// The regression this catches is the state the feature was built out of, and it is a *deletion*
+    /// rather than a breakage: with `GetRequestHandler`/`OnOpenURLFromTab` gone, everything still
+    /// compiles, links and passes — CEF's documented default for those clicks is "allow the
+    /// navigation to proceed in the source browser's top-level frame"
+    /// (`include/cef_request_handler.h`), so ⌘-click silently becomes a plain click again and
+    /// nothing anywhere says so. That is the third instance of the class `OnBeforePopup` was.
+    ///
+    /// **What this covers:** that the routing block is compiled into the shipped binary. The needle
+    /// is a `Log` literal that sits INSIDE the branch guarded by `RouteURLToNewPanelTab`'s own
+    /// return value, so — unlike the `popup-routed-to-panel-tab` needle, which is merely *beside*
+    /// its call — the literal is not reachable without the routing call having happened and
+    /// succeeded. Deleting the route deletes the literal.
+    ///
+    /// **What it does NOT cover, stated rather than implied:** that CEF ever calls the handler,
+    /// which dispositions the branch tests, or the `user_gesture` gate. CEF never starts under
+    /// XCTest (`testTheRuntimeRefusesToStartCEFUnderXCTest`), so no test in this host reaches
+    /// `OnOpenURLFromTab` at all. The Swift half of the route needs no new pin because there is no
+    /// new Swift code: a routed click enters the SAME container observer a popup does
+    /// (`NormaCEFSetPopupObserver` — one route, three producers), so
+    /// `ShellSessionHostTests.testAPopupOpensAPanelTabInTheSessionItsOwnBrowserBelongsTo` is
+    /// already the behavioural pin for model → policy → `panel.openTab`, in the browser's own
+    /// session. A second copy of it here would pass whether or not this feature existed.
+    ///
+    /// If you change that log message, change this needle with it — the coupling is deliberate and
+    /// is written at the call site too.
+    func testCommandAndMiddleClicksOPENANEWPANELTABInsteadOfNavigatingInPlace() throws {
+        XCTAssertTrue(
+            try appBinaryContains("click-routed-to-panel-tab"),
+            "NormaClient no longer routes CefRequestHandler::OnOpenURLFromTab into a panel tab. "
+                + "Nothing fails when that handler is absent — CEF's default is to navigate in the "
+                + "source browser's top-level frame — so ⌘-click, middle-click and shift-click "
+                + "silently go back to performing an ordinary click, which is the exact bug this "
+                + "was built to fix. See NormaCEF.mm.")
+    }
+
+    /// The context menu must OFFER Norma's own link and image items.
+    ///
+    /// Without a `CefContextMenuHandler` the user gets `CefMenuManager::CreateDefaultModel`'s stock
+    /// menu, which adds **no link items at all** (verified in CEF's own source: for a page or frame
+    /// it is exactly Back, Forward, separator, Print, View Page Source) — so a two-finger click on a
+    /// link offers nothing about the link. Deleting the handler compiles, links and leaves the suite
+    /// green while restoring precisely that.
+    ///
+    /// **The needles are the item LABELS**, i.e. the arguments of the `InsertItemAt` calls
+    /// themselves rather than a log line standing in for them — the tightest coupling available
+    /// from a binary scan. Removing an item removes its label from the binary.
+    ///
+    /// **What it does NOT cover:** the POSITION of the items, the separator, the conditions that
+    /// gate them (link vs. image), that the commands do anything when chosen, or that CEF ever
+    /// calls either method — none of which is reachable with CEF down, which it always is here.
+    func testTheContextMenuOFFERSNormasOwnLinkAndImageItems() throws {
+        for label in ["Open Link in New Tab", "Copy Link Address", "Copy Image Address"] {
+            XCTAssertTrue(
+                try appBinaryContains(label),
+                "the context menu no longer offers \"\(label)\". With no CefContextMenuHandler CEF "
+                    + "shows its stock model, which contains no link or image items whatsoever — a "
+                    + "two-finger click on a link would again offer nothing about that link. See "
+                    + "NormaCEF.mm's OnBeforeContextMenu.")
+        }
+    }
+
+    /// **"View Page Source" must stay REMOVED from the menu, because on macOS it does nothing.**
+    ///
+    /// Not "nothing useful" — nothing at all, and this is CEF's own source rather than an
+    /// inference. On branch `7922` (the exact Chromium branch of the vendored framework,
+    /// `chromium-151.0.7922.109`): `CefMenuManager::ExecuteDefaultCommand` sends
+    /// `MENU_ID_VIEW_SOURCE` to `GetFocusedFrame()->ViewSource()`, which is
+    /// `SendCommandWithResponse("GetSource", ViewTextCallback)` → `CefBrowserHostBase::ViewText` →
+    /// `platform_delegate_->ViewText`, and `CefBrowserPlatformDelegateNativeMac::ViewText`'s entire
+    /// body is `// TODO(cef): Implement this functionality.` + `NOTIMPLEMENTED();`. The base class's
+    /// is the same and the Alloy delegate does not override it, so there is no macOS implementation
+    /// anywhere — and in a release build `NOTIMPLEMENTED()` compiles to nothing.
+    ///
+    /// The regression this catches is someone restoring the stock item on the reasonable-sounding
+    /// grounds that removing a browser feature looks like a mistake. It is not: it is a dead verb.
+    ///
+    /// **What this covers:** that the `Remove` call is in the shipped binary AND is the thing that
+    /// gates the log — the needle sits inside `if (model->Remove(MENU_ID_VIEW_SOURCE)) { … }`, so
+    /// the literal cannot be reached without the removal having happened and having found the item
+    /// to remove. That is a stronger coupling than the adjacent-log needles elsewhere in this file.
+    ///
+    /// **What it does NOT cover:** that CEF ever builds a menu here, or that nothing else re-adds
+    /// the item afterwards.
+    func testViewPageSourceIsREMOVEDFromTheMenuBecauseItDoesNothingOnMacOS() throws {
+        XCTAssertTrue(
+            try appBinaryContains("context-menu-view-source-removed"),
+            "OnBeforeContextMenu no longer removes MENU_ID_VIEW_SOURCE. On macOS that item is a "
+                + "no-op all the way down to CefBrowserPlatformDelegateNativeMac::ViewText, whose "
+                + "body is NOTIMPLEMENTED() — clicking it does literally nothing, silently. A menu "
+                + "verb that does nothing is worse than an absent one. See NormaCEF.mm.")
+    }
+
     // MARK: - Pin 3: the termination path
 
     /// **`NormaApplication` must NOT override `-terminate:`** — the whole-branch review's F7, as a

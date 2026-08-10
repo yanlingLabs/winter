@@ -156,8 +156,15 @@ final class PanelWebTabModel: ObservableObject {
                                     url: allowed.url, title: allowed.title)
     }
 
-    /// **A popup the page asked for, arriving as a new panel tab.** CEF has already cancelled the
-    /// popup itself (it always does — `NormaCEF.h`), and only gestured ones reach this far.
+    /// **A URL the browser wants opened in a new panel tab.** Three producers reach here through
+    /// the one C channel (`NormaCEFSetPopupObserver`): a popup the page asked for, a ⌘-click /
+    /// middle-click / shift-click (`OnOpenURLFromTab`), and the context menu's "Open Link in New
+    /// Tab". Only gestured ones reach this far. For the popup case CEF has already cancelled the
+    /// popup itself (it always does — `NormaCEF.h`); for the click case it has cancelled the
+    /// in-place navigation, so in both the tab is not an addition to something else happening.
+    ///
+    /// The name is the first producer's and is kept because the C symbol is
+    /// (`NormaCEFSetPopupObserver`), not because it is the whole story.
     ///
     /// It goes through `ShellSessionHost.openPanelTab`, the app's existing tab door, rather than
     /// anywhere new: that is what runs `PanelURLPolicy.mayOpenTab` on a URL the PAGE chose — the

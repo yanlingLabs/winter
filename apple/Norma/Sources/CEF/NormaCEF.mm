@@ -13,6 +13,11 @@
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
+// Both arrive transitively through `cef_client.h`; named here because this file IMPLEMENTS them
+// (`CefRequestHandler::OnOpenURLFromTab`, `CefContextMenuHandler`), and a transitive include is not
+// a dependency anybody can see. `cef_menu_model.h` comes with the context-menu header.
+#include "include/cef_context_menu_handler.h"
+#include "include/cef_request_handler.h"
 #include "include/wrapper/cef_helpers.h"
 #include "include/wrapper/cef_library_loader.h"
 
@@ -501,6 +506,61 @@ void CreateBrowserNow(NSView *parent, const std::string &url);
 void ReplayPendingBrowsers();
 void CloseAbandonedBrowser(CefRefPtr<CefBrowser> browser, NormaCEFBrowserCreation *creation);
 
+/// **Hand a URL to the container's "open this as a new panel tab" channel.** Returns whether it was
+/// taken — `false` means there is nowhere to route it (no bridge, no observer, or nothing to open),
+/// and the caller decides what to do instead.
+///
+/// The channel is the one `OnBeforePopup` already uses (`NormaCEFSetPopupObserver`), reused rather
+/// than paralleled: it is registered on the CONTAINER VIEW, so the block it runs is the tab's own
+/// and carries the tab's captured session, and everything downstream — `PanelURLPolicy.mayOpenTab`,
+/// `ShellSessionHost.openPanelTab`, `panel.openTab` — is the daemon-minted tab door every other
+/// panel tab comes through. A second route would be a second place for policy to be missing from.
+///
+/// **Scheme policy is deliberately NOT applied here.** It lives in Swift, once
+/// (`PanelURLPolicy`), and the observer runs it on the far side of this call. A C seam that
+/// second-guessed its caller would make the real policy impossible to locate, and a second copy of
+/// an allowlist in a second language is this repo's worst known drift class.
+///
+/// Synchronous, no thread hop, exactly as `OnBeforePopup` calls it — CEF's UI thread IS the main
+/// thread under the external pump, and what the block does is a policy check plus an RPC enqueue.
+bool RouteURLToNewPanelTab(CefRefPtr<CefBrowser> browser, const std::string &url) {
+  if (url.empty()) {
+    return false;
+  }
+  NormaCEFTabBridge *bridge = BridgeForBrowser(browser);
+  if (bridge == nil || bridge.popupObserver == nil) {
+    return false;
+  }
+  NSString *target = [NSString stringWithUTF8String:url.c_str()];
+  if (target.length == 0) {
+    return false;  // not valid UTF-8, or empty after conversion
+  }
+  bridge.popupObserver(target);
+  return true;
+}
+
+/// Put `text` on the general pasteboard. **Presentation, not a door** — copying a string loads
+/// nothing and stores nothing, so `PanelURLPolicy`'s allowlist does not apply and is not consulted
+/// (see that file's "Not every caller of `isAllowed` is one of these doors").
+void CopyToGeneralPasteboard(const std::string &text) {
+  NSString *value = [NSString stringWithUTF8String:text.c_str()];
+  if (value.length == 0) {
+    return;
+  }
+  NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+  [pasteboard clearContents];
+  [pasteboard setString:value forType:NSPasteboardTypeString];
+}
+
+/// Norma's own context-menu commands. `MENU_ID_USER_FIRST`..`MENU_ID_USER_LAST` is the range CEF
+/// reserves for the embedder — "All user-defined command ids should be between MENU_ID_USER_FIRST
+/// and MENU_ID_USER_LAST" (`cef_context_menu_handler.h`) — and staying inside it is what keeps
+/// `OnContextMenuCommand`'s `default: return false` able to hand every OTHER id back to CEF's own
+/// default handling.
+constexpr int kMenuIdOpenLinkInNewTab = MENU_ID_USER_FIRST + 0;
+constexpr int kMenuIdCopyLinkAddress = MENU_ID_USER_FIRST + 1;
+constexpr int kMenuIdCopyImageAddress = MENU_ID_USER_FIRST + 2;
+
 /// Minimal client. `CefLifeSpanHandler` keeps `g_browsers` honest; `CefLoadHandler` exists because
 /// Task 1 explicitly asked for it: "Do not trust the first navigation blindly" — it saw one
 /// un-root-caused first-load failure in 23 runs, with every structural cause excluded by control,
@@ -509,7 +569,9 @@ void CloseAbandonedBrowser(CefRefPtr<CefBrowser> browser, NormaCEFBrowserCreatio
 class NormaClient : public CefClient,
                     public CefLifeSpanHandler,
                     public CefLoadHandler,
-                    public CefDisplayHandler {
+                    public CefDisplayHandler,
+                    public CefRequestHandler,
+                    public CefContextMenuHandler {
  public:
   /// **ONE CLIENT PER BROWSER**, holding the in-flight record for the creation it was made for. See
   /// `CreateBrowserNow` for why the client — rather than a table, an arrival order or a walk up the
@@ -520,6 +582,15 @@ class NormaClient : public CefClient,
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
   // Task 6b: address and title, for the URL field. NOT for the log — see OnLoadEnd.
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
+  // ⌘-click / middle-click, via `OnOpenURLFromTab` below. **These getters are the whole reason the
+  // two handlers exist at all**: a `CefClient` that returns nothing for them gets CEF's documented
+  // defaults for every method on them, silently — the class of gap `OnBeforePopup` was, twice over.
+  // Every OTHER method on both interfaces is left at its default deliberately; nothing here changes
+  // navigation, credentials, certificate errors or resource loading.
+  CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
+  // The context menu: Open Link in New Tab / Copy Link Address / Copy Image Address, and the
+  // removal of a stock item that does nothing on macOS. See OnBeforeContextMenu.
+  CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override { return this; }
 
   /// **A popup becomes a PANEL TAB — and CEF still never creates a window.** Those are two separate
   /// decisions and only the first of them changed here.
@@ -615,6 +686,91 @@ class NormaClient : public CefClient,
 #endif
     }
     return NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow();  // YES = cancel the popup
+  }
+
+  // MARK: CefRequestHandler — ⌘-click and middle-click
+
+  /// **⌘-click, middle-click and shift-click open a NEW PANEL TAB.** Until this, they performed an
+  /// ordinary click.
+  ///
+  /// The gap was a missing handler, not a bug in a present one — the third instance of the class
+  /// `OnBeforePopup` was, and it is worth naming precisely because nothing fails when a
+  /// `CefClient` returns no `CefRequestHandler`: those clicks arrive here, and the DOCUMENTED
+  /// DEFAULT is `false`, which `cef_request_handler.h` spells out as "allow the navigation to
+  /// proceed in the source browser's TOP-LEVEL FRAME" — i.e. exactly the normal-click behaviour the
+  /// user reported. The same header says which clicks these are: "user-initiated navigation that
+  /// might open in a special way (e.g. links clicked via middle-click or ctrl + left-click)".
+  ///
+  /// **The disposition names the modifier, and `cef_types.h` states each one:**
+  ///
+  ///   * `CEF_WOD_NEW_BACKGROUND_TAB` — "Middle mouse button or meta/ctrl key while clicking",
+  ///     i.e. plain ⌘-click and plain middle-click;
+  ///   * `CEF_WOD_NEW_FOREGROUND_TAB` — "Shift key + Middle mouse button or meta/ctrl key while
+  ///     clicking", i.e. ⌘⇧-click;
+  ///   * `CEF_WOD_NEW_WINDOW` — "Shift key while clicking". Norma has no second browser window to
+  ///     put it in and never will (a panel browser lives in the shell's window, which is why
+  ///     `OnBeforePopup` cancels), so it becomes a tab. That is a real difference from Chrome,
+  ///     stated rather than hidden;
+  ///   * `CEF_WOD_NEW_POPUP` — included for completeness. A page-driven `window.open` does not come
+  ///     through here (it goes to `OnBeforePopup`, via Chromium's window-creation path), so this is
+  ///     not a second chance to double-open the same popup.
+  ///
+  /// **`CEF_WOD_CURRENT_TAB` and everything else return `false` and are untouched** — including
+  /// `CEF_WOD_SAVE_TO_DISK` (alt-click), which needs a `CefDownloadHandler` this build does not
+  /// have, `CEF_WOD_OFF_THE_RECORD`, `CEF_WOD_NEW_PICTURE_IN_PICTURE` and `CEF_WOD_NEW_SPLIT_VIEW`
+  /// (Chrome-product surfaces with no Norma equivalent), and `CEF_WOD_SINGLETON_TAB` /
+  /// `CEF_WOD_SWITCH_TO_TAB`, which mean "reuse the tab already showing this URL" — a lookup
+  /// nothing here can do, and answering them with a NEW tab would be a wrong answer rather than a
+  /// missing one.
+  ///
+  /// **Foreground vs. background does not survive, and pretending otherwise would be a lie in a
+  /// comment.** A plain ⌘-click asks for a BACKGROUND tab; `panel.openTab` appends
+  /// `panel_tab_activated` (`packages/core/src/ipc/server.ts`), so every tab this opens comes to
+  /// the front. The daemon has no background-open today. `OnBeforePopup` records the same fact
+  /// about its own routing.
+  ///
+  /// **Gated on `user_gesture`, for the reason `OnBeforePopup` is gated on it** — a panel tab is
+  /// append-only session state in a log that is never auto-deleted, so an unwanted tab is permanent
+  /// litter rather than a window the user closes and forgets. This case is narrower than the popup
+  /// one: the header describes a second, non-click source of these callbacks ("certain types of
+  /// cross-origin navigation initiated from the renderer process (e.g. navigating the top-level
+  /// frame to/from a file URL)"), and an ungestured one of those must navigate, not mint a tab.
+  ///
+  /// **Returning `false` when the route is not taken is deliberate, not a fallback nobody thought
+  /// about.** With no bridge or no observer — a tab already dismantled — `true` would cancel the
+  /// navigation and the click would do nothing at all; `false` leaves today's behaviour, which is a
+  /// navigation in place. A click that does the old thing beats a click that does nothing.
+  bool OnOpenURLFromTab(CefRefPtr<CefBrowser> browser,
+                        CefRefPtr<CefFrame> frame,
+                        const CefString &target_url,
+                        WindowOpenDisposition target_disposition,
+                        bool user_gesture) override {
+    CEF_REQUIRE_UI_THREAD();
+    const bool wantsItElsewhere = target_disposition == CEF_WOD_NEW_BACKGROUND_TAB ||
+                                  target_disposition == CEF_WOD_NEW_FOREGROUND_TAB ||
+                                  target_disposition == CEF_WOD_NEW_WINDOW ||
+                                  target_disposition == CEF_WOD_NEW_POPUP;
+    if (!wantsItElsewhere || !user_gesture) {
+      return false;  // proceed in the source browser's top-level frame — CEF's own default
+    }
+    if (!RouteURLToNewPanelTab(browser, target_url.ToString())) {
+      return false;
+    }
+    // The literal is the needle `CEFRuntimeTests
+    // .testCommandAndMiddleClicksOPENANEWPANELTABInsteadOfNavigatingInPlace` scans the built
+    // product for — change this message and change that needle with it. It sits INSIDE the branch
+    // the route's own return value guards, so it cannot be reached without the call having
+    // happened: a stronger coupling than the `popup-routed-to-panel-tab` needle beside it, which
+    // is merely adjacent to its call.
+#if DEBUG
+    // Same privacy split as OnLoadEnd and OnBeforePopup: a shipped build never writes the page's
+    // address anywhere.
+    Log("click-routed-to-panel-tab (disposition=%d) %s", static_cast<int>(target_disposition),
+        target_url.ToString().c_str());
+#else
+    Log("click-routed-to-panel-tab (disposition=%d)", static_cast<int>(target_disposition));
+#endif
+    return true;  // cancel the in-place navigation; the tab is where it went
   }
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
@@ -852,6 +1008,135 @@ class NormaClient : public CefClient,
     bridge.titleURL = main ? ([NSString stringWithUTF8String:main->GetURL().ToString().c_str()] ?: @"")
                            : @"";
     NotifyState(bridge);
+  }
+
+  // MARK: CefContextMenuHandler — the two-finger click
+
+  /// **The stock CEF menu, minus a dead verb, plus the link and image items Chrome has.**
+  ///
+  /// The fourth instance of the missing-handler class: with no `CefContextMenuHandler`, CEF builds
+  /// `CefMenuManager::CreateDefaultModel`'s menu and shows it. That model adds **no link items at
+  /// all** — for a page or frame it is exactly Back, Forward, separator, Print, View Page Source,
+  /// which is verbatim what the user saw when they two-finger-clicked a link.
+  ///
+  /// **`MENU_ID_VIEW_SOURCE` is REMOVED because it does nothing on macOS.** Not "nothing useful" —
+  /// nothing. Every hop is in CEF's own source on branch `7922`, the exact Chromium branch of the
+  /// framework this repo vendors (`chromium-151.0.7922.109`):
+  /// `CefMenuManager::ExecuteDefaultCommand` → `GetFocusedFrame()->ViewSource()` →
+  /// `CefFrameHostImpl::ViewSource` (`SendCommandWithResponse("GetSource", ViewTextCallback)`) →
+  /// `CefBrowserHostBase::ViewText` → `platform_delegate_->ViewText(text)` →
+  /// `CefBrowserPlatformDelegateNativeMac::ViewText`, whose entire body is
+  /// `// TODO(cef): Implement this functionality.` and `NOTIMPLEMENTED();`. The base
+  /// `CefBrowserPlatformDelegate::ViewText` is also `NOTIMPLEMENTED()` and the Alloy delegate does
+  /// not override it, so there is no macOS implementation anywhere; in a release framework
+  /// `NOTIMPLEMENTED()` compiles to nothing at all. It never reaches a URL, a `view-source:`
+  /// navigation or a popup — so this is not a scheme-policy question and the policy was not
+  /// widened for it. Shipping a menu item that silently does nothing is worse than not shipping it.
+  ///
+  /// **The additions go at the TOP, above the stock items, with one separator between** — where
+  /// Chrome puts them, and the only position where "Open Link in New Tab" reads as being about the
+  /// thing under the cursor rather than about the page. `InsertItemAt`/`InsertSeparatorAt` rather
+  /// than `AddItem`, which appends to the bottom.
+  ///
+  /// **"Open Link in New Tab" is offered for a link the scheme policy would refuse** (a
+  /// `javascript:` href, which exists in the wild), and that is a decision rather than an
+  /// oversight. The alternative — hiding the item when the URL is not `http`/`https` — needs an
+  /// allowlist HERE, in C++, which is a second copy of `PanelURLPolicy` in a second language with
+  /// no compile-time coupling to the first. This repo has been bitten by exactly that shape more
+  /// than once (the `TRANSIENT_EVENT_TYPES` hand-copy; the field caps that agreed on the number and
+  /// disagreed on the unit), and `NormaCEF.h` already states the rule for this file: scheme policy
+  /// lives in Swift, in one place, because a C seam that second-guesses its caller makes the real
+  /// policy impossible to locate. The cost is honest and small: the item appears, the door refuses
+  /// it, nothing opens — the same outcome a `javascript:` popup already has, and the same one Chrome
+  /// gives (it too offers the item and then declines to navigate).
+  ///
+  /// **"Copy Link Address" and "Copy Image Address" are PRESENTATION, not doors** — copying a
+  /// string to the pasteboard loads nothing and persists nothing, so no policy applies to them, per
+  /// `PanelURLPolicy`'s own "Not every caller of `isAllowed` is one of these doors".
+  ///
+  /// Everything else in the stock model is left alone: Back, Forward and Print all work.
+  void OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
+                           CefRefPtr<CefFrame> frame,
+                           CefRefPtr<CefContextMenuParams> params,
+                           CefRefPtr<CefMenuModel> model) override {
+    CEF_REQUIRE_UI_THREAD();
+
+    // The log literal is the needle `CEFRuntimeTests
+    // .testViewPageSourceIsREMOVEDFromTheMenuBecauseItDoesNothingOnMacOS` scans the built product
+    // for, and it is INSIDE the branch the removal's own return value guards — so it cannot be
+    // reached without the `Remove` having happened, and having found something to remove. Change
+    // the message and change the needle with it.
+    if (model->Remove(MENU_ID_VIEW_SOURCE)) {
+      Log("context-menu-view-source-removed");
+    }
+
+    const std::string link = params->GetLinkUrl().ToString();
+    // `HasImageContents()` and not merely a non-empty source URL: `GetSourceUrl` is also set for
+    // `<audio>` and `<video>` (`cef_context_menu_handler.h`), and "Copy Image Address" on a video
+    // would be a wrong label rather than a missing feature. Media items are out of scope.
+    const std::string image = params->GetSourceUrl().ToString();
+    const bool onALink = !link.empty();
+    const bool onAnImage = params->HasImageContents() && !image.empty();
+    if (!onALink && !onAnImage) {
+      return;
+    }
+
+    // Read BEFORE inserting: the separator below belongs between our items and the stock ones, and
+    // must not be added when there are no stock ones to separate from (an empty model happens — the
+    // default model adds nothing at all for some node types).
+    const size_t stockItems = model->GetCount();
+    size_t at = 0;
+    if (onALink) {
+      // These two labels are `__cstring` literals in the built product and are what
+      // `testTheContextMenuOFFERSNormasOwnLinkAndImageItems` scans for. They are the items
+      // themselves, not a log beside them.
+      model->InsertItemAt(at++, kMenuIdOpenLinkInNewTab, "Open Link in New Tab");
+      model->InsertItemAt(at++, kMenuIdCopyLinkAddress, "Copy Link Address");
+    }
+    if (onAnImage) {
+      model->InsertItemAt(at++, kMenuIdCopyImageAddress, "Copy Image Address");
+    }
+    if (stockItems > 0) {
+      model->InsertSeparatorAt(at);
+    }
+  }
+
+  /// Run one of the three commands above. `false` for every other id — including all of CEF's own —
+  /// so Back, Forward and Print keep their default handling, which is the whole reason the ids live
+  /// in the `MENU_ID_USER_FIRST` range.
+  ///
+  /// `true` for ours even when nothing happened (a link the Swift door refuses, a tab already
+  /// dismantled): the command WAS handled here, and returning `false` would ask CEF to look for a
+  /// default implementation of an id it has never heard of.
+  bool OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
+                            CefRefPtr<CefFrame> frame,
+                            CefRefPtr<CefContextMenuParams> params,
+                            int command_id,
+                            EventFlags event_flags) override {
+    CEF_REQUIRE_UI_THREAD();
+    switch (command_id) {
+      case kMenuIdOpenLinkInNewTab:
+        // The same channel `OnBeforePopup` and `OnOpenURLFromTab` use — one route, three
+        // producers. No gesture check: choosing an item from a context menu IS the gesture.
+        RouteURLToNewPanelTab(browser, params->GetLinkUrl().ToString());
+        return true;
+      case kMenuIdCopyLinkAddress: {
+        // `GetUnfilteredLinkUrl` exists for precisely this: "the link URL, if any, to be used ONLY
+        // for 'copy link address'" (`cef_context_menu_handler.h`). It falls back to the filtered
+        // one rather than copying nothing.
+        std::string address = params->GetUnfilteredLinkUrl().ToString();
+        if (address.empty()) {
+          address = params->GetLinkUrl().ToString();
+        }
+        CopyToGeneralPasteboard(address);
+        return true;
+      }
+      case kMenuIdCopyImageAddress:
+        CopyToGeneralPasteboard(params->GetSourceUrl().ToString());
+        return true;
+      default:
+        return false;
+    }
   }
 
  private:

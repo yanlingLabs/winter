@@ -148,6 +148,11 @@ struct PanelCEFView: NSViewRepresentable {
         // every popup regardless (`NormaCEF.h`); this is what turns the cancelled one into a real
         // panel tab. `[weak model]` because the block is stored on the container, which the model
         // does not own — and a popup from a tab already on its way out must open nothing.
+        //
+        // It is no longer only popups: ⌘-click / middle-click / shift-click
+        // (`CefRequestHandler::OnOpenURLFromTab`) and the context menu's "Open Link in New Tab"
+        // come down this same channel, deliberately — see `NormaCEFSetPopupObserver`'s own doc for
+        // the three producers and why there is one route rather than three.
         NormaCEFSetPopupObserver(container) { [weak model] popupURL in
             model?.openPopupAsTab(url: popupURL ?? "")
         }

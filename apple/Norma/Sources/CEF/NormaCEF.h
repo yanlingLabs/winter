@@ -121,8 +121,20 @@ void NormaCEFSetStateObserver(NSView *parent, void (^observer)(NormaCEFBrowserSt
 /// suppression across a browser's whole lifetime rather than just one instance of it.
 void NormaCEFSetNavigationObserver(NSView *parent, void (^observer)(NSString *url, NSString *title));
 
-/// Observe POPUPS the page asks for — `window.open`, a clicked `target="_blank"` — so the host can
-/// open each one as a NEW PANEL TAB. Pass `nil` to stop observing.
+/// Observe URLS THIS BROWSER WANTS OPENED IN A NEW PANEL TAB. Pass `nil` to stop observing.
+///
+/// **THREE producers, one route** — the name says "popup" because that was the first of them and it
+/// is an exported C symbol other code and one test name it by:
+///
+///   1. `OnBeforePopup` — `window.open`, a clicked `target="_blank"`;
+///   2. `OnOpenURLFromTab` — ⌘-click, middle-click and shift-click, whose "open somewhere else"
+///      dispositions CEF would otherwise navigate in place;
+///   3. `OnContextMenuCommand` — the menu's "Open Link in New Tab".
+///
+/// They are deliberately not three channels: the observer is what carries the tab's own session and
+/// the Swift-side scheme policy, and a second route would be a second place for either to be
+/// missing from. Every one of them is gated on a real user gesture (for 3, choosing the item IS the
+/// gesture) — see `OnBeforePopup` for the whole ruling on why, which is Norma-specific.
 ///
 /// **This does not make CEF create anything.** `OnBeforePopup` still cancels every popup
 /// unconditionally (`NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow` below is that answer, and
@@ -140,8 +152,8 @@ void NormaCEFSetNavigationObserver(NSView *parent, void (^observer)(NSString *ur
 ///
 /// Registered against the CONTAINER VIEW, like the two observers above and for the same reason —
 /// and here it carries a second meaning: the container is what identifies WHICH panel tab (and so
-/// which session) the popup came from, so a popup can never open a tab in a session other than the
-/// one whose browser asked for it.
+/// which session) the request came from, so none of the three producers can open a tab in a session
+/// other than the one whose browser asked for it.
 ///
 /// Called on the MAIN thread, synchronously from inside CEF's own callback — CEF's UI thread IS
 /// the main thread under the external pump, which is what lets `NotifyState` and the navigation
