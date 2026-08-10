@@ -82,12 +82,14 @@ final class SpikeReparentHarness {
     private var msSinceLastMove: Int { Int(Date().timeIntervalSince(lastMove) * 1000) }
     private var lastMove = Date()
 
-    private let cycles = 20
+    /// `NORMA_SPIKE_CYCLES` / `NORMA_SPIKE_LONG_DWELL` exist so a follow-up run can re-ask one
+    /// question in 40 s instead of re-running the whole 4-minute programme.
+    private let cycles = SpikeReparentHarness.envInt("NORMA_SPIKE_CYCLES", 20)
     private let visibleDwell: TimeInterval = 3.5
     private let parkedDwell: TimeInterval = 3.5
     /// The long tail: one 40 s park and one 40 s show, so the CPU sampler has clean, uncontended
     /// windows to average over instead of 3.5 s slivers.
-    private let longDwell: TimeInterval = 40
+    private let longDwell = TimeInterval(SpikeReparentHarness.envInt("NORMA_SPIKE_LONG_DWELL", 40))
 
     private let parkedSize = NSSize(width: 700, height: 500)
     private let visibleSizes = [NSSize(width: 1000, height: 700), NSSize(width: 820, height: 560)]
@@ -158,6 +160,7 @@ final class SpikeReparentHarness {
 
         visibleWindow.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        log("SHOWWINDOW num=\(visibleWindow.windowNumber) key=\(visibleWindow.isKeyWindow) active=\(NSApp.isActive)")
 
         // One run-loop turn before CEF comes up, for the reason `PanelWebTab.startBrowser` states:
         // `CefInitialize` stands up a process tree and runs `OnContextInitialized` re-entrantly, and
@@ -225,27 +228,47 @@ final class SpikeReparentHarness {
     private func buildSteps() {
         for i in 1...cycles {
             let size = visibleSizes[i % visibleSizes.count]
-            enqueue(0.2, "attach\(i)") { [weak self] in self?.attach(cycle: i, size: size) }
+            enqueue(0.2, "attach\(i)") { [weak self] in
+                self?.attach(cycle: i, size: size)
+                if i <= 2 { self?.logSubtree("after-attach-\(i)") }
+            }
             // Key #1 goes in WITHOUT touching the first responder — that is the whole first-responder
             // measurement: did the reparent leave the CEF view able to take a keystroke on its own?
-            enqueue(0.5, "key1-\(i)") { [weak self] in self?.injectKey("a", keyCode: 0, forceFirstResponder: false) }
+            enqueue(0.3, "click\(i)") { [weak self] in
+                // `NORMA_SPIKE_NO_CLICK=1` removes the click, which is how the spike separates
+                // "a click restores focus" from "an explicit makeFirstResponder restores focus".
+                if SpikeReparentHarness.envInt("NORMA_SPIKE_NO_CLICK", 0) == 0 { self?.injectClick() }
+            }
+            enqueue(0.4, "key1-\(i)") { [weak self] in self?.injectKey("a", keyCode: 0, forceFirstResponder: false) }
             // Key #2 goes in after an explicit `makeFirstResponder`. Comparing the page's key count
             // across the two says which of "it just works" and "the host must re-focus it" is true.
             enqueue(0.5, "key2-\(i)") { [weak self] in self?.injectKey("b", keyCode: 11, forceFirstResponder: true) }
             enqueue(0.6, "measure\(i)") { [weak self] in self?.measure(tag: "visible") }
-            enqueue(visibleDwell - 1.8, "detach\(i)") { [weak self] in self?.detach(cycle: i) }
+            enqueue(visibleDwell - 2.1, "detach\(i)") { [weak self] in self?.detach(cycle: i) }
             enqueue(parkedDwell - 0.6, "measure-parked\(i)") { [weak self] in self?.measure(tag: "parked") }
             enqueue(0.6, "cycle-end\(i)") {}
         }
         // The long tail — clean CPU windows, and the only place the page sits parked long enough for
         // Chromium's own background-timer throttling to become visible in the tick rate.
+        // Sliced at 5 s rather than measured once at each end: run 5 saw a 565 ms audio-clock step
+        // somewhere inside a 40 s park and, with only the two bracketing samples, could not say
+        // WHERE — or whether it was a step at all rather than a slow drift.
+        let slices = max(1, Int(longDwell / 5))
         enqueue(0.2, "long-park-start") { [weak self] in self?.mark("LONGPARK begin") }
-        enqueue(longDwell, "long-park-end") { [weak self] in self?.measure(tag: "long-parked") }
+        for k in 1...slices {
+            enqueue(longDwell / Double(slices), "long-park-\(k)") { [weak self] in
+                self?.measure(tag: "long-parked-\(k)")
+            }
+        }
         enqueue(0.2, "long-show") { [weak self] in
             guard let self else { return }
             self.attach(cycle: self.cycles + 1, size: self.visibleSizes[0])
         }
-        enqueue(longDwell, "long-show-end") { [weak self] in self?.measure(tag: "long-visible") }
+        for k in 1...slices {
+            enqueue(longDwell / Double(slices), "long-show-\(k)") { [weak self] in
+                self?.measure(tag: "long-visible-\(k)")
+            }
+        }
         // Quit with a browser PARKED, which is live gate 7's shape — a free fact.
         enqueue(0.2, "final-park") { [weak self] in
             guard let self else { return }
@@ -301,18 +324,63 @@ final class SpikeReparentHarness {
         log("DETACH cyc=\(cycle) size=\(Int(parkedSize.width))x\(Int(parkedSize.height)) cef=\(describeCEFSubview()) inWindow=\(container.window === parkingWindow) parkVisible=\(parkingWindow.isVisible)")
     }
 
-    /// The keystroke half. `NSWindow.sendEvent` rather than `CGEvent` posting: this is in-process
-    /// delivery straight into our own responder chain, so it needs no Accessibility TCC — which the
-    /// development environment does not have and cannot be given (`AppDelegate`'s panel-smoke door
-    /// records the same constraint).
+    /// Every descendant of the container, outermost first. CEF's `SetAsChild` parents a
+    /// `CefBrowserHostView` into the container; Chromium's own `RenderWidgetHostViewCocoa` — the
+    /// thing that actually implements `keyDown:` and `NSTextInputClient` — is nested inside THAT,
+    /// so "the CEF view" is two different views depending on which question is being asked.
+    private func descendants() -> [NSView] {
+        var out: [NSView] = []
+        func walk(_ v: NSView) { for s in v.subviews { out.append(s); walk(s) } }
+        walk(container)
+        return out
+    }
+
+    private func logSubtree(_ tag: String) {
+        let d = descendants().map {
+            "\(type(of: $0))\(NSStringFromRect($0.frame))afr=\($0.acceptsFirstResponder ? 1 : 0)"
+        }
+        log("SUBTREE \(tag) depth=\(d.count) \(d.joined(separator: " > "))")
+    }
+
+    /// A synthetic click into the page, so Chromium's own focus machinery runs rather than
+    /// AppKit's. The page's text field is deliberately a full-width 160 px band at the top, so any
+    /// point in that band lands in it without the spike having to know the page's layout.
+    private func injectClick() {
+        let h = visibleWindow.contentView?.bounds.height ?? 0
+        let pt = NSPoint(x: 200, y: h - 80)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard let ev = NSEvent.mouseEvent(
+                with: type, location: pt, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: visibleWindow.windowNumber, context: nil,
+                eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0) else { continue }
+            NSApp.postEvent(ev, atStart: false)
+        }
+        log("CLICK cyc=\(cycle) at=\(NSStringFromPoint(pt)) fr=\(Self.describe(visibleWindow.firstResponder))")
+    }
+
+    /// The keystroke half. Synthetic `NSEvent`s rather than `CGEvent` posting, because this is
+    /// in-process delivery into our own responder chain and so needs no Accessibility TCC — which
+    /// the development environment does not have and cannot be given (`AppDelegate`'s panel-smoke
+    /// door records the same constraint).
+    ///
+    /// **`NSApp.postEvent`, never `NSWindow.sendEvent` — measured.** Run 1 of this spike sent key
+    /// events straight to the window, with the window key and the CEF view made first responder,
+    /// and the renderer received **not one of the 40**. The reason is Norma-specific and
+    /// structural: `NSWindow.sendEvent` bypasses `NSApplication.sendEvent:`, which is precisely
+    /// where `NormaApplication` (Norma's `CefAppProtocol` subclass, the thing `main.swift` exists
+    /// to install) wraps dispatch in `CefScopedSendingEvent` and sets `isHandlingSendEvent`. CEF
+    /// requires that flag to be set while an event is dispatched. Posting to the queue puts the
+    /// event back on the real `NSApp` path and the flag is set for us.
     private func injectKey(_ ch: String, keyCode: UInt16, forceFirstResponder: Bool) {
-        guard let cefView = container.subviews.first else {
+        let tree = descendants()
+        guard let deepest = tree.last(where: { $0.acceptsFirstResponder }) ?? tree.last else {
             log("KEY cyc=\(cycle) ch=\(ch) SKIPPED no CEF subview")
             return
         }
         var made = "n/a"
         if forceFirstResponder {
-            made = visibleWindow.makeFirstResponder(cefView) ? "yes" : "REFUSED"
+            made = visibleWindow.makeFirstResponder(deepest) ? "yes(\(type(of: deepest)))" : "REFUSED"
         }
         let fr = Self.describe(visibleWindow.firstResponder)
         for type in [NSEvent.EventType.keyDown, .keyUp] {
@@ -322,9 +390,9 @@ final class SpikeReparentHarness {
                 windowNumber: visibleWindow.windowNumber, context: nil,
                 characters: ch, charactersIgnoringModifiers: ch,
                 isARepeat: false, keyCode: keyCode) else { continue }
-            visibleWindow.sendEvent(ev)
+            NSApp.postEvent(ev, atStart: false)
         }
-        log("KEY cyc=\(cycle) ch=\(ch) forcedFR=\(made) fr=\(fr) key=\(visibleWindow.isKeyWindow)")
+        log("KEY cyc=\(cycle) ch=\(ch) forcedFR=\(made) fr=\(fr) key=\(visibleWindow.isKeyWindow) active=\(NSApp.isActive) keysSoFar=\(sampleInt(7)) inputLen=\(sampleInt(14))")
     }
 
     // MARK: Measurement
@@ -391,6 +459,11 @@ final class SpikeReparentHarness {
 
     // MARK: Harness plumbing
 
+    fileprivate static func envInt(_ key: String, _ fallback: Int) -> Int {
+        guard let v = ProcessInfo.processInfo.environment[key], let n = Int(v) else { return fallback }
+        return n
+    }
+
     private static var parkMode: String {
         ProcessInfo.processInfo.environment["NORMA_SPIKE_PARK_MODE"] ?? "never"
     }
@@ -450,7 +523,9 @@ final class SpikeReparentHarness {
       html,body{height:100%;margin:0;font:14px -apple-system,system-ui,sans-serif;background:#101014;color:#e6e6ea}
       body{display:flex;flex-direction:column;gap:10px;padding:16px;box-sizing:border-box}
       #start{font-size:20px;padding:14px 22px;background:#c33;color:#fff;border:0;border-radius:8px;cursor:pointer}
-      input{font-size:18px;padding:8px;width:340px}
+      #field{position:fixed;left:0;top:0;width:100%;height:160px;font-size:26px;box-sizing:border-box;
+             background:#22222c;color:#9f9;border:2px solid #556}
+      body{padding-top:176px}
       canvas{background:#1c1c22;border-radius:6px}
       pre{margin:0;font:11px ui-monospace,Menlo,monospace;color:#8fd}
     </style>
@@ -527,10 +602,20 @@ final class SpikeReparentHarness {
         var wall = Math.round(performance.now()-t0);
         var ctxMs = ctx ? Math.round(ctx.currentTime*1000) : 0;
         var ae = (document.activeElement && document.activeElement.id) || '-';
+        // A per-sample background colour, reported in the payload. This is how requirement 6
+        // ("does the browser render correctly IMMEDIATELY after attach") gets an answer instead of
+        // an inference: a screenshot taken N ms after an attach carries the colour of whichever
+        // sample the window server is actually showing, so a stale layer is the distance between
+        // that colour's seq and the seq the ledger says was current.
+        var col = '#' + ((seq*61)%256).toString(16).padStart(2,'0')
+                      + ((seq*151)%256).toString(16).padStart(2,'0')
+                      + ((seq*97)%256).toString(16).padStart(2,'0');
+        document.documentElement.style.background = col;
+        document.body.style.background = col;
         var payload = ['NS', ++seq, wall, Math.round(audioAccum*1000), ctxMs, raf, ticks, keys,
                        document.visibilityState.charAt(0), window.innerWidth, window.innerHeight,
                        audio.paused?1:0, ctx?ctx.state.charAt(0):'-', ae, field.value.length,
-                       lastKey].join('|');
+                       lastKey, col].join('|');
         document.title = payload;
         out.textContent = payload;
       }
