@@ -351,13 +351,6 @@ NormaCEFOpenBrowser *OpenBrowserRecordFor(CefRefPtr<CefBrowser> browser) {
   return g_open_browsers[@(browser->GetIdentifier())];
 }
 
-/// CEF's own host view for `browser`, as captured while it was provably alive. `nil` for a browser
-/// with no record **or for one whose close already handed the view back** — which the close paths
-/// treat exactly as they treat a nil handle: nothing to detach.
-NSView *HostViewForBrowser(CefRefPtr<CefBrowser> browser) {
-  return OpenBrowserRecordFor(browser).hostView;
-}
-
 /// **The second half of every close, and the one that actually finishes it.**
 ///
 /// `DoClose` answers `true`, so CEF stops: `AlloyBrowserHostImpl::CloseContents` computes
@@ -1840,6 +1833,31 @@ BOOL NormaCEFClientInstallsTheClickAndMenuHandlers(void) {
   // by `CefRefPtr` on return without ever having been handed to a browser.
   CefRefPtr<CefClient> client = new NormaClient(nil, nil);
   return client->GetRequestHandler() != nullptr && client->GetContextMenuHandler() != nullptr;
+}
+
+NSObject *NormaCEFRecordAfterACloseHandsTheHostViewBack(NSView *hostView) {
+  // A record filled the way `RememberOpenBrowser` fills one, minus the single line that needs a
+  // `CefBrowser`: the cast of CEF's window handle. Everything the close reads — the dictionary, the
+  // key, the strong `hostView` — is the production shape.
+  if (g_open_browsers == nil) {
+    g_open_browsers = [[NSMutableDictionary alloc] init];
+  }
+  // A synthetic id. CEF never starts in the unit-test host
+  // (`testTheRuntimeRefusesToStartCEFUnderXCTest`), so no real browser can collide with it, and the
+  // key is removed again below either way.
+  const int kSeamBrowserId = -424242;
+  NormaCEFOpenBrowser *record = [[NormaCEFOpenBrowser alloc] init];
+  record.hostView = hostView;
+  record.bridge = [[NormaCEFTabBridge alloc] init];
+  g_open_browsers[@(kSeamBrowserId)] = record;
+
+  // The production close's second half, verbatim — the same function all three close paths call.
+  CompleteCloseByReleasingHostView(kSeamBrowserId);
+
+  // What `OnBeforeClose` would do next, so the seam models the whole lifetime and leaves no
+  // process-global state behind for the tests that run after it.
+  [g_open_browsers removeObjectForKey:@(kSeamBrowserId)];
+  return record;
 }
 
 NSObject *NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere(void) {

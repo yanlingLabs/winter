@@ -251,6 +251,36 @@ BOOL NormaCEFClientInstallsTheClickAndMenuHandlers(void);
 /// itself a load-bearing property; see the implementation.
 NSObject *NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere(void);
 
+/// **Test seam.** Run the second half of a close — the half that actually completes it — against a
+/// real open-browser record, and hand the record back.
+///
+/// The question it answers is the one the audio leak turned on: **does closing a browser RELEASE
+/// CEF's host view, or only detach it?** `-[CefBrowserHostView dealloc]` is what calls
+/// `AlloyBrowserHostImpl::WindowDestroyed()`, and once `DoClose` has answered `true` that is the
+/// only remaining route to `OnBeforeClose`. Holding the view past the close is therefore not a leak
+/// with a tidy-up cost — it is a browser that never closes, a renderer that never exits, and audio
+/// the user cannot stop without quitting the app.
+///
+/// No string scan can ask this: the close paths, their log lines and every symbol around them are
+/// identical whether the record lets go or keeps holding. So the answer is produced. `hostView` is
+/// filed in a record exactly as `RememberOpenBrowser` files one, the production
+/// `CompleteCloseByReleasingHostView` is run against it, and the record comes back for the caller
+/// to read `hostView` through KVC (`NormaCEFOpenBrowser` is internal to the implementation). It
+/// must be `nil` — and since the seam holds no other reference, a caller whose own `weak` reference
+/// also went `nil` has watched the view actually deallocate, which is the event CEF is waiting for.
+/// Pass a view that is a subview of something to also exercise the detach.
+///
+/// **What it does NOT cover, stated rather than implied.** The nil-before-release ORDERING inside
+/// `CompleteCloseByReleasingHostView` (which keeps a re-entrant `OnBeforeClose` from releasing a
+/// view that is already inside its own `dealloc`) is not observable from here — nothing in this host
+/// can make `OnBeforeClose` fire. Neither is `RememberOpenBrowser`'s window-handle cast, nor the
+/// three call sites, which need a `CefBrowser`; the call sites are covered by the weaker
+/// built-product needle in `testTheZombieFixesTwoCallSitesAreCompiledIntoTheProduct`'s sibling.
+///
+/// Never `nil`. Safe to call with CEF down — nothing on this path reaches the framework — and it
+/// leaves no process-global state, because it also does what `OnBeforeClose` would do next.
+NSObject *NormaCEFRecordAfterACloseHandsTheHostViewBack(NSView *hostView);
+
 /// Close the browser hosted by `parent`, and cancel any creation still on its way to becoming one.
 /// Called from `NSViewRepresentable.dismantleNSView`.
 ///
