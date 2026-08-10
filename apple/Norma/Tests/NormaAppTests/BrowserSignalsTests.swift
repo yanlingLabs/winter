@@ -441,11 +441,15 @@ final class BrowserSignalsTests: XCTestCase {
         w.host.select("s2")
         await answerReattach(t, attachIndex: 2)
         XCTAssertTrue(w.runtime.isLive(tabId: "a1"), "a hop is not a stop")
-        let armed = try? XCTUnwrap(w.clock.liveTimers.first)
-        XCTAssertNotNil(armed, "no linger was armed for the departed session")
+        // `guard`, never a force-unwrap: a mutation that stops the linger being armed would
+        // otherwise CRASH the test bundle rather than red this row, and a crash truncates the whole
+        // mutation observation — which is exactly how it was first found.
+        guard let armed = w.clock.liveTimers.first else {
+            return XCTFail("no linger was armed for the departed session")
+        }
 
         w.clock.current += BrowserLifecycleEngine.stopLinger + 1
-        w.clock.fire(armed!.id)
+        w.clock.fire(armed.id)
 
         XCTAssertFalse(w.runtime.isLive(tabId: "a1"),
                        "the linger expired and nothing stopped: \(w.cef.log)")
