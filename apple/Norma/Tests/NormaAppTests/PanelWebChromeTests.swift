@@ -332,16 +332,38 @@ final class PanelWebChromeTests: XCTestCase {
                        "a real address IS shown — without this the assertion above proves nothing")
     }
 
-    /// Refusal is attributable to the POLICY, not to a missing browser — the two look identical to
-    /// the caller and only the first is a decision. With no container attached, a refused URL and an
-    /// allowed one would both return false; this pins that the policy runs first by checking the
-    /// refusal happens for the refused one regardless.
-    func testTheURLFieldRefusesAJavascriptURL() {
-        PanelWebTabModels.removeAllForTesting()
-        defer { PanelWebTabModels.removeAllForTesting() }
-
+    /// **The type-in door, with a real browser container attached** — enforcement point 1, which
+    /// the brief named the most important deliverable of this task.
+    ///
+    /// The previous shape of this test built the model with NO container, so
+    /// `guard let container else { return false }` answered false for EVERY input: deleting the
+    /// policy guard above it left the test green, and its own doc comment admitted it could not
+    /// distinguish the two failures. A test that cannot tell "refused by policy" from "no browser"
+    /// is not a test of the policy.
+    ///
+    /// With a container attached the two separate, so BOTH directions are asserted. An accepted URL
+    /// reaches `NormaCEFLoadURL`, which finds no browser hosted in this bare container and returns —
+    /// CEF never starts under XCTest (`CEFRuntimeTests` pins that refusal), so nothing here can
+    /// launch Chromium.
+    func testTheURLFieldNavigatesToAnAllowedAddressAndRefusesEverythingElse() {
         let model = PanelWebTabModel(tabId: "t1")
-        XCTAssertFalse(model.navigate(typed: "javascript:alert(1)"))
-        XCTAssertFalse(model.navigate(typed: ""))
+        // Strong, for the test's whole duration: `model.container` is deliberately weak.
+        let container = PanelCEFContainerView()
+        model.container = container
+
+        XCTAssertTrue(model.navigate(typed: "https://example.com"),
+                      "an allowed address must be ACCEPTED — without this the refusals below cannot "
+                          + "be attributed to the policy rather than to a missing browser")
+        XCTAssertTrue(model.navigate(typed: "example.com"),
+                      "a bare host gains a scheme, exactly like every browser's address bar")
+        XCTAssertTrue(model.navigate(typed: "localhost:3000"), "and the developer's own address")
+
+        XCTAssertFalse(model.navigate(typed: "javascript:alert(1)"),
+                       "the classic: it would be persisted and re-executed on every restore")
+        XCTAssertFalse(model.navigate(typed: "file:///etc/passwd"))
+        XCTAssertFalse(model.navigate(typed: "data:text/html,<h1>x</h1>"))
+        XCTAssertFalse(model.navigate(typed: ""), "an empty box goes nowhere")
+        XCTAssertFalse(model.navigate(typed: "https://e.example/\(String(repeating: "a", count: 2048))"),
+                       "past the cap the daemon would refuse the report anyway, silently")
     }
 }
