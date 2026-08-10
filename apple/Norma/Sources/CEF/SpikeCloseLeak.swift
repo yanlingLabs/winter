@@ -301,6 +301,20 @@ final class SpikeCloseLeakHarness {
     /// every other one.
     private func raceThenQuit() {
         let k = Self.raceCount
+        stopPageServer()
+        cefHostView = container?.subviews.first
+        let liveTabs = BrowserRuntime.shared.liveTabIds.count
+
+        // **The census is DELIBERATELY skipped on the racing path, and the first attempt is why.**
+        // `helperCensus()` ends in `Process.waitUntilExit()`, which SPINS THE RUN LOOP — so the
+        // instrument delivered the very pump turns the racing creations were waiting for, and all
+        // three were announced (`browser created id=9,10,11`) before the quit was even asked for.
+        // A measurement that completes the thing it is trying to catch in flight measures nothing.
+        // Everything from here to `NSApp.terminate` is `fputs` and pointer reads.
+        let census = k > 0 ? "(skipped — the census spins the run loop)" : Self.helperCensus()
+        log("PREQUIT cefHostViewAlive=\(cefHostView != nil) runtimeContainers=\(liveTabs) "
+            + "helpers=\(census) — quitting with them ALL OPEN")
+
         if k > 0, let parkingHost = BrowserRuntime.shared.parkingWindow.contentView {
             let page = pageURL ?? panelWebTabStartPageURL
             for _ in 1...k {
@@ -312,11 +326,6 @@ final class SpikeCloseLeakHarness {
             }
             log("RACE-CREATE k=\(k) — quitting in this same turn, with the creations inside CEF's queue")
         }
-        stopPageServer()
-        cefHostView = container?.subviews.first
-        let liveTabs = BrowserRuntime.shared.liveTabIds.count
-        log("PREQUIT cefHostViewAlive=\(cefHostView != nil) runtimeContainers=\(liveTabs) "
-            + "racing=\(raceContainers.count) helpers=\(Self.helperCensus()) — quitting with them ALL OPEN")
         quit()
     }
 
@@ -330,7 +339,11 @@ final class SpikeCloseLeakHarness {
     ///
     /// Best-effort by construction: a failure logs and the run continues on the New Tab page.
     private func startPageServer() -> Int? {
-        let dir = URL(fileURLWithPath: writePage()).deletingLastPathComponent().path
+        // `writePage()` answers an absolute URL STRING, not a path — feeding it to
+        // `URL(fileURLWithPath:)` produced `/private/tmp/file:///var/…`, which python served happily
+        // and every parked browser 404'd against. Measured on the first N=8 run; the close numbers
+        // were unaffected (a 404 page is a real renderer) but the media element was not there.
+        let dir = Self.pageDirectory().path
         let port = Int.random(in: 49_200...58_000)
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -584,12 +597,21 @@ final class SpikeCloseLeakHarness {
     /// (sound from a closed tab) and not only its mechanism. Autoplay may be refused without a
     /// gesture — nothing is gated on it, and the census below is the measurement either way.
     private func writePage() -> String {
-        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("norma-closeleak-page", isDirectory: true)
+        let dir = Self.pageDirectory()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let file = dir.appendingPathComponent("leak.html")
         try? Self.pageHTML.write(to: file, atomically: true, encoding: .utf8)
+        // An absolute URL STRING (`file:///…`), because its caller hands it straight to
+        // `NormaCEFCreateBrowser`. Anything that wants the DIRECTORY must take it from
+        // `pageDirectory()` — not by re-parsing this as a path. See `startPageServer`.
         return file.absoluteString
+    }
+
+    /// Where `writePage` puts the page. Split out so the loopback server can serve the same
+    /// directory without round-tripping a URL string through a path API.
+    private static func pageDirectory() -> URL {
+        URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("norma-closeleak-page", isDirectory: true)
     }
 
     private static let pageHTML = #"""

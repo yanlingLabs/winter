@@ -104,6 +104,11 @@ const int32_t kTimerDelayPlaceholder = INT_MAX;
 // CEF's own: "The maximum number of milliseconds we're willing to wait between calls to DoWork()".
 const int64_t kMaxTimerDelay = 1000 / 30;  // 30fps
 
+// How many 10 ms message-loop turns `NormaCEFShutdown` is willing to drive after the sweep, waiting
+// for every close to complete. Named rather than inline because the shutdown line now reports the
+// turns actually used against it — see that function for what has been measured at what N.
+const int kShutdownDrainTurns = 50;
+
 bool g_library_loaded = false;
 bool g_initialized = false;
 bool g_context_initialized = false;
@@ -2032,19 +2037,71 @@ void NormaCEFShutdown(void) {
   @autoreleasepool {
     NormaCEFCloseAllBrowsers();
   }
+  // **MEASURED AT THE RUNTIME'S FULL WORLD (browser-runtime T7), not at one tab.** The 50×10 ms
+  // bound was set when a quit meant one browser. `BrowserLifecycleEngine.maxLive` is 8, and seven of
+  // those are parked in `BrowserRuntime`'s hidden window with their containers held strongly by its
+  // `containers` map — which nothing clears at quit. That is the same shape as the T6 deadlock one
+  // layer up, and it costs nothing, because `CompleteCloseByReleasingHostView` does
+  // `-removeFromSuperview` FIRST: the container's retain on CEF's view is severed whether or not the
+  // container itself ever dies.
+  //
+  // Measured with 8 live browsers, 7 of them parked and every one of them playing audio
+  // (`SpikeCloseLeak`, `NORMA_SPIKE_CLOSE_BROWSERS=8`): all eight closes completed —
+  // `browser closed (id=1, live browsers=0)` ahead of `shutting down (0 browser(s) still open)` —
+  // **in `0/50` drain turns.** Zero is not a rounding: `g_browsers` was already empty at the loop's
+  // first check, because the `dealloc`s the pool pops run `WindowDestroyed()` → `DestroyBrowser()` →
+  // `OnBeforeClose` synchronously, on this thread, before the loop is reached. So on a healthy quit
+  // **the pool is the whole mechanism and the drain is unused margin** — which is precisely why the
+  // bound is left at 50 rather than widened: nothing has ever consumed the first turn of it.
+  //
   // CloseBrowser is asynchronous and the run loop is about to stop, so the pump can no longer
-  // deliver the turns CEF needs to finish closing. Drive them directly, bounded — CEF's own
-  // external-pump sample does the same thing after `[NSApp run]` returns
-  // (`main_message_loop_external_pump_mac.mm:114-125`, "run the message pump until it is idle...
-  // we don't have that information here so we run the message loop 'for a while'"). With the pool
-  // above, the `dealloc`s have already happened and these turns are what carries
-  // `DestroyBrowser()` through to `OnBeforeClose`.
-  for (int i = 0; i < 50 && !g_browsers.empty(); i++) {
+  // deliver the turns CEF needs. Drive them directly, bounded — CEF's own external-pump sample does
+  // the same thing after `[NSApp run]` returns (`main_message_loop_external_pump_mac.mm:114-125`,
+  // "run the message pump until it is idle... we don't have that information here so we run the
+  // message loop 'for a while'").
+  //
+  // **What these turns are for, stated after the measurement rather than before it.** This block
+  // used to say they "carry `DestroyBrowser()` through to `OnBeforeClose`" — T7 measured that they
+  // carry nothing at all on a healthy quit, because the pool above already did (`0/50`). They are
+  // the net for the case the pool cannot close: a browser whose host view is still retained by
+  // something else when the pool pops, whose `dealloc` therefore lands later. Nothing in this app
+  // holds one today — `BrowserRuntime` is never the last retain (T6) — so the net has never been
+  // needed, and it stays because the thing it catches is a leaked renderer.
+  int turns = 0;
+  for (; turns < kShutdownDrainTurns && !g_browsers.empty(); turns++) {
     CefDoMessageLoopWork();
     usleep(10000);
   }
-  Log("shutting down (%zu browser(s) still open, %ld DoWork calls)", g_browsers.size(),
-      g_do_work_count);
+  // `turns` is the DRAIN's own count and is the bound's evidence: it says how much of the 50 a real
+  // quit actually needed. (`DoWork calls` beside it counts the PUMP's turns for the whole process
+  // lifetime and says nothing about this loop — it is left in because it is the pump's own
+  // liveness figure.)
+  //
+  // ── **THE TRIPWIRE'S CONTRACT (browser-runtime T7). `N > 0` HAS NO BENIGN CASE THAT HAS EVER
+  //    BEEN OBSERVED, AND EXACTLY ONE THAT IS REACHABLE IN PRINCIPLE.** ───────────────────────────
+  //
+  //   * **Healthy quit, any number of browsers: N = 0.** Measured at 8 (7 parked, all with a live
+  //     media element).
+  //   * **Quit racing an in-flight create: N = 0, measured.** `NORMA_SPIKE_CLOSE_RACE` puts K
+  //     creations into CEF's own queue in the same run-loop turn as the quit (K = 3, 3, 8 — with
+  //     nothing in between that spins the run loop, which is a real hazard: the spike's own `ps`
+  //     census defeated the first attempt by delivering the pump turns the creations were waiting
+  //     for). `OnAfterCreated` never fired for any of them, so they never reached `g_browsers` and
+  //     never counted; `CefShutdown` took them. No crash, exit 0.
+  //   * **The T3 abandon path at quit: N = 0, by construction.** If `OnAfterCreated` DID land before
+  //     the sweep, the browser is in `g_browsers` and the sweep closes it like any other — the
+  //     `dispatch_async` that would have run `CloseAbandonedBrowser` never gets its turn (this loop
+  //     drives CEF's queue, not GCD's), and it does not need one: the close it owed was already
+  //     performed, and the only other thing it does is drop a retain the process is about to lose.
+  //   * **The one reachable nonzero, NOT reproduced:** a creation whose `OnAfterCreated` lands
+  //     *after* the sweep, i.e. inside this loop — which requires the loop to run at all, i.e. a
+  //     close still outstanding at the pool pop. That browser lands in `g_browsers` with nothing left
+  //     to close it and is reclaimed by process exit — exactly the pre-T6 status quo. It would need
+  //     both halves to be true at once, and no run has produced either.
+  //
+  // So `N > 0` means a close that did not complete. It is not a race artefact to be waved through.
+  Log("shutting down (%zu browser(s) still open, %d/%d drain turns, %ld DoWork calls)",
+      g_browsers.size(), turns, kShutdownDrainTurns, g_do_work_count);
   CefShutdown();
 }
 
