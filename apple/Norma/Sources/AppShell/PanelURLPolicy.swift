@@ -54,9 +54,13 @@ enum PanelURLPolicy {
     /// worst known drift class (the `TRANSIENT_EVENT_TYPES` hand-copy that silently dropped every
     /// `assistant_delta` on iOS). Drift here is silent in BOTH directions: every panel RPC call site
     /// is `try?`-wrapped, so a too-generous value here means the daemon rejects the report and
-    /// nothing anywhere says so — navigations simply stop being recorded. `PanelURLPolicyTests`
-    /// pins these literals and names its TS counterpart; the TS test pins the same two and names
-    /// this one.
+    /// nothing anywhere says so — navigations simply stop being recorded.
+    /// `PanelWebChromeTests.testTheCapsAreTheExactValuesTheDaemonEnforces` pins these literals and
+    /// names its TS counterpart; the TS test pins the same two and names this one.
+    ///
+    /// **A NUMBER is only half a mirrored cap — the other half is the UNIT**, and that is the half
+    /// that drifted (whole-branch review F4). Never measure against these with `String.count`; use
+    /// `wireLength` / `cappedTitle` below.
     static let urlMaxLength = 2048
     static let titleMaxLength = 256
 
