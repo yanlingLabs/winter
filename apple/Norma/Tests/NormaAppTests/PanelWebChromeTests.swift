@@ -188,15 +188,68 @@ final class PanelWebChromeTests: XCTestCase {
         XCTAssertEqual(PanelURLPolicy.restorableURL("https://example.com"), "https://example.com")
     }
 
-    /// The consumer's own door, exercised through the tab rather than the policy — this is the call
-    /// `PanelWebTab.makeContent()` makes, and a refactor that dropped the filter there would leave
-    /// every policy test above green.
-    func testAWebTabWithAHostileStoredURLResolvesToTheStartPage() {
+    /// **Enforcement point 3, exercised THROUGH `PanelWebTab.makeContent()`** — the one door the
+    /// policy's own doc calls "the last mile", and the only one on the path of every single load.
+    ///
+    /// The previous shape of this test built a `PanelTab` and then called
+    /// `PanelURLPolicy.restorableURL` DIRECTLY. `PanelWebTab` was never constructed and
+    /// `makeContent()` was never called, so rewriting `makeContent()` as
+    /// `PanelCEFView(tab: tab, model: model, url: tab.url ?? "")` — deleting the last mile — left
+    /// this test, and every other test in this file, green. It asserted exactly what
+    /// `testRestoreLoadsTheStartPageRatherThanAnythingOutsideTheAllowlist` asserts one line above.
+    /// A pin that cannot fail is worse than no pin, because it reads as coverage.
+    ///
+    /// **Mutation-verified after this rewrite**: with `makeContent()` changed to pass `tab.url` raw,
+    /// this is the ONE test in the suite that reds; restored, it passes. Recorded in the fix
+    /// round's report.
+    ///
+    /// `makeContent()` returns `AnyView`, so the url is not readable from outside — the view is
+    /// recovered by reflecting through `AnyView`'s storage (`loadedURL(of:)` below). That is
+    /// SwiftUI-internal shape, and it fails LOUDLY if the shape ever changes rather than passing
+    /// vacuously.
+    func testAWebTabWithAHostileStoredURLResolvesToTheStartPage() throws {
+        PanelWebTabModels.removeAllForTesting()
+        defer { PanelWebTabModels.removeAllForTesting() }
+
         let hostile = PanelTab(tabId: "t1", kind: .web, url: "javascript:alert(1)", title: "x")
-        XCTAssertEqual(PanelURLPolicy.restorableURL(hostile.url), panelWebTabStartPageURL)
+        XCTAssertEqual(
+            try loadedURL(of: hostile), panelWebTabStartPageURL,
+            "a stored javascript: URL is being handed to a real Chromium browser — "
+                + "PanelWebTab.makeContent() no longer runs PanelURLPolicy.restorableURL. Sessions "
+                + "are user-delete-only, so it would be re-executed against the page on every "
+                + "restore, forever.")
 
         let ordinary = PanelTab(tabId: "t2", kind: .web, url: "https://example.com", title: "Example")
-        XCTAssertEqual(PanelURLPolicy.restorableURL(ordinary.url), "https://example.com")
+        XCTAssertEqual(
+            try loadedURL(of: ordinary), "https://example.com",
+            "an allowed URL must reach the browser VERBATIM — without this the assertion above "
+                + "cannot tell 'filtered' from 'always the start page'")
+    }
+
+    /// The url `PanelWebTab.makeContent()` actually hands to a browser, read back out of the
+    /// `AnyView` it returns.
+    private func loadedURL(of tab: PanelTab) throws -> String {
+        let content = panelTabContent(for: tab)
+        XCTAssertTrue(content is PanelWebTab, "a .web tab must resolve to PanelWebTab")
+        let view = try XCTUnwrap(
+            Self.firstDescendant(PanelCEFView.self, in: content.makeContent()),
+            "no PanelCEFView inside makeContent()'s AnyView — either .web stopped resolving to the "
+                + "CEF surface, or AnyView's internal storage shape changed and this reflection "
+                + "needs updating. Either way this test is no longer covering enforcement point 3.")
+        return view.url
+    }
+
+    /// Depth-first search for a value of type `T` anywhere inside `value`'s reflection tree.
+    /// `AnyView` stores its wrapped view two levels down (`storage` -> `view`); the search is
+    /// recursive rather than hard-coded to that path so a change in SwiftUI's storage shape does
+    /// not silently break the pin.
+    private static func firstDescendant<T>(_ type: T.Type, in value: Any, depth: Int = 0) -> T? {
+        if let hit = value as? T { return hit }
+        guard depth < 6 else { return nil }
+        for child in Mirror(reflecting: value).children {
+            if let hit = firstDescendant(type, in: child.value, depth: depth + 1) { return hit }
+        }
+        return nil
     }
 
     // MARK: - The caps, mirrored across two languages
@@ -212,6 +265,87 @@ final class PanelWebChromeTests: XCTestCase {
     func testTheCapsAreTheExactValuesTheDaemonEnforces() {
         XCTAssertEqual(PanelURLPolicy.urlMaxLength, 2048)
         XCTAssertEqual(PanelURLPolicy.titleMaxLength, 256)
+    }
+
+    /// **The NUMBERS agreed and the UNIT did not** — whole-branch review F4, and the reason the
+    /// test above cannot catch it.
+    ///
+    /// Zod's `.max(256)` counts JS `String.length` — UTF-16 code units. Swift's `String.prefix(256)`
+    /// counts extended grapheme clusters. Identical for ASCII, which is every literal both pin
+    /// tests use. A page `<title>` over 256 characters containing one emoji was emitted at 256
+    /// Swift `Character`s / 257+ UTF-16 units, the daemon refused the whole
+    /// `panel.reportNavigation`, and `reportPanelNavigation`'s `try?` swallowed it: the navigation
+    /// was silently never recorded and the tab kept its previous stored address.
+    ///
+    /// The TS counterpart is `packages/core/test/ipc/panel-methods.test.ts`, "the caps count UTF-16
+    /// units, which is the unit the Swift mirror truncates in".
+    func testTheCapsCountTheSameUnitTheDaemonCounts() throws {
+        let emoji = "😀"
+        XCTAssertEqual(emoji.count, 1, "one Character…")
+        XCTAssertEqual(emoji.utf16.count, 2, "…and two UTF-16 units: the whole discrepancy")
+
+        // The exact hazard: > 256 characters, carrying a surrogate pair.
+        let hostile = emoji + String(repeating: "t", count: PanelURLPolicy.titleMaxLength + 400)
+        let capped = try XCTUnwrap(
+            PanelURLPolicy.persistableNavigation(url: "https://x.example", title: hostile)).title
+
+        XCTAssertLessThanOrEqual(
+            capped.utf16.count, PanelURLPolicy.titleMaxLength,
+            "the title the app emits is over the cap in the unit the DAEMON counts — the whole "
+                + "panel.reportNavigation is rejected and the try? swallows it, so the navigation "
+                + "is silently never recorded. String.prefix(256) is not z.string().max(256).")
+        XCTAssertEqual(capped.utf16.count, PanelURLPolicy.titleMaxLength,
+                       "and it fills the cap rather than under-cutting it")
+        XCTAssertEqual(capped.count, PanelURLPolicy.titleMaxLength - 1,
+                       "255 Characters — the emoji costs two units, so one fewer fits")
+        XCTAssertTrue(capped.hasPrefix(emoji),
+                      "a surrogate pair must never be split: half a pair is invalid UTF-8 on the "
+                          + "wire, which the encoder refuses just as surely as an over-long string")
+
+        // An all-ASCII title is unchanged by the switch — the two units coincide there.
+        let ascii = String(repeating: "t", count: PanelURLPolicy.titleMaxLength + 400)
+        XCTAssertEqual(
+            PanelURLPolicy.persistableNavigation(url: "https://x.example", title: ascii)?.title.count,
+            PanelURLPolicy.titleMaxLength)
+
+        // The URL side has the same unit, and DROPS rather than truncating. Reachable through the
+        // type-in door (an IDN or a percent-free unicode path), not through CEF's own canonical
+        // `frame->GetURL()`, which is percent-encoded ASCII.
+        let wideURL = "https://a.example/" + String(repeating: emoji, count: 1100)
+        XCTAssertLessThanOrEqual(wideURL.count, PanelURLPolicy.urlMaxLength,
+                                 "under the cap by Swift's count — the shape that used to pass")
+        XCTAssertGreaterThan(wideURL.utf16.count, PanelURLPolicy.urlMaxLength,
+                             "and over it by the daemon's")
+        XCTAssertNil(PanelURLPolicy.persistableNavigation(url: wideURL, title: "T"))
+        XCTAssertNil(PanelURLPolicy.normalizeTypedInput(wideURL))
+        XCTAssertFalse(PanelURLPolicy.mayOpenTab(kind: .web, url: wideURL))
+    }
+
+    /// `mayOpenTab` mirrors `PanelOpenTabParams` — and the caps in it are NOT kind-conditional.
+    ///
+    /// Only the scheme allowlist is (`superRefine` on `web`); `.max(PANEL_URL_MAX_LENGTH)` and
+    /// `.max(PANEL_TITLE_MAX_LENGTH)` apply to every kind. Before F4 this door bounded `url` for
+    /// `.web` only and never bounded `title` at all, so a request the daemon would refuse got as
+    /// far as `openPanelTab`'s auto-create branch — which mints a session BEFORE the RPC and would
+    /// have left an orphan empty session behind, the exact failure that guard is placed early to
+    /// prevent.
+    func testTheOpenTabDoorCapsBothFieldsForEveryKindAndGatesTheSchemeForWebOnly() {
+        let overTitle = String(repeating: "t", count: PanelURLPolicy.titleMaxLength + 1)
+        let overURL = "https://a.example/" + String(repeating: "p", count: PanelURLPolicy.urlMaxLength)
+
+        for kind in [PanelTabKind.web, .document, .code, .note] {
+            XCTAssertFalse(PanelURLPolicy.mayOpenTab(kind: kind, url: nil, title: overTitle),
+                           "\(kind): an over-cap title is refused by the daemon for every kind")
+            XCTAssertFalse(PanelURLPolicy.mayOpenTab(kind: kind, url: overURL),
+                           "\(kind): so is an over-cap url")
+            XCTAssertTrue(PanelURLPolicy.mayOpenTab(kind: kind, url: nil, title: "ordinary"))
+        }
+
+        // The scheme half stays kind-conditional: a local path is legitimate for the spec's
+        // LibreOffice and Monaco slots, and never for a web tab.
+        XCTAssertTrue(PanelURLPolicy.mayOpenTab(kind: .document, url: "file:///tmp/x.odt"))
+        XCTAssertFalse(PanelURLPolicy.mayOpenTab(kind: .web, url: "file:///tmp/x.odt"))
+        XCTAssertTrue(PanelURLPolicy.mayOpenTab(kind: .web, url: "https://example.com"))
     }
 
     // MARK: - The URL row's metrics

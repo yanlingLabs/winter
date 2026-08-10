@@ -482,7 +482,7 @@ final class ShellSessionHost: ObservableObject {
         // BEFORE the auto-create branch on purpose: with no session attached, a url the daemon
         // would refuse used to mint a session first and then fail its `panel.openTab` silently
         // (`try?`), leaving an orphan empty session behind. Refusing here costs nothing and cannot.
-        guard PanelURLPolicy.mayOpenTab(kind: kind, url: url) else { return }
+        guard PanelURLPolicy.mayOpenTab(kind: kind, url: url, title: title) else { return }
         let kindRaw = kind.rawValue
         guard let sessionId = attachedSessionId else {
             guard !panelAutoCreateInFlight else { return }

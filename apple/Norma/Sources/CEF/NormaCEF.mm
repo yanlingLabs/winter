@@ -735,7 +735,11 @@ static NormaCEFTerminationObserver *g_termination_observer = nil;
 // The C entry points — the Swift-facing seam
 // ---------------------------------------------------------------------------
 
-BOOL NormaCEFLoadLibrary(void) {
+// INTERNAL, not part of the header's surface (whole-branch review F9). It was exported with a
+// caller obligation nobody had — "nothing else in this header may be called before this returns
+// YES" — which is discharged here instead: `NormaCEFInitialize` below is its only caller, and
+// every other entry point guards on `g_initialized`.
+static BOOL NormaCEFLoadLibrary(void) {
   if (g_library_loaded) {
     return YES;
   }
@@ -746,8 +750,12 @@ BOOL NormaCEFLoadLibrary(void) {
   // — which, since Task 5 restructured the embedded copy into the versioned macOS layout Xcode's
   // product validator demands, resolves through the framework's top-level symlink to
   // `Versions/A/`. dlopen follows symlinks, so the path is unchanged from CEF's flat original.
-  static void *loader = nullptr;
-  loader = cef_scoped_library_loader_create(0 /* 0 = main process, not helper */);
+  //
+  // The handle is deliberately never destroyed — the framework stays loaded for the life of the
+  // process. It was `static` until the whole-branch review (F9), which did nothing: the value is
+  // overwritten on every call and the function early-returns on `g_library_loaded` anyway, so the
+  // storage class only read as though it were load-bearing.
+  void *loader = cef_scoped_library_loader_create(0 /* 0 = main process, not helper */);
   if (loader == nullptr) {
     g_last_error = "could not load the Chromium Embedded Framework (LoadInMain failed)";
     Log("FAILED: %s", g_last_error.c_str());
@@ -848,10 +856,6 @@ BOOL NormaCEFInitialize(int argc,
 
 BOOL NormaCEFIsInitialized(void) {
   return g_initialized ? YES : NO;
-}
-
-BOOL NormaCEFIsContextInitialized(void) {
-  return g_context_initialized ? YES : NO;
 }
 
 const char *NormaCEFLastError(void) {
@@ -1064,8 +1068,4 @@ void NormaCEFShutdown(void) {
 
 BOOL NormaCEFDidShutdown(void) {
   return g_did_shutdown ? YES : NO;
-}
-
-long NormaCEFDoWorkCount(void) {
-  return g_do_work_count;
 }

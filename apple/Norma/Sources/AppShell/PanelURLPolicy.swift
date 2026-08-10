@@ -60,6 +60,39 @@ enum PanelURLPolicy {
     static let urlMaxLength = 2048
     static let titleMaxLength = 256
 
+    /// **The UNIT the two caps are measured in — and the half that drifted while the numbers
+    /// agreed.** Zod's `.max(n)` on a string counts JS `String.length`, i.e. UTF-16 code units.
+    /// Swift's `String.count` (and `.prefix(n)`) counts extended grapheme clusters. For ASCII the
+    /// two are identical, which is why every literal-pinning test on both sides was structurally
+    /// blind to this: the drift was never in the number.
+    ///
+    /// A page `<title>` longer than 256 characters containing even ONE emoji is 256 Swift
+    /// `Character`s and ≥ 257 UTF-16 units, so the daemon rejected the entire
+    /// `panel.reportNavigation` — and `ShellSessionHost.reportPanelNavigation`'s `try?` swallowed
+    /// the rejection, exactly as the caps' own doc comments warn. The navigation was silently never
+    /// recorded and the tab kept its previous stored address. Whole-branch review F4;
+    /// `testTheCapsCountTheSameUnitTheDaemonCounts` is the pin that reds if this reverts.
+    static func wireLength(_ s: String) -> Int { s.utf16.count }
+
+    /// Truncate to `titleMaxLength` **UTF-16 units**, never splitting a grapheme cluster.
+    ///
+    /// Both properties are required: cutting at a raw UTF-16 offset could split a surrogate pair
+    /// (producing an unpaired surrogate — invalid UTF-8 on the wire, which the socket's JSON
+    /// encoder would reject just as surely as an over-long string), and cutting by `Character`
+    /// alone is the bug above. So: take whole `Character`s while the running UTF-16 total fits.
+    static func cappedTitle(_ title: String) -> String {
+        guard wireLength(title) > titleMaxLength else { return title }
+        var capped = ""
+        var units = 0
+        for character in title {
+            let width = String(character).utf16.count
+            if units + width > titleMaxLength { break }
+            capped.append(character)
+            units += width
+        }
+        return capped
+    }
+
     /// The scheme of `url`, lowercased, or `nil` when the string does not start with one.
     ///
     /// Matched against RFC 3986's grammar directly rather than via `URL(string:)`: a parser that
@@ -140,7 +173,7 @@ enum PanelURLPolicy {
             candidate = schemeToPrepend(forHostPortInput: trimmed) + trimmed
         }
 
-        guard isAllowed(candidate), candidate.count <= urlMaxLength else { return nil }
+        guard isAllowed(candidate), wireLength(candidate) <= urlMaxLength else { return nil }
         return candidate
     }
 
@@ -152,9 +185,12 @@ enum PanelURLPolicy {
     /// URL is a DIFFERENT URL — a wrong address that a later restore would navigate to. Not
     /// recording a navigation leaves the tab pointing at the last page it was known to be on, which
     /// is honest; recording a corrupted address is not.
+    ///
+    /// Both measured in the daemon's unit (`wireLength` / `cappedTitle`), not Swift's — see
+    /// `wireLength`'s own doc for the drift that cost.
     static func persistableNavigation(url: String, title: String) -> (url: String, title: String)? {
-        guard isAllowed(url), !url.isEmpty, url.count <= urlMaxLength else { return nil }
-        return (url, String(title.prefix(titleMaxLength)))
+        guard isAllowed(url), !url.isEmpty, wireLength(url) <= urlMaxLength else { return nil }
+        return (url, cappedTitle(title))
     }
 
     /// **Door 1b — opening a tab with a url already in hand.** May `ShellSessionHost.openPanelTab`
@@ -177,9 +213,19 @@ enum PanelURLPolicy {
     /// the whole request), and it keeps this file's standing rule: refuse outright, never sanitise.
     /// The daemon's own refusal stays where it is; this is the producer-side half of one guard, not
     /// a replacement for it.
-    static func mayOpenTab(kind: PanelTabKind, url: String?) -> Bool {
-        guard let url, kind == .web else { return true }
-        return isAllowed(url) && url.count <= urlMaxLength
+    ///
+    /// **Only the SCHEME test is kind-conditional; the field caps are not** (whole-branch review
+    /// F4). `PanelOpenTabParams` applies `.max(PANEL_URL_MAX_LENGTH)` / `.max(PANEL_TITLE_MAX_LENGTH)`
+    /// to both fields for every kind, and only `superRefine`s the allowlist for `web` — so an
+    /// over-cap url on a `.document` tab, or an over-cap title on any tab, was refused by the
+    /// daemon and waved through here. That is not merely untidy: `openPanelTab` runs this guard
+    /// BEFORE its auto-create branch precisely so a request the daemon will refuse cannot mint an
+    /// orphan empty session first (its own comment says so).
+    static func mayOpenTab(kind: PanelTabKind, url: String?, title: String? = nil) -> Bool {
+        if let title, wireLength(title) > titleMaxLength { return false }
+        guard let url else { return true }
+        guard wireLength(url) <= urlMaxLength else { return false }
+        return kind != .web || isAllowed(url)
     }
 
     /// **Door 3 — what a restored tab actually loads.** Falls back to the local New Tab page for

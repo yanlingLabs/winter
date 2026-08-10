@@ -211,6 +211,16 @@ struct ShellPanel: View {
                         Color.clear
                     }
                 }
+                // `.id(tabId)` for the same reason the content slot below carries one, and it is
+                // load-bearing here too (whole-branch review F8). `PanelWebChrome` holds the typed
+                // address and the refusal flash as local `@State`; without this the chrome view is
+                // REUSED across a tab switch, `.onAppear` fires once, and
+                // `.onChange(of: model.displayURL)` does not fire when the two tabs happen to share
+                // a `displayURL` — two fresh tabs both show "". Concretely: type into tab A's
+                // address bar without submitting, switch to tab B, press Return, and tab B
+                // navigates to what was typed for tab A. The cost is losing in-progress typing on a
+                // tab switch, which is the correct trade and the one the content slot already makes.
+                .id(shownTab?.tabId)
                 .frame(height: panelUrlRowHeight)
             }
             .frame(height: panelChromeBandHeight)

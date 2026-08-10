@@ -519,6 +519,36 @@ describe("panel RPC methods (panel-shell T6)", () => {
     expect(PANEL_TITLE_MAX_LENGTH).toBe(256);
   });
 
+  // Whole-branch review F4: the two sides agreed on the NUMBER and disagreed on the UNIT, which is
+  // why the literal pin above — and its Swift twin — were structurally blind to it. Zod's `.max(n)`
+  // counts JS `String.length`, i.e. UTF-16 code units; Swift's `String.prefix(n)` counts extended
+  // grapheme clusters. Identical for ASCII, which is every literal either test uses.
+  //
+  // This pins the DAEMON's unit from the daemon's side, so the Swift mirror
+  // (`PanelURLPolicy.cappedTitle`, `testTheCapsCountTheSameUnitTheDaemonCounts`) has something
+  // stable to be correct against. A title of 256 emoji is 256 Characters and 512 units: refused.
+  test("the caps count UTF-16 units, which is the unit the Swift mirror truncates in", () => {
+    const emoji = "\u{1F600}";           // one grapheme cluster, ONE JS "character"…
+    expect([...emoji].length).toBe(1);
+    expect(emoji.length).toBe(2);        // …and two UTF-16 code units. Zod counts these.
+
+    const title = emoji + "t".repeat(PANEL_TITLE_MAX_LENGTH - 1);   // 256 clusters, 257 units
+    expect([...title].length).toBe(PANEL_TITLE_MAX_LENGTH);
+    expect(title.length).toBe(PANEL_TITLE_MAX_LENGTH + 1);
+    const base = { sessionId: "s1", seq: 1, ts: 0 };
+    expect(SessionEvent.safeParse({
+      ...base, type: "panel_tab_navigated", tabId: "t1", url: "https://a.example", title,
+    }).success).toBe(false);
+
+    // One cluster shorter — 255 clusters, 256 units — is exactly AT the cap and accepted. This is
+    // the value the Swift side now emits for the same input.
+    const fitted = emoji + "t".repeat(PANEL_TITLE_MAX_LENGTH - 2);
+    expect(fitted.length).toBe(PANEL_TITLE_MAX_LENGTH);
+    expect(SessionEvent.safeParse({
+      ...base, type: "panel_tab_navigated", tabId: "t1", url: "https://a.example", title: fitted,
+    }).success).toBe(true);
+  });
+
   // -------------------------------------------------------------------------------------------
   // panel-cef Task 6b: opening a tab ACTIVATES it (the wire decision Plan A left open).
   // -------------------------------------------------------------------------------------------

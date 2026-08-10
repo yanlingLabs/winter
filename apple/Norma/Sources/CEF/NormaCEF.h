@@ -26,15 +26,16 @@
 extern "C" {
 #endif
 
-/// `dlopen` the vendored framework from `Contents/Frameworks` — `CefScopedLibraryLoader::
-/// LoadInMain()`. Idempotent; returns YES if the framework is loaded after the call.
-///
-/// The framework is NEVER linked directly. `include/wrapper/cef_library_loader.h` documents that
-/// as a requirement of the macOS sandbox implementation, not a style choice. Nothing else in this
-/// header may be called before this returns YES.
-BOOL NormaCEFLoadLibrary(void);
-
 /// `CefInitialize` with `external_message_pump = true`, plus the pump this file owns.
+///
+/// **It `dlopen`s the framework itself**, from `Contents/Frameworks` via
+/// `CefScopedLibraryLoader::LoadInMain()` — the framework is NEVER linked directly, which
+/// `include/wrapper/cef_library_loader.h` documents as a requirement of the macOS sandbox
+/// implementation rather than a style choice. The loader used to be exported here as
+/// `NormaCEFLoadLibrary`, with a caller obligation ("nothing else in this header may be called
+/// before this returns YES") that nobody had and nobody needed: every other entry point guards on
+/// initialisation, and this one loads the library on its own. It is `static` in the implementation
+/// now (whole-branch review F9).
 /// `argc`/`argv` are the process's real ones (`CommandLine.argc` / `CommandLine.unsafeArgv`), so
 /// Chromium's own command-line switches — `--remote-debugging-port`, `--disable-gpu`,
 /// `--use-angle=swiftshader`, `--enable-logging=stderr --v=1` — work exactly as they do for any
@@ -50,17 +51,18 @@ BOOL NormaCEFInitialize(int argc,
 /// re-initialised afterwards — so this never returns to NO; `NormaCEFDidShutdown` is the other half.
 BOOL NormaCEFIsInitialized(void);
 
-/// YES once `CefBrowserProcessHandler::OnContextInitialized` has fired. Task 1 measured it firing
-/// SYNCHRONOUSLY inside `CefInitialize` on every run, contrary to expectation — but that is timing,
-/// not contract, so browser creation is still queued behind it (`NormaCEFCreateBrowser`).
-BOOL NormaCEFIsContextInitialized(void);
-
 /// The last failure reason, for the placeholder the panel shows instead of a page. Never NULL.
 const char *NormaCEFLastError(void);
 
 /// Create a browser as a child of `parent` and navigate it to `url`. If the CEF context is not up
 /// yet the request is QUEUED and replayed from `OnContextInitialized`; `parent` is held weakly, so
 /// a view torn down before then simply drops out.
+///
+/// The queue is a CONTRACT, not a workaround: Task 1 measured
+/// `CefBrowserProcessHandler::OnContextInitialized` firing SYNCHRONOUSLY inside `CefInitialize` on
+/// every run, contrary to expectation — but that is timing, and creation is queued behind it
+/// anyway. (A `NormaCEFIsContextInitialized` predicate was exported for that finding and never
+/// called by anything; removed by whole-branch review F9, the state itself is read here.)
 void NormaCEFCreateBrowser(NSView *parent, const char *url);
 
 #pragma mark - Task 6b: the browser chrome's two channels
@@ -197,11 +199,6 @@ void NormaCEFShutdown(void);
 /// leak into every test that runs after it (`CEFRuntimeTests`), and what keeps
 /// `NormaCEFRuntime.isRetryable` honest.
 BOOL NormaCEFDidShutdown(void);
-
-/// How many times `CefDoMessageLoopWork()` has been called. Diagnostics only: this is the counter
-/// Task 1's A/B used to measure the run-loop-mode trap (0 calls across 5s of event tracking with
-/// the timer in the default mode alone).
-long NormaCEFDoWorkCount(void);
 
 #ifdef __cplusplus
 }
