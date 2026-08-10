@@ -235,7 +235,7 @@ final class BrowserRuntime {
         self.scheduler = scheduler
     }
 
-    // MARK: - What Task 5 feeds back into `plan`
+    // MARK: - What `BrowserSignalsCoordinator` feeds back into `plan`
 
     var liveTabIds: Set<String> { Set(containers.keys) }
     var lruOrder: [String] { lru }
@@ -397,7 +397,8 @@ final class BrowserRuntime {
         if host == nil {
             // Not fatal, and not silent: with no host a parked browser's committed navigations are
             // dropped on the floor rather than recorded, and nothing else will bind one for a tab
-            // that is never rendered. Task 5 sets `host` before the first `apply`.
+            // that is never rendered. `BrowserSignalsCoordinator.init` sets `host` before its
+            // first `apply` — see that property's own doc.
             NSLog("[BrowserRuntime] wiring \(tabId) with no ShellSessionHost — its navigations and "
                   + "popups will go nowhere until one is set")
         }
@@ -430,8 +431,9 @@ final class BrowserRuntime {
     private func startBrowser(tabId: String, container: PanelCEFContainerView, url: String) {
         // NOT synchronous. `CefInitialize` stands up a process tree, runs `OnContextInitialized`
         // re-entrantly and starts a run-loop timer; hopping one turn keeps all of that out of
-        // whatever pass called `apply` (Task 5's caller may well be a SwiftUI update, which is the
-        // case `makeNSView` had), and guarantees the run loop is genuinely spinning when CEF comes
+        // whatever pass called `apply` (`BrowserSignalsCoordinator.replan` runs from a fold, i.e.
+        // from inside the session event pump, and from a Combine sink), and guarantees the run loop
+        // is genuinely spinning when CEF comes
         // up (see `NormaCEFRuntime`'s note on Task 1's starvation hypothesis).
         scheduler.mainAsync { [weak self] in
             guard let self else { return }
@@ -607,8 +609,8 @@ final class BrowserRuntime {
     // MARK: The linger
 
     private struct Linger {
-        /// **The ENGINE's deadline, and it never moves.** Task 5 feeds it straight back into
-        /// `plan(pendingStops:)`, where it is compared against the engine's own clock; an executor
+        /// **The ENGINE's deadline, and it never moves.** `BrowserSignalsCoordinator` feeds it
+        /// straight back into `plan(pendingStops:)`, where it is compared against the engine's own clock; an executor
         /// that pushed it forward would make every later plan see an unexpired deadline and say
         /// nothing at all — the stop would never happen.
         let deadline: Date

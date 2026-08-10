@@ -38,8 +38,10 @@ struct PanelWebTab: PanelTabContent {
     /// policy in two places while leaving the runtime's own path (spec §5's headless browsers, and
     /// every one of B2's) depending on a view that never runs for them.
     /// `BrowserRuntimeTests.testTheRestoreDoorRefusesEveryDisallowedSchemeAndSeedsNothingForOne`
-    /// pins it at the runtime; `PanelViewportTests
-    /// .testAStoredHostileURLNeverReachesCEFThroughTheViewport` pins that this path reaches it.
+    /// pins the door itself; `BrowserSignalsTests
+    /// .testAStoredHostileURLNeverReachesCEFThroughTheFoldThatRestoresIt` pins that the path a
+    /// stored URL actually travels — a daemon fold, through the engine, into a create — reaches it.
+    /// (T4's viewport-path pin retired with the bridge Task 5 deleted: this view creates nothing.)
     func makeContent() -> AnyView {
         AnyView(PanelViewport(tab: tab, runtime: runtime))
     }
@@ -182,7 +184,8 @@ struct PanelViewport: NSViewRepresentable {
     ///
     /// **Where stopping lives now:** `BrowserRuntime.stop`, executed from a `.stop` action that
     /// `BrowserLifecycleEngine.plan` decided (`BrowserLifecycle.swift`) on the session-lifecycle
-    /// rules of spec §4 — signals Task 5 plumbs in. This file cannot make that decision: it does not
+    /// rules of spec §4, from the signals `BrowserSignalsCoordinator` assembles
+    /// (`BrowserSignals.swift`). This file cannot make that decision: it does not
     /// know whether the tab is still open, whether its session is working, or whether the user is
     /// switching away for a second or for the rest of the day.
     static func dismantleNSView(_ nsView: PanelViewportHostView, coordinator: ()) {
