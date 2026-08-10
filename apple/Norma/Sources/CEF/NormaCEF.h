@@ -93,8 +93,8 @@ void NormaCEFCreateBrowser(NSView *parent, const char *url);
 ///
 /// Registered against the CONTAINER VIEW rather than a browser id, because the container exists
 /// before the browser does — creation is asynchronous and may be queued behind
-/// `OnContextInitialized` — so a registration made at `makeNSView` time is already in place
-/// whenever the browser finally arrives.
+/// `OnContextInitialized` — so a registration made at create time (`BrowserRuntime.wire`, before
+/// the create is even queued) is already in place whenever the browser finally arrives.
 void NormaCEFSetStateObserver(NSView *parent, void (^observer)(NormaCEFBrowserState *state));
 
 /// Observe COMMITTED TOP-LEVEL NAVIGATIONS of the browser hosted by `parent` — the producer behind
@@ -286,7 +286,8 @@ NSObject *NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere(void);
 NSObject *NormaCEFRecordAfterACloseHandsTheHostViewBack(NSView *hostView);
 
 /// Close the browser hosted by `parent`, and cancel any creation still on its way to becoming one.
-/// Called from `NSViewRepresentable.dismantleNSView`.
+/// Called from `BrowserRuntime.stop` (via `CEFDriver.closeBrowser`) — the ONLY production caller
+/// since the T4 viewport rewire; `dismantleNSView` now detaches the viewport and closes nothing.
 ///
 /// A creation can be waiting in either of two queues when this is called, and the second is why the
 /// implementation is more than a close: requests made before the CEF context came up are ours to

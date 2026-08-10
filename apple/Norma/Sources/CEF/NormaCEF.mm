@@ -1728,8 +1728,9 @@ void NormaCEFCreateBrowser(NSView *parent, const char *url) {
     return;
   }
   // Task 1 measured OnContextInitialized firing SYNCHRONOUSLY inside CefInitialize on every run —
-  // but that is timing, not contract, and `makeNSView` can plausibly run before the context on a
-  // slower or busier launch. The queue costs nothing and removes the ordering assumption.
+  // but that is timing, not contract, and `BrowserRuntime.startBrowser`'s create (one main-queue
+  // hop after the engine's `.create`) can plausibly run before the context on a slower or busier
+  // launch. The queue costs nothing and removes the ordering assumption.
   if (g_pending == nil) {
     g_pending = [[NSMutableArray alloc] init];
   }
