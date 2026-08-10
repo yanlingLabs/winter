@@ -264,6 +264,46 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 }
 @end
 
+// ---------------------------------------------------------------------------
+// The ObjC side of a live browser — because a window HANDLE is not a way to find a view
+// ---------------------------------------------------------------------------
+
+/// Everything about ONE OPEN BROWSER that lives in AppKit rather than in CEF, captured at the one
+/// moment CEF hands it over and released the moment CEF says the browser is gone.
+///
+/// **`CefBrowserHost::GetWindowHandle()` keeps answering after the view behind it is dead**, and
+/// messaging that pointer is not a nil-check away from safe: Chromium replaces deallocated ObjC
+/// objects with `CrZombie`s in the browser process, so the FIRST message is a deliberate crash of
+/// the whole app. That is the live-gate crash this record was added for
+/// (`Norma-2026-08-10-152114.ips`, `CrBrowserMain`, `ZombieObjectCrash` under a late
+/// `OnTitleChange`), and the same hazard sat under every other caller of that handle: the chrome
+/// verbs' `BrowserForParent` walk and the three close paths' `removeFromSuperview`.
+///
+/// Keyed by `CefBrowser::GetIdentifier()` in `g_open_browsers`, filled in `OnAfterCreated` and
+/// dropped in `OnBeforeClose` — **the same two callbacks that keep `g_browsers` honest, one line
+/// apart in each**, which is the whole reason the two collections cannot drift.
+@interface NormaCEFOpenBrowser : NSObject
+/// CEF's own view — the one `SetAsChild` parented into the container.
+///
+/// **Strong on purpose.** Nothing else has to retain it: the close path's own
+/// `[hostView removeFromSuperview]` can drop the last reference, and the next caller to ask CEF for
+/// the handle gets a pointer to freed memory. Holding it here means the view a close path detaches
+/// is always a real object, and it is released when the browser is destroyed and no close can ask
+/// for it again.
+@property(nonatomic, strong) NSView *hostView;
+/// The tab this browser belongs to — the bridge its `NormaClient` was built with. Pointer identity
+/// against a container's own bridge is how `BrowserForParent` maps a view to a browser without
+/// messaging any view at all.
+@property(nonatomic, strong) NormaCEFTabBridge *bridge;
+@end
+
+@implementation NormaCEFOpenBrowser
+@end
+
+/// Browser identifier → its ObjC side, for exactly as long as the browser is open. Parallel to
+/// `g_browsers` and filled/drained beside it in the same two callbacks.
+static NSMutableDictionary<NSNumber *, NormaCEFOpenBrowser *> *g_open_browsers = nil;
+
 namespace {
 
 const char kTabBridgeKey = 'n';
@@ -291,22 +331,45 @@ NormaCEFTabBridge *BridgeFor(NSView *container) {
   return bridge;
 }
 
-/// The bridge for a browser — CEF's own view is a SUBVIEW of the container (`SetAsChild`), so the
-/// relation is descendancy and the walk goes upward. Returns `nil` (never creates) when no ancestor
-/// carries one: a browser whose panel tab has already been dismantled is exactly that case, and it
-/// must be silent rather than resurrecting state for a view nobody is watching.
-NormaCEFTabBridge *BridgeForBrowser(CefRefPtr<CefBrowser> browser) {
-  if (!browser || !browser->GetHost()) {
+/// The ObjC side of `browser`, or `nil` once it has been closed (or before it was ever created).
+NormaCEFOpenBrowser *OpenBrowserRecordFor(CefRefPtr<CefBrowser> browser) {
+  if (!browser || g_open_browsers == nil) {
     return nil;
   }
-  NSView *view = CAST_CEF_WINDOW_HANDLE_TO_NSVIEW(browser->GetHost()->GetWindowHandle());
-  for (NSView *v = view; v != nil; v = [v superview]) {
-    NormaCEFTabBridge *bridge = objc_getAssociatedObject(v, &kTabBridgeKey);
-    if (bridge != nil) {
-      return bridge;
-    }
+  return g_open_browsers[@(browser->GetIdentifier())];
+}
+
+/// CEF's own host view for `browser`, as captured while it was provably alive. `nil` for a browser
+/// with no record — which the close paths treat exactly as they treat a nil handle: nothing to
+/// detach.
+NSView *HostViewForBrowser(CefRefPtr<CefBrowser> browser) {
+  return OpenBrowserRecordFor(browser).hostView;
+}
+
+/// Record the ObjC side of a browser CEF has just created. **The one place in this file that casts
+/// a CEF window handle to an `NSView`** — and the only moment where doing so is provably safe: the
+/// creation has just completed, so CEF's view exists and is a subview of the parent the creation
+/// record is still retaining. Every later user reads the strong reference taken here instead of
+/// asking CEF again; see `NormaCEFOpenBrowser` for the crash that made that the rule.
+void RememberOpenBrowser(CefRefPtr<CefBrowser> browser, NormaCEFTabBridge *bridge) {
+  if (!browser || !browser->GetHost()) {
+    return;
   }
-  return nil;
+  if (g_open_browsers == nil) {
+    g_open_browsers = [[NSMutableDictionary alloc] init];
+  }
+  NormaCEFOpenBrowser *record = [[NormaCEFOpenBrowser alloc] init];
+  record.hostView = CAST_CEF_WINDOW_HANDLE_TO_NSVIEW(browser->GetHost()->GetWindowHandle());
+  record.bridge = bridge;
+  g_open_browsers[@(browser->GetIdentifier())] = record;
+}
+
+/// Drop a closed browser's ObjC side, releasing the host view and the bridge with it.
+void ForgetOpenBrowser(CefRefPtr<CefBrowser> browser) {
+  if (!browser || g_open_browsers == nil) {
+    return;
+  }
+  [g_open_browsers removeObjectForKey:@(browser->GetIdentifier())];
 }
 
 /// Push the live snapshot to whoever is watching. Main thread by construction — CEF's UI thread IS
@@ -523,11 +586,15 @@ void CloseAbandonedBrowser(CefRefPtr<CefBrowser> browser, NormaCEFBrowserCreatio
 ///
 /// Synchronous, no thread hop, exactly as `OnBeforePopup` calls it — CEF's UI thread IS the main
 /// thread under the external pump, and what the block does is a policy check plus an RPC enqueue.
-bool RouteURLToNewPanelTab(CefRefPtr<CefBrowser> browser, const std::string &url) {
+///
+/// Takes the BRIDGE rather than the browser: both callers are `NormaClient` methods, and the client
+/// carries its own tab (`NormaClient::Tab()`). Deriving it from the browser here meant asking CEF
+/// for a window handle and messaging the view behind it, which is the zombie crash described on
+/// `NormaCEFOpenBrowser`.
+bool RouteURLToNewPanelTab(NormaCEFTabBridge *bridge, const std::string &url) {
   if (url.empty()) {
     return false;
   }
-  NormaCEFTabBridge *bridge = BridgeForBrowser(browser);
   if (bridge == nil || bridge.popupObserver == nil) {
     return false;
   }
@@ -573,10 +640,27 @@ class NormaClient : public CefClient,
                     public CefRequestHandler,
                     public CefContextMenuHandler {
  public:
-  /// **ONE CLIENT PER BROWSER**, holding the in-flight record for the creation it was made for. See
-  /// `CreateBrowserNow` for why the client — rather than a table, an arrival order or a walk up the
-  /// view hierarchy — is what maps `OnAfterCreated` back to its parent view.
-  explicit NormaClient(NormaCEFBrowserCreation *creation) : creation_(creation) {}
+  /// **ONE CLIENT PER BROWSER**, holding the in-flight record for the creation it was made for and
+  /// the tab that creation belongs to. See `CreateBrowserNow` for why the client — rather than a
+  /// table, an arrival order or a walk up the view hierarchy — is what maps `OnAfterCreated` back to
+  /// its parent view.
+  NormaClient(NormaCEFBrowserCreation *creation, NormaCEFTabBridge *bridge)
+      : creation_(creation), bridge_(bridge) {}
+
+  /// **The tab this client's browser belongs to — and the whole callback-side zombie fix.**
+  ///
+  /// Every callback below used to find it by casting `GetHost()->GetWindowHandle()` to an `NSView`
+  /// and walking up the superview chain looking for the associated bridge. That is a message to a
+  /// view nothing guarantees is alive: a tab torn down while the renderer still has updates in
+  /// flight leaves CEF answering with a freed pointer, and the first `[v superview]` on it killed
+  /// the browser process — and the app — at the user's live gate (`Norma-2026-08-10-152114.ips`,
+  /// `ZombieObjectCrash` under `OnTitleChange`, during rapid tab switching, where every switch
+  /// closes one browser mid-navigation and reloads another).
+  ///
+  /// The client already knows the answer with no lookup at all: it is built per browser, from the
+  /// creation that named the container. Nothing here touches a view, so nothing here can touch a
+  /// dead one. `nil` after `OnBeforeClose`, which is the last callback CEF promises.
+  NormaCEFTabBridge *Tab() const { return bridge_; }
 
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
@@ -653,7 +737,7 @@ class NormaClient : public CefClient,
                      bool *no_javascript_access) override {
     CEF_REQUIRE_UI_THREAD();
     NSString *url = [NSString stringWithUTF8String:target_url.ToString().c_str()] ?: @"";
-    NormaCEFTabBridge *bridge = BridgeForBrowser(browser);
+    NormaCEFTabBridge *bridge = Tab();
     // `target_url` "may be empty if not specified with the request" (`cef_life_span_handler.h`) —
     // `window.open()` with no argument. There is no address to open a tab at, so it is cancelled
     // like any other unroutable popup rather than opening a blank one.
@@ -753,7 +837,7 @@ class NormaClient : public CefClient,
     if (!wantsItElsewhere || !user_gesture) {
       return false;  // proceed in the source browser's top-level frame — CEF's own default
     }
-    if (!RouteURLToNewPanelTab(browser, target_url.ToString())) {
+    if (!RouteURLToNewPanelTab(Tab(), target_url.ToString())) {
       return false;
     }
     // The literal is the needle `CEFRuntimeTests
@@ -776,6 +860,11 @@ class NormaClient : public CefClient,
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     g_browsers.push_back(browser);
+    // Beside the line above, and drained beside its counterpart in `OnBeforeClose`: the ObjC side
+    // of this browser — CEF's host view, retained here while it is provably alive, and the tab it
+    // belongs to. Recorded BEFORE the abandoned check below, because the abandoned path closes the
+    // browser and needs the host view like every other close path does.
+    RememberOpenBrowser(browser, bridge_);
 
     // The creation is over, so CEF is done with the raw parent handle: `CreateHostWindow()` has
     // already run (it is a step of the very call that ends in this callback). Dropping the record
@@ -804,16 +893,15 @@ class NormaClient : public CefClient,
       return;
     }
 
-    NSView *parent = creation.parent;
     creation.parent = nil;
     // Task 6b: a browser that exists but has not navigated yet still has chrome to draw (both
     // arrows disabled, no address). Pushing the empty snapshot now means the chrome's state comes
     // from exactly one channel from the very first frame, instead of a default it invents itself.
     //
-    // Read through the parent the creation record carried rather than `BridgeForBrowser`: the
-    // answer is identical whenever CEF's view is already a subview of the container, and this way
-    // the callback does not depend on that being true YET at the moment it runs.
-    NotifyState(BridgeFor(parent));
+    // Read from the client's own tab, like every other callback: the bridge is the one
+    // `CreateBrowserNow` attached to this creation's container, so the answer needs neither a view
+    // walk nor the parent the record was carrying.
+    NotifyState(Tab());
     Log("browser created (id=%d, live browsers=%zu)", browser->GetIdentifier(), g_browsers.size());
   }
 
@@ -879,6 +967,37 @@ class NormaClient : public CefClient,
     return NormaCEFDoCloseIsHandledByHost();
   }
 
+  /// **The last callback CEF promises for this browser** — "immediately before the browser object is
+  /// destroyed" (`cef_life_span_handler.h`) — so it is where both of this client's ObjC references
+  /// end.
+  ///
+  /// **What late callbacks in the window BEFORE this one do, decided rather than left to chance:
+  /// they update the tab normally.** Between `CloseBrowser` and here, a renderer's in-flight title,
+  /// address and load-state messages still arrive, and every one of them lands on the container's
+  /// bridge exactly as it would for an open browser.
+  ///
+  /// That is a real change and worth stating: before this fix they were dropped BY ACCIDENT on the
+  /// lucky path (the walk started at a view the close had already detached, so it found no bridge)
+  /// and crashed the app on the unlucky one (it started at a view the close had already freed).
+  /// Landing them is the deliberate answer, for three reasons:
+  ///
+  ///   * On the panel-tab path there is nothing to land on. `PanelCEFView.dismantleNSView` clears
+  ///     all three observers BEFORE it calls `NormaCEFCloseBrowser`, so a late update writes to an
+  ///     object nobody is watching — precisely the "somewhere to land harmlessly" the
+  ///     container-keyed bridge was designed for.
+  ///   * On the shutdown path the observers are still wired, and what a late callback reports is a
+  ///     navigation that genuinely committed. Reporting a true thing during a quit is not a defect;
+  ///     inventing one would be, and nothing here invents anything.
+  ///   * Dropping them needs a "closing" flag whose only effect is to discard information that is,
+  ///     as far as anything here knows, correct.
+  ///
+  /// The dedupe memory (`lastReportedURL`/`lastReportedTitle`) is what keeps a late duplicate out of
+  /// the session log, and none of this touches it. What the window must NOT do is find the bridge by
+  /// messaging a view — that is the crash, and `Tab()` is why it no longer happens.
+  ///
+  /// Clearing here rather than at `CloseBrowser` also keeps the client from carrying a tab's
+  /// observer blocks — which capture the SwiftUI model — for as long as CEF happens to hold the
+  /// client alive after the browser is gone.
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     for (auto it = g_browsers.begin(); it != g_browsers.end(); ++it) {
@@ -887,6 +1006,11 @@ class NormaClient : public CefClient,
         break;
       }
     }
+    // Beside the erase above, exactly as `OnAfterCreated` fills both beside each other. Releases
+    // CEF's host view: no close path can ask for it again, because every one of them is reached
+    // through a browser CEF has not yet destroyed.
+    ForgetOpenBrowser(browser);
+    bridge_ = nil;
     Log("browser closed (id=%d, live browsers=%zu)", browser->GetIdentifier(), g_browsers.size());
   }
 
@@ -899,7 +1023,21 @@ class NormaClient : public CefClient,
                             bool canGoBack,
                             bool canGoForward) override {
     CEF_REQUIRE_UI_THREAD();
-    NormaCEFTabBridge *bridge = BridgeForBrowser(browser);
+    ApplyLoadingState(isLoading, canGoBack, canGoForward);
+  }
+
+  /// The body of the callback above, and **the seam its pin calls**
+  /// (`NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere`).
+  ///
+  /// The split is not decoration. The override itself is unreachable from any test in this repo,
+  /// and not because of the arguments: `CEF_REQUIRE_UI_THREAD()` expands to `DCHECK(CefCurrentlyOn(
+  /// TID_UI))`, `DCHECK_IS_ON()` is true in any build without `NDEBUG`, and `CefCurrentlyOn` reaches
+  /// libcef through `libcef_dll_dylib.cc`'s function-pointer table — which is all zeroes until the
+  /// framework is `dlopen`ed. The unit-test host never loads CEF, so calling any override there is
+  /// a null call, not a test. Everything BELOW that line needs no browser, no frame and no view, so
+  /// it is the part a test can run — and the part the zombie fix is about.
+  void ApplyLoadingState(bool isLoading, bool canGoBack, bool canGoForward) {
+    NormaCEFTabBridge *bridge = Tab();
     if (bridge == nil) {
       return;
     }
@@ -921,7 +1059,7 @@ class NormaClient : public CefClient,
       return;
     }
     NSString *url = [NSString stringWithUTF8String:frame->GetURL().ToString().c_str()] ?: @"";
-    NormaCEFTabBridge *bridge = BridgeForBrowser(browser);
+    NormaCEFTabBridge *bridge = Tab();
     if (bridge != nil) {
       bridge.url = url;
       // **Only a title that belongs to THIS document may be written down.** A page with no
@@ -979,7 +1117,7 @@ class NormaClient : public CefClient,
     if (!frame->IsMain()) {
       return;
     }
-    NormaCEFTabBridge *bridge = BridgeForBrowser(browser);
+    NormaCEFTabBridge *bridge = Tab();
     if (bridge == nil) {
       return;
     }
@@ -999,7 +1137,7 @@ class NormaClient : public CefClient,
   /// — an untitled page inheriting the previous page's name. Only the pairing fixes both.
   void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString &title) override {
     CEF_REQUIRE_UI_THREAD();
-    NormaCEFTabBridge *bridge = BridgeForBrowser(browser);
+    NormaCEFTabBridge *bridge = Tab();
     if (bridge == nil) {
       return;
     }
@@ -1118,7 +1256,7 @@ class NormaClient : public CefClient,
       case kMenuIdOpenLinkInNewTab:
         // The same channel `OnBeforePopup` and `OnOpenURLFromTab` use — one route, three
         // producers. No gesture check: choosing an item from a context menu IS the gesture.
-        RouteURLToNewPanelTab(browser, params->GetLinkUrl().ToString());
+        RouteURLToNewPanelTab(Tab(), params->GetLinkUrl().ToString());
         return true;
       case kMenuIdCopyLinkAddress: {
         // `GetUnfilteredLinkUrl` exists for precisely this: "the link URL, if any, to be used ONLY
@@ -1146,6 +1284,14 @@ class NormaClient : public CefClient,
   /// client, ARC releases the record, the record releases the view. That covers the path no
   /// callback covers — a creation CEF abandons internally, for which no `OnAfterCreated` ever comes.
   NormaCEFBrowserCreation *creation_ = nil;
+
+  /// The tab this browser belongs to — see `Tab()` for what it replaced and why. **Strong**, and an
+  /// ObjC pointer member of a C++ class is exactly that under ARC, which is what `creation_` above
+  /// has always relied on: ARC gives the class a destructor that releases it, and
+  /// `IMPLEMENT_REFCOUNTING`'s `delete this` runs it when CEF drops the last reference to the
+  /// client. Cleared in `OnBeforeClose` so it is released with the browser rather than with the
+  /// client, which CEF may hold for longer.
+  NormaCEFTabBridge *bridge_ = nil;
 
   IMPLEMENT_REFCOUNTING(NormaClient);
   DISALLOW_COPY_AND_ASSIGN(NormaClient);
@@ -1245,7 +1391,8 @@ void CreateBrowserNow(NSView *parent, const std::string &url) {
   // mid-creation can still find this creation and mark it abandoned (`NormaCEFCloseBrowser`).
   NormaCEFBrowserCreation *creation = [[NormaCEFBrowserCreation alloc] init];
   creation.parent = parent;
-  BridgeFor(parent).creation = creation;
+  NormaCEFTabBridge *bridge = BridgeFor(parent);
+  bridge.creation = creation;
   Log("creation-retains-parent-view (CreateBrowser does not block and its parent handle is raw)");
 
   // **A CLIENT PER BROWSER, and not as a matter of taste.** `OnAfterCreated` has to know which
@@ -1256,8 +1403,13 @@ void CreateBrowserNow(NSView *parent, const std::string &url) {
   // test (CEF never starts under XCTest), and matching by arrival order breaks the moment anything
   // else creates a browser. CEF calls this object's `OnAfterCreated`, and this object was
   // constructed with the parent, so there is nothing left to work out.
+  //
+  // The container's BRIDGE goes in with it, for the callback side of the same argument: every
+  // display and load callback needs the tab, and the only other way to reach it from a callback is
+  // to message the view behind CEF's window handle — the zombie crash `NormaClient::Tab()`
+  // describes.
   CefBrowserSettings browser_settings;
-  CefRefPtr<NormaClient> client = new NormaClient(creation);
+  CefRefPtr<NormaClient> client = new NormaClient(creation, bridge);
   if (!CefBrowserHost::CreateBrowser(window_info, client, CefString(url), browser_settings, nullptr,
                                      nullptr)) {
     // Refused outright — CEF posted nothing, so no `OnAfterCreated` is coming and nothing else would
@@ -1275,10 +1427,15 @@ void CreateBrowserNow(NSView *parent, const std::string &url) {
 /// completing the close is ours — read that function's comment. The `IsValid` guard covers the
 /// browser having been closed already between `OnAfterCreated` and this turn, which
 /// `NormaCEFCloseAllBrowsers` does on the shutdown path.
+///
+/// The host view comes from `HostViewForBrowser` rather than from CEF's window handle, and that
+/// matters precisely because of the case the `IsValid` guard does NOT cover: a shutdown sweep that
+/// has already detached this browser's view but whose `OnBeforeClose` has not landed yet leaves
+/// `IsValid` true and the handle pointing at freed memory (`NormaCEFOpenBrowser`).
 void CloseAbandonedBrowser(CefRefPtr<CefBrowser> browser, NormaCEFBrowserCreation *creation) {
   CEF_REQUIRE_UI_THREAD();
   if (browser && browser->IsValid() && browser->GetHost()) {
-    NSView *hostView = CAST_CEF_WINDOW_HANDLE_TO_NSVIEW(browser->GetHost()->GetWindowHandle());
+    NSView *hostView = HostViewForBrowser(browser);
     browser->GetHost()->CloseBrowser(true);
     if (hostView != nil && [hostView superview] != nil) {
       [hostView removeFromSuperview];
@@ -1305,15 +1462,25 @@ void ReplayPendingBrowsers() {
   }
 }
 
-/// The browser hosted inside `parent`, if any. CEF's own `NSView` is added as a subview of the
-/// container by `SetAsChild`, so descendancy — not identity — is the relation to test.
+/// The browser hosted inside `parent`, if any — **matched by tab identity, not by walking views.**
+///
+/// A container's bridge is its identity here: `OnAfterCreated` files the bridge its client was built
+/// with alongside the browser, so the question "which open browser belongs to this container" is two
+/// live ObjC pointers compared. Nothing is messaged.
+///
+/// It used to ask CEF for every open browser's window handle and send `isDescendantOf:` to whatever
+/// came back. That is the zombie hazard `NormaCEFOpenBrowser` describes, and this was its widest
+/// exposure: every chrome verb — back, forward, reload, stop, load — walks this list, and the list
+/// contains OTHER tabs' browsers, including ones already mid-close whose host view has been detached
+/// and freed.
 CefRefPtr<CefBrowser> BrowserForParent(NSView *parent) {
-  if (parent == nil) {
+  NormaCEFTabBridge *bridge = ExistingBridgeFor(parent);
+  if (bridge == nil) {
     return nullptr;
   }
   for (auto &browser : g_browsers) {
-    NSView *view = CAST_CEF_WINDOW_HANDLE_TO_NSVIEW(browser->GetHost()->GetWindowHandle());
-    if (view != nil && (view == parent || [view isDescendantOf:parent])) {
+    NormaCEFOpenBrowser *open = OpenBrowserRecordFor(browser);
+    if (open != nil && open.bridge == bridge) {
       return browser;
     }
   }
@@ -1610,8 +1777,26 @@ BOOL NormaCEFClientInstallsTheClickAndMenuHandlers(void) {
   // derives from are header-only, abstract and inline — the app already links without the
   // framework, which is `dlopen`ed — so nothing here reaches libcef, and the client is destroyed
   // by `CefRefPtr` on return without ever having been handed to a browser.
-  CefRefPtr<CefClient> client = new NormaClient(nil);
+  CefRefPtr<CefClient> client = new NormaClient(nil, nil);
   return client->GetRequestHandler() != nullptr && client->GetContextMenuHandler() != nullptr;
+}
+
+NSObject *NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere(void) {
+  // A bridge with no container. That is the whole point: before this fix a callback could only
+  // reach a tab THROUGH a view, so this object could not exist in a test at all.
+  NormaCEFTabBridge *bridge = [[NormaCEFTabBridge alloc] init];
+  CefRefPtr<NormaClient> client = new NormaClient(nil, bridge);
+  // The real body of `CefLoadHandler::OnLoadingStateChange`, called exactly as the override calls
+  // it. The override cannot be called here — `CEF_REQUIRE_UI_THREAD()` reaches libcef through a
+  // function-pointer table that is all zeroes until the framework is `dlopen`ed, and this host never
+  // loads it — which is why the body is a seam; see `NormaClient::ApplyLoadingState`.
+  //
+  // The three values are deliberately not all `true`: `canGoBack = false` is the control, so a
+  // stub that wrote constants instead of arguments would fail this rather than satisfy it.
+  client->ApplyLoadingState(/*isLoading=*/true, /*canGoBack=*/false, /*canGoForward=*/true);
+  // The object handed back is the one the client was CONSTRUCTED with, so reading the flags off it
+  // is what proves the callback found this tab and not one it made up.
+  return bridge;
 }
 
 void NormaCEFCloseBrowser(NSView *parent) {
@@ -1661,9 +1846,13 @@ void NormaCEFCloseBrowser(NSView *parent) {
     //    dismantle behind it at all, and the header makes completion the CALLER's duty once DoClose
     //    answers true rather than something to infer from another framework's release timing.
     //
-    // The view is fetched BEFORE the close call — `GetWindowHandle()` is not guaranteed to answer
-    // once the close is under way.
-    NSView *hostView = CAST_CEF_WINDOW_HANDLE_TO_NSVIEW(browser->GetHost()->GetWindowHandle());
+    // The view comes from this browser's own record, taken when CEF created it and held strongly
+    // until `OnBeforeClose`. Asking `GetWindowHandle()` here instead is what the fetch-before-close
+    // ordering used to be about — it "is not guaranteed to answer once the close is under way" — and
+    // the ordering was never the real hazard: the handle answers with a pointer to a view that a
+    // previous close (a shutdown sweep, or this tab closed twice) may already have detached and
+    // released. See `NormaCEFOpenBrowser`.
+    NSView *hostView = HostViewForBrowser(browser);
     browser->GetHost()->CloseBrowser(true);
     if (hostView != nil && [hostView superview] != nil) {
       [hostView removeFromSuperview];
@@ -1682,8 +1871,14 @@ void NormaCEFCloseAllBrowsers(void) {
   std::vector<CefRefPtr<CefBrowser>> browsers = g_browsers;
   for (auto &browser : browsers) {
     // Same two-step as NormaCEFCloseBrowser, and for the same reason: `DoClose` returns true, so
-    // completing the close is ours to do. See its comment.
-    NSView *hostView = CAST_CEF_WINDOW_HANDLE_TO_NSVIEW(browser->GetHost()->GetWindowHandle());
+    // completing the close is ours to do. See its comment — including why the view comes from the
+    // browser's record. This sweep is where that mattered most: it runs over EVERY open browser,
+    // and a tab the user closed a moment before quitting is still one of them — with a host view
+    // `NormaCEFCloseBrowser` has already detached and released, its `OnBeforeClose` still in flight.
+    //
+    // Nothing is skipped as a result: a browser whose `OnBeforeClose` has run is no longer in
+    // `g_browsers` at all, and one whose close is still in flight still has its record.
+    NSView *hostView = HostViewForBrowser(browser);
     browser->GetHost()->CloseBrowser(true);
     if (hostView != nil && [hostView superview] != nil) {
       [hostView removeFromSuperview];

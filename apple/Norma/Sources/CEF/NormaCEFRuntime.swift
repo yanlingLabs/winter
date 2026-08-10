@@ -148,6 +148,16 @@ enum NormaCEFRuntime {
     /// Measured: it left all 18 CEF pins green. See `NormaCEF.h`.
     static var installsClickAndMenuHandlers: Bool { NormaCEFClientInstallsTheClickAndMenuHandlers() }
 
+    /// The tab a browser-client callback wrote to when there was **no view in existence** — the
+    /// produced answer to "does a callback find its tab through the reference the client was built
+    /// with, or by messaging the view behind CEF's window handle?". The second is the live-gate
+    /// zombie crash; see `NormaCEF.h` for what the returned object must carry and why no string
+    /// scan can ask this. Exposed here for the same reason as the five above: a bridging header is
+    /// not a module interface, so the test bundle cannot name the C function directly.
+    static var tabAfterOneClientCallbackWithNoViewAnywhere: NSObject? {
+        NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere()
+    }
+
     /// `CefShutdown`, at the point of no return. Safe no-op if CEF was never initialised — and a
     /// no-op that leaves `didShutdown` false, so running it in the unit-test host does not latch
     /// every later test into "CEF is finished" (whole-branch F10). That is what lets

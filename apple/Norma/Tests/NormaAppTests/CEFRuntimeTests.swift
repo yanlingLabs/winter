@@ -639,6 +639,62 @@ final class CEFRuntimeTests: XCTestCase {
                 + "and nothing ever closes it — a leaked renderer process per abandoned tab.")
     }
 
+    /// **A browser-client callback must reach its tab WITHOUT touching a view.**
+    ///
+    /// The third live-gate crash, and the callback-side half of the two pins above. `NormaClient`'s
+    /// display and load callbacks used to find the tab by casting
+    /// `GetHost()->GetWindowHandle()` to an `NSView` and walking up its superviews looking for the
+    /// associated bridge. CEF keeps answering that handle after the view is gone, and Chromium turns
+    /// a deallocated ObjC object in the browser process into a `CrZombie` whose first message is a
+    /// deliberate crash — so a title update arriving for a tab the user had just switched away from
+    /// killed the whole app (`Norma-2026-08-10-152114.ips`, `CrBrowserMain`, `ZombieObjectCrash`
+    /// under `NormaClient::OnTitleChange`). Rapid tab switching is the trigger, because the panel is
+    /// one browser per tab: every switch closes a browser mid-navigation and every switch back
+    /// reloads, so title/address/load updates are permanently in flight against closing browsers.
+    ///
+    /// **What this covers:** that a client hands a real callback the tab it was CONSTRUCTED with. The
+    /// tab here has no container view, no association and no browser — objects that could not have
+    /// existed together before the fix, since the only route from a callback to a tab was through a
+    /// view. Both reverts red it: restore the handle-cast walk in the callback body and there is no
+    /// view to walk, so nothing is written; stop storing the reference and the callback finds `nil`,
+    /// so nothing is written. `canGoBack` is asserted `false` as the control — a body that wrote
+    /// constants rather than its arguments would fail on it instead of passing.
+    ///
+    /// **What it does NOT cover, stated rather than implied.** Only `OnLoadingStateChange`'s body is
+    /// reachable, and only because that body needs no browser: `CEF_REQUIRE_UI_THREAD()` expands to
+    /// `DCHECK(CefCurrentlyOn(TID_UI))`, which calls into libcef through a function-pointer table
+    /// that stays all-zeroes until the framework is `dlopen`ed — so calling any override in this
+    /// host is a null call, not a test, and the same goes for every callback that reads a
+    /// `CefBrowser`, `CefFrame` or `CefString`. The other four callbacks (`OnTitleChange`,
+    /// `OnAddressChange`, `OnLoadEnd`, `OnBeforePopup`) read the identical member and are pinned
+    /// only by review. Also unreachable: `OnBeforeClose` clearing the reference, the open-browser
+    /// record that replaced the remaining window-handle casts, and `BrowserForParent` matching a
+    /// container to a browser by tab identity — all three need a `CefBrowser`, which nothing in this
+    /// host can construct.
+    func testAClientCallbackFindsItsTabWITHOUTMessagingAnyView() throws {
+        let tab = try XCTUnwrap(
+            NormaCEFRuntime.tabAfterOneClientCallbackWithNoViewAnywhere,
+            "the client could not be given a tab with no view behind it — the callback-side zombie "
+                + "fix (NormaClient::Tab) is gone from NormaCEF.mm")
+
+        XCTAssertEqual(
+            tab.value(forKey: "isLoading") as? Bool, true,
+            "a NormaClient callback did not write to the tab its client was built with. Either it "
+                + "is back to finding the tab by casting CEF's window handle to an NSView and "
+                + "walking superviews — which messages a view CEF keeps naming after it is freed, "
+                + "and is the ZombieObjectCrash that killed the app at the live gate — or the "
+                + "client no longer holds the tab at all. Nothing else in this suite notices: the "
+                + "callback, its log lines and every symbol around it are identical either way.")
+        XCTAssertEqual(
+            tab.value(forKey: "canGoForward") as? Bool, true,
+            "the callback wrote isLoading but not canGoForward — the tab state is no longer coming "
+                + "from the callback's own arguments")
+        XCTAssertEqual(
+            tab.value(forKey: "canGoBack") as? Bool, false,
+            "canGoBack came back true when the callback was passed false — the body is writing "
+                + "constants, so the assertions above prove nothing about what CEF reports")
+    }
+
     // MARK: - The test-host guard, and the panel wiring
 
     /// CEF must never start inside the suite. `NormaAppTests` runs with `Norma.app` itself as its

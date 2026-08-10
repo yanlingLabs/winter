@@ -230,6 +230,27 @@ BOOL NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow(void);
 /// Safe to call with CEF down — see the implementation for why nothing here reaches the framework.
 BOOL NormaCEFClientInstallsTheClickAndMenuHandlers(void);
 
+/// Run ONE real browser-client callback against a tab that has **no view behind it at all**, and
+/// hand the tab back for the caller to read.
+///
+/// The question it answers is the callback-side half of the zombie crash: does a client callback
+/// find its tab through the reference it was BUILT with, or by casting CEF's window handle to an
+/// `NSView` and messaging it? The second answer is what killed the app at the user's live gate
+/// (`Norma-2026-08-10-152114.ips` — a late `OnTitleChange` for a browser whose panel tab had already
+/// been torn down), and it cannot be distinguished by any string scan of the built product: the
+/// callback, its log lines and every symbol around it are identical either way.
+///
+/// So the answer is produced rather than inferred. A tab object is created with no container view
+/// anywhere, a client is constructed with it, and the body of `OnLoadingStateChange` is run: with
+/// the fix the tab comes back carrying `isLoading = YES`, `canGoBack = NO`, `canGoForward = YES`;
+/// with a lookup that needs a view — or with the reference no longer stored — it comes back
+/// untouched. Read the values through KVC (`NormaCEFTabBridge` is internal to the implementation),
+/// as `CEFRuntimeTests` does.
+///
+/// Never `nil`. Safe to call with CEF down — nothing on this path reaches the framework, which is
+/// itself a load-bearing property; see the implementation.
+NSObject *NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere(void);
+
 /// Close the browser hosted by `parent`, and cancel any creation still on its way to becoming one.
 /// Called from `NSViewRepresentable.dismantleNSView`.
 ///
