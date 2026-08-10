@@ -148,9 +148,33 @@ final class SpikeCloseLeakHarness {
     private func onNavigation(url: String?, title: String?) {
         guard !loaded, phase == "boot" else { return }
         loaded = true
-        log("LOADED url=\(url ?? "") title=\(title ?? "")")
+        log("LOADED url=\(url ?? "") title=\(title ?? "") mode=\(Self.mode)")
         // Let the renderer settle (and the page's audio element actually start) before the close.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in self?.closeTheTab() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self else { return }
+            Self.mode == "quit" ? self.quitWithTheTabSTILLOPEN() : self.closeTheTab()
+        }
+    }
+
+    /// **`NORMA_SPIKE_CLOSE_MODE=quit`: the path the per-tab measurement never exercised.**
+    ///
+    /// Fix round 1. The first AFTER run closed both tabs before quitting, so
+    /// `NormaCEFCloseAllBrowsers` swept an EMPTY `g_browsers` and the `0 browser(s) still open` it
+    /// printed said nothing at all about the drain. This mode quits with the tab open, which is what
+    /// a user does, and is the only way to find out whether `NormaCEFShutdown`'s bounded
+    /// `CefDoMessageLoopWork` loop can finish a close whose real gate is an **ObjC autorelease pool
+    /// drain** — `removeFromSuperview` autoreleases CEF's view into whatever pool is active, and the
+    /// pool active during `applicationWillTerminate:` never drains, because the process exits first.
+    /// CEF turns cannot pop an AppKit pool.
+    ///
+    /// Everything measurable is in the `NormaCEF:` ledger the shutdown path prints itself: whether
+    /// `browser closed (id=…)` arrives BEFORE `shutting down (N browser(s) still open, M DoWork
+    /// calls)`, and what N is.
+    private func quitWithTheTabSTILLOPEN() {
+        phase = "quitting"
+        cefHostView = container?.subviews.first
+        log("PREQUIT cefHostViewAlive=\(cefHostView != nil) helpers=\(Self.helperCensus()) — quitting with the tab OPEN")
+        quit()
     }
 
     // MARK: Phase 1 — the close under measurement
@@ -314,6 +338,12 @@ final class SpikeCloseLeakHarness {
     fileprivate static func envInt(_ key: String, _ fallback: Int) -> Int {
         guard let v = ProcessInfo.processInfo.environment[key], let n = Int(v) else { return fallback }
         return n
+    }
+
+    /// `close` (default) — the per-tab close of §1. `quit` — quit with the tab still open, which is
+    /// the ONLY way to exercise `NormaCEFShutdown`'s drain; see `quitWithTheTabSTILLOPEN`.
+    fileprivate static var mode: String {
+        ProcessInfo.processInfo.environment["NORMA_SPIKE_CLOSE_MODE"] ?? "close"
     }
 
     /// Scratch Chromium profile — never `~/.norma*`, never the bundle-id path the user's live dev

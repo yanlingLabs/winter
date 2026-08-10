@@ -397,7 +397,12 @@ void CompleteCloseByReleasingHostView(int browser_id) {
     [hostView removeFromSuperview];
   }
   Log("close-releases-CEFs-host-view (its dealloc is what completes the close, id=%d)", browser_id);
-  hostView = nil;  // the last reference: dealloc → WindowDestroyed() → … → OnBeforeClose
+  // The last reference here — but NOT the last one anywhere: `-removeFromSuperview` autoreleases
+  // the view, so the `dealloc` (→ `WindowDestroyed()` → … → `OnBeforeClose`) lands when the
+  // enclosing autorelease pool pops, not on this line. Measured at +290 ms on the panel-tab path,
+  // one run-loop turn later; `NormaCEFShutdown` has to open a pool of its own because at quit
+  // nothing ever pops the outer one.
+  hostView = nil;
 }
 
 /// Record the ObjC side of a browser CEF has just created. **The one place in this file that casts
@@ -988,15 +993,24 @@ class NormaClient : public CefClient,
   ///    partially closed state that interferes with proper functioning."
   ///
   /// Norma needs no notification at all — the tab is already gone from the UI by the time this
-  /// runs; the close was initiated BY that tear-down. The obligation is discharged by
-  /// `NormaCEFCloseBrowser`, which calls `CloseBrowser(true)` and then removes CEF's host view from
-  /// the container, so the view hierarchy tear-down the header names as the second acceptable
-  /// completion always happens and never depends on SwiftUI's release timing.
+  /// runs; the close was initiated BY that tear-down. **The obligation is discharged by
+  /// `CompleteCloseByReleasingHostView`, which RELEASES CEF's host view** — read that function,
+  /// because everything about why this returns `true` safely lives there.
   ///
-  /// `OnBeforeClose` still fires after this (the header: "will be called after DoClose() ... and
-  /// immediately before the browser object is destroyed"), which is what keeps `g_browsers`
-  /// draining and the renderer process exiting. Verified by measurement, not assumed — returning
-  /// `true` without completing the close would trade a window-close bug for a renderer leak.
+  /// The distinction is not pedantry, it is the whole bug this comment used to have. It said the
+  /// obligation was discharged by "removing CEF's host view from the container", and detaching a
+  /// view is not destroying it: `-removeFromSuperview` only drops the SUPERVIEW's retain. What
+  /// completes the close is `-[CefBrowserHostView dealloc]`, which calls
+  /// `AlloyBrowserHostImpl::WindowDestroyed()` — the only remaining route to `DestroyBrowser()`
+  /// once this method has answered `true`. For as long as anything else held that view, the detach
+  /// happened, the log lines printed, and the browser never closed at all
+  /// (`docs/research/2026-08-10-cef-close-completion.md`).
+  ///
+  /// `OnBeforeClose` then fires (the header: "will be called after DoClose() ... and immediately
+  /// before the browser object is destroyed"), which is what keeps `g_browsers` draining and the
+  /// renderer process exiting. Verified by measurement, not assumed — returning `true` without
+  /// completing the close trades a window-close bug for a renderer leak, and did exactly that for
+  /// one shipped day.
   /// TWO PINS GUARD THIS, because one alone left the Critical re-openable:
   ///
   ///   * The body must not be REPLACED (e.g. pasted from `cefsimple`/`cefclient`, both of which
@@ -1986,12 +2000,39 @@ void NormaCEFShutdown(void) {
   if (auto *pump = ExternalPump::Get()) {
     pump->KillTimer();
   }
-  NormaCEFCloseAllBrowsers();
+  // **The pool is the point, and it must open before the sweep and close before the loop.**
+  //
+  // Completing a close means deallocating CEF's host view (`CompleteCloseByReleasingHostView`), and
+  // `-removeFromSuperview` AUTORELEASES that view rather than releasing it. Every other close in
+  // this app is on a normal run-loop turn, so AppKit's own pool pops a moment later and the dealloc
+  // lands — measured at +290 ms on the panel-tab path. This one is not: the pool active during
+  // `applicationWillTerminate:` never drains, because the process exits first, and there is no
+  // other `@autoreleasepool` in the app (checked, zero). CEF turns cannot pop an AppKit pool, so
+  // the loop below ran its full 50 iterations against a view that was never going to die — provably
+  // all 50, since its only early exit is `g_browsers.empty()` and `g_browsers` was not empty at the
+  // end.
+  //
+  // MEASURED on this exact code before the pool was added — a quit with one tab open printed
+  // `shutting down (1 browser(s) still open, ...)`, with `browser closed (id=1)` arriving
+  // AFTERWARDS, i.e. from inside `CefShutdown()`. The drain was not draining; process teardown was
+  // doing its job for it. With the pool: `browser closed (id=1, live browsers=0)` first, then
+  // `shutting down (0 browser(s) still open, ...)`.
+  //
+  // (The `DoWork calls` figure in that line counts the PUMP's turns, not this loop's — it is
+  // unchanged across both runs and proves nothing either way. The browser count is the measurement.)
+  //
+  // Nesting it per-iteration inside the loop would do nothing: the autorelease has already been
+  // registered in the enclosing pool by then. The sweep's own pool is the only one that can take it.
+  @autoreleasepool {
+    NormaCEFCloseAllBrowsers();
+  }
   // CloseBrowser is asynchronous and the run loop is about to stop, so the pump can no longer
   // deliver the turns CEF needs to finish closing. Drive them directly, bounded — CEF's own
   // external-pump sample does the same thing after `[NSApp run]` returns
   // (`main_message_loop_external_pump_mac.mm:114-125`, "run the message pump until it is idle...
-  // we don't have that information here so we run the message loop 'for a while'").
+  // we don't have that information here so we run the message loop 'for a while'"). With the pool
+  // above, the `dealloc`s have already happened and these turns are what carries
+  // `DestroyBrowser()` through to `OnBeforeClose`.
   for (int i = 0; i < 50 && !g_browsers.empty(); i++) {
     CefDoMessageLoopWork();
     usleep(10000);
