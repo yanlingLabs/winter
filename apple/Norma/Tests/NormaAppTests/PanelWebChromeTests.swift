@@ -305,6 +305,33 @@ final class PanelWebChromeTests: XCTestCase {
         XCTAssertEqual(model.sessionId, "s1")
     }
 
+    /// **The address bar's DEFAULT state** — press `+`, look at the field.
+    ///
+    /// A fresh tab loads `panelWebTabStartPageURL`, a ~900-character percent-encoded `data:`
+    /// document, and Chromium COMMITS it exactly like a real page — so `OnAddressChange` and
+    /// `OnLoadEnd` publish it into the model and the field showed it, making the placeholder
+    /// unreachable on every new tab. `displayURL` is the presentation filter that answers it, the
+    /// same way the `⋮` menu already does.
+    ///
+    /// **Both directions, deliberately.** A refused-only assertion cannot tell "filters" from
+    /// "always empty" — the exact shape of the decorative test rewritten below.
+    func testTheFieldShowsNothingForAnAddressThePolicyRefuses() {
+        let model = PanelWebTabModel(tabId: "t1")
+
+        model.apply(url: panelWebTabStartPageURL, title: "New Tab", isLoading: false,
+                    canGoBack: false, canGoForward: false)
+        XCTAssertEqual(model.url, panelWebTabStartPageURL,
+                       "what CEF reported is untouched — this is a presentation filter, not a "
+                           + "change to what is reported or persisted")
+        XCTAssertEqual(model.displayURL, "",
+                       "the built-in data: start page must never be shown as the tab's address")
+
+        model.apply(url: "https://example.com/a?b=1", title: "Example", isLoading: false,
+                    canGoBack: false, canGoForward: false)
+        XCTAssertEqual(model.displayURL, "https://example.com/a?b=1",
+                       "a real address IS shown — without this the assertion above proves nothing")
+    }
+
     /// Refusal is attributable to the POLICY, not to a missing browser — the two look identical to
     /// the caller and only the first is a decision. With no container attached, a refused URL and an
     /// allowed one would both return false; this pins that the policy runs first by checking the

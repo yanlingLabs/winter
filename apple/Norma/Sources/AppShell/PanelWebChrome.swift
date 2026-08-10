@@ -105,12 +105,40 @@ final class PanelWebTabModel: ObservableObject {
         if let sessionId { self.sessionId = sessionId }
     }
 
+    /// **What the URL FIELD shows.** A PRESENTATION filter and nothing more: `url` above stays
+    /// exactly what CEF reported, what may be persisted is still `persistableNavigation`'s
+    /// question, and what may be loaded is still `normalizeTypedInput`/`restorableURL`'s.
+    ///
+    /// It exists because the ADDRESS BAR'S DEFAULT STATE was a ~900-character percent-encoded
+    /// inline document. A fresh tab loads `panelWebTabStartPageURL` — a `data:` URL — and Chromium
+    /// commits it exactly like a real page, so `OnAddressChange`/`OnLoadEnd` publish it into `url`
+    /// and the field displayed it. `PanelCEFView.makeNSView` already seeds the DISPLAYED address as
+    /// `""` when the policy refuses the URL being loaded; that intent was right and the live
+    /// channel overwrote it one turn later. This is the same intent, held on the channel that was
+    /// undoing it — and the same shape the `⋮` menu already uses, so there is ONE answer to "may
+    /// this address be shown to the user", asked everywhere it is shown.
+    var displayURL: String { PanelURLPolicy.isAllowed(url) ? url : "" }
+
     func apply(_ state: NormaCEFBrowserState) {
-        url = state.url
-        title = state.title
-        isLoading = state.isLoading
-        canGoBack = state.canGoBack
-        canGoForward = state.canGoForward
+        apply(url: state.url, title: state.title, isLoading: state.isLoading,
+              canGoBack: state.canGoBack, canGoForward: state.canGoForward)
+    }
+
+    /// The live channel, named in primitives — `apply(_:)` above is a one-line adapter onto it, so
+    /// this IS the path CEF drives, not a parallel one.
+    ///
+    /// Split out because `NormaCEFBrowserState`'s properties are `readonly` in `NormaCEF.h` and
+    /// readwrite only inside `NormaCEF.mm`: a test cannot construct a snapshot, so without this the
+    /// display filter above could only be pinned in isolation from the channel that feeds it —
+    /// which is precisely the "green whether or not the production path calls it" shape this branch
+    /// has already produced seven times. (`CEFRuntimeTests` reaches CEF's C surface through
+    /// `NormaCEFRuntime` for the same class of reason.)
+    func apply(url: String, title: String, isLoading: Bool, canGoBack: Bool, canGoForward: Bool) {
+        self.url = url
+        self.title = title
+        self.isLoading = isLoading
+        self.canGoBack = canGoBack
+        self.canGoForward = canGoForward
     }
 
     /// **The producer `panel.reportNavigation` never had.** CEF has just committed a top-level
@@ -199,7 +227,7 @@ enum PanelWebTabModels {
 struct PanelWebChrome: View {
     @ObservedObject var model: PanelWebTabModel
 
-    /// The text the field is SHOWING. Separate from `model.url` on purpose: while the user is
+    /// The text the field is SHOWING. Separate from `model.displayURL` on purpose: while the user is
     /// typing, a page that finishes loading (or any same-page address change) must not reach in and
     /// rewrite what they are halfway through. `@FocusState` is what distinguishes the two cases, and
     /// it is why this is local `@State` rather than another `@Published` on the model.
@@ -225,8 +253,11 @@ struct PanelWebChrome: View {
                 .frame(width: panelChromeFlankWidth, alignment: .trailing)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { text = model.url }
-        .onChange(of: model.url) { _, live in
+        // `displayURL`, never `url` — see its own doc. A fresh tab's committed address is the
+        // built-in `data:` start page, and showing it here made the placeholder unreachable on
+        // every new tab.
+        .onAppear { text = model.displayURL }
+        .onChange(of: model.displayURL) { _, live in
             // Never while the user is editing. Also clears a refusal: the address moved on, so the
             // rejected text is gone anyway.
             if !fieldFocused {
