@@ -68,6 +68,21 @@ final class SpikeCloseLeakHarness {
     /// landing on a browser whose close is already in flight.
     private var drillContainer: PanelCEFContainerView?
 
+    /// browser-runtime T7: the tabIds handed to `BrowserRuntime.shared` for the quit-with-N run.
+    /// The containers themselves are the RUNTIME's — held by its `containers` map, which is the
+    /// whole point of the measurement (see `parkTheRest`).
+    private var parkedTabIds: [String] = []
+    /// The loopback page server for the parked browsers, if one came up. Killed before the quit —
+    /// the pages are already loaded and their audio is a `data:` WAV built in the renderer, so
+    /// nothing about the measurement needs it alive, and a `Process` child outlives its parent.
+    private var pageServer: Process?
+    /// Containers created for the racing-create measurement (`NORMA_SPIKE_CLOSE_RACE`). Parked in
+    /// the runtime's own parking window, so they are alive at quit like every other container.
+    private var raceContainers: [PanelCEFContainerView] = []
+    /// The loopback page URL once a server is up — the same page the racing creates use, since they
+    /// run before `stopPageServer()`.
+    private var pageURL: String?
+
     private let deadline = TimeInterval(SpikeCloseLeakHarness.envInt("NORMA_SPIKE_CLOSE_DEADLINE", 12))
     private var pollCount = 0
     private var closedAt: Date?
@@ -96,6 +111,14 @@ final class SpikeCloseLeakHarness {
 
     func begin() {
         log("BEGIN pid=\(ProcessInfo.processInfo.processIdentifier) deadline=\(Int(deadline))s")
+        // Which binary is actually running, and when it was built. The stale-DerivedData trap is a
+        // named prior failure in this repo (a stale `-derivedDataPath` re-tested a five-day-old
+        // binary for a whole live gate), and one line makes freshness a fact in the ledger rather
+        // than an assumption about the shell that launched it.
+        let exe = Bundle.main.executableURL?.path ?? "?"
+        let built = (try? FileManager.default.attributesOfItem(atPath: exe)[.modificationDate] as? Date)
+            .flatMap { $0 } .map { ISO8601DateFormatter().string(from: $0) } ?? "?"
+        log("BINARY \(exe) built=\(built)")
         let page = writePage()
         log("PAGE url=\(page)")
 
@@ -173,9 +196,189 @@ final class SpikeCloseLeakHarness {
     /// calls)`, and what N is.
     private func quitWithTheTabSTILLOPEN() {
         phase = "quitting"
+        let extra = max(Self.envInt("NORMA_SPIKE_CLOSE_BROWSERS", 1) - 1, 0)
+        if extra == 0 && Self.raceCount == 0 {
+            // T6's run, byte for byte — the default, so those archived ledgers stay reproducible.
+            cefHostView = container?.subviews.first
+            log("PREQUIT cefHostViewAlive=\(cefHostView != nil) helpers=\(Self.helperCensus()) — quitting with the tab OPEN")
+            quit()
+            return
+        }
+        parkTheRest(count: extra)
+    }
+
+    // MARK: - browser-runtime T7: the runtime's world at quit, not one tab
+
+    /// **Quit with N browsers, most of them PARKED — the shape T6's one-tab run could not reach.**
+    ///
+    /// T6 measured the quit path against a single browser in a visible window and fixed it there.
+    /// The runtime's world is up to 8 (`BrowserLifecycleEngine.maxLive`), and all but the shown
+    /// one live in `BrowserRuntime`'s hidden parking window with their containers held **strongly**
+    /// by its `containers` map — a map nothing clears at quit (no quit path calls `stop`;
+    /// `applicationWillTerminate` → `closeMainWindows()` reaches only `PanelViewport.dismantleNSView`,
+    /// which detaches). Every container therefore outlives the sweep, still retaining CEF's host
+    /// view as a subview. That is the T6 deadlock's shape one layer up, and whether it bites is a
+    /// question about `CompleteCloseByReleasingHostView`'s `-removeFromSuperview` — which severs
+    /// that retain before the record drops its own — so it is a question to MEASURE, not to argue.
+    ///
+    /// The creates go through `BrowserRuntime.shared.apply` rather than `NormaCEFCreateBrowser`
+    /// directly: the parking window, the container registry, the model wiring and the URL policy are
+    /// all part of what is being measured, and `.shared` specifically because a `static let` is what
+    /// makes "still holding every container at `applicationWillTerminate`" structural.
+    ///
+    /// **That does not undo this harness's cache-path discipline.** The production driver's
+    /// `ensureInitialized` calls `NormaCEFRuntime.ensureInitialized()`, which passes the BUNDLE-ID
+    /// cache path the user's live dev app holds a Chromium lock on — but `NormaCEFInitialize`
+    /// returns `YES` on its `g_initialized` short-circuit before reading it, so `CefInitialize` is
+    /// never called a second time and no second profile lock is ever taken. CEF stays on the scratch
+    /// profile `startCEF` brought it up on.
+    private func parkTheRest(count: Int) {
+        phase = "parking"
+        let url = startPageServer().map { "http://127.0.0.1:\($0)/leak.html" }
+        if url == nil {
+            // Not fatal. `PanelURLPolicy.restorableURL` refuses `file:`, so a nil url is the built-in
+            // `data:` New Tab page: real browsers and real renderers, without the media element.
+            log("PARK-NOSERVER — parked browsers will load the built-in New Tab page (no audio)")
+        }
+        parkedTabIds = (1...count).map { "spike-park-\($0)" }
+        let tabs = ["spike": parkedTabIds.map {
+            BrowserTabState(tabId: $0, url: url, isShown: false, title: "parked")
+        }]
+        log("PARK-CREATE n=\(count) url=\(url ?? "(new tab page)")")
+        BrowserRuntime.shared.apply(parkedTabIds.map { .create(tabId: $0, url: url) },
+                                    tabs: tabs, sessionOf: { _ in "spike" })
+        pollParked(attempt: 0)
+    }
+
+    /// Wait for CEF to have parented its own view into every parked container — an observation, not
+    /// a sleep. `BrowserRuntime.create` defers the CEF call by one main-queue turn and the creation
+    /// itself is asynchronous, so "apply returned" means only that containers exist.
+    ///
+    /// Matched on Chromium's class name rather than "has a subview": the other thing that can appear
+    /// in a container is `showUnavailable`'s `NSTextField`, and a run that silently measured seven
+    /// placeholder labels would report a clean quit for browsers that never existed.
+    private func pollParked(attempt: Int) {
+        let ready = parkedTabIds.filter { tabId in
+            guard let c = BrowserRuntime.shared.container(forTabId: tabId) else { return false }
+            return c.subviews.contains { String(describing: type(of: $0)) == "CefBrowserHostView" }
+        }
+        let placeholders = parkedTabIds.filter { tabId in
+            guard let c = BrowserRuntime.shared.container(forTabId: tabId) else { return false }
+            return c.subviews.contains { $0 is NSTextField }
+        }
+        if !placeholders.isEmpty {
+            fatal("parked containers showing the unavailable placeholder: \(placeholders)")
+            return
+        }
+        if ready.count == parkedTabIds.count {
+            log("PARK-READY n=\(ready.count) attempts=\(attempt) helpers=\(Self.helperCensus())")
+            // Let the pages load and their media elements actually start before the quit.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in self?.raceThenQuit() }
+            return
+        }
+        guard attempt < 200 else {   // 200 × 50 ms = 10 s
+            fatal("only \(ready.count)/\(parkedTabIds.count) parked browsers ever reached CEF")
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.pollParked(attempt: attempt + 1)
+        }
+    }
+
+    /// **`NORMA_SPIKE_CLOSE_RACE=K`: quit while K creations are still inside CEF's own queue.**
+    ///
+    /// The tripwire's remaining unknown (T7 Q3): `shutting down (N…)` is claimed as a genuine
+    /// tripwire, and that claim is only useful if the racing-create case has a stated expected N.
+    ///
+    /// The create is made DIRECTLY here, in the same run-loop turn as the quit, and that is the
+    /// point rather than a shortcut: `BrowserRuntime.create` defers its `NormaCEFCreateBrowser` by
+    /// one main-queue turn (`startBrowser`), and at quit that turn never comes — the run loop is
+    /// stopping, and `CefDoMessageLoopWork` drives CEF's loop, not GCD's. Going through `apply`
+    /// would therefore measure nothing at all: the creation would die on the queue instead of being
+    /// handed to CEF. This calls the identical entry point that hop would have called.
+    ///
+    /// The containers are parked in the runtime's own parking window, so they are alive at quit like
+    /// every other one.
+    private func raceThenQuit() {
+        let k = Self.raceCount
+        if k > 0, let parkingHost = BrowserRuntime.shared.parkingWindow.contentView {
+            let page = pageURL ?? panelWebTabStartPageURL
+            for _ in 1...k {
+                let view = PanelCEFContainerView()
+                view.frame = parkingHost.bounds
+                parkingHost.addSubview(view)
+                raceContainers.append(view)
+                NormaCEFCreateBrowser(view, page)
+            }
+            log("RACE-CREATE k=\(k) — quitting in this same turn, with the creations inside CEF's queue")
+        }
+        stopPageServer()
         cefHostView = container?.subviews.first
-        log("PREQUIT cefHostViewAlive=\(cefHostView != nil) helpers=\(Self.helperCensus()) — quitting with the tab OPEN")
+        let liveTabs = BrowserRuntime.shared.liveTabIds.count
+        log("PREQUIT cefHostViewAlive=\(cefHostView != nil) runtimeContainers=\(liveTabs) "
+            + "racing=\(raceContainers.count) helpers=\(Self.helperCensus()) — quitting with them ALL OPEN")
         quit()
+    }
+
+    // MARK: The loopback page server
+
+    /// `python3 -m http.server` over the spike's own page directory, so the PARKED browsers load the
+    /// same media page the visible one does. They cannot load it as `file:` — those creates go
+    /// through `BrowserRuntime.create`, whose `PanelURLPolicy.restorableURL` allows `http`/`https`
+    /// and nothing else — and a parked browser rendering a static page would be a weaker instrument
+    /// than one with a live media element, which is the state the whole audio-leak class is about.
+    ///
+    /// Best-effort by construction: a failure logs and the run continues on the New Tab page.
+    private func startPageServer() -> Int? {
+        let dir = URL(fileURLWithPath: writePage()).deletingLastPathComponent().path
+        let port = Int.random(in: 49_200...58_000)
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        task.arguments = ["python3", "-m", "http.server", "\(port)",
+                          "--bind", "127.0.0.1", "--directory", dir]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        guard (try? task.run()) != nil else {
+            log("PAGESERVER-FAILED could not launch python3")
+            return nil
+        }
+        pageServer = task
+        // Probe rather than sleep: the server is up when it answers a connection.
+        for _ in 0..<60 {
+            if Self.canConnect(port: port) {
+                pageURL = "http://127.0.0.1:\(port)/leak.html"
+                log("PAGESERVER port=\(port) dir=\(dir)")
+                return port
+            }
+            usleep(50_000)
+        }
+        log("PAGESERVER-TIMEOUT port=\(port)")
+        stopPageServer()
+        return nil
+    }
+
+    private func stopPageServer() {
+        guard let server = pageServer else { return }
+        server.terminate()
+        pageServer = nil
+        log("PAGESERVER-STOPPED")
+    }
+
+    private static func canConnect(port: Int) -> Bool {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let ok = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
+        return ok
     }
 
     // MARK: Phase 1 — the close under measurement
@@ -324,6 +527,9 @@ final class SpikeCloseLeakHarness {
 
     private func fatal(_ reason: String) {
         log("FATAL \(reason)")
+        // Before the quit, always: a `Process` child outlives its parent, and a stranded page server
+        // would sit on a loopback port for the rest of the login session.
+        stopPageServer()
         quit()
     }
 
@@ -345,9 +551,16 @@ final class SpikeCloseLeakHarness {
 
     /// `close` (default) — the per-tab close of §1. `quit` — quit with the tab still open, which is
     /// the ONLY way to exercise `NormaCEFShutdown`'s drain; see `quitWithTheTabSTILLOPEN`.
+    ///
+    /// Two knobs ride on `quit`, both defaulting to T6's exact one-browser run so its archived
+    /// ledgers stay reproducible: `NORMA_SPIKE_CLOSE_BROWSERS=N` (total live browsers at quit — one
+    /// visible, the rest parked through `BrowserRuntime.shared`) and `NORMA_SPIKE_CLOSE_RACE=K`
+    /// (creations still inside CEF's own queue when the quit lands).
     fileprivate static var mode: String {
         ProcessInfo.processInfo.environment["NORMA_SPIKE_CLOSE_MODE"] ?? "close"
     }
+
+    fileprivate static var raceCount: Int { max(envInt("NORMA_SPIKE_CLOSE_RACE", 0), 0) }
 
     /// Scratch Chromium profile — never `~/.norma*`, never the bundle-id path the user's live dev
     /// app holds an exclusive lock on. See `startCEF`.
