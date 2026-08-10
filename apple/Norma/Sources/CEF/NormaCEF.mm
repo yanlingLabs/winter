@@ -648,6 +648,56 @@ class NormaApp : public CefApp, public CefBrowserProcessHandler {
 
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
 
+  /// **Works around an upstream CEF/Chromium crash that killed the browser process deterministically
+  /// on any single-page-app navigation.** Reproduced by the live gate as "searching on YouTube
+  /// reliably kills it"; two crash reports, byte-identical top-22 frames, same faulting instruction.
+  ///
+  /// Symbolicated against CEF's own `release_symbols` dSYM (UUID matches the shipped framework):
+  ///
+  ///     0  tabs::TabInterface::GetFromContents(content::WebContents*)  +24   <- null deref, x0 = 0
+  ///     1  ReadAnythingSoftNavigationObserver::OnSoftNavigation()      +44
+  ///     2  page_load_metrics::PageLoadTracker::OnSoftNavigation()
+  ///     3  PageLoadMetricsUpdateDispatcher::UpdateSoftNavigationMetrics(...)
+  ///     8  page_load_metrics::mojom::PageLoadMetricsStubDispatch::Accept(...)   <- mojo, from the renderer
+  ///
+  /// `tabs::TabInterface::GetFromContents` is **Chrome's tab-strip abstraction**
+  /// (`//chrome/browser/ui/tabs`). A CEF browser is not a Chrome `Tab`, so the lookup yields null
+  /// and `OnSoftNavigation` dereferences it at `+0x10` — a Chrome-browser-only observer running in
+  /// an embedding where the object it assumes cannot exist. Nothing in Norma is on that stack: the
+  /// only frames of ours are the pump driving `CefDoMessageLoopWork`, which is how ALL CEF work runs.
+  ///
+  /// A "soft navigation" is the SPA case — `history.pushState` treated as a navigation for metrics.
+  /// That is why it needs a real site to reproduce and never appeared in any test: YouTube's search
+  /// box is a pushState navigation, so every search hit it.
+  ///
+  /// We cannot patch Chromium, so we remove the TRIGGER. Both flags are metrics/perf-timeline
+  /// heuristics with no effect on what a page renders or how it navigates; disabling them costs a
+  /// `soft-navigation` PerformanceEntry that nothing in Norma consumes. **Revisit on every CEF
+  /// bump** — this is upstream's bug to fix, and the switch should come out when it is.
+  ///
+  /// Browser process only: the header (`cef_app.h:203-205`) warns that editing a non-browser
+  /// process's command line is undefined behaviour "including crashes". CEF propagates
+  /// `--disable-features` to the renderers itself.
+  void OnBeforeCommandLineProcessing(const CefString &process_type,
+                                     CefRefPtr<CefCommandLine> command_line) override {
+    if (!process_type.empty() || !command_line) {
+      return;
+    }
+    // Append rather than assign: a bare AppendSwitchWithValue would silently drop any value CEF or
+    // a future caller had already put there.
+    static const char kSwitch[] = "disable-features";
+    static const char kFeatures[] = "SoftNavigationDetection,SoftNavigationHeuristics";
+    std::string value = kFeatures;
+    if (command_line->HasSwitch(kSwitch)) {
+      const std::string existing = command_line->GetSwitchValue(kSwitch).ToString();
+      if (!existing.empty()) {
+        value = existing + "," + kFeatures;
+      }
+    }
+    command_line->AppendSwitchWithValue(kSwitch, value);
+    Log("disable-features=%s (upstream ReadAnythingSoftNavigationObserver null-deref)", value.c_str());
+  }
+
   void OnContextInitialized() override {
     CEF_REQUIRE_UI_THREAD();
     g_context_initialized = true;
