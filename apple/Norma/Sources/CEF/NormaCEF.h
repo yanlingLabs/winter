@@ -313,6 +313,17 @@ void NormaCEFCloseAllBrowsers(void);
 /// notification from inside `[NSApplication terminate:]` once the delegate has answered
 /// `.terminateNow`, which is what makes this the whole of the real-quit path.
 ///
+/// **The sweep runs inside an `@autoreleasepool`, and that is load-bearing rather than tidy.** A
+/// close completes when CEF's host view DEALLOCATES, and `-removeFromSuperview` autoreleases it.
+/// Every other close in this app is on a normal run-loop turn, where AppKit's own pool pops a
+/// moment later; this one is not — the pool active during `applicationWillTerminate:` never drains,
+/// because the process exits first — and CEF's message-loop turns cannot pop an AppKit pool. Before
+/// the pool was added, a measured quit with ONE TAB OPEN printed `shutting down (1 browser(s) still
+/// open)`, reporting the close only afterwards, from inside `CefShutdown` itself; with it, `browser
+/// closed (live browsers=0)` arrives first. **So `shutting down (N…)` with N > 0 is a genuine
+/// tripwire now and was not before** — before, on any quit with a tab open, it was the normal
+/// outcome and the renderer was reclaimed by process exit rather than by the close.
+///
 /// **A TRUE no-op if CEF was never initialised**: it does not run, and it does not record itself as
 /// having run — `NormaCEFDidShutdown` stays NO, so a process that merely passed through this call
 /// (a unit-test host; a quit before any web tab existed) is not latched into "CEF is finished" and
