@@ -306,6 +306,109 @@ final class CEFRuntimeTests: XCTestCase {
         XCTAssertFalse(NormaCEFRuntime.isInitialized, "a no-op shutdown must not report CEF as up")
     }
 
+    // MARK: - Pin 4: the zombie parent view at asynchronous browser creation
+
+    /// **`NormaCEFBrowserCreation.parent` must RETAIN the view** — the one word the crash fix is.
+    ///
+    /// `CefBrowserHost::CreateBrowser` does not block: it copies the parent `NSView *` as a RAW
+    /// handle (`CAST_NSVIEW_TO_CEF_WINDOW_HANDLE` is a cast) into a deferred `CreateBrowserHelper`
+    /// task, and when that task runs, `CefBrowserPlatformDelegateNativeMac::CreateHostWindow()`
+    /// messages that view. CEF retains nothing. A panel tab dismantled inside that gap — a saved tab
+    /// pointing at a domain that fails DNS, opened and torn down in quick succession — left CEF
+    /// messaging a deallocated object: `ZombieObjectCrash`, `EXC_BAD_ACCESS` at `0x0` on
+    /// `CrBrowserMain`, which kills the browser process and the whole app with it
+    /// (`Norma-2026-08-10-130829.ips`). The record holding the view across the gap is what stops it.
+    ///
+    /// **What this covers:** that the record's `parent` property is a strong reference, and that
+    /// clearing it releases. Change `strong` to `weak` in `NormaCEF.mm` — the exact regression — and
+    /// this test reds (verified by doing it).
+    ///
+    /// **What it does NOT cover, stated rather than implied:** that `CreateBrowserNow` still creates
+    /// a record, that `OnAfterCreated` still settles it, or that CEF behaves as described. None of
+    /// that is reachable — CEF never starts under XCTest
+    /// (`testTheRuntimeRefusesToStartCEFUnderXCTest`), so the whole creation path is unreachable
+    /// from this host, and the record is the only piece of the fix that can be exercised directly.
+    /// `testTheZombieFixesTwoCallSitesAreCompiledIntoTheProduct` below covers the call sites, by the
+    /// weaker built-product technique the DoClose and CEF_USE_SANDBOX pins use.
+    func testAnInFlightBrowserCreationRETAINSTheParentViewCEFOnlyHoldsRaw() throws {
+        let recordType = try XCTUnwrap(
+            NSClassFromString("NormaCEFBrowserCreation") as? NSObject.Type,
+            "NormaCEFBrowserCreation is gone — nothing holds the parent view across CEF's "
+                + "asynchronous browser creation, which is the zombie crash (NormaCEF.mm).")
+        let record = recordType.init()
+
+        // Control. Without it, the assertion below could pass because this harness kept the view
+        // alive for its own reasons rather than because the record retained it.
+        weak var unheld: NSView?
+        autoreleasepool {
+            let view = NSView(frame: .zero)
+            unheld = view
+        }
+        XCTAssertNil(unheld,
+                     "a view with no strong holder did not deallocate at scope exit — the retain "
+                         + "assertion below cannot distinguish anything in this harness")
+
+        weak var held: NSView?
+        autoreleasepool {
+            let view = NSView(frame: .zero)
+            held = view
+            record.setValue(view, forKey: "parent")
+        }
+        XCTAssertNotNil(
+            held,
+            "NormaCEFBrowserCreation.parent does not RETAIN the parent view. CEF holds that view "
+                + "as a raw, unretained pointer from CreateBrowser until CreateHostWindow() "
+                + "messages it — with nothing retaining it, a panel tab dismantled in between is "
+                + "the ZombieObjectCrash that killed the app at the live gate.")
+
+        record.setValue(nil, forKey: "parent")
+        XCTAssertNil(held,
+                     "settling a creation did not RELEASE the parent view: every browser ever "
+                         + "created would strand its container view, and CEF's own host view under "
+                         + "it, for the life of the process")
+    }
+
+    /// The two call sites of that fix must still be IN the built product.
+    ///
+    /// Asserted on the binary, for the reason the `DoClose` and `CEF_USE_SANDBOX` pins are: nothing
+    /// in this host can reach `CreateBrowserNow` or the close path with CEF down, and both sites sit
+    /// in an anonymous-namespace C++ class that Release strips the symbols of. `__cstring` literals
+    /// survive stripping.
+    ///
+    /// **Known limit, the same one those pins carry:** each needle is a `Log(...)` literal beside
+    /// the code it stands for, not the code itself. It catches the block being deleted or replaced,
+    /// which is how this kind of thing actually regresses; it cannot catch a surgical edit that
+    /// keeps the log line and removes only the retain or only the mark. If you change either
+    /// message, change the needle with it — the coupling is deliberate and written at both ends.
+    func testTheZombieFixesTwoCallSitesAreCompiledIntoTheProduct() throws {
+        let macOS = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
+        let binaries = [
+            macOS.appendingPathComponent("Norma.debug.dylib"),  // Debug puts the real code here
+            macOS.appendingPathComponent("Norma"),              // Release
+        ]
+        .filter { FileManager.default.fileExists(atPath: $0.path) }
+        .compactMap { try? Data(contentsOf: $0, options: .mappedIfSafe) }
+        XCTAssertFalse(binaries.isEmpty, "no app binary found to scan")
+
+        func contains(_ needle: String) -> Bool {
+            let bytes = Data(needle.utf8)
+            return binaries.contains { $0.range(of: bytes) != nil }
+        }
+
+        XCTAssertTrue(
+            contains("creation-retains-parent-view"),
+            "CreateBrowserNow no longer retains the parent view across CefBrowserHost::"
+                + "CreateBrowser. That call does not block and its parent handle is raw, so a panel "
+                + "tab dismantled before CreateHostWindow() runs leaves CEF messaging a zombie — "
+                + "EXC_BAD_ACCESS on CrBrowserMain, and the app dies with the browser process.")
+        XCTAssertTrue(
+            contains("creation-abandoned-in-CEFs-queue"),
+            "NormaCEFCloseBrowser no longer marks an in-flight creation as abandoned. A tab torn "
+                + "down while its creation sits in CEF's own queue has no browser to close yet, so "
+                + "without the mark the browser arrives afterwards parented into a discarded view "
+                + "and nothing ever closes it — a leaked renderer process per abandoned tab.")
+    }
+
     // MARK: - The test-host guard, and the panel wiring
 
     /// CEF must never start inside the suite. `NormaAppTests` runs with `Norma.app` itself as its

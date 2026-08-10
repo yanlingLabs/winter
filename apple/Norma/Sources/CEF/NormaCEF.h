@@ -163,8 +163,15 @@ void NormaCEFLoadURL(NSView *parent, const char *url);
 /// window and demoted it out of the Dock, leaving only the menu-bar orb.
 BOOL NormaCEFDoCloseIsHandledByHost(void);
 
-/// Close the browser hosted by `parent` (and drop any queued request for it). Called from
-/// `NSViewRepresentable.dismantleNSView`.
+/// Close the browser hosted by `parent`, and cancel any creation still on its way to becoming one.
+/// Called from `NSViewRepresentable.dismantleNSView`.
+///
+/// A creation can be waiting in either of two queues when this is called, and the second is why the
+/// implementation is more than a close: requests made before the CEF context came up are ours to
+/// drop, but a request already handed to `CefBrowserHost::CreateBrowser` is inside CEF's own queue,
+/// which does not block and offers no cancel. That one is MARKED, and the browser is closed the
+/// instant it is created — see `NormaCEFBrowserCreation` in the implementation for both halves and
+/// for the crash the same window produced before the parent view was retained across it.
 void NormaCEFCloseBrowser(NSView *parent);
 
 /// Close every live browser. REVERSIBLE — nothing here forecloses running CEF afterwards.
