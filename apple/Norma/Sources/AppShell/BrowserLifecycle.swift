@@ -59,6 +59,12 @@ enum BrowserAction: Equatable {
     case detachViewport(tabId: String)
     /// Arm the linger: re-plan when this deadline arrives. The engine never stops on the strength
     /// of having scheduled — it stops on a LATER plan whose `pendingStops` deadline has passed.
+    ///
+    /// **Executor obligation:** a plan that finds an UNEXPIRED pending deadline emits nothing at all
+    /// for that session — not a fresh `scheduleStop`, not a `cancelScheduledStop`. So the executor
+    /// must KEEP (or re-arm) its timer until it actually sees `cancelScheduledStop` for the session.
+    /// A timer that fires early — a clock adjustment, a sleep/wake — must re-arm rather than be
+    /// dropped, or the stop is stranded and the browsers live forever.
     case scheduleStop(sessionId: String, at: Date)
     /// Drop the session's pending deadline. Emitted both when a signal returns (the stop is
     /// cancelled) and when a deadline has just been consumed by the stops in the same plan (the
@@ -145,8 +151,21 @@ struct BrowserLifecycleEngine {
                 // sharpening: `stopImmediately` skips the LINGER, it does not beat spec §4's "never
                 // stop mid-work: `turnRunning || bgWork` holds browsers live regardless of
                 // attachment". Closing the window must not pull an agent's pages out from under a
-                // running turn — and because Task 5 keeps the flag set while the window stays
-                // closed, the first plan after the turn ends stops them with no linger at all.
+                // running turn.
+                //
+                // REQUIREMENT ON THE CALLER, not a property of this engine: a session that is
+                // `stopImmediately` AND held gets NO actions from this plan, so the stop happens
+                // only if the caller RE-PLANS WITH FRESHLY REFRESHED SIGNALS once work ends —
+                // including while the shell window is hidden. Nothing here can force that: `hold`
+                // emits no `scheduleStop` (it would churn against the cancel below and still needs a
+                // while-hidden timer), so if signals freeze at `working = true` the browsers stay
+                // live indefinitely. That freeze is the app's CURRENT behaviour, not a hypothetical:
+                // the `session.list` poll is gated on window visibility — "no ticks, no
+                // `session.list` calls, while the window is hidden" (`SessionDirectory.setPolling`,
+                // driven by `AppWindowController.onRenderingActiveChange`) — and `session_activity`
+                // events do not cover chat-mode sessions, which is what the panel auto-creates (see
+                // this file's header). Task 5 owes the refresh-and-re-plan; spec §10 gate 4 is what
+                // fails without it.
                 disposition[sessionId] = .hold
             } else if signals.stopImmediately {
                 // Rule 5.
@@ -264,7 +283,17 @@ struct BrowserLifecycleEngine {
     /// renderers" — it is a memory-budget policy. Every protected tab is protected because stopping
     /// it breaks something the user can see or the agent is mid-way through. Correctness outranks
     /// the budget, so this returns fewer evictions than the overage rather than reaching past the
-    /// protected set, and the live count sits above `maxLive` until an unprotected tab appears.
+    /// protected set.
+    ///
+    /// **The overage is UNBOUNDED, not transient.** Every tab of a `working` session is protected
+    /// and lazy restore creates one more on each show, so a long turn that browses thirty pages
+    /// leaves thirty live browsers with the cap inoperative — it does not "come back under the cap
+    /// when an unprotected tab appears", because nothing forces the protected ones to become
+    /// unprotected while the turn runs. **v1 accepts this (controller's ruling):** a working
+    /// session's visited tabs ARE the user's working set, and the cap's purpose is bounding idle
+    /// accumulation, not bounding active work. The last-resort tier — evicting a working session's
+    /// non-shown, non-viewport tabs once the overage gets large — is a NAMED FOLLOW-UP, deliberately
+    /// not built here.
     private static func capEvictions(live: Set<String>,
                                      stopping: Set<String>,
                                      created: Set<String>,

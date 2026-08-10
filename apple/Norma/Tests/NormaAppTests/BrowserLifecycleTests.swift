@@ -424,14 +424,36 @@ final class BrowserLifecycleTests: XCTestCase {
         XCTAssertEqual(actions, [])
     }
 
-    /// The other half of that sharpening: work ends, the flag is still set → stop, no linger, no
-    /// `scheduleStop` in between.
-    func test_stopImmediately_stopsAsSoonAsWorkEnds() {
-        let actions = plan(sessions: ["s1": sig(stopImmediately: true)],
-                           tabs: ["s1": [tab("t1", shown: true), tab("t2")]],
-                           live: ["t1", "t2"],
-                           lruOrder: ["t2", "t1"])
-        XCTAssertFalse(actions.contains { if case .scheduleStop = $0 { return true } else { return false } })
+    /// The other half of that sharpening, as an actual TRANSITION: the window closed mid-turn, the
+    /// turn then ended, and the flag is still set. Two plans over one `Sim`, because the claim is
+    /// about what changes between them — a single plan with `working: false` would just restate
+    /// `test_stopImmediately_stopsNowWithNoLinger` with a different name.
+    ///
+    /// Note what this does NOT prove: that anything in the app RE-PLANS after work ends. The engine
+    /// cannot force that (see `BrowserLifecycle.swift`'s requirement-on-the-caller note at the
+    /// `.hold` branch — the `session.list` poll is gated off while the window is hidden), so this
+    /// row pins the decision, and Task 5 owes the trigger.
+    func test_stopImmediately_stopsOnceWorkEnds() {
+        let tabs = ["s1": [tab("t1", shown: true), tab("t2")]]
+        var sim = Sim(live: ["t1", "t2"], lruOrder: ["t2", "t1"])
+
+        // Window closed while the turn is running: held, so nothing happens at all.
+        let duringWork = plan(sessions: ["s1": sig(working: true, stopImmediately: true)],
+                              tabs: tabs, live: sim.live, viewport: sim.viewport,
+                              pendingStops: sim.pendingStops, lruOrder: sim.lruOrder, now: t0)
+        sim.apply(duringWork)
+        XCTAssertEqual(duringWork, [])
+        XCTAssertEqual(sim.live, ["t1", "t2"])
+
+        // The turn ends. The flag is still set, so the very next plan stops — with no linger and no
+        // `scheduleStop` on the way.
+        let afterWork = plan(sessions: ["s1": sig(stopImmediately: true)],
+                             tabs: tabs, live: sim.live, viewport: sim.viewport,
+                             pendingStops: sim.pendingStops, lruOrder: sim.lruOrder,
+                             now: t0.addingTimeInterval(60))
+        sim.apply(afterWork)
+        XCTAssertEqual(afterWork, [.stop(tabId: "t1"), .stop(tabId: "t2")])
+        XCTAssertEqual(sim.live, [])
     }
 
     /// A phone attached to the session keeps it alive by the same rule that `working` does — the
@@ -577,16 +599,46 @@ final class BrowserLifecycleTests: XCTestCase {
         XCTAssertEqual(actions, [.stop(tabId: "t1"), .create(tabId: "n0", url: "https://n")])
     }
 
-    /// A tab created by THIS plan is never an eviction candidate — it is not in `lruOrder`, and a
-    /// plan that created and stopped the same browser would be a bug the executor cannot absorb.
-    func test_cap_neverEvictsATabItIsCreatingNow() {
-        let tabs = [tab("t0", shown: true)] + (1...7).map { tab("t\($0)") }
-        let waking = [tab("n0", url: "https://n", shown: true)]
-        let actions = plan(sessions: ["a": sig(attachedElsewhere: true), "z": sig(working: true)],
-                           tabs: ["a": tabs, "z": waking],
-                           live: Set(tabs.map(\.tabId)),
-                           lruOrder: tabs.map(\.tabId))
-        XCTAssertFalse(actions.contains(.stop(tabId: "n0")))
+    // ("a tab created by THIS plan is never an eviction candidate" had a row here with inputs
+    // byte-identical to the one above, whose exact-equality assertion already proves it. Deleted as
+    // decorative — and it cannot be made non-decorative: eviction candidates are drawn from
+    // `live.subtracting(stopping)`, which a just-created tab is definitionally absent from, AND
+    // every create targets a held session's shown tab, which the protected set covers. Two
+    // independent structural guarantees, neither isolable by an input.)
+
+    /// The belt and the cap interact through the count: a browser the belt is already stopping must
+    /// NOT be counted as a survivor, or an orphan at the cap boundary buys a spurious eviction of a
+    /// real tab. Eight legitimate live tabs (exactly the cap) plus one orphan → the orphan dies and
+    /// nothing else does.
+    func test_cap_beltStoppedOrphansDoNotCountAsSurvivors() {
+        let tabs = [tab("a0", shown: true)] + (1...7).map { tab("a\($0)") }   // 8 = exactly maxLive
+        let actions = plan(sessions: ["a": sig(attachedElsewhere: true)],
+                           tabs: ["a": tabs],
+                           live: Set(tabs.map(\.tabId)).union(["ghost"]),
+                           // `ghost` last = most-recently-used, so a mutation that counts it as a
+                           // survivor evicts a REAL tab (a1) rather than double-stopping the orphan.
+                           lruOrder: (1...7).map { "a\($0)" } + ["a0", "ghost"])
+        XCTAssertEqual(actions, [.stop(tabId: "ghost")])
+    }
+
+    /// A quiet session inside its linger is HELD by the linger, not PROTECTED from the cap: its
+    /// tabs — including its shown one — are ordinary eviction candidates. Deliberate: the linger
+    /// exists so a hop back is cheap, not to reserve renderers for a session nobody is using, and
+    /// the cap's own purpose is bounding exactly this kind of idle accumulation.
+    func test_cap_evictsAQuietSessionsTabsEvenInsideTheLinger() {
+        let quietTabs = [tab("q0", shown: true)] + (1...3).map { tab("q\($0)") }
+        let heldTabs = [tab("h0", shown: true)] + (1...4).map { tab("h\($0)") }
+        let all = Set(quietTabs.map(\.tabId)).union(heldTabs.map(\.tabId))
+        XCTAssertEqual(all.count, 9)
+
+        let actions = plan(sessions: ["h": sig(attachedElsewhere: true), "q": sig()],
+                           tabs: ["h": heldTabs, "q": quietTabs],
+                           live: all,
+                           pendingStops: ["q": t0.addingTimeInterval(100)],   // well inside the linger
+                           lruOrder: ["q0", "q1", "q2", "q3", "h1", "h2", "h3", "h4", "h0"])
+        // The quiet session's SHOWN tab is the LRU-oldest and is taken — quiet is not `hold`, so
+        // sharpening (c)'s shown-tab protection does not reach it.
+        XCTAssertEqual(actions, [.stop(tabId: "q0")])
     }
 
     /// A live tab missing from `lruOrder` has unknown recency. It is evicted LAST (unknown recency
