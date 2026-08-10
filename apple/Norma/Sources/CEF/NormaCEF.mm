@@ -159,6 +159,12 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 @property(nonatomic, copy) void (^navigationObserver)(NSString *, NSString *);
 @property(nonatomic, copy) NSString *url;
 @property(nonatomic, copy) NSString *title;
+/// **Which document `title` actually describes.** A title is not a property of a browser, it is a
+/// property of a page, and CEF only reports that one CHANGED — so a cache with no provenance
+/// silently attributes the outgoing page's title to the incoming one whenever the new page never
+/// fires `OnTitleChange`. Recorded from the main frame's own URL at the moment the title arrives,
+/// and checked against the committing URL before anything is written down. See `OnTitleChange`.
+@property(nonatomic, copy) NSString *titleURL;
 @property(nonatomic) BOOL isLoading;
 @property(nonatomic) BOOL canGoBack;
 @property(nonatomic) BOOL canGoForward;
@@ -528,28 +534,6 @@ class NormaClient : public CefClient,
     NotifyState(bridge);
   }
 
-  /// Task 6b: the commit point. Used ONLY to forget the outgoing page's title — not to report.
-  ///
-  /// Without this clear, a page with no `<title>` of its own inherits whatever the PREVIOUS page
-  /// was called: `OnTitleChange` simply never fires for it, so the cache would still hold the old
-  /// value when `OnLoadEnd` reads it, and the wrong title would be written to the session log
-  /// permanently. Chromium fires an early `OnTitleChange` carrying a URL-derived placeholder for
-  /// most navigations, which is what fills the gap in the ordinary case.
-  void OnLoadStart(CefRefPtr<CefBrowser> browser,
-                   CefRefPtr<CefFrame> frame,
-                   TransitionType transition_type) override {
-    CEF_REQUIRE_UI_THREAD();
-    if (!frame->IsMain()) {
-      return;
-    }
-    NormaCEFTabBridge *bridge = BridgeForBrowser(browser);
-    if (bridge == nil) {
-      return;
-    }
-    bridge.title = @"";
-    NotifyState(bridge);
-  }
-
   /// **THE PRODUCER `panel.reportNavigation` never had.** See `NormaCEFSetNavigationObserver`'s
   /// header doc for why `OnLoadEnd` + `IsMain()` is precisely "committed top-level navigation" in
   /// CEF's own words, and which three classes of event it excludes by contract rather than by a
@@ -565,7 +549,11 @@ class NormaClient : public CefClient,
     NormaCEFTabBridge *bridge = BridgeForBrowser(browser);
     if (bridge != nil) {
       bridge.url = url;
-      NSString *title = bridge.title ?: @"";
+      // **Only a title that belongs to THIS document may be written down.** A page with no
+      // `<title>` of its own never fires `OnTitleChange`, so an unqualified cache would attribute
+      // the previous page's name to it — permanently, in an append-only log. The provenance check
+      // is what makes the cache safe; see `titleURL`.
+      NSString *title = [bridge.titleURL isEqualToString:url] ? (bridge.title ?: @"") : @"";
       // Consecutive-duplicate suppression, seeded across browser lifetimes by
       // `NormaCEFSeedReportedNavigation`. A reload, or a re-created browser landing back on the
       // page the daemon already recorded, adds nothing to the log.
@@ -624,6 +612,16 @@ class NormaClient : public CefClient,
     NotifyState(bridge);
   }
 
+  /// A title arrives with no statement of which page it belongs to, so the page is recorded WITH
+  /// it, from the main frame itself rather than from our own `url` cache (no dependency on whether
+  /// `OnAddressChange` happens to have run first).
+  ///
+  /// **This provenance is not defensive tidiness — it was measured.** Reporting the cached title
+  /// unqualified, with `OnLoadStart` clearing it at each commit, was the first shape of this code,
+  /// and the live gate caught it in one run: reloading a page wrote a SECOND log entry with an
+  /// EMPTY title, because Chromium fires no `OnTitleChange` when the title has not changed, so the
+  /// clear was never undone. Dropping the clear alone would have swapped that for the opposite bug
+  /// — an untitled page inheriting the previous page's name. Only the pairing fixes both.
   void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString &title) override {
     CEF_REQUIRE_UI_THREAD();
     NormaCEFTabBridge *bridge = BridgeForBrowser(browser);
@@ -631,6 +629,9 @@ class NormaClient : public CefClient,
       return;
     }
     bridge.title = [NSString stringWithUTF8String:title.ToString().c_str()] ?: @"";
+    CefRefPtr<CefFrame> main = browser->GetMainFrame();
+    bridge.titleURL = main ? ([NSString stringWithUTF8String:main->GetURL().ToString().c_str()] ?: @"")
+                           : @"";
     NotifyState(bridge);
   }
 
@@ -911,6 +912,11 @@ void NormaCEFSeedTabState(NSView *parent, const char *url, const char *title) {
   bridge.lastReportedTitle = seedTitle;
   bridge.url = seedURL;
   bridge.title = seedTitle;
+  // The seeded title belongs to the seeded URL — without this the provenance check in `OnLoadEnd`
+  // would reject it, the restore would report an EMPTY title, and the dedupe it exists to feed
+  // would miss on its very first comparison. The two mechanisms have to agree about what a title
+  // is attached to or neither works.
+  bridge.titleURL = seedURL;
 }
 
 void NormaCEFGoBack(NSView *parent) {
