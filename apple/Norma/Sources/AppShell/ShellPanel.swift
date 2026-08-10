@@ -230,9 +230,14 @@ struct ShellPanel: View {
                 .overlay(Theme.hairline)
 
             // panel-cef Task 6a: the content slot Plan A left as `Color.clear`. `.id(tabId)` is
-            // load-bearing rather than tidy — it is what makes SwiftUI dismantle one tab's
-            // `PanelCEFView` and build the next tab's, instead of reusing a single representable
-            // and silently leaving the first tab's browser parented in the visible container.
+            // load-bearing rather than tidy — a different tab must arrive as a REBUILD, not as an
+            // update. browser-runtime T4 changed what that buys without changing the requirement:
+            // it is now what makes SwiftUI dismantle one tab's `PanelViewport` (detaching that
+            // tab's container back to the runtime's parking window, browser still running) and
+            // build the next tab's (attaching the next container). Reused instead, SwiftUI would
+            // call `updateNSView` — which is empty by contract — on a host view built for the FIRST
+            // tab's id, so the first tab's page would stay mounted while the strip highlighted the
+            // second, indefinitely.
             Group {
                 if let tab = shownTab, let content = activeTabContent {
                     content.makeContent().id(tab.tabId)

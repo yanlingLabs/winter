@@ -35,11 +35,29 @@ struct PanelTabsBySession: Equatable {
         bySession[sessionId]?.tabs ?? []
     }
 
+    /// The whole entry, for a caller that needs tabs AND `activeTabId` as one value — the two
+    /// getters below answer halves of the same question, and a caller that re-derives the pair from
+    /// them is reading the dictionary twice for no reason. An unseen session reads as the empty
+    /// state, same contract as `tabs(for:)`.
+    func state(for sessionId: String) -> PanelTabState {
+        bySession[sessionId] ?? PanelTabState()
+    }
+
     /// Sibling of `tabs(for:)` — a switch-back has to restore which tab was active, not just which
     /// tabs existed.
     func activeTabId(for sessionId: String) -> String? {
         bySession[sessionId]?.activeTabId
     }
+
+    /// browser-runtime T5: every session this store has folded, at once.
+    ///
+    /// The two lookups above answer "what does session X have"; the browser lifecycle engine's §8
+    /// belt asks the OPPOSITE question — "which live browsers belong to no tab of ANY session" —
+    /// and a per-session getter cannot answer it. A session missing from this map contributes no
+    /// tabs, so every browser it owns is an orphan by the belt's definition: that is exactly why
+    /// nothing in this type ever REMOVES a session's folded entry (see `PanelStore.switchSession`/
+    /// `detach`, which drop only the working buffers).
+    var all: [String: PanelTabState] { bySession }
 }
 
 /// panel-shell T7/T9: the app-side view of the daemon's panel tab state, session-keyed — daemon-owned
@@ -122,10 +140,26 @@ final class PanelStore: ObservableObject {
     private var eventsBySession: [String: [SessionEvent]] = [:]
 
     /// The frozen `panel.list` seed each session's buffer folds ON TOP OF — see the type doc's
-    /// "fold starting point" section for why this exists at all. Written once per switch, by
-    /// `applyFetchedSnapshot` (never by `apply(_:)`, which only ever READS it); cleared alongside
-    /// `eventsBySession` on `switchSession(to:)`/`detach()` for the identical reason.
+    /// "fold starting point" section for why this exists at all. Written by `applyFetchedSnapshot`
+    /// and by `switchSession(to:)` (which re-seeds from what is already folded — see its own doc);
+    /// `apply(_:)` only ever READS it. Dropped for the DEPARTING session on
+    /// `switchSession(to:)`/`detach()`.
     private var seedBySession: [String: PanelTabState] = [:]
+
+    /// browser-runtime T5: "a fold happened." Fired after EVERY mutation of the folded state —
+    /// `apply`, `applyFetchedSnapshot`, `switchSession`, `detach` — because spec §8's belt is
+    /// stated per fold ("on every fold, any live browser whose tabId is no longer in the session's
+    /// tab list is stopped") and three of those four are the only way a tab can leave a list.
+    ///
+    /// A HOOK rather than an `@Published` subscription, and the difference is load-bearing:
+    /// `applyFetchedSnapshot` for a session that is not `currentSessionId` mutates the fold without
+    /// publishing anything (its `publish(for:)` is guarded), and `switchSession` republishes even
+    /// when the slice is identical. An observer of `$tabs` would miss the first and fire twice for
+    /// the second; the belt needs the fold, not the publication.
+    ///
+    /// Set by `BrowserSignalsCoordinator`; `nil` in every test and every shell that has no browser
+    /// runtime, which is why nothing here depends on it having a value.
+    var onFold: (() -> Void)?
 
     /// Apply one event — live or replayed, see the type's own doc comment for why there is only
     /// this one path. Anything that isn't one of the four persisted panel-lifecycle cases (every
@@ -166,6 +200,7 @@ final class PanelStore: ObservableObject {
         if sessionId == (currentSessionId ?? sessionId) {
             publish(for: sessionId)
         }
+        onFold?()
     }
 
     /// Task 9: the shell attached/hopped to a different session — swap which slice is published.
@@ -178,6 +213,24 @@ final class PanelStore: ObservableObject {
     /// for a never-seen session — `tabs(for:)`'s own contract — or the last-known state for a
     /// returning one), so the panel never shows a stale, unrelated session's tabs even for one frame
     /// while the fresh `panel.list` fetch and replay are in flight.
+    ///
+    /// **browser-runtime T5: the target's seed is what is ALREADY FOLDED for it, not empty.** The
+    /// buffer is cleared here (replay redelivers the complete history from `seq` 0, so a stale
+    /// partial buffer must never be double-counted) — and until this change the SEED was cleared
+    /// with it, which meant the very first replayed event for a returning session was folded from
+    /// EMPTY: a session with five known tabs momentarily collapsed to one, then rebuilt across the
+    /// rest of the replay. Purely cosmetic while the panel only drew a strip; **destructive** once
+    /// the same fold drives spec §8's belt, which stops every live browser whose tab is not in a
+    /// list — the collapse would kill four parked browsers on every hop back, which is precisely
+    /// the reload this whole plan exists to prevent.
+    ///
+    /// This is an INPUT-CORRECTNESS fix, not a new behaviour: folding a session's complete history
+    /// on top of its own last-known state converges to the identical answer (`foldPanelTabs` is
+    /// idempotent — opens dedupe by `tabId`, closes remove, activations and navigations are
+    /// last-write-wins), which is the same reasoning that lets a `panel.list` snapshot be a seed.
+    /// The store simply stops reporting a state it never actually believed. `applyFetchedSnapshot`
+    /// still overwrites this seed when the fetch wins the race with replay (its own empty-buffer
+    /// guard is untouched), and a never-seen session seeds from an empty state exactly as before.
     func switchSession(to sessionId: String) {
         if let departing = currentSessionId, departing != sessionId {
             eventsBySession.removeValue(forKey: departing)
@@ -185,8 +238,9 @@ final class PanelStore: ObservableObject {
         }
         currentSessionId = sessionId
         eventsBySession[sessionId] = []
-        seedBySession.removeValue(forKey: sessionId)
+        seedBySession[sessionId] = bySession.state(for: sessionId)
         publish(for: sessionId)
+        onFold?()
     }
 
     /// Task 9: nothing is attached — the panel shows nothing, but nothing already learned about any
@@ -202,6 +256,7 @@ final class PanelStore: ObservableObject {
         currentSessionId = nil
         tabs = []
         activeTabId = nil
+        onFold?()
     }
 
     /// Task 9: seeds `sessionId` from a `panel.list` fetch — the app's instant-display answer on a
@@ -233,7 +288,12 @@ final class PanelStore: ObservableObject {
         if sessionId == currentSessionId {
             publish(for: sessionId)
         }
+        onFold?()
     }
+
+    /// browser-runtime T5: every session's folded tab state at once — the belt's input. See
+    /// `PanelTabsBySession.all` for why a per-session getter cannot serve it.
+    var allSessionTabStates: [String: PanelTabState] { bySession.all }
 
     private func publish(for sessionId: String) {
         tabs = bySession.tabs(for: sessionId)

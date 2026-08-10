@@ -1,3 +1,12 @@
+# THE SOURCE OF TRUTH FOR THE APP TARGET. `Norma.xcodeproj` is GENERATED FROM THIS FILE AND IS NOT
+# TRACKED (`.gitignore` beside this file) — so there is no committed project anyone can fix once, and
+# whatever your working tree last generated is what a build uses.
+#
+# `xcodegen generate` BEFORE EVERY BUILD, and always before one that is meant to prove something.
+# `sources: - path: Sources` is a DIRECTORY: xcodegen enumerates it at generate time, so a file added
+# since the last generate is simply not in the target — it compiles nowhere, its tests do not exist,
+# and the build goes green. Measured on the browser-runtime branch (T4): two tasks' worth of new
+# sources were missing from a stale local project, silently.
 name: Norma
 options:
   bundleIdPrefix: com.norma

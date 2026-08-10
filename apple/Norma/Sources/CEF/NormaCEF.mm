@@ -104,6 +104,11 @@ const int32_t kTimerDelayPlaceholder = INT_MAX;
 // CEF's own: "The maximum number of milliseconds we're willing to wait between calls to DoWork()".
 const int64_t kMaxTimerDelay = 1000 / 30;  // 30fps
 
+// How many 10 ms message-loop turns `NormaCEFShutdown` is willing to drive after the sweep, waiting
+// for every close to complete. Named rather than inline because the shutdown line now reports the
+// turns actually used against it — see that function for what has been measured at what N.
+const int kShutdownDrainTurns = 50;
+
 bool g_library_loaded = false;
 bool g_initialized = false;
 bool g_context_initialized = false;
@@ -214,11 +219,12 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 ///
 /// Keyed by the container for three reasons, each of which the browser-keyed alternative gets
 /// wrong: the container exists BEFORE the browser (creation is async and can queue behind
-/// `OnContextInitialized`, so observers registered at `makeNSView` time have nowhere else to live);
-/// the container OUTLIVES a close, so a late callback has somewhere to land harmlessly; and the
-/// dedupe memory below has to survive the browser entirely — `PanelCEFView` is `.id`'d by tab, so
-/// every tab SWITCH destroys one browser and builds another, and a per-browser memory would forget
-/// what was already reported on every single flip.
+/// `OnContextInitialized`, so observers registered at create time have nowhere else to live); the
+/// container OUTLIVES a close, so a late callback has somewhere to land harmlessly; and the dedupe
+/// memory below has to survive the browser entirely — a tab's browser is created more than once
+/// over that tab's life (on every tab SWITCH until browser-runtime T4; on a session hop, a relaunch
+/// or a lifecycle-engine stop-then-return since), and a per-browser memory would forget what was
+/// already reported each time.
 ///
 /// Attached with `objc_setAssociatedObject`, so its lifetime is the view's and there is no global
 /// table to leak or to sweep.
@@ -227,8 +233,9 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 @property(nonatomic, copy) void (^navigationObserver)(NSString *, NSString *);
 /// Where a popup this browser asks for goes — a new panel tab, in THIS tab's session. Keyed on the
 /// container like everything else here, which is what makes "the session the popup came from"
-/// answerable at all: the block is created by the tab's own `makeNSView`, so it closes over that
-/// tab's model and its captured session id. `nil` for a container nobody wired one to, and that
+/// answerable at all: the block is created when the tab's browser is (`BrowserRuntime.wire`, and
+/// the view's own `makeNSView` before browser-runtime T4), so it closes over that tab's model and
+/// its captured session id. `nil` for a container nobody wired one to, and that
 /// case cancels the popup exactly as this file did before the route existed.
 @property(nonatomic, copy) void (^popupObserver)(NSString *);
 @property(nonatomic, copy) NSString *url;
@@ -969,7 +976,9 @@ class NormaClient : public CefClient,
   /// Found at the user's live gate: closing a panel tab, or clicking Cowork in the sidebar with a
   /// tab open, made the whole app window vanish. The process survived (menu-bar orb still working,
   /// no crash report) — it was the window dying, not the app, and both triggers are the same event:
-  /// SwiftUI dismantles `PanelCEFView`, which calls `CloseBrowser(true)`.
+  /// something calls `NormaCEFCloseBrowser`, which calls `CloseBrowser(true)`. (Then, SwiftUI
+  /// dismantling the panel's `PanelCEFView`; since browser-runtime T4, `BrowserRuntime.stop` — the
+  /// caller moved, the mechanism below did not.)
   ///
   /// `include/cef_life_span_handler.h` states the mechanism outright, and this is quoted rather
   /// than inferred:
@@ -1049,10 +1058,11 @@ class NormaClient : public CefClient,
   /// and crashed the app on the unlucky one (it started at a view the close had already freed).
   /// Landing them is the deliberate answer, for three reasons:
   ///
-  ///   * On the panel-tab path there is nothing to land on. `PanelCEFView.dismantleNSView` clears
-  ///     all three observers BEFORE it calls `NormaCEFCloseBrowser`, so a late update writes to an
-  ///     object nobody is watching — precisely the "somewhere to land harmlessly" the
-  ///     container-keyed bridge was designed for.
+  ///   * On the panel-tab path there is nothing to land on. `BrowserRuntime.stop` clears all three
+  ///     observers BEFORE it calls `NormaCEFCloseBrowser` (as `PanelCEFView.dismantleNSView` did
+  ///     before browser-runtime T4 moved that sequence, in the same order and for the same reason),
+  ///     so a late update writes to an object nobody is watching — precisely the "somewhere to land
+  ///     harmlessly" the container-keyed bridge was designed for.
   ///   * On the shutdown path the observers are still wired, and what a late callback reports is a
   ///     navigation that genuinely committed. Reporting a true thing during a quit is not a defect;
   ///     inventing one would be, and nothing here invents anything.
@@ -1723,8 +1733,9 @@ void NormaCEFCreateBrowser(NSView *parent, const char *url) {
     return;
   }
   // Task 1 measured OnContextInitialized firing SYNCHRONOUSLY inside CefInitialize on every run —
-  // but that is timing, not contract, and `makeNSView` can plausibly run before the context on a
-  // slower or busier launch. The queue costs nothing and removes the ordering assumption.
+  // but that is timing, not contract, and `BrowserRuntime.startBrowser`'s create (one main-queue
+  // hop after the engine's `.create`) can plausibly run before the context on a slower or busier
+  // launch. The queue costs nothing and removes the ordering assumption.
   if (g_pending == nil) {
     g_pending = [[NSMutableArray alloc] init];
   }
@@ -1746,9 +1757,12 @@ void NormaCEFCreateBrowser(NSView *parent, const char *url) {
 void NormaCEFSetStateObserver(NSView *parent, void (^observer)(NormaCEFBrowserState *state)) {
   NormaCEFTabBridge *bridge = BridgeFor(parent);
   bridge.stateObserver = observer;
-  // Deliver the current snapshot immediately rather than waiting for the next CEF callback. A tab
-  // switched away from and back to re-registers against a container whose state is already known,
-  // and without this the chrome would sit blank until the page happened to change something.
+  // Deliver the current snapshot immediately rather than waiting for the next CEF callback. A plain
+  // tab switch does not re-register this any more — since browser-runtime T4 the observers stay
+  // wired for the browser's whole life, cleared only in `stop` — so what re-registers against a
+  // container whose state is already known is the rarer case: a session hop, a relaunch, or a tab
+  // the lifecycle engine stopped and has now recreated. Without this the chrome would sit blank
+  // until the page happened to change something.
   if (observer != nil) {
     NotifyState(bridge);
   }
@@ -2026,19 +2040,76 @@ void NormaCEFShutdown(void) {
   @autoreleasepool {
     NormaCEFCloseAllBrowsers();
   }
+  // **MEASURED AT THE RUNTIME'S FULL WORLD (browser-runtime T7), not at one tab.** The 50×10 ms
+  // bound was set when a quit meant one browser. `BrowserLifecycleEngine.maxLive` is 8, and seven of
+  // those are parked in `BrowserRuntime`'s hidden window with their containers held strongly by its
+  // `containers` map — which nothing clears at quit. That is the same shape as the T6 deadlock one
+  // layer up, and it costs nothing, because `CompleteCloseByReleasingHostView` does
+  // `-removeFromSuperview` FIRST: the container's retain on CEF's view is severed whether or not the
+  // container itself ever dies.
+  //
+  // Measured with 8 live browsers, 7 of them parked (`SpikeCloseLeak`,
+  // `NORMA_SPIKE_CLOSE_BROWSERS=8`), and the parked pages' playback SAMPLED rather than assumed —
+  // `PARK-AUDIO parked=7 playing=7 refused=0`, read off each tab's own model at quit, with
+  // `--autoplay-policy=no-user-gesture-required` on the command line (without it a parked page in a
+  // hidden window is the likeliest thing in the app to be refused autoplay, and the run says so
+  // either way: nothing here depends on playback, which is why it is reported rather than required).
+  // All eight closes completed —
+  // `browser closed (id=1, live browsers=0)` ahead of `shutting down (0 browser(s) still open)` —
+  // **in `0/50` drain turns.** Zero is not a rounding: `g_browsers` was already empty at the loop's
+  // first check, because the `dealloc`s the pool pops run `WindowDestroyed()` → `DestroyBrowser()` →
+  // `OnBeforeClose` synchronously, on this thread, before the loop is reached. So on a healthy quit
+  // **the pool is the whole mechanism and the drain is unused margin** — which is precisely why the
+  // bound is left at 50 rather than widened: nothing has ever consumed the first turn of it.
+  //
   // CloseBrowser is asynchronous and the run loop is about to stop, so the pump can no longer
-  // deliver the turns CEF needs to finish closing. Drive them directly, bounded — CEF's own
-  // external-pump sample does the same thing after `[NSApp run]` returns
-  // (`main_message_loop_external_pump_mac.mm:114-125`, "run the message pump until it is idle...
-  // we don't have that information here so we run the message loop 'for a while'"). With the pool
-  // above, the `dealloc`s have already happened and these turns are what carries
-  // `DestroyBrowser()` through to `OnBeforeClose`.
-  for (int i = 0; i < 50 && !g_browsers.empty(); i++) {
+  // deliver the turns CEF needs. Drive them directly, bounded — CEF's own external-pump sample does
+  // the same thing after `[NSApp run]` returns (`main_message_loop_external_pump_mac.mm:114-125`,
+  // "run the message pump until it is idle... we don't have that information here so we run the
+  // message loop 'for a while'").
+  //
+  // **What these turns are for, stated after the measurement rather than before it.** This block
+  // used to say they "carry `DestroyBrowser()` through to `OnBeforeClose`" — T7 measured that they
+  // carry nothing at all on a healthy quit, because the pool above already did (`0/50`). They are
+  // the net for the case the pool cannot close: a browser whose host view is still retained by
+  // something else when the pool pops, whose `dealloc` therefore lands later. Nothing in this app
+  // holds one today — `BrowserRuntime` is never the last retain (T6) — so the net has never been
+  // needed, and it stays because the thing it catches is a leaked renderer.
+  int turns = 0;
+  for (; turns < kShutdownDrainTurns && !g_browsers.empty(); turns++) {
     CefDoMessageLoopWork();
     usleep(10000);
   }
-  Log("shutting down (%zu browser(s) still open, %ld DoWork calls)", g_browsers.size(),
-      g_do_work_count);
+  // `turns` is the DRAIN's own count and is the bound's evidence: it says how much of the 50 a real
+  // quit actually needed. (`DoWork calls` beside it counts the PUMP's turns for the whole process
+  // lifetime and says nothing about this loop — it is left in because it is the pump's own
+  // liveness figure.)
+  //
+  // ── **THE TRIPWIRE'S CONTRACT (browser-runtime T7). `N > 0` HAS NO BENIGN CASE THAT HAS EVER
+  //    BEEN OBSERVED, AND EXACTLY ONE THAT IS REACHABLE IN PRINCIPLE.** ───────────────────────────
+  //
+  //   * **Healthy quit, any number of browsers: N = 0.** Measured at 8 (7 parked, all with a live
+  //     media element).
+  //   * **Quit racing an in-flight create: N = 0, measured.** `NORMA_SPIKE_CLOSE_RACE` puts K
+  //     creations into CEF's own queue in the same run-loop turn as the quit (K = 3, 3, 8 — with
+  //     nothing in between that spins the run loop, which is a real hazard: the spike's own `ps`
+  //     census defeated the first attempt by delivering the pump turns the creations were waiting
+  //     for). `OnAfterCreated` never fired for any of them, so they never reached `g_browsers` and
+  //     never counted; `CefShutdown` took them. No crash, exit 0.
+  //   * **The T3 abandon path at quit: N = 0, by construction.** If `OnAfterCreated` DID land before
+  //     the sweep, the browser is in `g_browsers` and the sweep closes it like any other — the
+  //     `dispatch_async` that would have run `CloseAbandonedBrowser` never gets its turn (this loop
+  //     drives CEF's queue, not GCD's), and it does not need one: the close it owed was already
+  //     performed, and the only other thing it does is drop a retain the process is about to lose.
+  //   * **The one reachable nonzero, NOT reproduced:** a creation whose `OnAfterCreated` lands
+  //     *after* the sweep, i.e. inside this loop — which requires the loop to run at all, i.e. a
+  //     close still outstanding at the pool pop. That browser lands in `g_browsers` with nothing left
+  //     to close it and is reclaimed by process exit — exactly the pre-T6 status quo. It would need
+  //     both halves to be true at once, and no run has produced either.
+  //
+  // So `N > 0` means a close that did not complete. It is not a race artefact to be waved through.
+  Log("shutting down (%zu browser(s) still open, %d/%d drain turns, %ld DoWork calls)",
+      g_browsers.size(), turns, kShutdownDrainTurns, g_do_work_count);
   CefShutdown();
 }
 

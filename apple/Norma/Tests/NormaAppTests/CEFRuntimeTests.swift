@@ -749,9 +749,13 @@ final class CEFRuntimeTests: XCTestCase {
     /// a deallocated ObjC object in the browser process into a `CrZombie` whose first message is a
     /// deliberate crash — so a title update arriving for a tab the user had just switched away from
     /// killed the whole app (`Norma-2026-08-10-152114.ips`, `CrBrowserMain`, `ZombieObjectCrash`
-    /// under `NormaClient::OnTitleChange`). Rapid tab switching is the trigger, because the panel is
-    /// one browser per tab: every switch closes a browser mid-navigation and every switch back
-    /// reloads, so title/address/load updates are permanently in flight against closing browsers.
+    /// under `NormaClient::OnTitleChange`). Rapid tab switching was the trigger in the pre-runtime
+    /// era this crash predates: the panel was one browser per tab, every switch closed a browser
+    /// mid-navigation and every switch back reloaded, so title/address/load updates were permanently
+    /// in flight against closing browsers. Browser-runtime T4 deleted that churn — a switch is a
+    /// container swap now, nothing closes. What the test still pins, present tense: a callback must
+    /// reach its tab without touching a view whenever a browser DOES close — the lifecycle engine's
+    /// `stop`, itself asynchronous — and that stays real regardless of what triggers the close.
     ///
     /// **What this covers:** that a client hands a real callback the tab it was CONSTRUCTED with. The
     /// tab here has no container view, no association and no browser — objects that could not have

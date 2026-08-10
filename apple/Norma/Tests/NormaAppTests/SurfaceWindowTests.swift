@@ -279,7 +279,18 @@ final class SurfaceWindowTests: XCTestCase {
         try await pollUntil(timeout: 8.0) { controller.surface == .window && controller.isMorphIdleForTesting }
 
         let screen = try XCTUnwrap(NSScreen.main).visibleFrame
-        let target = CGPoint(x: screen.midX + 250, y: screen.midY - 120)
+        let openFrame = controller.panelFrameForTesting
+        let openOrbPoint = try XCTUnwrap(controller.morphModel.windowOrbPoint)
+        let openAnchor = CGPoint(x: openFrame.minX + openOrbPoint.x, y: openFrame.maxY - openOrbPoint.y)
+        // Derived from the OPEN ANCHOR, never from a fixed screen point. The open anchor tracks the
+        // live OS mouse position (this suite cannot move it), so a fixed target lands arbitrarily
+        // close to it depending on where the user's cursor happens to rest, which would make the
+        // mid-collapse convergence this test asserts indistinguishable from never having moved at
+        // all. Offset toward whichever half of the screen has room, same derivation as the settle
+        // test below.
+        let dx: CGFloat = openAnchor.x < screen.midX ? 240 : -240
+        let dy: CGFloat = openAnchor.y < screen.midY ? 160 : -160
+        let target = CGPoint(x: openAnchor.x + dx, y: openAnchor.y + dy)
         controller.glassAnchorOverrideForTesting = target
 
         controller.collapseWindowToOrb()
@@ -327,7 +338,15 @@ final class SurfaceWindowTests: XCTestCase {
         let openOrbPoint = try XCTUnwrap(controller.morphModel.windowOrbPoint)
         let openAnchor = CGPoint(x: openFrame.minX + openOrbPoint.x, y: openFrame.maxY - openOrbPoint.y)
 
-        let target = CGPoint(x: screen.midX + 220, y: screen.midY + 90)
+        // Derived from the OPEN ANCHOR, never from a fixed screen point. The open anchor tracks the
+        // live OS mouse position (this suite cannot move it), so a fixed target lands arbitrarily
+        // close to it depending on where the user's cursor happens to rest — and BOTH ">50pt" guards
+        // below then fail for a reason that has nothing to do with the regression under test. This
+        // branch paid for that three times. Offset toward whichever half of the screen has room, far
+        // enough that `fenceAnchorForWindowCollapse` cannot pull it back inside 50pt.
+        let dx: CGFloat = openAnchor.x < screen.midX ? 240 : -240
+        let dy: CGFloat = openAnchor.y < screen.midY ? 160 : -160
+        let target = CGPoint(x: openAnchor.x + dx, y: openAnchor.y + dy)
         XCTAssertGreaterThan(
             hypot(target.x - openAnchor.x, target.y - openAnchor.y), 50,
             "the test target must actually differ from the open anchor for this regression to mean anything"

@@ -89,6 +89,14 @@
 //      and removed CEF's host view while nothing ever rebuilt it — a permanently blank rectangle,
 //      no placeholder, no Try again, for the life of the process.
 //
+//      **browser-runtime T4 retired the mechanism this point turns on, and left the conclusion
+//      standing.** The container belongs to `BrowserRuntime` now, not to the SwiftUI tree, and
+//      dismantling the panel's viewport only DETACHES it (`PanelViewport.dismantleNSView`) — so the
+//      teardown chain above closes no browser on any path, attached or not, and the blank-rectangle
+//      failure it describes is no longer reachable from here. Where browsers are actually closed at
+//      a real quit is unchanged: `NormaCEFShutdown`'s own `NormaCEFCloseAllBrowsers`, inside an
+//      `@autoreleasepool` before the bounded pump drain (`NormaCEF.mm`, Task 6).
+//
 // Dropping the call rather than making the unattached case tear down on hide, because the call was
 // redundant on the one path where it worked (`NormaCEFShutdown` calls `NormaCEFCloseAllBrowsers`
 // itself, then drives the pump bounded, which is CEF's own external-pump sample shape) and harmful

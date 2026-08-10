@@ -4,8 +4,9 @@ import Foundation
 /// about it.** Pure, and the only place either question is answered on the Mac side.
 ///
 /// This exists because Task 6b builds the FIRST PRODUCER of a panel tab's `url`. Task 6a created
-/// the consumer — `PanelWebTab.makeContent()` loads `tab.url` verbatim into a real Chromium
-/// browser — at a time when nothing anywhere could set one, so the policy had nothing to guard yet.
+/// the consumer — a stored `tab.url` loaded verbatim into a real Chromium browser, in the view then
+/// and in `BrowserRuntime.create` since browser-runtime T3/T4 — at a time when nothing anywhere
+/// could set one, so the policy had nothing to guard yet.
 /// The URL bar below changes that, which is why this lands WITH it rather than after: a
 /// `javascript:` URL typed into that field would otherwise be persisted to a permanent session log
 /// and re-executed against the page on every restore, forever (sessions are user-delete-only).
@@ -37,7 +38,8 @@ import Foundation
 /// **`mayOpenTab` (below) is door "1b"** — the app's OTHER producer of a panel url,
 /// `ShellSessionHost.openPanelTab(url:)`, added by the Task 6b review. Deliberately not renumbered:
 /// "enforcement point 3" and "the four places" are named verbatim in `PanelWebTab.swift`,
-/// `methods.ts` and this file's tests, and renumbering would make every one of them wrong.
+/// `BrowserRuntime.swift` (where point 3 actually runs since browser-runtime T3), `methods.ts` and
+/// this file's tests, and renumbering would make every one of them wrong.
 ///
 /// **Not every caller of `isAllowed` is one of these doors.** `PanelWebTabModel.displayURL` and the
 /// `⋮` menu ask the same question for PRESENTATION — what the address bar shows, whether Copy Link

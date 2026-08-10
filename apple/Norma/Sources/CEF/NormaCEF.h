@@ -93,8 +93,8 @@ void NormaCEFCreateBrowser(NSView *parent, const char *url);
 ///
 /// Registered against the CONTAINER VIEW rather than a browser id, because the container exists
 /// before the browser does — creation is asynchronous and may be queued behind
-/// `OnContextInitialized` — so a registration made at `makeNSView` time is already in place
-/// whenever the browser finally arrives.
+/// `OnContextInitialized` — so a registration made at create time (`BrowserRuntime.wire`, before
+/// the create is even queued) is already in place whenever the browser finally arrives.
 void NormaCEFSetStateObserver(NSView *parent, void (^observer)(NormaCEFBrowserState *state));
 
 /// Observe COMMITTED TOP-LEVEL NAVIGATIONS of the browser hosted by `parent` — the producer behind
@@ -161,8 +161,12 @@ void NormaCEFSetNavigationObserver(NSView *parent, void (^observer)(NSString *ur
 void NormaCEFSetPopupObserver(NSView *parent, void (^observer)(NSString *url));
 
 /// Prime a tab with what the daemon ALREADY knows about it, before its browser is created. Two
-/// effects, both of which exist because **one browser per tab is created and destroyed on every tab
-/// SWITCH** (`PanelCEFView` is `.id`'d by tab):
+/// effects, both of which exist because **a tab's browser can be created more than once over that
+/// tab's life, each time with an empty dedupe memory**. Until browser-runtime T4 that happened on
+/// every tab SWITCH (the panel's content view was `.id`'d by tab and owned the browser); since T4
+/// the runtime owns it and a switch is a container swap, so the re-creations left are the ones that
+/// matter longest — a session hop, a relaunch, and a tab whose browser the lifecycle engine stopped
+/// coming back:
 ///
 ///  1. **It suppresses the restore re-report.** A fresh browser has an empty dedupe memory, so
 ///     loading the tab's own persisted URL commits, fires `OnLoadEnd`, and reports a
@@ -282,7 +286,8 @@ NSObject *NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere(void);
 NSObject *NormaCEFRecordAfterACloseHandsTheHostViewBack(NSView *hostView);
 
 /// Close the browser hosted by `parent`, and cancel any creation still on its way to becoming one.
-/// Called from `NSViewRepresentable.dismantleNSView`.
+/// Called from `BrowserRuntime.stop` (via `CEFDriver.closeBrowser`) — the ONLY production caller
+/// since the T4 viewport rewire; `dismantleNSView` now detaches the viewport and closes nothing.
 ///
 /// A creation can be waiting in either of two queues when this is called, and the second is why the
 /// implementation is more than a close: requests made before the CEF context came up are ours to
@@ -323,6 +328,14 @@ void NormaCEFCloseAllBrowsers(void);
 /// closed (live browsers=0)` arrives first. **So `shutting down (N…)` with N > 0 is a genuine
 /// tripwire now and was not before** — before, on any quit with a tab open, it was the normal
 /// outcome and the renderer was reclaimed by process exit rather than by the close.
+///
+/// browser-runtime T7 measured that at the runtime's full world — 8 browsers, 7 of them parked with
+/// their containers still held by `BrowserRuntime.containers` (and playing: `playing=7 refused=0`,
+/// sampled per tab, under `--autoplay-policy=no-user-gesture-required`) — and at a quit racing
+/// creations still inside CEF's queue. **N = 0 in both, and the drain used `0/50` of its
+/// turns in both**, because the pool's `dealloc`s complete the closes synchronously before the loop
+/// is reached. The implementation states the whole contract, including the one nonzero that is
+/// reachable in principle and has never been observed; expect 0 on every healthy quit.
 ///
 /// **A TRUE no-op if CEF was never initialised**: it does not run, and it does not record itself as
 /// having run — `NormaCEFDidShutdown` stays NO, so a process that merely passed through this call

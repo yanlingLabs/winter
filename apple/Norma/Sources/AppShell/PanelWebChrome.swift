@@ -90,8 +90,11 @@ final class PanelWebTabModel: ObservableObject {
     @Published private(set) var canGoBack = false
     @Published private(set) var canGoForward = false
 
-    /// The container CEF's view is parented into — the handle every verb needs. Weak: the view's
-    /// owner is SwiftUI, and a tab switched away from must not be kept alive by this.
+    /// The container CEF's view is parented into — the handle every verb needs. Weak: the strong
+    /// owner is `BrowserRuntime.containers` now, not SwiftUI, and a tab switched away from is
+    /// DELIBERATELY kept alive by that registry — this reference must not become a second, competing
+    /// owner that outlives what the runtime decides. It goes nil exactly when the runtime actually
+    /// releases the container (`stop`), never merely on a tab switch.
     weak var container: PanelCEFContainerView?
 
     init(tabId: String) {
@@ -112,8 +115,9 @@ final class PanelWebTabModel: ObservableObject {
     /// It exists because the ADDRESS BAR'S DEFAULT STATE was a ~900-character percent-encoded
     /// inline document. A fresh tab loads `panelWebTabStartPageURL` — a `data:` URL — and Chromium
     /// commits it exactly like a real page, so `OnAddressChange`/`OnLoadEnd` publish it into `url`
-    /// and the field displayed it. `PanelCEFView.makeNSView` already seeds the DISPLAYED address as
-    /// `""` when the policy refuses the URL being loaded; that intent was right and the live
+    /// and the field displayed it. The browser's create path already seeds the DISPLAYED address as
+    /// `""` when the policy refuses the URL being loaded (`BrowserRuntime.create`, which absorbed
+    /// that seed from the view in browser-runtime T3); that intent was right and the live
     /// channel overwrote it one turn later. This is the same intent, held on the channel that was
     /// undoing it — and the same shape the `⋮` menu already uses, so there is ONE answer to "may
     /// this address be shown to the user", asked everywhere it is shown.
