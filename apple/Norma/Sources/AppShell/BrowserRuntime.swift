@@ -14,9 +14,16 @@ import Foundation
 /// in the order given, naively — no reordering, no deduping, no inference. The engine's own header
 /// states the two orderings that are hard contracts (detach before every stop; create before
 /// attach) precisely so a naive executor is sufficient, and staying naive is what keeps that true.
-/// There is exactly ONE documented departure, and it is an obligation the engine imposes rather
-/// than a decision this file takes: `scheduleStop`'s "keep or re-arm the timer until you actually
-/// see `cancelScheduledStop`" (see `lingerFired`).
+/// Two documented departures, and neither is a decision about whether a browser should exist.
+/// **(1)** `scheduleStop`'s "keep or re-arm the timer until you actually see
+/// `cancelScheduledStop`" — an obligation the engine imposes on its executor (see `lingerFired`).
+/// **(2)** Application is NOT fully synchronous: `create` parks and wires its container inline but
+/// defers the CEF call by one turn (`startBrowser`), so a `.attachViewport` applied later in the
+/// same plan reaches its container BEFORE the browser is asked for. Create-before-attach still
+/// holds in the sense the engine's contract needs — there is a container to mount — but it is
+/// inverted in the CEF sense, and that inversion is load-bearing: it is why the responder restore
+/// runs a second time after the create, and why the hop re-checks that the runtime still owns the
+/// container it was handed.
 ///
 /// What it owns:
 ///   * `tabId → PanelCEFContainerView`, strongly — the registry that outlives every view update;
@@ -253,9 +260,16 @@ final class BrowserRuntime {
     /// shape, which Task 1 measured as indistinguishable from ordered-out and offscreen on audio,
     /// rAF, timers, visibility and CPU (Fact 9), so the simplest wins.
     ///
-    /// Its size is a plausible desktop viewport rather than anything derived: a parked page is a
-    /// real page and lays itself out against whatever it is given, and every attach resizes it
-    /// exactly (Fact 4 — set the frame after `addSubview` and the page follows).
+    /// **Its size is load-bearing for headless, and this rect is where a never-attached browser
+    /// lives for life.** `CreateBrowserNow` reads `[parent bounds]` exactly ONCE, at creation, and
+    /// hands it to `CefWindowInfo::SetAsChild` (`NormaCEF.mm`) — so a browser created into a parked
+    /// container is laid out at whatever the container measured at that instant. An *attach* fixes a
+    /// visible tab (Fact 4: set the frame after `addSubview` and the page follows, via
+    /// `resizeSubviews(withOldSize:)`), but a browser created parked and NEVER attached — spec §5's
+    /// headless case, and the whole of B2's — has no such rescue: at a zero-sized parking window it
+    /// would run at zero width forever, laying out as if on a viewport nobody could ever see.
+    /// 1280×800 is therefore a plausible desktop viewport chosen deliberately, not an arbitrary
+    /// placeholder, and `BrowserRuntimeTests` pins that a create measures a non-zero container.
     var parkingWindow: NSWindow {
         if let existing = parkingWindowStorage { return existing }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
@@ -516,10 +530,22 @@ final class BrowserRuntime {
             // into the page fixes it in any case, since Chromium's own focus machinery then runs),
             // or Chromium's view tree has changed shape, which is. More than one: the choice below
             // is a guess.
+            //
+            // A THIRD cause reaches neither of those branches and is logged separately below: the
+            // search finds its one candidate, but the host is not in a window yet (SwiftUI runs
+            // `makeNSView` before the view joins one). `count == 1` would otherwise make that the
+            // only silently-skipped restore on the one path the spike calls silently breakable.
             NSLog("[BrowserRuntime] first-responder search for \(tabId) found \(found.count) "
                   + "candidates (matched by \(found.matchedBy.rawValue)) — expected exactly 1")
         }
-        guard let view = found.view, let window = container.window else { return }
+        guard let view = found.view else { return }
+        guard let window = container.window else {
+            // See the third cause above. Not an error — the next attach, once the host has joined a
+            // window, restores it — but it must not be the one exit here that says nothing.
+            NSLog("[BrowserRuntime] \(tabId): container is in no window yet — first responder not "
+                  + "restored (nothing can take a keystroke until it is)")
+            return
+        }
         if !window.makeFirstResponder(view) {
             NSLog("[BrowserRuntime] \(tabId): \(NSStringFromClass(type(of: view))) refused first "
                   + "responder — the panel will take no keyboard input")

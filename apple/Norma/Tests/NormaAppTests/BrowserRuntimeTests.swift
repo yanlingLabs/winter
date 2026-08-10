@@ -52,6 +52,12 @@ final class BrowserRuntimeTests: XCTestCase {
         /// view tree into it. Tests that care about the view tree install one here.
         var onCreate: ((PanelCEFContainerView, String) -> Void)?
 
+        /// **The container's bounds AT THE INSTANT the browser was asked for**, which is the only
+        /// instant that matters: `CreateBrowserNow` reads `[parent bounds]` once and hands it to
+        /// `CefWindowInfo::SetAsChild` (`NormaCEF.mm`). Recorded separately from `log` so that the
+        /// ordering assertions stay readable.
+        private(set) var boundsAtCreate: [String: NSRect] = [:]
+
         func mark(_ view: NSView) -> String {
             let key = ObjectIdentifier(view)
             if let existing = marks[key] { return existing }
@@ -81,7 +87,9 @@ final class BrowserRuntimeTests: XCTestCase {
                     self.log.append("\(self.mark(container)) seed url=\(url) title=\(title)")
                 },
                 createBrowser: { [unowned self] container, url in
-                    self.log.append("\(self.mark(container)) create url=\(url)")
+                    let mark = self.mark(container)
+                    self.boundsAtCreate[mark] = container.bounds
+                    self.log.append("\(mark) create url=\(url)")
                     self.onCreate?(container, url)
                 },
                 closeBrowser: { [unowned self] container in
@@ -293,6 +301,26 @@ final class BrowserRuntimeTests: XCTestCase {
         XCTAssertNotNil(container)
         XCTAssertTrue(container?.window === window, "the container must be in the parking window")
         XCTAssertEqual(container?.frame, window.contentView?.bounds)
+    }
+
+    /// **The parked container must be a REAL SIZE before the browser is asked for, and this is the
+    /// only moment that can be checked.** `CreateBrowserNow` reads `[parent bounds]` exactly once
+    /// and hands it to `CefWindowInfo::SetAsChild` (`NormaCEF.mm`), so the rect a browser is born
+    /// with is whatever the container measured at that instant. A tab that is later attached is
+    /// rescued by `resizeSubviews(withOldSize:)` — but spec §5's headless browsers, and every one of
+    /// B2's, are created parked and may NEVER be attached. At a zero-sized parking window they would
+    /// lay out at zero width for life, and every other row in this file would stay green: they
+    /// assert the container matches the parking window's bounds, which is just as true at zero.
+    func testTheContainerHasARealViewportSizeAtTheMomentTheBrowserIsAskedFor() {
+        let runtime = makeRuntime()
+        runtime.apply([.create(tabId: "t1", url: "https://example.com")],
+                      tabs: tabs("s1", tab("t1")), sessionOf: { _ in "s1" })
+
+        let bounds = cef.boundsAtCreate["c1"]
+        XCTAssertNotNil(bounds, "the browser must have been asked for at all")
+        XCTAssertEqual(bounds, NSRect(x: 0, y: 0, width: 1280, height: 800))
+        XCTAssertTrue((bounds?.width ?? 0) > 0 && (bounds?.height ?? 0) > 0,
+                      "a headless browser born into a zero-sized container lays out at zero for life")
     }
 
     /// **Enforcement point 3, moved here intact.** `PanelWebTab.makeContent()` ran the stored URL
@@ -532,6 +560,38 @@ final class BrowserRuntimeTests: XCTestCase {
         runtime.apply([.stop(tabId: "t1")], tabs: [:], sessionOf: { _ in nil })
 
         XCTAssertNil(runtime.viewportTabId)
+    }
+
+    /// **Stopping a BROWSER is not closing a TAB, and the model is where that difference shows.**
+    /// `PanelWebTabModels.discard` belongs to `ShellSessionHost.closePanelTab`; calling it here
+    /// would blank the chrome of a tab that is still open and still in the strip — the URL field,
+    /// the title, the back/forward state would all go empty the moment the linger expired, with the
+    /// tab still sitting there. The verbs going quiet is correct — the runtime drops the container,
+    /// and the model holds it weakly — but losing the address is not.
+    ///
+    /// Deliberately does NOT assert that `model.container` has become nil: that is autorelease
+    /// timing, not a claim this file gets to make. What is asserted is the thing the runtime
+    /// decides — it no longer owns the container — plus everything the model kept.
+    func testStoppingABrowserKeepsTheTabsModelAndTheStateItIsShowing() {
+        let runtime = makeRuntime()
+        runtime.apply([.create(tabId: "t1", url: "https://example.com")],
+                      tabs: tabs("s1", tab("t1")), sessionOf: { _ in "s1" })
+        let state = NormaCEFBrowserState()
+        state.setValue("https://example.com/page", forKey: "url")
+        state.setValue("A Page", forKey: "title")
+        cef.stateBlocks["c1"]?(state)
+        let before = PanelWebTabModels.model(for: PanelTab(tabId: "t1", kind: .web, url: nil, title: nil),
+                                             host: nil, sessionId: nil)
+
+        runtime.apply([.stop(tabId: "t1")], tabs: [:], sessionOf: { _ in nil })
+
+        let after = PanelWebTabModels.model(for: PanelTab(tabId: "t1", kind: .web, url: nil, title: nil),
+                                            host: nil, sessionId: nil)
+        XCTAssertTrue(after === before, "a stop must not discard the tab's model — the tab still exists")
+        XCTAssertEqual(after.url, "https://example.com/page", "nor the address it was last on")
+        XCTAssertEqual(after.title, "A Page")
+        XCTAssertEqual(after.sessionId, "s1")
+        XCTAssertNil(runtime.container(forTabId: "t1"), "only the browser is gone, and the owner let go")
     }
 
     // MARK: - Viewport
