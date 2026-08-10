@@ -109,12 +109,38 @@ final class BrowserSignalsCoordinator {
     /// `attachedElsewhere` beats `stopImmediately` by design — a window closed on a playing page
     /// would keep playing until the list happened to be re-read.
     ///
-    /// Cleared wholesale by the next `session.list` answer: one answer re-describes every row, and
-    /// an answer taken after the detach genuinely does distinguish the phone from us. **The bound is
-    /// one refresh, not zero** — a response already in flight when the detach happened was computed
-    /// before it, so it can re-arm this for one more interval. That costs a few seconds of extra
-    /// playback in a rare race, never a wrong stop, and it is why this is a suppression of a signal
-    /// we cannot justify rather than an assertion that nobody else is attached.
+    /// **Cleared by the next `$rows` PUBLICATION — which is usually a full `session.list` answer but
+    /// is not always one.** `SessionDirectory.handle` patches a single row in place for
+    /// `session_activity` and `session_titled` (`SessionDirectory.swift`), and `@Published` publishes
+    /// on any assignment, so an activity event about an UNRELATED session drops this suppression
+    /// while the stale reflection it was suppressing still stands. Both ends are bounded by one poll
+    /// interval — the next real answer settles it — and the two errors point opposite ways: an early
+    /// clear defers a window-close stop (the page keeps playing), a late clear is Case A below.
+    ///
+    /// **This is NOT "never a wrong stop", and here is the case that isn't** (review round 1,
+    /// Important-1). A session **co-attached by this shell and the phone**, no turn running, window
+    /// closing:
+    ///
+    ///   1. the row reads `"active"` — correctly, because the phone is on it;
+    ///   2. the close detaches us, so this suppression is armed for that session;
+    ///   3. `attachedElsewhere` is therefore suppressed to `false`, nothing else holds it, and
+    ///      `stopImmediately` carries a `.stopNow` — **a stop spec §4 row 2 forbids**;
+    ///   4. the next publication clears the suppression, the row still says `"active"` (the phone
+    ///      never left), so the session is `hold` again and engine rule 8 RE-CREATES its shown tab.
+    ///
+    /// So the honest bound is: **a wrong stop followed by a re-create, for a session another harness
+    /// is also attached to, converging within one poll interval.** The daemon cannot rescue it —
+    /// `SessionHub.emitActivity` suppresses an emit when the derived state is unchanged
+    /// (`packages/core/src/sessions/hub.ts`), and with the phone still attached our detach changes
+    /// nothing, so no `session_activity` arrives to correct the row sooner.
+    ///
+    /// It is disclosed rather than designed away because the alternative is worse in the common
+    /// case: not suppressing at all makes EVERY window close on a page this shell alone was
+    /// attached to read as `attachedElsewhere` and keep playing — the audio surprise this whole plan
+    /// opened with, and spec §10 gate 4. Pre-B2 the blast radius here is a headless reload of a page
+    /// nothing renders (the phone sees tab state, not a viewport — spec §7); the day an agent drives
+    /// these pages it becomes a real interruption and wants a signal that separates our own
+    /// attachment from anyone else's, which `session.list` does not carry today.
     private var ownAttachmentStillCountedIn: Set<String> = []
 
     /// What was last asked of `SessionDirectory.setPolling`. **The change-guard is load-bearing,
@@ -156,8 +182,10 @@ final class BrowserSignalsCoordinator {
                 // happens and one that never does. Combine delivers the current value on subscribe,
                 // so this is populated before the first plan below.
                 self?.latestRows = rows
-                // A fresh answer describes every row, including the ones this shell's own
-                // attachment was being counted in — see `ownAttachmentStillCountedIn`.
+                // A full answer re-describes every row, including the ones this shell's own
+                // attachment was being counted in. NOT every publication is a full answer — see
+                // `ownAttachmentStillCountedIn` for the in-place single-row patches that reach here
+                // too, and for what clearing early and clearing late each cost.
                 self?.ownAttachmentStillCountedIn.removeAll()
                 self?.replan()
             }

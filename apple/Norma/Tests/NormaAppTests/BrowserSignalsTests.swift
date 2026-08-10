@@ -163,6 +163,20 @@ final class BrowserSignalsTests: XCTestCase {
         t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
     }
 
+    /// A panel host view in a real (never ordered in) window — what `PanelViewportHostView` is to
+    /// the runtime. Needed by the one row that asserts the VIEWPORT comes back, because an
+    /// `.attachViewport` action mounts nothing without a registered host that is in a window.
+    /// The window is returned so the caller can keep it alive for the test's duration; showing one
+    /// would be test pollution (the harness-wide observer sweeps stray visible windows).
+    private func makePanelHost() -> (window: NSWindow, host: NSView) {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        window.contentView = host
+        return (window, host)
+    }
+
     /// Publish a session list, the only way `SessionDirectory.rows` is ever populated — a full
     /// `session.list` answer. Every `activity` signal in this file arrives this way.
     private func publishRows(_ w: World, _ rows: [SessionSummary]) async {
@@ -616,6 +630,49 @@ final class BrowserSignalsTests: XCTestCase {
                       "the window close skipped a linger it was not granted: \(w.cef.log)")
         XCTAssertEqual(w.cef.log, transcript)
         XCTAssertFalse(w.clock.liveTimers.isEmpty, "and the linger must still be running")
+    }
+
+    /// **Obligation #3's other half: the flag clears itself when the window comes back.**
+    ///
+    /// `stopImmediately` is DERIVED (`!shellVisible && sessionId == lastPanelSessionId`), never
+    /// latched, and the three rows above all end with the window still shut — so none of them can
+    /// tell a derivation from a latch that is simply never read again. This one can, and the failure
+    /// it guards is severe rather than cosmetic: a latched flag survives the reopen, the engine's
+    /// `shownHere = attachedHere && !stopImmediately` stays false, and the re-shown session gets
+    /// `.stopNow` plus no viewport — a blank panel over a session the user is looking straight at.
+    ///
+    /// Held across the close (row `background`, so spec §4's never-stop-mid-work applies) precisely
+    /// so the reopen has something to give back: the browser must be the SAME one, not a recreated
+    /// one, and the viewport must be mounted in the panel's host again.
+    func testReopeningTheWindowGivesTheShownSessionItsViewportBackAndStopsNothing() async {
+        let w = makeWorld()
+        await publishRows(w, [row("s1", activity: "background")])
+        let t = await openOneWebTab(w)
+
+        let (window, panelHost) = makePanelHost()
+        w.runtime.attachViewport(tabId: "t1", into: panelHost)
+        XCTAssertEqual(w.runtime.viewportTabId, "t1", "the premise: the panel is showing this tab")
+        let container = w.runtime.container(forTabId: "t1")
+        let transcript = w.cef.log
+
+        w.host.setShellVisible(false)
+        XCTAssertTrue(w.runtime.isLive(tabId: "t1"), "held mid-work, as spec §4 requires")
+        XCTAssertNil(w.runtime.viewportTabId, "and the viewport is given back while hidden")
+        XCTAssertTrue(container?.window === w.runtime.parkingWindow, "parked, not left in the panel")
+
+        w.host.setShellVisible(true)
+        await waitUntilMade(w.factory, 2)          // the re-show re-attaches on a fresh socket
+        await answerHandshake(w.factory.made[1], sessionId: "s1")
+
+        XCTAssertEqual(w.runtime.viewportTabId, "t1",
+                       "the reopened window shows a blank panel: \(w.cef.log)")
+        XCTAssertTrue(w.runtime.container(forTabId: "t1") === container,
+                      "the user came back to a different browser")
+        XCTAssertTrue(container?.superview === panelHost)
+        XCTAssertEqual(w.cef.log, transcript,
+                       "a close-and-reopen must reach CEF not at all: \(w.cef.log)")
+        _ = t
+        withExtendedLifetime(window) {}
     }
 
     // MARK: - Wiring (ledger obligation #6) and the new-chat page

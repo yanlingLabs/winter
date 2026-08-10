@@ -279,7 +279,7 @@ final class PanelViewportTests: XCTestCase {
     ///     itself; `BrowserSignalsTests
     ///     .testAStoredHostileURLNeverReachesCEFThroughTheFoldThatRestoresIt` pins that the path a
     ///     user actually takes — a fold, through the engine — reaches it.
-    ///   * `runtime.host` — `BrowserSignalsTests.testTheRuntimeIsWiredBeforeTheFirstCreate`
+    ///   * `runtime.host` — `BrowserSignalsTests.testTheShellHostIsWiredBeforeTheFirstCreateRuns`
     ///     (ledger obligation #6), which is stronger: the coordinator wires it in `init`, before
     ///     any plan can run, rather than on the first viewport attach.
     ///
