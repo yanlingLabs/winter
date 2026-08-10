@@ -208,8 +208,8 @@ struct PanelCEFView: NSViewRepresentable {
     /// Task 6b: the observers are cleared FIRST. Every block captures the model weakly, so a late
     /// callback would be harmless — but a `panel_tab_navigated` filed by a tab the user has already
     /// closed is not harmless, it is a permanent line in a log describing something that is no
-    /// longer on screen. The popup channel is cleared here for the same reason and it is the
-    /// stronger case of the two: a tab OPENED by a page whose own tab is gone would be a visible,
+    /// longer on screen. The popup channel is cleared here for the same reason, and it is the
+    /// sharpest case of the three: a tab OPENED by a page whose own tab is gone would be a visible,
     /// permanent artefact of a browser the user already closed.
     static func dismantleNSView(_ nsView: PanelCEFContainerView, coordinator: ()) {
         NormaCEFSetStateObserver(nsView, nil)

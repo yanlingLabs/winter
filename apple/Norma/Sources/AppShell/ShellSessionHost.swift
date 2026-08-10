@@ -499,11 +499,12 @@ final class ShellSessionHost: ObservableObject {
         if let sessionId {
             Task { @MainActor [weak self] in
                 _ = try? await client.openPanelTab(sessionId: sessionId, kind: kindRaw, url: url, title: title)
-                // The same re-fetch `closePanelTab` makes while unattached, for the identical
-                // reason: only the ATTACHED session has a live event pump, so a tab opened in any
-                // other one — the new-chat page's BOUND session is the case that exists today, and
-                // it can host a browser — would sit in the daemon, real and persisted, with the tab
-                // strip never showing it.
+                // The re-fetch `closePanelTab` makes while unattached, for the identical reason and
+                // generalised to "not the attached session" because this door can name ANY session
+                // rather than only the attached-or-bound one: only the ATTACHED session has a live
+                // event pump, so a tab opened in any other — the new-chat page's BOUND session is
+                // the case that exists today, and it can host a browser — would sit in the daemon,
+                // real and persisted, with the tab strip never showing it.
                 if self?.attachedSessionId != sessionId { self?.refreshPanelTabs(for: sessionId) }
             }
             return
