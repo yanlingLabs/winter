@@ -538,6 +538,82 @@ final class BrowserSignalsTests: XCTestCase {
         XCTAssertTrue(w.clock.liveTimers.isEmpty, "and it must skip the linger, not arm one")
     }
 
+    /// **Spec §4 row 2, the phone case — and the proof that the reflection suppression does not
+    /// over-suppress.** A session another harness is genuinely attached to keeps its browsers live
+    /// and headless, past the linger, with nothing of it on screen here.
+    ///
+    /// `ownAttachmentStillCountedIn` suppresses `"active"` for a session this shell has just stopped
+    /// being the attachment of, because the daemon's count includes us. It is cleared by the next
+    /// `session.list` answer — and this row is what proves that clearing happens: without it, a real
+    /// phone attachment would be suppressed for as long as the window stayed shut and the browsers
+    /// would be stopped out from under it.
+    ///
+    /// (The T2 review's live-gate note applies to this state: attached elsewhere with no reachable
+    /// UI here means audio nobody in this app can stop. Spec-sanctioned, and pinned as such.)
+    func testASessionAnotherHarnessIsAttachedToKeepsItsBrowsersPastTheLinger() async {
+        let w = makeWorld()
+        await publishRows(w, [row("s1", activity: "idle"), row("s2", activity: "idle")])
+        let t = await openOneWebTab(w, sessionId: "s2", tabId: "b1", url: "https://b.example")
+
+        w.host.select("s1")
+        await answerReattach(t, attachIndex: 2)
+        XCTAssertFalse(w.clock.liveTimers.isEmpty, "the departed session's linger is armed")
+
+        // A NEW answer from the daemon, taken after this shell detached: s2 is still "active", so
+        // somebody else is on it.
+        await publishRows(w, [row("s1", activity: "idle"), row("s2", activity: "active")])
+        XCTAssertTrue(w.clock.liveTimers.isEmpty,
+                      "any signal returning cancels the linger (spec §4)")
+
+        let transcript = w.cef.log
+        w.clock.current += BrowserLifecycleEngine.stopLinger + 1
+        w.coordinator.replan()
+
+        XCTAssertTrue(w.runtime.isLive(tabId: "b1"),
+                      "the phone's pages were stopped out from under it: \(w.cef.log)")
+        XCTAssertEqual(w.cef.log, transcript, "and nothing at all was touched: \(w.cef.log)")
+    }
+
+    /// **Archived outranks every live-holding signal** (engine rule 6): the session is gone, so a
+    /// turn still marked running on it is not a reason to keep renderers. Stopped on the pass that
+    /// learns it, with no linger — even though this shell is the one DISPLAYING it.
+    func testArchivingTheDisplayedSessionStopsItsBrowsersWithNoLinger() async {
+        let w = makeWorld()
+        await publishRows(w, [row("s1", activity: "active")])
+        await openOneWebTab(w)
+
+        await publishRows(w, [row("s1", activity: "archived")])
+
+        XCTAssertFalse(w.runtime.isLive(tabId: "t1"),
+                       "an archived session kept its renderers: \(w.cef.log)")
+        XCTAssertTrue(w.cef.log.contains("c1 close"), "log was \(w.cef.log)")
+        XCTAssertTrue(w.clock.liveTimers.isEmpty, "archived skips the linger, it does not arm one")
+    }
+
+    /// **Leaving a session is not closing the window on it.** Navigating to a landing detaches and
+    /// un-displays the session while the window is still open; spec §4 grants the linger skip to the
+    /// session the window was VIEWING, and that one was already abandoned — it is entitled to its
+    /// 300 seconds like any other. Remembering "the last session ever displayed" instead would
+    /// silently convert every later window close into a stop for a session nobody was looking at.
+    func testASessionLeftWhileTheWindowWasOpenKeepsItsLingerWhenTheWindowLaterCloses() async {
+        let w = makeWorld()
+        await publishRows(w, [row("s1", activity: "idle")])
+        await openOneWebTab(w)
+
+        // Navigate to a landing: detaches, un-displays, arms the linger — window still open.
+        w.host.deselect()
+        XCTAssertTrue(w.runtime.isLive(tabId: "t1"))
+        XCTAssertFalse(w.clock.liveTimers.isEmpty, "the linger is armed for the session just left")
+
+        let transcript = w.cef.log
+        w.host.setShellVisible(false)
+
+        XCTAssertTrue(w.runtime.isLive(tabId: "t1"),
+                      "the window close skipped a linger it was not granted: \(w.cef.log)")
+        XCTAssertEqual(w.cef.log, transcript)
+        XCTAssertFalse(w.clock.liveTimers.isEmpty, "and the linger must still be running")
+    }
+
     // MARK: - Wiring (ledger obligation #6) and the new-chat page
 
     /// **Obligation #6: `host` is set before anything can be created, not merely by the end of

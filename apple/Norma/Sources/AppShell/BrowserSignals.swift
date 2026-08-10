@@ -60,13 +60,21 @@ final class BrowserSignalsCoordinator {
 
     private var cancellables = Set<AnyCancellable>()
 
-    /// The session the panel was displaying the last time it was displaying anything.
+    /// The session the panel is displaying, or — once nothing is displayed **because the window
+    /// went away** — the one it was displaying when that happened. `nil` otherwise.
     ///
     /// Needed because hiding the shell window DETACHES (`ShellSessionHost.applyPolicy` → the
     /// policy table's hidden row), which clears `PanelStore.currentSessionId` before this
     /// coordinator ever runs — so by the time a re-plan happens, "the session the window was
     /// viewing" exists nowhere else. Spec §4's window-close rule is stated about exactly that
     /// session.
+    ///
+    /// **"Last displayed while the window was open" would be a different, wrong thing**, and the
+    /// difference is reachable: view a session, navigate to the dashboard (which detaches and
+    /// un-displays it while the window is still open), then close the window. Spec §4 grants the
+    /// linger skip to the session the window was VIEWING; that one was already abandoned and is
+    /// entitled to its 300 seconds like any other. So a pass that finds nothing displayed **while
+    /// the window is open** clears this — the user left the session, the window did not.
     private var lastPanelSessionId: String?
 
     /// `AppWindowController.isRenderingActive`, mirrored — the poll's ORIGINAL gate, which this
@@ -217,7 +225,13 @@ final class BrowserSignalsCoordinator {
     /// state maps onto the engine's vocabulary.
     private func assemble() -> (sessions: [String: BrowserSignals], tabs: [String: [BrowserTabState]]) {
         let displayed = host.panelStore.currentSessionId
-        if let displayed { lastPanelSessionId = displayed }
+        if let displayed {
+            lastPanelSessionId = displayed
+        } else if host.shellVisible {
+            // Nothing displayed and the window is still open: the session was left, not closed on.
+            // See `lastPanelSessionId` for why that must not read as a window close.
+            lastPanelSessionId = nil
+        }
 
         // This shell has stopped being some session's attachment (a hop, a detach, a window close).
         // Its row's `"active"` was answered while we were still counted in it.
