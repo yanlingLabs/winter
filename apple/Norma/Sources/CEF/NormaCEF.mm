@@ -285,11 +285,23 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 @interface NormaCEFOpenBrowser : NSObject
 /// CEF's own view — the one `SetAsChild` parented into the container.
 ///
-/// **Strong on purpose.** Nothing else has to retain it: the close path's own
-/// `[hostView removeFromSuperview]` can drop the last reference, and the next caller to ask CEF for
-/// the handle gets a pointer to freed memory. Holding it here means the view a close path detaches
-/// is always a real object, and it is released when the browser is destroyed and no close can ask
-/// for it again.
+/// **Strong on purpose, and released at close INITIATION rather than at `OnBeforeClose`.** Both
+/// halves of that sentence are load-bearing and each fixes a shipped bug:
+///
+///   * Strong, because the close path's own `[hostView removeFromSuperview]` can drop the last
+///     reference. Anything that reads this afterwards must get a real object or `nil`, never a
+///     pointer into freed memory — the `CrZombie` crash `NormaCEFOpenBrowser` was added for.
+///   * Released at close initiation, because **`-[CefBrowserHostView dealloc]` IS how a windowed
+///     close completes.** It calls `AlloyBrowserHostImpl::WindowDestroyed()`, and once `DoClose`
+///     has answered `true` that is the only remaining route to `DestroyBrowser()` and therefore to
+///     `OnBeforeClose` (CEF 7922, `browser_platform_delegate_native_mac.mm` +
+///     `alloy_browser_host_impl.cc`; see `CompleteCloseByReleasingHostView`). Holding this until
+///     `OnBeforeClose` was a circular wait: the callback needed the view to deallocate, the view
+///     could not deallocate until the callback drained the record. `DoClose` fired, `OnBeforeClose`
+///     never did, and the renderer — with its audio — outlived the tab by the whole run.
+///
+/// So `nil` here means "already handed back to AppKit by a close", and the close paths treat it
+/// exactly as they treat a browser with no record: nothing to detach.
 @property(nonatomic, strong) NSView *hostView;
 /// The tab this browser belongs to — the bridge its `NormaClient` was built with. Pointer identity
 /// against a container's own bridge is how `BrowserForParent` maps a view to a browser without
@@ -339,11 +351,53 @@ NormaCEFOpenBrowser *OpenBrowserRecordFor(CefRefPtr<CefBrowser> browser) {
   return g_open_browsers[@(browser->GetIdentifier())];
 }
 
-/// CEF's own host view for `browser`, as captured while it was provably alive. `nil` for a browser
-/// with no record — which the close paths treat exactly as they treat a nil handle: nothing to
-/// detach.
-NSView *HostViewForBrowser(CefRefPtr<CefBrowser> browser) {
-  return OpenBrowserRecordFor(browser).hostView;
+/// **The second half of every close, and the one that actually finishes it.**
+///
+/// `DoClose` answers `true`, so CEF stops: `AlloyBrowserHostImpl::CloseContents` computes
+/// `close_browser = !handler->DoClose(this)`, takes neither branch, and resets `destruction_state_`
+/// to `DESTRUCTION_STATE_NONE`. Calling `CloseBrowser(true)` again just re-enters `DoClose` and
+/// resets again — MEASURED, not reasoned: the repro's ledger shows `DoClose->true` for the same
+/// browser id FOUR times (the close, then three sweeps) without a single `OnBeforeClose`
+/// (`docs/research/2026-08-10-cef-close-completion.md`).
+///
+/// What remains is the header's other acceptable completion — *"proceeding with window/view
+/// hierarchy tear-down"* — and on macOS that reduces to one `-dealloc`:
+///
+///   `-[CefBrowserHostView dealloc]` → `AlloyBrowserHostImpl::WindowDestroyed()`
+///     → `window_destroyed_ = true` → `CloseBrowser(true)` → `CloseContents`, which now SKIPS
+///       `DoClose` (its guard is `IsWindowless() || !window_destroyed_`) → `DestroyBrowser()`
+///         → `OnBeforeClose`.
+///
+/// So the close completes when, and only when, CEF's own view is deallocated. Detaching it is not
+/// enough; **releasing it is the whole point.** Three orderings here are deliberate:
+///
+///   1. This runs AFTER `CloseBrowser(true)`, never before. Released first, the header says
+///      `DoClose` is not called at all ("will not be called if the browser's host window/view has
+///      already been destroyed") — which would silently retire a pin, a log line and the one
+///      decision that keeps CEF from sending `performClose:` to Norma's window.
+///   2. The record lets go BEFORE the last reference drops. `OnBeforeClose` can arrive re-entrantly
+///      inside the `dealloc` this function triggers, and `ForgetOpenBrowser` would then release the
+///      record's reference to a view that is already inside its own `dealloc`.
+///   3. The record is nil'd, not erased. A later close for the same browser (a shutdown sweep over a
+///      tab the user closed a moment ago; the same tab closed twice) still finds its record, reads
+///      `nil`, and skips the detach — `nil`, never a dangling pointer. That is the `CrZombie` crash
+///      this record exists to prevent, and it is preserved here without any code messaging a freed
+///      view.
+void CompleteCloseByReleasingHostView(int browser_id) {
+  if (g_open_browsers == nil) {
+    return;
+  }
+  NormaCEFOpenBrowser *record = g_open_browsers[@(browser_id)];
+  NSView *hostView = record.hostView;
+  if (hostView == nil) {
+    return;  // no record, or an earlier close already handed the view back
+  }
+  record.hostView = nil;  // (2) — before anything can deallocate it
+  if ([hostView superview] != nil) {
+    [hostView removeFromSuperview];
+  }
+  Log("close-releases-CEFs-host-view (its dealloc is what completes the close, id=%d)", browser_id);
+  hostView = nil;  // the last reference: dealloc → WindowDestroyed() → … → OnBeforeClose
 }
 
 /// Record the ObjC side of a browser CEF has just created. **The one place in this file that casts
@@ -1006,9 +1060,12 @@ class NormaClient : public CefClient,
         break;
       }
     }
-    // Beside the erase above, exactly as `OnAfterCreated` fills both beside each other. Releases
-    // CEF's host view: no close path can ask for it again, because every one of them is reached
-    // through a browser CEF has not yet destroyed.
+    // Beside the erase above, exactly as `OnAfterCreated` fills both beside each other. By the time
+    // this runs the record's `hostView` is already `nil` — releasing it is what BROUGHT us here
+    // (`CompleteCloseByReleasingHostView`), so this drops the bridge and the empty record, not the
+    // view. Reaching here with a view still attached would mean CEF destroyed a browser whose host
+    // view outlived it, which the close paths make unreachable; the release is idempotent either
+    // way.
     ForgetOpenBrowser(browser);
     bridge_ = nil;
     Log("browser closed (id=%d, live browsers=%zu)", browser->GetIdentifier(), g_browsers.size());
@@ -1428,18 +1485,15 @@ void CreateBrowserNow(NSView *parent, const std::string &url) {
 /// browser having been closed already between `OnAfterCreated` and this turn, which
 /// `NormaCEFCloseAllBrowsers` does on the shutdown path.
 ///
-/// The host view comes from `HostViewForBrowser` rather than from CEF's window handle, and that
+/// The host view comes from the browser's own record rather than from CEF's window handle, and that
 /// matters precisely because of the case the `IsValid` guard does NOT cover: a shutdown sweep that
-/// has already detached this browser's view but whose `OnBeforeClose` has not landed yet leaves
+/// has already released this browser's view but whose `OnBeforeClose` has not landed yet leaves
 /// `IsValid` true and the handle pointing at freed memory (`NormaCEFOpenBrowser`).
 void CloseAbandonedBrowser(CefRefPtr<CefBrowser> browser, NormaCEFBrowserCreation *creation) {
   CEF_REQUIRE_UI_THREAD();
   if (browser && browser->IsValid() && browser->GetHost()) {
-    NSView *hostView = HostViewForBrowser(browser);
     browser->GetHost()->CloseBrowser(true);
-    if (hostView != nil && [hostView superview] != nil) {
-      [hostView removeFromSuperview];
-    }
+    CompleteCloseByReleasingHostView(browser->GetIdentifier());
   }
   // Only now: until the line above, CEF's host view was a subview of this one, and dropping the last
   // reference to a superview takes its subviews with it.
@@ -1781,6 +1835,31 @@ BOOL NormaCEFClientInstallsTheClickAndMenuHandlers(void) {
   return client->GetRequestHandler() != nullptr && client->GetContextMenuHandler() != nullptr;
 }
 
+NSObject *NormaCEFRecordAfterACloseHandsTheHostViewBack(NSView *hostView) {
+  // A record filled the way `RememberOpenBrowser` fills one, minus the single line that needs a
+  // `CefBrowser`: the cast of CEF's window handle. Everything the close reads — the dictionary, the
+  // key, the strong `hostView` — is the production shape.
+  if (g_open_browsers == nil) {
+    g_open_browsers = [[NSMutableDictionary alloc] init];
+  }
+  // A synthetic id. CEF never starts in the unit-test host
+  // (`testTheRuntimeRefusesToStartCEFUnderXCTest`), so no real browser can collide with it, and the
+  // key is removed again below either way.
+  const int kSeamBrowserId = -424242;
+  NormaCEFOpenBrowser *record = [[NormaCEFOpenBrowser alloc] init];
+  record.hostView = hostView;
+  record.bridge = [[NormaCEFTabBridge alloc] init];
+  g_open_browsers[@(kSeamBrowserId)] = record;
+
+  // The production close's second half, verbatim — the same function all three close paths call.
+  CompleteCloseByReleasingHostView(kSeamBrowserId);
+
+  // What `OnBeforeClose` would do next, so the seam models the whole lifetime and leaves no
+  // process-global state behind for the tests that run after it.
+  [g_open_browsers removeObjectForKey:@(kSeamBrowserId)];
+  return record;
+}
+
 NSObject *NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere(void) {
   // A bridge with no container. That is the whole point: before this fix a callback could only
   // reach a tab THROUGH a view, so this object could not exist in a test at all.
@@ -1835,28 +1914,29 @@ void NormaCEFCloseBrowser(NSView *parent) {
     //    send `performClose:` to Norma's app window — the defect this pair of changes fixes.
     // 2. Returning true means CEF hands the completion back to us: "you are still required to
     //    complete the browser close as soon as possible ... or by proceeding with window/view
-    //    hierarchy tear-down" (`cef_life_span_handler.h`). Detaching CEF's own host view IS that
-    //    tear-down.
+    //    hierarchy tear-down" (`cef_life_span_handler.h`). `CompleteCloseByReleasingHostView` IS
+    //    that tear-down, and on macOS it is a single `-dealloc` — read its comment, because the
+    //    whole close hangs off it.
     //
-    //    MEASURED, so the comment does not overclaim: this detach is NOT required on the panel-tab
-    //    path. With `DoClose` alone and this block deleted, `OnBeforeClose` still fires,
-    //    `g_browsers` still drains to 0 and the renderer still exits — SwiftUI's own release of the
-    //    container discharges the obligation. It is kept for the two cases where nothing else will:
-    //    `NormaCEFCloseAllBrowsers` (from `NormaCEFShutdown`, on the real-quit path) has no SwiftUI
-    //    dismantle behind it at all, and the header makes completion the CALLER's duty once DoClose
-    //    answers true rather than something to infer from another framework's release timing.
+    // **CORRECTING A MEASUREMENT THAT WAS TRUE AND IS NOT ANY MORE.** This block used to say the
+    // detach was optional on the panel-tab path, because B1 measured that with it deleted
+    // `OnBeforeClose` still fired and `g_browsers` still drained — SwiftUI's release of the
+    // container discharging the obligation. That was true, and it stopped being true the moment
+    // `NormaCEFOpenBrowser` started holding CEF's host view strongly (`51a43124`): SwiftUI's
+    // release no longer reaches the view, because the record outlives the container. What B1
+    // actually measured was never the DETACH — it was the RELEASE that the detach happened to
+    // cause. Re-measured on the shipped code, the close stalled for the whole 12.3 s run with the
+    // renderer alive (`docs/research/2026-08-10-cef-close-completion.md`); with the release
+    // restored the view was still alive at +0 ms and gone by the next sample at +290 ms — one
+    // autorelease drain later, which is all the 250 ms poll can resolve. Not optional on any path.
     //
-    // The view comes from this browser's own record, taken when CEF created it and held strongly
-    // until `OnBeforeClose`. Asking `GetWindowHandle()` here instead is what the fetch-before-close
-    // ordering used to be about — it "is not guaranteed to answer once the close is under way" — and
-    // the ordering was never the real hazard: the handle answers with a pointer to a view that a
-    // previous close (a shutdown sweep, or this tab closed twice) may already have detached and
-    // released. See `NormaCEFOpenBrowser`.
-    NSView *hostView = HostViewForBrowser(browser);
+    // The view comes from this browser's own record, taken when CEF created it. Asking
+    // `GetWindowHandle()` here instead is what the fetch-before-close ordering used to be about —
+    // it "is not guaranteed to answer once the close is under way" — and the ordering was never the
+    // real hazard: the handle answers with a pointer to a view that a previous close (a shutdown
+    // sweep, or this tab closed twice) may already have released. See `NormaCEFOpenBrowser`.
     browser->GetHost()->CloseBrowser(true);
-    if (hostView != nil && [hostView superview] != nil) {
-      [hostView removeFromSuperview];
-    }
+    CompleteCloseByReleasingHostView(browser->GetIdentifier());
   }
 }
 
@@ -1874,15 +1954,13 @@ void NormaCEFCloseAllBrowsers(void) {
     // completing the close is ours to do. See its comment — including why the view comes from the
     // browser's record. This sweep is where that mattered most: it runs over EVERY open browser,
     // and a tab the user closed a moment before quitting is still one of them — with a host view
-    // `NormaCEFCloseBrowser` has already detached and released, its `OnBeforeClose` still in flight.
+    // `NormaCEFCloseBrowser` has already released, its `OnBeforeClose` still in flight. That record
+    // now reads `nil`, so this sweep skips it: nil, never a pointer into freed memory.
     //
-    // Nothing is skipped as a result: a browser whose `OnBeforeClose` has run is no longer in
-    // `g_browsers` at all, and one whose close is still in flight still has its record.
-    NSView *hostView = HostViewForBrowser(browser);
+    // Nothing is skipped that shouldn't be: a browser whose `OnBeforeClose` has run is no longer in
+    // `g_browsers` at all, and one whose close is genuinely still to be started still has its view.
     browser->GetHost()->CloseBrowser(true);
-    if (hostView != nil && [hostView superview] != nil) {
-      [hostView removeFromSuperview];
-    }
+    CompleteCloseByReleasingHostView(browser->GetIdentifier());
   }
 }
 

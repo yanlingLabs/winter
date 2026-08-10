@@ -568,16 +568,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DockPolicy.apply(.accessory)
         guard !Self.isRunningUnitTests else { return }
         #if DEBUG
-        // browser-runtime Task 1: the reparenting spike takes the launch over **INSTEAD OF**
-        // `boot()`, not after it — and that placement is the point. `boot()` performs
-        // account-global side effects from whatever bundle is executing (`SMAppService` helper
-        // registration, the login item, launchd migration, the updater, the global hotkey, a
-        // second menu-bar orb), and the spike runs from a throwaway bundle in a scratch
-        // `derivedDataPath` that gets deleted afterwards; none of that may be pointed at it. The
-        // spike needs `NSWindow`s and CEF and nothing else. Gated on `NORMA_SPIKE_REPARENT=1`, so
-        // with the variable unset this is one env read and the app behaves identically.
+        // Two measurement harnesses can take the launch over — each **INSTEAD OF** `boot()`,
+        // never after it, and that placement is the point. `boot()` performs account-global side
+        // effects from whatever bundle is executing (`SMAppService` helper registration, the
+        // login item, launchd migration, the updater, the global hotkey, a second menu-bar orb),
+        // and both harnesses run from throwaway bundles in scratch `derivedDataPath`s that get
+        // deleted afterwards; none of that may be pointed at them. Each needs `NSWindow`s and CEF
+        // and nothing else. Mutually exclusive by construction (each gates on its own env var and
+        // returns); with both variables unset this is two env reads and the app behaves
+        // identically. NORMA_SPIKE_REPARENT=1 → browser-runtime Task 1's reparenting spike;
+        // NORMA_SPIKE_CLOSE_LEAK=1 → Task 6's stalled-close repro.
         if SpikeReparent.isRequested {
             SpikeReparent.start(delegate: self)
+            return
+        }
+        if SpikeCloseLeak.isRequested {
+            SpikeCloseLeak.start(delegate: self)
             return
         }
         #endif

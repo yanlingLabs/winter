@@ -639,6 +639,107 @@ final class CEFRuntimeTests: XCTestCase {
                 + "and nothing ever closes it — a leaked renderer process per abandoned tab.")
     }
 
+    /// **Closing a browser must RELEASE CEF's host view, not merely detach it.**
+    ///
+    /// The audio leak: a panel-tab close started and never finished. `DoClose` fired, `OnBeforeClose`
+    /// never did, the live-browser count never came down, and the renderer kept playing sound until
+    /// the app quit. The cause was a **circular wait** introduced by the record above.
+    /// `-[CefBrowserHostView dealloc]` is what calls `AlloyBrowserHostImpl::WindowDestroyed()`, and
+    /// once `DoClose` has answered `true` that is the only remaining route to `DestroyBrowser()` —
+    /// `CloseContents` computes `close_browser = !handler->DoClose(this)`, so a `true` answer takes
+    /// neither branch and resets the destruction state, which makes a second `CloseBrowser(true)` a
+    /// no-op loop. So `OnBeforeClose` was waiting for CEF's view to deallocate while
+    /// `NormaCEFOpenBrowser.hostView` held that view alive until `OnBeforeClose`.
+    ///
+    /// **Nothing else in this suite notices.** The close paths still run, still detach, still log,
+    /// still return; every symbol and every literal is identical whether the record lets go or keeps
+    /// holding. The only observable difference is an object's lifetime, which is what this asserts —
+    /// with the seam holding no reference of its own, a `weak` reference that goes `nil` means the
+    /// view genuinely deallocated, i.e. `WindowDestroyed()` genuinely ran.
+    ///
+    /// **What it does NOT cover, stated rather than implied.** The nil-before-release ORDERING
+    /// inside `CompleteCloseByReleasingHostView` — which stops a re-entrant `OnBeforeClose` from
+    /// releasing a view that is already inside its own `dealloc` — is not observable here, because
+    /// nothing in this host can make `OnBeforeClose` fire. Nor are the three call sites or
+    /// `RememberOpenBrowser`'s window-handle cast, which need a `CefBrowser` this host cannot
+    /// construct; the call sites are covered by the weaker built-product needle in
+    /// `testEveryCloseReleasesTheHostViewInTheBuiltProduct`.
+    func testClosingABrowserRELEASESCEFsHostViewSoTheCloseCanCOMPLETE() throws {
+        // Control. Without it, the assertion below could pass because this harness happened to drop
+        // the view for its own reasons rather than because the close did.
+        weak var unheld: NSView?
+        autoreleasepool {
+            let view = NSView(frame: .zero)
+            unheld = view
+        }
+        XCTAssertNil(unheld,
+                     "a view with no strong holder did not deallocate at scope exit — the release "
+                         + "assertion below cannot distinguish anything in this harness")
+
+        // The container CEF parents its view into, kept alive past the pool so the detach half is
+        // readable after the close.
+        let container = NSView(frame: .zero)
+        weak var hostView: NSView?
+        var record: NSObject?
+        autoreleasepool {
+            let cefView = NSView(frame: .zero)
+            container.addSubview(cefView)
+            hostView = cefView
+            record = NormaCEFRuntime.recordAfterACloseHandsTheHostViewBack(cefView)
+            XCTAssertTrue(
+                container.subviews.isEmpty,
+                "the close did not DETACH CEF's host view from the container. The header makes "
+                    + "\"proceeding with window/view hierarchy tear-down\" the host's obligation once "
+                    + "DoClose answers true.")
+        }
+
+        XCTAssertNotNil(record, "the close seam returned no record at all")
+        XCTAssertNil(
+            record?.value(forKey: "hostView"),
+            "the open-browser record still holds CEF's host view after the close. That view's "
+                + "-dealloc is what calls WindowDestroyed(), which is the ONLY route to "
+                + "DestroyBrowser()/OnBeforeClose once DoClose has answered true — so holding it is "
+                + "not a leak with a tidy-up cost, it is a browser that never closes. Measured: the "
+                + "close stalls for as long as the app runs, the renderer never exits, and its audio "
+                + "keeps playing after the user closed the tab.")
+        XCTAssertNil(
+            hostView,
+            "CEF's host view is still alive after a close that holds no reference to it — something "
+                + "else in NormaCEF.mm retains it, so its -dealloc never runs and OnBeforeClose can "
+                + "never fire. This is the audio leak, exactly.")
+    }
+
+    /// The release must still be IN the built product, at the close paths.
+    ///
+    /// Asserted on the binary for the reason the `DoClose` and zombie pins are: nothing in this host
+    /// can reach `NormaCEFCloseBrowser`, `NormaCEFCloseAllBrowsers` or `CloseAbandonedBrowser` with
+    /// CEF down. The test above proves the release WORKS; this proves the close paths still call it.
+    ///
+    /// **Known limit, the same one those pins carry:** the needle is the `Log(...)` literal inside
+    /// `CompleteCloseByReleasingHostView`, not the call sites themselves. It catches that function
+    /// being deleted or gutted — how this actually regressed — and cannot catch one of the three
+    /// call sites being removed while the other two keep it. If you change the message, change the
+    /// needle with it; the coupling is deliberate and written at both ends.
+    func testEveryCloseReleasesTheHostViewInTheBuiltProduct() throws {
+        let macOS = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
+        let binaries = [
+            macOS.appendingPathComponent("Norma.debug.dylib"),  // Debug puts the real code here
+            macOS.appendingPathComponent("Norma"),              // Release
+        ]
+        .filter { FileManager.default.fileExists(atPath: $0.path) }
+        .compactMap { try? Data(contentsOf: $0, options: .mappedIfSafe) }
+        XCTAssertFalse(binaries.isEmpty, "no app binary found to scan")
+
+        let needle = Data("close-releases-CEFs-host-view".utf8)
+        XCTAssertTrue(
+            binaries.contains { $0.range(of: needle) != nil },
+            "the close paths no longer release CEF's host view. Detaching it is not enough: "
+                + "-[CefBrowserHostView dealloc] is what calls WindowDestroyed(), the only route to "
+                + "OnBeforeClose once DoClose has answered true. Without the release every closed "
+                + "panel tab leaves a live browser and a live renderer process — with its audio — "
+                + "until the app quits.")
+    }
+
     /// **A browser-client callback must reach its tab WITHOUT touching a view.**
     ///
     /// The third live-gate crash, and the callback-side half of the two pins above. `NormaClient`'s

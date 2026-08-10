@@ -158,6 +158,17 @@ enum NormaCEFRuntime {
         NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere()
     }
 
+    /// The open-browser record left behind after a close ran against it — the produced answer to
+    /// "does closing a browser RELEASE CEF's host view, or only detach it?". Releasing it is what
+    /// runs `-[CefBrowserHostView dealloc]`, which is the only route to `OnBeforeClose` once
+    /// `DoClose` has answered `true`; a record still holding the view is a browser that never
+    /// closes and a renderer that never exits. See `NormaCEF.h` for what the returned object must
+    /// carry and why no string scan can ask this. Exposed here for the same reason as the others: a
+    /// bridging header is not a module interface, so the test bundle cannot name the C function.
+    static func recordAfterACloseHandsTheHostViewBack(_ hostView: NSView) -> NSObject? {
+        NormaCEFRecordAfterACloseHandsTheHostViewBack(hostView)
+    }
+
     /// `CefShutdown`, at the point of no return. Safe no-op if CEF was never initialised — and a
     /// no-op that leaves `didShutdown` false, so running it in the unit-test host does not latch
     /// every later test into "CEF is finished" (whole-branch F10). That is what lets
