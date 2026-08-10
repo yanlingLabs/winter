@@ -54,8 +54,9 @@ final class SpikeCloseLeakHarness {
     private let started = Date()
     private let window: NSWindow
 
-    /// The production container, the class `PanelWebTab.makeNSView` builds — so the close under
-    /// measurement is the production close, not a stand-in's.
+    /// The production container, the class the production create builds (`BrowserRuntime.create`
+    /// since browser-runtime T3; `PanelWebTab.makeNSView` when this harness was written) — so the
+    /// close under measurement is the production close, not a stand-in's.
     private var container: PanelCEFContainerView?
     /// Held only so the harness can see it go: the container SwiftUI would have released.
     private weak var containerAfterClose: PanelCEFContainerView?
@@ -116,7 +117,7 @@ final class SpikeCloseLeakHarness {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
-        // One run-loop turn before CEF comes up — `PanelWebTab.startBrowser`'s reason: CefInitialize
+        // One run-loop turn before CEF comes up — `BrowserRuntime.startBrowser`'s reason: CefInitialize
         // stands up a process tree and runs `OnContextInitialized` re-entrantly.
         DispatchQueue.main.async { [weak self] in self?.startCEF(page: page) }
     }
@@ -179,10 +180,12 @@ final class SpikeCloseLeakHarness {
 
     // MARK: Phase 1 — the close under measurement
 
-    /// **The production close, in the production order.** `PanelWebTab.dismantleNSView` clears the
-    /// three observers and calls `NormaCEFCloseBrowser`; SwiftUI then releases the container. Both
-    /// halves happen here, so a container still alive afterwards would be this harness's fault and
-    /// is asserted against rather than assumed away.
+    /// **The production close, in the production order.** `BrowserRuntime.stop` clears the three
+    /// observers and calls `NormaCEFCloseBrowser`, then unparents and releases the container — the
+    /// same two halves, in the same order, that `PanelWebTab.dismantleNSView` + SwiftUI's release
+    /// performed when this harness was written (browser-runtime T4 moved them). Both halves happen
+    /// here, so a container still alive afterwards would be this harness's fault and is asserted
+    /// against rather than assumed away.
     private func closeTheTab() {
         guard let container else { return }
         phase = "closing"

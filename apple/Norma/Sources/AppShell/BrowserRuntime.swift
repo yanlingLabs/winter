@@ -106,7 +106,8 @@ final class BrowserRuntime {
             mainAsync: { work in
                 // `assumeIsolated` rather than a `Task`: the block is being run ON the main queue,
                 // so the assumption is a statement of fact, and it keeps the hop to exactly one
-                // turn — the same one-turn hop `PanelWebTab.makeNSView` documents.
+                // turn — the same one-turn hop the view-owned create used, for the reason
+                // `startBrowser` below sets out.
                 DispatchQueue.main.async { MainActor.assumeIsolated { work() } }
             },
             timer: { fireAt, work in
@@ -324,7 +325,8 @@ final class BrowserRuntime {
 
     /// `create` = container into the parking window → wire the model → seed → `NormaCEFCreateBrowser`.
     ///
-    /// The CEF part of the sequence is `PanelWebTab.makeNSView`'s, **in its order**, and that order
+    /// The CEF part of the sequence was `PanelWebTab.makeNSView`'s, absorbed **in its order** (T4
+    /// deleted that copy, so this is now the only one), and that order
     /// is load-bearing: the state observer publishes the current snapshot the moment it is
     /// registered, and the seed is what makes that first snapshot the tab's known address instead of
     /// blank (`NormaCEF.h`). Observers, then seed, then create. The two steps BEFORE it — parking
@@ -444,6 +446,22 @@ final class BrowserRuntime {
         }
     }
 
+    /// **TEMPORARY — TASK 5 REMOVES THIS**, together with its one caller
+    /// (`PanelViewportHostView.attachToRuntime`, which carries the same marker).
+    ///
+    /// Create `tabId`'s browser unless it already has one. It exists because T4 took browser
+    /// creation out of the view (`PanelViewport` attaches and detaches, nothing more) while the
+    /// engine that decides existence — written, tested, and correct — is not yet plumbed to any
+    /// signal: between the two commits nothing at all would create a browser and the panel would
+    /// paint an empty rectangle.
+    ///
+    /// **It decides nothing.** The caller supplies the url, title and session from the tab it is
+    /// rendering, and "unless it already has one" is `create`'s own double-create guard rather than
+    /// a second rule here. That is the whole of it — one forward, no state, no policy.
+    func ensureLive(tabId: String, url: String?, title: String?, sessionId: String?) {
+        create(tabId: tabId, url: url, title: title, sessionId: sessionId)
+    }
+
     // MARK: Stop
 
     /// `stop` = clear the observers → close the browser → release the container.
@@ -544,7 +562,9 @@ final class BrowserRuntime {
         guard let view = found.view else { return }
         guard let window = container.window else {
             // See the third cause above. Not an error — the next attach, once the host has joined a
-            // window, restores it — but it must not be the one exit here that says nothing.
+            // window, restores it, and since T4 that attach is guaranteed rather than hoped for
+            // (`PanelViewportHostView.viewDidMoveToWindow` re-calls `attachViewport` on window
+            // join) — but it must not be the one exit here that says nothing.
             NSLog("[BrowserRuntime] \(tabId): container is in no window yet — first responder not "
                   + "restored (nothing can take a keystroke until it is)")
             return

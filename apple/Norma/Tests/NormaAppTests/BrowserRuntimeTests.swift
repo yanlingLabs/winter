@@ -261,7 +261,8 @@ final class BrowserRuntimeTests: XCTestCase {
 
     // MARK: - Create
 
-    /// The absorbed `makeNSView` sequence, in the order that file writes it — which is load-bearing,
+    /// The absorbed `makeNSView` sequence, in the order that file wrote it (T4 deleted the original,
+    /// so this is now the only copy) — which is load-bearing,
     /// not cosmetic: `NormaCEFSetStateObserver` publishes the current snapshot the moment it is
     /// registered, and `NormaCEFSeedTabState` is what makes that first snapshot the tab's known
     /// address instead of blank (`NormaCEF.h`). Observers, then seed, then create.

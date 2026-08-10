@@ -1265,10 +1265,13 @@ final class ShellSessionHostTests: XCTestCase {
     ///     for a route that is simply broken.
     ///
     /// **What it does not cover, stated rather than implied:** that `OnBeforePopup` actually calls
-    /// the observer, and that `PanelCEFView.makeNSView` actually registers one. CEF never starts
-    /// under XCTest (`CEFRuntimeTests.testTheRuntimeRefusesToStartCEFUnderXCTest` pins that refusal)
-    /// and `makeNSView` needs a SwiftUI `Context` no test can build, so the C++→model hop is
-    /// unreachable from this host. `CEFRuntimeTests` covers what is reachable of that half — the
+    /// the observer, and that the production create (`BrowserRuntime.create`, which absorbed the
+    /// registration from `PanelCEFView.makeNSView` in browser-runtime T3) actually registers one
+    /// against a REAL browser. CEF never starts under XCTest
+    /// (`CEFRuntimeTests.testTheRuntimeRefusesToStartCEFUnderXCTest` pins that refusal), so the
+    /// C++→model hop is unreachable from this host. (That the create registers all three observers
+    /// at all, in order, is `BrowserRuntimeTests
+    /// .testCreateWiresTheThreeObserversThenSeedsThenCreates`.) `CEFRuntimeTests` covers what is reachable of that half — the
     /// cancel VALUE, and the routing block's presence in the built product — and is equally explicit
     /// about its own limits. This is the same posture `PanelWebTabModel.apply(url:title:…)` was
     /// split out for: test the entry point CEF drives, not a parallel one.

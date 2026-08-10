@@ -7,13 +7,25 @@ import SwiftUI
 /// the slot that used to hold `Color.clear`.
 ///
 /// panel-cef Task 6b fills the chrome slot (`PanelWebChrome` — back/forward/reload, the
-/// centre-aligned URL field, the `⋮` overflow) and applies **enforcement point 3 of the URL scheme
-/// policy** below.
+/// centre-aligned URL field, the `⋮` overflow).
+///
+/// browser-runtime T4: the content slot is now a **viewport** onto a browser this type does not
+/// own (`PanelViewport` below).
 struct PanelWebTab: PanelTabContent {
     let tab: PanelTab
     /// Shared by both slots — the thing that makes the URL field and the browser it describes the
-    /// same tab. Looked up once, in `panelTabContent(for:host:)`.
+    /// same tab. Looked up once, in `panelTabContent(for:host:sessionId:)`.
     let model: PanelWebTabModel
+    /// The runtime the viewport borrows its container from. Resolved in
+    /// `panelTabContent(for:host:sessionId:)` (which is `@MainActor`, and `BrowserRuntime` is) and
+    /// carried rather than read as `.shared` further down, so a test can drive a viewport against
+    /// its own runtime — `BrowserRuntime.shared` owns containers, timers and a window, all of which
+    /// would leak from one test into the next.
+    let runtime: BrowserRuntime
+    /// TEMPORARY, both of them — the viewport's bridge needs them and nothing else here does. See
+    /// `PanelViewportHostView.attachToRuntime`'s marked block, which Task 5 deletes.
+    let sessionId: String?
+    let host: ShellSessionHost?
 
     var kind: PanelTabKind { .web }
     var title: String { panelTabDisplayTitle(tab) }
@@ -21,14 +33,19 @@ struct PanelWebTab: PanelTabContent {
 
     func makeChrome() -> AnyView { AnyView(PanelWebChrome(model: model)) }
 
-    /// **Enforcement point 3 — restore.** `PanelURLPolicy.restorableURL` stands between whatever is
-    /// stored on the tab and a real Chromium browser, and it is the last mile of the whole policy:
-    /// every other door can be bypassed by data that predates it or arrives from a producer that
-    /// does not exist yet, but this one is on the path of *every* load. A stored `javascript:` URL
-    /// would otherwise be re-executed against the page on each restore, for as long as the session
-    /// exists — which is forever, since sessions are user-delete-only.
+    /// The tab's viewport. It carries the tab through **unfiltered** and loads nothing itself:
+    /// **enforcement point 3 — restore — moved to `BrowserRuntime.create`** (browser-runtime T3),
+    /// which is the one path every browser is born on whether the panel is showing it or not.
+    /// `PanelURLPolicy.restorableURL` is still the last mile of the whole policy — a stored
+    /// `javascript:` URL would otherwise be re-executed against the page on every restore, for as
+    /// long as the session exists, which is forever — but running it here as well would put the
+    /// policy in two places while leaving the runtime's own path (spec §5's headless browsers, and
+    /// every one of B2's) depending on a view that never runs for them.
+    /// `BrowserRuntimeTests.testTheRestoreDoorRefusesEveryDisallowedSchemeAndSeedsNothingForOne`
+    /// pins it at the runtime; `PanelViewportTests
+    /// .testAStoredHostileURLNeverReachesCEFThroughTheViewport` pins that this path reaches it.
     func makeContent() -> AnyView {
-        AnyView(PanelCEFView(tab: tab, model: model, url: PanelURLPolicy.restorableURL(tab.url)))
+        AnyView(PanelViewport(tab: tab, runtime: runtime, sessionId: sessionId, host: host))
     }
 }
 
@@ -60,8 +77,15 @@ func panelTabContent(for tab: PanelTab, host: ShellSessionHost? = nil,
                      sessionId: String? = nil) -> PanelTabContent {
     switch tab.kind {
     case .web:
+        // `BrowserRuntime.shared` is read HERE, in the one main-actor function on this path, and
+        // carried down as a value — see `PanelWebTab.runtime`. Nothing on this line creates or
+        // touches a browser: building a `PanelWebTab` is free, and a test that only asks what a tab
+        // renders as never reaches the runtime at all.
         return PanelWebTab(tab: tab,
-                           model: PanelWebTabModels.model(for: tab, host: host, sessionId: sessionId))
+                           model: PanelWebTabModels.model(for: tab, host: host, sessionId: sessionId),
+                           runtime: .shared,
+                           sessionId: sessionId,
+                           host: host)
     case .document, .code, .note:
         return PanelPlaceholderTab(tab: tab)
     }
@@ -112,123 +136,178 @@ let panelWebTabStartPageURL: String = {
     return "data:text/html;charset=utf-8,\(encoded)"
 }()
 
-// MARK: - Hosting CEF's NSView
+// MARK: - The viewport onto a runtime-owned container
 
-/// The SwiftUI seam. `CefWindowHandle` IS an `NSView*` on macOS, so `CefWindowInfo::SetAsChild`
-/// adds Chromium's own view as a subview of the container below — no layer surgery, no offscreen
-/// rendering.
+/// browser-runtime T4: the SwiftUI seam — **a viewport, not an owner** (spec §2's ownership
+/// inversion, on the view side).
 ///
-/// **One browser per tab, for this task.** The view is `.id`'d by tab in `ShellPanel`, so switching
-/// tabs dismantles this representable and closes its browser; switching back creates a fresh one at
-/// the tab's URL. That is a known, deliberate gap — a browser that survives tab switches needs a
-/// registry keyed by `tabId` and a close hook wired to `panel_tab_closed`, which is more lifecycle
-/// than "a page renders in the panel" is scoped to carry.
-struct PanelCEFView: NSViewRepresentable {
+/// **Before:** this representable created a browser in `makeNSView` and closed it in
+/// `dismantleNSView`, so a browser's existence was welded to a mounted view: a tab switch was a
+/// create/destroy churn and the page's scroll position, video, form text and JS heap died with it.
+/// Everything that used to happen here — the three observer channels, the seed, the deferred
+/// `NormaCEFCreateBrowser` and its unavailable/retry placeholder — is `BrowserRuntime`'s create
+/// path now (`BrowserRuntime.swift`, absorbed bit-for-bit in T3), and this file no longer calls
+/// into `NormaCEF*` at all.
+///
+/// **After:** this view does exactly two things — hand the runtime a host `NSView` to mount the
+/// tab's container into while the tab is on screen, and give it back when it is not. Neither is a
+/// create or a destroy; both are `addSubview` moves. `CefWindowHandle` IS an `NSView*` on macOS,
+/// which is what makes that possible at all: Chromium's own view is a subview of the container, so
+/// moving the container moves the page, live.
+struct PanelViewport: NSViewRepresentable {
     let tab: PanelTab
-    let model: PanelWebTabModel
-    let url: String
+    /// Carried from `panelTabContent`, never read as `.shared` here — see `PanelWebTab.runtime`.
+    let runtime: BrowserRuntime
+    /// TEMPORARY, with `host` below: the two things `attachToRuntime`'s marked block needs, and
+    /// the only reason either is threaded this far. Task 5 deletes them with it.
+    let sessionId: String?
+    let host: ShellSessionHost?
 
-    func makeNSView(context: Context) -> PanelCEFContainerView {
-        let container = PanelCEFContainerView()
-        model.container = container
-
-        // panel-cef Task 6b: both channels are registered BEFORE the browser exists — that is why
-        // the bridge keys them on the container view rather than on a browser id. Creation is
-        // asynchronous and can queue behind `OnContextInitialized`, so there is no later moment
-        // that is guaranteed to come.
-        NormaCEFSetStateObserver(container) { [weak model] state in
-            guard let state else { return }
-            model?.apply(state)
-        }
-        NormaCEFSetNavigationObserver(container) { [weak model] committedURL, committedTitle in
-            model?.reportCommittedNavigation(url: committedURL ?? "", title: committedTitle ?? "")
-        }
-        // A third channel, wired exactly like the two above and for the same structural reason: a
-        // popup can arrive before anything else would have had a chance to register. CEF cancels
-        // every popup regardless (`NormaCEF.h`); this is what turns the cancelled one into a real
-        // panel tab. `[weak model]` because the block is stored on the container, which the model
-        // does not own — and a popup from a tab already on its way out must open nothing.
-        //
-        // It is no longer only popups: ⌘-click / middle-click / shift-click
-        // (`CefRequestHandler::OnOpenURLFromTab`) and the context menu's "Open Link in New Tab"
-        // come down this same channel, deliberately — see `NormaCEFSetPopupObserver`'s own doc for
-        // the three producers and why there is one route rather than three.
-        NormaCEFSetPopupObserver(container) { [weak model] popupURL in
-            model?.openPopupAsTab(url: popupURL ?? "")
-        }
-        // Prime the dedupe memory AND the displayed address with what the daemon already knows, so
-        // a tab switched away from and back to neither re-reports its own stored URL nor flashes an
-        // empty field. Seeded with the URL actually being loaded — if scheme policy refused the
-        // stored one, this is empty rather than the refused value.
-        NormaCEFSeedTabState(container,
-                             PanelURLPolicy.isAllowed(url) ? url : "",
-                             tab.title ?? "")
-
-        startBrowser(in: container)
-        return container
-    }
-
-    /// Bring CEF up if needed and create the browser. Split out of `makeNSView` because the
-    /// unavailable placeholder's **Try again** button runs this exact path again — the retry has to
-    /// re-do the whole sequence, not merely clear a flag, since the async block below has long since
-    /// run by the time a user reads the message and clicks.
-    private func startBrowser(in container: PanelCEFContainerView) {
-        // NOT synchronous. `makeNSView` runs inside a SwiftUI view update, and `CefInitialize`
-        // stands up a process tree, runs `OnContextInitialized` re-entrantly and starts a run-loop
-        // timer. Hopping one turn keeps all of that out of the update pass, and it is also what
-        // guarantees the run loop is genuinely spinning when CEF comes up (see `NormaCEFRuntime`'s
-        // note on Task 1's starvation hypothesis).
-        DispatchQueue.main.async {
-            guard NormaCEFRuntime.ensureInitialized() else {
-                if case .failed(let reason) = NormaCEFRuntime.state {
-                    // `[weak container]`: this closure is STORED ON the container as
-                    // `retryAction`, so a strong capture is a cycle — container → closure →
-                    // container. `didTapRetry` nils it, so it is broken the moment the button is
-                    // pressed, but a user who reads "unavailable" and never clicks would leak that
-                    // container and its whole view tree for the life of the process.
-                    container.showUnavailable(reason, retry: NormaCEFRuntime.isRetryable ? { [weak container] in
-                        guard let container else { return }
-                        NormaCEFRuntime.clearFailure()
-                        startBrowser(in: container)
-                    } : nil)
-                }
-                return
-            }
-            NormaCEFCreateBrowser(container, url)
-        }
+    func makeNSView(context: Context) -> PanelViewportHostView {
+        let hostView = PanelViewportHostView(tab: tab, runtime: runtime,
+                                             sessionId: sessionId, host: host)
+        hostView.attachToRuntime()
+        return hostView
     }
 
     /// **Deliberately empty, and it must stay that way.** SwiftUI calls this whenever a stored
-    /// property changes — including `url`, which changes the moment a committed navigation is
-    /// reported, folded by the daemon and replayed back into `PanelStore`. Loading `url` here would
+    /// property changes — including `tab.url`, which changes the moment a committed navigation is
+    /// reported, folded by the daemon and replayed back into `PanelStore`. Loading it here would
     /// therefore close a loop: navigate → report → fold → `updateNSView` → navigate to where the
     /// browser already is. Navigation is driven by the user through `PanelWebTabModel`'s verbs, and
     /// by nothing else. (The `.id(tabId)` in `ShellPanel` means a genuinely different tab arrives as
     /// a rebuild, not as an update, so there is no case this method needs to handle.)
-    func updateNSView(_ nsView: PanelCEFContainerView, context: Context) {}
-
-    /// Closing here — rather than leaking the browser and letting the container's `deinit` decide —
-    /// is what keeps a closed or switched-away tab from leaving a live renderer process behind.
     ///
-    /// Task 6b: the observers are cleared FIRST. Every block captures the model weakly, so a late
-    /// callback would be harmless — but a `panel_tab_navigated` filed by a tab the user has already
-    /// closed is not harmless, it is a permanent line in a log describing something that is no
-    /// longer on screen. The popup channel is cleared here for the same reason, and it is the
-    /// sharpest case of the three: a tab OPENED by a page whose own tab is gone would be a visible,
-    /// permanent artefact of a browser the user already closed.
-    static func dismantleNSView(_ nsView: PanelCEFContainerView, coordinator: ()) {
-        NormaCEFSetStateObserver(nsView, nil)
-        NormaCEFSetNavigationObserver(nsView, nil)
-        NormaCEFSetPopupObserver(nsView, nil)
-        NormaCEFCloseBrowser(nsView)
+    /// T4 adds a second, blunter reason: there is nothing here to load INTO. This view holds no
+    /// browser and no container — only the rectangle the runtime mounts one in.
+    func updateNSView(_ nsView: PanelViewportHostView, context: Context) {}
+
+    /// **Detach, and nothing else — stopping a browser is not this view's business any more.**
+    ///
+    /// What stood here closed the browser, justified as "keeps a closed or switched-away tab from
+    /// leaving a live renderer process behind". That justification described the ownership this task
+    /// deleted: a switched-away tab is now SUPPOSED to leave a live renderer behind — that is the
+    /// whole point of the inversion, and it is what makes a tab switch a container swap instead of a
+    /// page reload. `detachViewport` parks the container in the runtime's own window; the browser
+    /// keeps running there, unwatched and unchanged.
+    ///
+    /// **Where stopping lives now:** `BrowserRuntime.stop`, executed from a `.stop` action that
+    /// `BrowserLifecycleEngine.plan` decided (`BrowserLifecycle.swift`) on the session-lifecycle
+    /// rules of spec §4 — signals Task 5 plumbs in. This file cannot make that decision: it does not
+    /// know whether the tab is still open, whether its session is working, or whether the user is
+    /// switching away for a second or for the rest of the day.
+    static func dismantleNSView(_ nsView: PanelViewportHostView, coordinator: ()) {
+        nsView.detachFromRuntime()
     }
 }
 
-/// The container CEF parents its view into.
+/// The rectangle the runtime mounts a container into — **a hole in the SwiftUI view tree, not a
+/// browser**. It owns no CEF state and holds no container of its own; `BrowserRuntime` puts one in
+/// and takes it back out. Its whole job is to be the right size in the right place, and to say when
+/// it has joined a window.
+final class PanelViewportHostView: NSView {
+    let tab: PanelTab
+    let runtime: BrowserRuntime
+    /// TEMPORARY, with `host` below — `attachToRuntime`'s marked block, deleted by Task 5.
+    let sessionId: String?
+    /// Weak, mirroring `BrowserRuntime.host`'s own posture: the shell owns the host, and a view
+    /// must not be what keeps it alive.
+    weak var host: ShellSessionHost?
+
+    /// Set by `detachFromRuntime`. SwiftUI is finished with a dismantled host view, so it is no
+    /// longer the viewport holder — and a re-attach from a late window join would take the container
+    /// away from whatever view holds it now and mount it in a rectangle nothing is showing.
+    private var isDismantled = false
+
+    init(tab: PanelTab, runtime: BrowserRuntime, sessionId: String?, host: ShellSessionHost?) {
+        self.tab = tab
+        self.runtime = runtime
+        self.sessionId = sessionId
+        self.host = host
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("PanelViewportHostView is never unarchived") }
+
+    /// **The third responder door** (T3 review Minor-1).
+    ///
+    /// A reparent destroys first-responder status and `attachViewport` restores it (spike Fact 2) —
+    /// but it can only do that in a window, and SwiftUI runs `makeNSView` BEFORE the view it returns
+    /// joins one. That first attach therefore reaches `restoreFirstResponder`'s "container is in no
+    /// window yet" exit and logs instead of restoring. Two doors already cover their own paths — a
+    /// later plan's `.attachViewport`, and `startBrowser`'s post-create restore — and neither fires
+    /// for the ordinary case of a panel simply opening on a browser that is already live. This is
+    /// the third: the moment this view joins a window, ask for the same attach again. Without it the
+    /// panel shows the page and accepts no keystrokes, and the only trace is one line in the log.
+    ///
+    /// It is also what re-restores the keyboard when the shell's panel moves between windows.
+    ///
+    /// **The repeat is a no-op except for the responder, and that was measured rather than assumed**
+    /// (AppKit, macOS 26): `addSubview:` of a view that is ALREADY a subview of the same superview
+    /// sends no `viewWillMove(toSuperview:)` and no `viewWillMove(toWindow:)` at all — the container
+    /// is not unparented and re-parented, so the "in a window at all times" invariant spike Fact 5
+    /// rests on is never broken by asking twice. `makeFirstResponder` on a view that is already the
+    /// first responder likewise returns `true` without sending `resignFirstResponder` /
+    /// `becomeFirstResponder`. What the second attach costs is a dictionary lookup, a frame
+    /// assignment and an LRU touch.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // Leaving a window is not joining one: `nil` here is the teardown side, and the runtime has
+        // either already been told (`detachFromRuntime`) or is about to be.
+        guard window != nil else { return }
+        attachToRuntime()
+    }
+
+    /// Mount this tab's container here. Called twice for an ordinary tab open — once from
+    /// `makeNSView`, once when this view joins a window — and again whenever the panel moves
+    /// between windows.
+    func attachToRuntime() {
+        guard !isDismantled else { return }
+
+        // ─── TASK 5 REMOVES THIS ────────────────────────────────────────────────────────────────
+        // **The temporary bridge: the one place in the view layer that asks for a browser to
+        // EXIST.** T4 inverted ownership; Task 5 plumbs the signals that let
+        // `BrowserLifecycleEngine` decide existence and feeds its actions to `BrowserRuntime.apply`.
+        // Between these two commits nothing else would ever create a browser, so the panel would
+        // attach a viewport with nothing to mount (`mountViewport` logs exactly that) and paint an
+        // empty rectangle. `ensureLive` is a forward to the runtime's create and the "unless one is
+        // already live" is that create's own guard — so this asks once per tab and no-ops on every
+        // later attach, including the window-join one just above.
+        //
+        // `runtime.host` is the same bridge under a different name: the runtime binds each tab's
+        // model to it AT CREATE TIME, and a model with no host records no navigations at all — so
+        // without this line panel history would silently stop being written between T4 and Task 5
+        // (which owes the real wiring: ledger item #6). Assigned only when there IS one, so a shell
+        // built without a host — the `nil` posture `ShellPanel.host` documents — cannot clear a
+        // binding a real one made.
+        //
+        // Two knowingly-stale things, named because this marker is a promise that they go away:
+        // `tab` is whatever the fold said when SwiftUI built this view (`updateNSView` is empty by
+        // contract, so a later url never reaches here), and the trigger is a viewport attach rather
+        // than any lifecycle signal. Both are exactly what Task 5 replaces.
+        if let host { runtime.host = host }
+        runtime.ensureLive(tabId: tab.tabId, url: tab.url, title: tab.title, sessionId: sessionId)
+        // ────────────────────────────────────────────────────────────────────────────────────────
+
+        runtime.attachViewport(tabId: tab.tabId, into: self)
+    }
+
+    /// SwiftUI is done with this view: give the container back to the runtime, which parks it in its
+    /// own window. The browser is untouched — see `PanelViewport.dismantleNSView`.
+    func detachFromRuntime() {
+        isDismantled = true
+        runtime.detachViewport(tabId: tab.tabId)
+    }
+}
+
+/// The container CEF parents its view into. **Owned by `BrowserRuntime`** since browser-runtime T4
+/// — created there, parked there, released there — and merely borrowed by the viewport above.
 ///
 /// It owns exactly one behaviour beyond being an `NSView`: keeping Chromium's subview at its own
-/// bounds. CEF does not set an autoresizing mask on the view it adds, and `updateNSView` does not
-/// fire for every live-resize step, so the resize is handled here where AppKit actually reports it.
+/// bounds. CEF does not set an autoresizing mask on the view it adds, and nothing in SwiftUI fires
+/// per live-resize step, so the resize is handled here where AppKit actually reports it — and it is
+/// what carries an attach's `frame = host.bounds` through to the page (spike Fact 4).
 final class PanelCEFContainerView: NSView {
     private var unavailableLabel: NSTextField?
     private var retryButton: NSButton?

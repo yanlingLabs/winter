@@ -60,8 +60,9 @@ final class SpikeReparentHarness {
     private let parkingWindow: NSWindow
     /// Stands in for the panel: an ordinary titled window whose `contentView` is the viewport.
     private let visibleWindow: NSWindow
-    /// The real thing — the same class `PanelWebTab.makeNSView` builds, so the spike measures the
-    /// production container's autoresize path rather than a stand-in's.
+    /// The real thing — the same class the production create builds (`BrowserRuntime.create` since
+    /// browser-runtime T3; `PanelWebTab.makeNSView` when this spike was written), so the spike
+    /// measures the production container's autoresize path rather than a stand-in's.
     private let container = PanelCEFContainerView()
 
     private var steps: [(delay: TimeInterval, label: String, body: () -> Void)] = []
@@ -162,7 +163,7 @@ final class SpikeReparentHarness {
         NSApp.activate(ignoringOtherApps: true)
         log("SHOWWINDOW num=\(visibleWindow.windowNumber) key=\(visibleWindow.isKeyWindow) active=\(NSApp.isActive)")
 
-        // One run-loop turn before CEF comes up, for the reason `PanelWebTab.startBrowser` states:
+        // One run-loop turn before CEF comes up, for the reason `BrowserRuntime.startBrowser` states:
         // `CefInitialize` stands up a process tree and runs `OnContextInitialized` re-entrantly, and
         // the pump spike's un-root-caused first-load failure had startup starvation as its surviving
         // hypothesis. Deferring guarantees the run loop is genuinely spinning.

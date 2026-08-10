@@ -5,11 +5,15 @@ import XCTest
 /// panel-cef Task 6b: the browser chrome — the URL scheme policy, the field caps, and the URL row's
 /// metrics.
 ///
-/// The policy tests are the important half of this file. Task 6a created the URL *consumer*
-/// (`PanelWebTab.makeContent()` loads `tab.url` into a real Chromium browser) at a time when nothing
-/// anywhere could set one; Task 6b's URL bar is the first producer. Everything below exists because
-/// a `javascript:` URL that reached the session log would be re-executed against the page on every
-/// restore, forever — sessions are user-delete-only.
+/// The policy tests are the important half of this file. Task 6a created the URL *consumer* (a
+/// stored `tab.url` loaded into a real Chromium browser) at a time when nothing anywhere could set
+/// one; Task 6b's URL bar is the first producer. Everything below exists because a `javascript:` URL
+/// that reached the session log would be re-executed against the page on every restore, forever —
+/// sessions are user-delete-only.
+///
+/// browser-runtime T4 moved that consumer out of the view: the panel's content slot is a viewport
+/// onto a browser `BrowserRuntime` owns and creates, so the load-time half of the policy is pinned
+/// where the load happens (`BrowserRuntimeTests`, `PanelViewportTests`) rather than here.
 @MainActor
 final class PanelWebChromeTests: XCTestCase {
 
@@ -188,55 +192,50 @@ final class PanelWebChromeTests: XCTestCase {
         XCTAssertEqual(PanelURLPolicy.restorableURL("https://example.com"), "https://example.com")
     }
 
-    /// **Enforcement point 3, exercised THROUGH `PanelWebTab.makeContent()`** — the one door the
-    /// policy's own doc calls "the last mile", and the only one on the path of every single load.
+    /// **What `makeContent()` is for, after browser-runtime T4: it hands the tab to a viewport, and
+    /// filters nothing.**
     ///
-    /// The previous shape of this test built a `PanelTab` and then called
-    /// `PanelURLPolicy.restorableURL` DIRECTLY. `PanelWebTab` was never constructed and
-    /// `makeContent()` was never called, so rewriting `makeContent()` as
-    /// `PanelCEFView(tab: tab, model: model, url: tab.url ?? "")` — deleting the last mile — left
-    /// this test, and every other test in this file, green. It asserted exactly what
-    /// `testRestoreLoadsTheStartPageRatherThanAnythingOutsideTheAllowlist` asserts one line above.
-    /// A pin that cannot fail is worse than no pin, because it reads as coverage.
+    /// This test used to assert that `makeContent()` ran `PanelURLPolicy.restorableURL` on the
+    /// stored url — enforcement point 3, "the last mile" — because the view was what loaded it. T4
+    /// deleted that: `BrowserRuntime.create` is now the one path every browser is born on, including
+    /// spec §5's headless ones that no view ever renders, and running the filter here as well would
+    /// put the policy in two places while leaving the runtime's own path guarded by a view that
+    /// never runs for it. **The door is pinned where it now lives** — `BrowserRuntimeTests
+    /// .testTheRestoreDoorRefusesEveryDisallowedSchemeAndSeedsNothingForOne` at the runtime, and
+    /// `PanelViewportTests.testAStoredHostileURLNeverReachesCEFThroughTheViewport` for this path
+    /// reaching it — so what is left to assert here is the wiring: the right tab, carried through
+    /// verbatim, to a viewport.
     ///
-    /// **Mutation-verified after this rewrite**: with `makeContent()` changed to pass `tab.url` raw,
-    /// this is the ONE test in the suite that reds; restored, it passes. Recorded in the fix
-    /// round's report.
-    ///
-    /// `makeContent()` returns `AnyView`, so the url is not readable from outside — the view is
-    /// recovered by reflecting through `AnyView`'s storage (`loadedURL(of:)` below). That is
+    /// `makeContent()` returns `AnyView`, so its content is not readable from outside — the view is
+    /// recovered by reflecting through `AnyView`'s storage (`firstDescendant` below). That is
     /// SwiftUI-internal shape, and it fails LOUDLY if the shape ever changes rather than passing
     /// vacuously.
-    func testAWebTabWithAHostileStoredURLResolvesToTheStartPage() throws {
+    func testAWebTabsContentIsAViewportCarryingThatExactTab() throws {
         PanelWebTabModels.removeAllForTesting()
         defer { PanelWebTabModels.removeAllForTesting() }
 
-        let hostile = PanelTab(tabId: "t1", kind: .web, url: "javascript:alert(1)", title: "x")
-        XCTAssertEqual(
-            try loadedURL(of: hostile), panelWebTabStartPageURL,
-            "a stored javascript: URL is being handed to a real Chromium browser — "
-                + "PanelWebTab.makeContent() no longer runs PanelURLPolicy.restorableURL. Sessions "
-                + "are user-delete-only, so it would be re-executed against the page on every "
-                + "restore, forever.")
+        let tab = PanelTab(tabId: "t1", kind: .web, url: "https://example.com/a?b=1", title: "Example")
+        let viewport = try viewport(of: tab)
+        XCTAssertEqual(viewport.tab.tabId, "t1", "the panel would mount some other tab's browser")
+        XCTAssertEqual(viewport.tab.url, "https://example.com/a?b=1")
 
-        let ordinary = PanelTab(tabId: "t2", kind: .web, url: "https://example.com", title: "Example")
-        XCTAssertEqual(
-            try loadedURL(of: ordinary), "https://example.com",
-            "an allowed URL must reach the browser VERBATIM — without this the assertion above "
-                + "cannot tell 'filtered' from 'always the start page'")
+        // A stored url the policy refuses reaches the viewport UNCHANGED — the filtering happens one
+        // layer down, on the create. Asserting the raw value here is what makes that division of
+        // labour visible instead of implied: if this ever came back filtered, the runtime's own
+        // restore door would be the thing to delete, not this.
+        let hostile = PanelTab(tabId: "t2", kind: .web, url: "javascript:alert(1)", title: "x")
+        XCTAssertEqual(try self.viewport(of: hostile).tab.url, "javascript:alert(1)")
     }
 
-    /// The url `PanelWebTab.makeContent()` actually hands to a browser, read back out of the
-    /// `AnyView` it returns.
-    private func loadedURL(of tab: PanelTab) throws -> String {
+    /// The `PanelViewport` inside `makeContent()`'s `AnyView`.
+    private func viewport(of tab: PanelTab) throws -> PanelViewport {
         let content = panelTabContent(for: tab)
         XCTAssertTrue(content is PanelWebTab, "a .web tab must resolve to PanelWebTab")
-        let view = try XCTUnwrap(
-            Self.firstDescendant(PanelCEFView.self, in: content.makeContent()),
-            "no PanelCEFView inside makeContent()'s AnyView — either .web stopped resolving to the "
-                + "CEF surface, or AnyView's internal storage shape changed and this reflection "
-                + "needs updating. Either way this test is no longer covering enforcement point 3.")
-        return view.url
+        return try XCTUnwrap(
+            Self.firstDescendant(PanelViewport.self, in: content.makeContent()),
+            "no PanelViewport inside makeContent()'s AnyView — either .web stopped resolving to the "
+                + "browser surface, or AnyView's internal storage shape changed and this reflection "
+                + "needs updating. Either way this test is no longer covering the content slot.")
     }
 
     /// Depth-first search for a value of type `T` anywhere inside `value`'s reflection tree.
