@@ -466,10 +466,13 @@ final class BrowserRuntime {
 
         // Only AFTER the close, and the ordering is the same one the shipped `dismantleNSView` had.
         // CEF's close is ASYNCHRONOUS — `OnBeforeClose` lands later — but `NormaCEFCloseBrowser`
-        // detaches CEF's own host view from this container before it returns, so what is unparented
-        // here is an empty container rather than one still carrying a live CEF view. Unparenting it
-        // matters both ways round: left in the parking window it is retained for the life of the
-        // process, and left in the PANEL's host it is a dead rectangle where the page used to be.
+        // both detaches CEF's own host view from this container AND releases the registry's strong
+        // reference to it before returning (`CompleteCloseByReleasingHostView` — the release is
+        // what lets the close COMPLETE; Task 6 measured that the detach alone completes nothing).
+        // So what is unparented here is an empty container rather than one still carrying a live
+        // CEF view, and this runtime is never the last retain on that view. Unparenting it matters
+        // both ways round: left in the parking window it is retained for the life of the process,
+        // and left in the PANEL's host it is a dead rectangle where the page used to be.
         container.removeFromSuperview()
 
         lru.removeAll { $0 == tabId }
