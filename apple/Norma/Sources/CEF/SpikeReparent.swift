@@ -171,7 +171,7 @@ final class SpikeReparentHarness {
 
     private func startCEF(pageURL: String) {
         guard let helper = Self.helperExecutablePath() else {
-            log("FATAL no CEF helper bundle in this build")
+            fatal("no CEF helper bundle in this build")
             return
         }
         let cache = Self.cachePath()
@@ -189,7 +189,7 @@ final class SpikeReparentHarness {
         // observers, the chrome verbs, the close path — is the production API verbatim.
         let ok = NormaCEFInitialize(CommandLine.argc, CommandLine.unsafeArgv, cache, helper)
         guard ok else {
-            log("FATAL CefInitialize failed: \(String(cString: NormaCEFLastError()))")
+            fatal("CefInitialize failed: \(String(cString: NormaCEFLastError()))")
             return
         }
         log("CEFREADY")
@@ -211,8 +211,8 @@ final class SpikeReparentHarness {
             return
         }
         guard attempt < 120 else {
-            log("FATAL audio never started (mediaMs=\(mediaMs) ctxMs=\(ctxMs)) — last title=\(lastTitle)")
             log("HINT relaunch with --autoplay-policy=no-user-gesture-required, or click Start in the window")
+            fatal("audio never started (mediaMs=\(mediaMs) ctxMs=\(ctxMs)) — last title=\(lastTitle)")
             return
         }
         if attempt % 10 == 0 {
@@ -453,7 +453,29 @@ final class SpikeReparentHarness {
     private func finish() {
         log("END steps=\(stepIndex)/\(steps.count) lastSample=\(lastTitle)")
         log("QUIT terminating with the browser PARKED (live gate 7's shape)")
-        delegate.reallyQuitting = true  // else `applicationShouldTerminate` answers `.terminateCancel`
+        quit()
+    }
+
+    /// A run that cannot measure anything must not sit there as a live window with a menu-bar-less
+    /// app behind it. Every unrecoverable path ends the process the same way `finish` does, so an
+    /// unattended run always terminates — and terminating is itself part of the measurement
+    /// (`NSApplicationWillTerminateNotification` is the only route to `CefShutdown`).
+    private func fatal(_ reason: String) {
+        log("FATAL \(reason)")
+        quit()
+    }
+
+    private func quit() {
+        // **Deliberately arming `AppDelegate.reallyQuitting` from outside the menu bar.** That flag
+        // is Lifecycle T4's ONE true-quit gate (`AppDelegate.swift`, `onReallyQuit`), and every
+        // other `NSApp.terminate` in the app is answered `.terminateCancel` by
+        // `applicationShouldTerminate` — which for the spike would mean "close the windows and keep
+        // running", i.e. an unattended run that never ends and a CEF that is never shut down. The
+        // bypass is safe precisely because this file is `#if DEBUG` and unreachable without
+        // `NORMA_SPIKE_REPARENT=1`: no shipped path can reach it, and the spike owns the whole
+        // process (it ran INSTEAD of `boot()`, so there is no daemon, no orb and no user window to
+        // take down with it).
+        delegate.reallyQuitting = true
         NSApp.terminate(nil)
     }
 

@@ -75,8 +75,9 @@ available).
 | 2 | 42 | **124 – 133 ms** over 235 s (reproduced) |
 
 Five milliseconds of spread across 235 seconds and 42 reparents. In the 5-second-sliced runs 6–8
-the per-slice delta is **±3 ms** in every phase of every park mode. **No reparent, in any run,
-produced a step in either clock.**
+the per-slice delta is **±3 ms in every slice of every phase of every park mode with exactly two
+exceptions** — two consecutive mid-park slices in run 6 (`never`), analysed in the next paragraph.
+**No reparent, in any run, produced a step in either clock.**
 
 Two wobbles were seen and neither is a reparent artefact. Both happened in the *middle of a long
 park*, nowhere near a move: 72 ms + 88 ms lost across two consecutive 5-second slices (run 6,
@@ -145,15 +146,20 @@ the CEF-unavailable placeholder label and its retry button.
 Three park modes, back to back under identical conditions, 37-second windows, summed over app +
 GPU + renderer + utility processes (100 % = one core):
 
-| park mode | parked | visible |
-|---|---|---|
-| never ordered in | **24.7 %** | 25.4 % |
-| ordered front then `orderOut:` | **24.7 %** | 24.6 % |
-| positioned offscreen | **23.8 %** | 25.8 % |
+| park mode | parked | visible | parked ÷ visible |
+|---|---|---|---|
+| never ordered in | 24.7 % | 25.4 % | **0.97** |
+| ordered front then `orderOut:` | 24.7 % | 24.6 % | **1.00** |
+| positioned offscreen | 23.8 % | 25.8 % | **0.92** |
+| run 2 (`never`, a 30 fps environment) | 12.8 % | 13.2 % | **0.97** |
 
-Within-run, parked and visible are the same number. The renderer's own share is 9.2–9.8 % in every
-cell; the GPU process's is 13.2–14.3 %. Peak RSS (run 2): app 207 MB, renderer 148 MB, GPU 112 MB,
-utility 88 MB.
+**The right-hand column is the finding; the left two are not constants.** The absolute cost tracks
+the display's refresh state — the same page, the same code, measured at 12.8 %/13.2 % in run 2 and
+24.7 %/25.4 % in run 6, a ~2× swing driven by something the spike does not control (§"Environment
+note" below). What survives across that swing is the ratio: **parked costs what visible costs, in
+every run that measured both.** Within any one run the renderer's own share is 5.0–9.8 % and the
+GPU process's 6.2–14.3 %, moving together with the absolute. Peak RSS (run 2, and RSS does *not*
+swing with refresh state): app 207 MB, renderer 148 MB, GPU 112 MB, utility 88 MB.
 
 The page-side counters say why:
 
@@ -174,11 +180,15 @@ Consequences worth carrying into Task 5 / §4:
 - **Headless is stronger than the spec promised.** A parked, agent-driven page runs at full rate:
   no background-tab timer throttling, no rAF suspension, no intensive-throttling cliff after 5
   minutes. Anything B2 drives behaves exactly as it would on screen.
-- **`browserMaxLive = 16` needs re-pricing.** A parked browser is not cheap-by-occlusion; it costs
-  what it would cost visible. Sixteen parked pages doing what this one does would be ~4 cores.
-  (Fair caveat: this page is deliberately pathological — a 120 fps rAF canvas plus two audio
-  sources. A parked *idle* page costs what an idle page costs. But the runtime cannot assume the
-  parked ones are idle, which is precisely the case §4's cap exists for.)
+- **`browserMaxLive = 16` needs re-pricing — but price it in RATIOS, not in this document's
+  percentages.** The durable fact is that a parked browser is not cheap-by-occlusion: it costs
+  **1.0× what the same page costs visible**. What that multiplies is whatever a real page actually
+  costs on the user's machine, which this spike cannot tell you: the same page measured 12.8 % and
+  24.7 % of a core in two runs of the *same* build, and it is deliberately pathological besides (a
+  full-rate rAF canvas plus two audio sources). A parked *idle* page still costs what an idle page
+  costs. The design consequence needs no absolute number: sixteen live browsers cost sixteen
+  browsers' worth of work whether or not anyone is looking at them, and the runtime cannot assume
+  the parked ones are idle — which is precisely the case §4's cap exists for.
 - The linger (§4) and the cap are therefore doing more work than the spec thought, not less.
 
 **Measurement note:** `ps -o %cpu` is a **lifetime average**, not an instantaneous rate — the first
@@ -232,8 +242,12 @@ the first instant — but the honest claim is "no flash at ≥90 ms resolution",
   agent-driven browsers both need this and now have it measured.
 - **Quitting with a browser parked is clean.** Every run ends by terminating with the container in
   the parking window: `browser close handled by the host (DoClose->true)` → `shutting down` →
-  `browser closed (id=1, live browsers=0)`, process gone, no stranded helpers. That is live gate 7's
-  shape, passing.
+  `browser closed (id=1, live browsers=0)`, process gone. "No stranded helpers" is not an inference
+  from those log lines — it is the CPU sampler's silence: in run 8 (the last of the back-to-back
+  sequence, so nothing else could reoccupy the filter) the sampler's final row is **1.2 s after the
+  QUIT line**, and it then polled `ps` at 1 Hz for a further **15.9 s and matched nothing at all** —
+  no app, renderer, GPU, utility or helper process of the spike bundle survived. That is live gate
+  7's shape, passing.
 
 ---
 
@@ -266,11 +280,19 @@ the first instant — but the honest claim is "no flash at ≥90 ms resolution",
 
 1. **Reparenting a live windowed CEF browser between a hidden parking window and a visible one is
    safe, repeatable in both directions, and preserves audio, DOM focus, page state and geometry.**
-   138 reparents, seven runs, zero failures. The spec's §3 assumption holds.
-2. **`attachViewport` must call `window.makeFirstResponder(…)` on the container's deepest
-   first-responder-accepting descendant** (`RenderWidgetHostViewCocoa`), or the shown tab takes no
-   keyboard input. Attaching alone leaves the window as first responder. Note this view is *not*
-   `container.subviews.first` and *not* `GetWindowHandle()`'s view.
+   138 reparents, nine runs, zero failures. The spec's §3 assumption holds.
+2. **`attachViewport` must call `window.makeFirstResponder(…)` on the container's
+   `RenderWidgetHostViewCocoa` descendant**, or the shown tab takes no keyboard input. Attaching
+   alone leaves the window as first responder. That view is *not* `container.subviews.first` and
+   *not* `GetWindowHandle()`'s view — both of those are the outer `CefBrowserHostView`, which
+   accepts first-responder status and then delivers nothing.
+   **Find it by identity, not by depth.** The harness takes "the last
+   `acceptsFirstResponder` view in a pre-order walk", which happens to equal
+   `RenderWidgetHostViewCocoa` only because the single spine measured here is three views deep with
+   exactly one candidate at the bottom. Chromium's view tree is not Norma's to promise: Task 3
+   should search for the descendant whose class is `RenderWidgetHostViewCocoa` (or, more durably,
+   the one conforming to `NSTextInputClient` — that conformance is what makes it the view that can
+   take a keystroke) and log loudly if it finds zero or more than one.
 3. **Reparenting fires no CEF callback**, so the fold, the navigation channel and the chrome's URL
    field need no defence against attach/detach.
 4. **Resize is handled entirely by `PanelCEFContainerView.resizeSubviews(withOldSize:)`** — set the
@@ -289,6 +311,14 @@ the first instant — but the honest claim is "no flash at ≥90 ms resolution",
 9. **The park mode does not matter.** never-ordered-in, ordered-out and offscreen were measured
    back to back and are indistinguishable on audio, rAF, timers, visibility and CPU. Task 5 should
    take the simplest — never ordered in — and this document is why that is not a guess.
+10. **Two limits ride with this list; do not lift facts 1 and 6 without them.**
+    (a) **Audio continuity is proven instrumentally, not by ear** — two clocks, no listener. A
+    by-ear pass on a real page is still a human live-gate item and nothing here discharges it.
+    (b) **"No white flash / no stale layer" is bounded at the ~90 ms screenshot cadence** (§6). A
+    flash shorter than that is not excluded by any evidence in this document.
+11. **The absolute CPU and fps numbers in §4 are environment-bound and must not be quoted as
+    constants** — the same page measured 12.8 % and 24.7 % of a core in two runs of the same build.
+    Only the within-run parked-vs-visible ratio (1.0×) is durable.
 
 ## Re-running the harness
 
@@ -310,6 +340,32 @@ silently failed cannot produce twenty green cycles proving nothing.
 
 Knobs: `NORMA_SPIKE_CYCLES` (default 20), `NORMA_SPIKE_LONG_DWELL` (40 s),
 `NORMA_SPIKE_PARK_MODE` (`never` | `ordered-out` | `offscreen`), `NORMA_SPIKE_NO_CLICK=1`.
+
+**With the CPU sampler, and then the derivation** — §4's table needs both halves, so start the
+sampler about a second before the app and hand both files to the analyser afterwards:
+
+```sh
+REF=docs/research/reference/2026-08-10-cef-reparent-spike
+"$REF"/cpusample.sh 330 > /tmp/cpu.txt &        # 1 Hz, filtered to the spike bundle only
+sleep 1
+NORMA_HOME=$(mktemp -d) NORMA_SPIKE_REPARENT=1 … /…/Norma > /tmp/spike.log 2>&1
+python3 "$REF"/analyze-spike-ledger.py /tmp/spike.log /tmp/cpu.txt
+```
+
+`analyze-spike-ledger.py` prints, per long phase, exactly the numbers §1/§4/§5 quote: rAF fps,
+`setInterval` Hz, `document.visibilityState`, `wall − AudioContext.currentTime` with its per-slice
+deltas, CPU as % of one core by process role, and the non-`OnTitleChange` state-callback count. It
+reproduces every published figure from all nine ledgers, including the two pre-slicing runs
+(`cpusample.sh` refuses `%cpu` input outright — trap 5).
+
+**One piece of evidence is NOT re-derivable: §6's frames.** The 286 PNGs were captured to a session
+scratch directory and are gone; the analysis (decoded sequence numbers 7/36/65, zero backward jumps,
+no white frames) survives only as this document's claim. Re-establishing it means re-running with
+an external `screencapture -x -o -l<windowNumber>` loop against the window number the ledger's
+`SHOWWINDOW` line reports, and decoding each PNG's background colour **after** converting it from
+the display profile to sRGB (raw pixels do not match the CSS values). The nine ledgers and their
+CPU samples are likewise session-scratch; the tooling above is committed so that any future run
+regenerates them rather than depending on files nobody kept.
 
 **The gate is inert.** With `NORMA_SPIKE_REPARENT` unset the whole file is unreachable and in
 Release it is not compiled at all (`#if DEBUG`). Proven: the app suite is **1324 passed, 0 failed**
