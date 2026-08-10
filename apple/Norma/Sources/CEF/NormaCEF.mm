@@ -357,7 +357,7 @@ NormaCEFOpenBrowser *OpenBrowserRecordFor(CefRefPtr<CefBrowser> browser) {
 /// `close_browser = !handler->DoClose(this)`, takes neither branch, and resets `destruction_state_`
 /// to `DESTRUCTION_STATE_NONE`. Calling `CloseBrowser(true)` again just re-enters `DoClose` and
 /// resets again — MEASURED, not reasoned: the repro's ledger shows `DoClose->true` for the same
-/// browser id five times without a single `OnBeforeClose`
+/// browser id FOUR times (the close, then three sweeps) without a single `OnBeforeClose`
 /// (`docs/research/2026-08-10-cef-close-completion.md`).
 ///
 /// What remains is the header's other acceptable completion — *"proceeding with window/view
@@ -1927,7 +1927,8 @@ void NormaCEFCloseBrowser(NSView *parent) {
     // actually measured was never the DETACH — it was the RELEASE that the detach happened to
     // cause. Re-measured on the shipped code, the close stalled for the whole 12.3 s run with the
     // renderer alive (`docs/research/2026-08-10-cef-close-completion.md`); with the release
-    // restored it completes in ~1 ms. Nothing here is optional on any path.
+    // restored the view was still alive at +0 ms and gone by the next sample at +290 ms — one
+    // autorelease drain later, which is all the 250 ms poll can resolve. Not optional on any path.
     //
     // The view comes from this browser's own record, taken when CEF created it. Asking
     // `GetWindowHandle()` here instead is what the fetch-before-close ordering used to be about —

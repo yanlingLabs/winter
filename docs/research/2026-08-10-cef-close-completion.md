@@ -35,8 +35,8 @@ if (client_.get() && (IsWindowless() || !window_destroyed_)) {
 Answering `true` makes `close_browser` false, so neither destruction branch is taken and the
 destruction state is reset. **Calling `CloseBrowser(true)` again does not help** — it re-enters
 `CloseContents`, re-enters `DoClose`, gets `true` again, and resets again. Measured on this binary:
-the repro's ledger shows `DoClose->true` printed **five times for two browser ids** with not one
-`OnBeforeClose`.
+the repro's ledger shows `DoClose->true` printed **eight times — four for each of two browser ids**
+(one real close plus three sweeps apiece) with not one `OnBeforeClose`.
 
 ### 2. The only remaining completion is one `-dealloc`
 
