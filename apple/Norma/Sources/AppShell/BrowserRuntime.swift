@@ -218,14 +218,16 @@ final class BrowserRuntime {
     /// The shell, for the two model channels that reach the daemon (`reportPanelNavigation` and
     /// `openPanelTab`).
     ///
-    /// **Set by Task 5, and it matters for more than tidiness.** A parked, agent-driven browser
-    /// (spec §5) is never rendered, so nothing else will ever bind a host to its model — and a model
-    /// with no host silently records no navigations at all. `wire` logs when this is nil.
+    /// **Set by `BrowserSignalsCoordinator.init`, before it can ever call `apply`, and it matters
+    /// for more than tidiness.** A parked, agent-driven browser (spec §5) is never rendered, so
+    /// nothing else will ever bind a host to its model — and a model with no host silently records
+    /// no navigations at all. `wire` logs when this is nil.
     weak var host: ShellSessionHost?
 
-    /// "A linger deadline has arrived; re-plan." Set by Task 5. The executor deliberately cannot
-    /// stop anything itself here — the stop is the engine's decision, taken on a later plan against
-    /// freshly read signals.
+    /// "A linger deadline has arrived; re-plan." Set by `BrowserSignalsCoordinator.init`, in the
+    /// same two lines as `host` and for the same reason: both are wired before the coordinator's
+    /// first `apply`. The executor deliberately cannot stop anything itself here — the stop is the
+    /// engine's decision, taken on a later plan against freshly read signals.
     var onLingerDeadline: ((String) -> Void)?
 
     init(driver: CEFDriver = .production, scheduler: Scheduler = .production) {
@@ -303,11 +305,31 @@ final class BrowserRuntime {
             case .stop(let tabId):
                 stop(tabId: tabId)
             case .attachViewport(let tabId):
-                guard let host = viewportHost else {
-                    // The panel has no host view yet (it is not on screen, or Task 4's viewport has
-                    // not appeared). Mount nothing and claim nothing: `viewportTabId` stays as it
-                    // was, so the next plan still sees `viewport != desired` and re-emits this.
-                    NSLog("[BrowserRuntime] attachViewport(\(tabId)) with no panel host — deferred")
+                // **The remembered host must be BOTH there and in a window** (T4 review Minor-3,
+                // discharged here — obligation #7 — in the same commit that first gives `apply` a
+                // caller). `viewportHost` is weak and the panel's host view belongs to SwiftUI, so
+                // between `PanelViewport.dismantleNSView` and ARC releasing that view the reference
+                // is non-nil while the view is in no window at all. Mounting into it would break
+                // spike Fact 5 (a container is in a window at all times — the invariant the whole
+                // reparenting design rests on) and put the page in a rectangle nothing shows.
+                //
+                // The window check lives HERE, on the action path, and not inside `mountViewport`:
+                // the view's own `attachViewport(tabId:into:)` deliberately mounts before its host
+                // joins a window (SwiftUI runs `makeNSView` first, and T4 MEASURED that ordering
+                // together with `viewDidMoveToWindow`'s re-attach). Only the action path can reach
+                // a host SwiftUI has already finished with.
+                //
+                // Clearing `viewportHost` in `detachViewport` was the alternative Minor-3 offered
+                // and it is the wrong one: a single plan legitimately emits `.detachViewport(A)`
+                // then `.attachViewport(B)`, and a detach that cleared the host would leave that
+                // same-pass attach with nowhere to mount.
+                //
+                // Either way nothing is claimed: `viewportTabId` stays as it was, so the next plan
+                // still sees `viewport != desired` and re-emits this — and a live host view
+                // re-attaches directly the moment it joins a window.
+                guard let host = viewportHost, host.window != nil else {
+                    NSLog("[BrowserRuntime] attachViewport(\(tabId)) with no panel host in a window "
+                          + "— deferred")
                     continue
                 }
                 mountViewport(tabId: tabId, into: host)
@@ -444,22 +466,6 @@ final class BrowserRuntime {
                 self.restoreFirstResponder(in: container, tabId: tabId)
             }
         }
-    }
-
-    /// **TEMPORARY — TASK 5 REMOVES THIS**, together with its one caller
-    /// (`PanelViewportHostView.attachToRuntime`, which carries the same marker).
-    ///
-    /// Create `tabId`'s browser unless it already has one. It exists because T4 took browser
-    /// creation out of the view (`PanelViewport` attaches and detaches, nothing more) while the
-    /// engine that decides existence — written, tested, and correct — is not yet plumbed to any
-    /// signal: between the two commits nothing at all would create a browser and the panel would
-    /// paint an empty rectangle.
-    ///
-    /// **It decides nothing.** The caller supplies the url, title and session from the tab it is
-    /// rendering, and "unless it already has one" is `create`'s own double-create guard rather than
-    /// a second rule here. That is the whole of it — one forward, no state, no policy.
-    func ensureLive(tabId: String, url: String?, title: String?, sessionId: String?) {
-        create(tabId: tabId, url: url, title: title, sessionId: sessionId)
     }
 
     // MARK: Stop

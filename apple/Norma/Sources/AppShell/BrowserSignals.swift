@@ -1,0 +1,263 @@
+import Combine
+import Foundation
+
+/// browser-runtime T5: **the assembly point** — the one place the app's own state becomes
+/// `BrowserSignals` + `[BrowserTabState]`, and the only caller of `BrowserLifecycleEngine.plan`.
+///
+/// Spec §4 (the signal table) and §8 (the belt). The shape is deliberately three lines long:
+/// gather → `plan` → `BrowserRuntime.apply`. Everything hard is on either side of it — the policy
+/// is `BrowserLifecycle.swift`'s and the mechanics are `BrowserRuntime.swift`'s — so this file has
+/// exactly two jobs of its own: **describe the world honestly**, and **make sure a re-plan
+/// happens**.
+///
+/// **It contains no policy, and that is a rule rather than an aspiration.** Nothing here decides
+/// whether a browser should exist, live, stop or move; if an integration pressure ever seems to
+/// need a special case, that is a gap in the ENGINE and belongs there. The two derivations that
+/// look like judgement calls are both re-uses of decisions the app had already made elsewhere, and
+/// each names where:
+///   * which tab a session SHOWS is `panelShownTab` — the pure function `ShellPanel` renders from,
+///     so the engine's viewport choice and the panel's rendered tab cannot disagree;
+///   * which sessions exist and what tabs they have is `PanelStore`'s fold, unmodified.
+///
+/// ## Re-plan triggers
+///
+/// A plan is a snapshot; a stop only happens because a LATER plan saw the signal go quiet. So the
+/// full set of things that must provoke one is part of this file's contract, not an implementation
+/// detail:
+///
+///  1. **Every fold** (`PanelStore.onFold`) — spec §8 states the belt per fold, and three of the
+///     four fold sites are the only ways a tab can leave a list or a session can stop being shown.
+///  2. **The session list** (`SessionDirectory.$rows`) — the poll and every lifecycle broadcast.
+///     This is where another harness attaching, a turn ending, or an archive lands.
+///  3. **The attached session's turn state** (`SessionModel.$state.turnRunning`) — the local,
+///     immediate half of `working`, which the daemon's derived label does not carry for chat.
+///  4. **The shell window's visibility** (`ShellSessionHost.onShellVisibilityApplied`).
+///  5. **A linger deadline** (`BrowserRuntime.onLingerDeadline`) — the executor asking the engine
+///     to look again; the stop is still the engine's to decide.
+///
+/// ## The hidden-window guarantee (ledger obligation #4)
+///
+/// `hold` emits no actions, so a session whose signals FREEZE while held keeps its browsers
+/// forever. Before this task the freeze was real and reachable: the `session.list` poll is gated on
+/// the shell window being on screen (`SessionDirectory.setPolling`, driven by
+/// `AppWindowController.onRenderingActiveChange`), so a window closed mid-turn stopped refreshing
+/// the only signal that could ever say the turn had ended.
+///
+/// `syncPolling()` below opens that gate on a second, narrow condition: **whenever the runtime has
+/// a live browser, the poll runs regardless of window state.** A dedicated timer was the
+/// alternative and is worse — it would be a SECOND producer of `session.list` refreshes with its
+/// own cadence, and the refresh is not the point in itself: what closes the loop is that
+/// `SessionDirectory.refresh()` republishes `rows`, which is already trigger 2. One mechanism, one
+/// cadence, and the gate closes again by itself the moment the last browser stops.
+@MainActor
+final class BrowserSignalsCoordinator {
+
+    private let host: ShellSessionHost
+    private let runtime: BrowserRuntime
+    /// The plan's clock. The engine never reads one (`plan(now:)` is a parameter) and neither does
+    /// this — it passes the caller's, so a test drives the linger without waiting 300 seconds.
+    private let now: () -> Date
+
+    private var cancellables = Set<AnyCancellable>()
+
+    /// The session the panel was displaying the last time it was displaying anything.
+    ///
+    /// Needed because hiding the shell window DETACHES (`ShellSessionHost.applyPolicy` → the
+    /// policy table's hidden row), which clears `PanelStore.currentSessionId` before this
+    /// coordinator ever runs — so by the time a re-plan happens, "the session the window was
+    /// viewing" exists nowhere else. Spec §4's window-close rule is stated about exactly that
+    /// session.
+    private var lastPanelSessionId: String?
+
+    /// `AppWindowController.isRenderingActive`, mirrored — the poll's ORIGINAL gate, which this
+    /// coordinator now unions with "a browser is live" (see the type doc). Starts `false`: nothing
+    /// is on screen until the first `setRenderingActive(true)`, which is exactly what
+    /// `AppShellTests`' "no polling before the shell is ever summoned" pins.
+    private var renderingActive = false
+
+    /// What was last asked of `SessionDirectory.setPolling`. **The change-guard is load-bearing,
+    /// not tidiness:** `setPolling(active: true)` cancels the outstanding loop and starts a fresh
+    /// one, so calling it again on every re-plan would reset the 5-second wait every time and the
+    /// poll would never tick at all — the exact opposite of what obligation #4 asks for.
+    private var pollActive = false
+
+    /// Wires the runtime's two callbacks FIRST, then subscribes, then plans once.
+    ///
+    /// **The order of the first two lines is ledger obligation #6**, and both halves have teeth.
+    /// `host` is read by `BrowserRuntime.wire` at CREATE time and bound onto the tab's model: a
+    /// browser created before it is set records no navigations at all, and nothing rebinds a model
+    /// for a parked browser nobody renders. `onLingerDeadline` is how an armed stop ever gets
+    /// re-examined: without it the runtime logs and the session's browsers live forever.
+    /// Assigning them in `init`, above the first `replan()`, is what makes "before the first
+    /// `apply`" structural rather than a convention someone has to remember.
+    init(host: ShellSessionHost, runtime: BrowserRuntime, now: @escaping () -> Date = Date.init) {
+        self.host = host
+        self.runtime = runtime
+        self.now = now
+
+        runtime.host = host
+        runtime.onLingerDeadline = { [weak self] _ in self?.replan() }
+
+        // Trigger 1. See `PanelStore.onFold` for why this is a hook rather than a `$tabs` sink.
+        host.panelStore.onFold = { [weak self] in self?.replan() }
+
+        // Trigger 4.
+        host.onShellVisibilityApplied = { [weak self] in self?.replan() }
+
+        // Trigger 2. `refresh()` assigns `rows` wholesale on every successful poll, so this fires
+        // once per tick even when nothing about the list changed — which is the point: it is the
+        // heartbeat that re-examines a held session while the window is hidden.
+        host.directory.$rows
+            .sink { [weak self] _ in self?.replan() }
+            .store(in: &cancellables)
+
+        // Trigger 3. `$attachment` republishes on attach and detach but NOT on a hop (a hop keeps
+        // the same `ShellSessionAttachment` object — its own doc comment), which is fine: the hop
+        // re-plans through trigger 1 anyway, and `switchToLatest` keeps following whatever
+        // attachment is current. `removeDuplicates` is what keeps a streamed reply from re-planning
+        // once per token — `session.$state` publishes on every delta, and only `turnRunning` here
+        // is a browser signal.
+        host.$attachment
+            .map { attachment -> AnyPublisher<Bool, Never> in
+                guard let attachment else { return Just(false).eraseToAnyPublisher() }
+                return attachment.session.$state.map(\.turnRunning).eraseToAnyPublisher()
+            }
+            .switchToLatest()
+            .removeDuplicates()
+            .sink { [weak self] _ in self?.replan() }
+            .store(in: &cancellables)
+
+        replan()
+    }
+
+    /// `AppWindowController.onRenderingActiveChange`'s new home. It no longer drives
+    /// `SessionDirectory.setPolling` directly — this coordinator owns the union of that signal with
+    /// "a browser is live" (see the type doc's hidden-window section). The window's own gate is
+    /// unchanged in every other respect: `shellRenderingActive` still decides it, and a shell with
+    /// no live browser polls exactly when it did before.
+    func setRenderingActive(_ active: Bool) {
+        renderingActive = active
+        syncPolling()
+    }
+
+    // MARK: - The pass
+
+    /// Gather → plan → apply. Idempotent by construction: it reads state, it never accumulates any.
+    func replan() {
+        let (sessions, tabs) = assemble()
+
+        let actions = BrowserLifecycleEngine.plan(sessions: sessions,
+                                                  tabs: tabs,
+                                                  live: runtime.liveTabIds,
+                                                  viewport: runtime.viewportTabId,
+                                                  pendingStops: runtime.pendingStopDeadlines,
+                                                  lruOrder: runtime.lruOrder,
+                                                  now: now())
+
+        // The reverse index the executor needs to bind a created tab's model to its session. Built
+        // from the same `tabs` the plan was computed from, so a `.create` can never be attributed to
+        // a session the plan did not see.
+        var sessionOf: [String: String] = [:]
+        for (sessionId, list) in tabs {
+            for tab in list { sessionOf[tab.tabId] = sessionId }
+        }
+
+        runtime.apply(actions, tabs: tabs, sessionOf: { sessionOf[$0] })
+
+        // After `apply`, because the live set is what the gate reads and this pass may have just
+        // created the first browser or stopped the last one.
+        syncPolling()
+    }
+
+    /// The whole of the signal assembly, and the only place in the app that knows how the shell's
+    /// state maps onto the engine's vocabulary.
+    private func assemble() -> (sessions: [String: BrowserSignals], tabs: [String: [BrowserTabState]]) {
+        let displayed = host.panelStore.currentSessionId
+        if let displayed { lastPanelSessionId = displayed }
+
+        // Which sessions the daemon says are running a turn / attached elsewhere / archived, read
+        // fresh off the sidebar's own rows. See `mapped(activity:)` below for the mapping and for
+        // what it CANNOT answer.
+        var activityBySession: [String: String] = [:]
+        for row in host.directory.rows {
+            if let activity = row.activity { activityBySession[row.sessionId] = activity }
+        }
+
+        // The local half of `working`: the shell is attached to this session and its harness says a
+        // turn is running. `attachedSessionId`, not `displayed` — the new-chat page's bound session
+        // is displayed with nothing attached, so it has no turn state to read.
+        let attachedTurnRunning = host.attachment?.session.state.turnRunning ?? false
+
+        var sessions: [String: BrowserSignals] = [:]
+        var tabs: [String: [BrowserTabState]] = [:]
+
+        // EVERY session this shell has folded, not merely the displayed one. The §8 belt asks
+        // "which live browsers belong to no tab of any session", and a browser parked for a session
+        // the user hopped away from must find its tab list here or the belt stops it on the spot —
+        // which would make hopping away a reload, the exact thing this plan exists to prevent.
+        for (sessionId, state) in host.panelStore.allSessionTabStates {
+            let activity = activityBySession[sessionId]
+            let attachedHere = sessionId == displayed
+
+            // **Obligation #2, and the one place it is subtler than "read `activeTabId`".** The
+            // engine's `isShown` is per SESSION, never "on screen" — every session has at most one,
+            // including the ones nobody is looking at, which is what makes lazy restore expressible
+            // for a session waking up in the background.
+            //
+            // `panelShownTab` — the pure function `ShellPanel` renders from — is the app's ONE
+            // answer to "which tab does this session show", and using it here is what stops the
+            // engine and the renderer from disagreeing. Its fallback ("no active tab → the first
+            // one") is not a nicety: `panel.closeTab` appends `panel_tab_closed` and nothing else
+            // (`packages/core/src/ipc/server.ts` — deliberate; `panel.openTab` activates, close does
+            // not), and `foldPanelTabs` clears `activeTabId` when the ACTIVE tab is the one closed.
+            // So after closing the active tab a session has tabs and no `activeTabId` until the user
+            // clicks one. Reading `activeTabId` literally would leave the engine creating nothing
+            // and detaching the viewport while the panel rendered — and highlighted — a tab.
+            let shownTabId = panelShownTab(tabs: state.tabs, activeTabId: state.activeTabId)?.tabId
+
+            // **Obligation #1: `.web` tabs only.** The engine has no concept of `PanelTabKind`; a
+            // `.document` tab handed to it would get a browser created for it. The shown-tab
+            // resolution above runs over the FULL list first, deliberately: if the session's shown
+            // tab is a document, no web tab is shown, and the engine creates nothing eagerly — the
+            // same answer the panel gives by rendering that document's placeholder.
+            tabs[sessionId] = state.tabs.filter { $0.kind == .web }.map { tab in
+                BrowserTabState(tabId: tab.tabId,
+                                url: tab.url,
+                                isShown: tab.tabId == shownTabId,
+                                // Obligation #5. Never read by the engine — it is here for
+                                // `NormaCEFSeedTabState`, which primes the navigation channel's
+                                // dedupe with the (url, title) PAIR; seeding an empty title lets
+                                // every restore re-report a navigation the log already holds.
+                                title: tab.title)
+            }
+
+            sessions[sessionId] = BrowserSignals(
+                attachedHere: attachedHere,
+                // "active" means the daemon counts at least one attached harness. If it is not this
+                // shell, it is somebody else — the phone, a detached window, the CLI.
+                attachedElsewhere: activity == "active" && !attachedHere,
+                working: (sessionId == host.attachedSessionId && attachedTurnRunning)
+                    || activity == "background",
+                archived: activity == "archived",
+                // **Obligation #3: it stays SET for as long as the window remains closed**, which
+                // is what makes the stop actually happen for a session that was mid-work when the
+                // window went away: `hold` beats `stopImmediately` (never stop mid-work), so the
+                // stop lands on the LATER plan that sees the work end — and that plan must still
+                // see this flag. Derived from live state rather than latched at close time for
+                // exactly that reason, and it clears itself the moment the window comes back.
+                stopImmediately: !host.shellVisible && sessionId == lastPanelSessionId)
+        }
+
+        return (sessions, tabs)
+    }
+
+    // MARK: - The poll gate (obligation #4)
+
+    /// The union gate. See the type doc for why this, and not a second timer.
+    private func syncPolling() {
+        let active = renderingActive || !runtime.liveTabIds.isEmpty
+        guard active != pollActive else { return }
+        pollActive = active
+        host.directory.setPolling(active: active)
+    }
+}

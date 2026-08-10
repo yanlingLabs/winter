@@ -1016,11 +1016,25 @@ final class ShellSessionHost: ObservableObject {
         selectDispatch()
     }
 
+    /// browser-runtime T5: "the shell's visibility changed AND the attachment policy has already
+    /// run for it." Fired at the end of `setShellVisible` — after `applyPolicy()`, never before,
+    /// because a listener that reads `attachedSessionId`/`panelStore.currentSessionId` on the way IN
+    /// would see the state the window is leaving rather than the one it just moved to. (That
+    /// ordering is also why this is a closure and not a `@Published shellVisible`: `@Published`
+    /// notifies in `willSet`, which is the wrong side of the policy.)
+    ///
+    /// The browser lifecycle needs it because spec §4's window-close rule is about the window, not
+    /// the attachment: hiding onto a landing with nothing selected changes no attachment and folds
+    /// no tabs, so nothing else would announce it. `nil` in every shell without a browser
+    /// coordinator, which is every test that does not drive one.
+    var onShellVisibilityApplied: (() -> Void)?
+
     /// Called by `AppWindowController` on every CHANGE of the window's on-screen state.
     func setShellVisible(_ visible: Bool) {
         guard shellVisible != visible else { return }
         shellVisible = visible
         applyPolicy()
+        onShellVisibilityApplied?()
     }
 
     private func applyPolicy() {

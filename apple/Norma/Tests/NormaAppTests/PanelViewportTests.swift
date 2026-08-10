@@ -52,11 +52,22 @@ final class PanelViewportTests: XCTestCase {
     /// A viewport host view exactly as `PanelViewport.makeNSView` builds one, at a real size (the
     /// frame is SwiftUI's job in the app, and a zero-sized host would make the attach's
     /// `frame = host.bounds` unfalsifiable).
-    private func makeHostView(_ tab: PanelTab, sessionId: String? = "s1",
-                              host: ShellSessionHost? = nil) -> PanelViewportHostView {
-        let view = PanelViewportHostView(tab: tab, runtime: runtime, sessionId: sessionId, host: host)
+    private func makeHostView(_ tab: PanelTab) -> PanelViewportHostView {
+        let view = PanelViewportHostView(tab: tab, runtime: runtime)
         view.frame = NSRect(x: 0, y: 0, width: 900, height: 600)
         return view
+    }
+
+    /// The browser this tab's viewport will borrow, created the ONLY way one can be created since
+    /// Task 5: a `.create` action, as the engine emits it. Before Task 5 these tests got their
+    /// browsers from the viewport's own temporary bridge — deleting that bridge is precisely the
+    /// commit where "no view asks for a browser to exist" became true, so every row here that needs
+    /// a live browser now says so out loud.
+    private func createBrowser(_ tab: PanelTab, sessionId: String = "s1") {
+        runtime.apply([.create(tabId: tab.tabId, url: tab.url)],
+                      tabs: [sessionId: [BrowserTabState(tabId: tab.tabId, url: tab.url,
+                                                         isShown: true, title: tab.title)]],
+                      sessionOf: { _ in sessionId })
     }
 
     /// A window that is never ordered in — `makeFirstResponder` does not need a visible window, and
@@ -106,7 +117,9 @@ final class PanelViewportTests: XCTestCase {
     /// container is mounted, the tree is right) looks green.
     func testTheHostViewRestoresTheKeyboardWhenItJoinsAWindow() throws {
         let deep = installFakeCEFTreeOnCreate()
-        let hostView = makeHostView(webTab("t1", url: "https://example.com"))
+        let tab = webTab("t1", url: "https://example.com")
+        createBrowser(tab)
+        let hostView = makeHostView(tab)
 
         hostView.attachToRuntime()   // what `makeNSView` does, and where SwiftUI leaves it
 
@@ -133,7 +146,9 @@ final class PanelViewportTests: XCTestCase {
     /// the second window join is not a special case, it is the same call.
     func testMovingTheHostBetweenWindowsRestoresTheKeyboardInTheNewOne() throws {
         let deep = installFakeCEFTreeOnCreate()
-        let hostView = makeHostView(webTab("t1", url: "https://example.com"))
+        let tab = webTab("t1", url: "https://example.com")
+        createBrowser(tab)
+        let hostView = makeHostView(tab)
         hostView.attachToRuntime()
 
         let first = makeWindow()
@@ -165,7 +180,9 @@ final class PanelViewportTests: XCTestCase {
     /// pass by naming only the call someone happened to think of.
     func testDismantleParksTheContainerAndNeverStopsTheBrowser() throws {
         installFakeCEFTreeOnCreate()
-        let hostView = makeHostView(webTab("t1", url: "https://example.com"))
+        let tab = webTab("t1", url: "https://example.com")
+        createBrowser(tab)
+        let hostView = makeHostView(tab)
         let window = makeWindow()
         window.contentView?.addSubview(hostView)
         hostView.attachToRuntime()
@@ -195,7 +212,9 @@ final class PanelViewportTests: XCTestCase {
     /// container away from whoever holds it now and mount it in a rectangle nothing is showing.
     func testAHostViewSwiftUIHasDismantledNeverTakesTheViewportBack() throws {
         installFakeCEFTreeOnCreate()
-        let hostView = makeHostView(webTab("t1", url: "https://example.com"))
+        let tab = webTab("t1", url: "https://example.com")
+        createBrowser(tab)
+        let hostView = makeHostView(tab)
         hostView.attachToRuntime()
         let container = try XCTUnwrap(runtime.container(forTabId: "t1"))
 
@@ -215,6 +234,7 @@ final class PanelViewportTests: XCTestCase {
     func testSwitchingAwayAndBackCreatesNothingAndClosesNothing() throws {
         installFakeCEFTreeOnCreate()
         let tab = webTab("t1", url: "https://example.com")
+        createBrowser(tab)
         let window = makeWindow()
 
         let first = makeHostView(tab)
@@ -238,98 +258,46 @@ final class PanelViewportTests: XCTestCase {
         XCTAssertEqual(runtime.viewportTabId, "t1")
     }
 
-    // MARK: - The temporary bridge (Task 5 deletes it)
+    // MARK: - The bridge is gone (Task 5)
 
-    /// **The bridge asks for a browser once per tab and never again** — `ensureLive` forwards to the
-    /// runtime's create, whose own double-create guard is what makes every later attach a no-op.
-    /// Both later attaches are real paths, not hypotheticals: the window join happens on every tab
-    /// open, and the second host view happens on every switch back.
+    /// **The commit where spec §2's "creation driven only by the engine" became literally true.**
     ///
-    /// This whole block is scaffolding between T4 and Task 5, which replaces it with the engine's
-    /// `.create` actions — but while it exists, a second `NormaCEFCreateBrowser` into the same
-    /// container would be a second live browser that nothing can ever close, because the registry
-    /// remembers one container per tab.
-    func testTheBridgeAsksForABrowserOnceAndOnlyOnce() {
+    /// Four rows stood here between T4 and Task 5, all of them about the temporary bridge
+    /// `PanelViewportHostView.attachToRuntime` carried: that it asked for a browser exactly once
+    /// per tab, that it asked for nothing when one was already live, that a stored hostile URL
+    /// still reached `PanelURLPolicy.restorableURL` through it, and that it handed the runtime a
+    /// `ShellSessionHost` so a created tab's navigations were recorded. Their subject no longer
+    /// exists, so they are retired rather than adapted — a test whose mechanism has been deleted
+    /// cannot fail, and one kept alive by rewriting it around a different mechanism is a claim
+    /// nobody made. Where each claim went:
+    ///
+    ///   * "asks once, and asks for nothing when live" — `BrowserRuntime.create`'s double-create
+    ///     guard, pinned by `BrowserRuntimeTests`, and by the row below (which proves the VIEW no
+    ///     longer asks at all).
+    ///   * the hostile-URL door — `BrowserRuntimeTests
+    ///     .testTheRestoreDoorRefusesEveryDisallowedSchemeAndSeedsNothingForOne` pins the door
+    ///     itself; `BrowserSignalsTests
+    ///     .testAStoredHostileURLNeverReachesCEFThroughTheFoldThatRestoresIt` pins that the path a
+    ///     user actually takes — a fold, through the engine — reaches it.
+    ///   * `runtime.host` — `BrowserSignalsTests.testTheRuntimeIsWiredBeforeTheFirstCreate`
+    ///     (ledger obligation #6), which is stronger: the coordinator wires it in `init`, before
+    ///     any plan can run, rather than on the first viewport attach.
+    ///
+    /// This row is the deletion's own pin: attaching a viewport for a tab with no browser must
+    /// reach CEF NOT AT ALL. Asserted as "the whole transcript is empty" rather than "no create",
+    /// so a bridge reintroduced as a seed, an observer registration or anything else fails it too.
+    func testAViewportForATabWithNoBrowserAsksForNothingAndMountsNothing() {
         installFakeCEFTreeOnCreate()
-        let tab = webTab("t1", url: "https://example.com")
-        let hostView = makeHostView(tab)
-
-        hostView.attachToRuntime()
-        XCTAssertEqual(cef.log.filter { $0.contains("create url=") }.count, 1,
-                       "the panel would paint an empty rectangle: \(cef.log)")
-
-        makeWindow().contentView?.addSubview(hostView)   // the window-join attach
-        makeHostView(tab).attachToRuntime()              // the switch-back attach
-
-        XCTAssertEqual(cef.log.filter { $0.contains("create url=") }.count, 1,
-                       "asked for a second browser in the same tab: \(cef.log)")
-    }
-
-    /// And it asks for nothing at all when the browser is already live — the shape every attach will
-    /// have once Task 5's engine is the one creating them.
-    func testTheBridgeAsksForNothingWhenTheBrowserAlreadyExists() {
-        installFakeCEFTreeOnCreate()
-        runtime.apply([.create(tabId: "t1", url: "https://example.com")],
-                      tabs: ["s1": [BrowserTabState(tabId: "t1", url: "https://example.com",
-                                                    isShown: true, title: "Example")]],
-                      sessionOf: { _ in "s1" })
-        let transcript = cef.log
-
         let hostView = makeHostView(webTab("t1", url: "https://example.com"))
         makeWindow().contentView?.addSubview(hostView)
+
         hostView.attachToRuntime()
 
-        XCTAssertEqual(cef.log, transcript,
-                       "attaching a viewport to a live browser must reach CEF not at all: \(cef.log)")
-        XCTAssertEqual(runtime.viewportTabId, "t1", "and must still mount it")
-    }
-
-    /// **Enforcement point 3, through the path a user actually takes.** The viewport hands the tab's
-    /// STORED url straight through — filtering moved to `BrowserRuntime.create`, which is the one
-    /// path every browser is born on, headless ones included — so this is what proves the view path
-    /// reaches that filter rather than routing around it. A stored `javascript:` URL would otherwise
-    /// be re-executed against the page on every restore, for as long as the session exists, which is
-    /// forever: sessions are user-delete-only.
-    ///
-    /// Replaces `PanelWebChromeTests.testAWebTabWithAHostileStoredURLResolvesToTheStartPage`, which
-    /// pinned the same door back when `makeContent()` was the one applying it.
-    func testAStoredHostileURLNeverReachesCEFThroughTheViewport() {
-        for hostile in ["javascript:alert(document.cookie)",
-                        "file:///Users/someone/.ssh/id_rsa",
-                        "data:text/html,<script>fetch('//evil')</script>"] {
-            cef = BrowserRuntimeTests.CEFRecorder()
-            runtime = BrowserRuntime(driver: cef.driver, scheduler: clock.scheduler)
-            PanelWebTabModels.removeAllForTesting()
-
-            makeHostView(webTab("t1", url: hostile, title: "stored")).attachToRuntime()
-
-            XCTAssertTrue(cef.log.contains("c1 create url=\(panelWebTabStartPageURL)"),
-                          "\(hostile) reached a real Chromium browser: \(cef.log)")
-            XCTAssertTrue(cef.log.contains("c1 seed url= title=stored"),
-                          "and the address bar must show nothing rather than the refused value: "
-                              + "\(cef.log)")
-        }
-
-        // Without this the assertions above cannot tell "filtered" from "always the start page".
-        cef = BrowserRuntimeTests.CEFRecorder()
-        runtime = BrowserRuntime(driver: cef.driver, scheduler: clock.scheduler)
-        PanelWebTabModels.removeAllForTesting()
-        makeHostView(webTab("t1", url: "https://example.com", title: "Example")).attachToRuntime()
-        XCTAssertTrue(cef.log.contains("c1 create url=https://example.com"), "log was \(cef.log)")
-    }
-
-    /// The other half of the bridge, and the reason it is two lines rather than one: the runtime
-    /// binds each tab's model to its `host` AT CREATE TIME, and a model with no host records no
-    /// navigations at all. Task 5 owes the real wiring (ledger item #6); until then this is what
-    /// keeps panel history being written across the intermediate commit instead of silently stopping.
-    func testTheBridgeGivesTheRuntimeAHostSoACreatedTabStillReportsItsNavigations() {
-        let shellHost = ShellSessionHost(directory: SessionDirectory(lister: { [] }),
-                                         makeFeed: { _ in nil })
-        XCTAssertNil(runtime.host, "the premise: nothing else sets this before Task 5")
-
-        makeHostView(webTab("t1", url: "https://example.com"), host: shellHost).attachToRuntime()
-
-        XCTAssertTrue(runtime.host === shellHost,
-                      "a browser created through the bridge would report its navigations nowhere")
+        XCTAssertEqual(cef.log, [],
+                       "the view layer asked for a browser to exist: \(cef.log)")
+        XCTAssertFalse(runtime.isLive(tabId: "t1"))
+        XCTAssertNil(runtime.viewportTabId,
+                     "and nothing may be claimed as the viewport when nothing was mounted")
+        XCTAssertNil(runtime.host, "nor may a view bind the runtime's shell host any more")
     }
 }

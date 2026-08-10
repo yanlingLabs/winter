@@ -68,6 +68,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (`PairedDevicesWindowController`) — see `openPairedDevices()`, now a plain
     /// `summonAppWindow(navigatingTo: .dashboard(pane: .pairedDevices))`.
     private(set) var appWindow: AppWindowController?
+    /// browser-runtime T5: the browser lifecycle's assembly point (`BrowserSignals.swift`) —
+    /// constructed once, beside the shell's own `ShellSessionHost`, and held for the app's life
+    /// because it owns the Combine subscriptions that provoke a re-plan. `nil` until the shell is
+    /// first summoned: with no shell there is no panel, so no tab can exist to have a browser.
+    private(set) var browserSignals: BrowserSignalsCoordinator?
     /// SP2b T5: owns this Mac's `RemoteHost` (lazily constructed — nothing starts until either a
     /// pairing window is requested or, autostart follow-up below, this Mac already has ≥1 paired
     /// device). Constructed unconditionally in `boot()` (cheap — it does no I/O of its own; only
@@ -426,6 +431,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             managementClient: model.client,
             outputsWatcher: outputsWatcher
         )
+        // browser-runtime T5: the browser lifecycle's assembly point, constructed BEFORE the
+        // controller — its `init` sets `BrowserRuntime.host`/`onLingerDeadline` (ledger obligation
+        // #6) and takes the first plan, and it must own the poll gate before `summon()` below fires
+        // the first `onRenderingActiveChange`. `BrowserRuntime.shared` is the app's one runtime;
+        // tests construct their own (it holds containers, timers and a window).
+        browserSignals = BrowserSignalsCoordinator(host: host, runtime: .shared)
         let controller = AppWindowController(
             directory: model.directory,
             host: host,
@@ -450,7 +461,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `summon()` below so the very first `syncState()` it triggers (occlusionVisible starts
         // `true`, `window.isVisible` flips `true` on `makeKeyAndOrderFront`) already starts the poll
         // — a freshly summoned shell must not sit unpolled until some LATER occlusion notification.
-        controller.onRenderingActiveChange = { [weak model] active in model?.directory.setPolling(active: active) }
+        //
+        // browser-runtime T5: it goes through `BrowserSignalsCoordinator` now rather than straight
+        // to `setPolling`, because the poll has a SECOND reason to run — "any browser is live",
+        // regardless of the window (ledger obligation #4: a window closed mid-turn must still learn
+        // that the turn ended, or its browsers and their audio outlive it). The window's own gate is
+        // untouched: a shell with no live browser polls exactly when it did before.
+        controller.onRenderingActiveChange = { [weak self] active in
+            self?.browserSignals?.setRenderingActive(active)
+        }
         appWindow = controller
         controller.summon(navigatingTo: destination)
     }

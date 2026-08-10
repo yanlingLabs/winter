@@ -22,10 +22,6 @@ struct PanelWebTab: PanelTabContent {
     /// its own runtime — `BrowserRuntime.shared` owns containers, timers and a window, all of which
     /// would leak from one test into the next.
     let runtime: BrowserRuntime
-    /// TEMPORARY, both of them — the viewport's bridge needs them and nothing else here does. See
-    /// `PanelViewportHostView.attachToRuntime`'s marked block, which Task 5 deletes.
-    let sessionId: String?
-    let host: ShellSessionHost?
 
     var kind: PanelTabKind { .web }
     var title: String { panelTabDisplayTitle(tab) }
@@ -45,7 +41,7 @@ struct PanelWebTab: PanelTabContent {
     /// pins it at the runtime; `PanelViewportTests
     /// .testAStoredHostileURLNeverReachesCEFThroughTheViewport` pins that this path reaches it.
     func makeContent() -> AnyView {
-        AnyView(PanelViewport(tab: tab, runtime: runtime, sessionId: sessionId, host: host))
+        AnyView(PanelViewport(tab: tab, runtime: runtime))
     }
 }
 
@@ -83,9 +79,7 @@ func panelTabContent(for tab: PanelTab, host: ShellSessionHost? = nil,
         // renders as never reaches the runtime at all.
         return PanelWebTab(tab: tab,
                            model: PanelWebTabModels.model(for: tab, host: host, sessionId: sessionId),
-                           runtime: .shared,
-                           sessionId: sessionId,
-                           host: host)
+                           runtime: .shared)
     case .document, .code, .note:
         return PanelPlaceholderTab(tab: tab)
     }
@@ -158,14 +152,9 @@ struct PanelViewport: NSViewRepresentable {
     let tab: PanelTab
     /// Carried from `panelTabContent`, never read as `.shared` here — see `PanelWebTab.runtime`.
     let runtime: BrowserRuntime
-    /// TEMPORARY, with `host` below: the two things `attachToRuntime`'s marked block needs, and
-    /// the only reason either is threaded this far. Task 5 deletes them with it.
-    let sessionId: String?
-    let host: ShellSessionHost?
 
     func makeNSView(context: Context) -> PanelViewportHostView {
-        let hostView = PanelViewportHostView(tab: tab, runtime: runtime,
-                                             sessionId: sessionId, host: host)
+        let hostView = PanelViewportHostView(tab: tab, runtime: runtime)
         hostView.attachToRuntime()
         return hostView
     }
@@ -208,22 +197,15 @@ struct PanelViewport: NSViewRepresentable {
 final class PanelViewportHostView: NSView {
     let tab: PanelTab
     let runtime: BrowserRuntime
-    /// TEMPORARY, with `host` below — `attachToRuntime`'s marked block, deleted by Task 5.
-    let sessionId: String?
-    /// Weak, mirroring `BrowserRuntime.host`'s own posture: the shell owns the host, and a view
-    /// must not be what keeps it alive.
-    weak var host: ShellSessionHost?
 
     /// Set by `detachFromRuntime`. SwiftUI is finished with a dismantled host view, so it is no
     /// longer the viewport holder — and a re-attach from a late window join would take the container
     /// away from whatever view holds it now and mount it in a rectangle nothing is showing.
     private var isDismantled = false
 
-    init(tab: PanelTab, runtime: BrowserRuntime, sessionId: String?, host: ShellSessionHost?) {
+    init(tab: PanelTab, runtime: BrowserRuntime) {
         self.tab = tab
         self.runtime = runtime
-        self.sessionId = sessionId
-        self.host = host
         super.init(frame: .zero)
     }
 
@@ -262,34 +244,14 @@ final class PanelViewportHostView: NSView {
     /// Mount this tab's container here. Called twice for an ordinary tab open — once from
     /// `makeNSView`, once when this view joins a window — and again whenever the panel moves
     /// between windows.
+    /// **Attaches, and only attaches.** Task 5 deleted the temporary bridge that used to sit here —
+    /// the one place in the view layer that asked for a browser to EXIST — so spec §2's "creation
+    /// driven only by the engine" is now literally true: `BrowserRuntime.create` has exactly one
+    /// caller, `apply`'s `.create` case, and `BrowserLifecycleEngine.plan` is the only thing that
+    /// emits one. If the tab this view is showing has no live browser, this mounts nothing and says
+    /// so in the log; the fold that put the tab on screen is what re-plans and creates it.
     func attachToRuntime() {
         guard !isDismantled else { return }
-
-        // ─── TASK 5 REMOVES THIS ────────────────────────────────────────────────────────────────
-        // **The temporary bridge: the one place in the view layer that asks for a browser to
-        // EXIST.** T4 inverted ownership; Task 5 plumbs the signals that let
-        // `BrowserLifecycleEngine` decide existence and feeds its actions to `BrowserRuntime.apply`.
-        // Between these two commits nothing else would ever create a browser, so the panel would
-        // attach a viewport with nothing to mount (`mountViewport` logs exactly that) and paint an
-        // empty rectangle. `ensureLive` is a forward to the runtime's create and the "unless one is
-        // already live" is that create's own guard — so this asks once per tab and no-ops on every
-        // later attach, including the window-join one just above.
-        //
-        // `runtime.host` is the same bridge under a different name: the runtime binds each tab's
-        // model to it AT CREATE TIME, and a model with no host records no navigations at all — so
-        // without this line panel history would silently stop being written between T4 and Task 5
-        // (which owes the real wiring: ledger item #6). Assigned only when there IS one, so a shell
-        // built without a host — the `nil` posture `ShellPanel.host` documents — cannot clear a
-        // binding a real one made.
-        //
-        // Two knowingly-stale things, named because this marker is a promise that they go away:
-        // `tab` is whatever the fold said when SwiftUI built this view (`updateNSView` is empty by
-        // contract, so a later url never reaches here), and the trigger is a viewport attach rather
-        // than any lifecycle signal. Both are exactly what Task 5 replaces.
-        if let host { runtime.host = host }
-        runtime.ensureLive(tabId: tab.tabId, url: tab.url, title: tab.title, sessionId: sessionId)
-        // ────────────────────────────────────────────────────────────────────────────────────────
-
         runtime.attachViewport(tabId: tab.tabId, into: self)
     }
 

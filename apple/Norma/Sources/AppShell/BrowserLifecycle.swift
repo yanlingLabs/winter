@@ -13,9 +13,10 @@ import Foundation
 /// those things — which matters because spec §9 records that no CEF client override is callable
 /// under XCTest, ever.
 
-/// One session's inputs, as assembled by Task 5 from the shell's own attach state and the sidebar's
-/// `session.list` rows. Deliberately signals, not the daemon's four-state activity LABEL: chat and
-/// dispatch modes do not participate in `activityFor` (`packages/core/src/sessions/activity.ts`)
+/// One session's inputs, as assembled by `BrowserSignalsCoordinator` (`BrowserSignals.swift`) from
+/// the shell's own attach state and the sidebar's `session.list` rows. Deliberately signals, not
+/// the daemon's four-state activity LABEL: chat and dispatch modes do not participate in
+/// `activityFor` (`packages/core/src/sessions/activity.ts`)
 /// and the panel's auto-created sessions are mode *chat*, so the label is unavailable exactly where
 /// the panel needs it. The underlying signals exist for every session.
 struct BrowserSignals: Equatable {
@@ -26,22 +27,26 @@ struct BrowserSignals: Equatable {
     /// `turnRunning || bgWork` — the agent may be driving these pages right now.
     var working: Bool
     var archived: Bool
-    /// Window close. Task 5 sets it (together with `attachedHere = false`) when the shell window
-    /// that was viewing this session goes away. It skips the LINGER — see `Disposition` for the
-    /// precedence, which is the one place this engine sharpens the brief.
+    /// Window close. `BrowserSignalsCoordinator.assemble` sets it — as `!shellVisible && sessionId
+    /// == lastPanelSessionId` — for the session the shell window was viewing when it went away, and
+    /// keeps it set for as long as the window stays closed. It skips the LINGER — see `Disposition`
+    /// for the precedence, which is the one place this engine sharpens the brief.
     var stopImmediately: Bool = false
 }
 
 /// One browser-backed tab of one session.
 ///
-/// **Caller contract (Task 5):** pass only tabs that *should* have a browser — the panel's `.web`
-/// tabs. This engine has no concept of `PanelTabKind`; a `.document` tab handed to it would get a
-/// browser created for it, and a live browser whose tab is withheld from the list would be stopped
+/// **Caller contract, met by `BrowserSignalsCoordinator.assemble`:** only tabs that *should* have a
+/// browser are passed — the panel's `.web` tabs, filtered there. This engine has no concept of
+/// `PanelTabKind`; a `.document` tab handed to it would get a browser created for it, and a live
+/// browser whose tab is withheld from the list would be stopped
 /// by the §8 belt.
 struct BrowserTabState: Equatable {
     var tabId: String
     var url: String?
-    /// This tab is its SESSION's shown tab (the daemon fold's `activeTabId`) — not "on screen".
+    /// This tab is its SESSION's shown tab — not "on screen". The daemon fold's `activeTabId`,
+    /// resolved through `panelShownTab` so the engine and the panel's renderer can never name
+    /// different tabs (`BrowserSignalsCoordinator.assemble` says why the fallback is reachable).
     /// Every session has at most one, including the ones nobody is looking at; that is what makes
     /// lazy restore (§6) expressible for a session waking up in the background. Only the
     /// `attachedHere` session's shown tab additionally gets the viewport.
@@ -107,8 +112,8 @@ struct BrowserLifecycleEngine {
     ///
     /// - Parameters:
     ///   - sessions: sessionId → signals. A session present in `tabs` but absent here is treated as
-    ///     **quiet** — the memory-safe default, and harmless: the linger is 300s and Task 5's first
-    ///     list refresh cancels it.
+    ///     **quiet** — the memory-safe default, and harmless: the linger is 300s and the caller's
+    ///     next list refresh cancels it.
     ///   - tabs: sessionId → its browser-backed tabs in fold order (see `BrowserTabState`).
     ///   - live: tabIds that currently have a live browser.
     ///   - viewport: the tabId whose container is currently mounted in the panel, if any. Must name
@@ -163,19 +168,25 @@ struct BrowserLifecycleEngine {
                 // attachment". Closing the window must not pull an agent's pages out from under a
                 // running turn.
                 //
-                // REQUIREMENT ON THE CALLER, not a property of this engine: a session that is
-                // `stopImmediately` AND held gets NO actions from this plan, so the stop happens
-                // only if the caller RE-PLANS WITH FRESHLY REFRESHED SIGNALS once work ends —
-                // including while the shell window is hidden. Nothing here can force that: `hold`
-                // emits no `scheduleStop` (it would churn against the cancel below and still needs a
-                // while-hidden timer), so if signals freeze at `working = true` the browsers stay
-                // live indefinitely. That freeze is the app's CURRENT behaviour, not a hypothetical:
-                // the `session.list` poll is gated on window visibility — "no ticks, no
-                // `session.list` calls, while the window is hidden" (`SessionDirectory.setPolling`,
-                // driven by `AppWindowController.onRenderingActiveChange`) — and `session_activity`
-                // events do not cover chat-mode sessions, which is what the panel auto-creates (see
-                // this file's header). Task 5 owes the refresh-and-re-plan; spec §10 gate 4 is what
-                // fails without it.
+                // A REQUIREMENT ON THE CALLER, not a property of this engine — and one the caller
+                // now meets, so this describes the app rather than asking something of it. A
+                // session that is `stopImmediately` AND held gets NO actions from this plan, so the
+                // stop happens only on a LATER plan taken against FRESHLY REFRESHED signals once
+                // work ends — including while the shell window is hidden. Nothing here can force
+                // that: `hold` emits no `scheduleStop` (it would churn against the cancel below and
+                // still needs a while-hidden timer), so if signals froze at `working = true` the
+                // browsers would stay live indefinitely.
+                //
+                // **Who does it, and where:** `BrowserSignalsCoordinator` (`BrowserSignals.swift`).
+                // It re-plans on every `SessionDirectory.$rows` publication, and — because the
+                // `session.list` poll was gated on the shell window being on screen
+                // (`SessionDirectory.setPolling`, driven by
+                // `AppWindowController.onRenderingActiveChange`), which is exactly the freeze this
+                // paragraph describes — its `syncPolling()` keeps that poll running for as long as
+                // the runtime has ANY live browser, window or no window. `session_activity` events
+                // do not cover chat-mode sessions, which is what the panel auto-creates (see this
+                // file's header), so the list refresh is the only signal that can arrive; spec §10
+                // gate 4 is what fails if it stops arriving.
                 disposition[sessionId] = .hold
             } else if signals.stopImmediately {
                 // Rule 5.
