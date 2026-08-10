@@ -113,10 +113,19 @@ final class BrowserRuntimeTests: XCTestCase {
         }
         private(set) var armed: [Armed] = []
         private(set) var cancelled: [Int] = []
+        private(set) var fired: [Int] = []
         private var nextId = 0
 
-        /// The timers still live: armed and not since cancelled.
-        var liveTimers: [Armed] { armed.filter { !cancelled.contains($0.id) } }
+        /// The timers that will still fire: armed, not cancelled, and **not already spent**.
+        ///
+        /// Modelling `fired` is not fussiness — it is what makes every row below discriminate. A
+        /// one-shot `Timer` is dead the moment it fires, so a double that kept a fired timer in this
+        /// list would report "still armed" for a linger that can never fire again, and the
+        /// re-arm-on-early-fire row went GREEN against an executor that dropped the re-arm entirely
+        /// (measured, mutation E). This is the project's decorative-test class, caught in the act.
+        var liveTimers: [Armed] {
+            armed.filter { !cancelled.contains($0.id) && !fired.contains($0.id) }
+        }
 
         func runPendingWork() {
             let work = pendingWork
@@ -129,6 +138,7 @@ final class BrowserRuntimeTests: XCTestCase {
             guard let entry = armed.first(where: { $0.id == id }) else {
                 return XCTFail("no timer with id \(id)")
             }
+            fired.append(id)
             entry.work()
         }
 
