@@ -844,12 +844,26 @@ BOOL NormaCEFInitialize(int argc,
   // The shutdown guarantee lives HERE, with the thing it guards, rather than in a line of
   // AppDelegate that could be deleted without anything failing to compile. It is registered only
   // once CEF is actually up, so a build that never starts CEF never arms it.
+  //
+  // **This block is now the WHOLE real-quit teardown guarantee.** The whole-branch review's F7 fix
+  // deleted `NormaApplication`'s `-terminate:` override — it destroyed browsers on quit-cancel too,
+  // blanking the panel permanently — which leaves exactly one path from a real quit to
+  // `CefShutdown`: this subscription. Deleting these six lines compiles, links, and leaves the
+  // suite green while the app quits without ever shutting CEF down.
+  //
+  // The `Log` below exists so that is no longer true: its literal lands in `__cstring`, survives
+  // stripping, and `testTheTerminationObserverIsACTUALLYSUBSCRIBED` scans the built product for it
+  // — the same technique, and the same reason, as the `CEF_USE_SANDBOX` and `DoClose` pins. It
+  // pins that the registration EXISTS, not that the notification fires (a host that must never
+  // start CEF cannot observe that). If you change this message, change that needle with it — the
+  // coupling is deliberate and is written at both ends.
   if (g_termination_observer == nil) {
     g_termination_observer = [[NormaCEFTerminationObserver alloc] init];
     [[NSNotificationCenter defaultCenter] addObserver:g_termination_observer
                                              selector:@selector(applicationWillTerminate:)
                                                  name:NSApplicationWillTerminateNotification
                                                object:nil];
+    Log("willTerminate-observer-armed (the only path from a real quit to CefShutdown)");
   }
   return YES;
 }

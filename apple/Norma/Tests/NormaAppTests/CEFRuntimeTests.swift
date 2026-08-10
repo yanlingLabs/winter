@@ -237,6 +237,48 @@ final class CEFRuntimeTests: XCTestCase {
                           + "NormaCEFInitialize registers against NSApplicationWillTerminateNotification")
     }
 
+    /// **The other half: that something actually SUBSCRIBES the observer** — the half the test above
+    /// is honest about not reaching, and which the whole-branch review's F7 fix made load-bearing.
+    ///
+    /// F7 deleted `NormaApplication`'s `-terminate:` override (it destroyed browsers on quit-CANCEL
+    /// too, blanking the panel permanently). That was the right fix, and it left exactly ONE path
+    /// from a real quit to `CefShutdown`: the `addObserver:` block in `NormaCEFInitialize`. Deleting
+    /// those six lines compiles, links, and leaves the whole suite green — the test above included,
+    /// because it pins only that the CLASS exists — while the app quits without shutting CEF down.
+    ///
+    /// The subscription itself cannot be observed from this host: it is made inside
+    /// `CefInitialize`'s success path, which never runs here by design
+    /// (`testTheRuntimeRefusesToStartCEFUnderXCTest`). So this asserts on the BUILT PRODUCT instead,
+    /// via a `__cstring` literal that survives stripping — the same technique, and the same reason,
+    /// as the `CEF_USE_SANDBOX` and `DoClose` pins above.
+    ///
+    /// **Known limits, stated rather than implied:** it catches the block being DELETED, not a
+    /// subtle rewrite that keeps the log and drops the `addObserver:` — the literal has no coupling
+    /// to the call, exactly as the `DoClose` pin's own doc says of its half. If you change that log
+    /// message, change this needle with it; the coupling is deliberate and written at both ends.
+    func testTheTerminationObserverIsACTUALLYSUBSCRIBED() throws {
+        let needle = Data("willTerminate-observer-armed".utf8)
+        let macOS = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
+        let candidates = [
+            macOS.appendingPathComponent("Norma.debug.dylib"),  // Debug puts the real code here
+            macOS.appendingPathComponent("Norma"),              // Release
+        ].filter { FileManager.default.fileExists(atPath: $0.path) }
+        XCTAssertFalse(candidates.isEmpty, "no app binary found to scan")
+
+        let found = candidates.contains { url in
+            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return false }
+            return data.range(of: needle) != nil
+        }
+        XCTAssertTrue(
+            found,
+            "NormaCEFInitialize no longer subscribes NormaCEFTerminationObserver to "
+                + "NSApplicationWillTerminateNotification. Since the whole-branch F7 fix removed "
+                + "NormaApplication's -terminate: override, that subscription is the ONLY path from "
+                + "a real quit to CefShutdown — without it the app terminates with Chromium still "
+                + "up: helper processes and the GPU process are torn down by the OS rather than "
+                + "shut down, and CefShutdown's own teardown never runs.")
+    }
+
     /// `NormaCEFShutdown` must be a safe no-op before initialisation — and a no-op that changes
     /// NOTHING, which is the half that was missing.
     ///
