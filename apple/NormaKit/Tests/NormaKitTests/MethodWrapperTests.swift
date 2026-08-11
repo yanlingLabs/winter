@@ -1304,4 +1304,64 @@ extension MethodWrapperTests {
             XCTAssertEqual(error.code, -3)
         }
     }
+
+    // ============================================================================================
+    // B2 Task 2 — `panel.commandResult`, the app's answer to a `panel_command` transient.
+    // ============================================================================================
+
+    /// The full shape: every field lands on the wire under the name `PanelCommandResultParams`
+    /// (methods.ts) expects, and the two optional payloads are OMITTED rather than sent as null
+    /// when absent (`obj(_:)`'s contract — a null `imageBase64` would fail the daemon's
+    /// `z.string().optional()`, which does not accept null).
+    func testPanelCommandResultEncodesEveryField() async throws {
+        let (client, t) = try await connected()
+
+        let (req, _) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true}"#) {
+            try await client.sendPanelCommandResult(
+                sessionId: "s_9", commandId: "pcmd_7", ok: true,
+                result: "Pricing \u{2014} $20/mo", imageBase64: "iVBORw0KG"
+            )
+        }
+        XCTAssertEqual(req["method"] as? String, "panel.commandResult")
+        let params = req["params"] as? [String: Any]
+        XCTAssertEqual(params?["sessionId"] as? String, "s_9")
+        XCTAssertEqual(params?["commandId"] as? String, "pcmd_7")
+        XCTAssertEqual(params?["ok"] as? Bool, true)
+        XCTAssertEqual(params?["result"] as? String, "Pricing \u{2014} $20/mo")
+        XCTAssertEqual(params?["imageBase64"] as? String, "iVBORw0KG")
+    }
+
+    /// A failure verdict: `ok:false` with the reason in `result`, no image. The absent field must
+    /// not appear at all — `panel.commandResult` is the one panel RPC whose optional payloads are
+    /// large, and a stray `"imageBase64": null` would be refused by the daemon's schema.
+    func testPanelCommandResultOmitsAbsentOptionals() async throws {
+        let (client, t) = try await connected()
+
+        let (req, _) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true}"#) {
+            try await client.sendPanelCommandResult(
+                sessionId: "s_9", commandId: "pcmd_8", ok: false, result: "no element matched"
+            )
+        }
+        let params = req["params"] as? [String: Any]
+        XCTAssertEqual(params?["ok"] as? Bool, false)
+        XCTAssertEqual(params?["result"] as? String, "no element matched")
+        XCTAssertNil(params?["imageBase64"], "an absent image must be omitted, never sent as null")
+    }
+
+    /// The ONE refusal the caller can actually hit: a `commandId` the daemon has no record of.
+    /// A LATE or duplicate result is deliberately NOT an error (the daemon drops it with a log line
+    /// and still answers `{ok:true}`), so nothing here needs to treat that case specially.
+    func testPanelCommandResultSurfacesAnUnknownCommandIdRefusal() async throws {
+        let (client, t) = try await connected()
+        async let call: Void = client.sendPanelCommandResult(sessionId: "s_9", commandId: "pcmd_ghost", ok: true)
+        let sent = try await waitForSent(t, count: 2)
+        let req = decodeLine(sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"error":{"code":-32001,"message":"unknown commandId: pcmd_ghost"}}"#)
+        do {
+            _ = try await call
+            XCTFail("expected an unknown commandId to throw")
+        } catch let error as RpcError {
+            XCTAssertEqual(error.message, "unknown commandId: pcmd_ghost")
+        }
+    }
 }

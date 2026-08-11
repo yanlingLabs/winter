@@ -1308,6 +1308,36 @@ extension NormaClient {
         ]))
     }
 
+    /// B2 Task 2: `panel.commandResult {sessionId, commandId, ok, result?, imageBase64?}` (methods.ts
+    /// `PanelCommandResultParams`) — the ANSWER to a `panel_command` transient. The daemon holds a
+    /// pending entry keyed by `commandId` until this arrives or its `deadlineMs` expires.
+    ///
+    /// **`ok` is the verdict on the VERB, not a transport ack.** `ok: false` with `result` carrying
+    /// the reason is how "no element matched that selector" or "the sensitive-field floor refused
+    /// this type" travels. A verb that could not be attempted at all is still a `false` result — the
+    /// daemon-side TIMEOUT is a different outcome entirely and is never produced by this call.
+    ///
+    /// **Call it exactly once per `commandId`, and don't fear calling it late.** First result wins;
+    /// a duplicate — or one that crossed the deadline in flight — is dropped daemon-side with a log
+    /// line and still answered `{ok:true}`, because the loser of that race has no way to have known.
+    /// The one case that DOES throw is a `commandId` the daemon has no record of (NOT_FOUND).
+    ///
+    /// **`result` is capped at 64 KiB and `imageBase64` at 3 MiB (`PANEL_COMMAND_RESULT_MAX_LENGTH`/
+    /// `PANEL_COMMAND_IMAGE_B64_MAX_LENGTH`), and an over-cap value is REFUSED, not truncated** —
+    /// the command then expires on its deadline and the agent is told "timed out" rather than handed
+    /// a shortened page or a corrupt half-image. Cap app-side first: this is defence in depth, the
+    /// same relationship `reportPanelNavigation`'s URL policy has with `PanelURLPolicy`.
+    /// `imageBase64` is raw base64 — no `data:` prefix.
+    public func sendPanelCommandResult(
+        sessionId: String, commandId: String, ok: Bool, result: String? = nil, imageBase64: String? = nil
+    ) async throws {
+        _ = try await request("panel.commandResult", params: obj([
+            "sessionId": .string(sessionId), "commandId": .string(commandId), "ok": .bool(ok),
+            "result": result.map { .string($0) },
+            "imageBase64": imageBase64.map { .string($0) },
+        ]))
+    }
+
     /// panel-shell T9: `panel.list {sessionId}` (methods.ts `PanelListParams`/`PanelListResult`) —
     /// the CURRENT fold, re-read fresh by the daemon on every call (Task 6's reviewer signed off on
     /// that cost — bounded by tab count, never the phone transport). The app's instant-display seed
