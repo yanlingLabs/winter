@@ -485,6 +485,27 @@ function webFetchApprovalOptions(host: string | undefined, matchedEntry: string 
  */
 const BROWSER_PROMPT_POLICIES = new Set<SessionApprovalPolicy>(["ask", "accept-edits", "plan"]);
 
+/**
+ * B2-T6: what `browserGate` concluded about one browser call. Three-valued, not a nullable card,
+ * because "no card is owed" splits into two outcomes that must NOT be conflated:
+ *
+ *  - `{kind:"card"}` — a dangerous domain, no standing rule, and a human who can be asked.
+ *  - `{kind:"rule"}` — a dangerous domain the human ALREADY approved, standingly, in their own
+ *    settings. No card is owed and the call must still run, which means the tool's unconditional
+ *    block has to be stood down for it exactly as an answered card stands it down. Collapsing this
+ *    into `null` produced a genuine bug in the first cut of this task, caught by the "a standing
+ *    rule flows with NO card" row: the card vanished and the refusal stayed.
+ *  - `null` — this gate did not adjudicate at all: an ordinary domain (free by default, as fetch
+ *    is), a verb that aims at no url, or a never-ask policy where the tool's block is the answer.
+ *
+ * The two non-null verdicts are exactly the paths that stamp `ctx.browserDomainApproved`, and they
+ * share one closure at the call site so that stays true by construction.
+ */
+type BrowserGateVerdict =
+  | { kind: "card"; summary: string; options: ApprovalOption[] }
+  | { kind: "rule" }
+  | null;
+
 /** Sanitize+cap a reviewer-authored free-text field (`tool_review.reason`/`.summary`,
  *  `approval_requested.reviewerReason`) before it goes on the wire (phase 5e T2). Deliberately NOT
  *  `sanitizeForReminder` (below): that helper also neutralizes literal `<system-reminder>` tags,
@@ -4096,8 +4117,9 @@ export class AgentEngine {
         // B2-T6 (spec §4): the browser's domain gate — the same shape, the same null-for-everything-
         // else fast path, and (via webFetchApprovalOptions) the same card as the line above. Unlike
         // webFetchGate this one takes the POLICY, because it declines to adjudicate at all in the
-        // never-ask modes and leaves the tool's own unconditional hard block to answer there.
-        const browserCard = call.name === "browser" ? this.browserGate(call, cwd, meta.approvalPolicy) : null;
+        // never-ask modes and leaves the tool's own unconditional hard block to answer there; and it
+        // is three-valued, because a standing rule must clear the block as well as the card.
+        const browserVerdict = call.name === "browser" ? this.browserGate(call, cwd, meta.approvalPolicy) : null;
         // SP-approvals Task 11 (spec §8): bash's two escalation args, parsed ONCE here — before
         // the ruleAllowed block below and the dispatch chain further down — so every consumer
         // (the classifier guard, the always-card branch) sees the SAME parse. `{allowNetwork:
@@ -4556,29 +4578,31 @@ export class AgentEngine {
               options: webFetchCard.options,
             }, loaded, undefined, pins, rootsOverride, visionCapable, excludeTools, allowTools);
           }
-        } else if (browserCard) {
-          // B2-T6: the browser's dangerous-domain card. No policy guard on the condition — unlike
-          // the web_fetch branch above, which has to exclude `bypass` and special-case `dont-ask`
-          // here, `browserGate` already returned null for every policy that must not prompt
-          // (BROWSER_PROMPT_POLICIES), so reaching this branch IS the decision that a card is owed.
-          // One place answers "may this prompt?", and it is the same place that answers "is this
-          // domain a problem?" — they cannot drift apart into a mode that cards but shouldn't.
+        } else if (browserVerdict) {
+          // B2-T6: the browser's dangerous-domain adjudication. No policy guard on the condition —
+          // unlike the web_fetch branch above, which has to exclude `bypass` and special-case
+          // `dont-ask` here, `browserGate` already returned null for every policy that must not
+          // prompt (BROWSER_PROMPT_POLICIES), so reaching this branch IS the decision that this
+          // navigation is the engine's to adjudicate. One place answers "may this prompt?", and it
+          // is the same place that answers "is this domain a problem?" — they cannot drift apart
+          // into a mode that cards but shouldn't.
           //
-          // The onApprove closure is what makes the approval reach the tool, and its shape is the
-          // Task-5 seam being honoured: the signal is a DAEMON STAMP keyed by callId, alive only
-          // for the duration of this one `executeCall`, never a key on `panel_command.args` (which
-          // is model-authored — see browser.ts's `commandArgs`). try/finally, not a bare delete:
-          // an executeCall that throws must not leave a stamp behind for a later call with a
-          // recycled id to inherit.
+          // ONE stamped-execution closure, shared by both verdicts, and that is deliberate: it makes
+          // "every path that stands the tool's block down is a path a human authorized" true by
+          // construction rather than by two branches happening to agree. A live card answered
+          // (`kind:"card"`) and a standing rule the human wrote (`kind:"rule"`) are the same
+          // authority; the only difference is whether anyone had to be interrupted for it.
+          //
+          // The stamp itself is the Task-5 seam being honoured: a DAEMON-written signal, keyed
+          // session|thread|callId, alive only for the duration of this one `executeCall`, never a
+          // key on `panel_command.args` (which is model-authored — see browser.ts's `commandArgs`).
+          // try/finally, not a bare delete: an executeCall that throws must not leave a stamp behind
+          // for a later call to inherit.
           //
           // Everything else is the default path's own argument list, forwarded unchanged — the same
           // list `requestApproval`'s built-in onApprove would have passed (the worktree/workflow
           // bridges spell it out the same way).
-          outcome = await this.requestApproval(call, cwd, sessionId, threadId, signal, {
-            timeoutMs: this.approvalTimeoutFor(meta),
-            summary: browserCard.summary,
-            options: browserCard.options,
-          }, loaded, async () => {
+          const runApproved = async (): Promise<{ output: string; isError: boolean }> => {
             const stamp = AgentEngine.callKey(sessionId, threadId, call.callId);
             this.browserApprovedCallIds.add(stamp);
             try {
@@ -4586,7 +4610,14 @@ export class AgentEngine {
             } finally {
               this.browserApprovedCallIds.delete(stamp);
             }
-          }, pins, rootsOverride, visionCapable, excludeTools, allowTools);
+          };
+          outcome = browserVerdict.kind === "rule"
+            ? await runApproved()
+            : await this.requestApproval(call, cwd, sessionId, threadId, signal, {
+              timeoutMs: this.approvalTimeoutFor(meta),
+              summary: browserVerdict.summary,
+              options: browserVerdict.options,
+            }, loaded, runApproved, pins, rootsOverride, visionCapable, excludeTools, allowTools);
         } else if (call.name === "exit_plan_mode" && this.cfg.plans && meta.approvalPolicy === "plan") {
           outcome = await this.runPlanBridge(call, sessionId, threadId, meta);
         } else if (call.name === "enter_plan_mode") {
@@ -5630,7 +5661,7 @@ export class AgentEngine {
     call: { name: string; argsJson: string },
     cwd: string,
     policy: SessionApprovalPolicy,
-  ): { summary: string; options: ApprovalOption[] } | null {
+  ): BrowserGateVerdict {
     if (!BROWSER_PROMPT_POLICIES.has(policy)) return null;
     const aimed = browserVerbUrl(call.argsJson);
     if (!aimed) return null;
@@ -5639,8 +5670,17 @@ export class AgentEngine {
     // Same projectRoot derivation as webFetchGate's (see its own comment): the card only ever mints
     // a GLOBAL rule, but decision() is scope-generic, so a hand-edited project rule works too.
     const projectRoot = cwd ? repoRootFor(cwd) : null;
-    if (this.cfg.permissionRules?.decision({ name: call.name, argsJson: call.argsJson }, projectRoot) === "allow") return null;
+    if (this.cfg.permissionRules?.decision({ name: call.name, argsJson: call.argsJson }, projectRoot) === "allow") {
+      // "rule", NOT null — and the distinction is load-bearing, which is what made this a
+      // three-valued verdict instead of a nullable card. `null` here would mean "this gate has
+      // nothing to say", and the tool's own unconditional block would then refuse a navigation the
+      // human already standing-approved: the card would be gone and the refusal would remain, which
+      // is the worst of both. A standing `WebFetch(domain:…)` rule IS a human approval — written by
+      // a human, in the human's own settings — so it earns the same daemon stamp a live card does.
+      return { kind: "rule" };
+    }
     return {
+      kind: "card",
       // The wording carries the two facts a human cannot see from the url alone, because this card
       // is the ONLY place they are ever said to them (spec §4's own "stated plainly" paragraph):
       // whose browser this is, and how far the approval actually reaches. FIRST-HOP-ONLY is not a

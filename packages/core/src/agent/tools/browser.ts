@@ -505,11 +505,12 @@ function panelReach(deps: BrowserToolDeps, sessionId: string): PanelReach {
  *
  * They meet in exactly one place: `approved`. The block is unconditional — every mode, every policy,
  * every caller including a direct `registry.execute` — EXCEPT for a single call the daemon stamped
- * `ctx.browserDomainApproved` after a live human answered that card. Nothing else lifts it: not a
- * standing rule (the engine consults those, and only where it could have shown a card), not an
- * argument, not a mode. In the never-ask modes (chat, dispatch/auto, dont-ask, bypass — spec §4's
- * unattended set) the engine declines to adjudicate at all, so this block is the whole answer there,
- * exactly as Task 4 shipped it.
+ * `ctx.browserDomainApproved`. **That stamp is the ONLY thing that lifts it**, and the engine issues
+ * it for exactly two reasons, both of them a human authorizing this domain: a card just answered, or
+ * a standing `WebFetch(domain:…)` rule the human wrote. No argument lifts it, no mode lifts it, and
+ * a rule alone does not either — the engine only consults rules where it could have shown a card. So
+ * in the never-ask modes (chat, dispatch/auto, dont-ask, bypass — spec §4's unattended set) this
+ * block is the whole answer, rule or no rule, exactly as Task 4 shipped it.
  *
  * The stamp is a ctx field and not an arg for the reason Task 5 recorded and this file's
  * `commandArgs` enforces: a "a human approved this" signal must be daemon-written. `ctx` is built by

@@ -60,9 +60,11 @@ export interface ToolContext {
   // tool's screenshot action refuses when this is explicitly false (ax_snapshot still works); the
   // `read` tool refuses reading an image file the same way. Unset = unknown → not blocked.
   visionCapable?: boolean;
-  // B2-T6 (spec §4): a live human approved THIS call's browser navigation, moments ago, through the
-  // same per-domain approval card `web_fetch` uses (engine.ts's `browserGate` → `requestApproval`).
-  // The `browser` tool reads it to stand its otherwise-unconditional dangerous-domain block down for
+  // B2-T6 (spec §4): a HUMAN authorized THIS call's browser navigation to a dangerous-list domain —
+  // either by answering the card `web_fetch` uses (engine.ts's `browserGate` → `requestApproval`)
+  // moments ago, or by a standing `WebFetch(domain:…)` rule they wrote in their own settings. The
+  // two are the same authority and both stamp this field; only one of them interrupts anybody. The
+  // `browser` tool reads it to stand its otherwise-unconditional dangerous-domain block down for
   // exactly this call.
   //
   // **This is the Task-5 seam, and its whole point is WHERE it lives.** The approval signal had to be

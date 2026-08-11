@@ -504,6 +504,59 @@ describe("browser: the dangerous-domain hard block covers BOTH url doors", () =>
     expect(h.recorded).toHaveLength(0);
   });
 
+  // ── T6: the ONE thing that stands the block down, and everything that does not ────────────────
+  //
+  // `ctx.browserDomainApproved` is the daemon's stamp, written by engine.ts's approved-execution
+  // closure after a human answered the domain card (or after their standing WebFetch rule matched).
+  // Its whole design constraint — Task 5's seam — is that it must be UNREACHABLE from the model, so
+  // these rows test the two halves separately: the stamp works, and the model cannot forge it.
+  test("T6: a daemon-stamped ctx lifts the block on BOTH doors, for that call only", async () => {
+    const h = makeHarness();
+    const nav = await h.run({ verb: "navigate", tabId: "t1", url: "https://evil.ngrok.io/x" }, { browserDomainApproved: true });
+    expect({ isError: nav.isError, dispatched: h.recorded.length }).toEqual({ isError: false, dispatched: 1 });
+    const open = await h.run({ verb: "open", url: "https://evil.ngrok.io/x" }, { browserDomainApproved: true });
+    expect({ isError: open.isError, opened: h.opened.length }).toEqual({ isError: false, opened: 1 });
+
+    // The very next call, unstamped, is refused again — the approval covered one call, not a session.
+    const again = await h.run({ verb: "navigate", tabId: "t1", url: "https://evil.ngrok.io/x" });
+    expect(again.isError).toBe(true);
+    expect(h.recorded).toHaveLength(1);
+  });
+
+  test("T6 SEAM: the model cannot approve itself — the flag in ARGS is not the flag in CTX", async () => {
+    const h = makeHarness();
+    // A model that has read its own tool description and guessed the field name. `args` is parsed by
+    // the tool's zod schema (which has no such field) and is never merged into ctx, so this is
+    // indistinguishable from a plain refused call.
+    const res = await h.run({ verb: "navigate", tabId: "t1", url: "https://evil.ngrok.io/x", browserDomainApproved: true });
+    expect(res.isError).toBe(true);
+    expect(res.output).toContain("dangerous-domain list");
+    expect(h.recorded).toHaveLength(0);
+  });
+
+  test("T6: `false`/absent are both refusals — an approval is a positively-present fact, never an inferred one", async () => {
+    const h = makeHarness();
+    for (const ctx of [{}, { browserDomainApproved: false }, { browserDomainApproved: undefined }]) {
+      const res = await h.run({ verb: "navigate", tabId: "t1", url: "https://evil.ngrok.io/x" }, ctx);
+      expect({ ctx: JSON.stringify(ctx), isError: res.isError }).toEqual({ ctx: JSON.stringify(ctx), isError: true });
+    }
+    expect(h.recorded).toHaveLength(0);
+  });
+
+  test("T6 FLOOR INDEPENDENCE: an approved domain changes NOTHING about a `type` — same args, no extra key on the wire", async () => {
+    // The sensitive floor is computed app-side against a DOM this daemon has never seen, and the
+    // only payload that crosses to it is `panel_command.args`. So the daemon-side half of "approved
+    // ≠ password fields allowed" is exactly this: a stamped session's `type` puts nothing on the
+    // wire that a consumer could read as a floor override. Compared against the UNSTAMPED call's own
+    // payload rather than a literal, so the claim is "identical", not "looks right".
+    const h = makeHarness();
+    await h.run({ verb: "type", tabId: "t1", selector: "input[name=\"pw\"]", text: "hunter2" });
+    await h.run({ verb: "type", tabId: "t1", selector: "input[name=\"pw\"]", text: "hunter2" }, { browserDomainApproved: true });
+    expect(h.recorded).toHaveLength(2);
+    expect(h.recorded[1]?.args).toEqual(h.recorded[0]?.args as Record<string, unknown>);
+    expect(h.recorded[1]?.args).toEqual({ selector: "input[name=\"pw\"]", text: "hunter2" });
+  });
+
   test("an ordinary host is untouched", async () => {
     const h = makeHarness();
     const res = await h.run({ verb: "navigate", tabId: "t1", url: "https://example.com" });
