@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { z } from "zod";
 import { PANEL_COMMAND_RESULT_MAX_LENGTH, PANEL_COMMAND_ACTIONS } from "@norma/protocol";
 import { ToolRegistry, MAX_OUTPUT, type ToolContext } from "../../../src/agent/tools/registry";
+import { registerToolSearchTool } from "../../../src/agent/tools/toolsearch";
 import {
   registerBrowserTool, canHostPanel, BROWSER_DEADLINES_MS,
   BROWSER_READ_VERBS, BROWSER_INTERACT_VERBS,
@@ -145,6 +146,20 @@ describe("browser: registration", () => {
       .toEqual([...BROWSER_READ_VERBS].sort());
     // No mode at all → fail-closed to the narrow schema, never the wide one.
     expect(verbsIn(h.registry.specFor("browser", "/tmp")).sort()).toEqual([...BROWSER_READ_VERBS].sort());
+  });
+
+  test("ToolSearch — the ONLY way code ever sees this schema — renders the code one", async () => {
+    // `specFor`'s mode param is only useful if its one production caller passes it. Driving the real
+    // ToolSearch tool is what pins that threading; asserting on `specFor` directly (above) cannot,
+    // and a mutation run proved it: unthreading toolsearch.ts alone left every other row green.
+    const h = makeHarness();
+    registerToolSearchTool(h.registry);
+    const loaded = await h.registry.execute("ToolSearch", { query: "select:browser" }, {
+      cwd: "/tmp", roots: ["/tmp"], sessionId: SID, mode: "code",
+      builtinDeferral: true, loadedTools: new Set<string>(),
+    } as ToolContext);
+    expect(loaded.isError).toBe(false);
+    for (const v of BROWSER_INTERACT_VERBS) expect(loaded.output).toContain(`"${v}"`);
   });
 
   test("the chat exclusion is ENFORCED at execute(), not merely un-advertised", async () => {
