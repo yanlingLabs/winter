@@ -30,7 +30,12 @@ export interface ToolContext {
   // execute()'s isDeferred check. Absent → execute() resolves an array-valued `deferred` as
   // deferred (fail-closed: a caller that doesn't know the mode must not be handed a tool some mode
   // needs to load first) — see isDeferred's own doc comment. `deferred: true`/absent are unaffected
-  // by this either way. Mechanism only as of this task: no real engine.ts call site sets it yet.
+  // by this either way.
+  //
+  // (The original "mechanism only — no real engine.ts call site sets it yet" is long stale: D1-T2's
+  // `executeCall` sets `mode: resolveMode(meta)` on every ToolContext the engine builds. As of
+  // b2-agent-browser T4 this field has a SECOND consumer — `argsByMode`, the per-mode ARGUMENT
+  // SCHEMA — so an unset `mode` now narrows a tool's accepted arguments as well as hiding it.)
   mode?: Mode;
   ask?: (questions: Question[]) => Promise<AskOutcome>; // engine bridge: emits question_asked/question_resolved events and blocks on the QuestionBroker; the ask_user tool calls it
   taskEvent?: (task: Task) => void; // engine bridge: emits task_updated; called by the task tools (task_create/task_update/task_list)

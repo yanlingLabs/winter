@@ -1526,6 +1526,9 @@ export function isPersistablePanelWebUrl(url: string): boolean {
  *  **64 KiB of text**, matching `MAX_OUTPUT` in `packages/core/src/agent/tools/registry.ts` — every
  *  byte of `result` is destined to become tool output, and the registry truncates tool output at 64
  *  KiB regardless, so a larger cap here would buy the model nothing while making the frame bigger.
+ *  That "matching" is no longer a claim a reader has to take on trust: B2 Task 4 exported
+ *  `MAX_OUTPUT` and `packages/core/test/agent/tools/browser.test.ts` asserts the two are equal, so
+ *  the numbers cannot drift while this sentence goes on saying they agree.
  *  It is also 3× `READPAGE_PER_PAGE_CHAR_CAP` (20 000), the sibling read path this verb replaces
  *  when a rendered, logged-in page is reachable.
  *
@@ -1563,7 +1566,10 @@ export const PanelOpenTabParams = z.object({
   // `.code` tab legitimately carries a local path, a `.web` tab never does. Written as a
   // `superRefine` on the object rather than a `refine` on the field because the decision needs
   // BOTH fields. B2's agent-facing browser tool reaches this same door, so it inherits the guard
-  // without a second policy of its own.
+  // without a second policy of its own — TRUE as of B2 Task 4, and by construction rather than by
+  // convention: `browser`'s `open` verb (packages/core/src/agent/tools/browser.ts) parses its
+  // model-supplied url through THIS schema before minting, so an agent-authored `javascript:` url is
+  // refused by the same line a user-authored one is.
   if (p.kind === "web" && p.url !== undefined && !isPersistablePanelWebUrl(p.url)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom, path: ["url"],

@@ -19,8 +19,10 @@ import type { NewSessionEvent, PANEL_COMMAND_ACTIONS, PanelCommandResultParams }
 // answer, give up on a timer) and its shape has held since Phase 4c.
 //
 // **Why a module here rather than a closure inside `ipc/server.ts`.** The registry has TWO owners
-// that must see the same map: the PRODUCER (B2 Task 4's browser tool, which reaches it through the
-// engine's deps) and the `panel.commandResult` HANDLER. A closure in server.ts would make the tool
+// that must see the same map: the PRODUCER (B2 Task 4's browser tool, which reaches it through its
+// own REGISTRATION deps — `registerBrowserTool`'s `dispatch`, wired in daemon.ts, not through
+// `ToolContext`; the registry is daemon-global while a ToolContext is per-call) and the
+// `panel.commandResult` HANDLER. A closure in server.ts would make the tool
 // depend on the ipc server to dispatch a command — the wrong direction entirely, and the same
 // reasoning that puts `HardwareBroker` in `peripheral/` with only its consent gate in server.ts. It
 // sits beside `panel/store.ts` because it is panel-domain state; unlike that file it is not pure,

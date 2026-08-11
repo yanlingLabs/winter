@@ -588,9 +588,25 @@ export const PanelTabNavigatedEvent = Base.extend({
  *  Split by capability, because the per-mode tool registry depends on the split (spec §1): the READ
  *  set — `navigate`, `back`, `read`, `screenshot` (plus the tab verbs, which are RPCs and never
  *  travel this channel) — is what chat mode may ever reach; the INTERACT set — `click`, `type`,
- *  `scroll`, `submit`, `wait` — exists only in code/cowork/dispatch. This constant is deliberately
+ *  `scroll`, `submit`, `wait` — is offered only in code and dispatch. This constant is deliberately
  *  the FLAT union: the wire has no reason to care which half a verb came from, and the split that
- *  matters is enforced where it is decided (the tool registration), not here. */
+ *  matters is enforced where it is decided (the tool registration), not here.
+ *
+ *  **B2 Task 4 built that registration, and two clauses above needed correcting to stay true.**
+ *
+ *  (1) The spec's phrase was "code/cowork/dispatch"; the DAEMON has no such mode. `registry.ts`'s
+ *  `Mode` is `code|dispatch|chat` and `engine.ts`'s `resolveMode` folds a `cowork` session into
+ *  `"chat"` (deliberately — see its own comment: cowork is chat-shaped and there is no cowork slot
+ *  for a per-mode seam to resolve against). So the day cowork ships, a cowork session gets CHAT's
+ *  read-only browser until someone widens `Mode` — a change with its own blast radius, not made
+ *  here. "code and dispatch" is what is actually enforced, so that is what this now says.
+ *
+ *  (2) "Enforced at the tool registration" is now literal rather than a rendering convention:
+ *  `browser` declares `ToolDefinition.argsByMode` (`packages/core/src/agent/tools/registry.ts`),
+ *  which resolves through ONE predicate that both `specs()`/`specFor()` (what the model is shown) and
+ *  `execute()` (what is accepted) call. A chat session that named an INTERACT verb anyway — a
+ *  provider ignoring the advertised schema — is rejected at argument validation, before the tool's
+ *  own code runs and long before anything is emitted onto this channel. */
 export const PANEL_COMMAND_ACTIONS = [
   "navigate", "back", "read", "screenshot", "click", "type", "scroll", "submit", "wait",
 ] as const;
