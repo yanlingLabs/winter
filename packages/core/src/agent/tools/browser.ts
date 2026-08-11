@@ -794,8 +794,11 @@ export function registerBrowserTool(r: ToolRegistry, deps: BrowserToolDeps): voi
       if (!outcome.ok) {
         // The APP's verdict that the verb ran and failed — a different axis from the timeout above,
         // and the reason `PanelCommandOutcome` keeps them as separate kinds. The reason string is the
-        // app's own ("no live browser for that tab", "only http and https urls…", "not implemented in
-        // this version of the Mac app yet") and is passed through untouched.
+        // app's own ("no live browser for that tab", "only http and https urls…", "nothing on the
+        // page matches …", and the sensitive floor's refusal) and is passed through UNTOUCHED. That
+        // matters most for the floor: its verdict is the app's, computed against a DOM this daemon
+        // has never seen, and softening or re-wording it here would be this layer pretending to a
+        // judgement it did not make.
         throw new Error(outcome.result ?? `the browser could not ${a.verb} in tab ${tabId}`);
       }
 
