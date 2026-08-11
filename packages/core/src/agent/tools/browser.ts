@@ -25,10 +25,13 @@ import { checkDangerousDomain, dangerousDomainRefusal } from "./page-core";
  *
  * ## What this tool does NOT do, with owners
  *
- * **Approvals are Task 6's.** Nothing here consults the per-domain rules the spec's §4 puts this tool
- * on (the same web floor `fetch`/`web_fetch` ride). When Task 6 lands, its gate belongs AHEAD of
- * `dispatchVerb` below — beside the dangerous-domain check, which is deliberately NOT the same thing
- * (see `refuseDangerous`).
+ * **APPROVALS ARE ADJUDICATED IN THE ENGINE (Task 6), not here.** Spec §4 puts this tool on the same
+ * per-domain mechanism `fetch`/`web_fetch` ride, and that mechanism needs a human — so it lives where
+ * the human is reachable: `AgentEngine.browserGate` decides, `webFetchApprovalOptions` builds the
+ * card, and a `WebFetch(domain:…)` rule remembers the answer. What reaches this file is one bit,
+ * `ctx.browserDomainApproved`, stamped by the daemon for exactly one call. Everything this file owns
+ * about domains is `refuseDangerous` — a block that is unconditional except for that bit, and whose
+ * own doc explains why the two halves are separate mechanisms rather than one.
  *
  * **URL SCHEME policy is the app's**, at the consumer (`PanelCommandConsumer.navigate`, the fifth
  * door — spec §3 puts policy there because the consumer is the last place before a real web view).
@@ -48,6 +51,22 @@ import { checkDangerousDomain, dangerousDomainRefusal } from "./page-core";
  *    link goes wherever the page says, and no `panel.commandResult` reports where that was. The
  *    fifth door (`PanelURLPolicy`) is a SCHEME door and holds for the url the CONSUMER loads, which
  *    a click never routes through. Inherited, named, not closed here — see `refuseDangerous`.
+ *
+ *    **Task 6's ruling on it, since the approval flow now exists and someone will ask:** approving
+ *    domain X DOES cover clicks that navigate away from X, by necessity rather than by choice. The
+ *    daemon has no hop to adjudicate — a click's destination is chosen by the page, resolved by CEF,
+ *    and reported (if at all) only after the load, with nothing awaiting the report. A gate that
+ *    cannot see the event cannot refuse it, and pretending otherwise would be worse than saying so.
+ *    The card the human answers therefore says it in the words they read: "Approving covers this
+ *    first hop only — not where that page redirects, and not where a click on it goes next."
+ *  - **`submit` gets no gate of its own either (Task 6), and `click` is the reason.** A browser-
+ *    autofilled form can be submitted by clicking its button, so gating `submit` alone would be
+ *    theatre while `click` exists; gating both would be a per-interaction approval category, which
+ *    spec §4's "no new approval category" forbids and which would card a dozen times per page. The
+ *    unit stays the DOMAIN. What still binds is the sensitive floor — the agent cannot TYPE into a
+ *    password or payment field anywhere, approved domain or not — so the residue is precisely
+ *    "submitting a form the user's own browser had already filled in", named here rather than
+ *    closed.
  *  - **The floor's refusal is a `{kind:"result", ok:false}`**, so it arrives on the same path as
  *    "no element matched" and is rendered by the same branch below. It is deliberately not modelled
  *    as a distinct outcome: the daemon has no way to verify a floor verdict it did not compute, and
