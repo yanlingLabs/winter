@@ -218,8 +218,14 @@ export const BROWSER_SCROLL_DIRECTIONS = ["up", "down", "left", "right"] as cons
  * class of "timed out" answers for work that succeeded.
  *
  * Enforced TWICE, and the second time is not redundant: zod refuses an over-bound `timeoutMs` here,
- * and `PanelCommandConsumer` CLAMPS whatever arrives (`waitTimeoutCeilingMs`) because the app must
- * not take a model-authored number's word for it just because this daemon says it checked.
+ * and the app CLAMPS whatever arrives, because it must not take a model-authored number's word for
+ * it just because this daemon says it checked.
+ *
+ * **The app clamps against the command's OWN `deadlineMs`, not against a constant**
+ * (`PanelCommandArguments.waitCeiling`, added by this task's fix round): with the 30 000 above the
+ * two agree exactly at 20 000, so if this number is ever lowered the app follows it down instead of
+ * quietly producing the answered-into-an-expired-entry case this doc exists to prevent. The core
+ * pin below is therefore a tripwire, not the mechanism.
  */
 export const BROWSER_WAIT_MAX_TIMEOUT_MS = 20_000;
 

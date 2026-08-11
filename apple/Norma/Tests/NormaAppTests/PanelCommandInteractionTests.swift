@@ -125,26 +125,75 @@ final class PanelCommandInteractionTests: XCTestCase {
     /// **The data-never-code assertion.** `value` may appear in the transcript ONLY as the value of
     /// `underKey`, and nowhere else — not in a method name, not in an `expression`, not in a
     /// `functionDeclaration`, not in any other parameter.
+    ///
+    /// **RECURSIVE since fix round 1 (review Minor-4).** It used to walk the params dictionary one
+    /// level deep and inspect only `String` leaves, which was enough for the shapes that exist —
+    /// and blind to the most likely shape a future arm would reach for: `Runtime.callFunctionOn`'s
+    /// `arguments: [{value: text}]`, an array of objects. That is the CDP-sanctioned way to bind a
+    /// model string as data, so the day someone uses it correctly this assertion must see the string
+    /// rather than silently see nothing at all. Arrays and nested objects are now walked; the KEY
+    /// PATH is reported so a violation says where it was found, and the key compared against
+    /// `underKey` is the LEAF one (`arguments[0].value` is judged as `value`).
+    ///
+    /// **What it still cannot see:** a breakout smuggled inside a non-`String` leaf — a number, a
+    /// bool, or a string re-encoded (base64, percent-escaped, UTF-16 escapes) so that a literal
+    /// `contains` misses it. It compares text, so it catches text. The structural guarantee is
+    /// upstream: `expression` and `functionDeclaration` are compared byte-for-byte against this
+    /// app's own constants elsewhere in this file, which is what makes "no model string is in them"
+    /// true independently of what this walk can spot.
     private func assertIsDataNotCode(_ value: String, underKey: String, expected: Int = 1,
                                      file: StaticString = #filePath, line: UInt = #line) {
-        var carried = 0
-        for call in transcript() {
-            XCTAssertFalse(call.method.contains(value),
-                           "a model string reached the CDP METHOD NAME: \(call.method)",
-                           file: file, line: line)
-            for (key, raw) in call.params {
-                guard let text = raw as? String, text.contains(value) else { continue }
-                XCTAssertEqual(key, underKey,
-                               "a model string reached `\(key)` of \(call.method) — the only "
-                                   + "parameter it may travel in is `\(underKey)`",
-                               file: file, line: line)
-                if key == underKey, text == value { carried += 1 }
-            }
-        }
-        XCTAssertEqual(carried, expected,
+        let scan = Self.scan(transcript(), for: value, underKey: underKey)
+        XCTAssertEqual(scan.violations, [],
+                       "a model string reached a place it may not travel in — the only parameter it "
+                           + "may is `\(underKey)`",
+                       file: file, line: line)
+        XCTAssertEqual(scan.carried, expected,
                        "the model string did not travel as `\(underKey)` at all — if resolution "
                            + "moved into an evaluated expression, this is the row that says so",
                        file: file, line: line)
+    }
+
+    struct DataNotCodeScan: Equatable {
+        /// `method params.key.path` for every place the string turned up that is not `underKey`.
+        var violations: [String]
+        /// How many times it travelled as `underKey`'s own value, whole.
+        var carried: Int
+    }
+
+    /// The walk itself, PURE, so its discrimination can be measured on synthetic shapes the real
+    /// consumer does not produce yet (see `testTheDataNotCodeWalkSeesNestedLeaves…`). Extracting it
+    /// is what turns "we extended the helper" into evidence.
+    static func scan(_ calls: [CDPCall], for value: String, underKey: String) -> DataNotCodeScan {
+        var violations: [String] = []
+        var carried = 0
+
+        func walk(_ node: Any, path: String, method: String) {
+            switch node {
+            case let text as String:
+                guard text.contains(value) else { return }
+                let leaf = path.split(separator: ".").last.map(String.init) ?? path
+                if leaf == underKey {
+                    if text == value { carried += 1 }
+                } else {
+                    violations.append("\(method) \(path)")
+                }
+            case let list as [Any]:
+                for (index, item) in list.enumerated() {
+                    walk(item, path: "\(path)[\(index)]", method: method)
+                }
+            case let object as [String: Any]:
+                for (key, item) in object { walk(item, path: "\(path).\(key)", method: method) }
+            default:
+                return
+            }
+        }
+
+        for call in calls {
+            if call.method.contains(value) { violations.append("METHOD NAME \(call.method)") }
+            for (key, raw) in call.params { walk(raw, path: key, method: call.method) }
+        }
+        return DataNotCodeScan(violations: violations.sorted(), carried: carried)
     }
 
     // MARK: - Canned replies
@@ -395,6 +444,92 @@ final class PanelCommandInteractionTests: XCTestCase {
         XCTAssertEqual(sent.first?.ok, true, "\(sent)")
     }
 
+    // MARK: - Fix round 1: the refusal must be DELIVERED, not merely produced
+
+    /// **Review Important-1.** The floor's evidence quoted a page-supplied `autocomplete` token
+    /// matched only by a `cc-` PREFIX — so `autocomplete="cc-<70 KB>"` built a 70 KB refusal, the
+    /// daemon refused the whole RPC at its 64 KiB cap, `sendPanelCommandResult`'s `try?` swallowed
+    /// the rejection, and the command expired: **the one message this task exists to deliver became
+    /// "the Mac app did not answer".**
+    ///
+    /// Two independent fixes now stand between a hostile page and that silence — the floor quotes at
+    /// `quotedEvidenceMaxLength`, and `answer` caps EVERY message — and this row asserts the
+    /// property they exist for rather than either mechanism: a refusal comes back, it names the
+    /// field kind, and it fits on the wire.
+    func testAHostilePageCannotTurnTheFloorsRefusalIntoSilence() throws {
+        let huge = "cc-" + String(repeating: "a", count: 70_000)
+        consumer.handle(command("type", args: ["selector": "#pay", "text": "4111"]))
+        answer([Self.document, Self.matched, Self.field(["type", "text", "autocomplete", huge])])
+
+        XCTAssertEqual(sent.count, 1, "the refusal must be SENT, not merely computed")
+        XCTAssertEqual(sent.first?.ok, false)
+        let result = try XCTUnwrap(sent.first?.result)
+        XCTAssertTrue(result.contains("payment field"), result.prefix(200).description)
+        XCTAssertLessThanOrEqual(PanelURLPolicy.wireLength(result),
+                                 PanelCommandConsumer.resultMaxLength,
+                                 "an over-cap result is REFUSED whole by the daemon — this is the "
+                                     + "timeout shape the finding described")
+        XCTAssertFalse(methods().contains("Input.insertText"))
+    }
+
+    /// The structural half on its own: the send-site cap cuts in the DAEMON's unit, marks the cut,
+    /// and the marked result fits. Every message out of the consumer inherits this, including ones
+    /// nobody has written yet — which is the whole reason it is at `answer` and not at the two sites
+    /// that happened to be found.
+    func testTheSendSiteCapCutsInTheWiresUnitAndSaysThatItCut() {
+        let short = "refused: that is a password field"
+        XCTAssertEqual(PanelCommandConsumer.capped(short), short, "an ordinary message is untouched")
+
+        let huge = String(repeating: "a", count: PanelCommandConsumer.resultMaxLength + 5_000)
+        let cut = PanelCommandConsumer.capped(huge)
+        XCTAssertLessThanOrEqual(PanelURLPolicy.wireLength(cut), PanelCommandConsumer.resultMaxLength)
+        XCTAssertTrue(cut.contains("cut by Norma"), "a silent truncation is a message read to the end")
+        XCTAssertTrue(cut.hasPrefix("aaa"), "the head — where the meaning is — survives")
+
+        // The UNIT, again: each emoji is one Character and TWO UTF-16 units, so a cut measured in
+        // Characters would leave a result the daemon still refuses.
+        let wide = String(repeating: "😀", count: PanelCommandConsumer.resultMaxLength / 2 + 500)
+        XCTAssertLessThan(wide.count, PanelCommandConsumer.resultMaxLength)
+        let cutWide = PanelCommandConsumer.capped(wide)
+        XCTAssertLessThanOrEqual(PanelURLPolicy.wireLength(cutWide),
+                                 PanelCommandConsumer.resultMaxLength)
+        XCTAssertTrue(cutWide.contains("😀"), "and it must not have cut a surrogate pair in half")
+    }
+
+    /// **Review Minor-4's discrimination, measured.** The depth-1 String-only walk this replaced
+    /// could not see any of these; the last row is the one that mattered — a string that travels
+    /// correctly AND ALSO appears somewhere it must not would have passed it green.
+    func testTheDataNotCodeWalkSeesNestedLeavesNotJustTopLevelStrings() {
+        // The CDP-sanctioned data slot, which is the shape a future arm will reach for.
+        let bound = CDPCall(method: "Runtime.callFunctionOn", params: [
+            "functionDeclaration": "function (v) { this.value = v; }",
+            "arguments": [["value": "SECRET"]],
+        ])
+        XCTAssertEqual(Self.scan([bound], for: "SECRET", underKey: "value"),
+                       DataNotCodeScan(violations: [], carried: 1))
+
+        // Interpolated into an expression: seen at depth 1, as before.
+        let interpolated = CDPCall(method: "Runtime.evaluate",
+                                   params: ["expression": "document.querySelector('SECRET')"])
+        XCTAssertEqual(Self.scan([interpolated], for: "SECRET", underKey: "selector"),
+                       DataNotCodeScan(violations: ["Runtime.evaluate expression"], carried: 0))
+
+        // Interpolated NESTED. Invisible to the old walk.
+        let deep = CDPCall(method: "Runtime.callFunctionOn",
+                           params: ["arguments": [["expression": "SECRET"]]])
+        XCTAssertEqual(Self.scan([deep], for: "SECRET", underKey: "selector"),
+                       DataNotCodeScan(violations: ["Runtime.callFunctionOn arguments[0].expression"],
+                                       carried: 0))
+
+        // **The silent pass the extension closes**: correct travel AND a nested breakout together.
+        // Old walk: carried 1, violations 0 → green. Now: the violation is named.
+        let both = [CDPCall(method: "DOM.querySelector", params: ["selector": "SECRET"]), deep]
+        let scan = Self.scan(both, for: "SECRET", underKey: "selector")
+        XCTAssertEqual(scan.carried, 1)
+        XCTAssertEqual(scan.violations,
+                       ["Runtime.callFunctionOn arguments[0].expression"])
+    }
+
     // MARK: - The floor as a pure function
 
     /// The policy directly, without a browser in the way — the table that says what the list catches
@@ -531,19 +666,19 @@ final class PanelCommandInteractionTests: XCTestCase {
 
     /// `idle` needs TWO agreeing polls — the first can never satisfy it, because "nothing new
     /// finished since last time" has no last time.
-    func testWaitForIdleNeedsTwoPollsThatAgree() {
+    func testWaitForIdleNeedsTwoPollsThatAgree() throws {
         consumer.handle(command("wait", args: ["until": "idle", "timeoutMs": 5_000],
                                 deadlineMs: 30_000))
         answer([Self.probe("complete", resources: 7)])
         XCTAssertEqual(sent, [], "one poll cannot establish idleness, however complete the page is")
 
         clock.current = clock.current.addingTimeInterval(0.25)
-        clock.fire(clock.liveTimers.last!.id)
+        clock.fire(try XCTUnwrap(clock.liveTimers.last).id)
         answer([Self.probe("complete", resources: 9)])
         XCTAssertEqual(sent, [], "the count moved — something finished fetching")
 
         clock.current = clock.current.addingTimeInterval(0.25)
-        clock.fire(clock.liveTimers.last!.id)
+        clock.fire(try XCTUnwrap(clock.liveTimers.last).id)
         answer([Self.probe("complete", resources: 9)])
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent.first?.ok, true)
@@ -552,13 +687,13 @@ final class PanelCommandInteractionTests: XCTestCase {
     /// **The bound.** A wait that never comes true stops on its OWN budget and says what it saw —
     /// it does not run to the command deadline, which would be reported to the agent as "the Mac app
     /// did not answer" for a wait that worked perfectly.
-    func testWaitStopsOnItsOwnBudgetAndSaysWhatItSaw() {
+    func testWaitStopsOnItsOwnBudgetAndSaysWhatItSaw() throws {
         consumer.handle(command("wait", args: ["until": "load", "timeoutMs": 1_000],
                                 deadlineMs: 30_000))
         answer([Self.probe("loading", resources: 1)])
 
         clock.current = clock.current.addingTimeInterval(0.9)
-        clock.fire(clock.liveTimers.last!.id)
+        clock.fire(try XCTUnwrap(clock.liveTimers.last).id)
         answer([Self.probe("loading", resources: 1)])
 
         XCTAssertEqual(sent.count, 1)
@@ -572,14 +707,14 @@ final class PanelCommandInteractionTests: XCTestCase {
     /// **The clamp, which is the arithmetic made real.** A model asking for a minute gets the
     /// ceiling, and says so — because a wait that outlived its command's `deadlineMs` would answer
     /// into a pending entry the daemon had already timed out.
-    func testAnOverLongModelTimeoutIsClampedToTheCeiling() {
+    func testAnOverLongModelTimeoutIsClampedToTheCeiling() throws {
         consumer.handle(command("wait", args: ["until": "load", "timeoutMs": 60_000],
                                 deadlineMs: 30_000))
         answer([Self.probe("loading", resources: 0)])
 
         clock.current = clock.current
             .addingTimeInterval(Double(PanelCommandArguments.waitTimeoutCeilingMs) / 1000 - 0.1)
-        clock.fire(clock.liveTimers.last!.id)
+        clock.fire(try XCTUnwrap(clock.liveTimers.last).id)
         answer([Self.probe("loading", resources: 0)])
 
         XCTAssertEqual(sent.count, 1)
@@ -588,12 +723,12 @@ final class PanelCommandInteractionTests: XCTestCase {
                       "unclamped this would still be polling, and would say 60000ms — \(sent)")
     }
 
-    func testWaitForMillisecondsTouchesNoBrowserAtAll() {
+    func testWaitForMillisecondsTouchesNoBrowserAtAll() throws {
         consumer.handle(command("wait", args: ["until": "ms", "timeoutMs": 500], deadlineMs: 30_000))
         XCTAssertEqual(cef.log, [], "a sleep must not make a tab's health a precondition")
         // Two clocks: the command deadline and the sleep. The sleep is the later-armed one.
         XCTAssertEqual(clock.liveTimers.count, 2)
-        clock.fire(clock.liveTimers.last!.id)
+        clock.fire(try XCTUnwrap(clock.liveTimers.last).id)
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent.first?.ok, true)
         XCTAssertTrue(sent.first?.result?.contains("waited 500ms") == true, "\(sent)")

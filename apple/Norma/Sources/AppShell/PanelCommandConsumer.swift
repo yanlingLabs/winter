@@ -151,6 +151,12 @@ final class PanelCommandConsumer {
     /// exists because `panel_command.tabId` has a `min(1)` and no `max` on the wire.
     private static let quotedIdentifierMaxLength = 120
 
+    /// How much of a quoted SENTENCE a reason may carry — a CDP error message, which is the
+    /// browser's prose and may embed a page-thrown exception's text. Longer than an identifier's
+    /// bound because 120 characters cuts a real diagnostic mid-clause; far short of the wire cap,
+    /// which `answer` enforces regardless (fix round 1, review Important-1).
+    private static let quotedReasonMaxLength = 400
+
     // MARK: - Construction
 
     private let runtime: BrowserRuntime
@@ -638,11 +644,11 @@ final class PanelCommandConsumer {
     ///
     /// Three clocks run on one `wait` and only the innermost may win: the daemon's pending entry
     /// (`deadlineMs`, armed first), this consumer's local abandon timer (the same `deadlineMs`,
-    /// armed later), and the model's `timeoutMs`. `PanelCommandArguments.waitTimeoutCeilingMs`
-    /// clamps the third to 20 s against a 30 s deadline; `browser.ts`'s
-    /// `BROWSER_WAIT_MAX_TIMEOUT_MS` carries the full arithmetic. The clamp is applied HERE as well
-    /// as there because the app is the last thing before the browser and does not take the wire's
-    /// word for a bound.
+    /// armed later), and the model's `timeoutMs`. `PanelCommandArguments.waitCeiling` clamps the
+    /// third **against this command's own `deadlineMs`** — 20 s inside the shipped 30 s;
+    /// `browser.ts`'s `BROWSER_WAIT_MAX_TIMEOUT_MS` carries the full arithmetic. The clamp is
+    /// applied HERE as well as there because the app is the last thing before the browser and does
+    /// not take the wire's word for a bound.
     ///
     /// `until:"ms"` touches no browser at all — it is a sleep, and dressing it up as a CDP call
     /// would make a tab's health a precondition for waiting.
@@ -650,7 +656,9 @@ final class PanelCommandConsumer {
         guard let tabId = command.tabId else {
             return answer(call, ok: false, result: "wait needs a tabId")
         }
-        guard let asked = operand(PanelCommandArguments.wait(command.args), call) else { return }
+        guard let asked = operand(
+            PanelCommandArguments.wait(command.args, deadlineMs: command.deadlineMs), call)
+        else { return }
 
         arm(call, deadlineMs: command.deadlineMs)
         let budget = Double(asked.timeoutMs) / 1000
@@ -690,9 +698,14 @@ final class PanelCommandConsumer {
             }
             let next = self.scheduler.now().addingTimeInterval(Self.waitPollIntervalSeconds)
             guard next <= until else {
+                // `probe.ready` is page-controlled, not merely page-reported: `document.readyState`
+                // is a property, and a page can shadow it with a getter returning a megabyte. It is
+                // read for a MESSAGE only — never for the verdict, which compares it to a literal —
+                // so the exposure is the message-length one Important-1 names, and it is briefed
+                // here as well as capped at `answer`.
                 return self.answer(call, ok: false,
                                    result: "the page did not reach `\(predicate.rawValue)` within "
-                                           + "\(timeoutMs)ms — it was still `\(probe.ready)`")
+                                           + "\(timeoutMs)ms — it was still `\(Self.brief(probe.ready))`")
             }
             call.pollTimer = self.scheduler.timer(next) { [weak self] in
                 self?.poll(call, tabId: tabId, predicate: predicate, until: until,
@@ -832,7 +845,11 @@ final class PanelCommandConsumer {
             if ok {
                 then(payload)
             } else {
+                // The browser's own words, BRIEFED: a CDP error message can carry a page-thrown
+                // exception's text, which is unbounded (fix round 1). `answer`'s cap is the
+                // structural guard; this keeps the quoted reason a reason rather than a wall.
                 let raw = PanelCDPReply.failureMessage(fromJSON: payload)
+                    .map { Self.brief($0, max: Self.quotedReasonMaxLength) }
                     ?? "the browser could not run \(method)"
                 self.answer(call, ok: false, result: failureIs.map { "\($0) (\(raw))" } ?? raw)
             }
@@ -901,7 +918,62 @@ final class PanelCommandConsumer {
                   + "twice — the second answer was dropped here, not on the wire")
             return
         }
-        sendResult(call.sessionId, call.commandId, ok, result, imageBase64)
+        var body = result
+        var image = imageBase64
+
+        // **THE LAST-RESORT CAP — at the send site, so EVERY message inherits it** (fix round 1,
+        // review Important-1).
+        //
+        // The finding it exists for: `SensitiveFieldFloor`'s evidence string quoted a page-supplied
+        // `autocomplete` token matched only by a `cc-` prefix, so `autocomplete="cc-<70KB>"` built a
+        // 70 KB refusal — and an over-cap `result` is REFUSED whole by the daemon at `parseParams`,
+        // `sendPanelCommandResult`'s `try?` swallows the rejection, and the command then expires on
+        // its deadline. **The floor's visible refusal would have become "the Mac app did not
+        // answer… Nothing is known about whether it ran"** — silence, on the one message this whole
+        // task exists to deliver.
+        //
+        // The individual sites are fixed too (`SensitiveFieldFloor.quoted`, `brief` on the tag name
+        // and on `readyState`), but a per-site fix only holds until the next message is written.
+        // This is the structural half: no path out of this file can produce a frame the daemon will
+        // refuse for length, whatever a future arm interpolates. Page-controlled text reaches a
+        // message from at least four directions today — an attribute value, an element's `nodeName`,
+        // a shadowed `document.readyState`, and the browser's own CDP error text — and the list is
+        // open by nature.
+        //
+        // **Truncated, where `read` REFUSES — and the difference is not an inconsistency.** `read`'s
+        // payload IS the answer, so half of it is a page that ends somewhere arbitrary while looking
+        // complete; that deserves an explicit refusal naming the size, and its own pre-check stays
+        // for exactly that reason (a better message, produced earlier). A REASON is prose: its first
+        // sentence carries the meaning, the cut is marked, and delivering it beats delivering
+        // nothing. This is a backstop, not the first line of defence.
+        if let data = image, PanelURLPolicy.wireLength(data) > Self.imageBase64MaxLength {
+            // Unreachable while `screenshot`'s own pre-check stands, and owed anyway. DROPPED, never
+            // cut: half a base64 PNG is not a smaller picture, it is a corrupt file — the one place
+            // truncation is not merely worse but meaningless.
+            NSLog("[PanelCommandConsumer] \(call.action) (\(Self.brief(call.commandId))) produced an "
+                  + "over-cap image — dropped rather than truncated")
+            image = nil
+            body = [body, "(the image was too large to send and was dropped)"]
+                .compactMap { $0 }.joined(separator: " ")
+        }
+        if let text = body, PanelURLPolicy.wireLength(text) > Self.resultMaxLength {
+            NSLog("[PanelCommandConsumer] \(call.action) (\(Self.brief(call.commandId))) produced a "
+                  + "\(PanelURLPolicy.wireLength(text))-character result — cut to the wire's cap so "
+                  + "it is delivered rather than refused")
+            body = Self.capped(text)
+        }
+        sendResult(call.sessionId, call.commandId, ok, body, image)
+    }
+
+    /// Cut a message to `resultMaxLength` in the daemon's unit, and SAY that it was cut — a silently
+    /// truncated reason is a reason the reader trusts to the end. The marker is measured too, so the
+    /// result of this function always fits.
+    static func capped(_ text: String) -> String {
+        let length = PanelURLPolicy.wireLength(text)
+        guard length > resultMaxLength else { return text }
+        let marker = " … [cut by Norma: the full message was \(length) characters]"
+        let room = max(0, resultMaxLength - PanelURLPolicy.wireLength(marker))
+        return PanelURLPolicy.truncated(text, toWireLength: room) + marker
     }
 
     // MARK: - Task 5's literals — every one of them fixed text, none assembled from a command
@@ -988,13 +1060,19 @@ final class PanelCommandConsumer {
 
     /// Name a field the way a person reading the transcript would — `<input name="q">` — so the
     /// success line says WHAT was typed into and not merely that something was.
+    ///
+    /// **Both halves are page-controlled and both are briefed** (fix round 1). The attribute value
+    /// always was; `tagName` is `DOM.describeNode`'s `nodeName`, which for a custom element is
+    /// whatever the page called it and has no length bound anywhere on the path. `answer`'s cap
+    /// would now keep an unbriefed one from killing the frame, but a 70 KB tag name that survives to
+    /// be cut is still a garbage message — the cap makes it deliverable, `brief` makes it readable.
     private static func describe(_ field: SensitiveFieldFloor.Field) -> String {
         for attribute in ["name", "id", "aria-label", "placeholder"] {
             if let value = field.attributes[attribute], !value.isEmpty {
-                return "<\(field.tagName) \(attribute)=\"\(brief(value))\">"
+                return "<\(brief(field.tagName)) \(attribute)=\"\(brief(value))\">"
             }
         }
-        return "<\(field.tagName)>"
+        return "<\(brief(field.tagName))>"
     }
 
     /// Why `normalizeTypedInput` refused — **computed only AFTER it already has**, and returning a
@@ -1018,9 +1096,14 @@ final class PanelCommandConsumer {
     }
 
     /// Quote an identifier inside a message. See `quotedIdentifierMaxLength`.
-    private static func brief(_ value: String) -> String {
-        guard value.count > quotedIdentifierMaxLength else { return value }
-        return String(value.prefix(quotedIdentifierMaxLength)) + "…"
+    ///
+    /// `max` exists because fix round 1 gave this a second kind of caller: a whole SENTENCE from the
+    /// browser (a CDP error, which can carry a page-thrown exception's text). An identifier cut at
+    /// 120 is still recognisable; a sentence cut at 120 usually is not, so quoted prose gets
+    /// `quotedReasonMaxLength`. Neither is a wire cap — `answer` owns that.
+    private static func brief(_ value: String, max limit: Int = quotedIdentifierMaxLength) -> String {
+        guard value.count > limit else { return value }
+        return String(value.prefix(limit)) + "…"
     }
 
     /// A CDP params object. `JSONSerialization` rather than string building for the obvious reason:

@@ -118,23 +118,34 @@ enum PanelURLPolicy {
     /// `testTheCapsCountTheSameUnitTheDaemonCounts` is the pin that reds if this reverts.
     static func wireLength(_ s: String) -> Int { s.utf16.count }
 
-    /// Truncate to `titleMaxLength` **UTF-16 units**, never splitting a grapheme cluster.
+    /// Truncate to `limit` **UTF-16 units**, never splitting a grapheme cluster.
     ///
     /// Both properties are required: cutting at a raw UTF-16 offset could split a surrogate pair
     /// (producing an unpaired surrogate — invalid UTF-8 on the wire, which the socket's JSON
     /// encoder would reject just as surely as an over-long string), and cutting by `Character`
-    /// alone is the bug above. So: take whole `Character`s while the running UTF-16 total fits.
-    static func cappedTitle(_ title: String) -> String {
-        guard wireLength(title) > titleMaxLength else { return title }
+    /// alone is the bug `wireLength` records. So: take whole `Character`s while the running UTF-16
+    /// total fits.
+    ///
+    /// Generalised out of `cappedTitle` by b2-agent-browser Task 5's fix round, which needed the
+    /// same cut for a `panel.commandResult` message and for the sensitive floor's quoted evidence.
+    /// One implementation, because getting this wrong is silent in both directions.
+    static func truncated(_ value: String, toWireLength limit: Int) -> String {
+        guard wireLength(value) > limit else { return value }
         var capped = ""
         var units = 0
-        for character in title {
+        for character in value {
             let width = String(character).utf16.count
-            if units + width > titleMaxLength { break }
+            if units + width > limit { break }
             capped.append(character)
             units += width
         }
         return capped
+    }
+
+    /// Truncate to `titleMaxLength` in the daemon's unit. See `truncated` for why the cut is what it
+    /// is, and `wireLength` for what a wrong unit here cost the first time.
+    static func cappedTitle(_ title: String) -> String {
+        truncated(title, toWireLength: titleMaxLength)
     }
 
     /// The scheme of `url`, lowercased, or `nil` when the string does not start with one.

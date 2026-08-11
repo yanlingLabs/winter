@@ -47,9 +47,17 @@ import NormaProtocol
 /// `BROWSER_SELECTOR_MAX_LENGTH`, `BROWSER_TYPE_TEXT_MAX_LENGTH`, `BROWSER_WAIT_MAX_TIMEOUT_MS`, and
 /// the wire's own 8 KiB `args` cap), and this app checks anyway because it is the last thing before
 /// a real browser in the user's own profile, and "the sender says it validated" is not a check.
-/// They are deliberately NOT hand-mirrored caps in the `PanelURLPolicy.urlMaxLength` sense — nothing
-/// breaks silently if they drift, because a value the daemon allows and this refuses comes back as a
+/// **Three of the four are not hand-mirrored caps in the `PanelURLPolicy.urlMaxLength` sense**, and
+/// nothing breaks silently if THEY drift: a value the daemon allows and this refuses comes back as a
 /// visible `ok:false` naming the limit, not as a dropped result.
+///
+/// **`waitTimeoutCeilingMs` is the exception, and the original wording here was wrong about it**
+/// (fix round 1, review Minor-2). It does not refuse, it CLAMPS — and it used to clamp against a
+/// hardcoded 20 000 rather than against the command's own `deadlineMs`. If `BROWSER_DEADLINES_MS.wait`
+/// ever dropped below the ceiling, a wait that ran its full course would answer into a pending entry
+/// the daemon had already expired: a `dropped` result and a "the Mac app did not answer" for work
+/// that succeeded — silent in exactly the way this paragraph claimed was impossible. What prevented
+/// it was a CORE-side pin, not this file. It now clamps against the deadline it was actually given.
 enum PanelCommandArguments {
 
     /// A selector's ceiling. Matches the daemon's so a legal command is never refused here.
@@ -67,7 +75,37 @@ enum PanelCommandArguments {
     /// deadline, ten seconds of headroom for the round trip). CLAMPED here rather than refused: an
     /// over-long wait is not a malformed request, it is one this app can only honour in part, and
     /// waiting 20 s and saying so beats refusing outright.
+    ///
+    /// It is the ABSOLUTE ceiling; `waitCeiling(forDeadlineMs:)` is what actually binds.
     static let waitTimeoutCeilingMs = 20_000
+
+    /// **What the app reserves out of the command's deadline for everything that is not the poll**
+    /// (fix round 1, review Minor-2): the daemon's emit, the socket, the hub fan-out, this app's
+    /// decode and main-thread scheduling, one poll interval of overshoot, and the result's encode
+    /// and crossing home.
+    ///
+    /// The same 10 s `browser.ts` reserves, and deliberately the same number rather than a tighter
+    /// one derived here: this app cannot see how much of the deadline was already spent in transit,
+    /// so its estimate can only be the producer's — and two numbers that must agree are better as
+    /// one value repeated with a reason than as two independently tuned guesses.
+    static let waitDeadlineMarginMs = 10_000
+
+    /// The floor a clamp may not go under: one poll interval
+    /// (`PanelCommandConsumer.waitPollIntervalSeconds`). It exists only for a pathological deadline
+    /// — with anything near the shipped 30 s it is unreachable — so that a tiny budget yields ONE
+    /// look at the page rather than a zero-length wait that reports failure without ever asking.
+    static let waitFloorMs = 250
+
+    /// **The bound that actually binds.** The smaller of the absolute ceiling and what THIS
+    /// command's deadline can afford.
+    ///
+    /// With the shipped `BROWSER_DEADLINES_MS.wait` of 30 000 the two agree exactly at 20 000, which
+    /// is why this changed no behaviour — it changed what happens if that number ever moves. Before
+    /// the fix round the clamp was against the hardcoded ceiling alone, so a deadline that dropped
+    /// below it would have produced a completed wait answering into an expired entry, silently.
+    static func waitCeiling(forDeadlineMs deadlineMs: Int) -> Int {
+        max(waitFloorMs, min(waitTimeoutCeilingMs, deadlineMs - waitDeadlineMarginMs))
+    }
 
     /// What `scroll` was asked to do.
     enum ScrollTarget: Equatable {
@@ -157,8 +195,10 @@ enum PanelCommandArguments {
         }
     }
 
-    /// `wait`'s predicate and its clamped budget.
-    static func wait(_ args: [String: SessionEvent.JSONValue]?)
+    /// `wait`'s predicate and its clamped budget. **`deadlineMs` is the command's own** — the clamp
+    /// is against what this command can actually afford, not against a constant that only happens to
+    /// fit today (fix round 1, review Minor-2; see `waitCeiling`).
+    static func wait(_ args: [String: SessionEvent.JSONValue]?, deadlineMs: Int)
         -> Read<(predicate: WaitPredicate, timeoutMs: Int)> {
         guard case .string(let raw)? = args?["until"],
               let predicate = WaitPredicate(rawValue: raw) else {
@@ -167,7 +207,7 @@ enum PanelCommandArguments {
         guard case .number(let ms)? = args?["timeoutMs"], ms >= 1 else {
             return .refused("wait needs a positive `timeoutMs`")
         }
-        return .ok((predicate, min(Int(ms), waitTimeoutCeilingMs)))
+        return .ok((predicate, min(Int(ms), waitCeiling(forDeadlineMs: deadlineMs))))
     }
 }
 
@@ -204,8 +244,21 @@ enum PanelCommandArguments {
  * `el.type` reads a PROPERTY, and a page can shadow a property:
  * `Object.defineProperty(input, "type", {get: () => "text"})` makes a password field introduce
  * itself as a text field, and the floor would wave it through. Attributes come from the DOM tree
- * Blink holds; page script can change an attribute (which is a real change to the element) but
- * cannot make the protocol report one value while the element behaves as another.
+ * Blink holds, so page script cannot make the protocol report one value while the element behaves
+ * as another.
+ *
+ * **That last clause is true because every attribute this floor reads is a REFLECTED IDL attribute,
+ * and it is NOT a general property of the DOM** (fix round 1, review Minor-5). `input.type`,
+ * `autocomplete`, `name`, `id`, `placeholder`, `aria-label`, `title`, `class` and `data-*` all
+ * reflect: setting the IDL property writes the content attribute, so the attribute Blink reports and
+ * the behaviour the element exhibits cannot diverge. The standing counterexample is **`value`**,
+ * which does not reflect at all — `el.value = "x"` changes what the field contains and never touches
+ * the `value` content attribute, so an attribute-reading inspector sees the ORIGINAL default and a
+ * property-reading one sees the truth. The floor never reads `value` and has no reason to.
+ *
+ * **The guard that keeps this true:** anything added to `haystackAttributes` must be verified
+ * reflected. An unreflected addition would not fail loudly — it would read a stale or absent
+ * attribute and quietly weaken the paragraph above into a claim this code no longer earns.
  *
  * ## What it CANNOT see — enumerated, because a floor whose limits are unwritten reads as a
  * guarantee it is not
@@ -223,10 +276,19 @@ enum PanelCommandArguments {
  *     did not take a dependency on. It is the largest known hole and is named in the task report.
  *  4. **A credential field the site calls something else.** The needles below are a list, and a list
  *     is never complete — `heslo`, `contraseña`, a field named `q4`.
- *  5. **Where the caret actually ends up.** The floor judges the element the agent NAMED, and
- *     `DOM.focus` puts focus on that element; a page's own `focus` handler may then move focus
- *     elsewhere before `Input.insertText` arrives, and no mechanism on this protocol prevents that.
- *     It is the same exposure a human user has, minus the seeing.
+ *  5. **What runs between the verdict and the keystrokes.** The floor judges the element the agent
+ *     NAMED and `DOM.focus` focuses that same node over the protocol — so an overridden
+ *     `Element.prototype.focus` cannot redirect it. What it cannot exclude is the page's own
+ *     synchronous JavaScript, and there are **three** entry points, not one (fix round 1, review
+ *     Minor-6): a `focus` EVENT HANDLER, which may move focus elsewhere; and `this.select` and
+ *     `this.isContentEditable`, both read off a page-controlled object by the select-before-type
+ *     literal and both shadowable. The conclusion is unchanged and is worth stating so the list is
+ *     not mistaken for a hole: a page that does any of this gains almost nothing — it can already
+ *     read its own inputs, and the worst outcomes are that the typed text appends instead of
+ *     replacing, or lands in a field the page chose. What it does mean is that the floor's
+ *     guarantee is about the field it JUDGED, not about where the characters finally settle.
+ *     No mechanism on this protocol closes that; it is the same exposure a human user has, minus
+ *     the seeing.
  *  6. **Anything about `click` or `submit`.** The floor bounds what the AGENT TYPES. A form the
  *     browser autofilled can be submitted by clicking its button, and gating `submit` alone would be
  *     theatre while `click` exists. What bounds that is the domain gate (Task 6), not this.
@@ -330,6 +392,11 @@ enum SensitiveFieldFloor {
     /// for a card field are the whole signal here; `class` is included because component libraries
     /// put the field's purpose there and nowhere else (`class="StripeElement card-number"`), and
     /// because a false positive costs a message.
+    ///
+    /// **Every entry must be a REFLECTED IDL attribute, and adding an unreflected one would weaken
+    /// this floor silently** — see the type's own doc for why (`value` is the counterexample: it
+    /// does not reflect, so reading it here would report the page's original default rather than
+    /// what the field holds). All nine below reflect.
     private static let haystackAttributes = [
         "name", "id", "placeholder", "aria-label", "title", "autocomplete", "class", "data-testid",
     ]
@@ -349,11 +416,11 @@ enum SensitiveFieldFloor {
             for token in autocomplete.lowercased().split(whereSeparator: { $0 == " " || $0 == "\t" }) {
                 let value = String(token)
                 if value.hasPrefix("cc-") {
-                    return .refuse(kind: "payment field", evidence: "autocomplete=\"\(value)\"")
+                    return .refuse(kind: "payment field", evidence: "autocomplete=\"\(quoted(value))\"")
                 }
                 if credentialAutocompleteTokens.contains(value) {
                     let kind = value == "one-time-code" ? "one-time-code field" : "password field"
-                    return .refuse(kind: kind, evidence: "autocomplete=\"\(value)\"")
+                    return .refuse(kind: kind, evidence: "autocomplete=\"\(quoted(value))\"")
                 }
             }
         }
@@ -368,6 +435,25 @@ enum SensitiveFieldFloor {
         }
 
         return .allow
+    }
+
+    /// **How much of a PAGE-CONTROLLED token the evidence may quote** (fix round 1, review
+    /// Important-1).
+    ///
+    /// The `cc-` branch matches by PREFIX, so the token it quotes is bounded by nothing: a page
+    /// serving `autocomplete="cc-<70 KB>"` produced a 70 KB refusal string, which the daemon refuses
+    /// whole at `PANEL_COMMAND_RESULT_MAX_LENGTH` — turning **the floor's visible refusal into a
+    /// timeout the agent reads as "nothing is known"**. The structural guard is at the send site
+    /// (`PanelCommandConsumer.answer` caps every message); this is the local half, and it is the one
+    /// that keeps the message USEFUL rather than merely deliverable. 64 characters is well past any
+    /// real autofill token (`cc-exp-month` is 12) and short enough that the sentence still reads.
+    static let quotedEvidenceMaxLength = 64
+
+    /// Quote a page-supplied token inside the evidence, cut in the daemon's unit (see
+    /// `PanelURLPolicy.truncated` for why the cut is grapheme-whole and UTF-16-measured).
+    private static func quoted(_ value: String) -> String {
+        guard PanelURLPolicy.wireLength(value) > quotedEvidenceMaxLength else { return value }
+        return PanelURLPolicy.truncated(value, toWireLength: quotedEvidenceMaxLength) + "…"
     }
 
     /// Lowercase, and drop the separators sites vary freely: `Card Number`, `card-number`,
