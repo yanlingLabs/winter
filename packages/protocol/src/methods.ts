@@ -206,6 +206,46 @@ export const SessionListResult = z.object({
     // calls a second apart legitimately differ. Absent means "does not participate" (chat/dispatch)
     // — NOT "idle", and not "old daemon" for any daemon at or past this version.
     activity: SessionActivity.optional(),
+    // b2-agent-browser T1 (spec §5): the session's ARCHIVED flag, for every mode.
+    //
+    // Not a new value on the wire — `store.list()` has selected `archived` since
+    // session-activity-hygiene T3 and this handler has always returned the row verbatim. What was
+    // missing is this DECLARATION, and its absence was not cosmetic: a zod object strips every key
+    // it does not name, so a schema-validating TS client (packages/cli/src/client.ts `validated()`)
+    // silently dropped a field the daemon was already putting on the socket — exactly the asymmetry
+    // `cwd` above was declared to close.
+    //
+    // Distinct from `activity === "archived"`, which is the same fact narrowed to code/cowork by
+    // `participatesInActivity`: this one is mode-blind, which is the point. An archived CHAT session
+    // is invisible in the label and visible here, and the Mac app's browser lifecycle reads this
+    // field (`BrowserSignals.archived`) rather than the label for that reason.
+    //
+    // Absent means NOT archived (the store writes NULL, never 0 — `store.setArchived`), so absence
+    // is a real answer for every daemon, old or new.
+    archived: z.boolean().optional(),
+    // b2-agent-browser T1 (spec §5): the two live signals the Mac app's browser lifecycle needs,
+    // computed per row for EVERY MODE — chat and dispatch included — and therefore deliberately NOT
+    // gated by `participatesInActivity` the way `activity`/`dirs` above are. See
+    // `makeSessionSignalsDeriver` (packages/core/src/sessions/activity.ts) for why that bypass is
+    // correct rather than an oversight: the mode gate governs the LABEL, which is a lifecycle
+    // policy; these are raw facts about the daemon's own state, and a chat session's running turn is
+    // no less a running turn for having no lifecycle.
+    //
+    // OPTIONAL, and absence means "this daemon predates the signals surface" — never `false`. A
+    // consumer that coerced absence to `false/false` would be claiming knowledge it does not have;
+    // the Mac app reads `nil` and falls back to its own local signals only (BrowserSignals.swift).
+    //
+    // Bounded by construction: two booleans. The recursive per-event string cap that guards
+    // `session.history`/the remote stream does not apply — that governs EVENTS, and this is a method
+    // result which has never passed through it.
+    signals: z.object({
+      // `SessionHub.attachedCount` MINUS the requesting connection's own attachment — the daemon
+      // answering "is anyone ELSE here?" instead of making every client subtract its own reflection
+      // by guesswork. See the handler in ipc/server.ts for how self is identified.
+      attachedElsewhere: z.boolean(),
+      // `turnRunning || bgWork` — the same disjunction `activityFor` calls "work is happening".
+      working: z.boolean(),
+    }).optional(),
   })),
 });
 
