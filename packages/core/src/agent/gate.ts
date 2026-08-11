@@ -185,6 +185,32 @@ const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_workt
 // (real outbound request, response text treated as untrusted model input), same unconditional
 // "allow" answer AT THIS GATE.
 //
+// B2-T6: `browser` (the agent's hands on the panel's real, logged-in Chromium tabs) joins NETWORK,
+// and it is the class it belongs in on every axis this file cares about: it is pointed at a
+// CALLER-SUPPLIED url exactly like web_fetch and ReadPage, its `read`/`screenshot` verbs return
+// attacker-reachable page content as model input (the same untrusted-response risk shape the class
+// exists to name), and it never touches an arbitrary fs/process path of its own — its whole effect
+// is confined to tabs the daemon minted for this session.
+//
+// It was UNCLASSIFIED until this task, which was not a neutral omission — it is what the final
+// fail-closed branch below does to a name it has never heard of, measured through the real engine:
+// "deny" under `chat` (the mode spec §1 makes the browser a DEFAULT tool in — the tool was dead
+// there), "deny" under `plan`, and "ask" under `auto` — i.e. an approval card on EVERY verb,
+// including `tabs`, in a dispatch session that can never answer one. That is the identical trap
+// list_sessions/manage_session's own entry above records, arriving the same way.
+//
+// The verb split (chat gets read verbs only, code/dispatch get the interaction verbs too) is NOT
+// enforced here and must not be: it is the per-mode TOOL REGISTRY's (`argsByMode` — a chat session
+// that calls `verb:"click"` is rejected at argument validation, structurally, before this gate's
+// verdict is even relevant). This file's answer is per-TOOL-NAME by construction, so folding a
+// verb-shaped distinction into it would be a second, weaker copy of a boundary that already holds.
+//
+// Its floor is one layer below, in the same two-place shape web_fetch's has: the DANGEROUS-DOMAIN
+// adjudication for `navigate`/`open` — a hard block inside the tool (tools/browser.ts's
+// `refuseDangerous`, unconditional and mode-blind), lifted for exactly one call by the engine's
+// `browserGate` when a human answered fetch's own approval card. Same list, same card, same
+// `WebFetch(domain:...)` rule, no new category (spec §4, the user's decision).
+//
 // Whole-branch review Critical 1 fix (2026-07-28, USER-REVISED design): `ReadPage` DOES now carry a
 // floor of its own — same family as web_fetch's, just NOT engine.ts-level and NOT a card. Chat/
 // dispatch structurally have no approval flow to card through at all (USER DECISION: "chat mode...
@@ -196,7 +222,7 @@ const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_workt
 // same reason: it "cannot card" (task-3-brief.md, "not interactive"). None of this changes what THIS
 // gate returns — `ReadPage`'s verdict here is still, and remains, unconditionally "allow"; the floor
 // lives entirely inside the tool, one layer below where this file's classification has any say.
-const NETWORK = new Set(["web_fetch", "web_search", "Search", "ReadPage"]);
+const NETWORK = new Set(["web_fetch", "web_search", "Search", "ReadPage", "browser"]);
 // skill_write (phase 5c Task 2) gets a NEW class, strictly stricter than MUTATING: "ask" under
 // BOTH `ask` AND `auto` (a card on EVERY call — no policy setting silences it), "deny" under
 // `plan`. THE SKETCH PIN (phase-5-intelligence-design-sketch.md §5c): "a skill is standing
@@ -229,7 +255,7 @@ export class PermissionGate {
     // policy — is checked FIRST, before ALWAYS_ASK/MUTATING/everything below, because the user's
     // directive ("chat simply wouldn't ever ask permissions") means NOTHING may resolve to "ask"
     // under it, not even a future ALWAYS_ASK-classified addition. Chat's own allowlisted tools
-    // (AskQuestion/Search/ReadPage) all live in READ_ONLY/NETWORK, so this is exactly "allow the
+    // (AskQuestion/Search/ReadPage, and B2-T6's `browser`) all live in READ_ONLY/NETWORK, so this is exactly "allow the
     // read-only/network classes, deny everything else outright" — never a card, matching "never
     // asks" literally rather than degrading to a stricter-but-still-asking policy.
     if (policy === "chat") {

@@ -4191,8 +4191,11 @@ export class AgentEngine {
           // flow. The message is mode-aware — dont-ask/plan/chat all reach this same branch but for
           // different reasons, so each gets its own accurate explanation. The "chat" branch is
           // unreachable for chat's REAL production allowlist today (registry.namesForMode("chat")
-          // is {AskQuestion, Search, ReadPage} — all READ_ONLY/NETWORK, so gate.evaluate never
-          // returns "deny" for any of them) — kept as honest, explicit handling for the hypothetical
+          // is {AskQuestion, Search, ReadPage, browser} — all READ_ONLY/NETWORK, so gate.evaluate
+          // never returns "deny" for any of them; `browser` joined NETWORK in B2-T6, which is what
+          // keeps that true — it was UNCLASSIFIED and therefore actually reaching this branch, in
+          // the one mode spec §1 makes it a default tool in)
+          // — kept as honest, explicit handling for the hypothetical
           // case (a future mistakenly-chat-eligible mutating tool) rather than falling through to
           // the "Blocked in plan mode" text, which would be a flatly wrong explanation for a chat
           // session that was never in plan mode at all.

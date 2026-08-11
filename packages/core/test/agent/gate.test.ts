@@ -208,6 +208,26 @@ describe("PermissionGate v1", () => {
     }
   });
 
+  // B2-T6: `browser` joins NETWORK — the caller-supplied-url, untrusted-response risk shape
+  // web_fetch and ReadPage already have. Pinned across ALL SEVEN policies (not the usual
+  // ask/auto/plan sample) because the two cells that were actually BROKEN before this task are
+  // `chat` and `auto`, and neither is in that sample: unclassified, `browser` fell to the final
+  // fail-closed branch and answered "deny" under chat (the mode spec §1 makes it a DEFAULT tool in
+  // — so the tool was dead there) and "ask" under auto (an approval card on every verb of a
+  // headless dispatch session, which can never answer one).
+  //
+  // Compared cell-by-cell against `ReadPage` rather than asserted as a literal table: the claim
+  // being pinned is CLASS MEMBERSHIP, and a future edit that moved BOTH out of NETWORK together
+  // would still be a deliberate act, while one that moved only `browser` is exactly the drift this
+  // guards. The absolute "allow" is asserted too, so the comparison can't pass by both being wrong.
+  test("browser is gate-classed NETWORK: allow under EVERY policy incl. chat and auto, identical to ReadPage's cell", () => {
+    const g = new PermissionGate();
+    for (const p of ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass", "chat"] as const) {
+      expect({ p, browser: g.evaluate("browser", p) }).toEqual({ p, browser: "allow" });
+      expect({ p, browser: g.evaluate("browser", p) }).toEqual({ p, browser: g.evaluate("ReadPage", p) });
+    }
+  });
+
   // T1 (file-based memory) note: memory_read/memory_write/memory_delete are DELETED (design doc
   // `2026-07-15-file-based-memory-design.md`) — a memory-fact read/write now goes through the
   // plain read/write/edit tools, already covered by their own tests elsewhere in this file.
@@ -296,7 +316,9 @@ describe("PermissionGate v1", () => {
   // ReadPage, all READ_ONLY or NETWORK) allow; everything else DENIES outright, never cards.
   describe("policy 'chat': chat's own tools allow, everything else DENIES (never asks)", () => {
     test("chat's allowlisted tools (READ_ONLY/NETWORK classes) allow under 'chat'", () => {
-      for (const name of ["AskQuestion", "Search", "ReadPage", "read", "glob", "web_fetch"]) {
+      // B2-T6 adds `browser` to this list — it is chat's PRIMARY web surface per spec §1 and a
+      // default (non-deferred) tool there, and it answered "deny" here until it was classified.
+      for (const name of ["AskQuestion", "Search", "ReadPage", "browser", "read", "glob", "web_fetch"]) {
         expect(gate.evaluate(name, "chat")).toBe("allow");
       }
     });
