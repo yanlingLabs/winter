@@ -539,12 +539,15 @@ final class BrowserSignalsTests: XCTestCase {
     /// one plan, `attachedElsewhere` read `false`, and `stopImmediately` carried a `.stopNow` spec §4
     /// row 2 forbids. The user heard the consequence: the re-create that follows cannot resume
     /// playback (autoplay gates initiation), so the "brief gap" the T5 review disclosed was really
-    /// permanent silence on the phone's own page. The daemon now excludes the asking connection
-    /// itself, so there is no suppression left to be wrong.
+    /// permanent silence on the phone's own page. The suppression is deleted, so there is nothing
+    /// left to be wrong in that direction — **not because the daemon excludes this shell** (it
+    /// excludes the connection that ASKED, which is the orb's, and the orb attaches only to dispatch
+    /// sessions), but because reading a possibly-stale `attachedElsewhere` verbatim can only ever
+    /// HOLD.
     ///
-    /// The fix's other half stands and is what this row still exercises: plan against a FRESH row.
-    /// By the time the close hook runs, `applyPolicy()` has detached us, so the daemon's answer is
-    /// the truth — and `attachedElsewhere` now means the phone alone.
+    /// **Fix F is what this row actually exercises, and it is load-bearing:** plan against a FRESH
+    /// row. By the time the close hook runs, `applyPolicy()` has detached us, so the daemon's answer
+    /// is the truth — and `attachedElsewhere` now means the phone alone.
     func testAWindowCloseOnACoAttachedSessionStopsNothing() async {
         let w = makeWorld()
         await publishRows(w, [row("s1", attachedElsewhere: true)])
@@ -759,7 +762,8 @@ final class BrowserSignalsTests: XCTestCase {
     /// The claim used to be entangled with the app's own suppression — this row existed partly to
     /// prove that `ownAttachmentStillCountedIn` was cleared again, or a real phone attachment would
     /// stay suppressed for as long as the window stayed shut. Since b2-agent-browser T1 there is
-    /// nothing to clear: the daemon excludes the asking connection and this shell reads the answer.
+    /// nothing to clear: this shell reads the daemon's answer verbatim, and a `true` it should not
+    /// have believed can only ever hold browsers alive, never stop them.
     ///
     /// (The T2 review's live-gate note applies to this state: attached elsewhere with no reachable
     /// UI here means audio nobody in this app can stop. Spec-sanctioned, and pinned as such.)

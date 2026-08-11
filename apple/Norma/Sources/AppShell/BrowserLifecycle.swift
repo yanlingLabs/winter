@@ -29,9 +29,11 @@ import Foundation
 struct BrowserSignals: Equatable {
     /// Shown in this Mac app's shell — the session whose tabs the panel is displaying.
     var attachedHere: Bool
-    /// Any other harness (the phone) is attached to this session. Daemon-computed with the asking
-    /// connection excluded (`SessionSummary.signals`); see `BrowserSignalsCoordinator.assemble` for
-    /// the one reflection that survives the exclusion and why it can only ever hold, never stop.
+    /// Any other harness (the phone) is attached to this session — the daemon's own count, minus the
+    /// attachment of the connection that asked for the list (`SessionSummary.signals`). That asker
+    /// is NOT the shell's harness, so this app's own attachment can appear here;
+    /// `BrowserSignalsCoordinator.assemble` documents why reading it verbatim is safe anyway, and
+    /// the answer starts with the fact that this signal can only ever hold, never stop.
     var attachedElsewhere: Bool
     /// `turnRunning || bgWork` — the agent may be driving these pages right now. The daemon's answer
     /// for every mode, OR'd with the attached harness's own live turn state (which arrives without

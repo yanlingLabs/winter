@@ -192,8 +192,12 @@ struct SessionSummary: Equatable, Identifiable {
     /// wire since session-activity-hygiene T3 and was merely never decoded.
     var archived: Bool? = nil
     /// b2-agent-browser T1 (spec §5): the daemon's live per-session signals — `attachedElsewhere`
-    /// (this connection's own attachment already excluded, daemon-side) and `working`
-    /// (`turnRunning || bgWork`), computed for EVERY mode.
+    /// and `working` (`turnRunning || bgWork`), computed for EVERY mode.
+    ///
+    /// `attachedElsewhere` excludes the attachment of the CONNECTION that asked — which is the one
+    /// this directory's `lister` runs on, not every socket this app holds. It is therefore not
+    /// "nothing of ours is attached"; `BrowserSignalsCoordinator.assemble` documents the app's own
+    /// reflection and why reading the value verbatim is still safe there.
     ///
     /// `nil` means "this daemon predates the signals surface", NEVER `false/false` — see
     /// `BrowserSignalsCoordinator.assemble` for what a consumer is entitled to conclude from

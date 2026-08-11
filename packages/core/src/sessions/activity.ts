@@ -76,10 +76,13 @@ export function participatesInActivity(mode?: string): boolean {
  *  `participatesInActivity` — see `makeSessionSignalsDeriver` directly below for why that bypass is
  *  the design and not an oversight. */
 export interface SessionSignals {
-  /** At least one harness OTHER THAN the asking connection holds this session open. The exclusion
-   *  is what makes the value usable: every client is attached to something, and a client cannot
-   *  tell its own reflection from a second harness in a bare count (the Mac app tried, for one
-   *  whole task — `ownAttachmentStillCountedIn`, deleted by this one). */
+  /** At least one harness OTHER THAN the asking connection holds this session open.
+   *
+   *  The exclusion is here because a client cannot tell its own reflection from a second harness in
+   *  a bare count, and the daemon can. It is a per-CONNECTION answer, not a per-app one: an app that
+   *  dials the daemon on several sockets still sees its other sockets' attachments here, so a
+   *  consumer must not read `false` as "nothing of mine is attached" (the Mac app's browser
+   *  lifecycle documents exactly that case at `BrowserSignalsCoordinator.assemble`). */
   attachedElsewhere: boolean;
   /** `turnRunning || bgWork` — the same disjunction `activityFor` calls "work is happening", and
    *  for the same reason: a turn and a detached task are one fact to a consumer asking whether the

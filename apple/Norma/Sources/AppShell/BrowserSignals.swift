@@ -201,20 +201,25 @@ final class BrowserSignalsCoordinator {
     /// **Trigger 4, split in two: the window OPENING re-plans at once; the window CLOSING fetches a
     /// fresh session list first.**
     ///
-    /// **Why it survives b2-agent-browser T1**, which deleted the suppression this fix was built
-    /// around: the fetch was never about the suppression, it was about the row being STALE. It is
-    /// still the only thing that makes the close's answer current.
+    /// **Why it survives b2-agent-browser T1 — and why deleting it would be the worst edit anyone
+    /// could make to this file.** T1 deleted the suppression this fix was written alongside, and the
+    /// temptation is to read the fetch as part of the same machinery. It is not: the fetch was never
+    /// about the suppression, it was about the row being STALE, and **it is now the ONLY thing that
+    /// makes the close's answer current.** A stale row at the close is what plays audio out of a
+    /// window the user just shut.
     ///
     /// The case it was written for — a session co-attached by this Mac and the phone, no turn
-    /// running, window closing — is now impossible in its original form. It went: the close detaches
-    /// us, `ownAttachmentStillCountedIn` is armed for that session, `attachedElsewhere` is
-    /// suppressed to `false`, nothing else holds the session, and `stopImmediately` carries a
-    /// `.stopNow` **spec §4 row 2 forbids**. Disclosed as "a wrong stop followed by a re-create,
-    /// converging within one poll interval", the user's live gate showed what it converged TO: the
-    /// re-created page never resumes playback (Chromium's autoplay policy gates *initiation*, and a
-    /// fresh browser has no user gesture), so the audible result was permanent silence. **The
-    /// suppression that produced it is gone** — the daemon now excludes the asking connection
-    /// itself, so nothing in this app has to guess which attachment is its own reflection.
+    /// running, window closing — went: the close detaches us, `ownAttachmentStillCountedIn` is armed
+    /// for that session, `attachedElsewhere` is suppressed to `false`, nothing else holds the
+    /// session, and `stopImmediately` carries a `.stopNow` **spec §4 row 2 forbids**. Disclosed as
+    /// "a wrong stop followed by a re-create, converging within one poll interval", the user's live
+    /// gate showed what it converged TO: the re-created page never resumes playback (Chromium's
+    /// autoplay policy gates *initiation*, and a fresh browser has no user gesture), so the audible
+    /// result was permanent silence. That failure mode is gone because the suppression is gone —
+    /// **not because the daemon excludes anything this shell does.** The daemon excludes the
+    /// connection that ASKED, and the asker is the orb's (`AppModel.init`'s lister), which attaches
+    /// only to DISPATCH sessions (`AppModel.focusNewestSession`/`refocus`' mode gate). The shell's
+    /// own attachment is not excluded at all — see `assemble` for what does make it safe.
     ///
     /// What remains is the ordinary staleness a poll always has, and this closes it: by the time
     /// this hook runs, `applyPolicy()` has detached this shell (`ShellSessionHost.setShellVisible`
@@ -370,22 +375,36 @@ final class BrowserSignalsCoordinator {
 
             sessions[sessionId] = BrowserSignals(
                 attachedHere: attachedHere,
-                // **The daemon's answer, verbatim** (b2-agent-browser T1). It already excludes the
-                // connection that ASKED — which is what retired the app-side
-                // `ownAttachmentStillCountedIn` suppression: guessing which attachment was our own
-                // reflection was the suppression's whole job, and the daemon is the only party that
-                // can do it without guessing.
+                // **The daemon's answer, verbatim** (b2-agent-browser T1) — including this shell's
+                // OWN attachment, which it does not exclude.
                 //
-                // **One reflection survives, and it is bounded rather than hidden.** The connection
-                // that asks is the ORB's (`AppModel.init` closes the directory's `lister` over
-                // `feed.client`), while the shell window's per-session harness rides its own socket
-                // (`AppDelegate`'s `makeFeed:` → `makeDetachedFeed`). So a row fetched while this
-                // shell was attached counts the shell's own attachment here. It cannot cause a wrong
-                // STOP — the reflection reads `true`, and `true` only ever holds browsers alive —
-                // and it decays with the next answer: at a window close `applyPolicy()` detaches
-                // before `shellVisibilityChanged` fetches (fix F), and at a hop/deselect the next
-                // poll (≤5s, against a 300s linger) reports the truth. Fixing it properly means the
-                // shell listing on its own connection, which is a wiring change, not a signal one.
+                // Read that plainly, because the obvious reading is wrong: the daemon does subtract
+                // the connection that ASKED, but the asker here is the ORB's (`AppModel.init` closes
+                // the directory's `lister` over `feed.client`) and the orb attaches only to DISPATCH
+                // sessions (`AppModel.focusNewestSession`/`refocus`' mode gate). The shell window's
+                // per-session harness rides a different socket (`AppDelegate`'s `makeFeed:` →
+                // `makeDetachedFeed`). So for exactly the sessions this coordinator describes —
+                // chat and code, in the panel — the daemon's exclusion subtracts nothing, and a row
+                // fetched while this shell was attached reports our own reflection as `true`.
+                //
+                // **What makes reading it verbatim SAFE is not the exclusion. It is three things:**
+                //
+                //  1. **`attachedElsewhere` can only ever HOLD.** Walk the dispositions in
+                //     `BrowserLifecycle.swift`: it appears in exactly one branch (rules 2+3, the
+                //     `.hold` arm) and in no stop of any kind, and a hold emits only rule 8's create
+                //     for a session's `isShown` tab plus the cancel of a pending linger. In every
+                //     scenario a reflection can arise in, that tab is already live — so a stale
+                //     `true` is inert, not merely tolerable.
+                //  2. **Fix F** — the window close re-fetches AFTER `applyPolicy()` has detached us,
+                //     so the one moment a held browser must actually stop plans against a row we are
+                //     no longer in. That fetch is load-bearing; see `shellVisibilityChanged`.
+                //  3. **Poll decay** everywhere else: a hop or deselect leaves the reflection
+                //     standing for at most one `session.list` tick (≤5s) against a 300s linger.
+                //
+                // The suppression this replaced was not needed for those three, and could do harm
+                // the three cannot (it produced a wrong STOP). Making the exclusion actually cover
+                // this shell means listing on the shell's own connection — a wiring change, not a
+                // signal one, and a named follow-up rather than something this reads around.
                 attachedElsewhere: row?.signals?.attachedElsewhere ?? false,
                 // Two halves, and the local one is not redundant: `signals.working` is the daemon's
                 // `turnRunning || bgWork` for every mode, and `attachedTurnRunning` is the same fact
