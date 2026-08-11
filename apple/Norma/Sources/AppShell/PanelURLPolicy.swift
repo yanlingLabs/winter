@@ -61,14 +61,23 @@ import Foundation
 /// The refusal is reported back to the model rather than swallowed (`ok:false` with the reason), so
 /// the one door that could otherwise fail silently is the one that explains itself.
 ///
-/// **Door 5 is not the only way a URL could reach a web view, and the other one is not a door at
-/// all** (fix round 1). The CDP bridge B2 Task 3 also built (`NormaCEFExecuteCDP`) can navigate:
-/// `Page.navigate` loads any URL, and a `Runtime.evaluate` assigning `location.href` does the same.
-/// Nothing in this file sees either. What contains it is **producer discipline, not policy**: every
-/// CDP method name and expression the app sends is a literal written in `PanelCommandConsumer`, and
-/// `panel_command.args` — the one model-authored payload on the wire — is not read at all until Task
-/// 5. That constraint is stated where it must be honoured (`NormaCEF.h`'s `NormaCEFExecuteCDP`), and
-/// it is named here so the door count is not mistaken for the whole threat model.
+/// **Door 5 is not the only way a URL could reach a web view, and the other ones are not doors at
+/// all** (fix round 1; extended by B2 Task 5). Two paths bypass this file entirely:
+///
+///  1. **The CDP bridge** (`NormaCEFExecuteCDP`) can navigate — `Page.navigate` loads any URL, and a
+///     `Runtime.evaluate` assigning `location.href` does the same. What contains it is **producer
+///     discipline, not policy**: every CDP method name, expression and `functionDeclaration` the app
+///     sends is a literal written in `PanelCommandConsumer`, and the model-authored payload
+///     (`panel_command.args`, read since Task 5) may only ever become a params VALUE whose meaning
+///     is data — `DOM.querySelector`'s selector, `Input.insertText`'s text. That constraint is
+///     stated where it must be honoured (`NormaCEF.h`'s `NormaCEFExecuteCDP`, and
+///     `PanelCommandConsumer`'s own Task-5 header).
+///  2. **`click`** (Task 5). A click on a link is a full navigation to wherever the page points,
+///     performed by the renderer, reported to nobody in time to matter. It reaches no allowlist in
+///     this file and no domain list in the daemon (whose dangerous-domain block is first-hop-only by
+///     construction). It is the widest of the three and is contained by nothing here.
+///
+/// Named so the door count is not mistaken for the whole threat model.
 ///
 /// **Not every caller of `isAllowed` is one of these doors.** `PanelWebTabModel.displayURL` and the
 /// `⋮` menu ask the same question for PRESENTATION — what the address bar shows, whether Copy Link

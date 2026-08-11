@@ -251,13 +251,26 @@ typedef void (^NormaCEFCDPCompletion)(BOOL ok, NSString *payloadJSON);
 /// **THIS IS ITSELF A NAVIGATION DOOR, contained by PRODUCER DISCIPLINE rather than by policy — said
 /// out loud because the scheme allowlist does not reach it.** `Page.navigate` loads any URL, and so
 /// does a `Runtime.evaluate` that assigns `location.href`; neither is refused here or anywhere else.
-/// The containment is exactly this: **every `method` string and every expression this app sends is a
-/// LITERAL written in `PanelCommandConsumer`** — `Runtime.evaluate` over one fixed text-extraction
-/// expression, and `Page.captureScreenshot` — never assembled from a command's fields.
-/// `panel_command.args`, the one model-authored payload on the wire, is deliberately **not read at
-/// all** until Task 5 builds the interaction verbs. When it is, whatever reaches a CDP method name,
-/// expression or params value must be treated as the untrusted input it is: a verb that interpolated
-/// a model string into any of the three would open a navigation path door 5 cannot see.
+///
+/// **The discipline, restated for a caller that now reads model input (B2 Task 5).** Through Task 3
+/// the containment was total and trivial: every `method` string and every expression was a LITERAL,
+/// and `panel_command.args` — the one model-authored payload on the wire — was not read at all.
+/// Task 5 built the interaction verbs, so `args` is read; what replaced the old blanket rule is a
+/// narrower one, honoured at every site in `PanelCommandConsumer` and stated in that file's header:
+///
+///   * **`method` is always a literal.** No command's bytes choose or shape a protocol method.
+///   * **`expression` and `functionDeclaration` are always literals**, and the two functions Task 5
+///     added take NO ARGUMENTS at all — so there is nothing for a model string to be bound to even
+///     by accident. Element resolution therefore happens over the **DOM domain**
+///     (`DOM.getDocument` → `DOM.querySelector`), never by evaluating an assembled string: the
+///     alternative, `"document.querySelector('" + selector + "')"`, is the exact interpolation this
+///     paragraph has always warned about, and on this bridge it is one `location.href` away from a
+///     navigation door 5 cannot see.
+///   * **A model string may be a PARAMS VALUE, and only where the value is data by construction** —
+///     `DOM.querySelector`'s `selector` (read by Blink's CSS parser) and `Input.insertText`'s `text`
+///     (committed like an IME keystroke). Neither is ever evaluated.
+///
+/// This function still validates none of it, deliberately, for the reason below.
 void NormaCEFExecuteCDP(NSView *parent,
                         const char *method,
                         const char *paramsJSON,

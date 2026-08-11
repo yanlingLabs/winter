@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import NormaProtocol
 
@@ -67,6 +68,51 @@ import NormaProtocol
 /// every verb for it expires on its deadline. Spec §3 wants that answered *fast* rather than by
 /// timeout ("no Mac app attached → the tool returns 'browser unavailable' immediately"), and the
 /// check is Task 4's, with Task 1's per-session signals as its input.
+///
+/// ## Task 5 — the interact set, and **the rule every one of its arms is built to**
+///
+/// From here a model types and clicks inside the user's own logged-in browser. `panel_command.args`
+/// is read for the first time, which retires the containment `NormaCEF.h`'s CDP-door header relied
+/// on ("every `method` string and every expression this app sends is a LITERAL … `args` is
+/// deliberately not read at all until Task 5"). What replaces it is a rule, honoured at every site:
+///
+/// > **A model string may become a CDP PARAMETER VALUE, and nothing else. It never becomes part of a
+/// > method name, a `Runtime.evaluate` expression, or a `functionDeclaration`.**
+///
+/// Concretely, and this is the whole reason the verbs are shaped the way they are:
+///
+///  * **Elements are resolved over the DOM domain, not by evaluating JavaScript.**
+///    `DOM.getDocument` → `DOM.querySelector`, with the model's selector as `querySelector`'s own
+///    `selector` parameter, read by Blink's CSS parser. The alternative — `Runtime.evaluate` over
+///    `"document.querySelector('" + selector + "')"` — is precisely the vulnerability the door's
+///    header names: a selector containing `')` would stop being a selector and start being a
+///    program, in a page the user is signed into, on a bridge where `location.href = …` is a
+///    navigation no URL policy can see.
+///  * **Text reaches the page through `Input.insertText`'s `text` parameter**, which the browser
+///    commits as if from an IME. It is never evaluated and never becomes markup.
+///  * **The only JavaScript these verbs run is two argument-free literals** — the select-before-type
+///    and `submit`'s form lookup — invoked with `Runtime.callFunctionOn` against an objectId this
+///    app resolved. A model string cannot reach either, because neither takes an argument at all.
+///  * **Numbers and enumerated words never travel as themselves.** `direction` becomes a signed
+///    delta chosen from `PanelCommandArguments`' own literals; `until` becomes a
+///    `WaitPredicate` case. What lands in a params dictionary is this app's value, not the
+///    command's bytes.
+///
+/// `SensitiveFieldFloor` (`BrowserInteractionPolicy.swift`) is the OTHER half, and the one spec §4
+/// calls the security deliverable: before any `type`, the target field is inspected over CDP and a
+/// password/payment field is refused — fail-closed, so an inspection that does not produce a
+/// readable answer refuses too. That policy lives app-side, against this repo's usual split, because
+/// the question is unanswerable anywhere else: the daemon has a selector string and has never seen
+/// the page. Its own doc comment carries the argument and the honest list of what it cannot catch.
+///
+/// **What Task 5 does NOT contain, said here because `click` is the one people assume is contained.**
+/// A `click` on a link is a full navigation to wherever the page points, and no part of this stack
+/// sees where that is: `PanelURLPolicy` (door 5) guards the url this consumer LOADS, and a click
+/// routes through none of it; the daemon's dangerous-domain block is first-hop-only by construction
+/// (`browser.ts`'s `refuseDangerous`); and `panel.reportNavigation` arrives after the fact, as a
+/// report, with nothing awaiting it. The agent can therefore reach any page a link on an allowed
+/// page leads to. That is inherited from Task 4 and named again here rather than left to be
+/// rediscovered.
 @MainActor
 final class PanelCommandConsumer {
 
@@ -136,6 +182,11 @@ final class PanelCommandConsumer {
         let commandId: String
         let action: String
         var timer: BrowserRuntime.Scheduler.Cancellable?
+        /// **`wait`'s poll timer — a SECOND clock, and it must die with the first.** The deadline
+        /// timer above bounds the whole command; this one paces the poll (or, for `until:"ms"`, IS
+        /// the wait). A `claim()` that cancelled only the deadline would leave a poll re-arming
+        /// itself against a call that was already answered, issuing CDP work for nobody.
+        var pollTimer: BrowserRuntime.Scheduler.Cancellable?
         private var answered = false
 
         init(sessionId: String, commandId: String, action: String) {
@@ -144,7 +195,12 @@ final class PanelCommandConsumer {
             self.action = action
         }
 
-        /// `true` for the first caller and never again. Cancelling the deadline here — rather than
+        /// Has this call already spoken? Read by every step of a multi-round-trip verb, so a chain
+        /// whose deadline fired mid-flight stops issuing CDP calls rather than running to the end
+        /// and discovering it at `answer`.
+        var isAnswered: Bool { answered }
+
+        /// `true` for the first caller and never again. Cancelling the timers here — rather than
         /// at each send site — is what keeps a command that answered early from firing a timer for
         /// a call nobody is waiting on.
         func claim() -> Bool {
@@ -152,6 +208,8 @@ final class PanelCommandConsumer {
             answered = true
             timer?.cancel()
             timer = nil
+            pollTimer?.cancel()
+            pollTimer = nil
             return true
         }
     }
@@ -201,14 +259,14 @@ final class PanelCommandConsumer {
         case "read": read(command, call: call)
         case "screenshot": screenshot(command, call: call)
 
-        case "click", "type", "scroll", "submit", "wait":
-            // The INTERACT set (`PANEL_COMMAND_ACTIONS`'s own split, events.ts). Task 5 builds these;
-            // until then they are answered rather than ignored, so its arrival is observable from the
-            // agent's side and a chat-mode leak of an interaction verb would be visible rather than
-            // silent.
-            answer(call, ok: false,
-                   result: "the browser's `\(command.action)` verb is not implemented in this "
-                           + "version of the Mac app yet")
+        // The INTERACT set (`PANEL_COMMAND_ACTIONS`'s own split, events.ts) — Task 5. Every one of
+        // these reads `command.args`, and the rule that governs what may be done with what it finds
+        // is in this file's header.
+        case "click": click(command, call: call)
+        case "type": typeText(command, call: call)
+        case "scroll": scroll(command, call: call)
+        case "submit": submit(command, call: call)
+        case "wait": wait(command, call: call)
 
         default:
             // A verb from a NEWER daemon. `PanelCommand.action` is a plain `String` precisely so this
@@ -221,7 +279,7 @@ final class PanelCommandConsumer {
         }
     }
 
-    // MARK: - The read set (Task 5 owns the interact set)
+    // MARK: - The read set
 
     /// **Door 5.** The url is judged BEFORE the tab is even resolved, so a refused scheme is
     /// attributable to the policy rather than to a missing browser — the same ordering
@@ -329,6 +387,367 @@ final class PanelCommandConsumer {
         }
     }
 
+    // MARK: - Task 5: the interact set
+
+    /// **`click` — a real pointer, at the element's own coordinates.**
+    ///
+    /// Seven CDP round trips and not one of them evaluates JavaScript: `DOM.getDocument` →
+    /// `DOM.querySelector` (the model's selector, as a protocol parameter) → `scrollIntoViewIfNeeded`
+    /// → `getBoxModel` → three `Input.dispatchMouseEvent`s. The mouse events carry NUMBERS this app
+    /// computed from Blink's own box model; nothing from the command reaches them.
+    ///
+    /// **`Input.dispatchMouseEvent` hit-tests like a real pointer, which is the honest caveat:** the
+    /// click lands on whatever is topmost at that point. An element that has a box but is covered by
+    /// an overlay, or is `visibility:hidden`, sends the click to the thing in front of it. That is
+    /// the same thing a person clicking there would get — it is not a defect to be papered over with
+    /// a JS `.click()`, which would fire an event no real user could have produced.
+    ///
+    /// **This is a navigation door the daemon never sees** (this file's header): a click on a link
+    /// goes wherever the page says, past every URL policy in this stack.
+    private func click(_ command: SessionEvent.PanelCommand, call: Call) {
+        guard let tabId = command.tabId else {
+            return answer(call, ok: false, result: "click needs a tabId")
+        }
+        guard let selector = operand(PanelCommandArguments.selector(command.args, verb: "click"), call)
+        else { return }
+
+        arm(call, deadlineMs: command.deadlineMs)
+        resolve(call, tabId: tabId, selector: selector) { nodeId in
+            self.step(call, tabId: tabId, method: "DOM.scrollIntoViewIfNeeded",
+                      params: ["nodeId": nodeId],
+                      failureIs: "the element could not be scrolled into view") { _ in
+                self.step(call, tabId: tabId, method: "DOM.getBoxModel", params: ["nodeId": nodeId],
+                          failureIs: Self.noVisibleBox) { payload in
+                    guard let centre = PanelCDPReply.boxCentre(fromResultJSON: payload) else {
+                        return self.answer(call, ok: false, result: Self.noVisibleBox)
+                    }
+                    self.dispatchClick(call, tabId: tabId, at: centre, selector: selector)
+                }
+            }
+        }
+    }
+
+    /// Move, press, release — the sequence a pointer actually makes. The `mouseMoved` is not
+    /// ceremony: menus, tooltips and half the web's dropdowns open on hover, and a press with no
+    /// preceding move arrives at an element that never learned the pointer was there.
+    private func dispatchClick(_ call: Call, tabId: String, at point: CGPoint, selector: String) {
+        let x = Double(point.x), y = Double(point.y)
+        step(call, tabId: tabId, method: "Input.dispatchMouseEvent",
+             params: ["type": "mouseMoved", "x": x, "y": y, "button": "none", "buttons": 0]) { _ in
+            self.step(call, tabId: tabId, method: "Input.dispatchMouseEvent",
+                      params: ["type": "mousePressed", "x": x, "y": y, "button": "left",
+                               "buttons": 1, "clickCount": 1]) { _ in
+                self.step(call, tabId: tabId, method: "Input.dispatchMouseEvent",
+                          params: ["type": "mouseReleased", "x": x, "y": y, "button": "left",
+                                   "buttons": 0, "clickCount": 1]) { _ in
+                    self.answer(call, ok: true,
+                                result: "clicked \(Self.brief(selector)) at "
+                                        + "(\(Int(x.rounded())), \(Int(y.rounded()))) in the page")
+                }
+            }
+        }
+    }
+
+    /// **`type` — and THE SENSITIVE FLOOR, which is the reason this arm has the shape it has.**
+    ///
+    /// The order is the policy: resolve → **inspect** → judge → (only then) focus, select, insert.
+    /// Nothing types before the floor has spoken, and the floor speaks from `DOM.describeNode`'s
+    /// attribute list — Blink's own view of the element, not a `Runtime.evaluate` of `el.type`,
+    /// which a page can shadow with a property getter. `SensitiveFieldFloor`'s doc carries that
+    /// argument in full, along with the list of what it cannot catch.
+    ///
+    /// **Fail closed, and this is where that is implemented:** an inspection that fails, or whose
+    /// payload does not yield a named node, is a REFUSAL. There is no branch here that types into a
+    /// field it could not read. (Mutation: break the inspector and this arm starts refusing — never
+    /// allowing — which is what the test of that name checks.)
+    ///
+    /// **One node, start to finish.** The floor judges `nodeId`, and `DOM.focus` focuses that same
+    /// `nodeId`; nothing re-runs the selector. Re-querying between inspection and typing would be a
+    /// genuine time-of-check/time-of-use hole — a page that swapped its DOM in between could be
+    /// inspected as a search box and typed into as a password field.
+    ///
+    /// **`type` SETS the field.** Focus, select what is there, then `Input.insertText`, which commits
+    /// over the selection the way an IME does. Not key-by-key synthesis: `Input.dispatchKeyEvent`
+    /// per character is slower, fires a plausible-looking key stream this app would be inventing, and
+    /// is exactly as visible to a page's `input` handlers as the insert is.
+    private func typeText(_ command: SessionEvent.PanelCommand, call: Call) {
+        guard let tabId = command.tabId else {
+            return answer(call, ok: false, result: "type needs a tabId")
+        }
+        guard let selector = operand(PanelCommandArguments.selector(command.args, verb: "type"), call),
+              let text = operand(PanelCommandArguments.text(command.args), call)
+        else { return }
+
+        arm(call, deadlineMs: command.deadlineMs)
+        resolve(call, tabId: tabId, selector: selector) { nodeId in
+            // ---- THE FLOOR ----------------------------------------------------------------------
+            self.step(call, tabId: tabId, method: "DOM.describeNode", params: ["nodeId": nodeId],
+                      failureIs: Self.floorInspectionFailed) { payload in
+                guard let field = PanelCDPReply.describedField(fromResultJSON: payload) else {
+                    return self.answer(call, ok: false, result: Self.floorInspectionFailed)
+                }
+                if case .refuse(let kind, let evidence) = SensitiveFieldFloor.judge(field) {
+                    NSLog("[PanelCommandConsumer] sensitive floor refused a type into a \(kind) "
+                          + "(\(evidence)) — \(SensitiveFieldFloor.taskSixSeam)")
+                    return self.answer(call, ok: false,
+                                       result: SensitiveFieldFloor.refusal(kind: kind,
+                                                                           evidence: evidence))
+                }
+                // ---- only now does anything touch the field ---------------------------------
+                self.insert(call, tabId: tabId, nodeId: nodeId, text: text, into: field)
+            }
+        }
+    }
+
+    /// Scroll into view, focus, select what is there, insert. Reached only past the floor.
+    private func insert(_ call: Call, tabId: String, nodeId: Int, text: String,
+                        into field: SensitiveFieldFloor.Field) {
+        step(call, tabId: tabId, method: "DOM.scrollIntoViewIfNeeded", params: ["nodeId": nodeId],
+             failureIs: "the field could not be scrolled into view") { _ in
+            // `DOM.focus` rather than a JavaScript `el.focus()`: focusing over the protocol cannot be
+            // redirected by a page that overrode `Element.prototype.focus`. (What it CANNOT prevent
+            // is a page moving focus from its own `focus` handler — named in the floor's limits.)
+            self.step(call, tabId: tabId, method: "DOM.focus", params: ["nodeId": nodeId],
+                      failureIs: "the field could not be focused — it may be disabled, read-only, or "
+                               + "not something text can be typed into") { _ in
+                self.step(call, tabId: tabId, method: "DOM.resolveNode", params: ["nodeId": nodeId],
+                          failureIs: "the field could not be prepared for typing") { payload in
+                    guard let objectId = PanelCDPReply.remoteObjectId(fromResultJSON: payload) else {
+                        return self.answer(call, ok: false,
+                                           result: "the field could not be prepared for typing")
+                    }
+                    // The first of this task's two JavaScript literals. It takes NO arguments, so no
+                    // model string can reach it; it runs against an objectId this app resolved.
+                    self.step(call, tabId: tabId, method: "Runtime.callFunctionOn",
+                              params: ["objectId": objectId,
+                                       "functionDeclaration": Self.selectExistingContentFunction,
+                                       "returnByValue": true],
+                              failureIs: "the field's existing content could not be selected") { _ in
+                        // The model's text, as `insertText`'s own parameter. Never evaluated.
+                        self.step(call, tabId: tabId, method: "Input.insertText",
+                                  params: ["text": text]) { _ in
+                            self.answer(call, ok: true,
+                                        result: "typed \(PanelURLPolicy.wireLength(text)) characters "
+                                                + "into the \(Self.describe(field))")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// **`scroll` — either bring one element into view, or wheel the page.**
+    ///
+    /// The wheel path dispatches a real `mouseWheel` at the viewport's centre rather than calling
+    /// `window.scrollBy`, and the difference is not stylistic: a wheel event scrolls whatever is
+    /// under the pointer, so an inner scroll container — a chat log, a virtualised table, a modal —
+    /// moves, where `scrollBy` would silently move the document behind it and report success.
+    ///
+    /// The viewport comes from `Page.getLayoutMetrics`, and an unreadable answer is refused rather
+    /// than defaulted: a guessed viewport aims the wheel at a point that may not be over the content
+    /// at all, and "scrolled" would then be a claim this code cannot make.
+    private func scroll(_ command: SessionEvent.PanelCommand, call: Call) {
+        guard let tabId = command.tabId else {
+            return answer(call, ok: false, result: "scroll needs a tabId")
+        }
+        guard let target = operand(PanelCommandArguments.scrollTarget(command.args), call) else { return }
+
+        arm(call, deadlineMs: command.deadlineMs)
+        switch target {
+        case .element(let selector):
+            resolve(call, tabId: tabId, selector: selector) { nodeId in
+                self.step(call, tabId: tabId, method: "DOM.scrollIntoViewIfNeeded",
+                          params: ["nodeId": nodeId],
+                          failureIs: Self.noVisibleBox) { _ in
+                    self.answer(call, ok: true,
+                                result: "scrolled \(Self.brief(selector)) into view")
+                }
+            }
+
+        case .wheel(let deltaX, let deltaY):
+            step(call, tabId: tabId, method: "Page.getLayoutMetrics", params: [:],
+                 failureIs: "the page's viewport could not be measured") { payload in
+                guard let viewport = PanelCDPReply.viewportSize(fromResultJSON: payload) else {
+                    return self.answer(call, ok: false,
+                                       result: "the page's viewport could not be measured")
+                }
+                self.step(call, tabId: tabId, method: "Input.dispatchMouseEvent",
+                          params: ["type": "mouseWheel",
+                                   "x": Double(viewport.width) / 2, "y": Double(viewport.height) / 2,
+                                   "button": "none", "buttons": 0,
+                                   "deltaX": deltaX, "deltaY": deltaY]) { _ in
+                    self.answer(call, ok: true, result: Self.scrolledBy(deltaX: deltaX, deltaY: deltaY))
+                }
+            }
+        }
+    }
+
+    /// **`submit` — the form, not the button.**
+    ///
+    /// `requestSubmit()` rather than `submit()`: the former is what pressing Enter in a field does —
+    /// it runs the form's constraint validation and fires a cancellable `submit` event, so a page's
+    /// own handler (every single-page app) sees it. `HTMLFormElement.submit()` skips both, which
+    /// would post a form the page believed it had intercepted. The fallback exists only for a
+    /// document old enough to lack `requestSubmit`.
+    ///
+    /// The selector may name the form or anything inside it — `this.form ?? this.closest("form")` —
+    /// because an agent looking at a page sees the button, not the form element.
+    ///
+    /// **The floor does not apply here, and that is deliberate rather than an oversight.** It bounds
+    /// what the agent TYPES. A form the browser autofilled can be submitted from here, and could
+    /// equally be submitted by `click`ing its button — gating one and not the other would be
+    /// theatre. What bounds this is the domain gate (Task 6).
+    private func submit(_ command: SessionEvent.PanelCommand, call: Call) {
+        guard let tabId = command.tabId else {
+            return answer(call, ok: false, result: "submit needs a tabId")
+        }
+        guard let selector = operand(PanelCommandArguments.selector(command.args, verb: "submit"), call)
+        else { return }
+
+        arm(call, deadlineMs: command.deadlineMs)
+        resolve(call, tabId: tabId, selector: selector) { nodeId in
+            self.step(call, tabId: tabId, method: "DOM.resolveNode", params: ["nodeId": nodeId],
+                      failureIs: "the element could not be prepared for submitting") { payload in
+                guard let objectId = PanelCDPReply.remoteObjectId(fromResultJSON: payload) else {
+                    return self.answer(call, ok: false,
+                                       result: "the element could not be prepared for submitting")
+                }
+                // The second of this task's two JavaScript literals — argument-free, so no model
+                // string reaches it, and run against an objectId this app resolved.
+                self.step(call, tabId: tabId, method: "Runtime.callFunctionOn",
+                          params: ["objectId": objectId,
+                                   "functionDeclaration": Self.submitFormFunction,
+                                   "returnByValue": true]) { payload in
+                    switch PanelCDPReply.evaluatedString(fromResultJSON: payload) {
+                    case "submitted":
+                        self.answer(call, ok: true,
+                                    result: "submitted the form containing \(Self.brief(selector))")
+                    case "no-form":
+                        self.answer(call, ok: false,
+                                    result: "\(Self.brief(selector)) is not inside a <form>, so there "
+                                            + "is nothing to submit — click the button instead")
+                    default:
+                        self.answer(call, ok: false, result: "the form would not submit")
+                    }
+                }
+            }
+        }
+    }
+
+    /// **`wait` — a bounded poll, whose bound has to fit inside the command's own deadline.**
+    ///
+    /// Three clocks run on one `wait` and only the innermost may win: the daemon's pending entry
+    /// (`deadlineMs`, armed first), this consumer's local abandon timer (the same `deadlineMs`,
+    /// armed later), and the model's `timeoutMs`. `PanelCommandArguments.waitTimeoutCeilingMs`
+    /// clamps the third to 20 s against a 30 s deadline; `browser.ts`'s
+    /// `BROWSER_WAIT_MAX_TIMEOUT_MS` carries the full arithmetic. The clamp is applied HERE as well
+    /// as there because the app is the last thing before the browser and does not take the wire's
+    /// word for a bound.
+    ///
+    /// `until:"ms"` touches no browser at all — it is a sleep, and dressing it up as a CDP call
+    /// would make a tab's health a precondition for waiting.
+    private func wait(_ command: SessionEvent.PanelCommand, call: Call) {
+        guard let tabId = command.tabId else {
+            return answer(call, ok: false, result: "wait needs a tabId")
+        }
+        guard let asked = operand(PanelCommandArguments.wait(command.args), call) else { return }
+
+        arm(call, deadlineMs: command.deadlineMs)
+        let budget = Double(asked.timeoutMs) / 1000
+        let until = scheduler.now().addingTimeInterval(budget)
+
+        if asked.predicate == .ms {
+            call.pollTimer = scheduler.timer(until) { [weak self] in
+                self?.answer(call, ok: true, result: "waited \(asked.timeoutMs)ms")
+            }
+            return
+        }
+        poll(call, tabId: tabId, predicate: asked.predicate, until: until,
+             timeoutMs: asked.timeoutMs, previousResources: nil)
+    }
+
+    /// One poll of the page's loading state, and the decision to poll again or give up.
+    ///
+    /// `previousResources` is what makes `idle` mean anything: the first poll can never satisfy it,
+    /// because "no new resource finished since last time" needs a last time.
+    private func poll(_ call: Call, tabId: String, predicate: PanelCommandArguments.WaitPredicate,
+                      until: Date, timeoutMs: Int, previousResources: Int?) {
+        step(call, tabId: tabId, method: "Runtime.evaluate",
+             params: ["expression": Self.waitProbeScript, "returnByValue": true, "awaitPromise": false],
+             failureIs: "the page's loading state could not be read") { payload in
+            guard let probe = PanelCDPReply.waitProbe(fromResultJSON: payload) else {
+                return self.answer(call, ok: false,
+                                   result: "the page's loading state could not be read")
+            }
+            let complete = probe.ready == "complete"
+            let satisfied = predicate == .idle
+                ? (complete && previousResources == probe.resources)
+                : complete
+            if satisfied {
+                return self.answer(call, ok: true, result: predicate == .idle
+                    ? "the page is loaded and nothing new finished fetching"
+                    : "the page finished loading")
+            }
+            let next = self.scheduler.now().addingTimeInterval(Self.waitPollIntervalSeconds)
+            guard next <= until else {
+                return self.answer(call, ok: false,
+                                   result: "the page did not reach `\(predicate.rawValue)` within "
+                                           + "\(timeoutMs)ms — it was still `\(probe.ready)`")
+            }
+            call.pollTimer = self.scheduler.timer(next) { [weak self] in
+                self?.poll(call, tabId: tabId, predicate: predicate, until: until,
+                           timeoutMs: timeoutMs, previousResources: probe.resources)
+            }
+        }
+    }
+
+    // MARK: - Resolution, and the one place a model string crosses into CDP
+
+    /// **`DOM.getDocument` → `DOM.querySelector`. The model's selector travels as `querySelector`'s
+    /// own parameter and nowhere else.**
+    ///
+    /// This function is the whole reason the interact verbs do not use `Runtime.evaluate`. A CSS
+    /// selector handed to `DOM.querySelector` is read by Blink's CSS parser: the worst a hostile one
+    /// can do is match a different element or fail to parse, and a parse failure comes back as a
+    /// protocol error this reports. The same string concatenated into
+    /// `"document.querySelector('" + selector + "')"` would be a program — in a page the user is
+    /// logged into, over a bridge where one `location.href` assignment is a navigation no URL policy
+    /// in this app can see (`NormaCEF.h`'s CDP-door header states exactly that).
+    ///
+    /// `DOM.getDocument` is re-issued per command rather than cached: node ids are scoped to the
+    /// DOM agent's current document and are invalidated by every navigation, so a cached root is a
+    /// stale-id bug waiting for the first page change.
+    private func resolve(_ call: Call, tabId: String, selector: String,
+                         then: @escaping (Int) -> Void) {
+        step(call, tabId: tabId, method: "DOM.getDocument", params: ["depth": 0],
+             failureIs: "the page's document could not be read") { payload in
+            guard let root = PanelCDPReply.rootNodeId(fromResultJSON: payload) else {
+                return self.answer(call, ok: false, result: "the page's document could not be read")
+            }
+            self.step(call, tabId: tabId, method: "DOM.querySelector",
+                      params: ["nodeId": root, "selector": selector],
+                      failureIs: "that is not a CSS selector this page's parser accepts") { payload in
+                guard let nodeId = PanelCDPReply.nodeId(fromResultJSON: payload), nodeId != 0 else {
+                    return self.answer(call, ok: false, result:
+                        "nothing on the page matches \(Self.brief(selector)). Selectors are matched "
+                        + "against the top document only — not inside iframes or shadow DOM.")
+                }
+                then(nodeId)
+            }
+        }
+    }
+
+    /// Unwrap an operand, answering the model with its own refusal when it is not there.
+    private func operand<Value>(_ read: PanelCommandArguments.Read<Value>, _ call: Call) -> Value? {
+        switch read {
+        case .ok(let value):
+            return value
+        case .refused(let why):
+            answer(call, ok: false, result: why)
+            return nil
+        }
+    }
+
     // MARK: - The CDP round trip and the deadline
 
     /// What a reply turns into.
@@ -343,7 +762,8 @@ final class PanelCommandConsumer {
         }
     }
 
-    /// Dispatch one CDP method, arm the deadline, and hand the reply to `interpret`.
+    /// Dispatch one CDP method, arm the deadline, and hand the reply to `interpret`. The shape the
+    /// two read verbs use — one round trip, one verdict.
     ///
     /// **The deadline is armed only for verbs that can still be running when it fires.** `navigate`
     /// and `back` answer synchronously, so a timer for them would be a timer that only ever gets
@@ -353,35 +773,85 @@ final class PanelCommandConsumer {
         guard let tabId = command.tabId else {
             return answer(call, ok: false, result: "\(command.action) needs a tabId")
         }
+        arm(call, deadlineMs: command.deadlineMs)
+        step(call, tabId: tabId, method: method, paramsJSON: paramsJSON) { payload in
+            let verdict = interpret(payload)
+            self.answer(call, ok: verdict.ok, result: verdict.result,
+                        imageBase64: verdict.imageBase64)
+        }
+    }
 
-        // **Armed BEFORE the dispatch**, because a completion that fires synchronously (every
-        // refusal `NormaCEFExecuteCDP` decides itself does) must find a call it can claim — and
-        // `claim()` cancels the timer, so arming first costs one cancelled timer in the fast case
-        // and closes a hole in the slow one.
-        let deadline = scheduler.now().addingTimeInterval(Double(command.deadlineMs) / 1000)
+    /// **Arm the command's one deadline.** Separate from `step` since Task 5, because an interact
+    /// verb is a CHAIN of round trips under a SINGLE deadline — a timer per step would give a
+    /// seven-hop `click` seven times the patience the command was dispatched with.
+    ///
+    /// **Armed BEFORE the first dispatch**, because a completion that fires synchronously (every
+    /// refusal `NormaCEFExecuteCDP` decides itself does) must find a call it can claim — and
+    /// `claim()` cancels the timer, so arming first costs one cancelled timer in the fast case and
+    /// closes a hole in the slow one.
+    ///
+    /// Idempotent, so a verb that re-enters this cannot restart its own clock.
+    private func arm(_ call: Call, deadlineMs: Int) {
+        guard call.timer == nil else { return }
+        let deadline = scheduler.now().addingTimeInterval(Double(deadlineMs) / 1000)
         call.timer = scheduler.timer(deadline) { [weak self] in self?.abandon(call) }
+    }
 
+    /// **One CDP round trip inside a verb's chain.** Arms nothing; `arm` owns the clock.
+    ///
+    /// Three things it guarantees, so the verbs above can be written as plain nesting:
+    ///
+    ///  1. **A call that has already spoken issues no further work.** Checked before the dispatch
+    ///     AND inside the completion — a chain whose deadline fired mid-flight stops there rather
+    ///     than running its remaining hops for an answer nobody will accept.
+    ///  2. **Every failure answers.** A CEF failure carries the browser's own message; `failureIs`
+    ///     replaces it with something the model can act on and keeps the raw text in parentheses,
+    ///     because "Could not compute box model" means nothing to a model and everything to whoever
+    ///     reads the log.
+    ///  3. **A dispatch that never happened answers too** — `executeCDP` returning false means no
+    ///     completion will ever fire, and that is the one case this file owes the answer itself.
+    ///
+    /// The quiescent check repeats `handle`'s, for the case `handle` cannot cover: a chain already
+    /// in flight when the app starts shutting down. Same verdict, same reason — silence, and the
+    /// daemon's timeout is the true answer.
+    private func step(_ call: Call, tabId: String, method: String, paramsJSON: String?,
+                      failureIs: String? = nil, then: @escaping (String) -> Void) {
+        guard !call.isAnswered else { return }
+        guard !runtime.isQuiescent else {
+            NSLog("[PanelCommandConsumer] quiesced mid-\(call.action) "
+                  + "(\(Self.brief(call.commandId))) — dropping \(method)")
+            return
+        }
         let dispatched = runtime.executeCDP(tabId: tabId, method: method, paramsJSON: paramsJSON) {
             [weak self] ok, payload in
-            guard let self else { return }
+            guard let self, !call.isAnswered else { return }
             // `NormaCEFExecuteCDP` promises this fires exactly once and always — including for a
             // browser that closed mid-call — so there is no "and if it never comes back" branch
-            // here beyond the deadline above, which exists for the app being wedged rather than for
-            // the bridge being unreliable.
+            // here beyond the deadline, which exists for the app being wedged rather than for the
+            // bridge being unreliable.
             if ok {
-                let verdict = interpret(payload)
-                self.answer(call, ok: verdict.ok, result: verdict.result,
-                            imageBase64: verdict.imageBase64)
+                then(payload)
             } else {
-                self.answer(call, ok: false,
-                            result: PanelCDPReply.failureMessage(fromJSON: payload)
-                                ?? "the browser could not run \(method)")
+                let raw = PanelCDPReply.failureMessage(fromJSON: payload)
+                    ?? "the browser could not run \(method)"
+                self.answer(call, ok: false, result: failureIs.map { "\($0) (\(raw))" } ?? raw)
             }
         }
         guard !dispatched else { return }
-        // Nothing was dispatched, so nothing will ever call back — the one case where this file owes
-        // the answer itself. `claim()` inside `answer` disarms the timer we just set.
         answer(call, ok: false, result: Self.noBrowserReason(tabId))
+    }
+
+    /// `step` with the params written as a dictionary — which is how every Task 5 verb builds them,
+    /// so that a value is a JSON value rather than a piece of hand-spliced text.
+    private func step(_ call: Call, tabId: String, method: String, params: [String: Any],
+                      failureIs: String? = nil, then: @escaping (String) -> Void) {
+        guard let json = Self.jsonObject(params) else {
+            // Unreachable with the literals and numbers these verbs build, and answered rather than
+            // ignored anyway: a silently dropped step is a command that can only time out.
+            return answer(call, ok: false,
+                          result: "the Mac app could not encode its \(method) request")
+        }
+        step(call, tabId: tabId, method: method, paramsJSON: json, failureIs: failureIs, then: then)
     }
 
     /// **The local deadline fired: abandon the verb and send NOTHING.**
@@ -434,7 +904,98 @@ final class PanelCommandConsumer {
         sendResult(call.sessionId, call.commandId, ok, result, imageBase64)
     }
 
+    // MARK: - Task 5's literals — every one of them fixed text, none assembled from a command
+
+    /// How often `wait` re-asks the page. 250 ms is four questions a second: fine-grained enough
+    /// that a page finishing at t+300 ms is reported at t+500 ms rather than a second later, and
+    /// coarse enough that a 20-second wait is 80 round trips rather than thousands.
+    static let waitPollIntervalSeconds: TimeInterval = 0.25
+
+    /// **What `wait` asks the page, and the honest limits of the answer.**
+    ///
+    /// `document.readyState` is the browser's own load state and needs no defending. `resources` is
+    /// a PROXY for network idle and is named as one everywhere it is used: a `PerformanceResourceTiming`
+    /// entry appears when a fetch FINISHES, so a count that did not move across two polls means
+    /// "nothing finished recently", which is the closest a page can come to observing its own
+    /// network. What it does not see: requests that started but have not finished (they are not
+    /// entries yet), websockets and long-polls (never entries), and anything after the resource
+    /// timing buffer fills — 250 entries by default, after which the count stops growing and `idle`
+    /// becomes trivially true. Observing the real thing needs the `Network` domain's EVENTS, and
+    /// this app's CDP bridge correlates method REPLIES only (`NormaCEF.h`), so there is no event
+    /// stream to subscribe to.
+    ///
+    /// A literal, with nothing interpolated into it — the rule this file's header states.
+    static let waitProbeScript = """
+        (function () {
+          var n = -1;
+          try { n = performance.getEntriesByType("resource").length; } catch (e) { n = -1; }
+          return { ready: document.readyState, resources: n };
+        })()
+        """
+
+    /// Select whatever the field already contains, so the `Input.insertText` that follows REPLACES
+    /// it rather than appending to it. Argument-free by design: no model string can reach a
+    /// `functionDeclaration`, and this one needs nothing but `this`.
+    ///
+    /// Three shapes of editable exist and all three are handled: `<input>`/`<textarea>` have
+    /// `select()`; a `contenteditable` element needs a range over its contents; anything else falls
+    /// through having changed nothing, which is harmless — `DOM.focus` has already refused a
+    /// non-focusable element by the time this runs.
+    static let selectExistingContentFunction = """
+        function () {
+          if (typeof this.select === "function") { this.select(); return true; }
+          if (this.isContentEditable) {
+            var range = document.createRange();
+            range.selectNodeContents(this);
+            var selection = window.getSelection();
+            if (selection) { selection.removeAllRanges(); selection.addRange(range); }
+            return true;
+          }
+          return false;
+        }
+        """
+
+    /// Find the form this element belongs to and submit it the way Enter does. `requestSubmit`
+    /// validates and fires a cancellable `submit` event; `submit()` does neither and exists here
+    /// only as a fallback. Argument-free, like the one above — `"form"` is this file's own literal.
+    static let submitFormFunction = """
+        function () {
+          var form = this.tagName === "FORM" ? this : (this.form || this.closest("form"));
+          if (!form) { return "no-form"; }
+          if (typeof form.requestSubmit === "function") { form.requestSubmit(); }
+          else { form.submit(); }
+          return "submitted";
+        }
+        """
+
     // MARK: - Wording (never decisions)
+
+    /// **The floor's fail-closed sentence.** Reached when the inspection failed or produced nothing
+    /// readable — which is a refusal, never a pass. Worded so a model does not read it as a
+    /// transient fault worth retrying into.
+    static let floorInspectionFailed =
+        "refused: Norma could not inspect that field, and it never types into a field it could not "
+        + "check — the check is what keeps a password or payment field from being filled in "
+        + "unattended. Nothing was typed."
+
+    private static let noVisibleBox =
+        "that element has no visible box on the page — it may be hidden, collapsed, or not laid out"
+
+    private static func scrolledBy(deltaX: Double, deltaY: Double) -> String {
+        if deltaY != 0 { return "scrolled \(deltaY > 0 ? "down" : "up") \(Int(abs(deltaY)))px" }
+        return "scrolled \(deltaX > 0 ? "right" : "left") \(Int(abs(deltaX)))px"
+    }
+
+    /// Name a field the way a person reading the transcript would — `<input name="q">` — so the
+    /// success line says WHAT was typed into and not merely that something was.
+    private static func describe(_ field: SensitiveFieldFloor.Field) -> String {
+        for attribute in ["name", "id", "aria-label", "placeholder"] {
+            if let value = field.attributes[attribute], !value.isEmpty {
+                return "<\(field.tagName) \(attribute)=\"\(brief(value))\">"
+            }
+        }
+        return "<\(field.tagName)>"
+    }
 
     /// Why `normalizeTypedInput` refused — **computed only AFTER it already has**, and returning a
     /// string rather than a verdict. It cannot admit anything: the policy has spoken by the time this
@@ -478,17 +1039,117 @@ final class PanelCommandConsumer {
 /// One place decodes CDP; it is testable with canned strings; and the bridge stays a transport.
 enum PanelCDPReply {
 
-    /// `Runtime.evaluate`'s answer: `{"result":{"type":"string","value":"…"}}`.
+    /// `Runtime.evaluate` / `Runtime.callFunctionOn`'s returned VALUE, whatever its JSON type.
     ///
     /// `exceptionDetails` beside it means the expression THREW — a page that redefines
     /// `document.body`, a CSP that blocks evaluation — and CEF still reports the call as a SUCCESS,
-    /// because the protocol method itself worked. Treating that as text would hand the model the
-    /// empty string as if it were the page.
-    static func evaluatedString(fromResultJSON json: String) -> String? {
+    /// because the protocol method itself worked. Treating that as a value would hand the model
+    /// `nil` dressed up as an answer.
+    ///
+    /// Both methods answer in the same shape (a `RemoteObject` under `result`), which is why one
+    /// reader serves the page text, the wait probe and the two `callFunctionOn` literals.
+    static func evaluatedValue(fromResultJSON json: String) -> Any? {
         guard let root = object(json) else { return nil }
         guard root["exceptionDetails"] == nil else { return nil }
         guard let result = root["result"] as? [String: Any] else { return nil }
-        return result["value"] as? String
+        return result["value"]
+    }
+
+    /// `Runtime.evaluate`'s answer when a STRING is what was asked for:
+    /// `{"result":{"type":"string","value":"…"}}`.
+    static func evaluatedString(fromResultJSON json: String) -> String? {
+        evaluatedValue(fromResultJSON: json) as? String
+    }
+
+    /// `DOM.getDocument`'s answer: `{"root":{"nodeId":1,…}}`. The id every `DOM.querySelector` in
+    /// this file is rooted at.
+    static func rootNodeId(fromResultJSON json: String) -> Int? {
+        guard let root = object(json), let node = root["root"] as? [String: Any] else { return nil }
+        return node["nodeId"] as? Int
+    }
+
+    /// `DOM.querySelector`'s answer: `{"nodeId":n}`, where **`0` means nothing matched** — the
+    /// protocol reports a miss as a valid reply with a zero id, not as an error, so a reader that
+    /// only checked for `nil` would hand the rest of a verb an id that addresses no element.
+    static func nodeId(fromResultJSON json: String) -> Int? {
+        guard let root = object(json) else { return nil }
+        return root["nodeId"] as? Int
+    }
+
+    /// **`DOM.describeNode`'s answer, turned into the floor's input.**
+    ///
+    /// `{"node":{"nodeName":"INPUT","attributes":["type","password","name","pw"]}}` — the attribute
+    /// list is FLAT and alternating, name then value, which is the protocol's shape and the reason
+    /// this reader exists rather than a dictionary decode.
+    ///
+    /// **`nil` is what makes the floor fail closed.** A payload with no node, or a node with no
+    /// name, produces no `Field`, and `PanelCommandConsumer.typeText` turns that into a refusal. A
+    /// node with a name and NO attributes is a perfectly readable answer (a bare `<input>` has
+    /// none) and is not the same thing.
+    static func describedField(fromResultJSON json: String) -> SensitiveFieldFloor.Field? {
+        guard let root = object(json), let node = root["node"] as? [String: Any] else { return nil }
+        guard let name = node["nodeName"] as? String, !name.isEmpty else { return nil }
+        var attributes: [String: String] = [:]
+        if let flat = node["attributes"] as? [String] {
+            var index = 0
+            while index + 1 < flat.count {
+                attributes[flat[index]] = flat[index + 1]
+                index += 2
+            }
+        }
+        return SensitiveFieldFloor.Field(tagName: name, attributes: attributes)
+    }
+
+    /// `DOM.getBoxModel`'s answer, reduced to the point a pointer should be aimed at.
+    ///
+    /// `{"model":{"content":[x1,y1,x2,y2,x3,y3,x4,y4],"width":w,"height":h}}` — a QUAD, in CSS
+    /// pixels relative to the viewport, which is the same coordinate space
+    /// `Input.dispatchMouseEvent` reads. The centre is the mean of its four corners rather than
+    /// `(x1+width/2, y1+height/2)`, because a transformed or rotated element's quad is not
+    /// axis-aligned and the corner-plus-half-extent reading would aim outside it.
+    ///
+    /// A zero-area box is `nil`: an element that occupies no space cannot be clicked, and the
+    /// protocol reports it as a success rather than an error.
+    static func boxCentre(fromResultJSON json: String) -> CGPoint? {
+        guard let root = object(json), let model = root["model"] as? [String: Any] else { return nil }
+        guard let quad = model["content"] as? [Double], quad.count >= 8 else { return nil }
+        let width = (model["width"] as? Double) ?? 0
+        let height = (model["height"] as? Double) ?? 0
+        guard width > 0, height > 0 else { return nil }
+        let x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4
+        let y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4
+        return CGPoint(x: x, y: y)
+    }
+
+    /// `DOM.resolveNode`'s answer: `{"object":{"type":"object","subtype":"node","objectId":"…"}}`.
+    /// The handle the two `Runtime.callFunctionOn` literals are run against.
+    static func remoteObjectId(fromResultJSON json: String) -> String? {
+        guard let root = object(json), let remote = root["object"] as? [String: Any] else { return nil }
+        guard let objectId = remote["objectId"] as? String, !objectId.isEmpty else { return nil }
+        return objectId
+    }
+
+    /// `PanelCommandConsumer.waitProbeScript`'s return value: `{ready, resources}`.
+    static func waitProbe(fromResultJSON json: String) -> (ready: String, resources: Int)? {
+        guard let value = evaluatedValue(fromResultJSON: json) as? [String: Any] else { return nil }
+        guard let ready = value["ready"] as? String else { return nil }
+        let resources = (value["resources"] as? Int) ?? Int((value["resources"] as? Double) ?? -1)
+        return (ready, resources)
+    }
+
+    /// `Page.getLayoutMetrics`' viewport, in CSS pixels — the space `Input.dispatchMouseEvent`
+    /// coordinates live in. `cssLayoutViewport` is the CSS-pixel one and is preferred; the two
+    /// fallbacks are for a build that predates it (`layoutViewport` is device pixels on a scaled
+    /// display, which would aim a wheel at the wrong point on a Retina Mac — hence the order).
+    static func viewportSize(fromResultJSON json: String) -> CGSize? {
+        guard let root = object(json) else { return nil }
+        for key in ["cssLayoutViewport", "layoutViewport", "cssVisualViewport"] {
+            guard let viewport = root[key] as? [String: Any] else { continue }
+            let width = (viewport["clientWidth"] as? Double) ?? 0
+            let height = (viewport["clientHeight"] as? Double) ?? 0
+            if width > 0, height > 0 { return CGSize(width: width, height: height) }
+        }
+        return nil
     }
 
     /// `Page.captureScreenshot`'s answer: `{"data":"<base64>"}`, no `data:` prefix.
