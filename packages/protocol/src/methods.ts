@@ -1460,7 +1460,8 @@ export type SyncMemoryResult = z.infer<typeof SyncMemoryResult>;
 /** panel-shell T6: the RPC surface over Task 5's `foldPanelTabs` (packages/core/src/panel/store.ts)
  *  — five methods, all harness/admin-only (never added to REMOTE_ALLOWED_METHODS or
  *  PLUGIN_ALLOWED_METHODS in ipc/server.ts: the phone has no panel, and a plugin has no reason to
- *  drive one).
+ *  drive one). B2 Task 2 added a SIXTH under the same rule, `panel.commandResult` at the end of this
+ *  section — so "five" below counts the tab methods, not the panel surface.
  *
  *  There is deliberately NO `panel.navigate`. A navigation has two producers that must not be
  *  conflated: the agent's navigation is a REQUEST and travels later as a `panel_command` (transient,

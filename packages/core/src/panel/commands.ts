@@ -73,9 +73,11 @@ export class PanelCommandRegistry {
   static readonly SETTLED_MEMORY = 256;
 
   private pending = new Map<string, PendingCommand>();
-  /** Insertion-ordered set of `commandId`s that HAD a pending entry and no longer do — settled by a
-   *  result or by deadline expiry. Spec §3 requires the distinction: "a timed-out command's late
-   *  result is dropped by the dedup", which is only expressible if expiry leaves a record. */
+  /** Insertion-ordered set of `commandId`s that were SETTLED — by a result or by deadline expiry.
+   *  Spec §3 requires the distinction: "a timed-out command's late result is dropped by the dedup",
+   *  which is only expressible if expiry leaves a record. A command whose emission FAILED is
+   *  deliberately not in here (see `dispatch`'s catch): it never reached a client, so a result for
+   *  it could only be fabricated, and `unknown` is the honest verdict. */
   private settled = new Set<string>();
   private readonly log: (line: string) => void;
 

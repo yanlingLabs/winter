@@ -2488,13 +2488,16 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
 
       // -----------------------------------------------------------------------------------------
-      // Panel (panel-shell T6): the RPC surface over Task 5's `foldPanelTabs` (panel/store.ts).
-      // Harness/admin-only by construction — none of the five are in REMOTE_ALLOWED_METHODS or
+      // Panel (panel-shell T6): the RPC surface over Task 5's `foldPanelTabs` (panel/store.ts), plus
+      // B2 Task 2's `panel.commandResult` at the end of the block.
+      // Harness/admin-only by construction — none of the six are in REMOTE_ALLOWED_METHODS or
       // PLUGIN_ALLOWED_METHODS above, so a remote/plugin connection is role-rejected before dispatch
-      // ever reaches this switch (the pre-switch gate a few hundred lines up). Every handler below
-      // maps an unknown SESSION to NOT_FOUND (the sessionHistory/directory_added precedent) — but,
-      // deliberately, none of them additionally check that a `tabId` currently exists before
-      // appending. See panel.closeTab's own comment just below for why.
+      // ever reaches this switch (the pre-switch gate a few hundred lines up). Every TAB handler
+      // below maps an unknown SESSION to NOT_FOUND (the sessionHistory/directory_added precedent) —
+      // `panel.commandResult` is keyed on a commandId rather than a session and has its own
+      // NOT_FOUND rule, stated at its case. Of the five tab handlers, deliberately, none
+      // additionally check that a `tabId` currently exists before appending. See panel.closeTab's
+      // own comment just below for why.
       // -----------------------------------------------------------------------------------------
       case METHODS.panelList: {
         const p = parseParams(PanelListParams, params);
