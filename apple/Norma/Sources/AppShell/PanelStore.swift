@@ -161,6 +161,100 @@ final class PanelStore: ObservableObject {
     /// runtime, which is why nothing here depends on it having a value.
     var onFold: (() -> Void)?
 
+    // MARK: - The replay window (live-gate fix A)
+
+    /// browser-runtime live-gate fix A: **one attach's replay, coalesced into a single fold.**
+    ///
+    /// A `session.attach` redelivers the session's COMPLETE panel history one event at a time, and
+    /// every one of them used to publish and fire `onFold`. That is not merely wasteful once the
+    /// fold drives spec §8's belt: the engine re-plans against each intermediate state, so a tab
+    /// that was opened and later closed within that history gets a REAL browser created for it (a
+    /// network load) by one replayed event and stopped by the next. The user's stderr ledger caught
+    /// it verbatim — `id=67,68,69 created`, all closed seconds later — and saw the ghost of a closed
+    /// tab flash in the strip on every session attach.
+    ///
+    /// So while a window is open the fold still happens on every event (the state stays current for
+    /// anything that READS it), but the publish and the `onFold` are held and fired ONCE when the
+    /// replay ends. Live events — everything after the window closes — are untouched: this is a
+    /// replay batch, not a debounce.
+    ///
+    /// **At most one window exists**, because at most one session is attached: `beginReplay(for:)`
+    /// replaces whatever was there, and `switchSession`/`detach` drop it (both fire `onFold`
+    /// themselves, so nothing is owed).
+    private struct ReplayWindow {
+        let sessionId: String
+        /// The seq of the `harness_attached` the daemon appended for THIS attach — `session.attach`'s
+        /// own return value (`SessionHub.attach` returns exactly that event's seq,
+        /// `packages/core/src/sessions/hub.ts`), and therefore the seq of the last event the replay
+        /// will deliver. `nil` until the RPC answers, which is genuinely not always before the
+        /// terminator has been folded: `SessionFeed.repin` re-attaches against an ALREADY-RUNNING
+        /// pump, so the whole replay can be consumed while its `await` is suspended.
+        var ceiling: Int?
+        /// The highest `harness_attached` seq folded since the window opened.
+        ///
+        /// **Why a comparison and not "a `harness_attached` arrived".** Every past attachment
+        /// appended one, and replay redelivers all of them — a session opened ten times carries ten,
+        /// scattered through its history, the first of them usually near the very beginning. Ending
+        /// the window on the first one seen would make this whole mechanism inert for exactly the
+        /// long-lived sessions spec §10 gate 12 is about.
+        var highestHarnessAttached = Int.min
+        /// At least one fold was held, so the flush owes a publish and an `onFold`. Without it a
+        /// replay that changed nothing (a re-attach to a session whose fold is already correct)
+        /// would still fire the belt.
+        var deferredFold = false
+    }
+
+    private var replay: ReplayWindow?
+
+    /// A daemon replay is about to start for `sessionId` — hold this session's folds until it ends.
+    ///
+    /// **Called synchronously at the two attach sites** (`ShellSessionHost.attachFresh`/`hop`),
+    /// before the attach is even requested, and NOT from `switchSession(to:)`: the store is switched
+    /// in places that trigger no replay at all (`ShellSessionHost.autoCreateForNewChatPage` binds a
+    /// session without attaching), and a window opened there would never see a terminator.
+    ///
+    /// It is deliberately opened AFTER `switchSession(to:)` rather than before, so the panel still
+    /// gets its instant republish of the target session's cached fold — the whole point of that
+    /// call. What is coalesced is the replay that follows it.
+    func beginReplay(for sessionId: String) {
+        replay = ReplayWindow(sessionId: sessionId)
+    }
+
+    /// The attach answered: `ceilingSeq` is `session.attach`'s `lastSeq` for this attach, or `nil` if
+    /// the attach failed outright. Ends the window immediately if the terminator has already been
+    /// folded (the `repin` ordering above) or if no terminator is coming.
+    ///
+    /// **`ceilingSeq <= 0` also means "no terminator is coming", and it is reachable rather than
+    /// defensive:** `SessionHub.attach` returns the last seq it successfully DELIVERED — without
+    /// attaching and without appending a `harness_attached` — when a client dies mid-replay
+    /// (`hub.ts`), so a value at or below the `fromSeq` we asked from (always 0 here) describes an
+    /// attach that never completed. A real terminator's seq is always ≥ 1.
+    func endReplay(for sessionId: String, throughSeq ceilingSeq: Int?) {
+        guard var window = replay, window.sessionId == sessionId else { return }
+        guard let ceilingSeq, ceilingSeq > 0 else { return flushReplay() }
+        window.ceiling = ceilingSeq
+        replay = window
+        if window.highestHarnessAttached >= ceilingSeq { flushReplay() }
+    }
+
+    /// A `harness_attached` was folded. The terminator is the one at or past the ceiling; every
+    /// other one is a redelivered fact about a previous attachment.
+    private func noteReplayTerminator(sessionId: String, seq: Int) {
+        guard var window = replay, window.sessionId == sessionId else { return }
+        window.highestHarnessAttached = max(window.highestHarnessAttached, seq)
+        replay = window
+        if let ceiling = window.ceiling, seq >= ceiling { flushReplay() }
+    }
+
+    /// Close the window and pay what it owes: one publish, one `onFold`.
+    private func flushReplay() {
+        guard let window = replay else { return }
+        replay = nil
+        guard window.deferredFold else { return }
+        publishIfCurrent(window.sessionId)
+        onFold?()
+    }
+
     /// Apply one event — live or replayed, see the type's own doc comment for why there is only
     /// this one path. Anything that isn't one of the four persisted panel-lifecycle cases (every
     /// other `SessionEvent`, INCLUDING `panelCommand`) is a no-op: this store recognizes exactly
@@ -185,6 +279,13 @@ final class PanelStore: ObservableObject {
         case .panelTabClosed(let v): sessionId = v.sessionId
         case .panelTabActivated(let v): sessionId = v.sessionId
         case .panelTabNavigated(let v): sessionId = v.sessionId
+        // live-gate fix A: not a fold — the replay TERMINATOR, and the reason this store recognizes
+        // a fifth case at all. It rides the same pump as the four above (`ShellSessionHost
+        // .attachFresh`'s one `onEvent` hook), so reading it here needs no second subscriber and no
+        // knowledge of the feed; see `ReplayWindow` for why the seq comparison is the whole rule.
+        case .harnessAttached(let v):
+            noteReplayTerminator(sessionId: v.sessionId, seq: v.seq)
+            return
         default: return
         }
         eventsBySession[sessionId, default: []].append(event)
@@ -197,9 +298,16 @@ final class PanelStore: ObservableObject {
         let seed = seedBySession[sessionId] ?? PanelTabState()
         let folded = foldPanelTabs(eventsBySession[sessionId] ?? [], startingFrom: seed)
         bySession.set(sessionId: sessionId, state: folded)
-        if sessionId == (currentSessionId ?? sessionId) {
-            publish(for: sessionId)
+        // live-gate fix A: inside a replay window the FOLD above still happened — only its two
+        // announcements are held, and paid once by `flushReplay`. Everything that reads the folded
+        // state (`allSessionTabStates`, `state(for:)`) therefore sees the same answer it always did,
+        // which is why a window that somehow never closes degrades to a stale STRIP rather than a
+        // stale engine: `BrowserSignalsCoordinator`'s other four re-plan triggers all read live.
+        if replay?.sessionId == sessionId {
+            replay?.deferredFold = true
+            return
         }
+        publishIfCurrent(sessionId)
         onFold?()
     }
 
@@ -239,6 +347,10 @@ final class PanelStore: ObservableObject {
         currentSessionId = sessionId
         eventsBySession[sessionId] = []
         seedBySession[sessionId] = bySession.state(for: sessionId)
+        // live-gate fix A: whatever replay was in flight is over — its attachment is being replaced.
+        // DROPPED rather than flushed: the publish and the `onFold` a held fold would owe are both
+        // about to happen anyway, two lines below.
+        replay = nil
         publish(for: sessionId)
         onFold?()
     }
@@ -256,6 +368,9 @@ final class PanelStore: ObservableObject {
         currentSessionId = nil
         tabs = []
         activeTabId = nil
+        // live-gate fix A: same as `switchSession` — the attachment this window belonged to is gone,
+        // and this method's own publish + `onFold` discharge everything a held fold owed.
+        replay = nil
         onFold?()
     }
 
@@ -298,5 +413,16 @@ final class PanelStore: ObservableObject {
     private func publish(for sessionId: String) {
         tabs = bySession.tabs(for: sessionId)
         activeTabId = bySession.activeTabId(for: sessionId)
+    }
+
+    /// `apply(_:)`'s publish gate, named so `flushReplay` can pay exactly what `apply` deferred.
+    ///
+    /// A nil `currentSessionId` publishes whatever session the fold was for — see `apply(_:)`'s own
+    /// doc for why (a bare store with no `switchSession` call must still publish). Deliberately NOT
+    /// shared with `applyFetchedSnapshot`, whose gate is the stricter `sessionId == currentSessionId`
+    /// and is not part of this fix.
+    private func publishIfCurrent(_ sessionId: String) {
+        guard sessionId == (currentSessionId ?? sessionId) else { return }
+        publish(for: sessionId)
     }
 }

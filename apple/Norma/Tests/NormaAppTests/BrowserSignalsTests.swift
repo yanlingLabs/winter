@@ -137,8 +137,14 @@ final class BrowserSignalsTests: XCTestCase {
         await waitUntil("\(n) connection(s)", { f.made.count >= n }, file: file, line: line)
     }
 
+    /// `lastSeq` is `session.attach`'s answer, and since live-gate fix A it is also **the replay
+    /// window's ceiling** (`PanelStore.endReplay(for:throughSeq:)`). The default `0` says "the daemon
+    /// appended no `harness_attached` for this attach, so no replay is coming" — which is what every
+    /// row below except the replay rows means: they feed their events as LIVE traffic, one fold
+    /// each, exactly as they did before the fix. A row that wants a real replay passes the seq of
+    /// the terminator it is going to feed.
     @discardableResult
-    private func answerHandshake(_ t: ShellScriptedTransport, sessionId: String,
+    private func answerHandshake(_ t: ShellScriptedTransport, sessionId: String, lastSeq: Int = 0,
                                  file: StaticString = #filePath, line: UInt = #line) async -> Bool {
         await waitUntil("the hello", { t.sent.count >= 1 }, file: file, line: line)
         let hello = feedLineJSON(t.sent[0])
@@ -146,21 +152,21 @@ final class BrowserSignalsTests: XCTestCase {
         await waitUntil("the attach", { t.sent.count >= 2 }, file: file, line: line)
         let attach = feedLineJSON(t.sent[1])
         XCTAssertEqual(attach["method"] as? String, "session.attach", file: file, line: line)
-        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":\#(lastSeq)}}"#)
         return true
     }
 
     /// A hop moves the attachment on the SAME socket (`ShellSessionHost.hop` — "one `session.attach`
     /// on the same connection"), so there is no second transport to answer; this answers the Nth
-    /// attach on the one there is. `attachIndex` counts from 1.
-    private func answerReattach(_ t: ShellScriptedTransport, attachIndex: Int,
+    /// attach on the one there is. `attachIndex` counts from 1. `lastSeq`: see `answerHandshake`.
+    private func answerReattach(_ t: ShellScriptedTransport, attachIndex: Int, lastSeq: Int = 0,
                                 file: StaticString = #filePath, line: UInt = #line) async {
         await waitUntil("re-attach #\(attachIndex)",
                         { t.methods.filter { $0 == "session.attach" }.count >= attachIndex },
                         file: file, line: line)
         let line0 = t.sent.last { feedLineJSON($0)["method"] as? String == "session.attach" }!
         let attach = feedLineJSON(line0)
-        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":0}}"#)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(attach["id"] as! Int),"result":{"ok":true,"lastSeq":\#(lastSeq)}}"#)
     }
 
     /// A panel host view in a real (never ordered in) window — what `PanelViewportHostView` is to
@@ -209,6 +215,14 @@ final class BrowserSignalsTests: XCTestCase {
     private func navigated(_ sessionId: String, _ tabId: String, seq: Int,
                            url: String, title: String) -> String {
         frame(#"{"type":"panel_tab_navigated","seq":\#(seq),"sessionId":"\#(sessionId)","ts":0,"tabId":"\#(tabId)","url":"\#(url)","title":"\#(title)"}"#)
+    }
+
+    /// The replay TERMINATOR at the seq `session.attach` answered with — and, at any LOWER seq, one
+    /// of the redelivered `harness_attached`s every previous attachment left in the history. Both
+    /// are the identical wire shape, which is the whole reason `PanelStore`'s window compares seqs
+    /// instead of matching on the type.
+    private func harnessAttached(_ sessionId: String, seq: Int, clientName: String = "orb") -> String {
+        frame(#"{"type":"harness_attached","seq":\#(seq),"sessionId":"\#(sessionId)","ts":0,"clientName":"\#(clientName)"}"#)
     }
 
     /// The ordinary opening move: a visible shell, attached to `sessionId`, with one active web tab
@@ -317,6 +331,85 @@ final class BrowserSignalsTests: XCTestCase {
         XCTAssertEqual(w.cef.log.dropFirst(transcript.count).filter { $0.contains("create url=") },
                        ["c3 create url=https://b.example"],
                        "exactly one create, and it is the shown tab's: \(w.cef.log)")
+    }
+
+    // MARK: - The replay window (live-gate fix A)
+
+    /// **The churn the user saw, as a row.** A session's attach replays its COMPLETE panel history
+    /// one event at a time, and before this fix each of those events published and fired `onFold` —
+    /// so the engine re-planned against every intermediate state and created a REAL browser (a
+    /// network load) for a tab that the very next replayed event closed again. The app's own stderr
+    /// ledger showed it as bursts of `created` ids all closing seconds later, and the strip flashed
+    /// the ghost of a closed tab on every session attach.
+    ///
+    /// The history here is built so both halves of the claim are observable at once: `t1` is opened,
+    /// shown, and closed WITHIN the replay (so a per-event fold must create it, and a coalesced one
+    /// must not), and `t2` survives (so the row cannot pass by simply creating nothing).
+    ///
+    /// **The `harness_attached` at seq 1 is not decoration.** Every past attachment left one in the
+    /// history and replay redelivers them all; ending the window on the first one seen would make
+    /// this mechanism inert for exactly the long-lived sessions spec §10 gate 12 is about. Here it
+    /// arrives BEFORE `t1` is opened, so a type-match terminator reds this row with a `t1` create.
+    func testAnAttachReplayFoldsOnceAndNeverCreatesATabTheSameReplayCloses() async {
+        let w = makeWorld()
+        var publishes = 0
+        let sink = w.host.panelStore.$tabs.dropFirst().sink { _ in publishes += 1 }
+
+        w.host.setShellVisible(true)
+        w.host.select("s1")
+        await waitUntilMade(w.factory, 1)
+        let t = w.factory.made[0]
+        // The daemon's answer names the terminator's seq — see `answerHandshake`.
+        await answerHandshake(t, sessionId: "s1", lastSeq: 6)
+        XCTAssertEqual(publishes, 1, "the premise: `switchSession`'s own republish, and nothing else")
+
+        t.feed(harnessAttached("s1", seq: 1))                                   // a PREVIOUS attach
+        t.feed(opened("s1", "t1", seq: 2, url: "https://t1.example"))
+        t.feed(activated("s1", "t1", seq: 3))
+        t.feed(opened("s1", "t2", seq: 4, url: "https://t2.example"))
+        t.feed(closed("s1", "t1", seq: 5))
+        t.feed(harnessAttached("s1", seq: 6))                                   // THIS attach
+
+        await waitUntil("the replay to flush", { w.runtime.isLive(tabId: "t2") })
+
+        XCTAssertFalse(w.cef.log.contains { $0.contains("create url=https://t1.example") },
+                       "a tab the same replay closed got a real browser — the churn: \(w.cef.log)")
+        XCTAssertEqual(w.cef.log.filter { $0.contains("create url=") },
+                       ["c1 create url=https://t2.example"],
+                       "exactly one create, and it is the tab that survived: \(w.cef.log)")
+        XCTAssertEqual(publishes, 2,
+                       "the strip rendered once per replayed event instead of once for the replay")
+        sink.cancel()
+    }
+
+    /// **The ordering the `repin` path actually has, and it is the reachable one.** `SessionFeed
+    /// .repin` re-attaches against an ALREADY-RUNNING pump, so the whole replay can be folded while
+    /// its `await client.attach` is suspended — the ceiling arrives AFTER its own terminator. A
+    /// window that only ever closed on "a terminator arrived while the ceiling was known" would stay
+    /// open forever on every hop, and the panel's strip would freeze on the fold it had at the hop.
+    ///
+    /// Driven exactly that way: the hop's re-attach is answered only after its whole replay has
+    /// landed, which is what puts the terminator in front of the ceiling.
+    func testAHopsReplayStillFlushesWhenTheCeilingArrivesAfterItsOwnTerminator() async {
+        let w = makeWorld()
+        await publishRows(w, [row("s1", activity: "idle"), row("s2", activity: "idle")])
+        let t = await openOneWebTab(w, sessionId: "s1", tabId: "a1", url: "https://a.example")
+
+        w.host.select("s2")
+        // The hop's re-attach has gone out; feed s2's whole replay BEFORE answering it.
+        await waitUntil("the re-attach", { t.methods.filter { $0 == "session.attach" }.count >= 2 })
+        t.feed(opened("s2", "b1", seq: 1, url: "https://b.example"))
+        t.feed(activated("s2", "b1", seq: 2))
+        t.feed(harnessAttached("s2", seq: 3))
+        await waitUntil("s2's replay to be folded",
+                        { w.host.panelStore.allSessionTabStates["s2"]?.tabs.count == 1 })
+        XCTAssertFalse(w.runtime.isLive(tabId: "b1"),
+                       "the premise: the window is still open, so nothing has been announced yet")
+
+        await answerReattach(t, attachIndex: 2, lastSeq: 3)
+
+        await waitUntil("the flush", { w.runtime.isLive(tabId: "b1") })
+        XCTAssertTrue(w.cef.log.contains("c2 create url=https://b.example"), "log was \(w.cef.log)")
     }
 
     // MARK: - The belt (spec §8)

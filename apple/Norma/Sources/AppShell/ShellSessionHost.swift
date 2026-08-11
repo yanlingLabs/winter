@@ -1109,6 +1109,14 @@ final class ShellSessionHost: ObservableObject {
             self?.refreshModelCatalogue()
             self?.deliverPendingFirstMessage(for: sessionId)
         }
+        // browser-runtime live-gate fix A: the replay window's other half. Set ONCE per
+        // `attachFresh` and — like `onEvent` above — it survives every later `hop(to:)` on the same
+        // attachment, which is what makes `repin`'s re-attach report its own ceiling too. The
+        // session comes from the hook rather than this closure's captured `sessionId` for the same
+        // reason `onEvent` re-reads `attachedSessionId`: a hop changes which session is current.
+        made.feed.onPinnedAttach = { [weak self] attachedSessionId, ceilingSeq in
+            self?.panelStore.endReplay(for: attachedSessionId, throughSeq: ceilingSeq)
+        }
         let live = ShellSessionAttachment(feed: made.feed, session: made.session, adapter: adapter)
         attachment = live
         attachedSessionId = sessionId
@@ -1120,6 +1128,10 @@ final class ShellSessionHost: ObservableObject {
         // comments for why ordering here matters (a switch after the first event would show a
         // flash of the OLD session's tabs under the NEW session's identity).
         panelStore.switchSession(to: sessionId)
+        // browser-runtime live-gate fix A: arm the replay window BEFORE the feed task can send the
+        // attach, and AFTER `switchSession` — which must keep its own instant republish of this
+        // session's cached fold, since that is the frame the panel shows while the replay runs.
+        panelStore.beginReplay(for: sessionId)
         refreshPanelTabs(for: sessionId)
         wire(adapter: adapter, feed: made.feed)
         live.feedTask = Task { await made.feed.start() }
@@ -1157,6 +1169,9 @@ final class ShellSessionHost: ObservableObject {
         // comments. Both run synchronously here too, before the `repin` Task below is even created,
         // so `attachedSessionId`/`panelStore.currentSessionId` are never observably out of step.
         panelStore.switchSession(to: sessionId)
+        // live-gate fix A: same pair as `attachFresh`, and it matters MORE here — `repin` re-attaches
+        // on a live pump, so the replay starts arriving the moment the RPC goes out.
+        panelStore.beginReplay(for: sessionId)
         refreshPanelTabs(for: sessionId)
         // Everything the OLD session's identity decided has to be re-derived or dropped, exactly as
         // an in-place switch does elsewhere: a different session means a different mode, a different

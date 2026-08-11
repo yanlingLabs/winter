@@ -51,6 +51,22 @@ final class SessionFeed {
     /// runs for followFocus). Pinned mode leaves this nil and falls through to the default: apply
     /// only events whose `sessionId` equals the pinned id, plus every connection state.
     var onEvent: ((NormaEvent) async -> Bool)?
+    /// browser-runtime live-gate fix A: a `.pinned` attach has answered — `ceilingSeq` is
+    /// `session.attach`'s `lastSeq`, which is the seq of the `harness_attached` the daemon appended
+    /// for THIS attach (`SessionHub.attach` returns exactly that, `packages/core/src/sessions/hub.ts`)
+    /// and therefore the seq of the last event its replay will deliver. `nil` = the attach threw, so
+    /// no replay is coming at all.
+    ///
+    /// Fired from BOTH pinned attach paths, `start()`'s and `repin`'s, and unavoidably AFTER the
+    /// await — which is why it is a CEILING and not a "replay finished" signal: `repin` re-attaches
+    /// against an already-running pump, so the entire replay can be folded while it suspends. A
+    /// consumer that must be armed before the first replayed event arrives has to arm at the call
+    /// site that asks for the attach (`ShellSessionHost.attachFresh`/`hop` call
+    /// `PanelStore.beginReplay` synchronously, for exactly that reason).
+    ///
+    /// Unused in `.followFocus` mode: that feed attaches through `onAttach`, which is `AppModel`'s
+    /// own focus machinery, and nothing there has a panel to coalesce folds for.
+    var onPinnedAttach: ((_ sessionId: String, _ ceilingSeq: Int?) -> Void)?
 
     init(makeTransport: @escaping @Sendable () -> NormaTransport, token: String, clientName: String, mode: Mode, session: SessionModel) {
         client = NormaClient(makeTransport: makeTransport, token: token, clientName: clientName)
@@ -90,7 +106,7 @@ final class SessionFeed {
         case .followFocus:
             await onAttach?()
         case .pinned(let sessionId):
-            _ = try? await client.attach(sessionId: sessionId, fromSeq: 0)
+            onPinnedAttach?(sessionId, try? await client.attach(sessionId: sessionId, fromSeq: 0))
         }
         session.markConnected() // M2: connect() success IS the connected signal
         onConnected?()
@@ -124,7 +140,7 @@ final class SessionFeed {
         guard case .pinned = mode else { return }
         mode = .pinned(sessionId: sessionId)
         session.reset()
-        _ = try? await client.attach(sessionId: sessionId, fromSeq: 0)
+        onPinnedAttach?(sessionId, try? await client.attach(sessionId: sessionId, fromSeq: 0))
     }
 
     private func handle(_ ev: NormaEvent) async {
