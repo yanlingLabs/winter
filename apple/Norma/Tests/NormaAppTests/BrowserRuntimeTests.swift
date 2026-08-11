@@ -712,6 +712,40 @@ final class BrowserRuntimeTests: XCTestCase {
         XCTAssertTrue(ambiguous.view === deeper, "the deepest match is the tiebreak the spike measured")
     }
 
+    /// **Live-gate fix B: a parked container keeps the viewport size it was last shown at.**
+    ///
+    /// Parking used to snap the container to the parking window's contentView bounds (1280×800),
+    /// which for a live page is a real viewport resize: Chromium reflows, lazily-loaded content
+    /// re-lays-out at the new width, and the pixel scroll offset the page preserves then points at
+    /// different content. The user's report is the symptom — a feed came back "decently far" from
+    /// where they left it — on a design whose whole premise is that a switch preserves state.
+    ///
+    /// The other half of the claim, that a browser born parked still gets a real 1280×800 viewport,
+    /// is `testTheContainerHasARealViewportSizeAtTheMomentTheBrowserIsAskedFor` above: `create` now
+    /// supplies that rect itself, because parking no longer supplies one. A "fix" that simply
+    /// stopped sizing containers anywhere reds that row, which is why both must stay.
+    func testParkingAContainerLeavesItsViewportSizeExactlyAsTheUserLeftIt() {
+        let (window, host) = makeHostView()   // 900×600
+        _ = window
+        let runtime = makeRuntime()
+        runtime.apply([.create(tabId: "t1", url: "https://example.com")],
+                      tabs: tabs("s1", tab("t1", shown: true)), sessionOf: { _ in "s1" })
+        runtime.attachViewport(tabId: "t1", into: host)
+        let container = runtime.container(forTabId: "t1")
+        XCTAssertEqual(container?.frame.size, NSSize(width: 900, height: 600),
+                       "the premise: the page is laid out at the panel's size")
+
+        runtime.detachViewport(tabId: "t1")
+
+        XCTAssertEqual(container?.frame.size, NSSize(width: 900, height: 600),
+                       "parking resized a live page's viewport — the reflow that moves the scroll")
+        XCTAssertTrue(container?.window === runtime.parkingWindow,
+                      "and it must still have been parked, not merely left alone")
+        XCTAssertNotEqual(container?.frame.size, runtime.parkingWindow.contentView?.bounds.size,
+                          "the premise this row rests on: the two sizes differ, so the assertion "
+                              + "above can tell 'kept' from 'snapped'")
+    }
+
     /// Detach is the other half of the move: back to the parking window, in one `addSubview`, with
     /// the browser untouched. The engine emits it before every stop and before every viewport swap.
     func testDetachParksTheContainerBackInTheParkingWindow() {

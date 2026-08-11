@@ -278,6 +278,14 @@ final class BrowserRuntime {
     /// would run at zero width forever, laying out as if on a viewport nobody could ever see.
     /// 1280×800 is therefore a plausible desktop viewport chosen deliberately, not an arbitrary
     /// placeholder, and `BrowserRuntimeTests` pins that a create measures a non-zero container.
+    ///
+    /// **Since live-gate fix B this rect is an INITIAL SIZE, not a size parked containers are held
+    /// at.** `park` no longer resizes anything (see its own doc for the scroll drift that caused),
+    /// so a container mounted in a 1600×1000 panel and then parked stays 1600×1000 — larger than the
+    /// window it now lives in. That is fine and needs no handling: this window is never ordered in,
+    /// so nothing is drawn, nothing is clipped that anyone can see, and AppKit imposes no
+    /// containment on a subview that overflows its superview's bounds. The window's size is read in
+    /// exactly one place — `create`, for a container that has no size of its own yet.
     var parkingWindow: NSWindow {
         if let existing = parkingWindowStorage { return existing }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
@@ -368,6 +376,15 @@ final class BrowserRuntime {
         let container = PanelCEFContainerView()
         containers[tabId] = container
         park(container)
+        // **The INITIAL size of a browser born parked, and since live-gate fix B the only place the
+        // parking window's rect is used as a size at all.** A fresh `PanelCEFContainerView` measures
+        // zero, and `CreateBrowserNow` reads `[parent bounds]` exactly ONCE, at creation
+        // (`NormaCEF.mm`) — so a headless browser created into an unsized container would lay out at
+        // zero width for life, with no attach ever coming to rescue it (spec §5, and all of B2).
+        // Parking no longer supplies that rect on every park, so the create path has to.
+        if let parkingBounds = parkingWindow.contentView?.bounds {
+            container.frame = parkingBounds
+        }
         touch(tabId)
 
         wire(container: container, tabId: tabId, url: url, title: title, sessionId: sessionId)
@@ -597,11 +614,21 @@ final class BrowserRuntime {
         park(container)
     }
 
+    /// **Moves the container, and touches nothing else — live-gate fix B.**
+    ///
+    /// It used to snap the container to the parking window's contentView bounds (1280×800) on the
+    /// way in. That is a genuine viewport resize for a live page: Chromium reflows, lazily-loaded
+    /// content re-lays-out at the new width, and the scroll OFFSET the page keeps in pixels then
+    /// points at different content. The user's report was exactly that — a YouTube feed came back
+    /// "decently far" from where they left it, on a design whose whole premise (spec §2) is that a
+    /// tab switch preserves state by construction. Nothing about parking needs a size: the window is
+    /// never shown, so there is no layout to satisfy and no clipping anyone can see.
+    ///
+    /// The autoresizing mask is deliberately not set here either. It belongs to `mountViewport`,
+    /// where a superview that really does resize is what makes it mean something; the parking
+    /// window's contentView never resizes, so a mask assigned on the way in would be inert.
     private func park(_ container: PanelCEFContainerView) {
-        guard let parkingHost = parkingWindow.contentView else { return }
-        parkingHost.addSubview(container)
-        container.frame = parkingHost.bounds
-        container.autoresizingMask = [.width, .height]
+        parkingWindow.contentView?.addSubview(container)
     }
 
     /// Appends, so the array reads least-recently-used FIRST — which is the order `plan(lruOrder:)`
