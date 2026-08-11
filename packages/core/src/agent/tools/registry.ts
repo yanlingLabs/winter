@@ -60,6 +60,20 @@ export interface ToolContext {
   // tool's screenshot action refuses when this is explicitly false (ax_snapshot still works); the
   // `read` tool refuses reading an image file the same way. Unset = unknown → not blocked.
   visionCapable?: boolean;
+  // B2-T6 (spec §4): a live human approved THIS call's browser navigation, moments ago, through the
+  // same per-domain approval card `web_fetch` uses (engine.ts's `browserGate` → `requestApproval`).
+  // The `browser` tool reads it to stand its otherwise-unconditional dangerous-domain block down for
+  // exactly this call.
+  //
+  // **This is the Task-5 seam, and its whole point is WHERE it lives.** The approval signal had to be
+  // something the DAEMON stamps after a real human answer — never a key on `panel_command.args`,
+  // which is model-authored. A ToolContext field is stamped in engine.ts's executeCall from a side
+  // table the model cannot reach; a model that puts `browserDomainApproved: true` in its tool
+  // arguments is writing into the ARGS object, which is parsed by the tool's zod schema (no such
+  // field) and never merged into ctx. Absent/false = "no approval", which is the answer for every
+  // call in the product except the one being executed out of an approved card — including a direct
+  // registry.execute() in a test, so the tool's block is on by default wherever it is used.
+  browserDomainApproved?: boolean;
   // D1-T3: the CALLING THREAD's own excludeTools/allowTools — engine.ts's executeCall already
   // receives these (runThread's `toolAccess`, computed once in turn() from
   // registry.namesForMode/namesNotForMode) and uses them for its own pre-dispatch rejection; this

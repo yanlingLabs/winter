@@ -184,7 +184,23 @@ export function parseRule(s: string): { tool: string; kind: "any" | "exact" | "p
  *  its "WebFetch(domain:...)" exception rule) only ever applies to web_fetch, so a WebFetch rule
  *  must never accidentally match a web_search call. Anything else (including tool names this
  *  grammar simply has no opinion on yet, e.g. `read`) maps to `null` and therefore never matches
- *  any rule. */
+ *  any rule.
+ *
+ *  B2-T6: `browser` maps to "web_fetch" TOO, and that shared mapping is the whole of the user's
+ *  "no new approval category" decision (spec §4: "a domain approved there covers fetch AND
+ *  browse/interact on that domain"). One rule population, one grammar, one card — a
+ *  `WebFetch(domain:transfer.sh)` rule the human wrote by approving a fetch also clears a browser
+ *  navigation to transfer.sh, and the browser's own card writes a rule of exactly that kind (it
+ *  calls engine.ts's `webFetchApprovalOptions`, the same function, rather than a parallel one).
+ *  It works with no grammar change because the browser's `navigate`/`open` args carry the host in
+ *  a top-level `url` field, which is precisely what `callUrlHost` below already reads.
+ *
+ *  Matching still needs a top-level `url` to read, which in practice is the two URL doors
+ *  (`navigate`/`open`). The browser's shared arg shape TOLERATES a `url` on any verb, so a model
+ *  could put one on a `click` — that buys it nothing, because the only caller that consults this
+ *  store for a browser call (engine.ts's `browserGate`) returns before the rules read for every
+ *  verb but those two. The thing being adjudicated is a NAVIGATION; an interaction inside an
+ *  already-loaded page is not one, and no rule of any kind is asked about it. */
 function toolForCallName(name: string): string | null {
   switch (name) {
     case "bash": return "bash";
@@ -193,7 +209,8 @@ function toolForCallName(name: string): string | null {
     case "computer": return "computer";
     case "enter_worktree":
     case "exit_worktree": return "worktree";
-    case "web_fetch": return "web_fetch";
+    case "web_fetch":
+    case "browser": return "web_fetch";
     default: return null;
   }
 }

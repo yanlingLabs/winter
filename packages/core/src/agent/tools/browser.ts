@@ -494,15 +494,26 @@ function panelReach(deps: BrowserToolDeps, sessionId: string): PanelReach {
 // ================================================================================================
 
 /**
- * **This is NOT an approval, which is why it is here and not in Task 6.**
+ * **The dangerous-domain block, and (Task 6) the one thing that can stand it down.**
  *
- * Spec §4 splits into two halves that read alike and behave nothing alike. The first is the per-domain
- * approval mechanism the browser shares with `fetch` — a card, a remembered rule, a user decision.
- * That is Task 6's, and nothing in this file consults it. The second is the dangerous-domains
- * HARD-BLOCK, which exists precisely BECAUSE no approval is available to ask for: it is unconditional
- * in every mode, over the SAME list ReadPage and the research runner use (`checkDangerousDomain` in
- * page-core.ts, whose own doc carries the full rationale, and spec §7's "the dangerous-domains list
- * is shared").
+ * Spec §4 splits into two halves that read alike and behave differently. The first is the per-domain
+ * approval mechanism the browser shares with `fetch` — a card, a remembered rule, a user decision —
+ * which is adjudicated in the ENGINE (`browserGate`, engine.ts) because that is where a human can be
+ * asked. The second is this HARD-BLOCK, over the SAME list ReadPage and the research runner use
+ * (`checkDangerousDomain` in page-core.ts, whose own doc carries the full rationale, and spec §7's
+ * "the dangerous-domains list is shared").
+ *
+ * They meet in exactly one place: `approved`. The block is unconditional — every mode, every policy,
+ * every caller including a direct `registry.execute` — EXCEPT for a single call the daemon stamped
+ * `ctx.browserDomainApproved` after a live human answered that card. Nothing else lifts it: not a
+ * standing rule (the engine consults those, and only where it could have shown a card), not an
+ * argument, not a mode. In the never-ask modes (chat, dispatch/auto, dont-ask, bypass — spec §4's
+ * unattended set) the engine declines to adjudicate at all, so this block is the whole answer there,
+ * exactly as Task 4 shipped it.
+ *
+ * The stamp is a ctx field and not an arg for the reason Task 5 recorded and this file's
+ * `commandArgs` enforces: a "a human approved this" signal must be daemon-written. `ctx` is built by
+ * `executeCall`; `args` are written by the model.
  *
  * **The LIST is shared with ReadPage; the ENFORCEMENT DEPTH is not, and the difference is
  * structural — do not read "same as ReadPage" as "same coverage".**
@@ -524,7 +535,10 @@ function panelReach(deps: BrowserToolDeps, sessionId: string): PanelReach {
  * So this is an INTENT-level block, not a fetch-level one: it stops the agent from *aiming* at a
  * listed host, on the surface where the user is logged in. Stated rather than implied because the
  * gap is inherited: Task 5's `click` is a whole navigation door the daemon never sees, and Task 6's
- * approval gate will sit beside this one with the identical first-hop-only reach.
+ * approval gate sits beside this one with the identical first-hop-only reach — which is why the card
+ * it shows SAYS SO, in the summary the human reads ("Approving covers this first hop only — not
+ * where that page redirects, and not where a click on it goes next"). An approval is exactly as deep
+ * as this block is.
  *
  * Taken by this task rather than deferred, deliberately, on three grounds: the tool ships to CHAT by
  * default and chat NEVER prompts, so deferring would ship the read set with an open hole in the one
@@ -536,13 +550,27 @@ function panelReach(deps: BrowserToolDeps, sessionId: string): PanelReach {
  * the tab and the app loads it (the panel's restore door), so an ungated `open` would be a `navigate`
  * with an extra step.
  */
-function refuseDangerous(url: string, deps: BrowserToolDeps, cwd: string | undefined): string | null {
+function refuseDangerous(
+  url: string,
+  deps: BrowserToolDeps,
+  cwd: string | undefined,
+  approved: boolean,
+): string | null {
   const match = checkDangerousDomain(url, deps.dangerousDomainsAdded?.(cwd));
   if (!match) return null;
+  // The stamp is checked AFTER the match, not before, so an approved call still costs the same
+  // lookup and this function's answer is a pure function of (url, list, stamp) either way.
+  if (approved) return null;
   return dangerousDomainRefusal(
     url, match,
-    "the browser tool has no approval flow to ask for one, so navigations to known "
-      + "exfiltration/tunnel-provider hosts are blocked outright",
+    // The reason is written to be true in EVERY mode, which is why it does not say "no approval flow
+    // exists" any more (Task 6 built one) and does not say "ask the user" either. A model reading
+    // this in a chat or dispatch session has no route to a human, and one reading it in an `ask`
+    // session is being told about a card the human already declined or that was never owed — in
+    // neither case is retrying the same url useful, and that is the one thing the sentence must
+    // convey.
+    "navigations to known exfiltration/tunnel-provider hosts are refused unless a human approves "
+      + "that specific domain, and no approval covers this one",
   );
 }
 
@@ -677,7 +705,7 @@ export function registerBrowserTool(r: ToolRegistry, deps: BrowserToolDeps): voi
       // ---- open: the daemon mints; the app is not consulted. ------------------------------------
       if (a.verb === "open") {
         if (!a.url) throw new Error('open needs a url (http or https) — e.g. verb:"open", url:"https://example.com".');
-        const refusal = refuseDangerous(a.url, deps, ctx.cwd);
+        const refusal = refuseDangerous(a.url, deps, ctx.cwd, ctx.browserDomainApproved === true);
         if (refusal) throw new Error(refusal);
         // Through `PanelOpenTabParams`, not around it: that schema's `superRefine` is the daemon's
         // existing http/https guard for a `web` tab and its url/title caps, and parsing here is what
@@ -714,7 +742,8 @@ export function registerBrowserTool(r: ToolRegistry, deps: BrowserToolDeps): voi
 
       // REFUSAL PRECEDENCE, most permanent first, so a given call always produces the same message:
       //   1. missing/invalid operands  — the call is malformed however the world looks
-      //   2. dangerous domain          — a permanent policy refusal (Task 6's approvals land beside it)
+      //   2. dangerous domain          — a permanent policy refusal, UNLESS a human approved it
+      //                                  (Task 6: `ctx.browserDomainApproved`)
       //   3. vision capability         — a permanent fact about this SESSION's model, not about the
       //                                  world: a model that cannot see images gains nothing from a
       //                                  screenshot however healthy the app is. Belongs among the
@@ -727,6 +756,25 @@ export function registerBrowserTool(r: ToolRegistry, deps: BrowserToolDeps): voi
       // Deciding transient-last also means a model that fixes its call gets the same complaint until
       // the call is actually right, instead of being told the app is missing and then, on retry, that
       // the tab is foreign.
+      //
+      // **WHERE THE APPROVAL SITS, AND WHY IT IS NOT A RUNG OF ITS OWN (Task 6).** The obvious move
+      // is a seventh row — but the ladder's ordering axis is permanent→transient, and an approval is
+      // neither: it can be granted mid-session, by a human, between two identical calls. Asking
+      // "which rung is it?" has no honest answer, which is the signal that it is not a rung.
+      //
+      // It is a term in rung 2. "Is this domain refused?" and "did a human just say yes to it?" are
+      // the SAME question — the second is the exception clause of the first — so they are decided at
+      // one site (`refuseDangerous`, which takes the stamp as a parameter), which keeps three
+      // properties that a separate rung would have cost:
+      //   - a call is never told about the approval flow by one rung and about the domain by
+      //     another, in either order;
+      //   - the ordering above stays exactly as Task 4 mutation-proved it — nothing moved, nothing
+      //     was inserted between two rungs whose relative order was the thing being pinned;
+      //   - and the block stays ON by default for every caller that never got a stamp (a direct
+      //     registry.execute, a future non-engine caller), because the exception is a parameter that
+      //     defaults to "not approved" rather than a rung someone must remember to run.
+      // The engine is what makes the exception rare and auditable: `browserGate` only stamps a call
+      // whose card a human actually answered, and only in the policies that may prompt at all.
 
       // Rung 1 — operands. `commandArgs` throws the per-verb complaint and BUILDS the payload from
       // parsed fields (see its own doc for why it is built rather than spread); `checkArgsBudget`
@@ -738,9 +786,11 @@ export function registerBrowserTool(r: ToolRegistry, deps: BrowserToolDeps): voi
       const args = commandArgs(a);
       checkArgsBudget(a.verb, args);
 
-      // Rung 2 — the permanent policy refusal.
+      // Rung 2 — the permanent policy refusal, with its one exception (see the ladder note above).
+      // `=== true` rather than a truthy read: the field is optional, and an approval is a fact that
+      // must be positively present, never inferred from an absent one.
       if (a.verb === "navigate" && a.url) {
-        const refusal = refuseDangerous(a.url, deps, ctx.cwd);
+        const refusal = refuseDangerous(a.url, deps, ctx.cwd, ctx.browserDomainApproved === true);
         if (refusal) throw new Error(refusal);
       }
 
