@@ -723,6 +723,38 @@ final class PanelCommandInteractionTests: XCTestCase {
                       "unclamped this would still be polling, and would say 60000ms — \(sent)")
     }
 
+    /// **Review Minor-2.** The clamp is against THIS command's `deadlineMs`, not against a constant
+    /// that only happens to fit today. Every other wait row runs at the shipped 30 000 deadline,
+    /// where the two agree at 20 000 — so none of them can tell the two mechanisms apart, which is
+    /// exactly how the hardcoded version passed review-worthy tests.
+    ///
+    /// Here the deadline is 22 000, so the ceiling must be 12 000. Mutation: clamp against
+    /// `waitTimeoutCeilingMs` alone and the wait runs to 20 000 — past the deadline the daemon armed
+    /// first, answering into an entry it had already expired, which the agent reads as "the Mac app
+    /// did not answer" for work that succeeded.
+    func testTheWaitClampFollowsTheCommandsDeadlineNotAConstant() throws {
+        XCTAssertEqual(PanelCommandArguments.waitCeiling(forDeadlineMs: 30_000), 20_000,
+                       "at the shipped deadline the deadline-derived bound and the absolute ceiling "
+                           + "must agree — this fix changed no behaviour, only what happens if the "
+                           + "deadline moves")
+        XCTAssertEqual(PanelCommandArguments.waitCeiling(forDeadlineMs: 22_000), 12_000)
+        XCTAssertEqual(PanelCommandArguments.waitCeiling(forDeadlineMs: 1_000),
+                       PanelCommandArguments.waitFloorMs,
+                       "a pathological deadline still buys one look at the page")
+
+        consumer.handle(command("wait", args: ["until": "load", "timeoutMs": 20_000],
+                                deadlineMs: 22_000))
+        answer([Self.probe("loading", resources: 0)])
+        clock.current = clock.current.addingTimeInterval(11.9)
+        clock.fire(try XCTUnwrap(clock.liveTimers.last).id)
+        answer([Self.probe("loading", resources: 0)])
+
+        XCTAssertEqual(sent.count, 1)
+        XCTAssertTrue(sent.first?.result?.contains("within 12000ms") == true,
+                      "clamped against the constant this would still be polling at 12 s and would "
+                          + "say 20000ms — \(sent)")
+    }
+
     func testWaitForMillisecondsTouchesNoBrowserAtAll() throws {
         consumer.handle(command("wait", args: ["until": "ms", "timeoutMs": 500], deadlineMs: 30_000))
         XCTAssertEqual(cef.log, [], "a sleep must not make a tab's health a precondition")
