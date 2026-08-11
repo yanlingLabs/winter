@@ -800,8 +800,19 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     /// `action` is a plain String, not a Swift enum — the same call `WorktreeExited.action`/
     /// `ToolReview.verdict` make above, and for the STRICT-decode reason `SessionActivity`'s own
     /// comment spells out: the Mac app's `NormaClient` decodes every pushed frame into this exact
-    /// type, so a future verb an older client doesn't recognize must decode, not throw. Today's
-    /// sole value is `navigate`; validation of the allowed set lives on the TS producer side.
+    /// type, so a future verb an older client doesn't recognize must decode, not throw. B2 Task 2
+    /// grew the TS producer's set from one verb to nine (`PANEL_COMMAND_ACTIONS`, events.ts:
+    /// navigate/back/read/screenshot/click/type/scroll/submit/wait); validation of the allowed set
+    /// stays on the producer side, and this type deliberately did not have to change for it.
+    ///
+    /// **Where the tolerance actually lives — two layers, only the first of which keeps the
+    /// COMMAND.** (1) This `String` is why an unrecognized verb decodes at all; (2) one layer up,
+    /// `parseServerLine` (NormaKit `ServerMessage.swift`) wraps the strict NormaProtocol decode in
+    /// `try?` and degrades any failure to `.unknownEvent(raw:)`, which `NormaClient` yields as
+    /// `.unknown` and keeps reading. So a Swift enum here would NOT kill the event stream — it
+    /// would silently drop that one command, the daemon's pending entry would run out its
+    /// `deadlineMs`, and the agent would be told "timed out" for a verb the app simply never
+    /// understood. Layer 2 protects the connection; only layer 1 protects the command.
     public struct PanelCommand: Codable, Equatable, Sendable {
         public let seq: Int
         public let sessionId: String
@@ -810,6 +821,18 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let tabId: String?
         public let action: String
         public let url: String?
+        /// B2 Task 2 — the per-verb payload (`{selector, text}` for `type`, `{dx, dy}` for
+        /// `scroll`, …), opaque here exactly as it is on the TS side: `z.record(z.string(),
+        /// z.unknown())` there, `[String: JSONValue]` here (the `PluginTileUpdated.tile` /
+        /// `Task.metadata` precedent). Optional, so every Plan A-era `panel_command` still decodes
+        /// — `panel_command_back.json` is the fixture that pins that direction.
+        ///
+        /// Nothing in the round-trip GATE would have caught this field's absence: an unknown JSON
+        /// key is dropped on decode and simply not re-encoded, so a mirror missing `args` decodes,
+        /// re-encodes and re-decodes to an equal value while losing the payload entirely. The
+        /// count assertion moves, the equality assertion does not — which is why
+        /// `RoundTripTests.testPanelCommandArgsDecodeOpaquely` checks CONTENT.
+        public let args: [String: JSONValue]?
         public let deadlineMs: Int
     }
 

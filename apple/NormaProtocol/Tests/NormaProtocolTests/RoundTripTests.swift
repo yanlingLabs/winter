@@ -4,7 +4,7 @@ import XCTest
 final class RoundTripTests: XCTestCase {
     func fixtureURLs() throws -> [URL] {
         let urls = Bundle.module.urls(forResourcesWithExtension: "json", subdirectory: "Fixtures") ?? []
-        XCTAssertEqual(urls.count, 63, "expected 63 fixtures — regenerate via pnpm protocol:generate")
+        XCTAssertEqual(urls.count, 65, "expected 65 fixtures — regenerate via pnpm protocol:generate")
         return urls
     }
 
@@ -199,5 +199,54 @@ final class RoundTripTests: XCTestCase {
         let withoutData = try Data(contentsOf: withoutURL)
         guard case .approvalRequested(let without) = try JSONDecoder().decode(SessionEvent.self, from: withoutData) else { return XCTFail() }
         XCTAssertNil(without.options)
+    }
+
+    /// B2 Task 2: `panel_command.args` is additive/optional, and the fixture-count tripwire above
+    /// CANNOT catch a mirror that forgot it — an unknown JSON key is dropped on decode and not
+    /// re-encoded, so `testAllFixturesRoundTrip`'s decoded == redecoded assertion holds perfectly
+    /// while the payload is silently lost. (Verified, not assumed: with `args` missing from
+    /// `PanelCommand`, that test failed on the COUNT alone and passed every round-trip.) This one
+    /// checks CONTENT, the `testApprovalRequestedOptionsOptional` pattern one method up.
+    func testPanelCommandArgsDecodeOpaquely() throws {
+        guard let withURL = Bundle.module.url(forResource: "panel_command_type", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing panel_command_type.json fixture")
+        }
+        guard case .panelCommand(let with) = try JSONDecoder().decode(SessionEvent.self, from: try Data(contentsOf: withURL)) else { return XCTFail() }
+        XCTAssertEqual(with.action, "type")
+        XCTAssertEqual(with.args?["selector"], .string("#search"))
+        XCTAssertEqual(with.args?["text"], .string("norma"))
+        XCTAssertEqual(with.deadlineMs, 15000)
+
+        let reencoded = try JSONEncoder().encode(SessionEvent.panelCommand(with))
+        guard case .panelCommand(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(with, redecoded)
+        XCTAssertEqual(redecoded.args?.count, 2, "args must survive a re-encode, not just a decode")
+
+        // The other direction: a verb with no payload (and the whole Plan A-era shape) still decodes.
+        guard let withoutURL = Bundle.module.url(forResource: "panel_command_back", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing panel_command_back.json fixture")
+        }
+        guard case .panelCommand(let without) = try JSONDecoder().decode(SessionEvent.self, from: try Data(contentsOf: withoutURL)) else { return XCTFail() }
+        XCTAssertNil(without.args)
+        XCTAssertNil(without.url)
+        XCTAssertEqual(without.action, "back")
+    }
+
+    /// B2 Task 2 — THE TOLERANCE STORY, pinned where it actually lives: `PanelCommand.action` is a
+    /// plain `String` (SessionEvent.swift), so a verb this build has never heard of decodes rather
+    /// than throwing. That matters because the TS `action` enum grows over time and the Mac app is
+    /// released separately from the daemon; NormaKit's own half of the story (a decode failure
+    /// degrades to `.unknownEvent` instead of killing the stream — `parseServerLine`, wrapped in
+    /// `try?`) is pinned in `ServerMessageTests`. Layer 2 protects the connection; only this layer
+    /// protects the command itself.
+    func testUnknownPanelCommandVerbStillDecodes() throws {
+        // `##"…"##`, not `#"…"#`: the payload contains a CSS id selector, and the two characters
+        // `"#` would otherwise close a single-pound raw string mid-literal.
+        let future = ##"{"type":"panel_command","seq":3,"sessionId":"s1","ts":0,"commandId":"c9","tabId":"t1","action":"drag","args":{"from":"#a"},"deadlineMs":5000}"##
+        guard case .panelCommand(let v) = try JSONDecoder().decode(SessionEvent.self, from: Data(future.utf8)) else {
+            return XCTFail("an unknown verb must decode — a Swift enum here would drop the command")
+        }
+        XCTAssertEqual(v.action, "drag")
+        XCTAssertEqual(v.args?["from"], .string("#a"))
     }
 }

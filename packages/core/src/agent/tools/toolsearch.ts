@@ -57,7 +57,11 @@ export function registerToolSearchTool(r: ToolRegistry): void {
       }
       const lines = matches.map((e) => {
         ctx.markToolLoaded?.(e.name);
-        return JSON.stringify(r.specFor(e.name, ctx.cwd));
+        // b2 T4: `ctx.mode` threaded into specFor too. This call is the ONLY place a deferred tool's
+        // schema is ever rendered for the model, so for a per-mode-schema def (`argsByMode`) an
+        // unthreaded mode would hand a code session the fail-closed NARROW schema for a tool
+        // `execute()` accepts the wide one for — see specFor's own doc comment.
+        return JSON.stringify(r.specFor(e.name, ctx.cwd, ctx.mode));
       });
       return `Loaded ${matches.length} tool(s) — now callable from your next step:\n${lines.join("\n")}`;
     },

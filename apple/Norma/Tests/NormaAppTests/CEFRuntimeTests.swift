@@ -843,4 +843,115 @@ final class CEFRuntimeTests: XCTestCase {
                        "an activeTabId naming a tab that is no longer open must not blank the panel")
         XCTAssertNil(panelShownTab(tabs: [], activeTabId: nil))
     }
+
+    // MARK: - B2 Task 3: the CDP door
+
+    /// **The door's whole contract, exercised on the one path XCTest can actually reach.**
+    ///
+    /// The unit-test host never starts CEF (`testTheRuntimeRefusesToStartCEFUnderXCTest` above is
+    /// the structural guard), so every call from here lands on `NormaCEFExecuteCDP`'s
+    /// `!g_initialized` branch — which is exactly the branch worth pinning: it is the shape of every
+    /// refusal, and "answers rather than hangs" is the property the daemon's always-settles registry
+    /// depends on (`packages/core/src/panel/commands.ts`). A door that returned silently here would
+    /// turn every verb into a `deadlineMs` timeout the agent cannot tell from a crashed app.
+    ///
+    /// Synchronously, deliberately: `XCTestExpectation` would pass just as well for a completion
+    /// that fired one run-loop turn later, and the failure this guards is one that fires NEVER.
+    func testTheCDPDoorAlwaysAnswersItsCompletionEvenWithCEFDown() {
+        let container = PanelCEFContainerView()
+        var answers: [(ok: Bool, payload: String)] = []
+        NormaCEFRuntime.executeCDP(in: container, method: "Runtime.evaluate",
+                                   paramsJSON: #"{"expression":"1+1"}"#) { ok, payload in
+            answers.append((ok, payload))
+        }
+        XCTAssertEqual(answers.count, 1,
+                       "the CDP door must answer exactly once, synchronously, when it refuses — a "
+                           + "silent return is a panel_command that can only ever time out")
+        XCTAssertEqual(answers.first?.ok, false)
+
+        // The failure payload is a JSON OBJECT carrying `message`, which is what the header promises
+        // both ways round and what `PanelCDPReply` parses. A bare reason string would decode as
+        // nothing and the consumer would report "the browser gave no reason".
+        let payload = answers.first?.payload ?? ""
+        let object = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any]
+        XCTAssertNotNil(object?["message"] as? String,
+                        "a refusal's payload must be {\"message\": …} JSON, got \(payload)")
+
+        // An empty method is refused before anything else is even looked at.
+        var second: [Bool] = []
+        NormaCEFRuntime.executeCDP(in: container, method: "", paramsJSON: nil) { ok, _ in
+            second.append(ok)
+        }
+        XCTAssertEqual(second, [false])
+    }
+
+    /// **Exactly one completion per reply, and a stranded call is FAILED rather than dropped** — the
+    /// correlation half of the door, produced rather than inferred.
+    ///
+    /// No needle can ask this (the correlation is a dictionary lookup and the fail-all is a loop,
+    /// neither of which leaves a literal), and the real path cannot be reached from here: registering
+    /// the observer needs a `CefBrowser` this host can never create. So the registry is driven
+    /// directly and hands back a transcript — see `NormaCEF.h` for the fixture's shape.
+    ///
+    /// Three properties, one string: the reply settles the call that asked for it and nothing else
+    /// (`A1` fires, `B1` does not); a second reply for the same id fires nothing (`A1` appears once);
+    /// and a browser going away fires every call it stranded (`A2` and `B1` both come back `ok=0`
+    /// with a reason). Drop the erase-before-call in `SettlePendingCDP` and `A1` doubles; drop
+    /// `FailAllPendingCDP`'s call from `NormaCEFCloseBrowser`/`ForgetOpenBrowser` and the consumer
+    /// waits out its whole deadline for a browser that is already gone.
+    func testAPendingCDPCallSettlesEXACTLYOnceAndAStrandedOneIsFAILEDNotDropped() {
+        let transcript = NormaCEFRuntime.pendingCDPTranscriptWithNoCEFAnywhere
+        let fired = transcript.split(separator: ";").map(String.init)
+
+        XCTAssertEqual(fired.count, 3, "expected A1, A2, B1 exactly once each — got \(transcript)")
+        XCTAssertEqual(fired.first, #"A1 ok=1 {"value":1}"#,
+                       "the reply must settle the call whose message id it names, with its payload "
+                           + "verbatim — got \(transcript)")
+        XCTAssertFalse(fired.dropFirst().contains { $0.hasPrefix("A1 ") },
+                       "a second reply for a settled id must fire nothing — got \(transcript)")
+        XCTAssertTrue(fired.contains { $0.hasPrefix("A2 ok=0 ") },
+                      "a call stranded by its browser closing must be FAILED, never left silent — "
+                          + "got \(transcript)")
+        XCTAssertTrue(fired.contains { $0.hasPrefix("B1 ok=0 ") },
+                      "the other browser's call must survive A's close and then fail on its own — "
+                          + "got \(transcript)")
+        XCTAssertTrue(transcript.contains("the tab's browser was closed"),
+                      "the failure must carry a reason the agent can read — got \(transcript)")
+    }
+
+    /// **The observer is registered for every browser CEF creates**, which is what makes a reply
+    /// reachable at all: `ExecuteDevToolsMethod` submits, and the answer arrives only through an
+    /// observer added with `AddDevToolsMessageObserver` (`cef_browser.h`).
+    ///
+    /// **Known limit, the same one every needle in this file carries:** it is a `Log` literal sitting
+    /// BESIDE the registration, so deleting only the `AddDevToolsMessageObserver` line would leave it
+    /// in the binary. What it does close is the deletion that is actually plausible — the whole block
+    /// going, or the registration moving out of `RememberOpenBrowser` and losing its lifetime
+    /// symmetry with the browser record. The correlation itself is covered by the produced test
+    /// above, and what CEF does with the registration is not observable from any test host.
+    ///
+    /// If you change that log message, change this needle with it — the coupling is deliberate and
+    /// written at both ends.
+    func testTheDevToolsObserverIsRegisteredForEveryBrowserInTheBuiltProduct() throws {
+        XCTAssertTrue(try appBinaryContains("cdp-observer-registered"),
+                      "NormaCEF.mm no longer registers a CefDevToolsMessageObserver when a browser "
+                          + "is created. Every CDP call would then submit successfully and never be "
+                          + "answered — the browser tool's verbs would all read as timeouts.")
+    }
+
+    /// **A browser going away fails the calls it stranded** — the built-product half of the produced
+    /// test above, and the one that says the fail-all is wired into the close paths at all.
+    ///
+    /// The needle is the `Log` literal INSIDE `FailAllPendingCDP`, past its "nothing pending" early
+    /// return — so unlike an adjacent-log needle it cannot survive that function being deleted. It
+    /// can still survive the function keeping its three CALLERS' lines removed, which is what the
+    /// produced test covers from the other side.
+    ///
+    /// If you change that log message, change this needle with it.
+    func testAClosedBrowsersInFlightCDPCallsAreFailedInTheBuiltProduct() throws {
+        XCTAssertTrue(try appBinaryContains("cdp-pending-failed"),
+                      "NormaCEF.mm no longer fails in-flight CDP calls when a browser closes. Each "
+                          + "one becomes silence, and the daemon's pending command runs out its "
+                          + "whole deadlineMs before the agent hears anything.")
+    }
 }

@@ -206,6 +206,46 @@ export const SessionListResult = z.object({
     // calls a second apart legitimately differ. Absent means "does not participate" (chat/dispatch)
     // — NOT "idle", and not "old daemon" for any daemon at or past this version.
     activity: SessionActivity.optional(),
+    // b2-agent-browser T1 (spec §5): the session's ARCHIVED flag, for every mode.
+    //
+    // Not a new value on the wire — `store.list()` has selected `archived` since
+    // session-activity-hygiene T3 and this handler has always returned the row verbatim. What was
+    // missing is this DECLARATION, and its absence was not cosmetic: a zod object strips every key
+    // it does not name, so a schema-validating TS client (packages/cli/src/client.ts `validated()`)
+    // silently dropped a field the daemon was already putting on the socket — exactly the asymmetry
+    // `cwd` above was declared to close.
+    //
+    // Distinct from `activity === "archived"`, which is the same fact narrowed to code/cowork by
+    // `participatesInActivity`: this one is mode-blind, which is the point. An archived CHAT session
+    // is invisible in the label and visible here, and the Mac app's browser lifecycle reads this
+    // field (`BrowserSignals.archived`) rather than the label for that reason.
+    //
+    // Absent means NOT archived (the store writes NULL, never 0 — `store.setArchived`), so absence
+    // is a real answer for every daemon, old or new.
+    archived: z.boolean().optional(),
+    // b2-agent-browser T1 (spec §5): the two live signals the Mac app's browser lifecycle needs,
+    // computed per row for EVERY MODE — chat and dispatch included — and therefore deliberately NOT
+    // gated by `participatesInActivity` the way `activity`/`dirs` above are. See
+    // `makeSessionSignalsDeriver` (packages/core/src/sessions/activity.ts) for why that bypass is
+    // correct rather than an oversight: the mode gate governs the LABEL, which is a lifecycle
+    // policy; these are raw facts about the daemon's own state, and a chat session's running turn is
+    // no less a running turn for having no lifecycle.
+    //
+    // OPTIONAL, and absence means "this daemon predates the signals surface" — never `false`. A
+    // consumer that coerced absence to `false/false` would be claiming knowledge it does not have;
+    // the Mac app reads `nil` and falls back to its own local signals only (BrowserSignals.swift).
+    //
+    // Bounded by construction: two booleans. The recursive per-event string cap that guards
+    // `session.history`/the remote stream does not apply — that governs EVENTS, and this is a method
+    // result which has never passed through it.
+    signals: z.object({
+      // `SessionHub.attachedCount` MINUS the requesting connection's own attachment — the daemon
+      // answering "is anyone ELSE here?" instead of making every client subtract its own reflection
+      // by guesswork. See the handler in ipc/server.ts for how self is identified.
+      attachedElsewhere: z.boolean(),
+      // `turnRunning || bgWork` — the same disjunction `activityFor` calls "work is happening".
+      working: z.boolean(),
+    }).optional(),
   })),
 });
 
@@ -1420,7 +1460,8 @@ export type SyncMemoryResult = z.infer<typeof SyncMemoryResult>;
 /** panel-shell T6: the RPC surface over Task 5's `foldPanelTabs` (packages/core/src/panel/store.ts)
  *  — five methods, all harness/admin-only (never added to REMOTE_ALLOWED_METHODS or
  *  PLUGIN_ALLOWED_METHODS in ipc/server.ts: the phone has no panel, and a plugin has no reason to
- *  drive one).
+ *  drive one). B2 Task 2 added a SIXTH under the same rule, `panel.commandResult` at the end of this
+ *  section — so "five" below counts the tab methods, not the panel surface.
  *
  *  There is deliberately NO `panel.navigate`. A navigation has two producers that must not be
  *  conflated: the agent's navigation is a REQUEST and travels later as a `panel_command` (transient,
@@ -1475,6 +1516,35 @@ export function isPersistablePanelWebUrl(url: string): boolean {
   return scheme === "http" || scheme === "https";
 }
 
+/** B2 Task 2 — the two caps on `PanelCommandResultParams` (below). Both are REFUSALS at
+ *  `parseParams`, not truncations: an over-cap result is rejected by the RPC, so the pending command
+ *  is left to expire on its deadline and the agent is told "timed out" rather than handed a
+ *  silently-shortened page or a corrupt half-image. The app is expected to cap on its own side
+ *  first (the `PANEL_URL_MAX_LENGTH` relationship exactly: this is defence in depth, not the primary
+ *  gate).
+ *
+ *  **64 KiB of text**, matching `MAX_OUTPUT` in `packages/core/src/agent/tools/registry.ts` — every
+ *  byte of `result` is destined to become tool output, and the registry truncates tool output at 64
+ *  KiB regardless, so a larger cap here would buy the model nothing while making the frame bigger.
+ *  That "matching" is no longer a claim a reader has to take on trust: B2 Task 4 exported
+ *  `MAX_OUTPUT` and `packages/core/test/agent/tools/browser.test.ts` asserts the two are equal, so
+ *  the numbers cannot drift while this sentence goes on saying they agree.
+ *  It is also 3× `READPAGE_PER_PAGE_CHAR_CAP` (20 000), the sibling read path this verb replaces
+ *  when a rendered, logged-in page is reachable.
+ *
+ *  **3 MiB of base64 image.** Sized from the artifact: the panel is a right-hand pane, so a full
+ *  retina capture is on the order of 2400×2800 px, which PNG-encodes to roughly 1.5–2 MiB for a
+ *  dense page; base64 inflates by 4/3, giving ~2–2.7 MiB. 3 MiB covers that with margin.
+ *  The BINDING limit it must stay under is the daemon's NDJSON de-framer — `LineDecoder`'s 8 MiB
+ *  `maxLine` (packages/protocol/src/ndjson.ts) — because this field travels app→daemon and Swift's
+ *  outbound path (`UnixSocketTransport.send`, NWConnection) imposes no cap of its own; 3 MiB is 37%
+ *  of it. `ConnWriter`'s 4 MiB buffer cap governs the OTHER direction and never sees this field.
+ *  Note the phone limits are irrelevant here and deliberately so: this method is harness-only, and
+ *  unlike `panel_command` (which streams to remote clients) a result never crosses the iroh
+ *  transport. */
+export const PANEL_COMMAND_RESULT_MAX_LENGTH = 64 * 1024;
+export const PANEL_COMMAND_IMAGE_B64_MAX_LENGTH = 3 * 1024 * 1024;
+
 export const PanelListParams = z.object({ sessionId: z.string().min(1) });
 /** Mirrors `PanelTabState` (core/src/panel/store.ts) field-for-field — this IS the fold, verbatim. */
 export const PanelListResult = z.object({
@@ -1496,7 +1566,10 @@ export const PanelOpenTabParams = z.object({
   // `.code` tab legitimately carries a local path, a `.web` tab never does. Written as a
   // `superRefine` on the object rather than a `refine` on the field because the decision needs
   // BOTH fields. B2's agent-facing browser tool reaches this same door, so it inherits the guard
-  // without a second policy of its own.
+  // without a second policy of its own — TRUE as of B2 Task 4, and by construction rather than by
+  // convention: `browser`'s `open` verb (packages/core/src/agent/tools/browser.ts) parses its
+  // model-supplied url through THIS schema before minting, so an agent-authored `javascript:` url is
+  // refused by the same line a user-authored one is.
   if (p.kind === "web" && p.url !== undefined && !isPersistablePanelWebUrl(p.url)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom, path: ["url"],
@@ -1529,6 +1602,56 @@ export const PanelReportNavigationParams = z.object({
   title: z.string().max(PANEL_TITLE_MAX_LENGTH),
 });
 export const PanelReportNavigationResult = z.object({ ok: z.literal(true) });
+
+/** B2 Task 2 — the ANSWER half of the command channel `PanelCommandEvent` (events.ts) opens. The
+ *  daemon pushes a `panel_command` transient and holds a pending entry keyed by `commandId`; the app
+ *  performs the verb against the tab's own browser and calls this **at most once**.
+ *
+ *  **"Over CDP" was this sentence's original wording and B2 Task 3 built it otherwise, so it is
+ *  corrected here rather than left to read as a spec.** `read` and `screenshot` do go over the Chrome
+ *  DevTools Protocol (`Runtime.evaluate`, `Page.captureScreenshot`, through `NormaCEFExecuteCDP`);
+ *  `navigate` and `back` go through the SAME two CEF entry points the panel's own address bar and
+ *  back button use (`NormaCEFLoadURL`/`NormaCEFGoBack`), deliberately, so the app has one load path
+ *  rather than two.
+ *
+ *  **"At most once", not "once", and the two zero-call cases are real** — both decided in
+ *  `PanelCommandConsumer` (apple/Norma/Sources/AppShell), both leaving the command to expire on its
+ *  `deadlineMs`: a command that arrives during the app's quit beat (the browser runtime is latched
+ *  shut; the app is about to stop existing, so a failure and a timeout describe the same fact), and a
+ *  verb still running when the app's own copy of the deadline fires (the daemon's timer was armed for
+ *  the same duration and armed strictly earlier, so a result sent then could only be dropped — see
+ *  the late-result paragraph below). Never more than once is enforced app-side by a per-command latch
+ *  rather than left to this method's dedup.
+ *
+ *  **Harness-role only, by omission.** Like the five `panel.*` methods above, this is absent from
+ *  `REMOTE_ALLOWED_METHODS` and `PLUGIN_ALLOWED_METHODS` (ipc/server.ts), so a remote or plugin
+ *  connection is role-rejected before dispatch. Nothing about the phone changes: it has no panel, no
+ *  CEF, and no way to have been sent a command in the first place.
+ *
+ *  **`ok` is the APP's verdict on the verb, not a transport ack** — `ok: false` with `result` as the
+ *  reason is how "no element matched that selector" or "the sensitive-field floor refused this
+ *  `type`" comes back. It is deliberately NOT the same axis as the daemon-side TIMEOUT: a command
+ *  whose deadline expires never produces one of these at all, and the tool distinguishes the two
+ *  (`PanelCommandOutcome`, packages/core/src/panel/commands.ts).
+ *
+ *  **A late result is not an error.** First result per `commandId` wins; a duplicate — or a result
+ *  arriving after the deadline already expired — is dropped with a log line and answered `{ok:true}`
+ *  anyway. The app cannot know it lost that race, and surfacing a routine race as an RPC failure
+ *  would be the same mistake `panel.closeTab` avoids by tolerating a double close. Only a
+ *  `commandId` the daemon has NO record of is refused (NOT_FOUND). */
+export const PanelCommandResultParams = z.object({
+  sessionId: z.string().min(1),
+  commandId: z.string().min(1),
+  ok: z.boolean(),
+  /** The verb's textual answer — extracted DOM text for `read`, a failure reason when `ok` is
+   *  false, a short confirmation otherwise. Capped at `PANEL_COMMAND_RESULT_MAX_LENGTH`. */
+  result: z.string().max(PANEL_COMMAND_RESULT_MAX_LENGTH).optional(),
+  /** `screenshot`'s PNG, base64, no data-URL prefix. The only large payload this method carries;
+   *  capped at `PANEL_COMMAND_IMAGE_B64_MAX_LENGTH`. */
+  imageBase64: z.string().max(PANEL_COMMAND_IMAGE_B64_MAX_LENGTH).optional(),
+});
+export const PanelCommandResultResult = z.object({ ok: z.literal(true) });
+export type PanelCommandResultParams = z.infer<typeof PanelCommandResultParams>;
 
 export const METHODS = {
   hello: "protocol.hello",
@@ -1621,4 +1744,5 @@ export const METHODS = {
   panelCloseTab: "panel.closeTab",
   panelActivateTab: "panel.activateTab",
   panelReportNavigation: "panel.reportNavigation",
+  panelCommandResult: "panel.commandResult",
 } as const;

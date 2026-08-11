@@ -6,6 +6,7 @@ import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type Wr
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { FakeProvider } from "../../src/agent/fake-provider";
+import { PermissionGate, isGateClassified } from "../../src/agent/gate";
 
 /**
  * R-T3 whole-branch review, Important 1 (FIX 1). mode-toolset-equivalence.test.ts pins the EXACT
@@ -85,7 +86,15 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
     return daemon;
   }
 
-  test("code mode is offered EXACTLY the full daemon tool surface (35 tools)", async () => {
+  // b2-agent-browser T4: ADDED "browser" to ALL THREE literals (SANCTIONED pin move — spec §1 gives
+  // every mode a browser: `modes: ["code","dispatch","chat"]`, deferred in code/dispatch and
+  // immediate in chat where it is the primary web surface). This is the deliberate three-literal
+  // decision this file's header asks a human to make, not a mechanical re-baseline: chat's set going
+  // from 3 names to 4 is the whole point of the task, and the per-MODE difference that matters —
+  // chat's schema carrying only the read verbs — is invisible to `namesForMode` (which reports
+  // ELIGIBILITY, exactly as the dispatch block below records for deferral) and is pinned separately
+  // in test/agent/tools/browser.test.ts.
+  test("code mode is offered EXACTLY the full daemon tool surface (36 tools)", async () => {
     const d = await boot();
     expect(d.registry).not.toBeNull();
     const offered = [...d.registry!.namesForMode("code", { builtinDeferral: true })];
@@ -112,6 +121,7 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
         "lsp",
         "list_mcp_resources", "read_mcp_resource",
         "Workflow",
+        "browser",
       ].sort(),
     );
   });
@@ -145,24 +155,24 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
   //   ELIGIBILITY, not deferred-vs-immediate (registry.ts's own doc comment — see the task_stop
   //   describe block below for the axis this list structurally can't see); the eligible-vs-loadable
   //   distinction is pinned separately, in dispatch-deferred.test.ts.
-  test("dispatch mode is offered EXACTLY this set (16 tools)", async () => {
+  test("dispatch mode is offered EXACTLY this set (17 tools)", async () => {
     const d = await boot();
     const offered = [...d.registry!.namesForMode("dispatch", { builtinDeferral: true })];
     expect(offered.sort()).toEqual(
       [
         "Search", "ReadPage", "ToolSearch", "AskQuestion", "bash", "computer", "glob", "grep", "ls",
         "push_notification", "read", "send_message", "session_spawn", "task_stop",
-        "list_sessions", "manage_session",
+        "list_sessions", "manage_session", "browser",
       ].sort(),
     );
   });
 
   // B2-T2: chat's exact offered set becomes AskQuestion + ReadPage + Search (SANCTIONED pin move —
   // task-2-brief.md's "chat exact set -> [AskQuestion, ReadPage, Search]").
-  test("chat mode is offered EXACTLY AskQuestion + ReadPage + Search", async () => {
+  test("chat mode is offered EXACTLY AskQuestion + ReadPage + Search + browser", async () => {
     const d = await boot();
     const offered = [...d.registry!.namesForMode("chat", { builtinDeferral: true })];
-    expect(offered.sort()).toEqual(["AskQuestion", "ReadPage", "Search"].sort());
+    expect(offered.sort()).toEqual(["AskQuestion", "ReadPage", "Search", "browser"].sort());
   });
 
   // B2-T2 forward guard (task-2-brief.md: "census must ALSO assert FetchPage appears in NO mode —
@@ -176,6 +186,98 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
     for (const mode of ["code", "dispatch", "chat"] as const) {
       expect(d.registry!.namesForMode(mode, { builtinDeferral: true }).has("FetchPage")).toBe(false);
     }
+  });
+
+  /**
+   * THE GATE-CLASSIFICATION COMPLETENESS PIN (b2-agent-browser T7, the whole-branch structural carry).
+   *
+   * Registering a tool and CLASSIFYING it in `agent/gate.ts` are two independent edits, and nothing
+   * has ever connected them. `modes` decides which sessions may see a tool; gate.ts decides what
+   * happens when one calls it. A tool that has the first and not the second is registered, offered,
+   * listed in every census literal above — and then fails CLOSED at the gate: denied under `plan`,
+   * denied under `dont-ask` (engine.ts converts a still-"ask" call there), and carded on EVERY call
+   * under `auto`, which in a dispatch session is a prompt nobody can answer.
+   *
+   * It happened TWICE on one branch. `browser` was unclassified until T6 measured it through the real
+   * engine (dead in chat, its primary mode); T6's review then found `list_mcp_resources` /
+   * `read_mcp_resource` in the same state, shipped that way for far longer. Neither was caught by a
+   * green 3900-test suite, and the reason is structural rather than an oversight: every existing tool
+   * test calls `registry.execute` with a hand-built ToolContext, so no exhaustive tool test crosses
+   * the gate at all, and this file's own literals are about `modes`, a different axis entirely.
+   *
+   * THE SET WALKED is the union of the three modes' offered names — i.e. every tool any session can
+   * call. A def eligible for no mode is deliberately out of scope: nothing can dispatch it, so what
+   * the gate would say about it is moot. Dynamic `mcp__`/`plugin__` names are covered by
+   * `isGateClassified`'s own external branch (they earn a real per-policy verdict), not by this walk,
+   * which sees only what `startDaemon` registers.
+   *
+   * MUTATION-PROVEN by removing a name from its class in gate.ts: the tool stays registered, stays in
+   * every literal above, and this row goes red alone.
+   */
+  test("COMPLETENESS: every tool the daemon registers resolves to a class in gate.ts — no silent fall-through to the fail-closed branch", async () => {
+    const d = await boot();
+    const offered = new Set<string>();
+    for (const mode of ["code", "dispatch", "chat"] as const) {
+      for (const name of d.registry!.namesForMode(mode, { builtinDeferral: true })) offered.add(name);
+    }
+    // Sanity: the walk is looking at a populated registry, not an empty one that would pass vacuously.
+    expect(offered.size).toBeGreaterThan(30);
+    const unclassified = [...offered].filter((name) => !isGateClassified(name)).sort();
+    // Named in the failure, not just counted — the fix is "decide which class this tool belongs in",
+    // and the message should say which tool.
+    expect(unclassified).toEqual([]);
+  });
+
+  /**
+   * The other half of the same claim, and the reason the pin above is worth having: for the two names
+   * T7 classified, assert the VERDICTS rather than only the membership. `list_mcp_resources` /
+   * `read_mcp_resource` are read-only listings over the user's own configured MCP servers, so they
+   * must be free at this gate under every policy — most pointedly under `plan`, where a research
+   * session's whole job is reading, and where they answered "deny" until this task.
+   *
+   * Compared CELL BY CELL against `ReadPage`'s row (the same NETWORK shape, classified since B2-T2),
+   * so this pins "the same answer as an already-agreed member of the class" rather than a literal
+   * transcribed from the implementation.
+   */
+  test("the two MCP resource tools are NETWORK-classified: their whole policy row matches ReadPage's, and `plan` allows them", () => {
+    const gate = new PermissionGate();
+    const policies = ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass", "chat"] as const;
+    for (const name of ["list_mcp_resources", "read_mcp_resource"]) {
+      for (const policy of policies) {
+        expect({ name, policy, verdict: gate.evaluate(name, policy) })
+          .toEqual({ name, policy, verdict: gate.evaluate("ReadPage", policy) });
+      }
+      expect(gate.evaluate(name, "plan")).toBe("allow");
+      expect(gate.evaluate(name, "auto")).toBe("allow");
+    }
+  });
+
+  /**
+   * The third name the completeness pin turned up — and the one it found ON ITS OWN, which is the
+   * empirical case for the pin existing.
+   *
+   * `session_spawn` is MUTATING, not READ_ONLY beside `spawn_agent`: its child is created at a FIXED
+   * `auto` policy (dispatch-children.ts), so the clause that earns spawn_agent its READ_ONLY (the
+   * child inherits the caller's policy) does not hold. See gate.ts's own entry.
+   *
+   * Pinned as a WHOLE ROW rather than one cell, because the point is which cell MOVED: only `auto`
+   * (an un-answerable card in a headless dispatch session → allow). `plan` still denies — a planning
+   * session must not be able to start an unattended auto-policy session — and that is the cell a
+   * careless "just make it READ_ONLY" fix would have silently opened.
+   */
+  test("session_spawn is MUTATING: `auto` allows (no un-answerable card), `plan` still DENIES (no unattended session started while planning)", () => {
+    const gate = new PermissionGate();
+    const row = Object.fromEntries(
+      (["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass", "chat"] as const)
+        .map((p) => [p, gate.evaluate("session_spawn", p)]),
+    );
+    expect(row).toEqual({
+      plan: "deny", "dont-ask": "ask", ask: "ask", "accept-edits": "ask",
+      auto: "allow", bypass: "allow", chat: "deny",
+    });
+    // The class it was NOT put in, asserted by contrast: spawn_agent allows under plan, session_spawn
+    // must not.
+    expect(gate.evaluate("spawn_agent", "plan")).toBe("allow");
   });
 });
 

@@ -2577,12 +2577,27 @@
         "action": {
           "type": "string",
           "enum": [
-            "navigate"
+            "navigate",
+            "back",
+            "read",
+            "screenshot",
+            "click",
+            "type",
+            "scroll",
+            "submit",
+            "wait"
           ]
         },
         "url": {
           "type": "string",
           "maxLength": 2048
+        },
+        "args": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
         },
         "deadlineMs": {
           "type": "integer",

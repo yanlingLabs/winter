@@ -47,6 +47,7 @@ import { registerScheduleTool } from "./agent/tools/schedule";
 import { registerWebTools } from "./agent/tools/web";
 import { registerSearchTool } from "./agent/tools/search";
 import { registerReadPageTool } from "./agent/tools/read-page";
+import { registerBrowserTool } from "./agent/tools/browser";
 import { PageCache } from "./agent/tools/page-core";
 import { createResearchRunner } from "./agent/research";
 import { registerComputerTool } from "./agent/tools/computer";
@@ -90,6 +91,9 @@ import { AuditLog } from "./peripheral/audit";
 import { PeripheralBroker, type PeripheralClass } from "./peripheral/broker";
 import { ProviderLink } from "./peripheral/provider-link";
 import { HardwareBroker } from "./peripheral/hardware";
+import { PanelCommandRegistry } from "./panel/commands";
+import { foldPanelTabs } from "./panel/store";
+import { mintPanelTab } from "./panel/open-tab";
 import { openRoutineStore } from "./routines/store";
 import { RoutineAuditLog } from "./routines/audit";
 import { makeApply } from "./settings-apply";
@@ -279,6 +283,20 @@ export async function startDaemon(opts: {
   // the IDENTICAL effective list that floor does, never a second independently-maintained getter.
   const dangerousDomainsAdded = (cwd?: string): string[] | undefined =>
     projectSettings.effective(projectRootOf(cwd))?.permissions?.dangerousDomains?.added;
+  // B2 Task 2: the panel command channel's pending-command registry (`panel/commands.ts`). Built
+  // unconditionally, the same reasoning as `hardware` further down — driving the user's panel has
+  // nothing to do with whether an LLM provider is configured, and a `panel.commandResult` can arrive
+  // on any daemon. `emit` is `hub.broadcastTransient`, NOT `providerLink.push`: unlike a hardware
+  // verb (aimed at the one provider connection), a panel command belongs to a SESSION and goes to
+  // whoever is attached to it — which is precisely why first-result-per-commandId dedup is needed.
+  //
+  // B2 Task 4 HOISTED it here, from just below the `if (agentProvider)` block to just above it. Its
+  // only dependency is `hub` (constructed far above), and the browser tool — registered inside that
+  // block — must dispatch into the SAME registry the `panel.commandResult` handler resolves against,
+  // or every command would time out against an empty map.
+  const panelCommands = new PanelCommandRegistry({
+    emit: (event) => { hub.broadcastTransient(event.sessionId, event); },
+  });
   // Output styles (CC-parity phase 2, Task 4): per-project effective outputStyle, repo-root-keyed
   // via the SAME projectRootOf as every other getter here — a trusted project's `.norma/settings.json`
   // outputStyle applies; an untrusted project's is ignored (ProjectSettingsResolver.effective()'s own
@@ -700,6 +718,20 @@ export async function startDaemon(opts: {
     // rationale and read-page.ts/research.ts for where the check actually fires.
     const research = createResearchRunner({ provider: agentProvider.provider, cache: pageCache, audit: (line) => audit.append(line), dangerousDomainsAdded });
     registerReadPageTool(registry, { cache: pageCache, audit: (line) => audit.append(line), research, dangerousDomainsAdded });
+    // B2 Task 4: the agent's browser. Four narrow deps, each the SAME thing the equivalent RPC uses —
+    // `tabs` is the fold `panel.list` serves, `openTab` is the function `panel.openTab`'s handler
+    // runs, `dispatch` is the one pending-command registry `panel.commandResult` resolves against,
+    // and `harnesses` is the hub's own attachment record. Nothing here is a second, parallel path to
+    // the panel; that is what keeps an agent-driven tab indistinguishable from a user-driven one.
+    // `dangerousDomainsAdded` is the SAME shared getter ReadPage/Search/research already take (spec
+    // §7: the dangerous-domains list is shared).
+    registerBrowserTool(registry, {
+      tabs: (sid) => foldPanelTabs(store.read(sid)),
+      openTab: (p) => mintPanelTab(hub, p),
+      dispatch: (cmd) => panelCommands.dispatch(cmd),
+      harnesses: (sid) => hub.attachedHarnesses(sid),
+      dangerousDomainsAdded,
+    });
     const agents = new AgentStore({
       normaHome, trust: trustStore, baseInstructions: SYSTEM_PROMPT,
       plugins: { disabled: settings?.plugins?.disabled ?? [] },
@@ -1465,6 +1497,10 @@ export async function startDaemon(opts: {
     peripheral,
     providerLink,
     hardware,
+    // B2 Task 2: the one pending-command registry for the whole daemon — the ipc handler resolving
+    // `panel.commandResult` and (Task 4) the browser tool dispatching commands must share the SAME
+    // map, or every command would time out against an empty one.
+    panelCommands,
     quota,
     providerInfo,
     startedAt,

@@ -16,18 +16,31 @@ import Foundation
 /// One session's inputs, as assembled by `BrowserSignalsCoordinator` (`BrowserSignals.swift`) from
 /// the shell's own attach state and the sidebar's `session.list` rows. Deliberately signals, not
 /// the daemon's four-state activity LABEL: chat and dispatch modes do not participate in
-/// `activityFor` (`packages/core/src/sessions/activity.ts`)
-/// and the panel's auto-created sessions are mode *chat*, so the label is unavailable exactly where
-/// the panel needs it. The underlying signals exist for every session **at the daemon** — this app
-/// sees only the derived label, so that guarantee does not reach here; see the spec's §4 T5
-/// correction note for exactly what degrades as a result.
+/// `activityFor` (`packages/core/src/sessions/activity.ts`) and the panel's auto-created sessions
+/// are mode *chat*, so the label is unavailable exactly where the panel needs it.
+///
+/// **The signals themselves now reach the app for every mode** (b2-agent-browser T1, spec §5): the
+/// daemon computes `attachedElsewhere`/`working` per `session.list` row outside the label's mode
+/// gate, and the archived flag rides the row raw. The browser-runtime spec §4 T5 correction note
+/// records the three degradations that existed while this app had only the label — an unattached
+/// chat session's browsers stopping mid-work, a phone-attached chat session stopping, an archived
+/// chat session waiting out the full linger — and all three are closed by that surface, with no
+/// rule in this engine changed: better inputs, same policy.
 struct BrowserSignals: Equatable {
     /// Shown in this Mac app's shell — the session whose tabs the panel is displaying.
     var attachedHere: Bool
-    /// Any other harness (the phone) is attached to this session.
+    /// Any other harness (the phone) is attached to this session — the daemon's own count, minus the
+    /// attachment of the connection that asked for the list (`SessionSummary.signals`). That asker
+    /// is NOT the shell's harness, so this app's own attachment can appear here;
+    /// `BrowserSignalsCoordinator.assemble` documents why reading it verbatim is safe anyway, and
+    /// the answer starts with the fact that this signal can only ever hold, never stop.
     var attachedElsewhere: Bool
-    /// `turnRunning || bgWork` — the agent may be driving these pages right now.
+    /// `turnRunning || bgWork` — the agent may be driving these pages right now. The daemon's answer
+    /// for every mode, OR'd with the attached harness's own live turn state (which arrives without
+    /// waiting for a poll).
     var working: Bool
+    /// The daemon's stored archived flag, read mode-blind off the row — NOT the `"archived"` label,
+    /// which chat/dispatch never carry.
     var archived: Bool
     /// Window close. `BrowserSignalsCoordinator.assemble` sets it — as `!shellVisible && sessionId
     /// == lastPanelSessionId` — for the session the shell window was viewing when it went away, and

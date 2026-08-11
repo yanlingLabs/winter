@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, SessionEvent,
-  PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH, type WritableSocket,
+  PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH,
+  PANEL_COMMAND_ARGS_MAX_JSON_BYTES, PANEL_COMMAND_RESULT_MAX_LENGTH, type WritableSocket,
 } from "@norma/protocol";
 import { startIpcServer, REMOTE_ALLOWED_METHODS } from "../../src/ipc/server";
+import { PanelCommandRegistry } from "../../src/panel/commands";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -598,6 +600,205 @@ describe("panel RPC methods (panel-shell T6)", () => {
     const res = await c.request("panel.navigate", { sessionId, tabId: "t1", url: "https://x.example" });
     expect(res.error).toBeTruthy();
     expect(res.error.code).toBe(ERR.METHOD_NOT_FOUND);
+    c.close();
+  });
+});
+
+// ================================================================================================
+// B2 Task 2 — `panel.commandResult`, the ANSWER half of the command channel. Own describe block
+// with its own boot() because these need a `PanelCommandRegistry` wired into the server, which the
+// panel-shell T6 tests above deliberately do not have (and must keep not having: a server built
+// without one still has to answer this method sanely).
+// ================================================================================================
+describe("panel.commandResult (B2 T2)", () => {
+  let stop: (() => void) | undefined;
+  afterEach(() => { stop?.(); stop = undefined; });
+
+  async function bootWithRegistry(): Promise<{
+    store: SessionStore; hub: SessionHub; registry: PanelCommandRegistry; logs: string[];
+    socketPath: string; harnessToken: string; remoteToken: string;
+  }> {
+    const home = mkdtempSync(join(tmpdir(), "norma-panel-cmdresult-"));
+    const store = new SessionStore(home);
+    const hub = new SessionHub(store);
+    const logs: string[] = [];
+    // Wired exactly as daemon.ts wires it: emit === hub.broadcastTransient. Anything the registry
+    // publishes therefore has to survive the real schema parse the hub performs.
+    const registry = new PanelCommandRegistry({
+      emit: (event) => { hub.broadcastTransient(event.sessionId, event); },
+      log: (line) => { logs.push(line); },
+    });
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({
+      socketPath, serverVersion: "test", tokens: authority, store, hub, panelCommands: registry,
+    });
+    stop = () => { server.stop(); store.close(); };
+    return { store, hub, registry, logs, socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote };
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Role. Deliverable 2 of the task is explicitly that the remote allowlists are NOT touched — the
+  // pin belongs beside the five-method one above.
+  // -------------------------------------------------------------------------------------------
+  test("panel.commandResult is NOT remote-allowed", async () => {
+    expect(REMOTE_ALLOWED_METHODS.has(METHODS.panelCommandResult)).toBe(false);
+  });
+
+  test("a remote connection is role-rejected before it ever reaches the handler", async () => {
+    const { socketPath, remoteToken } = await bootWithRegistry();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(remoteToken, "iphone-gateway", "remote");
+    const res = await c.request(METHODS.panelCommandResult, { sessionId: "s", commandId: "c", ok: true });
+    expect(res.error.code).toBe(ERR.UNAUTHORIZED);
+    c.close();
+  });
+
+  // -------------------------------------------------------------------------------------------
+  // The round trip, over the real socket.
+  // -------------------------------------------------------------------------------------------
+  test("a harness result settles the pending command the daemon dispatched", async () => {
+    const { store, registry, socketPath, harnessToken } = await bootWithRegistry();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "panel-tester");
+    const sessionId = store.createSession("global");
+
+    const { commandId, settled } = registry.dispatch({
+      sessionId, action: "read", tabId: "t1", deadlineMs: 5000,
+    });
+    const res = await c.request(METHODS.panelCommandResult, {
+      sessionId, commandId, ok: true, result: "Pricing — $20/mo",
+    });
+    expect(res.error).toBeUndefined();
+    expect(res.result).toEqual({ ok: true });
+    expect(await settled).toEqual({ kind: "result", ok: true, result: "Pricing — $20/mo" });
+    c.close();
+  });
+
+  test("TWO results for one commandId: the first wins, the second is dropped with a log line", async () => {
+    const { store, registry, logs, socketPath, harnessToken } = await bootWithRegistry();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "panel-tester");
+    const sessionId = store.createSession("global");
+
+    const { commandId, settled } = registry.dispatch({ sessionId, action: "click", deadlineMs: 5000 });
+    const first = await c.request(METHODS.panelCommandResult, { sessionId, commandId, ok: true, result: "clicked" });
+    const second = await c.request(METHODS.panelCommandResult, { sessionId, commandId, ok: false, result: "second opinion" });
+
+    // Both are answered {ok:true} — the loser of the race did nothing wrong (see the handler's own
+    // comment) — but only the first reached the agent.
+    expect(first.result).toEqual({ ok: true });
+    expect(second.error).toBeUndefined();
+    expect(second.result).toEqual({ ok: true });
+    expect(await settled).toEqual({ kind: "result", ok: true, result: "clicked" });
+    expect(logs.some((l) => l.includes(commandId) && l.includes("dropped"))).toBe(true);
+    c.close();
+  });
+
+  test("deadline expiry resolves as a TIMEOUT, and the late result is dropped rather than refused", async () => {
+    const { store, registry, logs, socketPath, harnessToken } = await bootWithRegistry();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "panel-tester");
+    const sessionId = store.createSession("global");
+
+    const { commandId, settled } = registry.dispatch({ sessionId, action: "wait", deadlineMs: 5 });
+    expect(await settled).toEqual({ kind: "timeout", deadlineMs: 5 });
+
+    const late = await c.request(METHODS.panelCommandResult, { sessionId, commandId, ok: true, result: "done, eventually" });
+    expect(late.error).toBeUndefined();
+    expect(logs.some((l) => l.includes(commandId) && l.includes("dropped"))).toBe(true);
+    c.close();
+  });
+
+  test("a result for a commandId the daemon never issued is refused with NOT_FOUND, not a crash", async () => {
+    const { store, socketPath, harnessToken } = await bootWithRegistry();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "panel-tester");
+    const sessionId = store.createSession("global");
+
+    const res = await c.request(METHODS.panelCommandResult, { sessionId, commandId: "pcmd_never", ok: true });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.NOT_FOUND);
+
+    // The server is still alive and serving after the refusal.
+    const after = await c.request(METHODS.panelList, { sessionId });
+    expect(after.error).toBeUndefined();
+    c.close();
+  });
+
+  test("a server built WITHOUT a registry refuses every result rather than throwing", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-panel-noreg-"));
+    const store = new SessionStore(home);
+    const hub = new SessionHub(store);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, hub });
+    stop = () => { server.stop(); store.close(); };
+
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "panel-tester");
+    const res = await c.request(METHODS.panelCommandResult, { sessionId: store.createSession("global"), commandId: "pcmd_x", ok: true });
+    expect(res.error.code).toBe(ERR.NOT_FOUND);
+    c.close();
+  });
+
+  // -------------------------------------------------------------------------------------------
+  // Wire validation. The caps are refusals, so an over-cap payload never becomes a truncated one.
+  // -------------------------------------------------------------------------------------------
+  test("an over-cap result/image is refused at the wire, leaving the command to time out", async () => {
+    const { store, registry, socketPath, harnessToken } = await bootWithRegistry();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "panel-tester");
+    const sessionId = store.createSession("global");
+
+    const { commandId, settled } = registry.dispatch({ sessionId, action: "read", deadlineMs: 40 });
+    const res = await c.request(METHODS.panelCommandResult, {
+      sessionId, commandId, ok: true, result: "x".repeat(PANEL_COMMAND_RESULT_MAX_LENGTH + 1),
+    });
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    // Refused, never truncated: the command is still pending and ends as a timeout.
+    expect(await settled).toEqual({ kind: "timeout", deadlineMs: 40 });
+    c.close();
+  });
+
+  // -------------------------------------------------------------------------------------------
+  // The command's own trip out. `panel_command` is TRANSIENT: attached clients see it live, and the
+  // session's JSONL never does.
+  // -------------------------------------------------------------------------------------------
+  test("a dispatched command reaches an attached harness live and is never persisted", async () => {
+    const { store, hub, registry, socketPath, harnessToken } = await bootWithRegistry();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "panel-tester");
+    const sessionId = store.createSession("global");
+
+    const seen: any[] = [];
+    hub.attach({ clientName: "spy", deliver: (e) => { seen.push(e); return true; } }, sessionId, 0);
+
+    const { commandId } = registry.dispatch({
+      sessionId, action: "type", tabId: "t1", args: { selector: "#q", text: "norma" }, deadlineMs: 5000,
+    });
+
+    const live = seen.find((e) => e.type === "panel_command");
+    expect(live).toBeTruthy();
+    expect(live.commandId).toBe(commandId);
+    expect(live.action).toBe("type");
+    expect(live.args).toEqual({ selector: "#q", text: "norma" });
+    expect(store.read(sessionId).some((e) => e.type === "panel_command")).toBe(false);
+    c.close();
+  });
+
+  test("an over-cap args object is refused at EMISSION, so a command that cannot be delivered is never registered", async () => {
+    const { store, registry, socketPath, harnessToken } = await bootWithRegistry();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "panel-tester");
+    const sessionId = store.createSession("global");
+
+    expect(() => registry.dispatch({
+      sessionId, action: "type", args: { text: "x".repeat(PANEL_COMMAND_ARGS_MAX_JSON_BYTES) }, deadlineMs: 5000,
+    })).toThrow();
+    expect(registry.pendingCount).toBe(0);
     c.close();
   });
 });

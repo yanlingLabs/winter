@@ -1920,6 +1920,49 @@ final class ShellSessionHostTests: XCTestCase {
                        "a foreign session's panel event reached PanelStore.apply — the pump's sessionId filter is gone")
     }
 
+    /// b2-agent-browser T3: **a `panel_command` reaches the consumer hook**, including one whose
+    /// `sessionId` is not the shell's current attachment.
+    ///
+    /// Both halves are the pin. The first is the wire itself: without `onPanelCommand` on the pump,
+    /// the event decodes into `PanelStore.apply`, is recognised by nothing (its own doc says so) and
+    /// vanishes, exactly as it has since Plan A.
+    ///
+    /// **The second models the HOP RACE, and fix round 1 corrected what this docstring claimed it
+    /// modelled.** The daemon never fans a command out to a connection not attached to its session
+    /// (`broadcastTransient` → `attachments.get(sessionId)`, `packages/core/src/sessions/hub.ts`), so
+    /// "a command for another session arrives" is not a daemon behaviour. What IS real is that
+    /// `hop(to:)` flips `attachedSessionId` synchronously while the departing session's in-flight
+    /// events are still crossing this socket — an event whose `sessionId` is no longer the attached
+    /// one, on an attachment that was genuinely ours when it was dispatched. Feeding a foreign-session
+    /// command on the live socket is exactly that shape, and it is the only way to exercise it without
+    /// racing a real hop. Move the call inside the guard and the second assertion reds.
+    func testPanelCommandsReachTheConsumerHookIncludingForAnotherSession() async {
+        let (host, factory) = makeHost()
+        defer { host.deselect() }
+        var seen: [(sessionId: String, commandId: String, action: String)] = []
+        host.onPanelCommand = { seen.append(($0.sessionId, $0.commandId, $0.action)) }
+        host.setShellVisible(true)
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "S1")
+        await feedWaitUntil { host.attachment?.session.state.status != .disconnected }
+
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"panel_command","seq":1,"sessionId":"S1","ts":0,"commandId":"c1","tabId":"t1","action":"read","deadlineMs":15000}}"#)
+        await feedWaitUntil { !seen.isEmpty }
+        XCTAssertEqual(seen.map(\.commandId), ["c1"])
+        XCTAssertEqual(seen.first?.action, "read")
+
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"panel_command","seq":2,"sessionId":"S2","ts":0,"commandId":"c2","tabId":"t9","action":"back","deadlineMs":15000}}"#)
+        await feedWaitUntil { seen.count > 1 }
+        XCTAssertEqual(seen.map(\.commandId), ["c1", "c2"],
+                       "a command whose sessionId is not the shell's current attachment was dropped "
+                           + "— that is the hop race (attachedSessionId flips synchronously while "
+                           + "the departing session's in-flight commands are still arriving), and "
+                           + "their tabs' browsers are still live in this runtime")
+        XCTAssertEqual(seen.last?.sessionId, "S2")
+    }
+
     /// `panel.list` fires on attach (the instant-display seed), targeted at the new session, over
     /// the management connection — same as the three mutation RPCs above.
     func testAttachFetchesPanelListForTheNewSessionAndSeedsTheStore() async {

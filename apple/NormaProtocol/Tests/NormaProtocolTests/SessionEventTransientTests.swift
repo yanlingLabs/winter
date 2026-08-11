@@ -97,7 +97,7 @@ final class SessionEventTransientTests: XCTestCase {
         // doc comment for why a replayed navigate would be an unwanted ACTION, not a stale card.
         // A tab lifecycle event (panelTabOpened here) is the opposite: PERSISTED, like
         // harnessAttached above, because the tab itself is durable session state.
-        let command = SessionEvent.panelCommand(.init(seq: 2, sessionId: "s1", ts: 0, commandId: "cmd_1", tabId: nil, action: "navigate", url: "https://example.com", deadlineMs: 5000))
+        let command = SessionEvent.panelCommand(.init(seq: 2, sessionId: "s1", ts: 0, commandId: "cmd_1", tabId: nil, action: "navigate", url: "https://example.com", args: nil, deadlineMs: 5000))
         XCTAssertTrue(command.isTransient)
         XCTAssertTrue(SessionEvent.transientTypes.contains("panel_command"))
 

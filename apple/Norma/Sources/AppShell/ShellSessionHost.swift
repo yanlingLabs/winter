@@ -1,6 +1,10 @@
 import AppKit
 import Combine
 import NormaKit
+// b2-agent-browser T3: `onPanelCommand` names `SessionEvent.PanelCommand` in its signature.
+// NormaKit re-exports the type in USE (its `NormaEvent.session` case carries one) but not in NAME,
+// which is the same wall `PanelStore` and every other panel surface here hit.
+import NormaProtocol
 import SwiftUI
 
 // MARK: - The attachment policy (PURE — spec §1's table, driven directly by ShellSessionHostTests)
@@ -418,6 +422,46 @@ final class ShellSessionHost: ObservableObject {
                 sessionId: sessionId, tabId: tabId, url: url, title: title)
         }
     }
+
+    /// b2-agent-browser Task 3: `panel.commandResult` — **the answer to a `panel_command`**, and the
+    /// second RPC on this connection whose producer arrived long after the method did.
+    ///
+    /// Rides `managementClient` for the same reason `reportPanelNavigation` does and one sharper
+    /// one: an answer is owed even while the shell is mid-hop or has no attachment at all, and the
+    /// attaching harness is exactly the thing that may have moved on. A bare, always-connected
+    /// connection is what makes "the app always answers" reachable.
+    ///
+    /// **Fire-and-forget, and the `try?` is not a shrug here.** Every outcome this call can have is
+    /// one the app can do nothing about: `{ok:true}` for an accepted result AND for one the daemon
+    /// dropped as late (first result wins — the loser has no way to have known, which is why the
+    /// method answers success either way), and NOT_FOUND only for a `commandId` the daemon has no
+    /// record of, which means the pending entry died with a daemon restart. Retrying any of them
+    /// would re-perform nothing and change nothing.
+    ///
+    /// The CALLER caps `result`/`imageBase64` before this is reached (`PanelCommandConsumer`'s
+    /// pre-checks): an over-cap value is refused at `parseParams`, and that rejection would vanish
+    /// into this `try?` — the command would then expire on its deadline with the app believing it
+    /// had answered.
+    func sendPanelCommandResult(sessionId: String, commandId: String, ok: Bool,
+                                result: String?, imageBase64: String?) {
+        guard let client = managementClient else { return }
+        Task {
+            _ = try? await client.sendPanelCommandResult(
+                sessionId: sessionId, commandId: commandId, ok: ok,
+                result: result, imageBase64: imageBase64)
+        }
+    }
+
+    /// b2-agent-browser Task 3: **"a `panel_command` arrived"** — the hook `PanelCommandConsumer`
+    /// is wired onto, in `AppDelegate`, beside the browser-lifecycle coordinator.
+    ///
+    /// A closure rather than a stored consumer, for the reason every other seam on this object is
+    /// one: the shell must build and behave identically in the many tests that drive it with no
+    /// browser runtime at all, and `nil` here is exactly that shell.
+    ///
+    /// See `PanelCommandConsumer`'s own doc for why the call site sits OUTSIDE the
+    /// `attachedSessionId` filter that `panelStore.apply` sits inside.
+    var onPanelCommand: ((SessionEvent.PanelCommand) -> Void)?
 
     /// The strip's `+`. Sends no `tabId` — the daemon mints one (`PanelOpenTabResult.tabId`),
     /// which this deliberately discards: nothing here needs it, and seeding it anywhere would be
@@ -1087,11 +1131,32 @@ final class ShellSessionHost: ObservableObject {
         // `SessionFeed.handle`'s own `.pinned` branch (`e.sessionId == sessionId`) — the identical
         // guard, just evaluated here instead, since `SessionFeed` has no knowledge of `PanelStore`
         // (a layering boundary Task 9 does not cross — see `PanelStore`'s own doc comment).
+        //
+        // b2-agent-browser T3: the `panel_command` consumer rides this same ONE pump — and
+        // deliberately OUTSIDE the `attachedSessionId` filter the store sits inside. **The reason is
+        // the HOP RACE.** `hop(to:)` flips `attachedSessionId` synchronously, while the DEPARTING
+        // session's already-in-flight events are still crossing this socket; those commands were
+        // dispatched to an attachment that was genuinely ours and their tab's browser is still live
+        // in the runtime, so an inside-the-filter consumer would drop every one of them into a
+        // `deadlineMs` timeout for nothing. Reading the event's own `sessionId` instead of the
+        // shell's current one is what keeps that window servable.
+        //
+        // It is NOT because unattached sessions get commands — they do not: `broadcastTransient`
+        // fans out to `attachments.get(sessionId)` alone (`packages/core/src/sessions/hub.ts`), and
+        // one connection is attached to one session. `PanelCommandConsumer`'s own doc carries the
+        // full reasoning, the correction, and the gap none of this closes.
+        //
+        // **`return false` is load-bearing, unchanged**: `SessionFeed.handle` reads `true` as
+        // "swallowed" and skips its own pinned application entirely, which would stop the session
+        // model dead.
         made.feed.onEvent = { [weak self] event in
             if case .session(let e) = event {
                 self?.directory.handle(e)
                 if let attached = self?.attachedSessionId, e.sessionId == attached {
                     self?.panelStore.apply(e)
+                }
+                if case .panelCommand(let command) = e {
+                    self?.onPanelCommand?(command)
                 }
             }
             return false

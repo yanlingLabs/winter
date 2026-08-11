@@ -71,6 +71,65 @@ export function participatesInActivity(mode?: string): boolean {
   return ACTIVITY_MODES.has(mode ?? "code");
 }
 
+/** b2-agent-browser T1 (spec §5): the two RAW signals `session.list` reports per row, for every
+ *  mode. Deliberately NOT an activity state and deliberately not gated by
+ *  `participatesInActivity` — see `makeSessionSignalsDeriver` directly below for why that bypass is
+ *  the design and not an oversight. */
+export interface SessionSignals {
+  /** At least one harness OTHER THAN the asking connection holds this session open.
+   *
+   *  The exclusion is here because a client cannot tell its own reflection from a second harness in
+   *  a bare count, and the daemon can. It is a per-CONNECTION answer, not a per-app one: an app that
+   *  dials the daemon on several sockets still sees its other sockets' attachments here, so a
+   *  consumer must not read `false` as "nothing of mine is attached" (the Mac app's browser
+   *  lifecycle documents exactly that case at `BrowserSignalsCoordinator.assemble`). */
+  attachedElsewhere: boolean;
+  /** `turnRunning || bgWork` — the same disjunction `activityFor` calls "work is happening", and
+   *  for the same reason: a turn and a detached task are one fact to a consumer asking whether the
+   *  agent may be driving something right now. */
+  working: boolean;
+}
+
+/** A bound signals derivation: `(sessionId, selfAttachedSessionId) → SessionSignals`.
+ *
+ *  `selfAttachedSessionId` is the session the REQUESTING connection is attached to (or `undefined`
+ *  — most connections are attached to nothing). Passed per call rather than bound, because it is a
+ *  property of the caller and not of the daemon: one bound deriver serves every connection. */
+export type SessionSignalsDeriver = (sessionId: string, selfAttachedSessionId?: string) => SessionSignals;
+
+/**
+ * Binds the same live sources `makeActivityDeriver` uses into the RAW signals surface.
+ *
+ * **The mode bypass is the point of this function, so read this before "fixing" it.**
+ * `participatesInActivity` (just above) gates the derived LABEL, and that gate is a lifecycle
+ * POLICY: from session-activity-hygiene T5 on, `active` means "abort the running turn when the last
+ * harness detaches", so a mode has to opt into the label deliberately. None of that is true of these
+ * two values. They are facts about what this daemon is doing right now — a chat session's turn is
+ * no less a running turn for having no lifecycle, and a phone attached to a chat session is no less
+ * attached. Withholding them from chat/dispatch is what left the Mac app's browser runtime unable
+ * to see its OWN main session class (browser-runtime spec §4's T5 correction: an unattached chat
+ * session's browsers stopped mid-work, a phone-attached one stopped, an archived one waited out the
+ * full linger). So: **no `participatesInActivity` call belongs in this function.**
+ *
+ * What the bypass costs, stated so the trade is visible rather than rediscovered: `makeActivityDeriver`'s
+ * short-circuit is also what keeps a per-row `lastEventTs` filesystem stat off every chat/dispatch
+ * row in a `session.list` scan. This deriver cannot inherit that protection because it does not
+ * short-circuit at all — so it deliberately takes only the three IN-MEMORY sources (two Map/Set
+ * lookups and a boolean), never `lastEventTs`. That is why the parameter is a `Pick` rather than the
+ * whole `ActivitySignalSources`: a future field that needs a stat cannot be added here by accident.
+ */
+export function makeSessionSignalsDeriver(
+  src: Pick<ActivitySignalSources, "attachedCount" | "turnRunning" | "bgWork">,
+): SessionSignalsDeriver {
+  return (sessionId, selfAttachedSessionId) => ({
+    // The subtraction is a single comparison rather than a count because `SessionHub.attach`
+    // enforces move semantics — one connection holds at most one session — so the asker can be
+    // counted in this session at most once.
+    attachedElsewhere: src.attachedCount(sessionId) - (selfAttachedSessionId === sessionId ? 1 : 0) > 0,
+    working: src.turnRunning(sessionId) || src.bgWork(sessionId),
+  });
+}
+
 /** Everything `activityFor` reads off a session, and nothing else. Narrowed from `SessionRow` in T3
  *  so the SAME derivation serves both per-session readers the daemon has: `session.list`, which
  *  holds full rows, and `session.setActivity`/`session.attach`, which hold a `store.meta()` result

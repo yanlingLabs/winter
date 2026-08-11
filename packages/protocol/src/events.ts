@@ -581,25 +581,100 @@ export const PanelTabNavigatedEvent = Base.extend({
   title: z.string().max(PANEL_TITLE_MAX_LENGTH),
 });
 
+/** B2 Task 2: the agent's nine browser verbs, in one place so the TS producer, the app's consumer
+ *  and the tool schema all name the same set. Plan A shipped this enum one-valued (`navigate`) with
+ *  no producer at all; B2 gives the agent hands.
+ *
+ *  Split by capability, because the per-mode tool registry depends on the split (spec §1): the READ
+ *  set — `navigate`, `back`, `read`, `screenshot` (plus the tab verbs, which are RPCs and never
+ *  travel this channel) — is what chat mode may ever reach; the INTERACT set — `click`, `type`,
+ *  `scroll`, `submit`, `wait` — is offered only in code and dispatch. This constant is deliberately
+ *  the FLAT union: the wire has no reason to care which half a verb came from, and the split that
+ *  matters is enforced where it is decided (the tool registration), not here.
+ *
+ *  **B2 Task 4 built that registration, and two clauses above needed correcting to stay true.**
+ *
+ *  (1) The spec's phrase was "code/cowork/dispatch"; the DAEMON has no such mode. `registry.ts`'s
+ *  `Mode` is `code|dispatch|chat` and `engine.ts`'s `resolveMode` folds a `cowork` session into
+ *  `"chat"` (deliberately — see its own comment: cowork is chat-shaped and there is no cowork slot
+ *  for a per-mode seam to resolve against). So the day cowork ships, a cowork session gets CHAT's
+ *  read-only browser until someone widens `Mode` — a change with its own blast radius, not made
+ *  here. "code and dispatch" is what is actually enforced, so that is what this now says.
+ *
+ *  (2) "Enforced at the tool registration" is now literal rather than a rendering convention:
+ *  `browser` declares `ToolDefinition.argsByMode` (`packages/core/src/agent/tools/registry.ts`),
+ *  which resolves through ONE predicate that both `specs()`/`specFor()` (what the model is shown) and
+ *  `execute()` (what is accepted) call. A chat session that named an INTERACT verb anyway — a
+ *  provider ignoring the advertised schema — is rejected at argument validation, before the tool's
+ *  own code runs and long before anything is emitted onto this channel. */
+export const PANEL_COMMAND_ACTIONS = [
+  "navigate", "back", "read", "screenshot", "click", "type", "scroll", "submit", "wait",
+] as const;
+
+/** Cap on `panel_command.args`, measured as `Buffer.byteLength(JSON.stringify(args), "utf8")` —
+ *  BYTES of serialized JSON, not characters and not per-field. Bytes because the thing being bounded
+ *  is a socket frame; the whole object because `args` is `z.unknown()`-valued and a per-field cap
+ *  cannot see inside a nested shape.
+ *
+ *  **8 KiB, and why that number.** The payloads are per-verb and small by nature — a CSS selector, a
+ *  scroll offset, a wait predicate — with exactly one that scales with model output: `type`'s text.
+ *  8 KiB is roughly 8000 ASCII characters, well past any form field an agent legitimately fills
+ *  (a long email draft is ~2 KiB), and it sits two orders of magnitude below the limits that would
+ *  actually bite. Those limits are real and worth naming, because `panel_command` is in
+ *  `REMOTE_STREAM_EVENT_TYPES` and therefore reaches the PHONE even though the phone has no panel:
+ *  `capEvent`'s `WHOLE_EVENT_CEILING` (160 KiB) and the iroh de-framer's hard 1 MiB frame, whose
+ *  overflow path is a silent connection kill. An unbounded `args` would be exactly the
+ *  "oversized field is a silent connection-killer" hazard CLAUDE.md names.
+ *
+ *  **Refused, never truncated.** A truncated selector or a truncated typed string is a DIFFERENT,
+ *  wrong action performed against a browser the user is logged into — the same reasoning that makes
+ *  the app drop an over-long URL rather than shorten it (`PANEL_URL_MAX_LENGTH`'s doc above). */
+export const PANEL_COMMAND_ARGS_MAX_JSON_BYTES = 8 * 1024;
+
 /** TRANSIENT — the daemon's only push channel to the app for verbs needing CEF execution.
  *
  *  Why transient rather than persisted: a persisted command is REPLAYED on every future attach,
  *  and unlike a replayed `ask_user` (which renders a stale card) a replayed `navigate` is an
  *  ACTION. Transient removes the hazard by construction rather than by a rule someone has to
- *  remember — transients are never persisted, so they can never be replayed.
+ *  remember — transients are never persisted, so they can never be replayed. B2 sharpens that
+ *  reasoning rather than softening it: a replayed `click` or `submit` would re-fire a purchase.
  *
  *  Tab lifecycle mutations are NOT commands: the daemon mints the id and appends the persisted
- *  event, and the app reacts to it. Commands carry only verbs whose value is the RESULT. */
+ *  event, and the app reacts to it. Commands carry only verbs whose value is the RESULT — which is
+ *  why every command has an answer channel (`panel.commandResult`, methods.ts) and a `commandId`
+ *  correlating the two. The daemon holds a pending entry per `commandId` until the first result
+ *  wins or `deadlineMs` expires (`packages/core/src/panel/commands.ts`). */
 export const PanelCommandEvent = Base.extend({
   type: z.literal("panel_command"),
   commandId: z.string().min(1),
   tabId: z.string().min(1).optional(),
-  action: z.enum(["navigate"]),
+  action: z.enum(PANEL_COMMAND_ACTIONS),
   // Capped for consistency with the persisted variants above, though the reasoning differs: this
   // one is TRANSIENT and never enters a JSONL, so the cap here bounds a FRAME rather than a file.
   // It is still the right default — B2's agent-authored navigate is the producer, and a model can
   // emit an arbitrarily long string.
   url: z.string().max(PANEL_URL_MAX_LENGTH).optional(),
+  /** Per-verb payload, opaque at this layer. B2 Task 5 fixed the real shapes on both sides:
+   *  `{selector}` for `click`/`submit`, `{selector, text}` for `type`, `{selector}` OR
+   *  `{direction, amount}` for `scroll`, `{until, timeoutMs}` for `wait`. (This comment used to say
+   *  `{dx, dy}` for `scroll`, which the built verb is not.)
+   *  Deliberately NOT a discriminated per-verb union —
+   *  the consumer that gives each key meaning is the app's CDP bridge (Task 3), and a wire-level
+   *  union would have to be re-mirrored in Swift on every verb tweak for no gained safety (the
+   *  Swift side decodes `args` as opaque JSON either way). Bounded by
+   *  `PANEL_COMMAND_ARGS_MAX_JSON_BYTES`; see that constant for the byte measure and for why an
+   *  over-cap object is REFUSED rather than truncated.
+   *
+   *  The cap is a FIELD-level `.refine`, not an object-level `.superRefine` (the shape
+   *  `PanelOpenTabParams` uses one file over): an object-level refinement turns the schema into a
+   *  `ZodEffects`, and `z.discriminatedUnion` below accepts only `ZodObject` members — this event
+   *  is a union member, that one is a standalone params schema. */
+  args: z.record(z.string(), z.unknown()).refine(
+    (a) => Buffer.byteLength(JSON.stringify(a), "utf8") <= PANEL_COMMAND_ARGS_MAX_JSON_BYTES,
+    { message: `args JSON exceeds the ${PANEL_COMMAND_ARGS_MAX_JSON_BYTES}-byte cap` },
+  ).optional(),
+  /** How long the daemon holds the pending entry before resolving it as a TIMEOUT. Set by the
+   *  producer per verb (`wait` and `navigate` need longer than `click`), never by the model. */
   deadlineMs: z.number().int().positive(),
 });
 
@@ -697,11 +772,25 @@ export const TRANSIENT_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<
   // panel-shell T3: the daemon->app command channel. See PanelCommandEvent for why transient.
   //
   // This membership ALSO puts it on the remote stream — `REMOTE_STREAM_EVENT_TYPES` spreads this
-  // set wholesale rather than listing it — and that is accepted rather than worked around. The
-  // phone has no panel and skips the variant (`NormaKit` decodes with `try?`), and the agent's
-  // browsing URLs already reach it via `tool_call`, which is in `HISTORY_EVENT_TYPES` with its
-  // arguments. Panel STATE stays Mac-only the real way: the four persisted panel variants are
-  // absent from `HISTORY_EVENT_TYPES`.
+  // set wholesale rather than listing it — and that is accepted rather than worked around.
+  //
+  // **Corrected mechanism (whole-branch review, Minor-1): the phone decodes this variant fine,
+  // `args` included.** `SessionEvent.PanelCommand` has carried `args` since B2 Task 2, content-
+  // checked by NormaProtocol's own round-trip test. `NormaKit`'s `try?` (`parseServerLine`)
+  // protects the CONNECTION from a genuinely unrecognized event — it has nothing to do with this
+  // one, which decodes just fine. What actually drops it is the phone's chat-transcript fold, which
+  // handles only `HISTORY_EVENT_TYPES ∪ {assistant_delta}` and `default: break`s on everything else
+  // (`norma-ios` `Transcript.apply`). The agent's browsing URLs are not lost the same way: they
+  // already reach the phone via `tool_call`, which IS in `HISTORY_EVENT_TYPES`, with its arguments.
+  //
+  // **The forward obligation that leaves (M6, a decision rather than an oversight):** `args` carries
+  // MODEL-AUTHORED text (a `type` call's `text`, a selector) inside an opaque record, on an event
+  // that DOES reach the phone. Nothing renders it there today, so nothing is exposed today — but the
+  // day a phone renderer reads `panel_command.args`, it must treat it as untrusted model text,
+  // exactly as any renderer of `tool_call.argsJson` already must.
+  //
+  // Panel STATE stays Mac-only the real way: the four persisted panel variants are absent from
+  // `HISTORY_EVENT_TYPES`.
   "panel_command",
 ]);
 

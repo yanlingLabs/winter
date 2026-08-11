@@ -25,6 +25,9 @@ import { sessionTmpDir } from "./session-tmp";
 import type { PermissionRules } from "./permission-rules";
 import { readOnlyBash } from "./readonly-bash";
 import { SHIPPED_DANGEROUS_DOMAINS, dangerousDomainMatch } from "./dangerous-domains";
+// B2-T6: the SAME matcher `tools/browser.ts`'s own hard block calls — imported rather than re-spelled
+// so this engine-side gate and that tool-side block can never disagree about what "dangerous" means.
+import { checkDangerousDomain } from "./tools/page-core";
 import { repoRootFor } from "./memory-dir";
 import { type ContextAssembler, neutralizeReminderTags } from "./context";
 import type { Compactor } from "./compactor";
@@ -392,6 +395,34 @@ function bashEscalationArgs(call: { argsJson: string }): { allowNetwork: boolean
   }
 }
 
+/**
+ * B2-T6: a browser call's NAVIGATION target, or `null` when the call does not aim at one.
+ *
+ * The two URL doors — `navigate` (points an existing tab at a url) and `open` (mints a new tab on
+ * one) — are the only verbs that make the browser go somewhere the model chose. Everything else
+ * (`read`, `screenshot`, `click`, `type`, `scroll`, `submit`, `wait`, `back`, `tabs`) acts on a page
+ * that is already loaded, and `browserGate` returns before ever consulting a rule for them.
+ *
+ * `back` is deliberately NOT a door despite moving the tab: its destination is a url this browser
+ * already loaded once, so it can only reach a place some earlier decision already permitted — and
+ * the model does not name it, so there is nothing to adjudicate. (`tools/browser.ts`'s own hard
+ * block makes the same call, gating exactly `navigate` and `open`.)
+ *
+ * Best-effort, gating-only, never throws — the same posture as `bashEscalationArgs` above: the
+ * tool's own zod schema re-validates the real args at execute time, and a call this parse cannot
+ * read is one the tool will refuse for its own reasons (rung 1).
+ */
+function browserVerbUrl(argsJson: string): { verb: "navigate" | "open"; url: string } | null {
+  try {
+    const a = JSON.parse(argsJson || "{}") as { verb?: unknown; url?: unknown };
+    if (a.verb !== "navigate" && a.verb !== "open") return null;
+    if (typeof a.url !== "string" || a.url === "") return null;
+    return { verb: a.verb, url: a.url };
+  } catch {
+    return null;
+  }
+}
+
 /** SP-approvals Task 10 (spec §7): the web_fetch dangerous-domain approval card's options — called
  *  ONLY from `webFetchGate` below, NEVER from `approvalOptionsFor` above (a structurally different
  *  card: it fires for EVERY policy, not just `ask`, and its "always allow" option is scoped to a
@@ -418,6 +449,62 @@ function webFetchApprovalOptions(host: string | undefined, matchedEntry: string 
   options.push({ id: "deny", label: "Deny" });
   return options;
 }
+
+/**
+ * B2-T6 (spec §4): the policies in which a browser NAVIGATION may raise an approval card at all.
+ *
+ * Everything not in this set is a **never-ask** surface, and each is absent for its own stated
+ * reason rather than by omission:
+ *
+ *  - `chat` — chat's fixed, immutable policy. "chat simply wouldn't ever ask permissions" (the
+ *    user's directive, recorded at gate.ts's own `SessionApprovalPolicy`); the browser is a DEFAULT
+ *    tool there, so this is the mode where a stray card would be most visible and most wrong.
+ *  - `dont-ask` — never prompts, by definition. (`web_fetch`'s floor spells this out as an explicit
+ *    deny branch; here the tool's own hard block produces the identical isError refusal, so there is
+ *    one mechanism instead of two.)
+ *  - `auto` and `bypass` — spec §4 names them, with dispatch, as the UNATTENDED modes, and says what
+ *    they get: "the dangerous-domains hard-block applies to navigation (as it does for ReadPage
+ *    today)". No card, and no rule lifting it either.
+ *
+ * **Two deliberate divergences from `web_fetch`'s floor, both in the strict direction, both because
+ * the browser drives the user's own logged-in profile (spec §4 states that as the reason the domain
+ * gate exists at all — cookies, sessions, saved cards; `fetch` carries none of that):**
+ *
+ *  1. `auto` CARDS for web_fetch and does NOT card here — it hard-blocks. Spec §4's unattended
+ *     paragraph is explicit, and a card nobody is watching is not a gate.
+ *  2. `bypass` SILENTLY ALLOWS a dangerous fetch (that floor's branch excludes it outright) and
+ *     hard-blocks here. Task 4 shipped the browser's block as unconditional in every mode; §4 lists
+ *     bypass among the unattended modes the block applies to, so this task does not weaken it.
+ *
+ * A consequence worth stating plainly, because it is the price of (1) and (2): a standing
+ * `WebFetch(domain:…)` rule is consulted ONLY where a card could have been shown. In an unattended
+ * mode the block holds even with the rule present — a grant earned in an attended session never
+ * silently widens a headless one, which is the same composition `page-core.ts`'s own doc refuses for
+ * ReadPage. `plan` IS in the set: plan mode has a human in it, and `web_fetch`'s floor cards there
+ * too (pinned by policy-modes-matrix.test.ts's own plan cell).
+ */
+const BROWSER_PROMPT_POLICIES = new Set<SessionApprovalPolicy>(["ask", "accept-edits", "plan"]);
+
+/**
+ * B2-T6: what `browserGate` concluded about one browser call. Three-valued, not a nullable card,
+ * because "no card is owed" splits into two outcomes that must NOT be conflated:
+ *
+ *  - `{kind:"card"}` — a dangerous domain, no standing rule, and a human who can be asked.
+ *  - `{kind:"rule"}` — a dangerous domain the human ALREADY approved, standingly, in their own
+ *    settings. No card is owed and the call must still run, which means the tool's unconditional
+ *    block has to be stood down for it exactly as an answered card stands it down. Collapsing this
+ *    into `null` produced a genuine bug in the first cut of this task, caught by the "a standing
+ *    rule flows with NO card" row: the card vanished and the refusal stayed.
+ *  - `null` — this gate did not adjudicate at all: an ordinary domain (free by default, as fetch
+ *    is), a verb that aims at no url, or a never-ask policy where the tool's block is the answer.
+ *
+ * The two non-null verdicts are exactly the paths that stamp `ctx.browserDomainApproved`, and they
+ * share one closure at the call site so that stays true by construction.
+ */
+type BrowserGateVerdict =
+  | { kind: "card"; summary: string; options: ApprovalOption[] }
+  | { kind: "rule" }
+  | null;
 
 /** Sanitize+cap a reviewer-authored free-text field (`tool_review.reason`/`.summary`,
  *  `approval_requested.reviewerReason`) before it goes on the wire (phase 5e T2). Deliberately NOT
@@ -1021,7 +1108,7 @@ export class AgentEngine {
   private ultracodeToggle = new Set<string>();
   // Vision image bridge (originally Phase 5 CU-only; generalized so ANY tool can stage an image —
   // the `computer` tool's screenshots AND the `read` tool's image/notebook-image-output attaches
-  // both go through this ONE map): images staged this turn, keyed by imageKey(sessionId, threadId,
+  // both go through this ONE map): images staged this turn, keyed by callKey(sessionId, threadId,
   // callId) — NOT bare callId: callIds are provider-minted with no cross-session/cross-thread
   // uniqueness guarantee, and a bare-callId collision between two concurrent sessions would drain
   // one session's image into the OTHER's model input (a cross-session leak). `ctx.attachImage`
@@ -1031,9 +1118,31 @@ export class AgentEngine {
   // runTurn's finally sweeps this session's leftovers. Never persisted (see the TurnInputItem image
   // variant's doc comment) — a purely in-turn, in-memory hand-off from tool to provider input.
   private pendingImages = new Map<string, string[]>();
-  private static imageKey(sessionId: string, threadId: string, callId: string): string {
+  /** The composite key EVERY per-call side table in this class uses — `pendingImages` above and
+   *  B2-T6's `browserApprovedCallIds` below. Named for what it identifies (one call, unambiguously)
+   *  rather than for its first consumer: a callId alone is provider-minted with no cross-session or
+   *  cross-thread uniqueness guarantee, and both tables carry something that must never bleed
+   *  between two concurrent sessions (an image into the wrong model input; a human's domain
+   *  approval into the wrong session's browser). */
+  private static callKey(sessionId: string, threadId: string, callId: string): string {
     return `${sessionId}|${threadId}|${callId}`;
   }
+  // B2-T6 (spec §4): the calls whose browser NAVIGATION a live human approved on this engine — the
+  // "a human approved this" signal Task 5's report demanded be DAEMON-STAMPED and never a key on
+  // `panel_command.args` (which is model-authored; browser.ts's `commandArgs` builds that object
+  // field by field precisely so a model cannot write one). A member here is what lets
+  // `tools/browser.ts`'s otherwise-unconditional dangerous-domain block stand down, for one call.
+  //
+  // Membership is added in the browserCard branch's onApprove and removed in its `finally`, so the
+  // stamp exists only while that one executeCall is running: it cannot be observed by a later call,
+  // by a retry, or by anything the model does after.
+  //
+  // Keyed with the SAME composite `callKey` builds, and for the SAME recorded reason — callIds are
+  // provider-minted with no cross-session/cross-thread uniqueness guarantee (see pendingImages'
+  // doc just above). A bare-callId key would let one session's approved navigation clear ANOTHER
+  // concurrent session's dangerous-domain block, which is the identical cross-session bleed that
+  // map already had to defend against, on a far worse payload.
+  private readonly browserApprovedCallIds = new Set<string>();
   // CC-parity subagent transcript writer (subagent-transcript.ts) — constructed in the constructor
   // BODY (not a field initializer) so it can close over `this.cfg`, which parameter-property
   // assignment guarantees is already set by the time the body runs.
@@ -1192,7 +1301,7 @@ export class AgentEngine {
         // in the map for the daemon's lifetime). Generalized past CU: the `read` tool can stage an
         // image via ctx.attachImage whenever the model is vision-capable, with no computer-use
         // service involved at all — so this sweep must run whenever no bg agent is live, NOT only
-        // when `cu` is configured. Keys are namespaced `${sessionId}|...` (imageKey) so this
+        // when `cu` is configured. Keys are namespaced `${sessionId}|...` (callKey) so this
         // touches only THIS session's leftovers; a mid-round child's staged-but-not-yet-drained
         // image must never be swept out from under its own round-end drain (same bgRunning guard).
         for (const key of this.pendingImages.keys()) {
@@ -4005,6 +4114,12 @@ export class AgentEngine {
         // non-web_fetch call and for a web_fetch call this floor has nothing to say about (byte-
         // identical fast path, mirrors `dirGrant`'s own null-for-everything-else shape above).
         const webFetchCard = call.name === "web_fetch" ? this.webFetchGate(call, cwd) : null;
+        // B2-T6 (spec §4): the browser's domain gate — the same shape, the same null-for-everything-
+        // else fast path, and (via webFetchApprovalOptions) the same card as the line above. Unlike
+        // webFetchGate this one takes the POLICY, because it declines to adjudicate at all in the
+        // never-ask modes and leaves the tool's own unconditional hard block to answer there; and it
+        // is three-valued, because a standing rule must clear the block as well as the card.
+        const browserVerdict = call.name === "browser" ? this.browserGate(call, cwd, meta.approvalPolicy) : null;
         // SP-approvals Task 11 (spec §8): bash's two escalation args, parsed ONCE here — before
         // the ruleAllowed block below and the dispatch chain further down — so every consumer
         // (the classifier guard, the always-card branch) sees the SAME parse. `{allowNetwork:
@@ -4191,8 +4306,11 @@ export class AgentEngine {
           // flow. The message is mode-aware — dont-ask/plan/chat all reach this same branch but for
           // different reasons, so each gets its own accurate explanation. The "chat" branch is
           // unreachable for chat's REAL production allowlist today (registry.namesForMode("chat")
-          // is {AskQuestion, Search, ReadPage} — all READ_ONLY/NETWORK, so gate.evaluate never
-          // returns "deny" for any of them) — kept as honest, explicit handling for the hypothetical
+          // is {AskQuestion, Search, ReadPage, browser} — all READ_ONLY/NETWORK, so gate.evaluate
+          // never returns "deny" for any of them; `browser` joined NETWORK in B2-T6, which is what
+          // keeps that true — it was UNCLASSIFIED and therefore actually reaching this branch, in
+          // the one mode spec §1 makes it a default tool in)
+          // — kept as honest, explicit handling for the hypothetical
           // case (a future mistakenly-chat-eligible mutating tool) rather than falling through to
           // the "Blocked in plan mode" text, which would be a flatly wrong explanation for a chat
           // session that was never in plan mode at all.
@@ -4460,6 +4578,46 @@ export class AgentEngine {
               options: webFetchCard.options,
             }, loaded, undefined, pins, rootsOverride, visionCapable, excludeTools, allowTools);
           }
+        } else if (browserVerdict) {
+          // B2-T6: the browser's dangerous-domain adjudication. No policy guard on the condition —
+          // unlike the web_fetch branch above, which has to exclude `bypass` and special-case
+          // `dont-ask` here, `browserGate` already returned null for every policy that must not
+          // prompt (BROWSER_PROMPT_POLICIES), so reaching this branch IS the decision that this
+          // navigation is the engine's to adjudicate. One place answers "may this prompt?", and it
+          // is the same place that answers "is this domain a problem?" — they cannot drift apart
+          // into a mode that cards but shouldn't.
+          //
+          // ONE stamped-execution closure, shared by both verdicts, and that is deliberate: it makes
+          // "every path that stands the tool's block down is a path a human authorized" true by
+          // construction rather than by two branches happening to agree. A live card answered
+          // (`kind:"card"`) and a standing rule the human wrote (`kind:"rule"`) are the same
+          // authority; the only difference is whether anyone had to be interrupted for it.
+          //
+          // The stamp itself is the Task-5 seam being honoured: a DAEMON-written signal, keyed
+          // session|thread|callId, alive only for the duration of this one `executeCall`, never a
+          // key on `panel_command.args` (which is model-authored — see browser.ts's `commandArgs`).
+          // try/finally, not a bare delete: an executeCall that throws must not leave a stamp behind
+          // for a later call to inherit.
+          //
+          // Everything else is the default path's own argument list, forwarded unchanged — the same
+          // list `requestApproval`'s built-in onApprove would have passed (the worktree/workflow
+          // bridges spell it out the same way).
+          const runApproved = async (): Promise<{ output: string; isError: boolean }> => {
+            const stamp = AgentEngine.callKey(sessionId, threadId, call.callId);
+            this.browserApprovedCallIds.add(stamp);
+            try {
+              return await this.executeCall(call, cwd, sessionId, threadId, signal, loaded, pins, rootsOverride, visionCapable, excludeTools, allowTools);
+            } finally {
+              this.browserApprovedCallIds.delete(stamp);
+            }
+          };
+          outcome = browserVerdict.kind === "rule"
+            ? await runApproved()
+            : await this.requestApproval(call, cwd, sessionId, threadId, signal, {
+              timeoutMs: this.approvalTimeoutFor(meta),
+              summary: browserVerdict.summary,
+              options: browserVerdict.options,
+            }, loaded, runApproved, pins, rootsOverride, visionCapable, excludeTools, allowTools);
         } else if (call.name === "exit_plan_mode" && this.cfg.plans && meta.approvalPolicy === "plan") {
           outcome = await this.runPlanBridge(call, sessionId, threadId, meta);
         } else if (call.name === "enter_plan_mode") {
@@ -5461,6 +5619,83 @@ export class AgentEngine {
     };
   }
 
+  /**
+   * B2-T6 (spec §4): the `browser` tool's domain gate — **`webFetchGate`'s twin, deliberately, down
+   * to calling the same options builder.**
+   *
+   * The user's decision was "no new approval category": the browser rides the SAME per-domain
+   * mechanism fetch already has. That is not a resemblance here, it is shared code — the card's
+   * options come from `webFetchApprovalOptions`, so the rule a human writes by approving a
+   * browser navigation is byte-identical to the one they write by approving a fetch
+   * (`WebFetch(domain:<matchedEntry>)`, scope global), and `permission-rules.ts`'s
+   * `toolForCallName` maps `browser` onto `web_fetch` so the same rule clears both.
+   *
+   * **What "no standing rule" means, and why it is not "every unseen domain".** Fetch has been free
+   * by default since SP-approvals T10: `webFetchGate` returns `null` for every host that matches
+   * nothing on the dangerous-domain list. So the only domain the existing mechanism has an opinion
+   * about — the only one for which a rule can exist at all — is a listed one. Prompting on every
+   * previously-unseen host would be a new category in all but name (a new gating input, a new rule
+   * population, and exactly the prompt volume T10 abolished because it "trained users to click
+   * through without reading"). This gate therefore adjudicates the same set fetch's does.
+   *
+   * **Only the two URL doors.** `navigate` and `open` are the verbs that AIM the browser at a host;
+   * every other verb acts inside a page that is already loaded and is not adjudicated here at all
+   * (see `browserVerbUrl`, and §"the click door" in the task report). `null` for all of them.
+   *
+   * **Never-ask policies get `null` too, and that is not a bypass** — it means this gate declines to
+   * adjudicate, leaving the tool's own unconditional hard block (`tools/browser.ts`'s
+   * `refuseDangerous`, Task 4, mode-blind) as the answer. The block is strictly stricter than a
+   * card: it refuses. See `BROWSER_PROMPT_POLICIES` for which policies those are and why.
+   *
+   * The dangerous check itself is `checkDangerousDomain` — the SAME function the tool's own block
+   * calls, not a re-implementation and not `webFetchGate`'s inline `dangerousDomainMatch` — so an
+   * unparseable url or one with no hostname produces the identical "nothing dangerous to say"
+   * verdict on both sides of the seam. That matters: this gate and the tool's block must agree
+   * exactly, or a call could be carded here and then refused there anyway (or, far worse, carded
+   * here for a url the tool would have let through, teaching the human that the card is noise).
+   * It is why this method does NOT copy `webFetchGate`'s fail-closed-on-a-malformed-url branch: a
+   * malformed url never reaches a browser, because the tool refuses it first (a missing url fails
+   * rung 1; a non-http url fails `PanelOpenTabParams` or the app's scheme door).
+   */
+  private browserGate(
+    call: { name: string; argsJson: string },
+    cwd: string,
+    policy: SessionApprovalPolicy,
+  ): BrowserGateVerdict {
+    if (!BROWSER_PROMPT_POLICIES.has(policy)) return null;
+    const aimed = browserVerbUrl(call.argsJson);
+    if (!aimed) return null;
+    const match = checkDangerousDomain(aimed.url, this.cfg.dangerousDomainsAdded?.(cwd) ?? []);
+    if (!match) return null; // nothing dangerous about this host — free by default, exactly as fetch is
+    // Same projectRoot derivation as webFetchGate's (see its own comment): the card only ever mints
+    // a GLOBAL rule, but decision() is scope-generic, so a hand-edited project rule works too.
+    const projectRoot = cwd ? repoRootFor(cwd) : null;
+    if (this.cfg.permissionRules?.decision({ name: call.name, argsJson: call.argsJson }, projectRoot) === "allow") {
+      // "rule", NOT null — and the distinction is load-bearing, which is what made this a
+      // three-valued verdict instead of a nullable card. `null` here would mean "this gate has
+      // nothing to say", and the tool's own unconditional block would then refuse a navigation the
+      // human already standing-approved: the card would be gone and the refusal would remain, which
+      // is the worst of both. A standing `WebFetch(domain:…)` rule IS a human approval — written by
+      // a human, in the human's own settings — so it earns the same daemon stamp a live card does.
+      return { kind: "rule" };
+    }
+    return {
+      kind: "card",
+      // The wording carries the two facts a human cannot see from the url alone, because this card
+      // is the ONLY place they are ever said to them (spec §4's own "stated plainly" paragraph):
+      // whose browser this is, and how far the approval actually reaches. FIRST-HOP-ONLY is not a
+      // caveat about implementation quality — it is the honest extent of the grant (Task 4's
+      // finding, inherited here verbatim: CEF follows redirects unreported, in-page navigation
+      // never crosses this daemon, and the app holds no domain list).
+      summary:
+        `browser ${aimed.verb} ${aimed.url} — ${match.host} matches a dangerous-domain rule `
+        + `(known exfiltration/tunnel-provider risk), in the user's OWN logged-in browser. `
+        + `Approving covers this first hop only — not where that page redirects, and not where a `
+        + `click on it goes next.`,
+      options: webFetchApprovalOptions(match.host, match.matchedEntry),
+    };
+  }
+
   /** Shared approval-request flow for the `ask`-policy path, the reviewer's escalation path, and
    *  (1d-iii) the worktree bridge's ask-policy path. Registers the broker wait BEFORE emitting
    *  `approval_requested` — the broadcast is synchronous, so a watcher that resolves the approval
@@ -5766,7 +6001,7 @@ export class AgentEngine {
   }
 
   /** Drain the images ANY tool staged for this round's calls (via ctx.attachImage → pendingImages,
-   *  keyed by imageKey — session|thread|callId, see the map's doc comment) into `input` as
+   *  keyed by callKey — session|thread|callId, see the map's doc comment) into `input` as
    *  `{type:"image"}` items. Originally Phase 5 CU-only (the `computer` tool's screenshots);
    *  generalized so the `read` tool's image/notebook-image-output attaches ride the identical path
    *  — this function has no idea which tool staged what. Called at the END of a round's dispatch
@@ -5777,7 +6012,7 @@ export class AgentEngine {
   private drainRoundImages(sessionId: string, threadId: string, calls: Array<{ callId: string }>, input: TurnInputItem[]): void {
     if (this.pendingImages.size === 0) return;
     for (const c of calls) {
-      const key = AgentEngine.imageKey(sessionId, threadId, c.callId);
+      const key = AgentEngine.callKey(sessionId, threadId, c.callId);
       const imgs = this.pendingImages.get(key);
       if (!imgs) continue;
       this.pendingImages.delete(key);
@@ -5947,7 +6182,7 @@ export class AgentEngine {
     // into `input` at this round's end (drainRoundImages).
     const attachImage = visionCapable
       ? (dataUrl: string) => {
-          const key = AgentEngine.imageKey(sessionId, threadId, call.callId);
+          const key = AgentEngine.callKey(sessionId, threadId, call.callId);
           const arr = this.pendingImages.get(key) ?? [];
           arr.push(dataUrl);
           this.pendingImages.set(key, arr);
@@ -5972,6 +6207,11 @@ export class AgentEngine {
       computerUse: cuNow,
       attachImage,
       visionCapable,
+      // B2-T6 (spec §4): true ONLY inside the browserCard branch's approved executeCall — a human
+      // answered the dangerous-domain card for THIS call's url, moments ago. Stamped here, by the
+      // daemon, on a ctx object the model never touches; `false` for every other call in the
+      // product, including every retry of this one. See browserApprovedCallIds' own doc comment.
+      browserDomainApproved: this.browserApprovedCallIds.has(AgentEngine.callKey(sessionId, threadId, call.callId)),
       // D1-T3: forwarded straight from THIS call's own `excludeTools`/`allowTools` params (runThread's
       // opts, threaded through every call site in this file — see this method's own doc comment on
       // them, just above). Additive only: absent for every caller that doesn't pass them, so this is

@@ -47,8 +47,9 @@ final class BrowserRuntime {
     /// override is callable under XCTest, ever" — so the runtime's logic has to be reachable without
     /// CEF, and the only way to get there is a seam the tests can substitute.
     ///
-    /// `production` below is the whole of the un-substitutable half: ten forwards to `NormaCEF*` /
-    /// `NormaCEFRuntime`, one line each but for `failureReason`'s three-line unwrap of an enum, with
+    /// `production` below is the whole of the un-substitutable half: thirteen forwards to
+    /// `NormaCEF*` / `NormaCEFRuntime` (ten of them until B2 Task 3 added the agent's three), one
+    /// line each but for `failureReason`'s three-line unwrap of an enum, with
     /// no branch and no state of their own — which is what "thin enough to verify by reading" has to
     /// mean when reading is the only verification available.
     struct CEFDriver {
@@ -58,6 +59,23 @@ final class BrowserRuntime {
         var seedTabState: (PanelCEFContainerView, String, String) -> Void
         var createBrowser: (PanelCEFContainerView, String) -> Void
         var closeBrowser: (PanelCEFContainerView) -> Void
+
+        /// B2 Task 3 — **the three calls the agent's verbs make**, added to this seam rather than
+        /// beside it for the reason the seam exists at all: `PanelCommandConsumer` is pure routing
+        /// and policy, and spec §9 says its logic tests through a driver.
+        ///
+        /// `loadURL` and `goBack` are the SAME two C entry points the chrome's own buttons use
+        /// (`NormaCEFLoadURL`/`NormaCEFGoBack`, reached from `PanelWebTabModel.navigate(typed:)` and
+        /// `.goBack()`) — deliberately not a second load path. What differs is only where the policy
+        /// ran: the field's Return key filters at the field, the agent's `navigate` filters at the
+        /// consumer, and both filter with `PanelURLPolicy`.
+        var loadURL: (PanelCEFContainerView, String) -> Void
+        var goBack: (PanelCEFContainerView) -> Void
+        /// One DevTools protocol method and its reply — `NormaCEFExecuteCDP`, whose completion
+        /// ALWAYS fires (`NormaCEF.h` carries that contract and the three points that keep it true
+        /// when a browser goes away mid-call). A recorder substituted here holds the completion and
+        /// fires it when the test says so, which is the whole of how the read verbs are testable.
+        var executeCDP: (PanelCEFContainerView, String, String?, @escaping (Bool, String) -> Void) -> Void
 
         /// `NormaCEFRuntime`'s four doors: the lazy start, the reason the placeholder shows, whether
         /// a retry can succeed, and the reset that makes one possible. Injected for the same reason
@@ -80,6 +98,9 @@ final class BrowserRuntime {
             seedTabState: { NormaCEFSeedTabState($0, $1, $2) },
             createBrowser: { NormaCEFCreateBrowser($0, $1) },
             closeBrowser: { NormaCEFCloseBrowser($0) },
+            loadURL: { NormaCEFLoadURL($0, $1) },
+            goBack: { NormaCEFGoBack($0) },
+            executeCDP: { NormaCEFRuntime.executeCDP(in: $0, method: $1, paramsJSON: $2, completion: $3) },
             ensureInitialized: { NormaCEFRuntime.ensureInitialized() },
             failureReason: {
                 if case .failed(let reason) = NormaCEFRuntime.state { return reason }
@@ -270,6 +291,58 @@ final class BrowserRuntime {
     /// weakly for its verbs; this is the owner's copy, and Task 4's viewport reads it through
     /// `attachViewport` rather than directly.
     func container(forTabId tabId: String) -> PanelCEFContainerView? { containers[tabId] }
+
+    // MARK: - B2 Task 3: performing a verb against a tab's browser
+
+    /// **The agent's three verbs, and nothing more than a container lookup plus a driver call.**
+    ///
+    /// They live here because this object is the one that OWNS containers — including the parked
+    /// ones nothing renders, which is exactly the set an agent browses in (spec §5's headless case).
+    /// A consumer that resolved tabs itself would be a second registry, and a consumer that reached
+    /// for `PanelWebTabModels` would be asking the VIEW world for a browser that may never have been
+    /// rendered.
+    ///
+    /// **They decide nothing**, which is this file's standing rule: whether a browser should exist is
+    /// `BrowserLifecycleEngine.plan`'s question, whether a URL may be loaded is `PanelURLPolicy`'s
+    /// (applied at the consumer, before `loadURL` is ever called — door 5), and which verbs exist at
+    /// all is `PanelCommandConsumer`'s.
+    ///
+    /// Each returns whether the call was DISPATCHED, never whether it succeeded — the browser has no
+    /// synchronous answer to give. `false` means one of two things the consumer must be able to tell
+    /// apart from a verb that ran and failed: no live browser for that tab, or the quit latch is
+    /// shut.
+    @discardableResult
+    func loadURL(tabId: String, url: String) -> Bool {
+        // live-gate fix I: the same door `attachViewport`/`detachViewport` refuse at, for the same
+        // reason — the world is ending and this object is frozen. Unreachable in practice, because
+        // `PanelCommandConsumer` checks `isQuiescent` before it routes anything (it has to: a
+        // dropped command must produce no RESULT either, which is a decision this method cannot
+        // make). Kept as the belt, so "quiesced means nothing reaches CEF" holds for every door.
+        guard !isQuiescent, let container = containers[tabId] else { return false }
+        driver.loadURL(container, url)
+        return true
+    }
+
+    @discardableResult
+    func goBack(tabId: String) -> Bool {
+        guard !isQuiescent, let container = containers[tabId] else { return false }
+        driver.goBack(container)
+        return true
+    }
+
+    /// Run one DevTools protocol method against `tabId`'s browser.
+    ///
+    /// **`completion` is called if and only if this returns `true`** — which is the whole reason it
+    /// returns anything. `NormaCEFExecuteCDP` guarantees its own completion always fires, so a caller
+    /// that got `true` will hear back; a caller that got `false` never dispatched anything and must
+    /// answer for itself rather than wait.
+    @discardableResult
+    func executeCDP(tabId: String, method: String, paramsJSON: String?,
+                    completion: @escaping (Bool, String) -> Void) -> Bool {
+        guard !isQuiescent, let container = containers[tabId] else { return false }
+        driver.executeCDP(container, method, paramsJSON, completion)
+        return true
+    }
 
     // MARK: - The parking window (spec §3)
 

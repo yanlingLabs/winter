@@ -52,11 +52,32 @@ final class BrowserRuntimeTests: XCTestCase {
         /// view tree into it. Tests that care about the view tree install one here.
         var onCreate: ((PanelCEFContainerView, String) -> Void)?
 
+        /// B2 Task 3: every CDP completion handed over and not yet answered, in dispatch order. The
+        /// test decides when — and whether — a reply arrives, which is the only way to exercise a
+        /// consumer's deadline.
+        private(set) var cdpCompletions: [(Bool, String) -> Void] = []
+
+        /// Answer the oldest outstanding CDP call. Removed BEFORE it is invoked, so a completion that
+        /// re-enters (the consumer sends a result, which in a test can drive more work) cannot be
+        /// handed the same reply twice.
+        @discardableResult
+        func answerNextCDP(ok: Bool, payload: String) -> Bool {
+            guard !cdpCompletions.isEmpty else { return false }
+            let completion = cdpCompletions.removeFirst()
+            completion(ok, payload)
+            return true
+        }
+
         /// **The container's bounds AT THE INSTANT the browser was asked for**, which is the only
         /// instant that matters: `CreateBrowserNow` reads `[parent bounds]` once and hands it to
         /// `CefWindowInfo::SetAsChild` (`NormaCEF.mm`). Recorded separately from `log` so that the
         /// ordering assertions stay readable.
         private(set) var boundsAtCreate: [String: NSRect] = [:]
+
+        /// Forget everything recorded so far — for tests whose subject is what happens AFTER a
+        /// setup that already logged (B2 Task 3's verbs, which need a live browser first). The marks
+        /// are deliberately kept, so `c1` still means the same container it did before the clear.
+        func forgetLog() { log.removeAll() }
 
         func mark(_ view: NSView) -> String {
             let key = ObjectIdentifier(view)
@@ -94,6 +115,20 @@ final class BrowserRuntimeTests: XCTestCase {
                 },
                 closeBrowser: { [unowned self] container in
                     self.log.append("\(self.mark(container)) close")
+                },
+                loadURL: { [unowned self] container, url in
+                    self.log.append("\(self.mark(container)) load url=\(url)")
+                },
+                goBack: { [unowned self] container in
+                    self.log.append("\(self.mark(container)) back")
+                },
+                executeCDP: { [unowned self] container, method, params, completion in
+                    let mark = self.mark(container)
+                    self.log.append("\(mark) cdp \(method) params=\(params ?? "-")")
+                    // HELD, not answered. `NormaCEFExecuteCDP` promises its completion always fires;
+                    // a recorder that fired it here would make every consumer test synchronous and
+                    // hide the case the deadline exists for — a verb that never comes back.
+                    self.cdpCompletions.append(completion)
                 },
                 ensureInitialized: { [unowned self] in self.initialises },
                 failureReason: { [unowned self] in self.failure },
@@ -1195,6 +1230,67 @@ final class BrowserRuntimeTests: XCTestCase {
         runtime.quiesce()
         runtime.quiesce()
         XCTAssertTrue(runtime.isQuiescent)
+        XCTAssertEqual(cef.log, [])
+    }
+
+    // MARK: - B2 Task 3: the agent's verbs
+
+    /// Each verb reaches THIS tab's container and no other. The registry is the whole of the
+    /// resolution, which is why a parked browser — the only kind an agent ever drives headless — is
+    /// reachable exactly like a mounted one.
+    func testEachAgentVerbReachesItsOwnTabsBrowser() {
+        let runtime = makeRuntime()
+        runtime.apply([.create(tabId: "t1", url: "https://a"), .create(tabId: "t2", url: "https://b")],
+                      tabs: tabs("s1", tab("t1"), tab("t2")), sessionOf: { _ in "s1" })
+        clock.runPendingWork()
+        cef.forgetLog()
+
+        XCTAssertTrue(runtime.loadURL(tabId: "t1", url: "https://example.com"))
+        XCTAssertTrue(runtime.goBack(tabId: "t2"))
+        XCTAssertTrue(runtime.executeCDP(tabId: "t1", method: "Runtime.evaluate",
+                                         paramsJSON: #"{"expression":"1"}"#) { _, _ in })
+
+        XCTAssertEqual(cef.log, [
+            "c1 load url=https://example.com",
+            "c2 back",
+            #"c1 cdp Runtime.evaluate params={"expression":"1"}"#,
+        ])
+    }
+
+    /// **A tab with no live browser dispatches NOTHING and says so** — and for `executeCDP` that is
+    /// the difference between a caller that answers for itself and one that waits forever. The
+    /// completion is never even handed over.
+    func testAVerbForATabWithNoLiveBrowserDispatchesNothing() {
+        let runtime = makeRuntime()
+
+        XCTAssertFalse(runtime.loadURL(tabId: "ghost", url: "https://example.com"))
+        XCTAssertFalse(runtime.goBack(tabId: "ghost"))
+        var answered = false
+        XCTAssertFalse(runtime.executeCDP(tabId: "ghost", method: "Runtime.evaluate",
+                                          paramsJSON: nil) { _, _ in answered = true })
+
+        XCTAssertEqual(cef.log, [])
+        XCTAssertEqual(cef.cdpCompletions.count, 0)
+        XCTAssertFalse(answered, "a call that never dispatched must not fabricate a reply either")
+    }
+
+    /// The quit latch closes these doors like every other. Belt rather than the gate — the consumer
+    /// refuses first, because a dropped command must produce no RESULT either and only it can decide
+    /// that — but "quiesced means nothing reaches CEF" has to hold for every door or it holds for
+    /// none.
+    func testTheQuitLatchStopsEveryAgentVerbFromReachingCEF() {
+        let runtime = makeRuntime()
+        runtime.apply([.create(tabId: "t1", url: "https://a")],
+                      tabs: tabs("s1", tab("t1")), sessionOf: { _ in "s1" })
+        clock.runPendingWork()
+        cef.forgetLog()
+
+        runtime.quiesce()
+
+        XCTAssertFalse(runtime.loadURL(tabId: "t1", url: "https://example.com"))
+        XCTAssertFalse(runtime.goBack(tabId: "t1"))
+        XCTAssertFalse(runtime.executeCDP(tabId: "t1", method: "Page.captureScreenshot",
+                                          paramsJSON: nil) { _, _ in })
         XCTAssertEqual(cef.log, [])
     }
 }

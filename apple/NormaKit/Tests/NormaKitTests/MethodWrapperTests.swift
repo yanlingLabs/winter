@@ -1117,6 +1117,56 @@ extension MethodWrapperTests {
         XCTAssertEqual(rows.first { $0.sessionId == "s_archived" }?.activity, "archived")
     }
 
+    // MARK: - b2-agent-browser T1: `session.list`'s `signals` + `archived`
+
+    /// The surface the whole task exists for: a CHAT row carries live signals while carrying no
+    /// lifecycle label at all. Decoding one from the other — the app's pre-T1 shape — is exactly
+    /// what could not work for chat sessions.
+    func testListSessionsDecodesSignalsForARowWithNoActivityLabel() async throws {
+        let (client, t) = try await connected()
+        let listBody = #"{"sessions":[{"sessionId":"s_chat","scope":"global","createdAt":2,"lastSeq":0,"mode":"chat","signals":{"attachedElsewhere":true,"working":true}},{"sessionId":"s_quiet","scope":"global","createdAt":1,"lastSeq":0,"mode":"chat","signals":{"attachedElsewhere":false,"working":false}}]}"#
+        let (_, rows) = try await roundTrip(t, sentIndex: 1, result: listBody) {
+            try await client.listSessions()
+        }
+        XCTAssertEqual(rows.first { $0.sessionId == "s_chat" }?.signals,
+                       SessionSignals(attachedElsewhere: true, working: true))
+        XCTAssertNil(rows.first { $0.sessionId == "s_chat" }?.activity,
+                     "the premise: signals arrive on a row the label was never computed for")
+        XCTAssertEqual(rows.first { $0.sessionId == "s_quiet" }?.signals,
+                       SessionSignals(attachedElsewhere: false, working: false),
+                       "an explicit false pair is a real answer and must not decode as nil")
+    }
+
+    /// An ABSENT `signals` key is an older daemon, and it must reach the consumer as `nil` — the one
+    /// value that says "unknown". Coerced to `false/false` it would claim a working session is
+    /// quiet, which stops that session's browsers mid-work.
+    func testListSessionsDecodesAbsentOrMalformedSignalsAsNil() async throws {
+        let (client, t) = try await connected()
+        let listBody = #"{"sessions":[{"sessionId":"s_old","scope":"global","createdAt":3,"lastSeq":0},{"sessionId":"s_half","scope":"global","createdAt":2,"lastSeq":0,"signals":{"attachedElsewhere":true}},{"sessionId":"s_junk","scope":"global","createdAt":1,"lastSeq":0,"signals":"yes"}]}"#
+        let (_, rows) = try await roundTrip(t, sentIndex: 1, result: listBody) {
+            try await client.listSessions()
+        }
+        XCTAssertNil(rows.first { $0.sessionId == "s_old" }?.signals, "a daemon predating the surface")
+        XCTAssertNil(rows.first { $0.sessionId == "s_half" }?.signals,
+                     "both members are required — a half object is dropped, never half-guessed")
+        XCTAssertNil(rows.first { $0.sessionId == "s_junk" }?.signals)
+    }
+
+    /// `archived` is the mode-blind half. It has ridden the wire since hygiene T3 and is only now
+    /// read: `true` for an archived row of ANY mode, `nil` when the daemon omits it (the store
+    /// writes NULL, never 0, so absence means not archived).
+    func testListSessionsDecodesTheArchivedFlagForEveryMode() async throws {
+        let (client, t) = try await connected()
+        let listBody = #"{"sessions":[{"sessionId":"s_chat","scope":"global","createdAt":3,"lastSeq":0,"mode":"chat","archived":true},{"sessionId":"s_code","scope":"global","createdAt":2,"lastSeq":0,"archived":true,"activity":"archived"},{"sessionId":"s_live","scope":"global","createdAt":1,"lastSeq":0,"mode":"chat"}]}"#
+        let (_, rows) = try await roundTrip(t, sentIndex: 1, result: listBody) {
+            try await client.listSessions()
+        }
+        XCTAssertEqual(rows.first { $0.sessionId == "s_chat" }?.archived, true,
+                       "the only way to learn a CHAT session is archived — it has no label")
+        XCTAssertEqual(rows.first { $0.sessionId == "s_code" }?.archived, true)
+        XCTAssertNil(rows.first { $0.sessionId == "s_live" }?.archived, "absent = not archived")
+    }
+
     /// The write half: method + params for each of the three ops, and the POST-WRITE set decoded off
     /// the result (never an echo of what was sent — an idempotent `add` comes back unchanged).
     func testSetDirsEncodesEachOpAndDecodesThePostWriteSet() async throws {
@@ -1252,6 +1302,66 @@ extension MethodWrapperTests {
             XCTFail("expected setDirs to throw on a malformed result")
         } catch let error as RpcError {
             XCTAssertEqual(error.code, -3)
+        }
+    }
+
+    // ============================================================================================
+    // B2 Task 2 — `panel.commandResult`, the app's answer to a `panel_command` transient.
+    // ============================================================================================
+
+    /// The full shape: every field lands on the wire under the name `PanelCommandResultParams`
+    /// (methods.ts) expects, and the two optional payloads are OMITTED rather than sent as null
+    /// when absent (`obj(_:)`'s contract — a null `imageBase64` would fail the daemon's
+    /// `z.string().optional()`, which does not accept null).
+    func testPanelCommandResultEncodesEveryField() async throws {
+        let (client, t) = try await connected()
+
+        let (req, _) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true}"#) {
+            try await client.sendPanelCommandResult(
+                sessionId: "s_9", commandId: "pcmd_7", ok: true,
+                result: "Pricing \u{2014} $20/mo", imageBase64: "iVBORw0KG"
+            )
+        }
+        XCTAssertEqual(req["method"] as? String, "panel.commandResult")
+        let params = req["params"] as? [String: Any]
+        XCTAssertEqual(params?["sessionId"] as? String, "s_9")
+        XCTAssertEqual(params?["commandId"] as? String, "pcmd_7")
+        XCTAssertEqual(params?["ok"] as? Bool, true)
+        XCTAssertEqual(params?["result"] as? String, "Pricing \u{2014} $20/mo")
+        XCTAssertEqual(params?["imageBase64"] as? String, "iVBORw0KG")
+    }
+
+    /// A failure verdict: `ok:false` with the reason in `result`, no image. The absent field must
+    /// not appear at all — `panel.commandResult` is the one panel RPC whose optional payloads are
+    /// large, and a stray `"imageBase64": null` would be refused by the daemon's schema.
+    func testPanelCommandResultOmitsAbsentOptionals() async throws {
+        let (client, t) = try await connected()
+
+        let (req, _) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true}"#) {
+            try await client.sendPanelCommandResult(
+                sessionId: "s_9", commandId: "pcmd_8", ok: false, result: "no element matched"
+            )
+        }
+        let params = req["params"] as? [String: Any]
+        XCTAssertEqual(params?["ok"] as? Bool, false)
+        XCTAssertEqual(params?["result"] as? String, "no element matched")
+        XCTAssertNil(params?["imageBase64"], "an absent image must be omitted, never sent as null")
+    }
+
+    /// The ONE refusal the caller can actually hit: a `commandId` the daemon has no record of.
+    /// A LATE or duplicate result is deliberately NOT an error (the daemon drops it with a log line
+    /// and still answers `{ok:true}`), so nothing here needs to treat that case specially.
+    func testPanelCommandResultSurfacesAnUnknownCommandIdRefusal() async throws {
+        let (client, t) = try await connected()
+        async let call: Void = client.sendPanelCommandResult(sessionId: "s_9", commandId: "pcmd_ghost", ok: true)
+        let sent = try await waitForSent(t, count: 2)
+        let req = decodeLine(sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"error":{"code":-32001,"message":"unknown commandId: pcmd_ghost"}}"#)
+        do {
+            _ = try await call
+            XCTFail("expected an unknown commandId to throw")
+        } catch let error as RpcError {
+            XCTAssertEqual(error.message, "unknown commandId: pcmd_ghost")
         }
     }
 }

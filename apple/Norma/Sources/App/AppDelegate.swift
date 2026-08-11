@@ -73,6 +73,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// because it owns the Combine subscriptions that provoke a re-plan. `nil` until the shell is
     /// first summoned: with no shell there is no panel, so no tab can exist to have a browser.
     private(set) var browserSignals: BrowserSignalsCoordinator?
+    /// b2-agent-browser T3: the `panel_command` consumer (`PanelCommandConsumer.swift`) — the app
+    /// half of the agent's browser. Constructed beside `browserSignals` and held for the same
+    /// reason: the shell's harness is the pump the command arrives on, and the consumer is what the
+    /// host's `onPanelCommand` hook holds weakly. `nil` until the shell is first summoned, exactly
+    /// like the coordinator above — with no shell there is no harness, so no command can arrive.
+    private(set) var panelCommands: PanelCommandConsumer?
     /// SP2b T5: owns this Mac's `RemoteHost` (lazily constructed — nothing starts until either a
     /// pairing window is requested or, autostart follow-up below, this Mac already has ≥1 paired
     /// device). Constructed unconditionally in `boot()` (cheap — it does no I/O of its own; only
@@ -437,6 +443,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the first `onRenderingActiveChange`. `BrowserRuntime.shared` is the app's one runtime;
         // tests construct their own (it holds containers, timers and a window).
         browserSignals = BrowserSignalsCoordinator(host: host, runtime: .shared)
+        // b2-agent-browser T3: the `panel_command` consumer — the FIRST consumer that event has had
+        // since Plan A shipped it. Constructed here, beside the lifecycle coordinator, because it
+        // needs exactly the same two things: the app's ONE `BrowserRuntime` (which owns every
+        // browser, including the parked ones an agent drives headless) and the shell whose harness
+        // is the pump the command arrives on.
+        //
+        // The result rides `host.sendPanelCommandResult` — `managementClient`, the bare
+        // always-connected connection, never the attaching harness (see that method's own doc).
+        // Both captures are weak in the direction that matters: the host holds the hook, the
+        // delegate holds the consumer, and neither closure closes a cycle.
+        let commands = PanelCommandConsumer(
+            runtime: .shared,
+            sendResult: { [weak host] sessionId, commandId, ok, result, imageBase64 in
+                host?.sendPanelCommandResult(sessionId: sessionId, commandId: commandId, ok: ok,
+                                             result: result, imageBase64: imageBase64)
+            })
+        panelCommands = commands
+        host.onPanelCommand = { [weak commands] command in commands?.handle(command) }
         let controller = AppWindowController(
             directory: model.directory,
             host: host,

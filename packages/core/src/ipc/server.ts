@@ -1,7 +1,6 @@
 import { chmodSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
@@ -28,6 +27,7 @@ import {
   WorkflowListParams, WorkflowRunParams, WorkflowStopParams, WorkflowGetParams,
   SyncHeadsParams, SyncPullParams, SyncPushParams, SyncConfigParams, SyncMemoryParams,
   PanelListParams, PanelOpenTabParams, PanelCloseTabParams, PanelActivateTabParams, PanelReportNavigationParams,
+  PanelCommandResultParams,
   SYSTEM_SESSION_ID,
   type SessionEvent, ConnWriter, type WritableSocket,
 } from "@norma/protocol";
@@ -41,13 +41,18 @@ import type { MemoryStore, MemoryErrorKind } from "../agent/memory";
 import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTailMemDir } from "../agent/memory-file-ops";
 import type { SessionStore } from "../sessions/store";
 import { readHistoryPage } from "../sessions/history";
-import { makeActivityDeriver, participatesInActivity, type ActivityDeriver } from "../sessions/activity";
+import {
+  makeActivityDeriver, makeSessionSignalsDeriver, participatesInActivity,
+  type ActivityDeriver, type SessionSignalsDeriver,
+} from "../sessions/activity";
 import { createActivityEnforcement } from "../sessions/activity-enforcement";
 import { setSessionActivity, type SetActivityDeps } from "../sessions/set-activity";
 import { setSessionDirs, type SetDirsDeps } from "../sessions/set-dirs";
 import { reapEmptySessions } from "../sessions/reaper";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
 import { foldPanelTabs } from "../panel/store";
+import { mintPanelTab } from "../panel/open-tab";
+import type { PanelCommandRegistry } from "../panel/commands";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { AgentEngine } from "../agent/engine";
@@ -235,6 +240,13 @@ export interface IpcServerOptions {
   // `peripheral.isProvider()` to gate on that SAME connection identity (see the hardware.respond
   // case below) rather than tracking its own.
   hardware?: HardwareBroker;
+  // B2 Task 2: the pending-command registry (`panel/commands.ts`) whose OTHER owner is the browser
+  // tool that dispatches commands. Optional, and the same "typed refusal, never a crash" precedent
+  // as `bg`/`skills`/`routines` above: a server built without one (every panel test that predates
+  // this, and every non-panel test) answers `panel.commandResult` with NOT_FOUND — which is the
+  // truthful answer, since a daemon with no registry has certainly never issued the command being
+  // answered.
+  panelCommands?: PanelCommandRegistry;
   quota?: QuotaManager;      // token/rate-limit snapshot; quota.state (dashboard read)
   // Phase 5 routines T3 (design doc §3): the daemon-owned RoutineStore backing routines.*
   // (create/list/update/delete). Optional — same "typed no-op, never a crash" precedent as
@@ -554,6 +566,21 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     // settled while the emitted stream still (correctly) said "background".
     activeSince: (sessionId) => enforcement.activeSince(sessionId),
     autoBackground: (sessionId) => enforcement.autoBackgrounded(sessionId),
+  });
+
+  /** b2-agent-browser T1 (spec §5): the RAW signals half of the same three sources, for EVERY mode.
+   *  Bound beside `deriveActivity` rather than folded into it because they answer different
+   *  questions and have different audiences: the label is a lifecycle state that chat/dispatch
+   *  deliberately do not have, these are facts about what the daemon is doing. See
+   *  `makeSessionSignalsDeriver` (sessions/activity.ts) for why the mode gate must NOT be applied
+   *  here — that comment is the one that stops this from being "fixed".
+   *
+   *  Same `hub` binding as `deriveActivity` above, for the same reason: on a server built without
+   *  an `opts.hub`, the local fallback hub is the one that actually holds every attachment. */
+  const deriveSignals: SessionSignalsDeriver = makeSessionSignalsDeriver({
+    attachedCount: (sessionId) => hub.attachedCount(sessionId),
+    turnRunning: (sessionId) => opts.engine?.isRunning(sessionId) ?? false,
+    bgWork: (sessionId) => opts.engine?.hasBackgroundWork(sessionId) ?? false,
   });
 
   /** session-activity-hygiene T5: the lifecycle's ENFORCEMENT — what the daemon does when the last
@@ -1136,9 +1163,20 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // about whether the same 24h boundary has passed.
         //
         // `deriveActivity` (defined beside the `hub` binding, shared with `session.setActivity`)
-        // returns undefined for chat/dispatch and builds no signals for those rows — which also
-        // keeps the per-row `lastEventTs` stat off the chat/dispatch rows entirely.
+        // returns undefined for chat/dispatch and assembles no `ActivitySignals` for those rows —
+        // which also keeps the per-row `lastEventTs` stat off the chat/dispatch rows entirely. (Not
+        // to be confused with the row's own `signals` field, added below: that one is stamped for
+        // every mode and reads none of the sources that touch the filesystem.)
         const now = Date.now();
+        // b2-agent-browser T1 (spec §5): WHICH session this connection is itself attached to, read
+        // once for the whole batch (like `now` just above) — one hub lookup per request, not per row.
+        //
+        // Asked of the HUB, never remembered on the connection: `fanOut`'s dead-client eviction
+        // (sessions/hub.ts) can drop this client from an attachment by a path the connection never
+        // hears about, so `socket.data.hubClient` is "the handle we last attached with" and
+        // `hub.attachedSession` is "where it actually is, now". `undefined` for the common case of
+        // a connection that never attached — and for one whose attachment has been dropped.
+        const selfSessionId = socket.data.hubClient ? hub.attachedSession(socket.data.hubClient) : undefined;
         // working-directories T3: `dirs` rides the SAME participation gate `activity` above uses
         // (code + cowork + absent-means-code) — chat/dispatch have no writable root at all
         // (DIRS_MODE_REFUSAL), so `dirs` stays absent on those rows, exactly like `activity`.
@@ -1152,9 +1190,18 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // this alias is a no-op there — the value is unchanged, just re-read through the derived
         // path instead of trusted directly.
         const sessions = opts.store.list().map((s) => {
-          if (!participatesInActivity(s.mode)) return s;
+          // The signals ride EVERY row: chat and dispatch included, which is the whole point (the
+          // Mac app's browser lifecycle runs on chat sessions and had no signal for them at all —
+          // browser-runtime spec §4's T5 correction). Stamped OUTSIDE the participation gate below
+          // on purpose; `makeSessionSignalsDeriver` carries the argument for why.
+          const signals = deriveSignals(s.sessionId, selfSessionId);
+          // `activity`/`dirs`/the `cwd` alias stay INSIDE the gate, unchanged: those are the
+          // lifecycle label and the working-directory set, and chat/dispatch have neither. A row
+          // therefore legitimately carries signals and no label, which is exactly what the app
+          // needs and what test/ipc/session-list-signals.test.ts pins.
+          if (!participatesInActivity(s.mode)) return { ...s, signals };
           const dirs = opts.store.dirs(s.sessionId);
-          return { ...s, activity: deriveActivity(s, s.sessionId, now), dirs, cwd: dirs[0]?.path };
+          return { ...s, activity: deriveActivity(s, s.sessionId, now), dirs, cwd: dirs[0]?.path, signals };
         });
         // Chat mode Slice C: chat sessions are now visible to remote too. A mode outside
         // REMOTE_ELIGIBLE_SESSION_MODES (Mac-local-only — e.g. a future cowork surface) stays
@@ -2441,13 +2488,16 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
 
       // -----------------------------------------------------------------------------------------
-      // Panel (panel-shell T6): the RPC surface over Task 5's `foldPanelTabs` (panel/store.ts).
-      // Harness/admin-only by construction — none of the five are in REMOTE_ALLOWED_METHODS or
+      // Panel (panel-shell T6): the RPC surface over Task 5's `foldPanelTabs` (panel/store.ts), plus
+      // B2 Task 2's `panel.commandResult` at the end of the block.
+      // Harness/admin-only by construction — none of the six are in REMOTE_ALLOWED_METHODS or
       // PLUGIN_ALLOWED_METHODS above, so a remote/plugin connection is role-rejected before dispatch
-      // ever reaches this switch (the pre-switch gate a few hundred lines up). Every handler below
-      // maps an unknown SESSION to NOT_FOUND (the sessionHistory/directory_added precedent) — but,
-      // deliberately, none of them additionally check that a `tabId` currently exists before
-      // appending. See panel.closeTab's own comment just below for why.
+      // ever reaches this switch (the pre-switch gate a few hundred lines up). Every TAB handler
+      // below maps an unknown SESSION to NOT_FOUND (the sessionHistory/directory_added precedent) —
+      // `panel.commandResult` is keyed on a commandId rather than a session and has its own
+      // NOT_FOUND rule, stated at its case. Of the five tab handlers, deliberately, none
+      // additionally check that a `tabId` currently exists before appending. See panel.closeTab's
+      // own comment just below for why.
       // -----------------------------------------------------------------------------------------
       case METHODS.panelList: {
         const p = parseParams(PanelListParams, params);
@@ -2462,12 +2512,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // The daemon mints the id — the caller never supplies one ("persisted events are the
         // instruction"). This is what makes an agent-opened tab and a user-opened tab
         // indistinguishable downstream: exactly one code path creates a tab, and it always runs
-        // here, regardless of who asked.
-        const tabId = randomUUID();
+        // there, regardless of who asked.
+        //
+        // B2 Task 4 made that sentence literal. The mint moved to `mintPanelTab`
+        // (packages/core/src/panel/open-tab.ts) when the agent's `browser` tool's `open` verb became
+        // its second caller — this handler and that tool now run the SAME function, rather than two
+        // hand-copies of the same two appends. The commentary below is unchanged and still describes
+        // what that function does; it stays here because this is the call site a reader of the RPC
+        // surface arrives at first.
+        let tabId: string;
         try {
-          hub.append(p.sessionId, {
-            type: "panel_tab_opened", sessionId: p.sessionId, tabId, kind: p.kind, url: p.url, title: p.title,
-          });
+          tabId = mintPanelTab(hub, p);
           // panel-cef Task 6b — THE WIRE DECISION Plan A left open and Task 6a could not make.
           //
           // Opening a tab ACTIVATES it. Before this, `panel.openTab` appended `panel_tab_opened`
@@ -2480,9 +2535,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // report said: with nothing active, pressing "+" a second time leaves the panel showing
           // tab 1, so the button appears to do nothing at all.
           //
-          // Fixed HERE rather than in either fold or with a second RPC from the app, for the reason
-          // this handler's own doc gives about minting the id: exactly one code path creates a tab,
-          // and it always runs here. An agent-opened tab and a user-opened tab must be
+          // Fixed AT THE MINT rather than in either fold or with a second RPC from the app, for the
+          // reason this handler's own doc gives about minting the id: exactly one code path creates a
+          // tab. An agent-opened tab and a user-opened tab must be
           // indistinguishable downstream — an app-side follow-up `panel.activateTab` would have
           // been true only for tabs the app opened, and every client would have had to remember to
           // send it. Two appends, not one, is the whole cost: ~2 events per tab open, against a
@@ -2492,7 +2547,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // this: it still covers legacy sessions written before today (including the ~19 the 6a
           // smoke door left on the dev daemon) and the moment after the ACTIVE tab is closed, where
           // `foldPanelTabs` clears `activeTabId` by design.
-          hub.append(p.sessionId, { type: "panel_tab_activated", sessionId: p.sessionId, tabId });
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
@@ -2539,6 +2593,27 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
+        return { ok: true };
+      }
+      // B2 Task 2 — the ANSWER half of the command channel. Harness-only by the same omission as the
+      // five methods above: absent from REMOTE_ALLOWED_METHODS and PLUGIN_ALLOWED_METHODS, so a
+      // remote or plugin connection is role-rejected at the pre-switch gate and never arrives here.
+      // Neither allowlist was touched by this task, and both parity tests (TS literal + Swift
+      // GatewayGateTests) stay green untouched.
+      //
+      // All the dedup/first-wins/late-result policy lives in the registry (`panel/commands.ts`);
+      // this handler is only the wire mapping of its three-valued verdict:
+      //   accepted/dropped -> {ok:true}. A LOSER OF THE RACE IS NOT AN ERROR — the app cannot know
+      //     it lost (a duplicate answer, or an answer that crossed the deadline in flight), and
+      //     surfacing that as an RPC failure would be the mistake `panel.closeTab` avoids by
+      //     tolerating a double close. The agent's outcome is unaffected either way.
+      //   unknown -> NOT_FOUND. A commandId this daemon has no record of is a genuine caller
+      //     mistake, and the one case worth telling the app about.
+      case METHODS.panelCommandResult: {
+        const p = parseParams(PanelCommandResultParams, params);
+        if (!opts.panelCommands) throw new RpcFailure(ERR.NOT_FOUND, `unknown commandId: ${p.commandId}`);
+        const verdict = opts.panelCommands.resolve(p);
+        if (verdict === "unknown") throw new RpcFailure(ERR.NOT_FOUND, `unknown commandId: ${p.commandId}`);
         return { ok: true };
       }
 

@@ -132,9 +132,27 @@ final class BrowserSignalsTests: XCTestCase {
 
     // MARK: - Wire helpers
 
-    private func row(_ sessionId: String, activity: String?, mode: String = "code") -> SessionSummary {
+    /// One `session.list` row **as the daemon answers it since b2-agent-browser T1**: the two live
+    /// signals per session, plus the mode-blind `archived` flag.
+    ///
+    /// `attachedElsewhere` is the daemon's own answer with the ASKING connection already excluded,
+    /// so a row saying `true` means a harness this app does not speak through — the phone, the CLI,
+    /// or (the one reflection the exclusion does not catch) this shell's own per-session socket. The
+    /// `activity` LABEL is deliberately absent from every row here: nothing in the browser lifecycle
+    /// reads it any more, and leaving it set would let a row pass by a path the app no longer has.
+    private func row(_ sessionId: String, attachedElsewhere: Bool = false, working: Bool = false,
+                     archived: Bool = false, mode: String = "code") -> SessionSummary {
         SessionSummary(sessionId: sessionId, title: nil, createdAt: 1, scope: "global", cwd: nil,
-                       mode: mode, activity: activity)
+                       mode: mode, archived: archived ? true : nil,
+                       signals: SessionSignals(attachedElsewhere: attachedElsewhere, working: working))
+    }
+
+    /// A row from a daemon that predates the signals surface: `signals` absent, which is NOT the
+    /// same as both-false and must never be read as it. Used by the one row that pins what the app
+    /// does with `nil` — see `testADaemonWithNoSignalsSurfaceLeavesTheAppItsLocalHalfOnly`.
+    private func legacyRow(_ sessionId: String, mode: String = "code") -> SessionSummary {
+        SessionSummary(sessionId: sessionId, title: nil, createdAt: 1, scope: "global", cwd: nil,
+                       mode: mode)
     }
 
     private func waitUntil(_ what: String, _ condition: () -> Bool,
@@ -199,7 +217,7 @@ final class BrowserSignalsTests: XCTestCase {
     }
 
     /// Publish a session list, the only way `SessionDirectory.rows` is ever populated — a full
-    /// `session.list` answer. Every `activity` signal in this file arrives this way.
+    /// `session.list` answer. Every daemon-side signal in this file arrives this way.
     private func publishRows(_ w: World, _ rows: [SessionSummary]) async {
         w.rows.rows = rows
         await w.directory.refresh()
@@ -317,7 +335,7 @@ final class BrowserSignalsTests: XCTestCase {
     /// nothing here; reading it as "every tab of a woken session" would create both.
     func testANonDisplayedSessionsOwnShownTabIsTheOneThatWakes() async {
         let w = makeWorld()
-        await publishRows(w, [row("s1", activity: "idle"), row("s2", activity: "idle")])
+        await publishRows(w, [row("s1"), row("s2")])
 
         // s2's tabs enter this shell the way a hop leaves them behind: displayed, folded, departed.
         let t = await openOneWebTab(w, sessionId: "s2", tabId: "a1", url: "https://a.example")
@@ -337,7 +355,7 @@ final class BrowserSignalsTests: XCTestCase {
 
         let transcript = w.cef.log
         // s2 wakes: still nothing of it on screen, still not displayed.
-        await publishRows(w, [row("s1", activity: "idle"), row("s2", activity: "background")])
+        await publishRows(w, [row("s1"), row("s2", working: true)])
 
         XCTAssertTrue(w.runtime.isLive(tabId: "a2"),
                       "the woken session's own shown tab must come back: \(w.cef.log)")
@@ -407,7 +425,7 @@ final class BrowserSignalsTests: XCTestCase {
     /// landed, which is what puts the terminator in front of the ceiling.
     func testAHopsReplayStillFlushesWhenTheCeilingArrivesAfterItsOwnTerminator() async {
         let w = makeWorld()
-        await publishRows(w, [row("s1", activity: "idle"), row("s2", activity: "idle")])
+        await publishRows(w, [row("s1"), row("s2")])
         let t = await openOneWebTab(w, sessionId: "s1", tabId: "a1", url: "https://a.example")
 
         w.host.select("s2")
@@ -457,7 +475,7 @@ final class BrowserSignalsTests: XCTestCase {
     /// like when the shell comes back.
     func testASnapshotThatNoLongerNamesATabStopsItsBrowserToo() async {
         let w = makeWorld()
-        await publishRows(w, [row("s1", activity: "idle"), row("s2", activity: "idle")])
+        await publishRows(w, [row("s1"), row("s2")])
         let t = await openOneWebTab(w, sessionId: "s2", tabId: "b1", url: "https://b.example")
         XCTAssertTrue(w.runtime.isLive(tabId: "b1"))
 
@@ -484,22 +502,23 @@ final class BrowserSignalsTests: XCTestCase {
     ///
     /// **live-gate fix F changed the SHAPE of this row, not its claim.** The close no longer plans
     /// against whatever the shell last heard — it fetches a fresh `session.list` first — so the
-    /// daemon's answer has to be modelled honestly on both sides of the close: `"active"` while
-    /// this shell is attached (our own reflection), `"idle"` once it has detached, which is what a
-    /// real daemon reports the instant `applyPolicy()` drops the attachment. The stop is therefore
-    /// one round trip late rather than synchronous, and `waitUntil` is what that costs.
+    /// daemon's answer has to be modelled honestly on both sides of the close: `attachedElsewhere`
+    /// while this shell is attached (its per-session harness rides its own socket, so the daemon's
+    /// asker-exclusion does not catch it), and gone once it has detached, which is what a real
+    /// daemon reports the instant `applyPolicy()` drops the attachment. The stop is therefore one
+    /// round trip late rather than synchronous, and `waitUntil` is what that costs.
     func testClosingTheWindowStopsTheViewedSessionsBrowsersImmediately() async {
         let w = makeWorld()
-        // "active" because THIS shell is attached — the case that makes the reflection matter (see
-        // `BrowserSignalsCoordinator.ownAttachmentStillCountedIn`): read naively, the row would say
-        // another harness is here and the engine would hold the browsers live, exactly the audio
-        // surprise this plan opened with.
-        await publishRows(w, [row("s1", activity: "active")])
+        // `attachedElsewhere` while THIS shell is attached — the surviving reflection (see
+        // `BrowserSignalsCoordinator.assemble`): read as knowledge, the row says another harness is
+        // here and the engine holds the browsers live, exactly the audio surprise this plan opened
+        // with. It is the fresh fetch, not a suppression, that settles it.
+        await publishRows(w, [row("s1", attachedElsewhere: true)])
         await openOneWebTab(w)
 
         // Nobody else is on this session, so the daemon's count goes to zero with our detach. NOT
         // published — the close path's own fetch is what has to read it.
-        w.rows.rows = [row("s1", activity: "idle")]
+        w.rows.rows = [row("s1")]
         w.host.setShellVisible(false)
 
         await waitUntil("the browsers to stop", { !w.runtime.isLive(tabId: "t1") })
@@ -514,25 +533,31 @@ final class BrowserSignalsTests: XCTestCase {
     /// closes.**
     ///
     /// Mac and phone both attached to one session, a page playing in the Mac's panel, ⌘Q hides the
-    /// window. The close DETACHES this shell, which arms `ownAttachmentStillCountedIn` for the
-    /// session — so the row this shell already holds (`"active"`, correct: the phone is on it) is
-    /// suppressed for exactly one plan, `attachedElsewhere` reads `false`, and `stopImmediately`
-    /// carries a `.stopNow` spec §4 row 2 forbids. The user heard the consequence: the re-create
-    /// that follows cannot resume playback (autoplay gates initiation), so the "brief gap" the T5
-    /// review disclosed is really permanent silence on the phone's own page.
+    /// window. **The mechanism that made this fail is gone as of b2-agent-browser T1**: the close
+    /// DETACHED this shell, which armed `ownAttachmentStillCountedIn` for the session — so the row
+    /// this shell already held (`"active"`, correct: the phone was on it) was suppressed for exactly
+    /// one plan, `attachedElsewhere` read `false`, and `stopImmediately` carried a `.stopNow` spec §4
+    /// row 2 forbids. The user heard the consequence: the re-create that follows cannot resume
+    /// playback (autoplay gates initiation), so the "brief gap" the T5 review disclosed was really
+    /// permanent silence on the phone's own page. The suppression is deleted, so there is nothing
+    /// left to be wrong in that direction — **not because the daemon excludes this shell** (it
+    /// excludes the connection that ASKED, which is the orb's, and the orb attaches only to dispatch
+    /// sessions), but because reading a possibly-stale `attachedElsewhere` verbatim can only ever
+    /// HOLD.
     ///
-    /// The fix is to plan against a FRESH row. By the time the close hook runs, `applyPolicy()` has
-    /// detached us, so the daemon's answer is the truth — and `"active"` now means the phone alone.
+    /// **Fix F is what this row actually exercises, and it is load-bearing:** plan against a FRESH
+    /// row. By the time the close hook runs, `applyPolicy()` has detached us, so the daemon's answer
+    /// is the truth — and `attachedElsewhere` now means the phone alone.
     func testAWindowCloseOnACoAttachedSessionStopsNothing() async {
         let w = makeWorld()
-        await publishRows(w, [row("s1", activity: "active")])
+        await publishRows(w, [row("s1", attachedElsewhere: true)])
         await openOneWebTab(w)
         let transcript = w.cef.log
 
-        // The daemon's answer AFTER our detach: still "active", because the phone never left. The
+        // The daemon's answer AFTER our detach: the phone never left, so somebody is still here. The
         // second row is the observable — `@Published` sends from `willSet`, so `directory.rows`
         // holding it means the sink (and the re-plan inside it) has already returned.
-        w.rows.rows = [row("s1", activity: "active"), row("s2", activity: "idle")]
+        w.rows.rows = [row("s1", attachedElsewhere: true), row("s2")]
         w.host.setShellVisible(false)
 
         await waitUntil("the close path's own session.list answer", { w.directory.rows.count == 2 })
@@ -547,10 +572,10 @@ final class BrowserSignalsTests: XCTestCase {
     /// §10 gate 4's immediate stop with no linger.
     func testAWindowCloseOnASessionNobodyElseHoldsStillStopsIt() async {
         let w = makeWorld()
-        await publishRows(w, [row("s1", activity: "active")])
+        await publishRows(w, [row("s1", attachedElsewhere: true)])
         await openOneWebTab(w)
 
-        w.rows.rows = [row("s1", activity: "idle"), row("s2", activity: "idle")]
+        w.rows.rows = [row("s1"), row("s2")]
         w.host.setShellVisible(false)
 
         await waitUntil("the close path's own session.list answer", { w.directory.rows.count == 2 })
@@ -573,7 +598,7 @@ final class BrowserSignalsTests: XCTestCase {
     /// stop every one of its browsers.
     func testASessionHopInsideTheLingerNeitherStopsNorRecreates() async {
         let w = makeWorld()
-        await publishRows(w, [row("s1", activity: "idle"), row("s2", activity: "idle")])
+        await publishRows(w, [row("s1"), row("s2")])
         let t = await openOneWebTab(w, sessionId: "s1", tabId: "a1", url: "https://a.example")
         t.feed(opened("s1", "a2", seq: 3, url: "https://b.example"))
         t.feed(activated("s1", "a2", seq: 4))
@@ -618,7 +643,7 @@ final class BrowserSignalsTests: XCTestCase {
     /// the question again.
     func testASessionAbandonedPastTheLingerStops() async {
         let w = makeWorld()
-        await publishRows(w, [row("s1", activity: "idle"), row("s2", activity: "idle")])
+        await publishRows(w, [row("s1"), row("s2")])
         let t = await openOneWebTab(w, sessionId: "s1", tabId: "a1", url: "https://a.example")
 
         w.host.select("s2")
@@ -655,7 +680,7 @@ final class BrowserSignalsTests: XCTestCase {
         let w = makeWorld()
         // Mid-turn, and the daemon knows it: an app-kind harness detaching mid-turn auto-backgrounds
         // the session, which is what `session.list` reports for the whole of a turn nobody watches.
-        await publishRows(w, [row("s1", activity: "background")])
+        await publishRows(w, [row("s1", working: true)])
         await openOneWebTab(w)
         w.coordinator.setRenderingActive(true)
         await waitUntil("the poll to start", { w.directory.isPollingForTesting })
@@ -671,7 +696,7 @@ final class BrowserSignalsTests: XCTestCase {
                           + "ended, so the browsers live until it reopens")
 
         // The turn ends. Nothing announces it: the only way this shell can learn is the next poll.
-        w.rows.rows = [row("s1", activity: "idle")]   // NOT published — the poll has to fetch it
+        w.rows.rows = [row("s1")]   // NOT published — the poll has to fetch it
         await waitUntil("the poll to be waiting", { w.tick.parkedCount > 0 })
         w.tick.release()
 
@@ -690,7 +715,7 @@ final class BrowserSignalsTests: XCTestCase {
     /// provokes, so the gate closes on the pass that stops the last browser.
     func testAHiddenWindowWithNoLiveBrowserDoesNotPoll() async {
         let w = makeWorld()
-        await publishRows(w, [row("s1", activity: "idle")])
+        await publishRows(w, [row("s1")])
         await openOneWebTab(w)
         w.coordinator.setRenderingActive(true)
         XCTAssertTrue(w.directory.isPollingForTesting)
@@ -712,7 +737,7 @@ final class BrowserSignalsTests: XCTestCase {
     /// if the flag is still there to see.
     func testStopImmediatelyOutlivesTheCloseItselfForAsLongAsTheWindowIsShut() async {
         let w = makeWorld()
-        await publishRows(w, [row("s1", activity: "background")])
+        await publishRows(w, [row("s1", working: true)])
         await openOneWebTab(w)
 
         w.host.setShellVisible(false)
@@ -723,7 +748,7 @@ final class BrowserSignalsTests: XCTestCase {
         XCTAssertTrue(w.runtime.isLive(tabId: "t1"))
 
         // The work ends. No linger may be waited out first — that is what `stopImmediately` means.
-        await publishRows(w, [row("s1", activity: "idle")])
+        await publishRows(w, [row("s1")])
 
         XCTAssertFalse(w.runtime.isLive(tabId: "t1"),
                        "the window-close flag did not survive to the plan that could act on it: "
@@ -731,30 +756,28 @@ final class BrowserSignalsTests: XCTestCase {
         XCTAssertTrue(w.clock.liveTimers.isEmpty, "and it must skip the linger, not arm one")
     }
 
-    /// **Spec §4 row 2, the phone case — and the proof that the reflection suppression does not
-    /// over-suppress.** A session another harness is genuinely attached to keeps its browsers live
-    /// and headless, past the linger, with nothing of it on screen here.
+    /// **Spec §4 row 2, the phone case.** A session another harness is genuinely attached to keeps
+    /// its browsers live and headless, past the linger, with nothing of it on screen here.
     ///
-    /// `ownAttachmentStillCountedIn` suppresses `"active"` for a session this shell has just stopped
-    /// being the attachment of, because the daemon's count includes us. It is cleared by the next
-    /// `session.list` answer — and this row is what proves that clearing happens: without it, a real
-    /// phone attachment would be suppressed for as long as the window stayed shut and the browsers
-    /// would be stopped out from under it.
+    /// The claim used to be entangled with the app's own suppression — this row existed partly to
+    /// prove that `ownAttachmentStillCountedIn` was cleared again, or a real phone attachment would
+    /// stay suppressed for as long as the window stayed shut. Since b2-agent-browser T1 there is
+    /// nothing to clear: this shell reads the daemon's answer verbatim, and a `true` it should not
+    /// have believed can only ever hold browsers alive, never stop them.
     ///
     /// (The T2 review's live-gate note applies to this state: attached elsewhere with no reachable
     /// UI here means audio nobody in this app can stop. Spec-sanctioned, and pinned as such.)
     func testASessionAnotherHarnessIsAttachedToKeepsItsBrowsersPastTheLinger() async {
         let w = makeWorld()
-        await publishRows(w, [row("s1", activity: "idle"), row("s2", activity: "idle")])
+        await publishRows(w, [row("s1"), row("s2")])
         let t = await openOneWebTab(w, sessionId: "s2", tabId: "b1", url: "https://b.example")
 
         w.host.select("s1")
         await answerReattach(t, attachIndex: 2)
         XCTAssertFalse(w.clock.liveTimers.isEmpty, "the departed session's linger is armed")
 
-        // A NEW answer from the daemon, taken after this shell detached: s2 is still "active", so
-        // somebody else is on it.
-        await publishRows(w, [row("s1", activity: "idle"), row("s2", activity: "active")])
+        // A NEW answer from the daemon, taken after this shell detached: somebody else is on s2.
+        await publishRows(w, [row("s1"), row("s2", attachedElsewhere: true)])
         XCTAssertTrue(w.clock.liveTimers.isEmpty,
                       "any signal returning cancels the linger (spec §4)")
 
@@ -770,17 +793,119 @@ final class BrowserSignalsTests: XCTestCase {
     /// **Archived outranks every live-holding signal** (engine rule 6): the session is gone, so a
     /// turn still marked running on it is not a reason to keep renderers. Stopped on the pass that
     /// learns it, with no linger — even though this shell is the one DISPLAYING it.
+    ///
+    /// The archived row carries BOTH live-holding signals on purpose: this is rule 6's precedence,
+    /// not an absence of anything to outrank.
     func testArchivingTheDisplayedSessionStopsItsBrowsersWithNoLinger() async {
         let w = makeWorld()
-        await publishRows(w, [row("s1", activity: "active")])
+        await publishRows(w, [row("s1", attachedElsewhere: true)])
         await openOneWebTab(w)
 
-        await publishRows(w, [row("s1", activity: "archived")])
+        await publishRows(w, [row("s1", attachedElsewhere: true, working: true, archived: true)])
 
         XCTAssertFalse(w.runtime.isLive(tabId: "t1"),
                        "an archived session kept its renderers: \(w.cef.log)")
         XCTAssertTrue(w.cef.log.contains("c1 close"), "log was \(w.cef.log)")
         XCTAssertTrue(w.clock.liveTimers.isEmpty, "archived skips the linger, it does not arm one")
+    }
+
+    // MARK: - b2-agent-browser T1: the three degradations, flipped
+
+    // Browser-runtime spec §4's T5 correction disclosed three states this app could not describe,
+    // all of them for CHAT sessions — the panel's own auto-created mode, and the mode the derived
+    // `activity` label is withheld from (`participatesInActivity`). Each row below is one of those
+    // three, asserting the daemon's signals surface (spec §5) closes it. None of them could pass
+    // before T1, for the same reason each time: the row carried no signal at all.
+
+    /// **Degradation 1: an unattached chat session that is WORKING holds its browsers.**
+    ///
+    /// The agent is driving pages in a chat session; the user hops to another session, so this
+    /// shell is no longer its attachment and its local `turnRunning` is out of reach. Before the
+    /// signals surface the row said nothing, the session read `quiet`, and its browsers were stopped
+    /// 300 seconds later with the agent still working — which is precisely why B2's agent browsing
+    /// was unsafe in chat sessions and why this task came first.
+    func testAChatSessionWorkingWithNothingAttachedHoldsItsBrowsersPastTheLinger() async {
+        let w = makeWorld()
+        await publishRows(w, [row("s1", mode: "chat"), row("s2", mode: "chat")])
+        let t = await openOneWebTab(w, sessionId: "s2", tabId: "b1", url: "https://b.example")
+
+        w.host.select("s1")
+        await answerReattach(t, attachIndex: 2)
+        XCTAssertFalse(w.clock.liveTimers.isEmpty, "the premise: the departed session's linger is armed")
+
+        // The daemon's answer for a chat session with a turn running — a row that carries a signal
+        // and no lifecycle label at all, which is the whole surface.
+        await publishRows(w, [row("s1", mode: "chat"), row("s2", working: true, mode: "chat")])
+        XCTAssertTrue(w.clock.liveTimers.isEmpty, "work returning cancels the linger (spec §4)")
+
+        let transcript = w.cef.log
+        w.clock.current += BrowserLifecycleEngine.stopLinger + 1
+        w.coordinator.replan()
+
+        XCTAssertTrue(w.runtime.isLive(tabId: "b1"),
+                      "the agent's pages were stopped mid-work in a chat session: \(w.cef.log)")
+        XCTAssertEqual(w.cef.log, transcript, "and nothing at all was touched: \(w.cef.log)")
+    }
+
+    /// **Degradation 2: a phone-attached chat session holds its browsers.** Same shape as the code
+    /// case above it, on the mode that had no `"active"` to read.
+    func testAPhoneAttachedChatSessionHoldsItsBrowsersPastTheLinger() async {
+        let w = makeWorld()
+        await publishRows(w, [row("s1", mode: "chat"), row("s2", mode: "chat")])
+        let t = await openOneWebTab(w, sessionId: "s2", tabId: "b1", url: "https://b.example")
+
+        w.host.select("s1")
+        await answerReattach(t, attachIndex: 2)
+        await publishRows(w, [row("s1", mode: "chat"), row("s2", attachedElsewhere: true, mode: "chat")])
+
+        let transcript = w.cef.log
+        w.clock.current += BrowserLifecycleEngine.stopLinger + 1
+        w.coordinator.replan()
+
+        XCTAssertTrue(w.runtime.isLive(tabId: "b1"),
+                      "the phone's chat-session pages were stopped out from under it: \(w.cef.log)")
+        XCTAssertEqual(w.cef.log, transcript)
+    }
+
+    /// **Degradation 3: an archived chat session stops NOW, not in five minutes.** The flag is read
+    /// off the row rather than off the label, which is the only way to see it for a chat session —
+    /// before T1 an archived chat session sat out the full 300s linger like an abandoned one.
+    func testAnArchivedChatSessionStopsWithNoLinger() async {
+        let w = makeWorld()
+        await publishRows(w, [row("s1", mode: "chat")])
+        await openOneWebTab(w)
+
+        await publishRows(w, [row("s1", archived: true, mode: "chat")])
+
+        XCTAssertFalse(w.runtime.isLive(tabId: "t1"),
+                       "an archived chat session kept its renderers: \(w.cef.log)")
+        XCTAssertTrue(w.cef.log.contains("c1 close"), "log was \(w.cef.log)")
+        XCTAssertTrue(w.clock.liveTimers.isEmpty, "archived skips the linger, it does not arm one")
+    }
+
+    /// **What an OLD daemon costs, stated rather than papered over.** `signals` absent is not
+    /// `false/false` on the wire, but it is all the app can act on: the remote half of the world is
+    /// unknown, so a session nothing here is attached to reads quiet and takes the linger. That is
+    /// exactly the pre-T1 behaviour, which is the point — absence degrades to the old world, and
+    /// nothing pretends to know better.
+    func testADaemonWithNoSignalsSurfaceLeavesTheAppItsLocalHalfOnly() async {
+        let w = makeWorld()
+        await publishRows(w, [legacyRow("s1", mode: "chat"), legacyRow("s2", mode: "chat")])
+        let t = await openOneWebTab(w, sessionId: "s2", tabId: "b1", url: "https://b.example")
+
+        // Still attached: the LOCAL half of `working` needs no daemon at all, so a turn running on
+        // the session this shell holds is visible even here.
+        XCTAssertTrue(w.runtime.isLive(tabId: "b1"))
+
+        w.host.select("s1")
+        await answerReattach(t, attachIndex: 2)
+        await publishRows(w, [legacyRow("s1", mode: "chat"), legacyRow("s2", mode: "chat")])
+
+        w.clock.current += BrowserLifecycleEngine.stopLinger + 1
+        w.coordinator.replan()
+        XCTAssertFalse(w.runtime.isLive(tabId: "b1"),
+                       "an absent signals surface must degrade to the pre-T1 linger, not to a hold "
+                           + "forever: \(w.cef.log)")
     }
 
     /// **Leaving a session is not closing the window on it.** Navigating to a landing detaches and
@@ -790,7 +915,7 @@ final class BrowserSignalsTests: XCTestCase {
     /// silently convert every later window close into a stop for a session nobody was looking at.
     func testASessionLeftWhileTheWindowWasOpenKeepsItsLingerWhenTheWindowLaterCloses() async {
         let w = makeWorld()
-        await publishRows(w, [row("s1", activity: "idle")])
+        await publishRows(w, [row("s1")])
         await openOneWebTab(w)
 
         // Navigate to a landing: detaches, un-displays, arms the linger — window still open.
@@ -821,7 +946,7 @@ final class BrowserSignalsTests: XCTestCase {
     /// one, and the viewport must be mounted in the panel's host again.
     func testReopeningTheWindowGivesTheShownSessionItsViewportBackAndStopsNothing() async {
         let w = makeWorld()
-        await publishRows(w, [row("s1", activity: "background")])
+        await publishRows(w, [row("s1", working: true)])
         let t = await openOneWebTab(w)
 
         let (window, panelHost) = makePanelHost()

@@ -41,6 +41,57 @@ import Foundation
 /// `BrowserRuntime.swift` (where point 3 actually runs since browser-runtime T3), `methods.ts` and
 /// this file's tests, and renumbering would make every one of them wrong.
 ///
+/// ## Door 5 — **what the AGENT asked to navigate to** (b2-agent-browser Task 3)
+///
+/// `PanelCommandConsumer.navigate` (`PanelCommandConsumer.swift`, in the `case "navigate"` arm of
+/// `handle`) calls `normalizeTypedInput` on `panel_command.url` before anything reaches
+/// `BrowserRuntime.loadURL`. It is a real fifth door and not a restatement of door 1, because the
+/// command channel bypasses the address bar entirely: the daemon caps that field
+/// (`PANEL_URL_MAX_LENGTH`) but deliberately does **not** scheme-refine it — spec §3 states in as
+/// many words that "the consumer is where policy lands" — so before Task 3 a `javascript:` URL
+/// authored by a model would have gone straight into `NormaCEFLoadURL`.
+///
+/// **It reuses door 1's function rather than adding a second one**, which is why door 1's own name
+/// now says "typed or authored". The agent is the same kind of producer the address bar is: an
+/// untrusted string that may or may not carry a scheme, judged by one decision procedure. A
+/// second, agent-specific normaliser would be a second place for the allowlist to be missing from —
+/// the exact failure `mayOpenTab` was added to end. It also means an agent may write
+/// `example.com`, exactly as a person may, and reach `https://example.com`.
+///
+/// The refusal is reported back to the model rather than swallowed (`ok:false` with the reason), so
+/// the one door that could otherwise fail silently is the one that explains itself.
+///
+/// **Door 5 is not the only way the agent reaches a web view outside this file, and the other ones
+/// are not doors at all** (fix round 1; extended by B2 Task 5; N3/N4 added by whole-branch review,
+/// Minor-2). Four paths bypass this file entirely:
+///
+///  1. **The CDP bridge** (`NormaCEFExecuteCDP`) can navigate — `Page.navigate` loads any URL, and a
+///     `Runtime.evaluate` assigning `location.href` does the same. What contains it is **producer
+///     discipline, not policy**: every CDP method name, expression and `functionDeclaration` the app
+///     sends is a literal written in `PanelCommandConsumer`, and the model-authored payload
+///     (`panel_command.args`, read since Task 5) may only ever become a params VALUE whose meaning
+///     is data — `DOM.querySelector`'s selector, `Input.insertText`'s text. That constraint is
+///     stated where it must be honoured (`NormaCEF.h`'s `NormaCEFExecuteCDP`, and
+///     `PanelCommandConsumer`'s own Task-5 header).
+///  2. **`click`** (Task 5). A click on a link is a full navigation to wherever the page points,
+///     performed by the renderer, reported to nobody in time to matter. It reaches no allowlist in
+///     this file and no domain list in the daemon (whose dangerous-domain block is first-hop-only by
+///     construction). It is the widest of the three and is contained by nothing here.
+///  3. **The shared strip** (Task 6). The panel's tab strip is not agent-owned: a tab the USER
+///     navigated to a listed host is exactly as reachable to the agent as one it opened itself —
+///     `read`/`screenshot` in every mode INCLUDING CHAT, `click`/`type`/`submit` wherever the
+///     interact verbs reach. No url ever loads for this path, so there is nothing here for a scheme
+///     check to refuse; what has no reach is the DAEMON's dangerous-domain block (`refuseDangerous`,
+///     `browser.ts`), which fires only on `navigate`/`open`'s own url argument, never on a verb that
+///     merely acts on a tab already sitting on one.
+///  4. **`back`.** History navigation carries no url for anything to judge: `PanelCommandConsumer`
+///     asks CEF to go back by tabId alone; `normalizeTypedInput` is never called. `back` — being
+///     `navigate`'s own exact inverse — reaches exactly what `navigate` would have been refused for,
+///     on a tab whose history already holds a listed host. It is in the daemon's READ set
+///     (`BROWSER_READ_VERBS`), so chat has it too.
+///
+/// Named so the door count is not mistaken for the whole threat model.
+///
 /// **Not every caller of `isAllowed` is one of these doors.** `PanelWebTabModel.displayURL` and the
 /// `⋮` menu ask the same question for PRESENTATION — what the address bar shows, whether Copy Link
 /// is enabled. Those change nothing about what may be loaded or stored, and removing one is a
@@ -80,23 +131,34 @@ enum PanelURLPolicy {
     /// `testTheCapsCountTheSameUnitTheDaemonCounts` is the pin that reds if this reverts.
     static func wireLength(_ s: String) -> Int { s.utf16.count }
 
-    /// Truncate to `titleMaxLength` **UTF-16 units**, never splitting a grapheme cluster.
+    /// Truncate to `limit` **UTF-16 units**, never splitting a grapheme cluster.
     ///
     /// Both properties are required: cutting at a raw UTF-16 offset could split a surrogate pair
     /// (producing an unpaired surrogate — invalid UTF-8 on the wire, which the socket's JSON
     /// encoder would reject just as surely as an over-long string), and cutting by `Character`
-    /// alone is the bug above. So: take whole `Character`s while the running UTF-16 total fits.
-    static func cappedTitle(_ title: String) -> String {
-        guard wireLength(title) > titleMaxLength else { return title }
+    /// alone is the bug `wireLength` records. So: take whole `Character`s while the running UTF-16
+    /// total fits.
+    ///
+    /// Generalised out of `cappedTitle` by b2-agent-browser Task 5's fix round, which needed the
+    /// same cut for a `panel.commandResult` message and for the sensitive floor's quoted evidence.
+    /// One implementation, because getting this wrong is silent in both directions.
+    static func truncated(_ value: String, toWireLength limit: Int) -> String {
+        guard wireLength(value) > limit else { return value }
         var capped = ""
         var units = 0
-        for character in title {
+        for character in value {
             let width = String(character).utf16.count
-            if units + width > titleMaxLength { break }
+            if units + width > limit { break }
             capped.append(character)
             units += width
         }
         return capped
+    }
+
+    /// Truncate to `titleMaxLength` in the daemon's unit. See `truncated` for why the cut is what it
+    /// is, and `wireLength` for what a wrong unit here cost the first time.
+    static func cappedTitle(_ title: String) -> String {
+        truncated(title, toWireLength: titleMaxLength)
     }
 
     /// The scheme of `url`, lowercased, or `nil` when the string does not start with one.
@@ -138,7 +200,14 @@ enum PanelURLPolicy {
         return loopbackHosts.contains(bare.lowercased()) ? "http://" : "https://"
     }
 
-    /// **Door 1 — what the user typed.** Returns the URL to navigate to, or `nil` to refuse.
+    /// **Door 1 — what the user typed, and (since b2-agent-browser Task 3) what the agent
+    /// authored.** Returns the URL to navigate to, or `nil` to refuse.
+    ///
+    /// The second caller is `PanelCommandConsumer`'s `navigate` arm — door 5 in this file's header,
+    /// which explains why the command channel is a genuinely separate door and why it reuses this
+    /// function instead of growing one of its own. Everything below applies unchanged to both: the
+    /// input is an untrusted string that may or may not carry a scheme, and there is one decision
+    /// procedure for it.
     ///
     /// A bare host (`example.com`) gains a scheme, which is what every browser's address bar does
     /// and the only reason `isAllowed` alone is not enough here. Anything that still fails the
