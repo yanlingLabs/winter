@@ -106,7 +106,14 @@ final class SessionFeed {
         case .followFocus:
             await onAttach?()
         case .pinned(let sessionId):
-            onPinnedAttach?(sessionId, try? await client.attach(sessionId: sessionId, fromSeq: 0))
+            // **The attach is taken FIRST, into a local, and the hook called after — never
+            // `onPinnedAttach?(sessionId, try? await client.attach(…))`.** Optional chaining does
+            // not evaluate its arguments when the base is nil, so writing it that way skips the
+            // ATTACH ITSELF for every feed with no hook wired — which is every one but the shell's
+            // (`DetachedWindowController`, the chat window, most tests). Caught by the full suite:
+            // two rows timed out having seen only `protocol.hello` on the wire.
+            let ceilingSeq = try? await client.attach(sessionId: sessionId, fromSeq: 0)
+            onPinnedAttach?(sessionId, ceilingSeq)
         }
         session.markConnected() // M2: connect() success IS the connected signal
         onConnected?()
@@ -140,7 +147,9 @@ final class SessionFeed {
         guard case .pinned = mode else { return }
         mode = .pinned(sessionId: sessionId)
         session.reset()
-        onPinnedAttach?(sessionId, try? await client.attach(sessionId: sessionId, fromSeq: 0))
+        // Same two lines, and for the same reason — see `start()`'s pinned branch.
+        let ceilingSeq = try? await client.attach(sessionId: sessionId, fromSeq: 0)
+        onPinnedAttach?(sessionId, ceilingSeq)
     }
 
     private func handle(_ ev: NormaEvent) async {
