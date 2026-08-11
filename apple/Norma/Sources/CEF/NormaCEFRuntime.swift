@@ -169,6 +169,38 @@ enum NormaCEFRuntime {
         NormaCEFRecordAfterACloseHandsTheHostViewBack(hostView)
     }
 
+    /// B2 Task 3 — **the CDP door, in Swift terms.** Run one DevTools protocol method against the
+    /// browser hosted by `container` and answer through `completion`.
+    ///
+    /// A wrapper for the same reason as everything above it (a bridging header is not a module
+    /// interface, so the test bundle cannot name `NormaCEFExecuteCDP`) and for one more: it is the
+    /// SINGLE door, used by `BrowserRuntime.CEFDriver.production` as well as by the test that pins
+    /// the always-answers contract. Two doors onto the same C function would let that test pass while
+    /// the production forward was deleted.
+    ///
+    /// `payloadJSON` is normalised to a non-optional here — the C block declares `NSString *` without
+    /// nullability, which Swift imports as implicitly-unwrapped, and every caller wants a string it
+    /// can hand to `JSONSerialization`.
+    ///
+    /// **The completion always fires** (`NormaCEF.h` carries the whole contract): synchronously with
+    /// `ok == false` for every refusal, including CEF never having started — which is every call made
+    /// from the unit-test host.
+    static func executeCDP(in container: NSView, method: String, paramsJSON: String?,
+                           completion: @escaping (Bool, String) -> Void) {
+        NormaCEFExecuteCDP(container, method, paramsJSON) { ok, payload in
+            completion(ok, payload ?? "{}")
+        }
+    }
+
+    /// The transcript of what the pending-CDP registry actually fired, produced with no browser and
+    /// no CEF — the answer to "does a reply settle exactly one call, and is a stranded call FAILED
+    /// rather than dropped?". See `NormaCEF.h` for why no needle can ask this and what the transcript
+    /// means. Exposed here for the same reason as the rest: a bridging header is not a module
+    /// interface.
+    static var pendingCDPTranscriptWithNoCEFAnywhere: String {
+        NormaCEFPendingCDPTranscriptForOneBrowserWithNoCEFAnywhere()
+    }
+
     /// `CefShutdown`, at the point of no return. Safe no-op if CEF was never initialised — and a
     /// no-op that leaves `didShutdown` false, so running it in the unit-test host does not latch
     /// every later test into "CEF is finished" (whole-branch F10). That is what lets

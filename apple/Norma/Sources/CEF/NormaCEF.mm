@@ -6,6 +6,7 @@
 #include <climits>
 #include <cstdarg>
 #include <cstdio>
+#include <map>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -18,6 +19,12 @@
 // a dependency anybody can see. `cef_menu_model.h` comes with the context-menu header.
 #include "include/cef_context_menu_handler.h"
 #include "include/cef_request_handler.h"
+// B2 Task 3 — the CDP door. The observer is IMPLEMENTED here; the other two are what
+// `AddDevToolsMessageObserver` returns and what turns a Swift-built params string into the
+// `CefDictionaryValue` `ExecuteDevToolsMethod` takes.
+#include "include/cef_devtools_message_observer.h"
+#include "include/cef_parser.h"
+#include "include/cef_registration.h"
 #include "include/wrapper/cef_helpers.h"
 #include "include/wrapper/cef_library_loader.h"
 
@@ -358,6 +365,164 @@ NormaCEFOpenBrowser *OpenBrowserRecordFor(CefRefPtr<CefBrowser> browser) {
   return g_open_browsers[@(browser->GetIdentifier())];
 }
 
+// ---------------------------------------------------------------------------
+// B2 Task 3: the pending-CDP registry — which completion a DevTools reply belongs to
+// ---------------------------------------------------------------------------
+
+/// Browser identifier → (DevTools message id → the completion waiting on it).
+///
+/// **Nested rather than keyed on a composite, because the two operations this needs are "settle ONE
+/// reply" and "fail EVERY call a browser stranded"** — and the second is what makes the door's
+/// always-answers contract true. A flat map keyed by a packed pair would make the fail-all a scan of
+/// every pending call in the process on each close.
+///
+/// Message ids are assigned by CEF and are per-browser (`ExecuteDevToolsMethod`'s own doc:
+/// "an incremental number ... based on previous values"), so the browser id is a necessary part of
+/// the key — two tabs can legitimately be waiting on the same number.
+static NSMutableDictionary<NSNumber *, NSMutableDictionary<NSNumber *, NormaCEFCDPCompletion> *>
+    *g_pending_cdp = nil;
+
+/// The DevTools observer registration for each open browser, filled beside its `NormaCEFOpenBrowser`
+/// record in `RememberOpenBrowser` and dropped beside it in `ForgetOpenBrowser` — the same
+/// "one line apart, so the two collections cannot drift" discipline `g_browsers`/`g_open_browsers`
+/// already use.
+///
+/// **Holding it IS the registration**: `AddDevToolsMessageObserver`'s own contract is that "the
+/// observer will remain registered until the returned Registration object is destroyed"
+/// (`cef_browser.h`), so this map is not bookkeeping about a subscription — it is the subscription.
+/// Dropping the entry at `OnBeforeClose` is what unregisters, and the observer object dies with it.
+static std::map<int, CefRefPtr<CefRegistration>> g_cdp_registrations;
+
+/// A `{"message": …}` object — the shape `NormaCEFCDPCompletion` promises for every failure this
+/// bridge decides itself. Built with `NSJSONSerialization` rather than string concatenation for the
+/// obvious reason (a reason string with a quote in it would emit invalid JSON and the Swift parse
+/// would then report the wrong failure), and with Foundation rather than `CefWriteJSON` for a
+/// sharper one: this runs on paths where CEF was never loaded.
+NSString *CDPReasonJSON(NSString *message) {
+  NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"message" : message ?: @""}
+                                                 options:0
+                                                   error:nil];
+  NSString *json = data != nil ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
+                               : nil;
+  // A hand-written fallback for a failure that cannot happen (a dictionary of two literals is always
+  // serialisable) but must not become silence if it ever did.
+  return json ?: @"{\"message\":\"the browser could not report why this failed\"}";
+}
+
+/// Register a completion against the id CEF assigned its method call.
+void RememberPendingCDP(int browser_id, int message_id, NormaCEFCDPCompletion completion) {
+  if (g_pending_cdp == nil) {
+    g_pending_cdp = [[NSMutableDictionary alloc] init];
+  }
+  NSMutableDictionary<NSNumber *, NormaCEFCDPCompletion> *byMessage = g_pending_cdp[@(browser_id)];
+  if (byMessage == nil) {
+    byMessage = [[NSMutableDictionary alloc] init];
+    g_pending_cdp[@(browser_id)] = byMessage;
+  }
+  byMessage[@(message_id)] = [completion copy];
+}
+
+/// Settle exactly one pending call. **Erase THEN call** — the same delete-then-resolve ordering the
+/// daemon's own registry uses (`PanelCommandRegistry.resolve`) and for the same reason: a completion
+/// can re-enter this file (it hops to Swift, which may close the tab), and an entry still in the map
+/// when that happens is an entry a fail-all would fire a second time.
+///
+/// A reply with no pending entry is dropped in silence, deliberately. It is not an error condition:
+/// a DevTools front-end attached to the same browser, or an event message that reached
+/// `OnDevToolsMethodResult` for a call this app never made, has no completion to be owed one.
+void SettlePendingCDP(int browser_id, int message_id, BOOL ok, NSString *payloadJSON) {
+  NSMutableDictionary<NSNumber *, NormaCEFCDPCompletion> *byMessage = g_pending_cdp[@(browser_id)];
+  NormaCEFCDPCompletion completion = byMessage[@(message_id)];
+  if (completion == nil) {
+    return;
+  }
+  [byMessage removeObjectForKey:@(message_id)];
+  if (byMessage.count == 0) {
+    [g_pending_cdp removeObjectForKey:@(browser_id)];
+  }
+  completion(ok, payloadJSON);
+}
+
+/// **Fail every call one browser stranded** — the whole of "error, never silence" for a browser that
+/// goes away mid-flight.
+///
+/// The map entry is taken out BEFORE any completion runs, for the ordering reason above and for a
+/// second one specific to this path: the three callers can reach each other (an app-initiated close
+/// is followed by `OnBeforeClose`; a detach can precede either), and a fail-all that iterated the
+/// live map would let a re-entrant second sweep fire the same completions again.
+void FailAllPendingCDP(int browser_id, NSString *reason) {
+  NSMutableDictionary<NSNumber *, NormaCEFCDPCompletion> *byMessage = g_pending_cdp[@(browser_id)];
+  if (byMessage == nil || byMessage.count == 0) {
+    return;
+  }
+  [g_pending_cdp removeObjectForKey:@(browser_id)];
+  NSString *payload = CDPReasonJSON(reason);
+  Log("cdp-pending-failed (id=%d, %lu call(s), %s)", browser_id,
+      static_cast<unsigned long>(byMessage.count), reason.UTF8String);
+  for (NSNumber *messageId in [byMessage allKeys]) {
+    NormaCEFCDPCompletion completion = byMessage[messageId];
+    if (completion != nil) {
+      completion(NO, payload);
+    }
+  }
+}
+
+/// **The reply side of the CDP door.** One instance per open browser, alive for exactly as long as
+/// its registration is (`g_cdp_registrations`).
+///
+/// Only two of the five callbacks are overridden, and the two that are left alone are left alone on
+/// purpose. `OnDevToolsMessage` would see every message before it is dispatched — returning `true`
+/// from it would SUPPRESS the structured callbacks below, which is the opposite of what this needs —
+/// and `OnDevToolsEvent` fires only while a domain's notifications are enabled, which nothing here
+/// enables (B2's verbs are all method calls). `OnDevToolsAgentAttached` is a fact with no consequence
+/// for a caller that is already waiting.
+class NormaCDPObserver : public CefDevToolsMessageObserver {
+ public:
+  /// A method call finished. `message_id` is the id `ExecuteDevToolsMethod` returned to the caller,
+  /// which is the whole correlation: `result` is the protocol's `"result"` dictionary on success and
+  /// its `"error"` dictionary on failure (`cef_devtools_message_observer.h`), and both are already
+  /// the JSON object this door's completion promises — so neither is reshaped here.
+  void OnDevToolsMethodResult(CefRefPtr<CefBrowser> browser,
+                              int message_id,
+                              bool success,
+                              const void* result,
+                              size_t result_size) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (!browser) {
+      return;
+    }
+    // "|result| is only valid for the scope of this callback and should be copied if necessary" —
+    // and it is necessary: the completion hands this to Swift.
+    NSString *payload = nil;
+    if (result != nullptr && result_size > 0) {
+      payload = [[NSString alloc] initWithBytes:result
+                                         length:result_size
+                                       encoding:NSUTF8StringEncoding];
+    }
+    if (payload == nil) {
+      // An empty result is documented and ordinary ("which may be empty"); an empty ERROR would
+      // leave the Swift side with nothing to say, so each gets the right empty object.
+      payload = success ? @"{}" : CDPReasonJSON(@"the DevTools method failed without a reason");
+    }
+    SettlePendingCDP(browser->GetIdentifier(), message_id, success ? YES : NO, payload);
+  }
+
+  /// **The one CEF documents as losing results**: "Any method results that were pending before the
+  /// agent became detached will not be delivered." Without this every call in flight at that moment
+  /// would be silent forever — the exact failure the door exists to make impossible.
+  void OnDevToolsAgentDetached(CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (!browser) {
+      return;
+    }
+    FailAllPendingCDP(browser->GetIdentifier(),
+                      @"the browser's DevTools agent detached before the result arrived");
+  }
+
+ private:
+  IMPLEMENT_REFCOUNTING(NormaCDPObserver);
+};
+
 /// **The second half of every close, and the one that actually finishes it.**
 ///
 /// `DoClose` answers `true`, so CEF stops: `AlloyBrowserHostImpl::CloseContents` computes
@@ -428,6 +593,20 @@ void RememberOpenBrowser(CefRefPtr<CefBrowser> browser, NormaCEFTabBridge *bridg
   record.hostView = CAST_CEF_WINDOW_HANDLE_TO_NSVIEW(browser->GetHost()->GetWindowHandle());
   record.bridge = bridge;
   g_open_browsers[@(browser->GetIdentifier())] = record;
+
+  // B2 Task 3 — the CDP reply channel, registered HERE rather than lazily at the first
+  // `NormaCEFExecuteCDP`, for two reasons. **Lifetime**: filled and drained beside the record above,
+  // so "registered for exactly as long as the browser is open" is structural rather than a rule
+  // someone maintains. **Ordering**: a registration made inside the call it is meant to hear the
+  // reply to would be a race with no upside.
+  //
+  // It costs nothing on a browser that is never CDP'd: `AddDevToolsMessageObserver` does not attach
+  // the DevTools agent (the agent attaches "in response to the first message sent while the agent is
+  // detached", `cef_devtools_message_observer.h`) and no event messages are delivered unless a domain
+  // has been enabled, which nothing here enables.
+  g_cdp_registrations[browser->GetIdentifier()] =
+      browser->GetHost()->AddDevToolsMessageObserver(new NormaCDPObserver());
+  Log("cdp-observer-registered (id=%d)", browser->GetIdentifier());
 }
 
 /// Drop a closed browser's ObjC side, releasing the host view and the bridge with it.
@@ -436,6 +615,13 @@ void ForgetOpenBrowser(CefRefPtr<CefBrowser> browser) {
     return;
   }
   [g_open_browsers removeObjectForKey:@(browser->GetIdentifier())];
+  // B2 Task 3, beside the removal above. The FAIL comes first and the unregister second: dropping
+  // the registration destroys the observer, and an observer that is gone can deliver nothing to a
+  // call still sitting in the pending map. In practice the close that brought us here has already
+  // failed these (`NormaCEFCloseBrowser`); this is the belt for a browser destroyed by a route this
+  // app did not initiate — CEF's own shutdown sweep, or a renderer that went away.
+  FailAllPendingCDP(browser->GetIdentifier(), @"the tab's browser closed before the result arrived");
+  g_cdp_registrations.erase(browser->GetIdentifier());
 }
 
 /// Push the live snapshot to whoever is watching. Main thread by construction — CEF's UI thread IS
@@ -1831,6 +2017,109 @@ void NormaCEFLoadURL(NSView *parent, const char *url) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// B2 Task 3: the CDP door
+// ---------------------------------------------------------------------------
+
+void NormaCEFExecuteCDP(NSView *parent,
+                        const char *method,
+                        const char *paramsJSON,
+                        NormaCEFCDPCompletion completion) {
+  if (completion == nil) {
+    // Nobody to answer. Deliberately NOT "run it anyway": every verb this door serves exists for its
+    // reply, so a call with no completion is a caller bug, and running it would hide the bug behind a
+    // side effect on a page the user is logged into.
+    Log("cdp REFUSED: no completion block");
+    return;
+  }
+  // Copied once, here, so every exit below hands back the same block — a stack block escaping into
+  // the pending map is the classic ARC hazard on this shape.
+  NormaCEFCDPCompletion answer = [completion copy];
+
+  if (method == nullptr || *method == '\0') {
+    answer(NO, CDPReasonJSON(@"no DevTools method was named"));
+    return;
+  }
+  if (!g_initialized) {
+    // The header's standing promise — every entry point is safe with CEF never loaded — and here it
+    // is also the always-answers contract: the unit-test host and a failed `CefInitialize` both land
+    // on this line, and both must produce a reply rather than a hang.
+    answer(NO, CDPReasonJSON(@"the browser engine is not running"));
+    return;
+  }
+  auto browser = BrowserForParent(parent);
+  if (!browser || !browser->GetHost()) {
+    answer(NO, CDPReasonJSON(@"this tab has no live browser"));
+    return;
+  }
+
+  CefRefPtr<CefDictionaryValue> params;
+  if (paramsJSON != nullptr && *paramsJSON != '\0') {
+    CefRefPtr<CefValue> parsed = CefParseJSON(CefString(paramsJSON), JSON_PARSER_RFC);
+    if (!parsed || parsed->GetType() != VTYPE_DICTIONARY) {
+      // `ExecuteDevToolsMethod` takes a dictionary, and CEF's own validation of a malformed one is
+      // asynchronous and silent — "messages that fail due to formatting errors or missing parameters
+      // may be discarded without notification" (`cef_browser.h`). Refusing here is what keeps that
+      // documented silence from becoming this door's silence.
+      answer(NO, CDPReasonJSON(@"the DevTools params were not a JSON object"));
+      return;
+    }
+    params = parsed->GetDictionary();
+  }
+
+  // 0 = "assign the next id yourself". Passing our own would collide with the sequence CEF hands to
+  // any other session on the same browser (a DevTools front-end the user opened), and the id is only
+  // ever used to correlate — it is never chosen for meaning.
+  const int messageId = browser->GetHost()->ExecuteDevToolsMethod(0, CefString(method), params);
+  if (messageId <= 0) {
+    // "will return the assigned message ID if called on the UI thread and the message was
+    // successfully submitted for validation, otherwise 0" — so this is a submit that never happened,
+    // and registering a pending entry for it would be registering one that can only ever be failed
+    // by a later close.
+    answer(NO, CDPReasonJSON(@"the browser refused to submit the DevTools method"));
+    return;
+  }
+  // **The ordering assumption, stated rather than assumed.** A DevTools method result travels back
+  // through the agent, never re-entrantly out of the call above, so registering after the submit is
+  // safe — but if that were ever untrue the reply would find no pending entry and be dropped, and
+  // this completion would never fire. That is the one hole in the always-answers contract that lives
+  // on this line, and the caller's own deadline is what covers it (`PanelCommandConsumer`'s
+  // abandonment timer, which exists for the app-is-wedged case anyway).
+  RememberPendingCDP(browser->GetIdentifier(), messageId, answer);
+}
+
+NSString *NormaCEFPendingCDPTranscriptForOneBrowserWithNoCEFAnywhere(void) {
+  // Ids far outside anything CEF hands out in this process, so a real browser cannot collide with
+  // the fixture even if one is somehow open while a test runs.
+  const int browserA = 910001;
+  const int browserB = 910002;
+  NSMutableArray<NSString *> *fired = [[NSMutableArray alloc] init];
+
+  RememberPendingCDP(browserA, 1, ^(BOOL ok, NSString *payload) {
+    [fired addObject:[NSString stringWithFormat:@"A1 ok=%d %@", ok ? 1 : 0, payload]];
+  });
+  RememberPendingCDP(browserA, 2, ^(BOOL ok, NSString *payload) {
+    [fired addObject:[NSString stringWithFormat:@"A2 ok=%d %@", ok ? 1 : 0, payload]];
+  });
+  RememberPendingCDP(browserB, 1, ^(BOOL ok, NSString *payload) {
+    [fired addObject:[NSString stringWithFormat:@"B1 ok=%d %@", ok ? 1 : 0, payload]];
+  });
+
+  // One reply settles exactly the call that asked — same id, other browser, must not move.
+  SettlePendingCDP(browserA, 1, YES, @"{\"value\":1}");
+  // The same id again: the entry is gone, so this fires nothing. (A duplicate reply, or a fail-all
+  // racing a result, is the shape this guards.)
+  SettlePendingCDP(browserA, 1, YES, @"{\"value\":2}");
+  // The browser goes away with A2 still in flight: it must be FAILED, never stranded.
+  FailAllPendingCDP(browserA, @"the tab's browser was closed");
+  // And again, with nothing left — no second fire.
+  FailAllPendingCDP(browserA, @"the tab's browser was closed");
+  // B's own call is untouched by everything above; drained here so this seam leaves no state behind.
+  FailAllPendingCDP(browserB, @"the tab's browser was closed");
+
+  return [fired componentsJoinedByString:@";"];
+}
+
 BOOL NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow(void) {
   // Flipping this to NO does NOT "let popups through to somewhere else" — it hands CEF a window
   // Norma has no handle on and, because `DoClose` says the host completes every close, nothing can
@@ -1967,6 +2256,12 @@ void NormaCEFCloseBrowser(NSView *parent) {
     // it "is not guaranteed to answer once the close is under way" — and the ordering was never the
     // real hazard: the handle answers with a pointer to a view that a previous close (a shutdown
     // sweep, or this tab closed twice) may already have released. See `NormaCEFOpenBrowser`.
+    // B2 Task 3: **fail every in-flight CDP call BEFORE the close starts.** This is the
+    // deterministic one of the three fail points — the app decided this close, so it knows here and
+    // now that no reply is coming. `OnBeforeClose` is the belt behind it and lands later (a close
+    // completes on an autorelease drain, measured at +290 ms), which for a caller holding a deadline
+    // is the difference between an honest immediate failure and a timeout.
+    FailAllPendingCDP(browser->GetIdentifier(), @"the tab's browser was closed");
     browser->GetHost()->CloseBrowser(true);
     CompleteCloseByReleasingHostView(browser->GetIdentifier());
   }
@@ -1991,6 +2286,10 @@ void NormaCEFCloseAllBrowsers(void) {
     //
     // Nothing is skipped that shouldn't be: a browser whose `OnBeforeClose` has run is no longer in
     // `g_browsers` at all, and one whose close is genuinely still to be started still has its view.
+    //
+    // B2 Task 3: same fail-before-close as `NormaCEFCloseBrowser`, for the same reason. This sweep
+    // runs from `NormaCEFShutdown`, where the completions are the last thing anything will hear.
+    FailAllPendingCDP(browser->GetIdentifier(), @"the tab's browser was closed");
     browser->GetHost()->CloseBrowser(true);
     CompleteCloseByReleasingHostView(browser->GetIdentifier());
   }
@@ -2164,6 +2463,13 @@ void NormaCEFShutdown(void) {
   // So `N > 0` means a close that did not complete. It is not a race artefact to be waved through.
   Log("shutting down (%zu browser(s) still open, %d/%d drain turns, %ld DoWork calls)",
       g_browsers.size(), turns, kShutdownDrainTurns, g_do_work_count);
+  // B2 Task 3: let go of every DevTools observer registration BEFORE `CefShutdown`, and never after.
+  // `g_cdp_registrations` is a file-static `std::map` of `CefRefPtr`s, so anything still in it at
+  // process exit would be Released by a static destructor running after CEF is finished. It is
+  // normally already empty — `ForgetOpenBrowser` erases each entry at `OnBeforeClose` — so this is
+  // the same shape as the drain loop above: a bound on the case the tripwire is about (`N > 0`
+  // means some browser's close did not complete, and its registration is exactly what would be left).
+  g_cdp_registrations.clear();
   CefShutdown();
 }
 

@@ -194,6 +194,79 @@ void NormaCEFReload(NSView *parent);
 void NormaCEFStopLoad(NSView *parent);
 void NormaCEFLoadURL(NSView *parent, const char *url);
 
+#pragma mark - B2 Task 3: the CDP door
+
+/// How `NormaCEFExecuteCDP` answers. **`payloadJSON` is ALWAYS a JSON OBJECT**, both ways round, so
+/// the Swift side has exactly one parse to write:
+///
+///   * `ok == YES` — the DevTools method's `"result"` dictionary, verbatim (`{}` when it has none);
+///   * `ok == NO`  — a `{"message": …}`-shaped object. For a failure CEF reported it is the
+///     protocol's own `"error"` dictionary (which carries `code` and `message`,
+///     `cef_devtools_message_observer.h`); for a failure this bridge decided — no live browser, CEF
+///     down, unparseable params, a submit CEF refused, a browser that closed with the call still in
+///     flight — it is a synthesised object carrying only `message`.
+///
+/// Called on the MAIN thread, like every other observer in this header (CEF's UI thread IS the main
+/// thread under the external pump).
+typedef void (^NormaCEFCDPCompletion)(BOOL ok, NSString *payloadJSON);
+
+/// **Run one Chrome DevTools Protocol method against the browser hosted by `parent`** — B2's read
+/// verbs (`Runtime.evaluate` for page text, `Page.captureScreenshot` for a PNG) and, from Task 5,
+/// its interaction verbs.
+///
+/// `method` is a protocol method name (`"Runtime.evaluate"`); `paramsJSON` is that method's params
+/// as a UTF-8 JSON **object** (`NULL` or empty for none). Wraps
+/// `CefBrowserHost::ExecuteDevToolsMethod` and correlates the reply through a
+/// `CefDevToolsMessageObserver` registered per browser, keyed by the message id CEF assigns
+/// (`cef_browser.h`) — which is why nothing here needs an active DevTools front-end or a
+/// remote-debugging port.
+///
+/// **THE COMPLETION ALWAYS FIRES — error, never silence.** That is this function's whole contract,
+/// and it is shaped by the daemon's: `PanelCommandRegistry`'s promise always settles
+/// (`packages/core/src/panel/commands.ts`), and a Mac app that goes quiet turns an answerable verb
+/// into a `deadlineMs` timeout the agent cannot tell from a crashed app. So every refusal answers
+/// synchronously before returning, and a call still in flight when its browser goes away is failed
+/// at three points rather than dropped: the close this app initiates, `OnBeforeClose`, and
+/// `OnDevToolsAgentDetached` (whose own header states that pending results are never delivered
+/// after it).
+///
+/// **One reply is delivered per call, exactly once** — the pending entry is erased before its
+/// completion runs, so a duplicate id, a re-entrant close and a detach racing a result cannot
+/// double-answer. `NormaCEFPendingCDPTranscriptForOneBrowserWithNoCEFAnywhere` produces that
+/// property rather than asserting it from a log line.
+///
+/// Safe to call with CEF never loaded, like everything else in this header: it answers
+/// `ok = NO` with a reason and touches no framework symbol.
+///
+/// **What it deliberately does NOT do:** validate `method` or `paramsJSON` against any policy. The
+/// URL allowlist is `PanelURLPolicy`'s (Swift), the verb set is `PanelCommandConsumer`'s, and a C
+/// seam that second-guessed either would make the real policy impossible to locate — the same
+/// ruling `NormaCEFLoadURL` carries.
+void NormaCEFExecuteCDP(NSView *parent,
+                        const char *method,
+                        const char *paramsJSON,
+                        NormaCEFCDPCompletion completion);
+
+/// **Test seam.** Drive the pending-CDP registry — the half of the CDP door that decides *which*
+/// completion a reply belongs to — with **no browser, no observer and no CEF anywhere**, and hand
+/// back a transcript of what fired.
+///
+/// The question it answers is the one no needle can: does a reply settle exactly ONE call, and does
+/// a browser going away still fire every completion it stranded? Neither is visible in the built
+/// product (the correlation is a dictionary lookup; the fail-all is a loop) and neither is reachable
+/// from XCTest through the real path, because registering an observer needs a `CefBrowser` this host
+/// can never create (spec §9's standing constraint).
+///
+/// So the answer is produced. Two calls are registered against browser 1 and one against browser 2;
+/// browser 1's first call is settled by its message id, then settled AGAIN with the same id, then
+/// browser 1 is failed wholesale, then browser 2. The returned transcript is a `;`-separated list of
+/// what each completion actually received, in order — a second fire for one id, a cross-talk between
+/// the two browsers, or a stranded call that never fired all change it.
+///
+/// Never `nil`, leaves no process-global state behind (it drains what it registered), and reaches no
+/// framework symbol.
+NSString *NormaCEFPendingCDPTranscriptForOneBrowserWithNoCEFAnywhere(void);
+
 /// The ONE answer `CefLifeSpanHandler::DoClose` gives, exported so a test can read the VALUE rather
 /// than infer it from a log string.
 ///
