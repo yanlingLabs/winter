@@ -2041,7 +2041,9 @@ void NormaCEFShutdown(void) {
     NormaCEFCloseAllBrowsers();
   }
   // **MEASURED AT THE RUNTIME'S FULL WORLD (browser-runtime T7), not at one tab.** The 50×10 ms
-  // bound was set when a quit meant one browser. `BrowserLifecycleEngine.maxLive` is 8, and seven of
+  // bound was set when a quit meant one browser. The runtime's world was 8 browsers when this was
+  // measured (`BrowserLifecycleEngine.maxLive`, since replaced by a memory budget with a count
+  // backstop of 24 — live-gate fix G), and seven of
   // those are parked in `BrowserRuntime`'s hidden window with their containers held strongly by its
   // `containers` map — which nothing clears at quit. That is the same shape as the T6 deadlock one
   // layer up, and it costs nothing, because `CompleteCloseByReleasingHostView` does

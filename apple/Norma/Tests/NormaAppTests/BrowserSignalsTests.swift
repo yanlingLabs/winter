@@ -65,7 +65,19 @@ final class BrowserSignalsTests: XCTestCase {
         var parkedCount: Int { lock.lock(); defer { lock.unlock() }; return waiters.count }
     }
 
+    /// live-gate fix G: the renderer-RSS total, under the test's thumb.
+    ///
+    /// The real one is a detached `ps` sweep (`BrowserMemorySampler`); letting it through here would
+    /// spawn a process per world and make every budget row wait on it. Zero — the default — is the
+    /// engine's documented "no measurement" input, under which `maxLiveBackstop` is the only bound,
+    /// so every row that is not about memory behaves exactly as it did before this fix.
+    @MainActor
+    final class Memory {
+        var totalBytes: UInt64 = 0
+    }
+
     struct World {
+        let memory: Memory
         let host: ShellSessionHost
         let factory: ShellTransportFactory
         let directory: SessionDirectory
@@ -107,9 +119,12 @@ final class BrowserSignalsTests: XCTestCase {
         let cef = BrowserRuntimeTests.CEFRecorder()
         let clock = BrowserRuntimeTests.FakeScheduler()
         let runtime = BrowserRuntime(driver: cef.driver, scheduler: clock.scheduler)
+        let memory = Memory()
         let coordinator = BrowserSignalsCoordinator(host: host, runtime: runtime,
-                                                    now: { clock.current })
-        let world = World(host: host, factory: factory, directory: directory, rows: rows, tick: tick,
+                                                    now: { clock.current },
+                                                    memoryBytes: { memory.totalBytes })
+        let world = World(memory: memory, host: host, factory: factory, directory: directory,
+                          rows: rows, tick: tick,
                           runtime: runtime, cef: cef, clock: clock, coordinator: coordinator)
         worlds.append(world)   // the coordinator's subscriptions die with it; keep it alive
         return world
@@ -888,8 +903,8 @@ final class BrowserSignalsTests: XCTestCase {
             t.feed(activated("s2", "b\(i)", seq: next()))
             await waitUntil("b\(i)'s browser", { w.runtime.isLive(tabId: "b\(i)") })
         }
-        XCTAssertEqual(w.runtime.liveTabIds.count, 8, "the premise: exactly at the cap, nothing "
-                       + "evicted yet (\(w.cef.log))")
+        XCTAssertEqual(w.runtime.liveTabIds.count, 8, "the premise: eight live and nothing evicted "
+                       + "— with no measurement at all, only the count backstop binds (\(w.cef.log))")
 
         // Back to s1 — which re-shows a4, its last active tab — and then a click on a1, the OLDEST
         // browser in the app. Both are attaches, and both are what make recency stop agreeing with
@@ -903,19 +918,24 @@ final class BrowserSignalsTests: XCTestCase {
                        "the premise this row exists to exercise: recency no longer agrees with "
                            + "creation order")
 
+        // **The renderers now fill the budget** (live-gate fix G). Eight live tabs sharing exactly
+        // `memoryBudgetBytes` sit AT it and are left alone — the rule is `>`, not `>=` — so the
+        // ninth create is what tips it, and one tab has to go to pay for it.
+        w.memory.totalBytes = BrowserLifecycleEngine.memoryBudgetBytes
+
         // The ninth tab.
         t.feed(opened("s1", "a5", seq: next(), url: "https://a5.example"))
         t.feed(activated("s1", "a5", seq: next()))
         await waitUntil("a5's browser", { w.runtime.isLive(tabId: "a5") })
 
         XCTAssertFalse(w.runtime.isLive(tabId: "a2"),
-                       "the cap took the wrong tab — the least-RECENT unprotected browser is a2: "
+                       "eviction took the wrong tab — the least-RECENT unprotected browser is a2: "
                            + "\(w.runtime.lruOrder) / \(w.cef.log)")
         XCTAssertTrue(w.runtime.isLive(tabId: "a1"),
                       "a1 is the OLDEST browser in the app and the one the user is looking at — "
                           + "evicting it is what reading creation order for recency does")
         XCTAssertEqual(w.runtime.liveTabIds, ["a1", "a3", "a4", "a5", "b1", "b2", "b3", "b4"],
-                       "exactly one eviction, and exactly the cap: \(w.cef.log)")
+                       "exactly one eviction, and back to exactly the budget: \(w.cef.log)")
         withExtendedLifetime(window) {}
     }
 

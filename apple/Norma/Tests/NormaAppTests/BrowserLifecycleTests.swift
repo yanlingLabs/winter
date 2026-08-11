@@ -38,12 +38,19 @@ final class BrowserLifecycleTests: XCTestCase {
 
     /// Thin wrapper so every row reads as a table entry: only the fields a row cares about are
     /// spelled out.
+    ///
+    /// `memoryBytesByTab` defaults to EMPTY here and nowhere in production — the engine's own
+    /// parameter is deliberately undefaulted (live-gate fix G), so this default is the test
+    /// harness's convenience and not a hole in the engine's surface. Empty means "no measurement",
+    /// under which `maxLiveBackstop` is the only bound, which is exactly what every row that is not
+    /// about the budget wants.
     private func plan(sessions: [String: BrowserSignals] = [:],
                       tabs: [String: [BrowserTabState]] = [:],
                       live: Set<String> = [],
                       viewport: String? = nil,
                       pendingStops: [String: Date] = [:],
                       lruOrder: [String] = [],
+                      memoryBytesByTab: [String: UInt64] = [:],
                       now: Date? = nil) -> [BrowserAction] {
         BrowserLifecycleEngine.plan(sessions: sessions,
                                     tabs: tabs,
@@ -51,7 +58,20 @@ final class BrowserLifecycleTests: XCTestCase {
                                     viewport: viewport,
                                     pendingStops: pendingStops,
                                     lruOrder: lruOrder,
+                                    memoryBytesByTab: memoryBytesByTab,
                                     now: now ?? t0)
+    }
+
+    /// **The budget, expressed as "how many of these fit".** Every tab in `tabIds` is priced at
+    /// `memoryBudgetBytes / n`, so exactly `n` of them sit AT the budget and the (n+1)-th is over
+    /// it — which is what makes the eviction rows below readable as counts while still exercising
+    /// the real byte arithmetic and the real 4 GiB constant.
+    ///
+    /// It also matches what the app actually supplies: the sampler divides one total equally
+    /// (`BrowserMemorySampler.equalShare`), so every live tab really does carry the same number.
+    private func bytes(_ tabIds: some Sequence<String>, nFit n: Int) -> [String: UInt64] {
+        let perTab = BrowserLifecycleEngine.memoryBudgetBytes / UInt64(n)
+        return Dictionary(uniqueKeysWithValues: tabIds.map { ($0, perTab) })
     }
 
     /// The state an executor would hold, mutated by applying a plan — used by the idempotence rows
@@ -105,17 +125,20 @@ final class BrowserLifecycleTests: XCTestCase {
     private func assertIdempotent(sessions: [String: BrowserSignals],
                                   tabs: [String: [BrowserTabState]],
                                   sim: Sim,
+                                  memoryBytesByTab: [String: UInt64] = [:],
                                   now: Date? = nil,
                                   file: StaticString = #filePath,
                                   line: UInt = #line) {
         var state = sim
         let first = plan(sessions: sessions, tabs: tabs, live: state.live, viewport: state.viewport,
-                         pendingStops: state.pendingStops, lruOrder: state.lruOrder, now: now)
+                         pendingStops: state.pendingStops, lruOrder: state.lruOrder,
+                         memoryBytesByTab: memoryBytesByTab, now: now)
         XCTAssertFalse(first.isEmpty, "the first plan did no work — idempotence would be vacuous",
                        file: file, line: line)
         state.apply(first)
         let second = plan(sessions: sessions, tabs: tabs, live: state.live, viewport: state.viewport,
-                          pendingStops: state.pendingStops, lruOrder: state.lruOrder, now: now)
+                          pendingStops: state.pendingStops, lruOrder: state.lruOrder,
+                          memoryBytesByTab: memoryBytesByTab, now: now)
         XCTAssertEqual(second, [], "re-planning after applying \(first) must be a no-op", file: file, line: line)
     }
 
@@ -313,31 +336,133 @@ final class BrowserLifecycleTests: XCTestCase {
         ])
     }
 
-    /// **Rule 8b stops at the cap, and this row is why that is not a detail.**
+    /// **Rule 8b stops at the BUDGET, and this row is why that is not a detail** (live-gate fix G).
     ///
-    /// A shown session's non-shown tabs are deliberately NOT protected from cap eviction
+    /// A shown session's non-shown tabs are deliberately NOT protected from eviction
     /// (`capEvictions`' own doc — spec §4's "never the shown tab, never a working session's tabs",
-    /// read literally). So an UNBOUNDED eager pass would create tab 9, have the cap evict it as
-    /// least-recently-used, and create it again on the very next plan, forever — the create/stop
+    /// read literally). So an UNBOUNDED eager pass would create one more tab, have the cap evict it
+    /// as least-recently-used, and create it again on the very next plan, forever — the create/stop
     /// loop `capEvictions` names as the thing eviction must never cause, arrived at from the create
-    /// side instead. The second plan below is what catches it: with the rule capped it is empty.
-    func test_rule8b_stopsAtTheCapInsteadOfCreatingTabsTheCapWouldImmediatelyEvict() {
+    /// side instead. The second plan below is what catches it: with the rule bounded it is empty.
+    ///
+    /// Four of the ten are already live and measured at an eighth of the budget each, so the
+    /// engine's estimate for a tab it has not created yet (the heaviest measured tab) is that same
+    /// eighth — and exactly four more fit.
+    func test_rule8b_stopsAtTheBudgetInsteadOfCreatingTabsTheCapWouldImmediatelyEvict() {
         let many = (1...10).map { tab("t\($0)", url: "https://t\($0)", shown: $0 == 1) }
         let sessions = ["s1": sig(attachedHere: true)]
-        let actions = plan(sessions: sessions, tabs: ["s1": many], live: [])
+        let alreadyLive: Set<String> = ["t1", "t2", "t3", "t4"]
+        let memory = bytes(alreadyLive, nFit: 8)
+
+        let actions = plan(sessions: sessions, tabs: ["s1": many], live: alreadyLive,
+                           viewport: "t1", lruOrder: ["t1", "t2", "t3", "t4"],
+                           memoryBytesByTab: memory)
 
         XCTAssertEqual(actions.compactMap { if case .create(let id, _) = $0 { return id } else { return nil } },
-                       (1...BrowserLifecycleEngine.maxLive).map { "t\($0)" },
-                       "the cap is the eager pass's budget, taken in fold order")
+                       ["t5", "t6", "t7", "t8"],
+                       "the budget is the eager pass's allowance, spent in fold order")
         XCTAssertFalse(actions.contains { if case .stop = $0 { return true } else { return false } },
                        "a plan must never create a tab and evict one in the same breath")
 
-        var sim = Sim()
+        var sim = Sim(live: alreadyLive, viewport: "t1", lruOrder: ["t1", "t2", "t3", "t4"])
         sim.apply(actions)
+        // The four new tabs measure what the engine estimated they would — which is what the app's
+        // own equal-share sampler produces once they exist (`BrowserMemorySampler.equalShare`).
         let second = plan(sessions: sessions, tabs: ["s1": many], live: sim.live,
-                          viewport: sim.viewport, lruOrder: sim.lruOrder)
+                          viewport: sim.viewport, lruOrder: sim.lruOrder,
+                          memoryBytesByTab: bytes(sim.live, nFit: 8))
         XCTAssertEqual(second, [],
-                       "the create/stop loop: rule 8b re-created what the cap had just evicted")
+                       "the create/stop loop: rule 8b re-created what the budget had just refused")
+    }
+
+    /// **The empty map: no measurement, so the count backstop is the only bound** (live-gate fix G).
+    ///
+    /// Reachable in production and not merely defensive — it is the state of every launch until the
+    /// first `ps` sweep answers, and the state of any machine where the sweep fails. The correct
+    /// degradation is "we cannot justify stopping anything for memory", i.e. the process bound and
+    /// nothing else; the cost is a cold session with more tabs than that opening at the backstop
+    /// rather than at a measured budget, corrected by the very next plan once a sample lands.
+    func test_rule8b_withNoMeasurementAtAllStopsAtTheCountBackstop() {
+        let many = (1...30).map { tab("t\($0)", url: "https://t\($0)", shown: $0 == 1) }
+        let actions = plan(sessions: ["s1": sig(attachedHere: true)], tabs: ["s1": many], live: [])
+
+        let created = actions.compactMap { if case .create(let id, _) = $0 { return id } else { return nil } }
+        XCTAssertEqual(created.count, BrowserLifecycleEngine.maxLiveBackstop)
+        XCTAssertEqual(created, (1...BrowserLifecycleEngine.maxLiveBackstop).map { "t\($0)" },
+                       "fold order, and the backstop is where it stops")
+        XCTAssertFalse(actions.contains { if case .stop = $0 { return true } else { return false } })
+    }
+
+    /// The two policy numbers, written out. Every row above expresses its budget as a FRACTION of
+    /// `memoryBudgetBytes` and its backstop through `maxLiveBackstop`, which is what keeps them
+    /// readable — and also what makes them all move silently if either constant is edited. This is
+    /// the one row that does not, so a change to the policy has to be a deliberate change to the
+    /// policy. (It replaces `XCTAssertEqual(maxLive, 8)`, which did the same job for the count cap.)
+    func test_budget_theConstantsAreTheDocumentedPolicy() {
+        XCTAssertEqual(BrowserLifecycleEngine.memoryBudgetBytes, 4 * 1024 * 1024 * 1024,
+                       "4 GiB — spec §4's budget")
+        XCTAssertEqual(BrowserLifecycleEngine.maxLiveBackstop, 24,
+                       "the process/fd backstop, and the whole rule when nothing is measured")
+    }
+
+    /// **The user's headline case: 16 tabs that barely eat any memory all stay alive.**
+    ///
+    /// The whole reason the count cap was replaced — under `maxLive = 8` these would have been
+    /// halved on principle. Sixteen tabs at a sixty-fourth of the budget each spend a quarter of it
+    /// between them, so nothing is evicted and nothing is refused.
+    func test_budget_sixteenTinyTabsAllStayLive() {
+        let tabs = [tab("t0", shown: true)] + (1...15).map { tab("t\($0)") }
+        let ids = Set(tabs.map(\.tabId))
+        let actions = plan(sessions: ["a": sig(attachedElsewhere: true)],
+                           tabs: ["a": tabs],
+                           live: ids,
+                           lruOrder: tabs.map(\.tabId),
+                           memoryBytesByTab: bytes(ids, nFit: 64))
+        XCTAssertEqual(actions, [], "a count cap would have stopped eight of these: \(actions)")
+    }
+
+    /// The same sixteen tabs, heavy instead of tiny: a quarter of the budget each, so four fit and
+    /// the twelve least-recently-used go. The count is identical, the answer is not — which is the
+    /// whole of the change.
+    func test_budget_heavyTabsAreEvictedLeastRecentlyUsedFirst() {
+        let tabs = [tab("t0", shown: true)] + (1...15).map { tab("t\($0)") }
+        let ids = Set(tabs.map(\.tabId))
+        // t0 is the session's shown tab and therefore protected, so eviction starts at t1.
+        let actions = plan(sessions: ["a": sig(attachedElsewhere: true)],
+                           tabs: ["a": tabs],
+                           live: ids,
+                           lruOrder: tabs.map(\.tabId),
+                           memoryBytesByTab: bytes(ids, nFit: 4))
+        XCTAssertEqual(actions, (1...12).map { .stop(tabId: "t\($0)") })
+    }
+
+    /// **The count backstop still bites when the pages are weightless.** Twenty-five tabs at a
+    /// thousandth of the budget each are nowhere near it, and one still has to go: a live browser is
+    /// a renderer process with its own descriptors and IPC channels whatever the page weighs.
+    func test_budget_theCountBackstopBoundsEvenWeightlessTabs() {
+        let tabs = [tab("t00", shown: true)] + (1...24).map { tab(String(format: "t%02d", $0)) }
+        let ids = Set(tabs.map(\.tabId))
+        let actions = plan(sessions: ["a": sig(attachedElsewhere: true)],
+                           tabs: ["a": tabs],
+                           live: ids,
+                           lruOrder: tabs.map(\.tabId),
+                           memoryBytesByTab: bytes(ids, nFit: 1000))
+        XCTAssertEqual(actions, [.stop(tabId: "t01")])
+    }
+
+    /// The protections are the budget's, not the count's: over budget by miles, with every live tab
+    /// belonging to a working session, nothing is stopped. (`capEvictions`' sharpened edge, restated
+    /// against the new bound so a mutation that swapped byte-overage for count-overage cannot pass
+    /// it by accident.)
+    func test_budget_protectionsHoldWhenTheBudgetIsBlownWideOpen() {
+        let workTabs = [tab("w0", shown: true)] + (1...5).map { tab("w\($0)") }
+        let ids = Set(workTabs.map(\.tabId))
+        let actions = plan(sessions: ["w": sig(working: true)],
+                           tabs: ["w": workTabs],
+                           live: ids,
+                           lruOrder: workTabs.map(\.tabId),
+                           memoryBytesByTab: bytes(ids, nFit: 1))   // each tab alone fills the budget
+        XCTAssertEqual(actions, [])
     }
 
     // MARK: - Rule 4: the linger
@@ -584,7 +709,7 @@ final class BrowserLifecycleTests: XCTestCase {
         XCTAssertEqual(actions, [.stop(tabId: "t1"), .cancelScheduledStop(sessionId: "s1")])
     }
 
-    // MARK: - Rule 7: the cap
+    // MARK: - Rule 7: the cap (a BUDGET since live-gate fix G)
 
     /// Ten live tabs across two phone-attached sessions; the cap is 8, so the two least-recently
     /// used EVICTABLE tabs go. Evictable = not a session's shown tab (which would be recreated on
@@ -598,18 +723,20 @@ final class BrowserLifecycleTests: XCTestCase {
         let actions = plan(sessions: ["a": sig(attachedElsewhere: true), "b": sig(attachedElsewhere: true)],
                            tabs: ["a": tabsA, "b": tabsB],
                            live: all,
-                           lruOrder: ["a1", "b1", "a2", "b2", "a3", "b3", "a4", "b4", "a0", "b0"])
+                           lruOrder: ["a1", "b1", "a2", "b2", "a3", "b3", "a4", "b4", "a0", "b0"],
+                           memoryBytesByTab: bytes(all, nFit: 8))
         XCTAssertEqual(actions, [.stop(tabId: "a1"), .stop(tabId: "b1")])
-        XCTAssertEqual(BrowserLifecycleEngine.maxLive, 8)
     }
 
-    /// Exactly at the cap, nothing is evicted — the rule is `>`, not `>=`.
+    /// Exactly AT the budget, nothing is evicted — the rule is `>`, not `>=`.
     func test_cap_exactlyAtTheCap_evictsNothing() {
         let tabs = [tab("t0", shown: true)] + (1...7).map { tab("t\($0)") }
+        let ids = Set(tabs.map(\.tabId))
         let actions = plan(sessions: ["a": sig(attachedElsewhere: true)],
                            tabs: ["a": tabs],
-                           live: Set(tabs.map(\.tabId)),
-                           lruOrder: tabs.map(\.tabId))
+                           live: ids,
+                           lruOrder: tabs.map(\.tabId),
+                           memoryBytesByTab: bytes(ids, nFit: 8))
         XCTAssertEqual(actions, [])
     }
 
@@ -625,7 +752,8 @@ final class BrowserLifecycleTests: XCTestCase {
                            tabs: ["s": shownTabs, "o": otherTabs],
                            live: all,
                            viewport: "v",
-                           lruOrder: ["v", "s1", "s2", "s3", "s4", "o1", "o2", "o3", "o0"])
+                           lruOrder: ["v", "s1", "s2", "s3", "s4", "o1", "o2", "o3", "o0"],
+                           memoryBytesByTab: bytes(all, nFit: 8))
         XCTAssertEqual(actions, [.stop(tabId: "s1")])
     }
 
@@ -640,7 +768,8 @@ final class BrowserLifecycleTests: XCTestCase {
         let actions = plan(sessions: ["w": sig(working: true), "o": sig(attachedElsewhere: true)],
                            tabs: ["w": workTabs, "o": otherTabs],
                            live: all,
-                           lruOrder: ["w1", "w2", "w3", "w4", "w5", "w6", "w0", "o1", "o0"])
+                           lruOrder: ["w1", "w2", "w3", "w4", "w5", "w6", "w0", "o1", "o0"],
+                           memoryBytesByTab: bytes(all, nFit: 8))
         XCTAssertEqual(actions, [.stop(tabId: "o1")])
     }
 
@@ -649,22 +778,26 @@ final class BrowserLifecycleTests: XCTestCase {
     /// working session — zero stops.
     func test_cap_everythingProtected_exceedsTheCapRatherThanStopping() {
         let workTabs = [tab("w0", shown: true)] + (1...8).map { tab("w\($0)") }
+        let ids = Set(workTabs.map(\.tabId))
         let actions = plan(sessions: ["w": sig(working: true)],
                            tabs: ["w": workTabs],
-                           live: Set(workTabs.map(\.tabId)),
-                           lruOrder: workTabs.map(\.tabId))
+                           live: ids,
+                           lruOrder: workTabs.map(\.tabId),
+                           memoryBytesByTab: bytes(ids, nFit: 8))
         XCTAssertEqual(actions, [])
     }
 
     /// A create counts against the cap in the same plan that emits it — otherwise the cap is always
     /// one plan behind the growth it exists to bound.
     func test_cap_aCreateCountsTowardTheCap() {
-        let tabs = [tab("t0", shown: true)] + (1...7).map { tab("t\($0)") }   // 8 live
+        let tabs = [tab("t0", shown: true)] + (1...7).map { tab("t\($0)") }   // 8 live, exactly the budget
         let waking = [tab("n0", url: "https://n", shown: true)]               // +1 create
+        let ids = Set(tabs.map(\.tabId))
         let actions = plan(sessions: ["a": sig(attachedElsewhere: true), "z": sig(working: true)],
                            tabs: ["a": tabs, "z": waking],
-                           live: Set(tabs.map(\.tabId)),
-                           lruOrder: tabs.map(\.tabId))
+                           live: ids,
+                           lruOrder: tabs.map(\.tabId),
+                           memoryBytesByTab: bytes(ids, nFit: 8))
         XCTAssertEqual(actions, [.stop(tabId: "t1"), .create(tabId: "n0", url: "https://n")])
     }
 
@@ -680,13 +813,18 @@ final class BrowserLifecycleTests: XCTestCase {
     /// real tab. Eight legitimate live tabs (exactly the cap) plus one orphan → the orphan dies and
     /// nothing else does.
     func test_cap_beltStoppedOrphansDoNotCountAsSurvivors() {
-        let tabs = [tab("a0", shown: true)] + (1...7).map { tab("a\($0)") }   // 8 = exactly maxLive
+        let tabs = [tab("a0", shown: true)] + (1...7).map { tab("a\($0)") }   // 8 = exactly the budget
+        let live = Set(tabs.map(\.tabId)).union(["ghost"])
         let actions = plan(sessions: ["a": sig(attachedElsewhere: true)],
                            tabs: ["a": tabs],
-                           live: Set(tabs.map(\.tabId)).union(["ghost"]),
+                           live: live,
                            // `ghost` last = most-recently-used, so a mutation that counts it as a
                            // survivor evicts a REAL tab (a1) rather than double-stopping the orphan.
-                           lruOrder: (1...7).map { "a\($0)" } + ["a0", "ghost"])
+                           lruOrder: (1...7).map { "a\($0)" } + ["a0", "ghost"],
+                           // The sampler measures every LIVE tab, orphan included — which is what
+                           // makes the survivor arithmetic the thing under test: count the ghost in
+                           // and the eight real tabs are over budget.
+                           memoryBytesByTab: bytes(live, nFit: 8))
         XCTAssertEqual(actions, [.stop(tabId: "ghost")])
     }
 
@@ -704,7 +842,8 @@ final class BrowserLifecycleTests: XCTestCase {
                            tabs: ["h": heldTabs, "q": quietTabs],
                            live: all,
                            pendingStops: ["q": t0.addingTimeInterval(100)],   // well inside the linger
-                           lruOrder: ["q0", "q1", "q2", "q3", "h1", "h2", "h3", "h4", "h0"])
+                           lruOrder: ["q0", "q1", "q2", "q3", "h1", "h2", "h3", "h4", "h0"],
+                           memoryBytesByTab: bytes(all, nFit: 8))
         // The quiet session's SHOWN tab is the LRU-oldest and is taken — quiet is not `hold`, so
         // sharpening (c)'s shown-tab protection does not reach it.
         XCTAssertEqual(actions, [.stop(tabId: "q0")])
@@ -714,21 +853,43 @@ final class BrowserLifecycleTests: XCTestCase {
     /// is treated as most-recent, so a KNOWN-old tab always goes first) and, among such tabs,
     /// in sorted order — rule 10 leaves no ambiguity even on malformed input.
     func test_cap_tabsMissingFromLruOrderAreEvictedLastAndSorted() {
-        let tabs = [tab("t0", shown: true)] + (1...9).map { tab("t\($0)") }   // 10 live, cap 8
+        let tabs = [tab("t0", shown: true)] + (1...9).map { tab("t\($0)") }   // 10 live, 8 fit
+        let ids = Set(tabs.map(\.tabId))
         let actions = plan(sessions: ["a": sig(attachedElsewhere: true)],
                            tabs: ["a": tabs],
-                           live: Set(tabs.map(\.tabId)),
-                           lruOrder: ["t3", "t1"])
+                           live: ids,
+                           lruOrder: ["t3", "t1"],
+                           memoryBytesByTab: bytes(ids, nFit: 8))
         XCTAssertEqual(actions, [.stop(tabId: "t3"), .stop(tabId: "t1")])
     }
 
     func test_cap_whenLruIsExhaustedTheRemainderIsSorted() {
         let tabs = [tab("t0", shown: true)] + (1...9).map { tab("t\($0)") }
+        let ids = Set(tabs.map(\.tabId))
         let actions = plan(sessions: ["a": sig(attachedElsewhere: true)],
                            tabs: ["a": tabs],
-                           live: Set(tabs.map(\.tabId)),
-                           lruOrder: ["t9"])
+                           live: ids,
+                           lruOrder: ["t9"],
+                           memoryBytesByTab: bytes(ids, nFit: 8))
         XCTAssertEqual(actions, [.stop(tabId: "t9"), .stop(tabId: "t1")])
+    }
+
+    /// **An UNMEASURED tab is never evicted for the budget's sake** — it contributed nothing to the
+    /// total, so it cannot be why the total is over, and stopping it would free nothing while
+    /// destroying a real page. Here the two measured tabs blow the budget between them and the
+    /// unmeasured one sits first in LRU order: it is skipped, and the eviction reaches past it.
+    ///
+    /// (Today's sampler measures every live tab or none, so this is a contract the engine holds
+    /// rather than a state the app produces — which is exactly why it needs a row rather than a
+    /// comment.)
+    func test_budget_anUnmeasuredTabIsNotEvictedToPayAByteOverage() {
+        let tabs = [tab("t0", shown: true), tab("unmeasured"), tab("t1"), tab("t2")]
+        let actions = plan(sessions: ["a": sig(attachedElsewhere: true)],
+                           tabs: ["a": tabs],
+                           live: ["t0", "unmeasured", "t1", "t2"],
+                           lruOrder: ["unmeasured", "t1", "t2", "t0"],
+                           memoryBytesByTab: bytes(["t0", "t1", "t2"], nFit: 2))
+        XCTAssertEqual(actions, [.stop(tabId: "t1")])
     }
 
     // MARK: - Rule 10: determinism, and the documented action order
@@ -866,8 +1027,10 @@ final class BrowserLifecycleTests: XCTestCase {
     /// cap, so the re-plan is empty (the shown tab it protected is NOT re-created either).
     func test_idempotent_capEviction() {
         let tabs = [tab("t0", shown: true)] + (1...8).map { tab("t\($0)") }
+        let ids = Set(tabs.map(\.tabId))
         assertIdempotent(sessions: ["a": sig(attachedElsewhere: true)],
                          tabs: ["a": tabs],
-                         sim: Sim(live: Set(tabs.map(\.tabId)), lruOrder: tabs.map(\.tabId)))
+                         sim: Sim(live: ids, lruOrder: tabs.map(\.tabId)),
+                         memoryBytesByTab: bytes(ids, nFit: 8))
     }
 }

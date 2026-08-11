@@ -60,6 +60,17 @@ final class BrowserSignalsCoordinator {
     /// this — it passes the caller's, so a test drives the linger without waiting 300 seconds.
     private let now: () -> Date
 
+    /// live-gate fix G: the renderer-RSS total behind `plan(memoryBytesByTab:)`. Supplying the
+    /// engine's inputs is this file's job; deciding what to do with them is not — the budget, the
+    /// backstop and every rule that spends them live in `BrowserLifecycle.swift`.
+    ///
+    /// A CLOSURE rather than the sampler itself, so a test can hand over a number instead of a
+    /// process: `BrowserMemorySampler`'s refresh is a detached `ps` sweep, and a suite that let the
+    /// real one through would spawn one per world and then have to wait for it. The sampler's own
+    /// two decisions — the throttle and the equal share — are pinned directly
+    /// (`BrowserMemoryTests`), which is where they are actually visible.
+    private let memoryBytes: @MainActor () -> UInt64
+
     private var cancellables = Set<AnyCancellable>()
 
     /// The session the panel is displaying, or — once nothing is displayed **because the window
@@ -165,10 +176,16 @@ final class BrowserSignalsCoordinator {
     /// re-examined: without it the runtime logs and the session's browsers live forever.
     /// Assigning them in `init`, above the first `replan()`, is what makes "before the first
     /// `apply`" structural rather than a convention someone has to remember.
-    init(host: ShellSessionHost, runtime: BrowserRuntime, now: @escaping () -> Date = Date.init) {
+    init(host: ShellSessionHost, runtime: BrowserRuntime, now: @escaping () -> Date = Date.init,
+         memoryBytes: (@MainActor () -> UInt64)? = nil) {
         self.host = host
         self.runtime = runtime
         self.now = now
+        // Defaulted so the app's one construction site stays a single line. The sampler takes `now`
+        // with it: one clock for the whole coordinator, so nothing refreshes on a schedule the
+        // caller cannot reach.
+        let sampler = BrowserMemorySampler(now: now)
+        self.memoryBytes = memoryBytes ?? { sampler.totalBytesRefreshingIfStale() }
 
         runtime.host = host
         runtime.onLingerDeadline = { [weak self] _ in self?.replan() }
@@ -294,12 +311,22 @@ final class BrowserSignalsCoordinator {
     func replan() {
         let (sessions, tabs) = assemble()
 
+        // live-gate fix G. The sampler answers from its cache and kicks a refresh only when that has
+        // gone stale, so this never blocks a plan on a `ps` sweep — see `BrowserMemorySampler` for
+        // what "up to `interval` seconds old" costs and why it is the right trade for a bound whose
+        // job is to stop idle accumulation. The share is computed against the SAME live set the plan
+        // is given, so the map can never describe a tab the plan does not know about.
+        let live = runtime.liveTabIds
+        let memoryBytesByTab = BrowserMemorySampler.equalShare(totalBytes: memoryBytes(),
+                                                               liveTabIds: live)
+
         let actions = BrowserLifecycleEngine.plan(sessions: sessions,
                                                   tabs: tabs,
-                                                  live: runtime.liveTabIds,
+                                                  live: live,
                                                   viewport: runtime.viewportTabId,
                                                   pendingStops: runtime.pendingStopDeadlines,
                                                   lruOrder: runtime.lruOrder,
+                                                  memoryBytesByTab: memoryBytesByTab,
                                                   now: now())
 
         // The reverse index the executor needs to bind a created tab's model to its session. Built

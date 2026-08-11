@@ -212,7 +212,9 @@ final class SpikeCloseLeakHarness {
     /// **Quit with N browsers, most of them PARKED — the shape T6's one-tab run could not reach.**
     ///
     /// T6 measured the quit path against a single browser in a visible window and fixed it there.
-    /// The runtime's world is up to 8 (`BrowserLifecycleEngine.maxLive`), and all but the shown
+    /// The runtime's world is up to `BrowserLifecycleEngine.maxLiveBackstop` (24 since live-gate fix
+    /// G replaced the count cap with a memory budget; it was 8 when this run was taken, which is why
+    /// `NORMA_SPIKE_CLOSE_BROWSERS` defaults the way it does), and all but the shown
     /// one live in `BrowserRuntime`'s hidden parking window with their containers held **strongly**
     /// by its `containers` map — a map nothing clears at quit (no quit path calls `stop`;
     /// `applicationWillTerminate` → `closeMainWindows()` reaches only `PanelViewport.dismantleNSView`,
