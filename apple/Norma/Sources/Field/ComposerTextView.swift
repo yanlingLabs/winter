@@ -117,7 +117,13 @@ struct ComposerTextView: NSViewRepresentable {
 
         DispatchQueue.main.async { [weak textView] in
             guard let textView else { return }
-            _ = textView.window?.makeFirstResponder(textView)
+            // Live-gate fix D: yield to whatever text input the user is already in. A composer
+            // MOUNTING is not a reason to take the caret out of a field somebody is typing in — the
+            // panel opening beside a focused URL bar is exactly that case.
+            if let window = textView.window,
+               composerShouldClaimFirstResponder(current: window.firstResponder, composer: textView) {
+                _ = window.makeFirstResponder(textView)
+            }
             context.coordinator.reportHeight(textView)
         }
         return scrollView
@@ -143,11 +149,25 @@ struct ComposerTextView: NSViewRepresentable {
         )
         context.coordinator.reportHeight(textView)
 
-        let window = textView.window
-        if window?.firstResponder !== textView {
-            DispatchQueue.main.async {
-                _ = window?.makeFirstResponder(textView)
-            }
+        // **The re-claim, and live-gate fix D's main site.**
+        //
+        // This runs on EVERY SwiftUI update pass of the composer, and in the shell those are
+        // constant: the 5-second `session.list` poll republishes `SessionDirectory.rows`, every
+        // streamed delta republishes `SessionModel.state`, and `FieldStateAdapter` is an
+        // `@ObservedObject` of the view that owns this. Before this fix the re-claim was
+        // unconditional — "if I am not first responder, become it" — so any of that churn arriving
+        // while the user typed in the panel's URL field pulled the caret into the composer, one or
+        // two keystrokes in. That is the user's report exactly, and it is why the predicate is
+        // consulted INSIDE the hop: the responder can change between the update pass and the block.
+        //
+        // The resting behaviour is deliberately unchanged — with the window, a button or a scroll
+        // view as first responder the composer still claims, which is the premise `isTextEditing
+        // Focused` (`NormaComposerCard.swift`) is written against and `CardWiringTests` pins.
+        DispatchQueue.main.async { [weak textView] in
+            guard let textView, let window = textView.window,
+                  composerShouldClaimFirstResponder(current: window.firstResponder, composer: textView)
+            else { return }
+            _ = window.makeFirstResponder(textView)
         }
     }
 
@@ -183,6 +203,33 @@ struct ComposerTextView: NSViewRepresentable {
             }
         }
     }
+}
+
+/// **Live-gate fix D: may the composer take first responder right now?**
+///
+/// The composer is designed to hold `firstResponder` at rest — `isTextEditingFocused`
+/// (`NormaComposerCard.swift`) documents that as a standing fact the card-key routing has to work
+/// around — and it does that by re-claiming on every mount and every SwiftUI update. That is right
+/// against the window, a button, or nothing at all. It is wrong against **another text input the
+/// user is in the middle of using**: the panel's URL field is a SwiftUI `TextField` in the same
+/// window, and the shell's ordinary churn (the 5-second session-list poll, every streamed delta)
+/// was enough to pull the caret out of it mid-address, which is what the user reported.
+///
+/// So the one thing this refuses is stealing from a text input:
+///   * `nil` — nobody has it. Claim.
+///   * the composer itself — nothing to do.
+///   * an `NSText` (a SwiftUI `TextField`'s shared field editor is one, as is any `NSTextView`) or
+///     an `NSTextInputClient` (which is what Chromium's `RenderWidgetHostViewCocoa` is, so typing
+///     INTO a page is protected by the same rule) — **yield**.
+///   * anything else, `NSWindow` included — claim, exactly as before.
+///
+/// Both conformance tests are kept even though `NSTextView` satisfies both: `NSTextField` itself is
+/// neither (its field editor is the responder), and a view that is only `NSTextInputClient` — CEF's
+/// — is not an `NSText`. Either test alone leaves a real text input unprotected.
+func composerShouldClaimFirstResponder(current: NSResponder?, composer: NSView) -> Bool {
+    guard let current else { return true }
+    if current === composer { return false }
+    return !(current is NSText || current is NSTextInputClient)
 }
 
 /// v1 port of `CommandTextView` (TextField/ComposerTextView.swift:333-437), stripped to just

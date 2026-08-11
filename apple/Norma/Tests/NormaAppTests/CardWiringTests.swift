@@ -158,6 +158,54 @@ final class CardWiringTests: XCTestCase {
         XCTAssertFalse(isTextEditingFocused(in: window), "the composer itself must never count as a card's text field")
     }
 
+    // MARK: - composerShouldClaimFirstResponder (live-gate fix D)
+
+    /// **The composer must not pull the caret out of a text input the user is using.**
+    ///
+    /// `ComposerTextView.updateNSView` re-claims first responder on every SwiftUI update pass, and
+    /// in the shell those are constant (the 5-second `session.list` poll, every streamed delta,
+    /// `FieldStateAdapter` being an `@ObservedObject` of the view that owns it). Unconditionally,
+    /// that pulled the caret into the composer while the user typed in the panel's URL field — the
+    /// reported bug. The predicate is what the re-claim now consults, at both its sites.
+    ///
+    /// The row is built around the distinction that matters: the RESTING claim must survive
+    /// untouched, because `isTextEditingFocused` above is written against "the composer holds
+    /// `firstResponder` at rest" and `testCardKeyActionDigitsSelectOption` depends on it. So the
+    /// window case and the field-editor case are asserted side by side; a predicate that simply
+    /// answered "never claim" would pass half of this and break the other half.
+    @MainActor
+    func testTheComposerYieldsToAnyOtherFocusedTextInputButStillClaimsAtRest() {
+        let composer = CommandTextView()
+
+        XCTAssertTrue(composerShouldClaimFirstResponder(current: nil, composer: composer),
+                      "nobody has it — the composer's whole resting behaviour")
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false   // see the row above for why this is not optional
+        defer { window.close() }
+        XCTAssertTrue(composerShouldClaimFirstResponder(current: window, composer: composer),
+                      "the window is the resting first responder — claiming from it is the point")
+
+        XCTAssertTrue(composerShouldClaimFirstResponder(current: NSButton(), composer: composer),
+                      "a non-text responder is not somebody typing")
+
+        XCTAssertFalse(composerShouldClaimFirstResponder(current: composer, composer: composer),
+                       "already ours")
+
+        // A SwiftUI `TextField` under focus makes its shared FIELD EDITOR the first responder, and
+        // that is always an NSTextView — the panel's URL field, the card's notes/Other fields, the
+        // sidebar search palette. This is the bug's own case.
+        XCTAssertFalse(composerShouldClaimFirstResponder(current: NSTextView(), composer: composer),
+                       "the composer stole the caret from a focused text field")
+
+        // And a view that is only `NSTextInputClient` — which is exactly what Chromium's
+        // `RenderWidgetHostViewCocoa` is, i.e. typing INTO a page.
+        XCTAssertFalse(composerShouldClaimFirstResponder(current: BrowserRuntimeTests.TextInputView(),
+                                                         composer: composer),
+                       "the composer stole the caret from a page the user was typing in")
+    }
+
     // MARK: - Adapter in-flight/error discipline
 
     @MainActor
