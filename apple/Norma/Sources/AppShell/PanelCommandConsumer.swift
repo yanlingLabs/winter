@@ -33,15 +33,27 @@ import NormaProtocol
 /// it), and the same hook `panelStore.apply` rides. Deliberately NOT inside `PanelStore.apply`: that
 /// object is a pure fold over four PERSISTED events, and a command is an action with a reply.
 ///
-/// Deliberately **outside** that hook's `e.sessionId == attachedSessionId` filter, unlike the store.
-/// Three reasons, in order of weight: the command names its own `sessionId` and `tabId` and needs no
-/// context to be routed; `BrowserRuntime` owns browsers for every session this shell has folded, not
-/// merely the displayed one, so a hopped-away session's parked browser is genuinely drivable; and
-/// the daemon re-checks `sessionId` against its own pending entry before accepting the result
-/// (`PanelCommandRegistry.resolve`), so nothing is being trusted here that is not checked there.
-/// Filtering would convert a command the app can serve into a `deadlineMs` timeout — and `hop(to:)`
-/// makes that race real, since it flips `attachedSessionId` synchronously while the daemon is still
-/// delivering the previous session's events on the same socket.
+/// Deliberately **outside** that hook's `e.sessionId == attachedSessionId` filter, unlike the store —
+/// and **the reason is the HOP RACE, not a claim that unattached sessions get commands.**
+///
+/// Fix round 1 corrected the justification that stood here, which was false about the daemon: a
+/// `panel_command` is delivered by `hub.broadcastTransient` → `fanOut(sessionId, …)` →
+/// `this.attachments.get(sessionId)` alone (`packages/core/src/sessions/hub.ts`) — it is not on the
+/// `onGlobalEvent` path — and this app is attached to exactly ONE session at a time, because a hop is
+/// move semantics on one connection. So a command for a session the shell is not attached to is never
+/// DELIVERED here at all, and "a hopped-away session's parked browser is drivable" was wrong.
+///
+/// What is real, and is sufficient on its own: **`hop(to:)` flips `attachedSessionId` synchronously**,
+/// while the departing session's already-in-flight events are still crossing this socket. Those
+/// commands were dispatched to an attachment that was genuinely ours, their tab's browser is still
+/// live in this runtime, and an inside-the-filter consumer would drop every one of them into a
+/// `deadlineMs` timeout for no reason. Reading the event's own `sessionId` rather than the shell's
+/// current one is what keeps that window servable.
+///
+/// Two supporting facts, neither of which is the reason: the command names its own `sessionId` and
+/// `tabId`, so no ambient context is needed to route it; and the daemon re-checks `sessionId` against
+/// its own pending entry before accepting the result (`PanelCommandRegistry.resolve`), so nothing is
+/// trusted here that is not checked there.
 ///
 /// **A command can never arrive by REPLAY**, which is why nothing here guards against re-execution:
 /// `panel_command` is transient, transients are never persisted, and the event's own schema comment
@@ -165,6 +177,21 @@ final class PanelCommandConsumer {
             return
         }
 
+        // **WHO OWNS "does this tabId belong to this sessionId?" — the daemon's browser tool, not
+        // this file.** Written down here because this is where the tab is resolved and nothing on
+        // this side checks it: every verb below hands `command.tabId` to `BrowserRuntime`, whose
+        // container registry is keyed by tabId across EVERY session the shell has folded, and the
+        // runtime keeps no tab→session map to check against even if this file wanted one.
+        //
+        // Unreachable today, and named in `mayOpenTab`'s voice precisely because "every call site
+        // happens to pass a safe value today" is exactly the reasoning this repo has already been
+        // bitten by (`turn_completed.contextTokens`): the fan-out is session-scoped, so a command
+        // can only arrive for a session that was ours, and the sole producer is Task 4's tool, which
+        // does not exist yet. What makes it worth writing down now is that that tool takes a
+        // **model-supplied `tabId`** — so it is the layer that holds the per-session tab list
+        // (`panel.list`'s fold) and the layer that must validate `tabId ∈ that session's tabs`
+        // BEFORE dispatch. Without that check a model could name another session's tab and this
+        // consumer would drive it, because from here the two are indistinguishable.
         let call = Call(sessionId: command.sessionId, commandId: command.commandId,
                         action: command.action)
 
@@ -362,11 +389,19 @@ final class PanelCommandConsumer {
     /// The decision, and the reasoning, because it is the one place this file deliberately goes
     /// quiet on a command it accepted:
     ///
-    /// The daemon's pending entry was armed for the SAME `deadlineMs` and armed STRICTLY EARLIER —
+    /// The daemon's pending entry was armed for the SAME `deadlineMs` and armed EARLIER —
     /// `PanelCommandRegistry.dispatch` starts its `setTimeout` before it emits, and the event still
     /// has a socket, a fold and a decode to cross before this consumer sees it. So by the time this
-    /// timer fires, the daemon's has already fired: the command is settled as `{kind:"timeout"}`,
-    /// the awaiting tool has been answered, and a result sent now can only be `dropped`.
+    /// timer fires, the daemon's has all but certainly fired too: the command is settled as
+    /// `{kind:"timeout"}`, the awaiting tool has been answered, and a result sent now can only be
+    /// `dropped`.
+    ///
+    /// **"All but certainly", not "necessarily"** (fix round 1): arming order is a fact, FIRING
+    /// order is not guaranteed — a daemon whose event loop is blocked can run its `setTimeout` late
+    /// enough for this side to fire first. The registry's first-wins covers that skew, so the only
+    /// cost of being wrong is one unsent answer that would have been accepted. Sending would trade
+    /// that for a 3 MiB payload on every genuinely-timed-out screenshot, which is the wrong side of
+    /// the bet.
     ///
     /// The registry TOLERATES that — a late result is not an error, it is logged and answered
     /// `{ok:true}` — so sending would be harmless, and the argument against it is not safety but

@@ -61,6 +61,15 @@ import Foundation
 /// The refusal is reported back to the model rather than swallowed (`ok:false` with the reason), so
 /// the one door that could otherwise fail silently is the one that explains itself.
 ///
+/// **Door 5 is not the only way a URL could reach a web view, and the other one is not a door at
+/// all** (fix round 1). The CDP bridge B2 Task 3 also built (`NormaCEFExecuteCDP`) can navigate:
+/// `Page.navigate` loads any URL, and a `Runtime.evaluate` assigning `location.href` does the same.
+/// Nothing in this file sees either. What contains it is **producer discipline, not policy**: every
+/// CDP method name and expression the app sends is a literal written in `PanelCommandConsumer`, and
+/// `panel_command.args` — the one model-authored payload on the wire — is not read at all until Task
+/// 5. That constraint is stated where it must be honoured (`NormaCEF.h`'s `NormaCEFExecuteCDP`), and
+/// it is named here so the door count is not mistaken for the whole threat model.
+///
 /// **Not every caller of `isAllowed` is one of these doors.** `PanelWebTabModel.displayURL` and the
 /// `⋮` menu ask the same question for PRESENTATION — what the address bar shows, whether Copy Link
 /// is enabled. Those change nothing about what may be loaded or stored, and removing one is a

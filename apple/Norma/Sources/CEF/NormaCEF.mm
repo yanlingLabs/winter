@@ -619,7 +619,21 @@ void ForgetOpenBrowser(CefRefPtr<CefBrowser> browser) {
   // the registration destroys the observer, and an observer that is gone can deliver nothing to a
   // call still sitting in the pending map. In practice the close that brought us here has already
   // failed these (`NormaCEFCloseBrowser`); this is the belt for a browser destroyed by a route this
-  // app did not initiate — CEF's own shutdown sweep, or a renderer that went away.
+  // app did not initiate — CEF's own shutdown sweep, chiefly.
+  //
+  // **A RENDERER CRASH IS NOT ONE OF THOSE ROUTES, stated because the obvious reading is wrong.**
+  // Nothing here handles `OnRenderProcessTerminated`, and a renderer death leaves the `CefBrowser`
+  // alive — so this callback does NOT run, and the pending calls are not failed from here. Coverage
+  // for that case rests entirely on `OnDevToolsAgentDetached` firing when the agent's renderer dies:
+  // plausible (the agent lives in the renderer), NOT stated by `cef_devtools_message_observer.h`,
+  // and not verifiable from any test host.
+  //
+  // **The worst case is bounded, which is why it is disclosed rather than engineered around.** If
+  // the detach never comes, the pending entry simply survives until the browser is closed, and then
+  // one of the three fail points takes it. Meanwhile the consumer's own deadline has already
+  // abandoned the command and CLAIMED its `Call`, so the eventual failure finds a claimed call and
+  // is dropped on the Swift side: no double-send, no unbounded growth (the map is per browser and
+  // drains with it), and the agent was told "timed out" — which for a dead renderer is true.
   FailAllPendingCDP(browser->GetIdentifier(), @"the tab's browser closed before the result arrived");
   g_cdp_registrations.erase(browser->GetIdentifier());
 }

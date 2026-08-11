@@ -247,6 +247,17 @@ typedef void (^NormaCEFCDPCompletion)(BOOL ok, NSString *payloadJSON);
 /// URL allowlist is `PanelURLPolicy`'s (Swift), the verb set is `PanelCommandConsumer`'s, and a C
 /// seam that second-guessed either would make the real policy impossible to locate — the same
 /// ruling `NormaCEFLoadURL` carries.
+///
+/// **THIS IS ITSELF A NAVIGATION DOOR, contained by PRODUCER DISCIPLINE rather than by policy — said
+/// out loud because the scheme allowlist does not reach it.** `Page.navigate` loads any URL, and so
+/// does a `Runtime.evaluate` that assigns `location.href`; neither is refused here or anywhere else.
+/// The containment is exactly this: **every `method` string and every expression this app sends is a
+/// LITERAL written in `PanelCommandConsumer`** — `Runtime.evaluate` over one fixed text-extraction
+/// expression, and `Page.captureScreenshot` — never assembled from a command's fields.
+/// `panel_command.args`, the one model-authored payload on the wire, is deliberately **not read at
+/// all** until Task 5 builds the interaction verbs. When it is, whatever reaches a CDP method name,
+/// expression or params value must be treated as the untrusted input it is: a verb that interpolated
+/// a model string into any of the three would open a navigation path door 5 cannot see.
 void NormaCEFExecuteCDP(NSView *parent,
                         const char *method,
                         const char *paramsJSON,

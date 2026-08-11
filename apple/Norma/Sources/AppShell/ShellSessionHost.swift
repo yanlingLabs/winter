@@ -1133,15 +1133,18 @@ final class ShellSessionHost: ObservableObject {
         // (a layering boundary Task 9 does not cross — see `PanelStore`'s own doc comment).
         //
         // b2-agent-browser T3: the `panel_command` consumer rides this same ONE pump — and
-        // deliberately OUTSIDE the `attachedSessionId` filter the store sits inside. A command
-        // names its own `sessionId` and `tabId`, `BrowserRuntime` owns browsers for every session
-        // this shell has folded rather than only the displayed one, and the daemon re-checks the
-        // session against its own pending entry before accepting the answer
-        // (`PanelCommandRegistry.resolve`). Filtering would turn a command the app can actually
-        // serve into a `deadlineMs` timeout, and `hop(to:)` makes that reachable: it flips
-        // `attachedSessionId` synchronously while the daemon is still delivering the previous
-        // session's events on this very socket. `PanelCommandConsumer`'s own doc carries the full
-        // reasoning and the gap it does not close.
+        // deliberately OUTSIDE the `attachedSessionId` filter the store sits inside. **The reason is
+        // the HOP RACE.** `hop(to:)` flips `attachedSessionId` synchronously, while the DEPARTING
+        // session's already-in-flight events are still crossing this socket; those commands were
+        // dispatched to an attachment that was genuinely ours and their tab's browser is still live
+        // in the runtime, so an inside-the-filter consumer would drop every one of them into a
+        // `deadlineMs` timeout for nothing. Reading the event's own `sessionId` instead of the
+        // shell's current one is what keeps that window servable.
+        //
+        // It is NOT because unattached sessions get commands — they do not: `broadcastTransient`
+        // fans out to `attachments.get(sessionId)` alone (`packages/core/src/sessions/hub.ts`), and
+        // one connection is attached to one session. `PanelCommandConsumer`'s own doc carries the
+        // full reasoning, the correction, and the gap none of this closes.
         //
         // **`return false` is load-bearing, unchanged**: `SessionFeed.handle` reads `true` as
         // "swallowed" and skips its own pinned application entirely, which would stop the session

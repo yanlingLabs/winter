@@ -1920,16 +1920,22 @@ final class ShellSessionHostTests: XCTestCase {
                        "a foreign session's panel event reached PanelStore.apply — the pump's sessionId filter is gone")
     }
 
-    /// b2-agent-browser T3: **a `panel_command` reaches the consumer hook**, and — unlike every
-    /// panel event above it — reaches it for a session this shell is NOT attached to.
+    /// b2-agent-browser T3: **a `panel_command` reaches the consumer hook**, including one whose
+    /// `sessionId` is not the shell's current attachment.
     ///
     /// Both halves are the pin. The first is the wire itself: without `onPanelCommand` on the pump,
     /// the event decodes into `PanelStore.apply`, is recognised by nothing (its own doc says so) and
-    /// vanishes, exactly as it has since Plan A. The second is the deliberate placement OUTSIDE the
-    /// `attachedSessionId` filter `PanelStore` sits inside — a command names its own session and tab,
-    /// `BrowserRuntime` owns browsers for every folded session, and the daemon re-checks the session
-    /// before accepting the answer, so filtering here would only convert a servable command into a
-    /// `deadlineMs` timeout. Move the call inside the guard and the second assertion reds.
+    /// vanishes, exactly as it has since Plan A.
+    ///
+    /// **The second models the HOP RACE, and fix round 1 corrected what this docstring claimed it
+    /// modelled.** The daemon never fans a command out to a connection not attached to its session
+    /// (`broadcastTransient` → `attachments.get(sessionId)`, `packages/core/src/sessions/hub.ts`), so
+    /// "a command for another session arrives" is not a daemon behaviour. What IS real is that
+    /// `hop(to:)` flips `attachedSessionId` synchronously while the departing session's in-flight
+    /// events are still crossing this socket — an event whose `sessionId` is no longer the attached
+    /// one, on an attachment that was genuinely ours when it was dispatched. Feeding a foreign-session
+    /// command on the live socket is exactly that shape, and it is the only way to exercise it without
+    /// racing a real hop. Move the call inside the guard and the second assertion reds.
     func testPanelCommandsReachTheConsumerHookIncludingForAnotherSession() async {
         let (host, factory) = makeHost()
         defer { host.deselect() }
@@ -1950,9 +1956,10 @@ final class ShellSessionHostTests: XCTestCase {
         t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"panel_command","seq":2,"sessionId":"S2","ts":0,"commandId":"c2","tabId":"t9","action":"back","deadlineMs":15000}}"#)
         await feedWaitUntil { seen.count > 1 }
         XCTAssertEqual(seen.map(\.commandId), ["c1", "c2"],
-                       "a command for a session this shell is not attached to was dropped — its "
-                           + "tab's parked browser is still this app's to drive, and the daemon "
-                           + "checks the session itself before accepting the answer")
+                       "a command whose sessionId is not the shell's current attachment was dropped "
+                           + "— that is the hop race (attachedSessionId flips synchronously while "
+                           + "the departing session's in-flight commands are still arriving), and "
+                           + "their tabs' browsers are still live in this runtime")
         XCTAssertEqual(seen.last?.sessionId, "S2")
     }
 
