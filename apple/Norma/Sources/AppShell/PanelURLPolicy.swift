@@ -41,6 +41,26 @@ import Foundation
 /// `BrowserRuntime.swift` (where point 3 actually runs since browser-runtime T3), `methods.ts` and
 /// this file's tests, and renumbering would make every one of them wrong.
 ///
+/// ## Door 5 — **what the AGENT asked to navigate to** (b2-agent-browser Task 3)
+///
+/// `PanelCommandConsumer.navigate` (`PanelCommandConsumer.swift`, in the `case "navigate"` arm of
+/// `handle`) calls `normalizeTypedInput` on `panel_command.url` before anything reaches
+/// `BrowserRuntime.loadURL`. It is a real fifth door and not a restatement of door 1, because the
+/// command channel bypasses the address bar entirely: the daemon caps that field
+/// (`PANEL_URL_MAX_LENGTH`) but deliberately does **not** scheme-refine it — spec §3 states in as
+/// many words that "the consumer is where policy lands" — so before Task 3 a `javascript:` URL
+/// authored by a model would have gone straight into `NormaCEFLoadURL`.
+///
+/// **It reuses door 1's function rather than adding a second one**, which is why door 1's own name
+/// now says "typed or authored". The agent is the same kind of producer the address bar is: an
+/// untrusted string that may or may not carry a scheme, judged by one decision procedure. A
+/// second, agent-specific normaliser would be a second place for the allowlist to be missing from —
+/// the exact failure `mayOpenTab` was added to end. It also means an agent may write
+/// `example.com`, exactly as a person may, and reach `https://example.com`.
+///
+/// The refusal is reported back to the model rather than swallowed (`ok:false` with the reason), so
+/// the one door that could otherwise fail silently is the one that explains itself.
+///
 /// **Not every caller of `isAllowed` is one of these doors.** `PanelWebTabModel.displayURL` and the
 /// `⋮` menu ask the same question for PRESENTATION — what the address bar shows, whether Copy Link
 /// is enabled. Those change nothing about what may be loaded or stored, and removing one is a
@@ -138,7 +158,14 @@ enum PanelURLPolicy {
         return loopbackHosts.contains(bare.lowercased()) ? "http://" : "https://"
     }
 
-    /// **Door 1 — what the user typed.** Returns the URL to navigate to, or `nil` to refuse.
+    /// **Door 1 — what the user typed, and (since b2-agent-browser Task 3) what the agent
+    /// authored.** Returns the URL to navigate to, or `nil` to refuse.
+    ///
+    /// The second caller is `PanelCommandConsumer`'s `navigate` arm — door 5 in this file's header,
+    /// which explains why the command channel is a genuinely separate door and why it reuses this
+    /// function instead of growing one of its own. Everything below applies unchanged to both: the
+    /// input is an untrusted string that may or may not carry a scheme, and there is one decision
+    /// procedure for it.
     ///
     /// A bare host (`example.com`) gains a scheme, which is what every browser's address bar does
     /// and the only reason `isAllowed` alone is not enough here. Anything that still fails the
