@@ -504,6 +504,24 @@ private struct PanelTabPill: View {
                     .font(.system(size: 12))
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    // **live-gate fix J: the title swap must not animate.** Fix E made a parked
+                    // tab's pill update the moment `OnTitleChange` lands, and the user's gate
+                    // reported a small shake as it does. Nothing about the pill's GEOMETRY moves:
+                    // the width is `panelTabPillWidth`'s, fixed on the frame below and independent
+                    // of the label, and this `Text` is leading-aligned at a constant inset. What
+                    // changes is this view's own glyph run and its intrinsic width inside that
+                    // fixed frame — and SwiftUI animates that like any other change if a
+                    // transaction with an animation happens to be in flight when it lands (the
+                    // strip's neighbours have several: `withAnimation(.snappy)` on the expand and
+                    // sidebar toggles, and the insert of the ⌘-clicked tab that is usually
+                    // moments away from this very update).
+                    //
+                    // SUPPRESSED: implicit animation of the update caused by `title` changing, for
+                    // this label only. PRESERVED: everything else the strip animates on purpose —
+                    // tab add/remove, activation, hover (`ShellSidebarRowStyle`), and the pill
+                    // width change when the tab count moves. `.animation(_:value:)` applies only
+                    // when the value it names changes, so no other update is touched.
+                    .animation(nil, value: title)
                     .padding(.leading, 33)
                     // DERIVED from the close button's own inset and box below, so tightening one
                     // can never leave the label running under the other.
