@@ -160,6 +160,12 @@ describe("b2-t6: a DANGEROUS domain with no standing rule", () => {
       expect({ policy, carded: o.carded, dispatched: o.dispatched.length, isError: o.isError })
         .toEqual({ policy, carded: false, dispatched: 0, isError: true });
       expect(o.output).toContain("dangerous-domain list");
+      // Fix round 1, Minor 2: the refusal must not imply an escape that cannot be reached HERE. The
+      // string is mode-invariant (this tool has no policy in ctx, by design), so the only way it can
+      // be true in this cell is by naming the unattended regime out loud — including for a user who
+      // holds a standing rule and would otherwise be told "no approval covers this one" while their
+      // approval exists and is being ignored by policy. One fragment, on the cell where it matters.
+      expect(o.output).toContain("deliberately inert");
     });
   }
 

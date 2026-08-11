@@ -569,6 +569,19 @@ function panelReach(deps: BrowserToolDeps, sessionId: string): PanelReach {
  * Both URL doors are gated — `navigate` AND `open`. `open` matters as much: its url is persisted onto
  * the tab and the app loads it (the panel's restore door), so an ungated `open` would be a `navigate`
  * with an extra step.
+ *
+ * **THE DOOR THAT IS NOT A URL DOOR, named because it is the one place this gate's coverage is
+ * narrower than the card implies (fix round 1, Minor 4).** The session's tab strip is SHARED: the
+ * user opens tabs in it themselves, and the agent's verbs address every tab in the session, not only
+ * the ones it minted. So a tab the USER navigated to a listed host is fully interactable — `click`,
+ * `type`, `submit`, in every interaction-capable mode, with no gate anywhere. Not an oversight and
+ * not closable from here: an interaction verb names no url (this function is never called for one),
+ * and the only fact the daemon holds about where a tab IS — the fold's url, from
+ * `panel.reportNavigation` — is a post-hoc report that can be stale by exactly one click, so a gate
+ * keyed on it would refuse and permit on facts that were true a moment ago. Ruled explicitly in Task
+ * 6 (report §3d) and recorded here, beside the block, rather than only in a report: the domain gate
+ * adjudicates where the AGENT aims, and a shared strip means that is not the same set as where the
+ * agent can act.
  */
 function refuseDangerous(
   url: string,
@@ -583,14 +596,27 @@ function refuseDangerous(
   if (approved) return null;
   return dangerousDomainRefusal(
     url, match,
-    // The reason is written to be true in EVERY mode, which is why it does not say "no approval flow
-    // exists" any more (Task 6 built one) and does not say "ask the user" either. A model reading
-    // this in a chat or dispatch session has no route to a human, and one reading it in an `ask`
-    // session is being told about a card the human already declined or that was never owed — in
-    // neither case is retrying the same url useful, and that is the one thing the sentence must
-    // convey.
-    "navigations to known exfiltration/tunnel-provider hosts are refused unless a human approves "
-      + "that specific domain, and no approval covers this one",
+    // **This sentence is MODE-INVARIANT and has to describe BOTH approval regimes, because this
+    // function cannot tell them apart.** `ToolContext` carries no approval policy — deliberately;
+    // policy is decided in the engine and what arrives here is one bit about THIS call — so there is
+    // no branch to write and the wording must be true under all seven policies at once.
+    //
+    // The first cut of it was not (fix round 1, Minor 2). "…unless a human approves that specific
+    // domain, and no approval covers this one" is accurate under ask/accept-edits/plan and wrong in
+    // two ways under the other four: it implies an escape that cannot be reached there (the card
+    // never fires, so nothing the model or the user does mid-session changes this answer), and it
+    // tells a user who DOES hold a standing `WebFetch(domain:…)` rule that no approval covers the
+    // domain — while their approval exists and is being ignored by policy, which is the more
+    // misleading half. Both are fixed by saying the second regime out loud rather than by narrowing
+    // the claim: approvals are consulted only where a human can be asked for one.
+    //
+    // What it must NOT say, and still doesn't: "no approval flow exists" (Task 6 built one) or "ask
+    // the user" (a chat or dispatch model has no route to a human). What it must convey in every
+    // mode is the same thing either way — retrying this url is not useful.
+    "navigations to known exfiltration/tunnel-provider hosts need a human's approval of that exact "
+      + "domain, and approvals are only consulted where one can be asked for — in the unattended "
+      + "modes (chat, dispatch/auto, dont-ask, bypass) even a standing rule is deliberately inert, "
+      + "so this is a flat refusal there",
   );
 }
 
