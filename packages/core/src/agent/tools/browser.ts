@@ -51,10 +51,18 @@ import { checkDangerousDomain, dangerousDomainRefusal } from "./page-core";
 // The verb sets
 // ================================================================================================
 
-/** Spec §1/§2's READ set — what CHAT may ever reach, and what every other mode gets too. `tabs` and
- *  `open` are in it despite never travelling the command channel: from the model's side they are
- *  verbs of the same tool, and the mode split is about what the agent may DO, not about which wire
- *  carries it. */
+/** The READ set — what CHAT may ever reach, and what every other mode gets too. `tabs` and `open`
+ *  are in it despite never travelling the command channel: from the model's side they are verbs of
+ *  the same tool, and the mode split is about what the agent may DO, not about which wire carries it.
+ *
+ *  **The spec disagrees with itself about `back`, and this follows §2.** §1's prose lists chat's
+ *  read-only set as "open, navigate, tabs, read, screenshot" — five verbs, no `back` — while §2's
+ *  verb table puts `navigate` / `back` on one row and marks it `read`. §2 is taken as the better
+ *  reading on two grounds: it is the normative table (§1 is a summary sentence, and it also omits
+ *  `back` from the code/cowork/dispatch list where nobody disputes it belongs), and `back` is the
+ *  strict inverse of `navigate` — a mode allowed to move a tab forward but not to undo it would be
+ *  a strange capability boundary, and `back` reaches nothing `navigate` did not already reach. Six
+ *  verbs, therefore; recorded here so the divergence is a decision rather than a typo. */
 export const BROWSER_READ_VERBS = ["tabs", "open", "navigate", "back", "read", "screenshot"] as const;
 
 /** Spec §1's INTERACT set — code and dispatch only, never chat. Every member is a
@@ -258,9 +266,31 @@ function panelReach(deps: BrowserToolDeps, sessionId: string): PanelReach {
  * approval mechanism the browser shares with `fetch` — a card, a remembered rule, a user decision.
  * That is Task 6's, and nothing in this file consults it. The second is the dangerous-domains
  * HARD-BLOCK, which exists precisely BECAUSE no approval is available to ask for: it is unconditional
- * in every mode, exactly as it already is for ReadPage and the research runner (`checkDangerousDomain`
- * in page-core.ts, whose own doc carries the full rationale, and spec §7's "the dangerous-domains list
+ * in every mode, over the SAME list ReadPage and the research runner use (`checkDangerousDomain` in
+ * page-core.ts, whose own doc carries the full rationale, and spec §7's "the dangerous-domains list
  * is shared").
+ *
+ * **The LIST is shared with ReadPage; the ENFORCEMENT DEPTH is not, and the difference is
+ * structural — do not read "same as ReadPage" as "same coverage".**
+ *
+ * ReadPage checks TWICE: once on the caller-supplied url, and again on the RESOLVED, post-redirect
+ * host inside `fetchCleanPage` (page-core.ts's `dangerousAdded` option, added for exactly this — "a
+ * url that merely redirects INTO a dangerous host"). It can, because it owns the fetch.
+ *
+ * This tool checks ONCE, on the FIRST HOP — the model-supplied string, before anything is sent. After
+ * that the daemon is blind by construction:
+ *   - CEF follows redirects itself; no `panel.commandResult` reports a redirect chain, and the only
+ *     navigation fact that comes back at all is `panel.reportNavigation`'s COMMITTED top-level url,
+ *     which arrives after the load, as a report, with nothing awaiting it;
+ *   - in-page navigation (a link, a `location.href` assignment, a meta refresh) never crosses this
+ *     daemon at any point;
+ *   - the app holds NO domain list. `PanelURLPolicy.isAllowed` is scheme-only (http/https), by
+ *     design — the fifth door is a SCHEME door, not a domain one — so nothing downstream re-applies
+ *     this check on the daemon's behalf.
+ * So this is an INTENT-level block, not a fetch-level one: it stops the agent from *aiming* at a
+ * listed host, on the surface where the user is logged in. Stated rather than implied because the
+ * gap is inherited: Task 5's `click` is a whole navigation door the daemon never sees, and Task 6's
+ * approval gate will sit beside this one with the identical first-hop-only reach.
  *
  * Taken by this task rather than deferred, deliberately, on three grounds: the tool ships to CHAT by
  * default and chat NEVER prompts, so deferring would ship the read set with an open hole in the one
@@ -354,7 +384,15 @@ export function registerBrowserTool(r: ToolRegistry, deps: BrowserToolDeps): voi
       + "• screenshot — a PNG of the tab, returned to you as an image.\n"
       + "tabId is optional on the tab-driving verbs and defaults to the session's ACTIVE tab. "
       + "Verbs other than tabs/open need the Mac app to be showing this session; if it isn't, you are "
-      + "told so immediately rather than left waiting.",
+      + "told so immediately rather than left waiting.\n"
+      // The description is MODE-INVARIANT — `ToolDefinition.description` has no per-mode seam, only
+      // `argsByMode` does — so this sentence is written to be true in every mode. In chat the
+      // interaction verbs are absent from the enum and the sentence is simply inert; in code and
+      // dispatch it is what stops the model spending a guaranteed-terminal round trip discovering
+      // that `click` is not built yet. Delete this line when Task 5 implements them.
+      + "The interaction verbs (click, type, scroll, submit, wait), where offered, are accepted by "
+      + "the schema but NOT yet implemented by the Mac app — calling one only returns 'not "
+      + "implemented'. Don't plan around them.",
     // Spec §1: every mode may browse. `modes` is the DECLARATION site the per-mode registry replaced
     // the old hand-written allowlists with (registry.ts) — listing "chat" here is what makes this a
     // default tool there.
@@ -428,9 +466,15 @@ export function registerBrowserTool(r: ToolRegistry, deps: BrowserToolDeps): voi
       // REFUSAL PRECEDENCE, most permanent first, so a given call always produces the same message:
       //   1. missing/invalid operands  — the call is malformed however the world looks
       //   2. dangerous domain          — a permanent policy refusal (Task 6's approvals land beside it)
-      //   3. tab ownership             — a permanent fact about this session's tabs
-      //   4. availability              — the only TRANSIENT one, so it is checked last of the four
-      //   5. dispatch
+      //   3. vision capability         — a permanent fact about this SESSION's model, not about the
+      //                                  world: a model that cannot see images gains nothing from a
+      //                                  screenshot however healthy the app is. Belongs among the
+      //                                  permanent rungs and ABOVE availability for that reason —
+      //                                  moving it below would answer "the app isn't showing this
+      //                                  session" to a call that could never have worked anyway
+      //   4. tab ownership             — a permanent fact about this session's tabs
+      //   5. availability              — the only TRANSIENT one, so it is checked last of the five
+      //   6. dispatch
       // Deciding transient-last also means a model that fixes its call gets the same complaint until
       // the call is actually right, instead of being told the app is missing and then, on retry, that
       // the tab is foreign.
@@ -441,9 +485,10 @@ export function registerBrowserTool(r: ToolRegistry, deps: BrowserToolDeps): voi
         if (refusal) throw new Error(refusal);
       }
 
-      // Vision gate, before anything is sent: a model that cannot see images has nothing to gain from
-      // a screenshot, and the payload is up to 3 MiB. Mirrors the `computer` tool's own screenshot
-      // check exactly — `undefined` means "unknown", which is NOT a refusal.
+      // Rung 3, the vision gate (see the ladder above for why it sits here and not lower): a model
+      // that cannot see images has nothing to gain from a screenshot, and the payload is up to 3 MiB.
+      // Mirrors the `computer` tool's own screenshot check exactly — `undefined` means "unknown",
+      // which is NOT a refusal.
       if (a.verb === "screenshot" && ctx.visionCapable === false) {
         throw new Error("this session's model cannot accept images, so a screenshot would be discarded — use verb:\"read\" for the page's text instead.");
       }

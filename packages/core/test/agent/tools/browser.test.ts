@@ -488,7 +488,7 @@ describe("browser: the dangerous-domain hard block covers BOTH url doors", () =>
 // ================================================================================================
 
 describe("browser: precedence and abort", () => {
-  test("the ladder is operands → dangerous → ownership → availability", async () => {
+  test("the ladder is operands → dangerous → vision → ownership → availability", async () => {
     // Everything wrong at once, peeled one layer at a time. Each stage must win over the ones below
     // it, so a given call always produces the same complaint.
     const h = makeHarness({ harnesses: [] });
@@ -502,6 +502,26 @@ describe("browser: precedence and abort", () => {
     expect(foreign.output).toContain("does not belong to this session");
 
     const unavailable = await h.run({ verb: "navigate", tabId: "t1", url: "https://ok.example" });
+    expect(unavailable.output).toContain("browser unavailable");
+
+    expect(h.recorded).toHaveLength(0);
+  });
+
+  test("the vision rung sits ABOVE ownership and availability — screenshot peels through both", async () => {
+    // `screenshot` is the one verb with a rung of its own, and its placement is the claim: a session
+    // whose model cannot see images must hear THAT, not "the tab is foreign" and not "the app isn't
+    // running" — those describe a world that could change, while this call could never have worked.
+    // Peeled downward, so moving the gate below either of the two reds this row.
+    const h = makeHarness({ harnesses: [] });
+    const blind = await h.run({ verb: "screenshot", tabId: "nope" }, { visionCapable: false });
+    expect(blind.output).toContain("cannot accept images");
+
+    // Vision restored: the next rung down (ownership) takes over, on the identical call.
+    const foreign = await h.run({ verb: "screenshot", tabId: "nope" });
+    expect(foreign.output).toContain("does not belong to this session");
+
+    // Ownership satisfied: availability, the transient rung, is last.
+    const unavailable = await h.run({ verb: "screenshot", tabId: "t1" });
     expect(unavailable.output).toContain("browser unavailable");
 
     expect(h.recorded).toHaveLength(0);
