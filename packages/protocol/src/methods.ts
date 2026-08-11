@@ -1515,6 +1515,32 @@ export function isPersistablePanelWebUrl(url: string): boolean {
   return scheme === "http" || scheme === "https";
 }
 
+/** B2 Task 2 — the two caps on `PanelCommandResultParams` (below). Both are REFUSALS at
+ *  `parseParams`, not truncations: an over-cap result is rejected by the RPC, so the pending command
+ *  is left to expire on its deadline and the agent is told "timed out" rather than handed a
+ *  silently-shortened page or a corrupt half-image. The app is expected to cap on its own side
+ *  first (the `PANEL_URL_MAX_LENGTH` relationship exactly: this is defence in depth, not the primary
+ *  gate).
+ *
+ *  **64 KiB of text**, matching `MAX_OUTPUT` in `packages/core/src/agent/tools/registry.ts` — every
+ *  byte of `result` is destined to become tool output, and the registry truncates tool output at 64
+ *  KiB regardless, so a larger cap here would buy the model nothing while making the frame bigger.
+ *  It is also 3× `READPAGE_PER_PAGE_CHAR_CAP` (20 000), the sibling read path this verb replaces
+ *  when a rendered, logged-in page is reachable.
+ *
+ *  **3 MiB of base64 image.** Sized from the artifact: the panel is a right-hand pane, so a full
+ *  retina capture is on the order of 2400×2800 px, which PNG-encodes to roughly 1.5–2 MiB for a
+ *  dense page; base64 inflates by 4/3, giving ~2–2.7 MiB. 3 MiB covers that with margin.
+ *  The BINDING limit it must stay under is the daemon's NDJSON de-framer — `LineDecoder`'s 8 MiB
+ *  `maxLine` (packages/protocol/src/ndjson.ts) — because this field travels app→daemon and Swift's
+ *  outbound path (`UnixSocketTransport.send`, NWConnection) imposes no cap of its own; 3 MiB is 37%
+ *  of it. `ConnWriter`'s 4 MiB buffer cap governs the OTHER direction and never sees this field.
+ *  Note the phone limits are irrelevant here and deliberately so: this method is harness-only, and
+ *  unlike `panel_command` (which streams to remote clients) a result never crosses the iroh
+ *  transport. */
+export const PANEL_COMMAND_RESULT_MAX_LENGTH = 64 * 1024;
+export const PANEL_COMMAND_IMAGE_B64_MAX_LENGTH = 3 * 1024 * 1024;
+
 export const PanelListParams = z.object({ sessionId: z.string().min(1) });
 /** Mirrors `PanelTabState` (core/src/panel/store.ts) field-for-field — this IS the fold, verbatim. */
 export const PanelListResult = z.object({
@@ -1569,6 +1595,40 @@ export const PanelReportNavigationParams = z.object({
   title: z.string().max(PANEL_TITLE_MAX_LENGTH),
 });
 export const PanelReportNavigationResult = z.object({ ok: z.literal(true) });
+
+/** B2 Task 2 — the ANSWER half of the command channel `PanelCommandEvent` (events.ts) opens. The
+ *  daemon pushes a `panel_command` transient and holds a pending entry keyed by `commandId`; the app
+ *  performs the verb over CDP and calls this once.
+ *
+ *  **Harness-role only, by omission.** Like the five `panel.*` methods above, this is absent from
+ *  `REMOTE_ALLOWED_METHODS` and `PLUGIN_ALLOWED_METHODS` (ipc/server.ts), so a remote or plugin
+ *  connection is role-rejected before dispatch. Nothing about the phone changes: it has no panel, no
+ *  CEF, and no way to have been sent a command in the first place.
+ *
+ *  **`ok` is the APP's verdict on the verb, not a transport ack** — `ok: false` with `result` as the
+ *  reason is how "no element matched that selector" or "the sensitive-field floor refused this
+ *  `type`" comes back. It is deliberately NOT the same axis as the daemon-side TIMEOUT: a command
+ *  whose deadline expires never produces one of these at all, and the tool distinguishes the two
+ *  (`PanelCommandOutcome`, packages/core/src/panel/commands.ts).
+ *
+ *  **A late result is not an error.** First result per `commandId` wins; a duplicate — or a result
+ *  arriving after the deadline already expired — is dropped with a log line and answered `{ok:true}`
+ *  anyway. The app cannot know it lost that race, and surfacing a routine race as an RPC failure
+ *  would be the same mistake `panel.closeTab` avoids by tolerating a double close. Only a
+ *  `commandId` the daemon has NO record of is refused (NOT_FOUND). */
+export const PanelCommandResultParams = z.object({
+  sessionId: z.string().min(1),
+  commandId: z.string().min(1),
+  ok: z.boolean(),
+  /** The verb's textual answer — extracted DOM text for `read`, a failure reason when `ok` is
+   *  false, a short confirmation otherwise. Capped at `PANEL_COMMAND_RESULT_MAX_LENGTH`. */
+  result: z.string().max(PANEL_COMMAND_RESULT_MAX_LENGTH).optional(),
+  /** `screenshot`'s PNG, base64, no data-URL prefix. The only large payload this method carries;
+   *  capped at `PANEL_COMMAND_IMAGE_B64_MAX_LENGTH`. */
+  imageBase64: z.string().max(PANEL_COMMAND_IMAGE_B64_MAX_LENGTH).optional(),
+});
+export const PanelCommandResultResult = z.object({ ok: z.literal(true) });
+export type PanelCommandResultParams = z.infer<typeof PanelCommandResultParams>;
 
 export const METHODS = {
   hello: "protocol.hello",
@@ -1661,4 +1721,5 @@ export const METHODS = {
   panelCloseTab: "panel.closeTab",
   panelActivateTab: "panel.activateTab",
   panelReportNavigation: "panel.reportNavigation",
+  panelCommandResult: "panel.commandResult",
 } as const;

@@ -155,6 +155,18 @@ const fixtures: Record<string, unknown> = {
   "panel_tab_activated": { ...base, type: "panel_tab_activated", tabId: "tab_1" },
   "panel_tab_navigated": { ...base, type: "panel_tab_navigated", tabId: "tab_1", url: "https://example.com/pricing", title: "Pricing" },
   "panel_command": { ...base, type: "panel_command", commandId: "cmd_1", tabId: "tab_1", action: "navigate", url: "https://example.com/pricing", deadlineMs: 15000 },
+  // B2 Task 2: the verb set grew from one to nine and gained an opaque per-verb `args` bag. Two
+  // MORE fixtures for the SAME variant (the `approval_requested_with_options` precedent) because
+  // the Swift mirror's two risks are different shapes, and one fixture can only carry one:
+  //   - `_back` — a verb with NO `args` and no `url`, proving the new field stayed optional so the
+  //     Plan A-era shape still decodes;
+  //   - `_type` — a verb WITH `args`, proving the Swift side decodes an opaque JSON object into
+  //     `[String: JSONValue]` and re-encodes it equal (RoundTripTests asserts decoded equality).
+  // Both keep `args` values as STRINGS deliberately: a numeric value would round-trip through
+  // Swift's `JSONValue.number(Double)` and re-encode as `1` vs `1.0`-shaped drift that has nothing
+  // to do with what these fixtures are pinning.
+  "panel_command_back": { ...base, type: "panel_command", commandId: "cmd_2", tabId: "tab_1", action: "back", deadlineMs: 15000 },
+  "panel_command_type": { ...base, type: "panel_command", commandId: "cmd_3", tabId: "tab_1", action: "type", args: { selector: "#search", text: "norma" }, deadlineMs: 15000 },
 };
 for (const [name, value] of Object.entries(fixtures)) {
   SessionEvent.parse(value); // fixtures must be valid by construction
@@ -171,7 +183,7 @@ for (const [name, value] of Object.entries(fixtures)) {
 // Written into the SAME fixtures/ directory as the SessionEvent fixtures above, but deliberately
 // NOT added to the `fixtures` map itself and NOT swept into the Swift NormaProtocol test bundle
 // below: RoundTripTests.swift decodes EVERY .json file it finds under Fixtures/ as a SessionEvent
-// and asserts an exact count (63 as of panel-shell) — these two are a different shape entirely, so
+// and asserts an exact count (65 as of B2 T2) — these two are a different shape entirely, so
 // the sync step
 // below now copies the SessionEvent set explicitly (never a blanket directory copy) to keep that
 // gate byte-for-byte unchanged. A later task wires these two into their own Swift consumer.
@@ -182,7 +194,7 @@ writeFileSync(join(fixDir, "cleaner-vectors.json"), JSON.stringify(cleanerVector
 // 3. Sync fixtures into the Swift test bundle — the SessionEvent per-variant fixtures ONLY (see
 // the comment above): a blanket directory copy would also carry dangerous-domains.json/
 // cleaner-vectors.json into RoundTripTests.swift's Fixtures/, which decodes every file there as a
-// SessionEvent and hard-asserts an exact count (63 as of panel-shell). Both counts here are
+// SessionEvent and hard-asserts an exact count (65 as of B2 T2). Both counts here are
 // deliberately written as "the count RoundTripTests asserts" rather than restated numbers — they
 // have drifted twice; check `RoundTripTests.swift` rather than trusting a figure in this comment.
 const swiftFixDir = join(import.meta.dir, "..", "..", "..", "apple", "NormaProtocol", "Tests", "NormaProtocolTests", "Fixtures");

@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { SessionEvent, SYSTEM_SESSION_ID, TaskSchema } from "../src/events";
-import { HelloParams, HelloResult, PROTOCOL_VERSION } from "../src/methods";
+import { SessionEvent, SYSTEM_SESSION_ID, TaskSchema, PANEL_COMMAND_ACTIONS, PANEL_COMMAND_ARGS_MAX_JSON_BYTES } from "../src/events";
+import {
+  HelloParams, HelloResult, PROTOCOL_VERSION,
+  PanelCommandResultParams, PANEL_COMMAND_RESULT_MAX_LENGTH, PANEL_COMMAND_IMAGE_B64_MAX_LENGTH,
+} from "../src/methods";
 
 describe("SessionEvent discriminated union", () => {
   const base = { seq: 1, sessionId: "s_abc", ts: 1781270000000 };
@@ -502,5 +505,85 @@ describe("hello method schemas", () => {
     const p = HelloParams.parse({ protocolVersion: PROTOCOL_VERSION, role: "harness", token: "t", clientName: "x", pluginId: "sample-echo" });
     expect(p.role).toBe("harness");
     expect(p.pluginId).toBe("sample-echo");
+  });
+});
+
+// ================================================================================================
+// B2 Task 2 — the command wire. `panel_command` grew from one verb to nine and gained a per-verb
+// `args` bag; `panel.commandResult` is the answer channel. These pin the two things a schema change
+// here can silently break: the verb set itself, and the two caps that keep a frame deliverable.
+// ================================================================================================
+describe("panel_command (B2 T2)", () => {
+  const base = { seq: 7, sessionId: "s_abc", ts: 1781270000000 };
+  const cmd = (over: Record<string, unknown>) => ({
+    ...base, type: "panel_command", commandId: "cmd_1", deadlineMs: 15000, ...over,
+  });
+
+  test("every one of the nine verbs parses", () => {
+    for (const action of PANEL_COMMAND_ACTIONS) {
+      expect(SessionEvent.parse(cmd({ action })).type).toBe("panel_command");
+    }
+    expect(PANEL_COMMAND_ACTIONS).toHaveLength(9);
+  });
+
+  test("an unknown verb is refused", () => {
+    expect(() => SessionEvent.parse(cmd({ action: "eval" }))).toThrow();
+  });
+
+  test("args round-trips as an opaque per-verb bag", () => {
+    const e = cmd({ action: "type", tabId: "tab_1", args: { selector: "#q", text: "norma", submit: true } });
+    expect(SessionEvent.parse(e)).toEqual(e);
+  });
+
+  test("args is optional — a verb that needs no payload omits it", () => {
+    const e = cmd({ action: "back", tabId: "tab_1" });
+    expect((SessionEvent.parse(e) as { args?: unknown }).args).toBeUndefined();
+  });
+
+  // The cap is REFUSAL, never truncation: a silently shortened selector or typed string is a
+  // different, wrong action performed against the user's logged-in browser.
+  test("args at the cap passes, one byte over is REFUSED", () => {
+    const fill = (bytes: number) => cmd({ action: "type", args: { text: "x".repeat(bytes) } });
+    // Measure the real serialized size and pad to land exactly on the cap.
+    const overhead = Buffer.byteLength(JSON.stringify({ text: "" }), "utf8");
+    const atCap = fill(PANEL_COMMAND_ARGS_MAX_JSON_BYTES - overhead);
+    expect(Buffer.byteLength(JSON.stringify(atCap.args), "utf8")).toBe(PANEL_COMMAND_ARGS_MAX_JSON_BYTES);
+    expect(SessionEvent.parse(atCap)).toEqual(atCap);
+    expect(() => SessionEvent.parse(fill(PANEL_COMMAND_ARGS_MAX_JSON_BYTES - overhead + 1))).toThrow();
+  });
+
+  // The cap counts BYTES, not UTF-16 units — the thing being bounded is a socket frame.
+  test("the args cap counts bytes, so multi-byte characters count for more than one", () => {
+    const overhead = Buffer.byteLength(JSON.stringify({ text: "" }), "utf8");
+    // Each "é" is 2 UTF-8 bytes: half as many characters fit as ASCII would.
+    const chars = (PANEL_COMMAND_ARGS_MAX_JSON_BYTES - overhead) / 2;
+    expect(SessionEvent.parse(cmd({ action: "type", args: { text: "é".repeat(chars) } })).type).toBe("panel_command");
+    expect(() => SessionEvent.parse(cmd({ action: "type", args: { text: "é".repeat(chars + 1) } }))).toThrow();
+  });
+});
+
+describe("panel.commandResult (B2 T2)", () => {
+  const ok = { sessionId: "s_abc", commandId: "cmd_1", ok: true };
+
+  test("minimal success and failure shapes parse", () => {
+    expect(PanelCommandResultParams.parse(ok)).toEqual(ok);
+    const fail = { ...ok, ok: false, result: "no element matched #q" };
+    expect(PanelCommandResultParams.parse(fail)).toEqual(fail);
+  });
+
+  test("result at the cap passes, one over is refused", () => {
+    expect(PanelCommandResultParams.parse({ ...ok, result: "r".repeat(PANEL_COMMAND_RESULT_MAX_LENGTH) }).result)
+      .toHaveLength(PANEL_COMMAND_RESULT_MAX_LENGTH);
+    expect(() => PanelCommandResultParams.parse({ ...ok, result: "r".repeat(PANEL_COMMAND_RESULT_MAX_LENGTH + 1) })).toThrow();
+  });
+
+  test("imageBase64 at the cap passes, one over is refused", () => {
+    expect(PanelCommandResultParams.parse({ ...ok, imageBase64: "A".repeat(PANEL_COMMAND_IMAGE_B64_MAX_LENGTH) }).imageBase64)
+      .toHaveLength(PANEL_COMMAND_IMAGE_B64_MAX_LENGTH);
+    expect(() => PanelCommandResultParams.parse({ ...ok, imageBase64: "A".repeat(PANEL_COMMAND_IMAGE_B64_MAX_LENGTH + 1) })).toThrow();
+  });
+
+  test("the image cap leaves real margin under the daemon's 8 MiB NDJSON line cap", () => {
+    expect(PANEL_COMMAND_IMAGE_B64_MAX_LENGTH).toBeLessThan(8 * 1024 * 1024 / 2);
   });
 });
