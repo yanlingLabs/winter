@@ -289,11 +289,21 @@ type BrowserArgs = z.infer<typeof BrowserFullArgs>;
  *
  * That is a security property and not a style: `args` is the only model-authored payload on the
  * wire, and the app gives its keys meaning. A `{...a}` here would let a model put ANY key in it —
- * including whichever key a later task chooses for a privileged flag. Task 6's attended-approval
- * path is exactly that hazard: the sensitive floor's future "a human approved this" signal must be
- * DAEMON-STAMPED after a real approval, and it must not be a key the model can set. Constructing the
- * object here, explicitly, is what makes "the model cannot write that key" structural rather than a
- * rule someone has to remember.
+ * including whichever key a later task chooses for a privileged flag.
+ *
+ * **Task 6 settled that hazard, and not in the direction this comment used to predict.** It was
+ * written expecting the SENSITIVE FLOOR to grow an "a human approved this" signal. It did not: Task 6
+ * built a DOMAIN approval and ruled the floor independent of it (the floor still refuses every
+ * password/payment field, approved domain or not — see `refuseDangerous` and the app's
+ * `SensitiveFieldFloor`). What it did build is the worked example of the right shape:
+ * `ctx.browserDomainApproved`, a bit the DAEMON stamps in `executeCall` from a side table keyed
+ * session|thread|callId, reached by no argument at all. A model that writes
+ * `browserDomainApproved: true` into its tool arguments is writing into the object zod parses (no
+ * such field) and never into `ctx`.
+ *
+ * So the rule this function enforces is unchanged and now has a precedent rather than a prediction:
+ * any future privileged flag is daemon-stamped, and constructing this object explicitly is what makes
+ * "the model cannot write that key" structural rather than a rule someone has to remember.
  *
  * `undefined` for the verbs that carry no payload (`navigate` carries a `url`, which is a top-level
  * field of its own, not an arg).

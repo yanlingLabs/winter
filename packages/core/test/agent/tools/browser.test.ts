@@ -607,10 +607,15 @@ describe("browser: the interaction operands", () => {
   });
 
   /** **`args` is BUILT, never spread.** A model that sends extra keys — including whatever key a
-   *  later task might use for a privileged flag, e.g. Task 6's attended-approval signal — cannot
-   *  get them onto the wire: zod strips what the schema does not declare, and `commandArgs`
-   *  re-emits only the fields it named itself. Mutation: `return {...a}` in `commandArgs` and this
-   *  reds. */
+   *  privileged flag might one day use — cannot get them onto the wire: zod strips what the schema
+   *  does not declare, and `commandArgs` re-emits only the fields it named itself. Mutation:
+   *  `return {...a}` in `commandArgs` and this reds.
+   *
+   *  T7: this used to cite "Task 6's attended-approval signal" as the example. Task 6's approval
+   *  turned out to be a DOMAIN one that never touches `args` at all (`ctx.browserDomainApproved`,
+   *  daemon-stamped) — the row is unchanged and still pins the rule, but the example was a
+   *  prediction rather than a fact, so it is stated generically now. The concrete version lives in
+   *  browser-approvals.test.ts, which drives a model trying exactly that key through a real turn. */
   test("a model cannot smuggle an extra key into args", async () => {
     const h = makeHarness();
     const res = await h.run({

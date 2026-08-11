@@ -218,11 +218,22 @@ enum PanelCommandArguments {
 /**
  * **The sensitive floor: the agent never types into a password or payment field.**
  *
- * Spec §4, stated there as an absolute for every unattended mode and, for v1, everywhere —
- * "unattended" has no complement yet because the attended-approval path is Task 6's. Until it
- * exists this refuses in EVERY mode including an interactive code session, and that is the correct
- * conservative reading of a spec whose only stated exception is "a live human approval" that cannot
- * currently be obtained. See `taskSixSeam` below for the shape that exception must take.
+ * Spec §4 states it as an absolute for every unattended mode; this refuses in EVERY mode, including
+ * an interactive code session, and — since Task 6 — that is a settled decision rather than a
+ * placeholder.
+ *
+ * **What Task 6 actually did, because this comment used to promise something else.** It was written
+ * expecting Task 6 to build the attended complement ("unattended has no complement YET"). Task 6
+ * built a DOMAIN approval instead — `ctx.browserDomainApproved`, a card over the dangerous-domain
+ * list — and ruled explicitly that it is not a licence to type: the domain gate adjudicates WHERE the
+ * agent may aim, the floor bounds WHAT it may put in a field, and the two are independent by design
+ * (pinned core-side: "THE FLOOR IS INDEPENDENT — an approved domain is not a licence to type",
+ * test/agent/browser-approvals.test.ts, which asserts that a `type` under a standing domain rule
+ * still dispatches exactly `{selector, text}` and carries no approval key of any kind).
+ *
+ * So the complement does not exist and is not owed by a queued task: a field-level exception would
+ * need an approval flow of its own, and nobody has designed one. What survives from the original
+ * note is the SHAPE any such flow would have to take — see `noApprovalCanLiftThis` below.
  *
  * ## Why policy lives in the app, when policy normally lives in the daemon
  *
@@ -325,15 +336,24 @@ enum SensitiveFieldFloor {
         case refuse(kind: String, evidence: String)
     }
 
-    /// **The Task 6 seam, written down where the exception will have to be made.**
+    /// **The seam, written down where an exception would have to be made — and the standing rule
+    /// that guards it.**
     ///
-    /// Spec §4's floor is absolute "unattended"; the attended path is an approval this app cannot
-    /// currently obtain. When Task 6 builds it, the signal that a human said yes must arrive as a
-    /// field the DAEMON stamped after a real approval — never as a key on `panel_command.args`,
-    /// which is model-authored. `browser.ts`'s `commandArgs` already builds that object field by
-    /// field precisely so a model cannot write such a key; the matching obligation on this side is
-    /// that this function must not learn to read one out of `args`.
-    static let taskSixSeam = "attended approval is Task 6's; until it exists this refuses everywhere"
+    /// No approval lifts this floor today, and Task 6 did not add one: it built a DOMAIN approval and
+    /// ruled it is not a licence to type (see this type's own header). If a field-level exception is
+    /// ever designed, the signal that a human said yes must arrive as a field the DAEMON stamped
+    /// after a real approval — never as a key on `panel_command.args`, which is model-authored.
+    ///
+    /// That is no longer just an instruction: Task 6's `ctx.browserDomainApproved` is exactly that
+    /// shape and is the worked example to copy. `browser.ts`'s `commandArgs` builds the args object
+    /// field by field precisely so a model cannot write such a key; the matching obligation on THIS
+    /// side is that this function must not learn to read one out of `args`.
+    ///
+    /// The string is a log line (`PanelCommandConsumer`), so it is worded for the person reading a
+    /// refusal in Console rather than for a reader of this file.
+    static let noApprovalCanLiftThis =
+        "no approval lifts this — the domain approval is deliberately not a licence to type, and no "
+        + "field-level approval exists"
 
     /// The autofill tokens that name a credential outright (WHATWG HTML's autofill field names).
     /// `cc-*` is handled as a PREFIX below, which is what covers `cc-number`, `cc-csc`, `cc-exp`

@@ -494,7 +494,7 @@ final class PanelCommandConsumer {
                 }
                 if case .refuse(let kind, let evidence) = SensitiveFieldFloor.judge(field) {
                     NSLog("[PanelCommandConsumer] sensitive floor refused a type into a \(kind) "
-                          + "(\(evidence)) — \(SensitiveFieldFloor.taskSixSeam)")
+                          + "(\(evidence)) — \(SensitiveFieldFloor.noApprovalCanLiftThis)")
                     return self.answer(call, ok: false,
                                        result: SensitiveFieldFloor.refusal(kind: kind,
                                                                            evidence: evidence))
