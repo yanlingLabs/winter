@@ -1188,7 +1188,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// see spec §10 gate 10.
     ///
     /// A Norma with no live browser terminates immediately — no timer, no delay, nothing to release.
+    ///
+    /// **live-gate fix I: the beat this method buys is only worth having if nothing refills it.**
+    /// The user's next real quit — eleven browsers — still ended `1 browser(s) still open, 50/50
+    /// drain turns`, and the survivor was the NEWEST id: a browser created inside these 150 ms,
+    /// because a run loop that is turning is a run loop where a fold can re-plan. `quiesce()`
+    /// latches `BrowserRuntime` inert first, so the release below is the last thing that happens to
+    /// the browsers. Latched BEFORE the no-browsers guard on purpose: the door has opened either
+    /// way, and a runtime that cannot be reached is the same statement in both branches.
     func quitReleasingBrowserViews() {
+        BrowserRuntime.shared.quiesce()
         guard BrowserRuntime.shared.hasLiveBrowsers else { return NSApp.terminate(nil) }
         BrowserRuntime.shared.releaseViewsForShutdown()
         // **A `Timer` in COMMON modes, not `DispatchQueue.main.asyncAfter`** — the same lesson

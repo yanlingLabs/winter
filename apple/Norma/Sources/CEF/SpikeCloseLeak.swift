@@ -611,7 +611,73 @@ final class SpikeCloseLeakHarness {
         quit()
     }
 
+    // MARK: - live-gate fix I: a re-plan that lands INSIDE the quit beat
+
+    /// How long after the quit door opens the injected re-plan fires. Must be comfortably inside
+    /// `AppDelegate.browserQuitSettleSeconds` (150 ms) — the whole point is to land while the run
+    /// loop is still turning and `NSApp.terminate` has not been called.
+    private static let beatReplanDelay: TimeInterval = 0.05
+
+    /// **`NORMA_SPIKE_CLOSE_BEAT=1`: the fold that arrives mid-beat.**
+    ///
+    /// Fix H's quit door releases every browser view and then lets the run loop turn for 150 ms
+    /// before terminating. Those turns are ordinary turns: a session fold, a Combine sink or the
+    /// session-list poll can reach `BrowserSignalsCoordinator.replan` inside them, and the plan it
+    /// computes is against a world whose viewport was just released — so it says `.attachViewport`,
+    /// and for a session waking up, `.create`. The user's eleven-browser quit ended `1 browser(s)
+    /// still open, 50/50 drain turns` on the NEWEST id, which is what a create in that window looks
+    /// like from the outside.
+    ///
+    /// The harness has no daemon and no coordinator, so the fold itself cannot be reproduced —
+    /// this injects what a fold would have DONE: the same `apply` call with the same two actions,
+    /// plus the view door (`PanelViewportHostView.viewDidMoveToWindow` reaches `attachViewport`
+    /// with no plan involved at all). A `Timer` in common modes, for the reason the quit door's own
+    /// deferral carries.
+    ///
+    /// **It proves it landed rather than assuming it.** A mode that fires late, or not at all, would
+    /// print a clean shutdown for a run that measured nothing — this repo's recurring failure. The
+    /// ledger therefore carries the fire's own timestamp, the latch's state as read at that instant,
+    /// the container count either side of the call, and whether the browser exists afterwards; and
+    /// every one of those lines must appear BEFORE `NormaCEF: shutting down` in the same capture.
+    private func armTheBeatReplan() {
+        guard Self.envInt("NORMA_SPIKE_CLOSE_BEAT", 0) == 1 else { return }
+        let timer = Timer(fire: Date().addingTimeInterval(Self.beatReplanDelay),
+                          interval: 0, repeats: false) { _ in
+            MainActor.assumeIsolated { SpikeCloseLeakHarness.shared?.replanDuringTheBeat() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        log("BEAT-ARMED fireIn=\(Int(Self.beatReplanDelay * 1000))ms "
+            + "beat=\(Int(AppDelegate.browserQuitSettleSeconds * 1000))ms")
+    }
+
+    fileprivate func replanDuringTheBeat() {
+        let runtime = BrowserRuntime.shared
+        let before = runtime.liveTabIds.count
+        log("BEAT-REPLAN fire quiescent=\(runtime.isQuiescent) containers=\(before) "
+            + "viewport=\(runtime.viewportTabId ?? "nil") — applying create+attach")
+
+        let tabId = "spike-beat"
+        // No url: `PanelURLPolicy.restorableURL(nil)` loads the built-in New Tab page, which is a
+        // real browser and a real renderer. The loopback server is already stopped by now, and what
+        // is being measured is whether a browser comes into existence at all.
+        runtime.apply([.create(tabId: tabId, url: nil), .attachViewport(tabId: tabId)],
+                      tabs: ["spike": [BrowserTabState(tabId: tabId, url: nil, isShown: true,
+                                                       title: "beat")]],
+                      sessionOf: { _ in "spike" })
+        if let host = window.contentView, let parked = parkedTabIds.first {
+            runtime.attachViewport(tabId: parked, into: host)
+        }
+
+        let mounted = parkedTabIds.first.flatMap { runtime.container(forTabId: $0) }
+        log("BEAT-REPLAN done created=\(runtime.isLive(tabId: tabId)) "
+            + "containers=\(runtime.liveTabIds.count) viewport=\(runtime.viewportTabId ?? "nil") "
+            + "parkedTabRemounted=\(mounted?.window === window)")
+    }
+
     private func quit() {
+        // live-gate fix I's instrument — armed BEFORE the door opens so its timer fires inside the
+        // beat that door starts, and a no-op unless `NORMA_SPIKE_CLOSE_BEAT=1`.
+        armTheBeatReplan()
         // Lifecycle T4's one true-quit gate, armed from outside the menu bar — the same deliberate
         // bypass Task 1's spike documents. Every other `NSApp.terminate` is answered
         // `.terminateCancel`, which for an unattended run means never ending and never shutting CEF
@@ -640,7 +706,9 @@ final class SpikeCloseLeakHarness {
     /// visible, the rest parked through `BrowserRuntime.shared`), `NORMA_SPIKE_CLOSE_RACE=K`
     /// (creations still inside CEF's own queue when the quit lands), and
     /// `NORMA_SPIKE_CLOSE_MOUNTED=1` (live-gate fix H — one of the parked browsers is mounted in the
-    /// visible window through the production `attachViewport`, see `mountOneInTheWindow`).
+    /// visible window through the production `attachViewport`, see `mountOneInTheWindow`), and
+    /// `NORMA_SPIKE_CLOSE_BEAT=1` (live-gate fix I — a re-plan fired inside the quit beat, see
+    /// `armTheBeatReplan`).
     fileprivate static var mode: String {
         ProcessInfo.processInfo.environment["NORMA_SPIKE_CLOSE_MODE"] ?? "close"
     }

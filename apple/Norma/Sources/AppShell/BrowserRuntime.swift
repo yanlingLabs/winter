@@ -311,6 +311,69 @@ final class BrowserRuntime {
         return window
     }
 
+    // MARK: - The quiescence latch (live-gate fix I)
+
+    /// **The quit beat is not quiescent unless something makes it so.**
+    ///
+    /// Fix H bought the clean shutdown with a beat: `AppDelegate.quitReleasingBrowserViews`
+    /// unparents every container and only THEN calls `NSApp.terminate`, ~150 ms later
+    /// (`AppDelegate.browserQuitSettleSeconds`). A beat is run-loop turns, and run-loop turns are
+    /// exactly when a session fold, a Combine sink or the session-list poll reaches
+    /// `BrowserSignalsCoordinator.replan`. That re-plan is computed against a world where the
+    /// viewport has just been released, so it legitimately emits `.attachViewport` (the engine sees
+    /// `viewport != desired`) or `.create` — and either one puts back what the beat just gave up:
+    /// the attach re-mounts a container into the window and responder chain it was taken out of,
+    /// the create makes a browser nothing will ever close.
+    ///
+    /// The user's third live gate is that at real scale: eleven browsers, ten closed cleanly before
+    /// terminate, then `shutting down (1 browser(s) still open, 50/50 drain turns)` — and the
+    /// survivor was **id=49, the newest**, which is the signature of a browser that came into
+    /// existence during the beat rather than one that was open when the user chose Quit.
+    ///
+    /// So the quit door latches this object shut on its way through: `apply` drops every action,
+    /// the two view doors refuse, the in-flight create hop refuses, and every linger timer is
+    /// cancelled. **Runtime mechanics, not policy** — it decides nothing about which browsers
+    /// should exist (that is `BrowserLifecycleEngine.plan`'s question and only its); it freezes the
+    /// world for the last ~150 ms of the process.
+    ///
+    /// **One-way, with no un-quiesce, and that is a fact about the callers rather than a
+    /// convenience.** `quiesce()` is called only from `AppDelegate.quitReleasingBrowserViews()`,
+    /// which has exactly two callers, both true quits that cannot be cancelled:
+    ///
+    ///   * the menu bar's "Quit Norma" — the `quit:` closure at `AppDelegate.swift:1082`, fired by
+    ///     `MenuBarController.didQuit()` (`MenuBarController.swift:454`), which runs `onReallyQuit()`
+    ///     — setting `AppDelegate.reallyQuitting = true` — BEFORE `quitApplication()`, so
+    ///     `applicationShouldTerminate` answers `.terminateNow` and the quit cannot be refused;
+    ///   * `SpikeCloseLeakHarness.quit()` (`SpikeCloseLeak.swift:614`), `#if DEBUG` and env-gated,
+    ///     which arms that same flag first for that same reason.
+    ///
+    /// **It deliberately does NOT gate `releaseViewsForShutdown`.** That is fix H's other half and
+    /// the belt for a shutdown reached without this door (the `NormaCEFSetPreShutdownHook` block, a
+    /// system logout): `NormaCEFCloseAllBrowsers`' sweep must still get every host view back, and a
+    /// latch that silenced the release would trade this fix for the one it is built on.
+    private(set) var isQuiescent = false
+
+    /// One line, not a page of them: a replan storm during the beat reaches `apply` repeatedly.
+    private var loggedQuiescentApply = false
+
+    /// Latch shut. Idempotent — a second call is a no-op, so nothing depends on the door being
+    /// walked through exactly once.
+    ///
+    /// The linger timers are cancelled here because they are the one thing that can wake this
+    /// object up with nobody calling into it. A fire during the beat would ask the coordinator for
+    /// a re-plan (harmless now — that `apply` is a no-op) and then **re-arm itself**, which is
+    /// pointless work inside a process that is ending. `lingerFired` needs no latch of its own: it
+    /// guards on `lingers[sessionId]`, which this empties.
+    func quiesce() {
+        guard !isQuiescent else { return }
+        isQuiescent = true
+        let armed = lingers.count
+        for linger in lingers.values { linger.cancellable.cancel() }
+        lingers.removeAll()
+        NSLog("[BrowserRuntime] quiesced for the quit — \(containers.count) browser(s) frozen, "
+              + "\(armed) linger(s) cancelled; nothing can create, attach or detach from here")
+    }
+
     // MARK: - The executor
 
     /// Apply one plan. **Verbatim, in order, with no cleverness** — see this file's header for why
@@ -323,6 +386,19 @@ final class BrowserRuntime {
     ///   - sessionOf: the session a tab belongs to, bound onto its model at create time.
     func apply(_ actions: [BrowserAction], tabs: [String: [BrowserTabState]],
                sessionOf: (String) -> String?) {
+        // **live-gate fix I: after the quit door, no plan is applied at all.** Not a decision about
+        // the plan — the plan is correct, and on any other beat this would execute it faithfully.
+        // The world is simply ending, and re-attaching or creating now is what left the user's
+        // newest browser open at `CefShutdown`. See `isQuiescent`.
+        guard !isQuiescent else {
+            if !loggedQuiescentApply {
+                loggedQuiescentApply = true
+                NSLog("[BrowserRuntime] quiesced — dropping this plan (\(actions.count) action(s)) "
+                      + "and every later one; logged once")
+            }
+            return
+        }
+
         var titles: [String: String?] = [:]
         for state in tabs.values.joined() { titles[state.tabId] = state.title }
 
@@ -480,6 +556,16 @@ final class BrowserRuntime {
             // Creating a browser into it now would leave one live, observer-less, and closed by
             // nobody for the life of the process.
             guard self.containers[tabId] === container else { return }
+            // **live-gate fix I, and the reason the latch cannot live in `apply` alone.** This hop
+            // is the one piece of `create` that runs on a LATER turn, so a create applied in the
+            // last plan before the quit door opens still has its `NormaCEFCreateBrowser` pending
+            // when the beat starts — and the identity guard above passes, because quiescing does
+            // not clear the registry. Asking CEF for a browser now is exactly the racing-create
+            // shape the tripwire counts (`NormaCEF.mm`), one turn from `NSApp.terminate`.
+            guard !self.isQuiescent else {
+                NSLog("[BrowserRuntime] quiesced — \(tabId)'s create never reached CEF")
+                return
+            }
 
             guard self.driver.ensureInitialized() else {
                 guard let reason = self.driver.failureReason() else { return }
@@ -554,6 +640,12 @@ final class BrowserRuntime {
     /// Task 4's call: mount `tabId`'s container in the panel, and remember the panel's host view so
     /// a later plan's `.attachViewport` has somewhere to put things.
     func attachViewport(tabId: String, into host: NSView) {
+        // live-gate fix I: the VIEW door, refused after the quit door. `PanelViewportHostView`
+        // calls this from `viewDidMoveToWindow` as well as from `makeNSView`, so a window closing
+        // during the beat is enough to reach it — and a mount now re-takes the window retain and
+        // the responder chain that `releaseViewsForShutdown` just gave up. Not even the host is
+        // remembered: there is no later plan for it to serve.
+        guard !isQuiescent else { return }
         viewportHost = host
         mountViewport(tabId: tabId, into: host)
     }
@@ -624,6 +716,12 @@ final class BrowserRuntime {
     /// point of the inversion: a tab switch is a container swap, and page state survives it by
     /// construction.
     func detachViewport(tabId: String) {
+        // live-gate fix I: refused after the quit door, for symmetry with the attach and because
+        // there is nothing left for it to do — `releaseViewsForShutdown` has already parked every
+        // container and cleared the viewport. `PanelViewport.dismantleNSView` reaches here while
+        // `applicationWillTerminate` closes the main windows, i.e. after the beat; letting that
+        // through would only re-run a park that has already happened.
+        guard !isQuiescent else { return }
         if viewportTabId == tabId { viewportTabId = nil }
         guard let container = containers[tabId] else { return }
         park(container)

@@ -1056,4 +1056,145 @@ final class BrowserRuntimeTests: XCTestCase {
         XCTAssertTrue(runtime.isLive(tabId: "shown"))
         XCTAssertFalse(runtime.isLive(tabId: "never-created"))
     }
+
+    // MARK: - The quiescence latch (live-gate fix I)
+
+    /// **The headline row: after the quit door, a plan changes nothing at all.**
+    ///
+    /// Fix H's beat (`AppDelegate.quitReleasingBrowserViews`, ~150 ms of live run loop before
+    /// `NSApp.terminate`) is exactly when a fold or the session-list poll can re-plan — against a
+    /// world whose viewport was just released, so the plan legitimately says "attach" and, for a
+    /// session waking up, "create". The user's eleven-browser quit ended `1 browser(s) still open,
+    /// 50/50 drain turns` on the NEWEST id, which is what a create during the beat looks like.
+    ///
+    /// Both halves are asserted, because either alone is satisfiable by a mistake: **zero driver
+    /// calls** (nothing reached CEF) and **zero registry change** (nothing was even parked or
+    /// remembered, so nothing survives to be swept).
+    func testAQuiescedRuntimeAppliesNoPlanAtAllNeitherToCEFNorToItsOwnRegistry() {
+        let (window, host) = makeHostView()
+        _ = window
+        let runtime = makeRuntime()
+
+        runtime.quiesce()
+        XCTAssertTrue(runtime.isQuiescent)
+
+        runtime.apply([.create(tabId: "t1", url: "https://example.com"),
+                       .attachViewport(tabId: "t1"),
+                       .create(tabId: "t2", url: "https://two.example"),
+                       .scheduleStop(sessionId: "s1", at: clock.current.addingTimeInterval(300))],
+                      tabs: tabs("s1", tab("t1", shown: true), tab("t2")), sessionOf: { _ in "s1" })
+
+        XCTAssertEqual(cef.log, [], "a plan applied after the quit door reached CEF")
+        XCTAssertEqual(runtime.liveTabIds, [], "and it must not have registered a container either")
+        XCTAssertNil(runtime.viewportTabId)
+        XCTAssertEqual(runtime.lruOrder, [])
+        XCTAssertEqual(runtime.pendingStopDeadlines, [:])
+        XCTAssertEqual(clock.liveTimers.count, 0)
+        XCTAssertEqual(host.subviews.count, 0)
+        XCTAssertFalse(runtime.hasParkingWindow,
+                       "a runtime that applied nothing must not have built a window to park it in")
+    }
+
+    /// **The half `apply`'s latch cannot reach: the create hop that was already in flight.**
+    ///
+    /// `create` registers its container synchronously and defers the CEF call by one main-queue turn
+    /// (`startBrowser`), so the last plan before the quit still has a `NormaCEFCreateBrowser`
+    /// pending when the beat starts — and the hop's own guard (`containers[tabId] === container`)
+    /// passes, because quiescing deliberately does not clear the registry. That is a browser created
+    /// one turn from `NSApp.terminate`: the racing-create shape `NormaCEF.mm`'s tripwire counts.
+    ///
+    /// The container is asserted still registered afterwards, so this row proves the HOP's guard
+    /// rather than an identity check that happened to fire.
+    func testACreateHopStillInFlightWhenTheLatchClosesNeverReachesCEF() {
+        clock.autoRun = false
+        let runtime = makeRuntime()
+        runtime.apply([.create(tabId: "t1", url: "https://example.com")],
+                      tabs: tabs("s1", tab("t1", shown: true)), sessionOf: { _ in "s1" })
+        XCTAssertEqual(cef.log, ["c1 state=set", "c1 nav=set", "c1 popup=set",
+                                 "c1 seed url=https://example.com title="],
+                       "the premise: everything but the CEF create has already happened")
+
+        runtime.quiesce()
+        clock.runPendingWork()
+
+        XCTAssertFalse(cef.log.contains("c1 create url=https://example.com"),
+                       "the deferred create reached CEF during the quit beat: \(cef.log)")
+        XCTAssertTrue(runtime.isLive(tabId: "t1"),
+                      "the registry is deliberately untouched — so the guard under test is the hop's "
+                          + "own, not the identity check above it")
+    }
+
+    /// The two VIEW doors, which no plan is involved in: `PanelViewportHostView` calls
+    /// `attachViewport` from `viewDidMoveToWindow` and `detachViewport` from `dismantleNSView`, and
+    /// a window closing during the beat reaches both. An attach re-takes the window retain and the
+    /// responder chain that `releaseViewsForShutdown` just gave up — the whole of what fix H
+    /// measured — so after the latch both refuse and the mounted container stays exactly where it is
+    /// until the shutdown release moves it.
+    ///
+    /// The linger timers go in the same breath: they are the only thing that can wake this object
+    /// with nobody calling into it.
+    func testTheLatchRefusesBothViewDoorsAndCancelsEveryLingerTimer() {
+        let (window, host) = makeHostView()
+        _ = window
+        let runtime = makeRuntime()
+        runtime.apply([.create(tabId: "t1", url: "https://example.com"),
+                       .create(tabId: "t2", url: "https://two.example"),
+                       .scheduleStop(sessionId: "s1", at: clock.current.addingTimeInterval(300))],
+                      tabs: tabs("s1", tab("t1", shown: true), tab("t2")), sessionOf: { _ in "s1" })
+        runtime.attachViewport(tabId: "t1", into: host)
+        XCTAssertEqual(clock.liveTimers.count, 1, "the premise: a linger is armed")
+
+        runtime.quiesce()
+
+        XCTAssertEqual(clock.liveTimers.count, 0, "an armed linger survived the quit door")
+        XCTAssertEqual(runtime.pendingStopDeadlines, [:])
+
+        runtime.attachViewport(tabId: "t2", into: host)
+        XCTAssertEqual(runtime.viewportTabId, "t1", "the view door mounted a container during the beat")
+        XCTAssertTrue(runtime.container(forTabId: "t2")?.window === runtime.parkingWindow)
+        XCTAssertEqual(host.subviews.count, 1)
+
+        runtime.detachViewport(tabId: "t1")
+        XCTAssertEqual(runtime.viewportTabId, "t1", "the detach door ran during the beat")
+        XCTAssertTrue(runtime.container(forTabId: "t1")?.superview === host)
+    }
+
+    /// **The latch must not gate the shutdown release** — that is fix H's other half, and the belt
+    /// for a shutdown reached without the quit door at all (`NormaCEFSetPreShutdownHook`, i.e. a
+    /// system logout). `NormaCEFCloseAllBrowsers`' sweep completes a close only when CEF's host view
+    /// deallocates, and a container still mounted in a window (still holding the first responder)
+    /// is what defeats it. A latch that silenced this would trade fix I for fix H.
+    func testTheShutdownReleaseStillRunsAfterTheLatchIsSet() {
+        var deep: FakeRenderWidgetHostView?
+        cef.onCreate = { [unowned self] container, _ in deep = self.installFakeCEFTree(in: container) }
+        let (window, host) = makeHostView()
+        let runtime = makeRuntime()
+        runtime.apply([.create(tabId: "t1", url: "https://example.com")],
+                      tabs: tabs("s1", tab("t1", shown: true)), sessionOf: { _ in "s1" })
+        runtime.attachViewport(tabId: "t1", into: host)
+        XCTAssertTrue(window.firstResponder === deep, "the premise: the mounted tab holds the responder")
+        XCTAssertTrue(runtime.hasLiveBrowsers)
+
+        runtime.quiesce()
+        runtime.releaseViewsForShutdown()
+
+        XCTAssertTrue(runtime.container(forTabId: "t1")?.window === runtime.parkingWindow,
+                      "the quit latch swallowed the shutdown release")
+        XCTAssertNil(runtime.viewportTabId)
+        XCTAssertFalse(window.firstResponder === deep,
+                       "the window still retains Chromium's view as its first responder")
+        XCTAssertTrue(runtime.isLive(tabId: "t1"),
+                      "release is not a stop: the sweep is what closes browsers")
+    }
+
+    /// Idempotent, and the log is a once-only thing rather than one line per replan — a beat can
+    /// carry many. Nothing here is a behaviour the app depends on; it is pinned because "logged
+    /// once" is a claim the comment makes.
+    func testQuiescingTwiceIsANoOp() {
+        let runtime = makeRuntime()
+        runtime.quiesce()
+        runtime.quiesce()
+        XCTAssertTrue(runtime.isQuiescent)
+        XCTAssertEqual(cef.log, [])
+    }
 }
