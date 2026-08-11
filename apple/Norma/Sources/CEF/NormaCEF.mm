@@ -2012,7 +2012,9 @@ void NormaCEFLoadURL(NSView *parent, const char *url) {
   }
   if (auto browser = BrowserForParent(parent)) {
     // No validation here on purpose — `PanelURLPolicy` (Swift) is the one place the scheme
-    // allowlist is expressed, and it has already run at the field. See this function's header doc.
+    // allowlist is expressed, and it has already run at whichever door this load came through:
+    // the URL field (door 1) or, since b2-agent-browser Task 3, the agent's `navigate` command
+    // (door 5, `PanelCommandConsumer`). Both call the same function. See this function's header doc.
     browser->GetMainFrame()->LoadURL(CefString(url));
   }
 }

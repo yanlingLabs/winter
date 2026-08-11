@@ -184,10 +184,15 @@ void NormaCEFSeedTabState(NSView *parent, const char *url, const char *title);
 
 #pragma mark - Task 6b: the chrome's verbs
 
-/// Back / forward / reload / stop, and "go to what the user typed". All are no-ops when `parent`
-/// hosts no browser, and none of them validate `url` — **scheme policy lives in Swift**
-/// (`PanelURLPolicy`), in one place, applied before anything reaches here. A C seam that silently
-/// second-guessed its caller would make the real policy impossible to locate.
+/// Back / forward / reload / stop, and "go to what the user typed **or the agent authored**". All
+/// are no-ops when `parent` hosts no browser, and none of them validate `url` — **scheme policy
+/// lives in Swift** (`PanelURLPolicy`), in one place, applied before anything reaches here. A C seam
+/// that silently second-guessed its caller would make the real policy impossible to locate.
+///
+/// Two doors reach `NormaCEFLoadURL` since b2-agent-browser Task 3 — the panel's URL field and the
+/// `panel_command` consumer — and they call the SAME policy function, which is what keeps "one
+/// place" true with two producers. `NormaCEFGoBack` likewise serves the back button and the agent's
+/// `back` verb; it carries no url and so no policy.
 void NormaCEFGoBack(NSView *parent);
 void NormaCEFGoForward(NSView *parent);
 void NormaCEFReload(NSView *parent);

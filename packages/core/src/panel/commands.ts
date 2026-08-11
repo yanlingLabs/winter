@@ -36,7 +36,13 @@ export type PanelCommandAction = (typeof PANEL_COMMAND_ACTIONS)[number];
  *  reporting that the verb ran and failed ("no element matched that selector", "the sensitive-field
  *  floor refused this type"), while `{kind:"timeout"}` means nothing is known — the app may be gone,
  *  may be busy, or may have executed the verb and lost the race back. Collapsing them would let the
- *  agent report "the button isn't there" when the truth is "the Mac app never answered". */
+ *  agent report "the button isn't there" when the truth is "the Mac app never answered".
+ *
+ *  B2 Task 3 built the app half, and two of its shapes produce a timeout DELIBERATELY rather than by
+ *  accident: a command arriving during the app's quit beat, and a verb still running when the app's
+ *  own copy of this deadline fires. Both are cases where the app has nothing true to say, so the
+ *  timeout is the honest outcome — but it does mean "timed out" covers a slightly wider set of facts
+ *  than "the Mac app is gone", which is worth knowing when wording the tool's own message. */
 export type PanelCommandOutcome =
   | { kind: "result"; ok: boolean; result?: string; imageBase64?: string }
   | { kind: "timeout"; deadlineMs: number };

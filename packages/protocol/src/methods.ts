@@ -1599,7 +1599,23 @@ export const PanelReportNavigationResult = z.object({ ok: z.literal(true) });
 
 /** B2 Task 2 — the ANSWER half of the command channel `PanelCommandEvent` (events.ts) opens. The
  *  daemon pushes a `panel_command` transient and holds a pending entry keyed by `commandId`; the app
- *  performs the verb over CDP and calls this once.
+ *  performs the verb against the tab's own browser and calls this **at most once**.
+ *
+ *  **"Over CDP" was this sentence's original wording and B2 Task 3 built it otherwise, so it is
+ *  corrected here rather than left to read as a spec.** `read` and `screenshot` do go over the Chrome
+ *  DevTools Protocol (`Runtime.evaluate`, `Page.captureScreenshot`, through `NormaCEFExecuteCDP`);
+ *  `navigate` and `back` go through the SAME two CEF entry points the panel's own address bar and
+ *  back button use (`NormaCEFLoadURL`/`NormaCEFGoBack`), deliberately, so the app has one load path
+ *  rather than two.
+ *
+ *  **"At most once", not "once", and the two zero-call cases are real** — both decided in
+ *  `PanelCommandConsumer` (apple/Norma/Sources/AppShell), both leaving the command to expire on its
+ *  `deadlineMs`: a command that arrives during the app's quit beat (the browser runtime is latched
+ *  shut; the app is about to stop existing, so a failure and a timeout describe the same fact), and a
+ *  verb still running when the app's own copy of the deadline fires (the daemon's timer was armed for
+ *  the same duration and armed strictly earlier, so a result sent then could only be dropped — see
+ *  the late-result paragraph below). Never more than once is enforced app-side by a per-command latch
+ *  rather than left to this method's dedup.
  *
  *  **Harness-role only, by omission.** Like the five `panel.*` methods above, this is absent from
  *  `REMOTE_ALLOWED_METHODS` and `PLUGIN_ALLOWED_METHODS` (ipc/server.ts), so a remote or plugin

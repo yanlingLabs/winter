@@ -1317,10 +1317,15 @@ extension NormaClient {
     /// this type" travels. A verb that could not be attempted at all is still a `false` result — the
     /// daemon-side TIMEOUT is a different outcome entirely and is never produced by this call.
     ///
-    /// **Call it exactly once per `commandId`, and don't fear calling it late.** First result wins;
+    /// **Call it at most once per `commandId`, and don't fear calling it late.** First result wins;
     /// a duplicate — or one that crossed the deadline in flight — is dropped daemon-side with a log
     /// line and still answered `{ok:true}`, because the loser of that race has no way to have known.
     /// The one case that DOES throw is a `commandId` the daemon has no record of (NOT_FOUND).
+    ///
+    /// **"At most", because B2 Task 3's consumer deliberately calls it ZERO times for two shapes** —
+    /// a command that arrives during the app's quit beat, and a verb still running when the app's own
+    /// copy of the deadline fires. Both leave the command to expire daemon-side, which is the honest
+    /// outcome in each (see `PanelCommandResultParams`'s own doc, methods.ts, for the reasoning).
     ///
     /// **`result` is capped at 64 KiB and `imageBase64` at 3 MiB (`PANEL_COMMAND_RESULT_MAX_LENGTH`/
     /// `PANEL_COMMAND_IMAGE_B64_MAX_LENGTH`), and an over-cap value is REFUSED, not truncated** —
