@@ -344,7 +344,7 @@ final class BrowserRuntime {
     ///     `MenuBarController.didQuit()` (`MenuBarController.swift:454`), which runs `onReallyQuit()`
     ///     — setting `AppDelegate.reallyQuitting = true` — BEFORE `quitApplication()`, so
     ///     `applicationShouldTerminate` answers `.terminateNow` and the quit cannot be refused;
-    ///   * `SpikeCloseLeakHarness.quit()` (`SpikeCloseLeak.swift:614`), `#if DEBUG` and env-gated,
+    ///   * `SpikeCloseLeakHarness.quit()` (`SpikeCloseLeak.swift:677`), `#if DEBUG` and env-gated,
     ///     which arms that same flag first for that same reason.
     ///
     /// **It deliberately does NOT gate `releaseViewsForShutdown`.** That is fix H's other half and
