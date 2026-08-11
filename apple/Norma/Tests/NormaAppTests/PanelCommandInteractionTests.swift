@@ -280,7 +280,7 @@ final class PanelCommandInteractionTests: XCTestCase {
     /// selected and typed into — and if the inspector stops producing a readable field, this is what
     /// goes red, by REFUSING. The floor rows below stay green under that mutation, which is the
     /// direction that proves fail-closed rather than merely asserting it.
-    func testASafeFieldIsInspectedThenFocusedSelectedAndTypedInto() {
+    func testASafeFieldIsInspectedThenFocusedSelectedAndTypedInto() throws {
         consumer.handle(command("type", args: ["selector": "input[name=q]", "text": "norma"]))
         answer([Self.document, Self.matched, Self.field(["type", "search", "name", "q"]),
                 Self.empty, Self.empty, Self.handle, Self.selected, Self.empty])
@@ -290,10 +290,13 @@ final class PanelCommandInteractionTests: XCTestCase {
             "DOM.focus", "DOM.resolveNode", "Runtime.callFunctionOn", "Input.insertText",
         ])
         // The floor's inspection comes BEFORE anything touches the field. Ordering is the policy.
+        // `XCTUnwrap` rather than `!`: under the broken-inspector mutation these steps do not happen
+        // at all, and a row that CRASHES instead of failing takes the rest of the suite with it —
+        // which is how this file's first mutation run read as "18 executed" rather than as evidence.
         let order = methods()
-        XCTAssertLessThan(order.firstIndex(of: "DOM.describeNode")!, order.firstIndex(of: "DOM.focus")!)
-        XCTAssertLessThan(order.firstIndex(of: "DOM.describeNode")!,
-                          order.firstIndex(of: "Input.insertText")!)
+        let inspected = try XCTUnwrap(order.firstIndex(of: "DOM.describeNode"))
+        XCTAssertLessThan(inspected, try XCTUnwrap(order.firstIndex(of: "DOM.focus")))
+        XCTAssertLessThan(inspected, try XCTUnwrap(order.firstIndex(of: "Input.insertText")))
         // Focus and inspection are the SAME node — no re-query, so no DOM swap in between.
         let nodeIds = transcript()
             .filter { ["DOM.describeNode", "DOM.focus", "DOM.resolveNode"].contains($0.method) }
@@ -508,14 +511,14 @@ final class PanelCommandInteractionTests: XCTestCase {
 
     // MARK: - wait
 
-    func testWaitForLoadPollsUntilCompleteAndAnswersExactlyOnce() {
+    func testWaitForLoadPollsUntilCompleteAndAnswersExactlyOnce() throws {
         consumer.handle(command("wait", args: ["until": "load", "timeoutMs": 5_000],
                                 deadlineMs: 30_000))
         answer([Self.probe("loading", resources: 3)])
         XCTAssertEqual(sent, [], "a page still loading is not an answer")
 
         // The poll re-arms rather than spinning: fire its timer to take the next look.
-        let poll = try! XCTUnwrap(clock.liveTimers.last)
+        let poll = try XCTUnwrap(clock.liveTimers.last)
         clock.current = clock.current.addingTimeInterval(0.25)
         clock.fire(poll.id)
         answer([Self.probe("complete", resources: 3)])
