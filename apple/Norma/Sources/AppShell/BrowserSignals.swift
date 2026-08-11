@@ -29,6 +29,14 @@ import Foundation
 ///     four fold sites are the only ways a tab can leave a list or a session can stop being shown.
 ///  2. **The session list** (`SessionDirectory.$rows`) — the poll and every lifecycle broadcast.
 ///     This is where another harness attaching, a turn ending, or an archive lands.
+///
+///     **Only a full answer carries new SIGNALS** (b2-agent-browser T1). `SessionDirectory.handle`
+///     patches a row in place for the `session_activity` transient, which re-plans (any assignment
+///     publishes) but updates the LABEL alone — the event carries nothing else, and synthesising
+///     signals from it would be the label-decoding this task removed, wrong for chat besides (chat
+///     never emits it). So a remote attach/detach reaches this coordinator on the next `session.list`
+///     tick, ≤5s, against a 300s linger — and `syncPolling` keeps that tick running with the window
+///     shut whenever a browser is live, which is the case that would otherwise never converge.
 ///  3. **The attached session's turn state** (`SessionModel.$state.turnRunning`) — the local,
 ///     immediate half of `working`. Since b2-agent-browser T1 the daemon reports the other half for
 ///     every mode (`SessionSummary.signals`), so this is no longer chat's ONLY working signal; it is
@@ -103,7 +111,7 @@ final class BrowserSignalsCoordinator {
     ///
     /// `@Published` sends its value from `willSet`, so a sink that reads the property it is
     /// subscribed to gets the OLD array — the new one has not been stored yet. Reading it that way
-    /// makes every activity change land exactly one publication late, which for this coordinator
+    /// makes every signal change land exactly one publication late, which for this coordinator
     /// means the plan that should stop a session's browsers is computed from the very signals that
     /// were true before the change: the poll answers "the turn ended", the re-plan reads "the turn
     /// is running", and nothing ever stops. (`ShellSessionHost.reconcileIsChatSession` takes its

@@ -1154,9 +1154,20 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // about whether the same 24h boundary has passed.
         //
         // `deriveActivity` (defined beside the `hub` binding, shared with `session.setActivity`)
-        // returns undefined for chat/dispatch and builds no signals for those rows — which also
-        // keeps the per-row `lastEventTs` stat off the chat/dispatch rows entirely.
+        // returns undefined for chat/dispatch and assembles no `ActivitySignals` for those rows —
+        // which also keeps the per-row `lastEventTs` stat off the chat/dispatch rows entirely. (Not
+        // to be confused with the row's own `signals` field, added below: that one is stamped for
+        // every mode and reads none of the sources that touch the filesystem.)
         const now = Date.now();
+        // b2-agent-browser T1 (spec §5): WHICH session this connection is itself attached to, read
+        // once for the whole batch (like `now` just above) — one hub lookup per request, not per row.
+        //
+        // Asked of the HUB, never remembered on the connection: `fanOut`'s dead-client eviction
+        // (sessions/hub.ts) can drop this client from an attachment by a path the connection never
+        // hears about, so `socket.data.hubClient` is "the handle we last attached with" and
+        // `hub.attachedSession` is "where it actually is, now". `undefined` for the common case of
+        // a connection that never attached — and for one whose attachment has been dropped.
+        const selfSessionId = socket.data.hubClient ? hub.attachedSession(socket.data.hubClient) : undefined;
         // working-directories T3: `dirs` rides the SAME participation gate `activity` above uses
         // (code + cowork + absent-means-code) — chat/dispatch have no writable root at all
         // (DIRS_MODE_REFUSAL), so `dirs` stays absent on those rows, exactly like `activity`.
@@ -1169,15 +1180,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // `store.dirs()` derives its answer FROM that same `cwd` column (T1's lazy migration), so
         // this alias is a no-op there — the value is unchanged, just re-read through the derived
         // path instead of trusted directly.
-        // b2-agent-browser T1 (spec §5): WHICH session this connection is itself attached to, read
-        // once for the whole batch (like `now` above) — one hub lookup per request, not per row.
-        //
-        // Asked of the HUB, never remembered on the connection: `fanOut`'s dead-client eviction
-        // (sessions/hub.ts) can drop this client from an attachment by a path the connection never
-        // hears about, so `socket.data.hubClient` is "the handle we last attached with" and
-        // `hub.attachedSession` is "where it actually is, now". `undefined` for the common case of
-        // a connection that never attached — and for one whose attachment has been dropped.
-        const selfSessionId = socket.data.hubClient ? hub.attachedSession(socket.data.hubClient) : undefined;
         const sessions = opts.store.list().map((s) => {
           // The signals ride EVERY row: chat and dispatch included, which is the whole point (the
           // Mac app's browser lifecycle runs on chat sessions and had no signal for them at all —
