@@ -157,20 +157,17 @@ final class BrowserLifecycleTests: XCTestCase {
 
     // MARK: - Rule 2: the shown session
 
+    /// The shown tab is created and takes the viewport — and, since live-gate fix C, so is its
+    /// sibling: the shown SESSION's tabs are all live (rule 8b's own section below). This row's
+    /// predecessor asserted the opposite (`test_shown_siblingIsNotCreatedEagerly`, deleted), which
+    /// was the shipped behaviour the user corrected: a ⌘-clicked tab sat unloaded until visited.
     func test_shown_shownTabIsCreatedAndTakesTheViewport() {
         let actions = plan(sessions: ["s1": sig(attachedHere: true)],
                            tabs: ["s1": [tab("t1", url: "https://a", shown: true), tab("t2", url: "https://b")]],
                            live: [])
-        XCTAssertEqual(actions, [.create(tabId: "t1", url: "https://a"), .attachViewport(tabId: "t1")])
-    }
-
-    /// Rule 8's other half, stated from the shown session's side: the sibling is NOT created
-    /// eagerly. (The row above already proves the shown tab IS.)
-    func test_shown_siblingIsNotCreatedEagerly() {
-        let actions = plan(sessions: ["s1": sig(attachedHere: true)],
-                           tabs: ["s1": [tab("t1", shown: true), tab("t2")]],
-                           live: [])
-        XCTAssertFalse(actions.contains(.create(tabId: "t2", url: nil)))
+        XCTAssertEqual(actions, [.create(tabId: "t1", url: "https://a"),
+                                 .create(tabId: "t2", url: "https://b"),
+                                 .attachViewport(tabId: "t1")])
     }
 
     /// Siblings that are ALREADY live stay live and parked — the switch-away that used to destroy
@@ -269,6 +266,78 @@ final class BrowserLifecycleTests: XCTestCase {
                            live: ["t1"],
                            lruOrder: ["t1"])
         XCTAssertEqual(actions, [.create(tabId: "t2", url: "https://two")])
+    }
+
+    // MARK: - Rule 8b: the shown session's tabs are ALL live (live-gate fix C)
+
+    /// **The user's policy correction, as the table row that states it.** ⌘-clicking a link minted
+    /// the tab and left it unloaded until first shown; Chrome loads a background tab immediately,
+    /// and that is what was asked for. Three web tabs, one shown, nothing live → three creates.
+    func test_rule8b_theShownSessionCreatesEveryOneOfItsWebTabs() {
+        let actions = plan(sessions: ["s1": sig(attachedHere: true)],
+                           tabs: ["s1": [tab("t1", url: "https://one", shown: true),
+                                         tab("t2", url: "https://two"),
+                                         tab("t3", url: "https://three")]],
+                           live: [])
+        XCTAssertEqual(actions, [.create(tabId: "t1", url: "https://one"),
+                                 .create(tabId: "t2", url: "https://two"),
+                                 .create(tabId: "t3", url: "https://three"),
+                                 .attachViewport(tabId: "t1")])
+    }
+
+    /// **…and no other held session does — the half that keeps the fix from being "wake
+    /// everything".** Both sessions here are `hold` and both have three tabs with one shown; only
+    /// the one the shell is DISPLAYING is eager. Stated as one plan over two sessions rather than
+    /// two plans, because "eager" and "lazy" being decided by shown-ness rather than by disposition
+    /// is exactly what a single row can show and two cannot.
+    ///
+    /// `s2` is `working`, i.e. an agent may be driving it right now, which is the strongest form of
+    /// held there is — and it still restores lazily (spec §6).
+    func test_rule8b_onlyTheShownSessionIsEagerEveryOtherHeldSessionStaysLazy() {
+        let actions = plan(sessions: ["s1": sig(attachedHere: true), "s2": sig(working: true)],
+                           tabs: ["s1": [tab("a1", url: "https://a1", shown: true),
+                                         tab("a2", url: "https://a2"),
+                                         tab("a3", url: "https://a3")],
+                                  "s2": [tab("b1", url: "https://b1", shown: true),
+                                         tab("b2", url: "https://b2"),
+                                         tab("b3", url: "https://b3")]],
+                           live: [])
+        XCTAssertEqual(actions, [
+            // Rule 8, in sessionId order: each held session's shown tab.
+            .create(tabId: "a1", url: "https://a1"),
+            .create(tabId: "b1", url: "https://b1"),
+            // Rule 8b, fold order: the SHOWN session's remaining tabs, and only its.
+            .create(tabId: "a2", url: "https://a2"),
+            .create(tabId: "a3", url: "https://a3"),
+            .attachViewport(tabId: "a1"),
+        ])
+    }
+
+    /// **Rule 8b stops at the cap, and this row is why that is not a detail.**
+    ///
+    /// A shown session's non-shown tabs are deliberately NOT protected from cap eviction
+    /// (`capEvictions`' own doc — spec §4's "never the shown tab, never a working session's tabs",
+    /// read literally). So an UNBOUNDED eager pass would create tab 9, have the cap evict it as
+    /// least-recently-used, and create it again on the very next plan, forever — the create/stop
+    /// loop `capEvictions` names as the thing eviction must never cause, arrived at from the create
+    /// side instead. The second plan below is what catches it: with the rule capped it is empty.
+    func test_rule8b_stopsAtTheCapInsteadOfCreatingTabsTheCapWouldImmediatelyEvict() {
+        let many = (1...10).map { tab("t\($0)", url: "https://t\($0)", shown: $0 == 1) }
+        let sessions = ["s1": sig(attachedHere: true)]
+        let actions = plan(sessions: sessions, tabs: ["s1": many], live: [])
+
+        XCTAssertEqual(actions.compactMap { if case .create(let id, _) = $0 { return id } else { return nil } },
+                       (1...BrowserLifecycleEngine.maxLive).map { "t\($0)" },
+                       "the cap is the eager pass's budget, taken in fold order")
+        XCTAssertFalse(actions.contains { if case .stop = $0 { return true } else { return false } },
+                       "a plan must never create a tab and evict one in the same breath")
+
+        var sim = Sim()
+        sim.apply(actions)
+        let second = plan(sessions: sessions, tabs: ["s1": many], live: sim.live,
+                          viewport: sim.viewport, lruOrder: sim.lruOrder)
+        XCTAssertEqual(second, [],
+                       "the create/stop loop: rule 8b re-created what the cap had just evicted")
     }
 
     // MARK: - Rule 4: the linger

@@ -103,7 +103,8 @@ struct BrowserLifecycleEngine {
     private enum Disposition {
         /// Stop every live tab of the session now, with no linger.
         case stopNow
-        /// Keep every live tab live; create the shown one if it is missing (lazy restore).
+        /// Keep every live tab live; create the shown one if it is missing (lazy restore) — or, for
+        /// the one session the shell is DISPLAYING, all of its web tabs up to the cap (rule 8b).
         case hold
         /// Nobody wants this session: arm the linger, or stop if its deadline has passed.
         case quiet
@@ -230,6 +231,10 @@ struct BrowserLifecycleEngine {
                 // Only the shown tab is created; already-live siblings are simply left alone, which
                 // is what "live + parked" means in the §4 table. Tabs are never stopped here — the
                 // cap below is the only thing that may take one from a held session.
+                //
+                // This is now the rule for every held session EXCEPT the shown one, which rule 8b
+                // below serves instead (live-gate fix C). Waking, working and
+                // attached-elsewhere sessions keep lazy restore exactly as before.
                 for tab in sessionTabs where tab.isShown && !live.contains(tab.tabId) {
                     creates.append(.create(tabId: tab.tabId, url: tab.url))
                 }
@@ -255,6 +260,38 @@ struct BrowserLifecycleEngine {
                 } else {
                     schedules.append(.scheduleStop(sessionId: sessionId, at: now.addingTimeInterval(stopLinger)))
                 }
+            }
+        }
+
+        // ── Rule 8b: the SHOWN session's tabs are ALL live (live-gate fix C). ────────────────────
+        //
+        // **A policy correction from the user, and it lives here because it IS policy.** ⌘-clicking
+        // a link minted the tab and left it unloaded until first shown; Chrome loads a new
+        // background tab immediately, and that is the behaviour asked for. So for the ONE session
+        // the shell is displaying, every web tab gets a browser — not just `isShown`. Every other
+        // held session keeps rule 8's lazy restore, which is what stops this from being "wake every
+        // tab of every session anyone ever attached to".
+        //
+        // **Capped, and the cap is what makes this rule safe rather than a create/stop loop.** The
+        // §4 cap does not protect a shown session's non-shown tabs (see `capEvictions`), so an
+        // uncapped eager pass would create tab 9, have the cap evict it as least-recently-used, and
+        // create it again on the very next plan — for as long as the session stayed shown. That is
+        // the thrash `capEvictions` names as the thing eviction must never do, arrived at from the
+        // create side. Stopping at `maxLive` instead produces exactly spec §10 gate 13's promise:
+        // over 8, the tabs that do not fit simply are not loaded until shown, and showing one makes
+        // it the shown tab (protected) and evicts the genuine least-recently-used.
+        //
+        // Fold order among the candidates, which is deterministic (rule 10) and means "the tabs you
+        // opened first" get the budget.
+        if let shownSession = viewportSession {
+            var pending = Set(creates.compactMap(\.createdTabId))
+            var projectedLive = live.subtracting(stopping).union(pending).count
+            for tab in tabs[shownSession] ?? []
+            where !live.contains(tab.tabId) && !pending.contains(tab.tabId) {
+                guard projectedLive < maxLive else { break }
+                creates.append(.create(tabId: tab.tabId, url: tab.url))
+                pending.insert(tab.tabId)
+                projectedLive += 1
             }
         }
 
@@ -284,8 +321,9 @@ struct BrowserLifecycleEngine {
         //     the panel's host view destroys a live subview of a visible window;
         //   • create precedes attach — there is no container to mount before the browser exists.
         // The rest is ordered for readability and determinism: belt stops, then per-session stops
-        // (sessionId order, then fold order), then cap evictions (LRU order), then creates
-        // (sessionId order, then fold order), then the bookkeeping.
+        // (sessionId order, then fold order), then cap evictions (LRU order), then creates — rule
+        // 8's, in sessionId order then fold order, followed by rule 8b's for the shown session, in
+        // fold order — then the bookkeeping.
         return detach + beltStops + sessionStops + capStops + creates + attach + cancels + schedules
     }
 
@@ -300,6 +338,15 @@ struct BrowserLifecycleEngine {
     ///     next plan (rule 8), so evicting one would produce a create/stop loop that cycles through
     ///     the whole set forever. Eviction must never target a tab these same rules would
     ///     immediately recreate — that is thrash, not degradation.
+    ///
+    /// **What is deliberately NOT protected, and how it stays clear of that same thrash rule:** the
+    /// SHOWN session's non-shown tabs. Rule 8b creates all of them, and they are ordinary cap
+    /// candidates like anyone else's — over `maxLive`, least-recently-used still wins, which is spec
+    /// §4's "never the shown tab, never a working session's tabs" read literally. That would be the
+    /// create/stop loop above if rule 8b were unbounded, so rule 8b stops at `maxLive` instead: past
+    /// the cap the tabs that do not fit are simply never created, so there is nothing for an
+    /// eviction here to fight with. The two rules are a pair — changing either one alone
+    /// reintroduces the loop.
     ///
     /// **The sharpened edge: when everything live is protected, the cap is EXCEEDED, not enforced.**
     /// The cap exists (spec §4) "so heavy use degrades to v1 behaviour instead of unbounded
