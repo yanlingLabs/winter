@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
-import { PANEL_COMMAND_RESULT_MAX_LENGTH, PANEL_COMMAND_ACTIONS } from "@norma/protocol";
+import {
+  PANEL_COMMAND_RESULT_MAX_LENGTH, PANEL_COMMAND_ACTIONS, PANEL_COMMAND_ARGS_MAX_JSON_BYTES,
+} from "@norma/protocol";
 import { ToolRegistry, MAX_OUTPUT, type ToolContext } from "../../../src/agent/tools/registry";
 import { registerToolSearchTool } from "../../../src/agent/tools/toolsearch";
 import {
   registerBrowserTool, canHostPanel, BROWSER_DEADLINES_MS,
   BROWSER_READ_VERBS, BROWSER_INTERACT_VERBS,
+  BROWSER_SELECTOR_MAX_LENGTH, BROWSER_TYPE_TEXT_MAX_LENGTH,
+  BROWSER_SCROLL_DEFAULT_AMOUNT_PX, BROWSER_WAIT_DEFAULT_TIMEOUT_MS, BROWSER_WAIT_MAX_TIMEOUT_MS,
   type BrowserToolDeps,
 } from "../../../src/agent/tools/browser";
 import type { PanelCommandOutcome } from "../../../src/panel/commands";
@@ -29,6 +33,7 @@ interface Recorded {
   action: string;
   tabId?: string;
   url?: string;
+  args?: Record<string, unknown>;
   deadlineMs: number;
 }
 
@@ -72,7 +77,7 @@ function makeHarness(opts?: {
       dispatch(cmd) {
         const rec: Recorded = {
           sessionId: cmd.sessionId, action: cmd.action, tabId: cmd.tabId, url: cmd.url,
-          deadlineMs: cmd.deadlineMs,
+          args: cmd.args, deadlineMs: cmd.deadlineMs,
         };
         recorded.push(rec);
         return { commandId: `pcmd_${recorded.length}`, settled: h.outcome(rec) };
@@ -91,6 +96,22 @@ function makeHarness(opts?: {
   registerBrowserTool(h.registry, h.deps);
   return h;
 }
+
+/** One WELL-FORMED call per command verb — every verb that travels the wire, each carrying operands
+ *  that pass rung 1. Rows that mean to prove a LATER rung (ownership, availability, the outcome
+ *  mapping) must start from here, or they prove rung 1 instead and the verb they name is untested.
+ *  `url` is only meaningful to `navigate`; the others ignore it. */
+const WELL_FORMED_COMMAND_CALLS: Array<Record<string, unknown>> = [
+  { verb: "navigate", url: "https://a.example" },
+  { verb: "back" },
+  { verb: "read" },
+  { verb: "screenshot" },
+  { verb: "click", selector: "button" },
+  { verb: "type", selector: "input", text: "hello" },
+  { verb: "scroll", direction: "down" },
+  { verb: "submit", selector: "form" },
+  { verb: "wait", until: "load" },
+];
 
 // ================================================================================================
 // Registration: modes, deferral, and the per-mode SCHEMA
@@ -164,12 +185,12 @@ describe("browser: registration", () => {
 
   test("the chat exclusion is ENFORCED at execute(), not merely un-advertised", async () => {
     const h = makeHarness();
-    const res = await h.run({ verb: "click", tabId: "t1" }, { mode: "chat" });
+    const res = await h.run({ verb: "click", tabId: "t1", selector: "a" }, { mode: "chat" });
     expect(res.isError).toBe(true);
     expect(res.output).toContain("invalid arguments for browser");
     expect(h.recorded).toHaveLength(0);
     // The same call in code mode gets past validation and reaches the app.
-    const code = await h.run({ verb: "click", tabId: "t1" });
+    const code = await h.run({ verb: "click", tabId: "t1", selector: "a" });
     expect(code.isError).toBe(false);
     expect(h.recorded.map((r) => r.action)).toEqual(["click"]);
   });
@@ -314,16 +335,21 @@ describe("browser: the outcomes are mapped honestly", () => {
     expect(h.recorded).toHaveLength(1);
   });
 
-  test("the interaction verbs dispatch for real — the app's 'not implemented' is the answer", async () => {
+  /** T4 shipped this row against the app's `not implemented` stub. Task 5 built the arm, so the row
+   *  now pins what it always meant to: an interaction verb reaches the app carrying its operands,
+   *  and the app's `ok:false` — whatever it is — is the answer the model gets, untouched. The
+   *  fixture is the SENSITIVE FLOOR's refusal, which is the `ok:false` this tool must not soften. */
+  test("an interaction verb dispatches with its operands, and the app's refusal is the answer", async () => {
     const h = makeHarness();
-    h.outcome = async (cmd) => ({
+    h.outcome = async () => ({
       kind: "result", ok: false,
-      result: `the browser's \`${cmd.action}\` verb is not implemented in this version of the Mac app yet`,
+      result: "refused: that is a password field, and Norma never types into one unattended",
     });
-    const res = await h.run({ verb: "type", tabId: "t1" });
+    const res = await h.run({ verb: "type", tabId: "t1", selector: "#pw", text: "hunter2" });
     expect(res.isError).toBe(true);
-    expect(res.output).toContain("not implemented in this version of the Mac app yet");
+    expect(res.output).toContain("password field");
     expect(h.recorded.map((r) => r.action)).toEqual(["type"]);
+    expect(h.recorded[0]?.args).toEqual({ selector: "#pw", text: "hunter2" });
   });
 });
 
@@ -390,10 +416,13 @@ describe("browser: a tabId must belong to THIS session", () => {
     expect(h.recorded).toHaveLength(0);
   });
 
+  /** Every command verb, WITH valid operands — because operands are rung 1 and would otherwise be
+   *  the refusal under test for the five interaction verbs, which would leave tab ownership
+   *  unproven for exactly the verbs that act. */
   test("the check runs for EVERY command verb, including the interaction ones", async () => {
     const h = makeHarness();
-    for (const verb of ["navigate", "back", "read", "screenshot", "click", "type", "scroll", "submit", "wait"]) {
-      const res = await h.run({ verb, tabId: "nope", url: "https://a.example" });
+    for (const args of WELL_FORMED_COMMAND_CALLS) {
+      const res = await h.run({ ...args, tabId: "nope" });
       expect(res.isError).toBe(true);
       expect(res.output).toContain("does not belong to this session");
     }
@@ -480,6 +509,170 @@ describe("browser: the dangerous-domain hard block covers BOTH url doors", () =>
     const res = await h.run({ verb: "navigate", tabId: "t1", url: "https://example.com" });
     expect(res.isError).toBe(false);
     expect(h.recorded).toHaveLength(1);
+  });
+});
+
+// ================================================================================================
+// Task 5 — the interaction operands
+// ================================================================================================
+
+describe("browser: the interaction operands", () => {
+  test("every interaction verb's payload is built field by field, with the shapes the app reads", async () => {
+    const h = makeHarness();
+    await h.run({ verb: "click", selector: "button.buy" });
+    await h.run({ verb: "type", selector: "#q", text: "norma" });
+    await h.run({ verb: "submit", selector: "form#checkout" });
+    await h.run({ verb: "scroll", direction: "down" });
+    await h.run({ verb: "scroll", direction: "up", amount: 120 });
+    await h.run({ verb: "scroll", selector: "#footer" });
+    await h.run({ verb: "wait", until: "load" });
+    await h.run({ verb: "wait", until: "ms", timeoutMs: 2_500 });
+
+    expect(h.recorded.map((r) => r.args)).toEqual([
+      { selector: "button.buy" },
+      { selector: "#q", text: "norma" },
+      { selector: "form#checkout" },
+      { direction: "down", amount: BROWSER_SCROLL_DEFAULT_AMOUNT_PX },
+      { direction: "up", amount: 120 },
+      { selector: "#footer" },
+      { until: "load", timeoutMs: BROWSER_WAIT_DEFAULT_TIMEOUT_MS },
+      { until: "ms", timeoutMs: 2_500 },
+    ]);
+  });
+
+  /** The READ verbs carry no `args` at all — `navigate`'s url is a top-level field, not a payload.
+   *  A read verb that started shipping an args object would be a new model-authored payload on a
+   *  wire nothing on the app side reads for it. */
+  test("the read verbs dispatch with NO args object", async () => {
+    const h = makeHarness();
+    await h.run({ verb: "navigate", url: "https://a.example" });
+    await h.run({ verb: "back" });
+    await h.run({ verb: "read" });
+    await h.run({ verb: "screenshot" });
+    expect(h.recorded.map((r) => r.args)).toEqual([undefined, undefined, undefined, undefined]);
+    expect(h.recorded[0]?.url).toBe("https://a.example");
+  });
+
+  /** **`args` is BUILT, never spread.** A model that sends extra keys — including whatever key a
+   *  later task might use for a privileged flag, e.g. Task 6's attended-approval signal — cannot
+   *  get them onto the wire: zod strips what the schema does not declare, and `commandArgs`
+   *  re-emits only the fields it named itself. Mutation: `return {...a}` in `commandArgs` and this
+   *  reds. */
+  test("a model cannot smuggle an extra key into args", async () => {
+    const h = makeHarness();
+    const res = await h.run({
+      verb: "click", selector: "button", sensitiveApproved: true, args: { evil: 1 },
+    });
+    expect(res.isError).toBe(false);
+    expect(h.recorded[0]?.args).toEqual({ selector: "button" });
+  });
+
+  test("each interaction verb names its missing operand, and NOTHING is dispatched", async () => {
+    const h = makeHarness();
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ verb: "click" }, "click needs a CSS selector"],
+      [{ verb: "submit" }, "submit needs a CSS selector"],
+      [{ verb: "type", selector: "#q" }, "type needs text"],
+      [{ verb: "type", text: "hi" }, "type needs a CSS selector"],
+      [{ verb: "scroll" }, "scroll needs either"],
+      [{ verb: "scroll", selector: "#a", direction: "down" }, "EITHER a selector"],
+      [{ verb: "scroll", selector: "#a", amount: 10 }, "amount is the distance for a direction"],
+      [{ verb: "wait" }, "wait needs until"],
+    ];
+    for (const [args, expected] of cases) {
+      const res = await h.run(args);
+      expect(res.isError).toBe(true);
+      expect(res.output).toContain(expected);
+    }
+    expect(h.recorded).toHaveLength(0);
+  });
+
+  /** Rung 1 is rung 1: a malformed interaction call is refused the same way whether or not the app
+   *  is there, and whether or not the tab is this session's. "The call is malformed however the
+   *  world looks." */
+  test("a missing operand outranks BOTH tab ownership and availability", async () => {
+    const h = makeHarness({ harnesses: [] });
+    const res = await h.run({ verb: "click", tabId: "not-ours" });
+    expect(res.output).toContain("click needs a CSS selector");
+    expect(res.output).not.toContain("browser unavailable");
+    expect(res.output).not.toContain("does not belong");
+  });
+
+  test("the schema's own bounds refuse before run() is ever reached", async () => {
+    const h = makeHarness();
+    const overLongSelector = await h.run({
+      verb: "click", selector: "a".repeat(BROWSER_SELECTOR_MAX_LENGTH + 1),
+    });
+    expect(overLongSelector.output).toContain("invalid arguments for browser");
+    const badDirection = await h.run({ verb: "scroll", direction: "sideways" });
+    expect(badDirection.output).toContain("invalid arguments for browser");
+    const badUntil = await h.run({ verb: "wait", until: "forever" });
+    expect(badUntil.output).toContain("invalid arguments for browser");
+    const overLongWait = await h.run({
+      verb: "wait", until: "ms", timeoutMs: BROWSER_WAIT_MAX_TIMEOUT_MS + 1,
+    });
+    expect(overLongWait.output).toContain("invalid arguments for browser");
+    expect(h.recorded).toHaveLength(0);
+  });
+
+  /** **The wait arithmetic**, as a pin rather than as prose: the model's own timeout must finish
+   *  inside the command deadline with room for the round trip. Reds if either number moves toward
+   *  the other. */
+  test("wait's ceiling leaves real headroom inside its command deadline", () => {
+    expect(BROWSER_WAIT_MAX_TIMEOUT_MS).toBeLessThan(BROWSER_DEADLINES_MS.wait);
+    expect(BROWSER_DEADLINES_MS.wait - BROWSER_WAIT_MAX_TIMEOUT_MS).toBeGreaterThanOrEqual(10_000);
+    expect(BROWSER_WAIT_DEFAULT_TIMEOUT_MS).toBeLessThanOrEqual(BROWSER_WAIT_MAX_TIMEOUT_MS);
+  });
+
+  /**
+   * **The over-cap `type`, pre-checked in the wire's own unit.**
+   *
+   * The character bound (`BROWSER_TYPE_TEXT_MAX_LENGTH`) is zod's and fires first for long ASCII.
+   * What reaches `checkArgsBudget` is text that is SHORT and WIDE — this fixture is under the
+   * character bound and over the 8 KiB byte bound, which is the case a character-counting check
+   * cannot see. Mutation: measure `text.length` instead of `Buffer.byteLength` and this reds while
+   * every other row stays green.
+   */
+  test("an over-cap type is refused BEFORE dispatch, measured in bytes and not characters", async () => {
+    const h = makeHarness();
+    // Each emoji is FOUR UTF-8 bytes and TWO JS characters, so 2048 of them is exactly the 4096
+    // character bound (zod passes it) and 8192 bytes of text — which with the object's own 27 bytes
+    // of punctuation is 8219, past the 8192-byte wire cap.
+    const wide = "😀".repeat(2_048);
+    expect(wide.length).toBeLessThanOrEqual(BROWSER_TYPE_TEXT_MAX_LENGTH);
+    expect(Buffer.byteLength(JSON.stringify({ selector: "#q", text: wide }), "utf8"))
+      .toBeGreaterThan(PANEL_COMMAND_ARGS_MAX_JSON_BYTES);
+
+    const res = await h.run({ verb: "type", selector: "#q", text: wide });
+    expect(res.isError).toBe(true);
+    expect(res.output).toContain("past the 8192-byte limit");
+    expect(res.output).toContain("nothing was sent");
+    expect(h.recorded).toHaveLength(0);
+  });
+
+  /** The character bound is the FIRST of the two and produces the schema's own error. Both exist:
+   *  this one for long ASCII, the byte one for short-and-wide. */
+  test("a very long ASCII type is refused by the character bound", async () => {
+    const h = makeHarness();
+    const res = await h.run({
+      verb: "type", selector: "#q", text: "a".repeat(BROWSER_TYPE_TEXT_MAX_LENGTH + 1),
+    });
+    expect(res.output).toContain("invalid arguments for browser");
+    expect(h.recorded).toHaveLength(0);
+  });
+
+  /** Spec §1: "No interaction verbs, ever" in chat — and the OPERANDS are not there either, so the
+   *  rendered chat schema does not advertise an interaction surface the mode cannot reach. */
+  test("chat's schema carries none of the interaction operands", () => {
+    const h = makeHarness();
+    const spec = (mode: "chat" | "code") => JSON.stringify(
+      h.registry
+        .specs("/tmp", { mode, builtinDeferral: true, loaded: new Set(["browser"]) })
+        .find((s) => s.name === "browser")?.parameters,
+    );
+    const operands = ["selector", "text", "direction", "amount", "until", "timeoutMs"];
+    for (const field of operands) expect(spec("chat")).not.toContain(`"${field}"`);
+    for (const field of operands) expect(spec("code")).toContain(`"${field}"`);
   });
 });
 

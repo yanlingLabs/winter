@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { PanelOpenTabParams } from "@norma/protocol";
+import { PanelOpenTabParams, PANEL_COMMAND_ARGS_MAX_JSON_BYTES } from "@norma/protocol";
 import type { ToolRegistry } from "./registry";
 import type { PanelCommandAction, PanelCommandOutcome } from "../../panel/commands";
 import type { PanelTabState } from "../../panel/store";
@@ -38,13 +38,20 @@ import { checkDangerousDomain, dangerousDomainRefusal } from "./page-core";
  * growing a second policy (methods.ts's own comment on that schema says so, and this is what makes
  * it true).
  *
- * **The interaction verbs are not implemented anywhere yet.** They are in this tool's code/dispatch
- * schema (see `registerBrowserTool`) and they DISPATCH for real; the Mac app answers them
- * `ok:false, "not implemented in this version of the Mac app yet"` (`PanelCommandConsumer`'s own
- * INTERACT arm, built in Task 3 for exactly this window). Task 5 builds them — and, stated plainly
- * because the task brief assumed otherwise: **Task 5 is not daemon-side only.** These verbs are
- * currently operand-less; `click` needs a selector, `type` needs text, `wait` needs a predicate, and
- * none of those fields exist on this schema. Task 5 must add them here as well as in the app.
+ * **The interaction verbs are BUILT (Task 5)** — operands here (`INTERACT_OPERANDS`), mechanics in
+ * `PanelCommandConsumer` (Swift), and the SENSITIVE FLOOR at the consumer because field inspection
+ * is only possible where the DOM is (spec §4). Two consequences of that split are this file's to
+ * state, because a reader of the tool cannot see them from the app:
+ *
+ *  - **`click` is a whole navigation door this daemon never sees.** `refuseDangerous` below stops
+ *    the agent from *aiming* a `navigate`/`open` at a listed host on the first hop; a `click` on a
+ *    link goes wherever the page says, and no `panel.commandResult` reports where that was. The
+ *    fifth door (`PanelURLPolicy`) is a SCHEME door and holds for the url the CONSUMER loads, which
+ *    a click never routes through. Inherited, named, not closed here — see `refuseDangerous`.
+ *  - **The floor's refusal is a `{kind:"result", ok:false}`**, so it arrives on the same path as
+ *    "no element matched" and is rendered by the same branch below. It is deliberately not modelled
+ *    as a distinct outcome: the daemon has no way to verify a floor verdict it did not compute, and
+ *    a second kind would invite exactly that pretence.
  */
 
 // ================================================================================================
@@ -97,6 +104,8 @@ function isCommandVerb(v: BrowserVerb): v is (typeof COMMAND_VERBS)[number] {
  *    byte. The panel's own address bar has no bound at all (a person watches and gives up), so this
  *    is the agent's patience, not the browser's. It is deliberately the most generous.
  *  - `wait` **30s** — a bounded poll for load/idle; the same "waiting on a page" shape as navigate.
+ *    **This is the one deadline a MODEL-supplied number has to fit inside**, and the arithmetic is
+ *    in `BROWSER_WAIT_MAX_TIMEOUT_MS` below.
  *  - `back` **15s** — history navigation, usually served from the back/forward cache, but still a
  *    load and still able to hit the network.
  *  - `read` **20s** — one `Runtime.evaluate` over `innerText`. Fast once the page is settled, but it
@@ -104,9 +113,12 @@ function isCommandVerb(v: BrowserVerb): v is (typeof COMMAND_VERBS)[number] {
  *    being stingy here is "timed out" for a page that was one tick from readable.
  *  - `screenshot` **20s** — `Page.captureScreenshot` is quick; the variable part is the up-to-3 MiB
  *    base64 payload crossing back over the socket.
- *  - the interaction verbs **15s** — a CDP input dispatch is local to the renderer and does not wait
- *    on the network. (They cannot actually run yet; the number is chosen for the verb, not for
- *    today's refusal, so Task 5 inherits a considered value rather than a placeholder.)
+ *  - `click` / `type` / `scroll` / `submit` **15s** — CDP input dispatch and DOM resolution, both
+ *    local to the renderer, neither waiting on the network. Task 5 made each of these a CHAIN of
+ *    CDP round trips rather than one (`click` is 7: getDocument → querySelector → scrollIntoView →
+ *    getBoxModel → three `Input.dispatchMouseEvent`s), which does not change the sizing: the chain
+ *    is sequential renderer IPC on an already-loaded page, microseconds per hop, and the 15s is
+ *    still overwhelmingly the app's own scheduling plus the two socket crossings.
  *
  * Not settings. Nothing here is a knob a user would turn, and a setting would drag in the
  * hot-reload obligation (CLAUDE.md) for no gain — the same call `AUTO_BACKGROUND_GRACE_MS` records.
@@ -138,6 +150,98 @@ const SHARED = {
   title: z.string().min(1).optional(),
 };
 
+// ------------------------------------------------------------------------------------------------
+// Task 5's operand bounds.
+//
+// **These are not the security mechanism and must not be read as one.** What makes a model-supplied
+// selector safe is that it travels to CDP as a PROTOCOL PARAMETER — `DOM.querySelector`'s own
+// `selector` field, parsed by Blink's CSS parser — and never as a substring of a JavaScript
+// expression (`PanelCommandConsumer`'s Task-5 header carries the full argument, per verb). A length
+// bound on a string that is interpolated into code buys nothing; these bounds exist for the ordinary
+// reason every wire field here has one: to keep a runaway model from filling a frame.
+//
+// The one that is load-bearing for CORRECTNESS rather than hygiene is `BROWSER_WAIT_MAX_TIMEOUT_MS`.
+// ------------------------------------------------------------------------------------------------
+
+/** A CSS selector's ceiling. Generous — a real selector chosen off a rendered page (`form#checkout >
+ *  div.row:nth-child(3) input[name="q"]`) is under 200 characters, and jQuery-style monsters copied
+ *  out of devtools reach a few hundred. Mirrored app-side as an INDEPENDENT guard, not as a
+ *  hand-mirrored cap: see `PanelCommandConsumer.selectorMaxLength`. */
+export const BROWSER_SELECTOR_MAX_LENGTH = 1024;
+
+/** `type`'s text ceiling, in CHARACTERS. The wire's own bound is
+ *  `PANEL_COMMAND_ARGS_MAX_JSON_BYTES` (8 KiB of serialised JSON, BYTES) and it is the one that
+ *  actually refuses — this is the friendlier of the two errors, and deliberately below it so that
+ *  the byte check is reached only by text that is short but wide (CJK, emoji: 3–4 bytes each). Both
+ *  are needed; see `checkArgsBudget`. */
+export const BROWSER_TYPE_TEXT_MAX_LENGTH = 4096;
+
+/** `scroll`'s directional amount, in CSS pixels, and its default.
+ *
+ *  The default is a bit under one 900pt viewport, which is what "scroll down" means to a person
+ *  reading: a screenful minus the overlap that keeps the reading position. The maximum is a page's
+ *  worth of very long document — past it the agent should be scrolling to an ELEMENT (`selector`),
+ *  which lands exactly rather than approximately. */
+export const BROWSER_SCROLL_DEFAULT_AMOUNT_PX = 700;
+export const BROWSER_SCROLL_MAX_AMOUNT_PX = 20_000;
+
+/** `wait`'s predicates. `until` rather than `for` for two reasons: `for` is a reserved word and
+ *  `a.for` reads badly at every use site, and `{until, timeoutMs}` is the shape
+ *  `PanelCommandEvent.args`'s own doc comment in `packages/protocol/src/events.ts` already names for
+ *  this verb — matching it keeps that comment true rather than making it a third thing to correct. */
+export const BROWSER_WAIT_UNTIL = ["load", "idle", "ms"] as const;
+
+/** Directions `scroll` accepts. */
+export const BROWSER_SCROLL_DIRECTIONS = ["up", "down", "left", "right"] as const;
+
+/**
+ * **`wait`'s own timeout must finish INSIDE the command deadline, and this is the arithmetic.**
+ *
+ * Three clocks are running on one `wait`, and only the innermost may be allowed to win:
+ *
+ *   1. the DAEMON's pending entry — `BROWSER_DEADLINES_MS.wait` = **30 000 ms**, armed by
+ *      `PanelCommandRegistry.dispatch` BEFORE the event is emitted;
+ *   2. the APP's local abandon timer — the same 30 000 ms (the command carries its own
+ *      `deadlineMs`), armed when the consumer receives the command, i.e. strictly later;
+ *   3. this **model-supplied `timeoutMs`**, the poll's own bound inside the consumer.
+ *
+ * If (3) could reach or exceed (1), a `wait` that legitimately ran its full course would answer into
+ * a pending entry that had already timed out — the agent would be told "the Mac app did not answer"
+ * for a wait that completed and reported honestly, which is the exact confusion
+ * `PanelCommandOutcome` keeps `timeout` a separate kind to avoid.
+ *
+ * So: **20 000 ms**, leaving a 10 000 ms floor of headroom for everything that is not the poll —
+ * the emit, the socket, the hub fan-out, the app's decode and main-thread scheduling, one poll
+ * interval of overshoot (250 ms), the result's encode and its socket crossing home. Ten seconds is
+ * absurdly generous for that list and is chosen to be absurdly generous: the cost of over-reserving
+ * is a `wait` that cannot be asked to run longer than 20 s, and the cost of under-reserving is a
+ * class of "timed out" answers for work that succeeded.
+ *
+ * Enforced TWICE, and the second time is not redundant: zod refuses an over-bound `timeoutMs` here,
+ * and `PanelCommandConsumer` CLAMPS whatever arrives (`waitTimeoutCeilingMs`) because the app must
+ * not take a model-authored number's word for it just because this daemon says it checked.
+ */
+export const BROWSER_WAIT_MAX_TIMEOUT_MS = 20_000;
+
+/** What `wait` uses when the model names no timeout. Long enough for an ordinary page load to
+ *  finish, short enough that a wait for something that will never happen does not eat the whole
+ *  deadline before the agent learns it. */
+export const BROWSER_WAIT_DEFAULT_TIMEOUT_MS = 10_000;
+
+/** The interaction operands — **on the FULL schema only, never on chat's.**
+ *
+ *  Chat cannot reach a verb that would read them, so carrying them there would be advertising an
+ *  interaction surface to the one mode spec §1 says must never have one. Keeping them out is also
+ *  what makes the rendered chat schema honestly small. */
+const INTERACT_OPERANDS = {
+  selector: z.string().min(1).max(BROWSER_SELECTOR_MAX_LENGTH).optional(),
+  text: z.string().min(1).max(BROWSER_TYPE_TEXT_MAX_LENGTH).optional(),
+  direction: z.enum(BROWSER_SCROLL_DIRECTIONS).optional(),
+  amount: z.number().int().positive().max(BROWSER_SCROLL_MAX_AMOUNT_PX).optional(),
+  until: z.enum(BROWSER_WAIT_UNTIL).optional(),
+  timeoutMs: z.number().int().positive().max(BROWSER_WAIT_MAX_TIMEOUT_MS).optional(),
+};
+
 /** CHAT's schema — and, because `argsByMode` is fail-closed, the schema for any caller whose mode is
  *  unknown. Read verbs only: spec §1, "No interaction verbs, ever". */
 const BrowserReadArgs = z.object({ verb: z.enum(BROWSER_READ_VERBS), ...SHARED });
@@ -145,9 +249,133 @@ const BrowserReadArgs = z.object({ verb: z.enum(BROWSER_READ_VERBS), ...SHARED }
 const BrowserFullArgs = z.object({
   verb: z.enum([...BROWSER_READ_VERBS, ...BROWSER_INTERACT_VERBS]),
   ...SHARED,
+  ...INTERACT_OPERANDS,
 });
 
 type BrowserArgs = z.infer<typeof BrowserFullArgs>;
+
+// ================================================================================================
+// The command payload
+// ================================================================================================
+
+/**
+ * Build `panel_command.args` for one verb — **field by field, from PARSED operands, never by
+ * spreading the model's object.**
+ *
+ * That is a security property and not a style: `args` is the only model-authored payload on the
+ * wire, and the app gives its keys meaning. A `{...a}` here would let a model put ANY key in it —
+ * including whichever key a later task chooses for a privileged flag. Task 6's attended-approval
+ * path is exactly that hazard: the sensitive floor's future "a human approved this" signal must be
+ * DAEMON-STAMPED after a real approval, and it must not be a key the model can set. Constructing the
+ * object here, explicitly, is what makes "the model cannot write that key" structural rather than a
+ * rule someone has to remember.
+ *
+ * `undefined` for the verbs that carry no payload (`navigate` carries a `url`, which is a top-level
+ * field of its own, not an arg).
+ *
+ * Throws — with the message the model needs — for a malformed interaction call. This is rung 1 of
+ * `run`'s refusal ladder.
+ */
+function commandArgs(a: BrowserArgs): Record<string, unknown> | undefined {
+  switch (a.verb) {
+    case "click":
+    case "submit":
+      return { selector: requireSelector(a) };
+
+    case "type": {
+      const selector = requireSelector(a);
+      if (a.text === undefined) {
+        throw new Error(
+          'type needs text — e.g. verb:"type", selector:"input[name=\\"q\\"]", text:"norma". '
+          + "type SETS the field (whatever is in it is replaced), so pass the whole value you want.",
+        );
+      }
+      return { selector, text: a.text };
+    }
+
+    case "scroll": {
+      // EITHER/OR rather than a precedence rule: a call naming both means the model has two
+      // different intentions and guessing which one to honour would move a real browser by the
+      // wrong amount, silently.
+      if (a.selector !== undefined && a.direction !== undefined) {
+        throw new Error(
+          "scroll takes EITHER a selector (bring that element into view) OR a direction — not both.",
+        );
+      }
+      if (a.selector !== undefined) {
+        if (a.amount !== undefined) {
+          throw new Error(
+            "scroll's amount is the distance for a direction; with a selector the distance is "
+            + "whatever brings the element into view. Drop one of the two.",
+          );
+        }
+        return { selector: a.selector };
+      }
+      if (a.direction === undefined) {
+        throw new Error(
+          'scroll needs either direction:"up"/"down"/"left"/"right" (with an optional amount in '
+          + 'pixels) or selector:"…" to bring an element into view.',
+        );
+      }
+      return { direction: a.direction, amount: a.amount ?? BROWSER_SCROLL_DEFAULT_AMOUNT_PX };
+    }
+
+    case "wait": {
+      if (a.until === undefined) {
+        throw new Error(
+          'wait needs until:"load" (the page finished loading), "idle" (loaded, and nothing new has '
+          + 'finished fetching) or "ms" (just wait the timeout out) — e.g. verb:"wait", until:"load".',
+        );
+      }
+      return { until: a.until, timeoutMs: a.timeoutMs ?? BROWSER_WAIT_DEFAULT_TIMEOUT_MS };
+    }
+
+    default:
+      return undefined;
+  }
+}
+
+function requireSelector(a: BrowserArgs): string {
+  if (a.selector === undefined) {
+    throw new Error(
+      `${a.verb} needs a CSS selector naming the element — e.g. verb:"${a.verb}", `
+      + 'selector:"button[type=\\"submit\\"]". The selector is matched against the page\'s TOP '
+      + "document only: it does not reach inside iframes or shadow DOM. Use verb:\"read\" or "
+      + 'verb:"screenshot" first if you do not know the page.',
+    );
+  }
+  return a.selector;
+}
+
+/**
+ * **The over-cap pre-check — the same shape, and the same reasoning, as the app's result caps.**
+ *
+ * `PanelCommandEvent.args` refuses (never truncates) an object whose serialised JSON exceeds
+ * `PANEL_COMMAND_ARGS_MAX_JSON_BYTES`, and that refusal is real but arrives badly: `dispatch` →
+ * `emit` → `hub.broadcastTransient` re-parses the event, zod throws, and the tool would surface a
+ * raw issue path about a `refine` on a record. Checking here turns it into a sentence naming the
+ * verb, the size and the limit.
+ *
+ * **BYTES of `JSON.stringify`, measured exactly as the schema measures it** — not characters, not
+ * `text.length`. `BROWSER_TYPE_TEXT_MAX_LENGTH` already bounds the character count; what gets past
+ * that and lands here is text that is short and wide (CJK and emoji are 3–4 UTF-8 bytes each), which
+ * is precisely the case a character-counting check is blind to. This is the same unit trap
+ * `PanelURLPolicy.wireLength` records from the other direction.
+ *
+ * Nothing is dispatched: no `panel_command`, no pending entry, no deadline burned.
+ */
+function checkArgsBudget(verb: BrowserVerb, args: Record<string, unknown> | undefined): void {
+  if (args === undefined) return;
+  const bytes = Buffer.byteLength(JSON.stringify(args), "utf8");
+  if (bytes <= PANEL_COMMAND_ARGS_MAX_JSON_BYTES) return;
+  throw new Error(
+    `browser ${verb}'s arguments are ${bytes} bytes of JSON, past the `
+    + `${PANEL_COMMAND_ARGS_MAX_JSON_BYTES}-byte limit on a browser command — nothing was sent. `
+    + (verb === "type"
+      ? "Type a shorter value, or fill the field in several passes."
+      : "Use a shorter selector."),
+  );
+}
 
 // ================================================================================================
 // Deps
@@ -382,17 +610,32 @@ export function registerBrowserTool(r: ToolRegistry, deps: BrowserToolDeps): voi
       + "• read — the page's rendered text, as a reader sees it. Prefer this over ReadPage when the "
       + "page needs JavaScript or the user's login; ReadPage is still better for plain articles.\n"
       + "• screenshot — a PNG of the tab, returned to you as an image.\n"
+      // The description is MODE-INVARIANT — `ToolDefinition.description` has no per-mode seam, only
+      // `argsByMode` does — so everything below is written to be true in every mode. In chat these
+      // verbs are absent from the enum and the paragraph is simply inert; the alternative, a
+      // per-mode description, is a registry change with a far wider blast radius than one paragraph
+      // a chat model cannot act on.
+      + "• click — selector: a CSS selector. Moves the pointer to the element and clicks it, as a "
+      + "person would. Scrolls it into view first; fails if nothing matches or it has no visible box.\n"
+      + "• type — selector + text. Focuses the field and SETS it: existing content is replaced, so "
+      + "pass the whole value. Password and payment fields are refused (see below).\n"
+      + "• scroll — either direction (up/down/left/right, with an optional amount in pixels) or "
+      + "selector, to bring one element into view.\n"
+      + "• submit — selector naming a form, or any element inside one. Submits it exactly as pressing "
+      + "Enter in the form would, validation and all.\n"
+      + "• wait — until:\"load\" (the page finished loading), \"idle\" (loaded, and nothing new has "
+      + "finished fetching for a moment) or \"ms\" (just wait), with an optional timeoutMs up to "
+      + `${BROWSER_WAIT_MAX_TIMEOUT_MS}. Reports honestly whether the condition was met or the wait ran out.\n`
+      + "Selectors match the page's TOP document only — not inside iframes, not inside shadow DOM; "
+      + "if an element is invisible to a selector it is usually one of those.\n"
+      + "SENSITIVE FIELDS: typing into a password or payment field is refused outright, and so is "
+      + "typing into a field the app could not inspect. Nothing you can pass changes that — ask the "
+      + "user to fill those in themselves.\n"
+      + "You are driving the user's own logged-in browser. A click can buy, send or delete things. "
+      + "Read or screenshot the page before acting on it.\n"
       + "tabId is optional on the tab-driving verbs and defaults to the session's ACTIVE tab. "
       + "Verbs other than tabs/open need the Mac app to be showing this session; if it isn't, you are "
-      + "told so immediately rather than left waiting.\n"
-      // The description is MODE-INVARIANT — `ToolDefinition.description` has no per-mode seam, only
-      // `argsByMode` does — so this sentence is written to be true in every mode. In chat the
-      // interaction verbs are absent from the enum and the sentence is simply inert; in code and
-      // dispatch it is what stops the model spending a guaranteed-terminal round trip discovering
-      // that `click` is not built yet. Delete this line when Task 5 implements them.
-      + "The interaction verbs (click, type, scroll, submit, wait), where offered, are accepted by "
-      + "the schema but NOT yet implemented by the Mac app — calling one only returns 'not "
-      + "implemented'. Don't plan around them.",
+      + "told so immediately rather than left waiting.",
     // Spec §1: every mode may browse. `modes` is the DECLARATION site the per-mode registry replaced
     // the old hand-written allowlists with (registry.ts) — listing "chat" here is what makes this a
     // default tool there.
@@ -479,8 +722,18 @@ export function registerBrowserTool(r: ToolRegistry, deps: BrowserToolDeps): voi
       // the call is actually right, instead of being told the app is missing and then, on retry, that
       // the tab is foreign.
 
-      if (a.verb === "navigate") {
-        if (!a.url) throw new Error('navigate needs a url — e.g. verb:"navigate", url:"https://example.com".');
+      // Rung 1 — operands. `commandArgs` throws the per-verb complaint and BUILDS the payload from
+      // parsed fields (see its own doc for why it is built rather than spread); `checkArgsBudget`
+      // then measures that payload in the wire's own unit, so an over-long `type` is refused here
+      // with a sentence instead of at `emit` with a zod issue path.
+      if (a.verb === "navigate" && !a.url) {
+        throw new Error('navigate needs a url — e.g. verb:"navigate", url:"https://example.com".');
+      }
+      const args = commandArgs(a);
+      checkArgsBudget(a.verb, args);
+
+      // Rung 2 — the permanent policy refusal.
+      if (a.verb === "navigate" && a.url) {
         const refusal = refuseDangerous(a.url, deps, ctx.cwd);
         if (refusal) throw new Error(refusal);
       }
@@ -509,6 +762,7 @@ export function registerBrowserTool(r: ToolRegistry, deps: BrowserToolDeps): voi
         action: a.verb,
         tabId,
         ...(a.verb === "navigate" && a.url !== undefined ? { url: a.url } : {}),
+        ...(args !== undefined ? { args } : {}),
         deadlineMs,
       });
 

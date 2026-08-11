@@ -654,8 +654,11 @@ export const PanelCommandEvent = Base.extend({
   // It is still the right default — B2's agent-authored navigate is the producer, and a model can
   // emit an arbitrarily long string.
   url: z.string().max(PANEL_URL_MAX_LENGTH).optional(),
-  /** Per-verb payload, opaque at this layer: `{selector, text}` for `type`, `{dx, dy}` for
-   *  `scroll`, `{until, timeoutMs}` for `wait`. Deliberately NOT a discriminated per-verb union —
+  /** Per-verb payload, opaque at this layer. B2 Task 5 fixed the real shapes on both sides:
+   *  `{selector}` for `click`/`submit`, `{selector, text}` for `type`, `{selector}` OR
+   *  `{direction, amount}` for `scroll`, `{until, timeoutMs}` for `wait`. (This comment used to say
+   *  `{dx, dy}` for `scroll`, which the built verb is not.)
+   *  Deliberately NOT a discriminated per-verb union —
    *  the consumer that gives each key meaning is the app's CDP bridge (Task 3), and a wire-level
    *  union would have to be re-mirrored in Swift on every verb tweak for no gained safety (the
    *  Swift side decodes `args` as opaque JSON either way). Bounded by
