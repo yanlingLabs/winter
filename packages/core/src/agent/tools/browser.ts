@@ -290,7 +290,8 @@ function refuseDangerous(url: string, deps: BrowserToolDeps, cwd: string | undef
 const ABORTED = Symbol("browser-command-aborted");
 
 /**
- * Await a dispatched command, or give up the moment the turn is aborted.
+ * Await a dispatched command, or give up the moment the turn is aborted. (An ALREADY-aborted turn is
+ * caught one step earlier, in `run`, so nothing is dispatched at all in that case.)
  *
  * **The registry has no cancel path, and this does not add one.** `PanelCommandRegistry` exposes
  * `dispatch` and `resolve` only; a pending entry ends when the app answers or when its own
@@ -313,6 +314,7 @@ async function settleOrAbort(
   signal: AbortSignal | undefined,
 ): Promise<PanelCommandOutcome | typeof ABORTED> {
   if (!signal) return await settled;
+  // Belt for a signal that went down between `run`'s pre-check and here.
   if (signal.aborted) return ABORTED;
   return await new Promise<PanelCommandOutcome | typeof ABORTED>((resolve) => {
     const onAbort = () => resolve(ABORTED);
@@ -450,6 +452,11 @@ export function registerBrowserTool(r: ToolRegistry, deps: BrowserToolDeps): voi
 
       const reach = panelReach(deps, sessionId);
       if (!reach.ok) throw new Error(reach.reason);
+
+      // Already interrupted before we even sent it: nothing is gained by pushing a command at the
+      // app that no one will read the answer to, and this is the ordinary shape after an ESC (the
+      // engine keeps draining a round's remaining tool calls with the signal already down).
+      if (ctx.signal?.aborted) return `browser ${a.verb} was not sent — the turn was interrupted first.`;
 
       const deadlineMs = BROWSER_DEADLINES_MS[a.verb];
       const { settled } = deps.dispatch({
