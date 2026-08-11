@@ -105,6 +105,29 @@ export interface ToolDefinition<S extends z.ZodTypeAny = z.ZodTypeAny> {
    *  defers it. Resolution always goes through the single `isDeferred` predicate below, which takes
    *  a `mode` alongside this value — never re-implement the true/array/absent switch at a call site. */
   deferred?: boolean | Mode[];
+  /** Per-MODE argument schema. Absent (every tool but `browser`) means `args` is the schema in
+   *  every mode — byte-identical behaviour to before this field existed, for every other def.
+   *
+   *  **Why a registry seam rather than two registered tools.** The `AskQuestion` precedent SPLIT a
+   *  tool in two rather than vary one, and its own doc comment gives the reason: `register()` throws
+   *  on a duplicate NAME and per-session differentiation is name filtering. That reasoning holds for
+   *  two tools that are genuinely different (`ask_user` vs `AskQuestion`). It does not reach
+   *  `browser`, which is ONE tool by design (b2-agent-browser spec §1, "ONE `browser` tool") whose
+   *  per-mode difference is its VERB ENUM, not its existence — and a second registered name would be
+   *  a second browser tool in the daemon, i.e. exactly the wrong-mode exposure the spec says the
+   *  per-mode registry should make structurally impossible.
+   *
+   *  Resolved ONLY through `argsFor` below, which BOTH `toSpec` (what the model is SHOWN) and
+   *  `execute` (what is ACCEPTED) call. Rendering-only enforcement would be advisory prose: a
+   *  provider that ignored the advertised schema could still call a chat-excluded verb. Fail-closed
+   *  when `mode` is unknown — `args` itself must therefore be the NARROWEST schema, on exactly the
+   *  convention `isDeferred` records for an absent mode (resolve to the restrictive answer, never
+   *  the permissive one).
+   *
+   *  `rawParameters` still wins over both, unchanged — a def carrying `rawParameters` AND
+   *  `argsByMode` would advertise one fixed schema while validating a per-mode one. Nothing does;
+   *  said here so it is a known trap rather than a discovered one. */
+  argsByMode?: Partial<Record<Mode, z.ZodTypeAny>>;
   /** Which session modes may see this tool. ABSENT MEANS `["code"]` — deliberately restrictive:
    *  a newly registered tool can never silently appear in a hands-off mode (chat) or a
    *  narrow one (dispatch). This is the single declaration site that replaces the old
@@ -115,7 +138,15 @@ export interface ToolDefinition<S extends z.ZodTypeAny = z.ZodTypeAny> {
   run(args: z.infer<S>, ctx: ToolContext): Promise<string> | string;
 }
 
-const MAX_OUTPUT = 64 * 1024; // tool outputs are model input — cap them
+/** Tool outputs are model input — cap them.
+ *
+ *  EXPORTED as of b2-agent-browser T4 (T2 review rider M1) so that
+ *  `PANEL_COMMAND_RESULT_MAX_LENGTH`'s claim to "match `MAX_OUTPUT` in
+ *  packages/core/src/agent/tools/registry.ts" (packages/protocol/src/methods.ts) is a TEST rather
+ *  than prose — `packages/core/test/agent/tools/browser.test.ts` asserts the two are equal, so the
+ *  two numbers can no longer drift while the comment goes on claiming they agree. Nothing else
+ *  reads it; `execute` below is still the only enforcement site. */
+export const MAX_OUTPUT = 64 * 1024;
 
 export class ToolRegistry {
   private defs = new Map<string, ToolDefinition>();
@@ -204,8 +235,20 @@ export class ToolRegistry {
     return false;
   }
 
-  private toSpec(d: ToolDefinition): ToolSpec {
-    return { name: d.name, description: d.description, parameters: d.rawParameters ?? z.toJSONSchema(d.args) };
+  /** THE one resolution of "which argument schema applies in `mode`" — see
+   *  `ToolDefinition.argsByMode` for why the seam exists at all. Both `toSpec` (rendering) and
+   *  `execute` (validation) go through it, on the same one-predicate discipline `isDeferred` above
+   *  records: two independent re-implementations of a per-mode switch is precisely how what the model
+   *  is shown and what the daemon accepts start to disagree mid-turn.
+   *
+   *  An absent `mode`, or a mode with no override, resolves to `d.args` — which for a def that
+   *  declares `argsByMode` must be the NARROWEST schema (fail-closed). */
+  private argsFor(d: ToolDefinition, mode?: Mode): z.ZodTypeAny {
+    return (mode === undefined ? undefined : d.argsByMode?.[mode]) ?? d.args;
+  }
+
+  private toSpec(d: ToolDefinition, mode?: Mode): ToolSpec {
+    return { name: d.name, description: d.description, parameters: d.rawParameters ?? z.toJSONSchema(this.argsFor(d, mode)) };
   }
 
   specs(cwd?: string | null, opts?: { loaded?: Set<string>; deferThreshold?: number; deferExternals?: "count" | "always"; builtinDeferral?: boolean; mode?: Mode }): ToolSpec[] {
@@ -228,7 +271,9 @@ export class ToolRegistry {
         if (!this.isDeferred(d, countActive, builtinActive, mode)) return true; // not deferred → always visible
         return opts?.loaded?.has(d.name) ?? false; // deferred → only loaded (or pinned-then-loaded) tools ride along
       })
-      .map((d) => this.toSpec(d));
+      // `mode` threaded into the RENDERING too (b2 T4), not only into the visibility filters above:
+      // a def with `argsByMode` shows this mode's schema and no other.
+      .map((d) => this.toSpec(d, mode));
   }
 
   deferredIndex(
@@ -267,10 +312,17 @@ export class ToolRegistry {
     return this.isDeferred(def, false, builtinActive, mode);
   }
 
-  specFor(name: string, cwd?: string | null): ToolSpec | undefined {
+  /** One tool's spec, by name. `mode` (b2 T4) resolves an `argsByMode` def exactly as `specs()`
+   *  does, and threading it is LOAD-BEARING rather than tidy: this is the method ToolSearch renders a
+   *  newly-loaded deferred tool's schema with (toolsearch.ts), and `browser` is deferred in code and
+   *  dispatch — i.e. ToolSearch is the ONLY way a code session ever sees its schema. Unthreaded, a
+   *  code session would be handed the fail-closed narrow (chat) schema and be told it may not call a
+   *  verb `execute()` in that same session would happily accept: a silent narrowing, visible nowhere,
+   *  since nothing errors and the tool simply appears smaller than it is. */
+  specFor(name: string, cwd?: string | null, mode?: Mode): ToolSpec | undefined {
     const d = this.defs.get(name);
     if (!d || (d.scope && !(cwd && isWithin(cwd, d.scope)))) return undefined;
-    return this.toSpec(d);
+    return this.toSpec(d, mode);
   }
 
   has(name: string): boolean { return this.defs.has(name); }
@@ -294,7 +346,10 @@ export class ToolRegistry {
   async execute(name: string, rawArgs: unknown, ctx: ToolContext): Promise<ToolOutcome> {
     const def = this.defs.get(name);
     if (!def) return { output: `unknown tool: ${name}`, isError: true };
-    const parsed = def.args.safeParse(rawArgs);
+    // b2 T4: the SAME `argsFor` resolution `toSpec` renders with — this is where a per-mode schema
+    // stops being advisory. A chat session calling `browser` with an INTERACT verb fails here, at
+    // argument validation, whether or not the provider ever saw the narrow schema.
+    const parsed = this.argsFor(def, ctx.mode).safeParse(rawArgs);
     if (!parsed.success) {
       return { output: `invalid arguments for ${name}: ${parsed.error.issues.map((i) => i.path.join(".") || "(root)").join(", ")}`, isError: true };
     }

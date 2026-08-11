@@ -151,6 +151,24 @@ export class SessionHub {
     return this.attachments.get(sessionId)?.size ?? 0;
   }
 
+  /** b2-agent-browser T4: the IDENTITIES of the clients attached to `sessionId` right now —
+   *  `clientName` and the authenticated hello `role`, copied into plain objects so no `HubClient`
+   *  (and in particular no `deliver`) escapes the hub through a read accessor.
+   *
+   *  `attachedCount` above answers "can a `fanOut` reach anyone at all", which is the NECESSARY
+   *  condition for delivering a `panel_command`. It is not the sufficient one: a session held only by
+   *  the phone's gateway or by a `norma` terminal has a positive count and no browser anywhere, so
+   *  every command for it would be dispatched and then time out on its full deadline. The browser
+   *  tool needs the identities to tell those apart and refuse immediately instead (spec §3,
+   *  "unavailability is honest and fast").
+   *
+   *  The hub deliberately does NOT classify them — `harnessKindOf`'s prefix/role rules live in
+   *  `activity-enforcement.ts` and the panel-specific question ("could this client be hosting a
+   *  panel?") lives with the browser tool that asks it. This method only reports what is attached. */
+  attachedHarnesses(sessionId: string): Array<{ clientName: string; role?: string | null }> {
+    return [...(this.attachments.get(sessionId) ?? [])].map((c) => ({ clientName: c.clientName, role: c.role }));
+  }
+
   /** Which session `client` is currently attached to, or `undefined` if none — read-only, no side
    *  effects. session-activity-hygiene T9: the global sink asks this to answer "did `fanOut`
    *  already deliver this event to that connection?" (see `GlobalDeliveryOptions`). Deliberately

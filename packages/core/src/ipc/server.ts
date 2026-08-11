@@ -1,7 +1,6 @@
 import { chmodSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   ERR, METHODS, PROTOCOL_VERSION, LineDecoder, encodeLine, parseIncoming,
@@ -52,6 +51,7 @@ import { setSessionDirs, type SetDirsDeps } from "../sessions/set-dirs";
 import { reapEmptySessions } from "../sessions/reaper";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
 import { foldPanelTabs } from "../panel/store";
+import { mintPanelTab } from "../panel/open-tab";
 import type { PanelCommandRegistry } from "../panel/commands";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
@@ -2512,12 +2512,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // The daemon mints the id — the caller never supplies one ("persisted events are the
         // instruction"). This is what makes an agent-opened tab and a user-opened tab
         // indistinguishable downstream: exactly one code path creates a tab, and it always runs
-        // here, regardless of who asked.
-        const tabId = randomUUID();
+        // there, regardless of who asked.
+        //
+        // B2 Task 4 made that sentence literal. The mint moved to `mintPanelTab`
+        // (packages/core/src/panel/open-tab.ts) when the agent's `browser` tool's `open` verb became
+        // its second caller — this handler and that tool now run the SAME function, rather than two
+        // hand-copies of the same two appends. The commentary below is unchanged and still describes
+        // what that function does; it stays here because this is the call site a reader of the RPC
+        // surface arrives at first.
+        let tabId: string;
         try {
-          hub.append(p.sessionId, {
-            type: "panel_tab_opened", sessionId: p.sessionId, tabId, kind: p.kind, url: p.url, title: p.title,
-          });
+          tabId = mintPanelTab(hub, p);
           // panel-cef Task 6b — THE WIRE DECISION Plan A left open and Task 6a could not make.
           //
           // Opening a tab ACTIVATES it. Before this, `panel.openTab` appended `panel_tab_opened`
@@ -2530,9 +2535,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // report said: with nothing active, pressing "+" a second time leaves the panel showing
           // tab 1, so the button appears to do nothing at all.
           //
-          // Fixed HERE rather than in either fold or with a second RPC from the app, for the reason
-          // this handler's own doc gives about minting the id: exactly one code path creates a tab,
-          // and it always runs here. An agent-opened tab and a user-opened tab must be
+          // Fixed AT THE MINT rather than in either fold or with a second RPC from the app, for the
+          // reason this handler's own doc gives about minting the id: exactly one code path creates a
+          // tab. An agent-opened tab and a user-opened tab must be
           // indistinguishable downstream — an app-side follow-up `panel.activateTab` would have
           // been true only for tabs the app opened, and every client would have had to remember to
           // send it. Two appends, not one, is the whole cost: ~2 events per tab open, against a
@@ -2542,7 +2547,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // this: it still covers legacy sessions written before today (including the ~19 the 6a
           // smoke door left on the dev daemon) and the moment after the ACTIVE tab is closed, where
           // `foldPanelTabs` clears `activeTabId` by design.
-          hub.append(p.sessionId, { type: "panel_tab_activated", sessionId: p.sessionId, tabId });
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
