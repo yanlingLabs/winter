@@ -180,6 +180,24 @@ struct SessionSummary: Equatable, Identifiable {
     /// One of `"active"|"background"|"idle"|"archived"` for a participating (code/cowork) row,
     /// `nil` for a chat/dispatch row or a daemon predating the field — the SAME absent-is-a-real-
     /// value discipline `dirs` documents above. Never coerce absence to a displayed value.
+    ///
+    /// **Not the browser lifecycle's input any more** (b2-agent-browser T1): this is the daemon's
+    /// four-state LABEL, withheld from chat/dispatch, and the panel's own sessions are chat. What
+    /// that surface reads is `signals`/`archived` below, which exist for every mode.
     var activity: String? = nil
+    /// b2-agent-browser T1: the session's ARCHIVED flag, for every mode — threaded through from
+    /// `listSessions()`. The same fact `activity == "archived"` carries for a code row and the ONLY
+    /// way to learn it for a chat one. `nil` means NOT archived (the daemon writes NULL, never 0),
+    /// so unlike `signals` below there is no "old daemon" reading to make: the value has ridden the
+    /// wire since session-activity-hygiene T3 and was merely never decoded.
+    var archived: Bool? = nil
+    /// b2-agent-browser T1 (spec §5): the daemon's live per-session signals — `attachedElsewhere`
+    /// (this connection's own attachment already excluded, daemon-side) and `working`
+    /// (`turnRunning || bgWork`), computed for EVERY mode.
+    ///
+    /// `nil` means "this daemon predates the signals surface", NEVER `false/false` — see
+    /// `BrowserSignalsCoordinator.assemble` for what a consumer is entitled to conclude from
+    /// absence, which is nothing at all about the remote half of the world.
+    var signals: SessionSignals? = nil
     var id: String { sessionId }
 }

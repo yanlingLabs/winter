@@ -82,6 +82,37 @@ public struct SessionDirEntry: Equatable, Hashable, Sendable {
     }
 }
 
+// MARK: - b2-agent-browser T1: a session's live signals
+
+/// The two live signals `session.list` reports per row — mirrors the protocol's `signals` object
+/// (`SessionListResult`, `packages/protocol/src/methods.ts`) field-for-field.
+///
+/// **These exist for EVERY MODE**, which is the entire reason the surface was built: the derived
+/// `activity` label is withheld from chat/dispatch by `participatesInActivity`
+/// (`packages/core/src/sessions/activity.ts`), and the Mac app's browser lifecycle runs on chat
+/// sessions. Reading the label to answer "is anyone else attached / is the agent working" is
+/// therefore right only for code sessions; reading these is right for all of them.
+///
+/// A STRUCT rather than a tuple deliberately: a tuple has no `Equatable` conformance, so a tuple
+/// property on `SessionSummary` would silently cost that type its synthesized `==`.
+public struct SessionSignals: Equatable, Hashable, Sendable {
+    /// At least one harness OTHER THAN this connection holds the session open. The daemon does the
+    /// subtracting (`SessionHub.attachedSession` for the asking connection) precisely because a
+    /// client cannot tell its own reflection from a second harness in a bare count.
+    ///
+    /// **"This connection" is the one that made the `session.list` call** — which, in an app that
+    /// dials the daemon more than once, is not the same as "this app". See
+    /// `BrowserSignalsCoordinator.assemble` for what that costs the Mac shell and why it is benign.
+    public let attachedElsewhere: Bool
+    /// `turnRunning || bgWork` — the agent may be driving this session's pages right now.
+    public let working: Bool
+
+    public init(attachedElsewhere: Bool, working: Bool) {
+        self.attachedElsewhere = attachedElsewhere
+        self.working = working
+    }
+}
+
 /// The three mutations `session.setDirs` supports (`SessionSetDirsParams.op`'s zod enum, mirrored
 /// by `DirsOp` in `packages/core/src/sessions/set-dirs.ts`). A closed, three-value wire enum with
 /// no growth pressure, so this is a Swift enum rather than the bare `String` `setPolicy`/`setModel`
@@ -308,6 +339,20 @@ extension NormaClient {
         }
     }
 
+    /// b2-agent-browser T1: the wire `signals` object, decoded whole or not at all.
+    ///
+    /// **`nil` is a real answer and the ONLY honest one for an absent key**: it means "this daemon
+    /// predates the signals surface", never `false/false`. Both members are REQUIRED in the zod
+    /// schema, so a half-present object is a daemon that does not agree with this build about the
+    /// shape — dropped rather than defaulted, on `decodeSessionDirs`' own reasoning (a guessed
+    /// `false` here would tell the browser lifecycle that a working session is quiet, which stops
+    /// browsers mid-work; a guessed `true` would keep every session's browsers alive forever).
+    private func decodeSessionSignals(_ value: JSONValue?) -> SessionSignals? {
+        guard let attachedElsewhere = value?["attachedElsewhere"]?.boolValue,
+              let working = value?["working"]?.boolValue else { return nil }
+        return SessionSignals(attachedElsewhere: attachedElsewhere, working: working)
+    }
+
     /// Chat Slice D Task 10: `model` (T1's per-session override, round-tripped by
     /// `session.list`'s own row — see `SessionListResult` in methods.ts) appended at the END of
     /// the tuple, same "purely additive, positional destructuring never used" precedent as
@@ -353,12 +398,23 @@ extension NormaClient {
     /// `nil` for a missing key or a non-string value, never a guessed default). Kept a plain `String`
     /// rather than a Swift enum for the same reason `SessionEvent.SessionActivity.activity` is one
     /// (that struct's own doc comment): a newer daemon's fifth value must decode here, not throw.
-    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?, dirs: [SessionDirEntry]?, activity: String?)] {
+    /// b2-agent-browser T1: `archived` and `signals` appended LAST, same purely-additive precedent
+    /// as `dirs`/`activity` above.
+    ///
+    /// `archived` is the session's stored flag for EVERY mode — not new to the wire (`store.list()`
+    /// has selected it since session-activity-hygiene T3), only newly declared and newly read here.
+    /// It is the same fact `activity == "archived"` carries for a code/cowork row and the ONLY way
+    /// to learn it for a chat/dispatch one, where the label does not exist. Absent means NOT
+    /// archived — the daemon writes NULL, never 0 — so absence is a real answer for every daemon.
+    ///
+    /// `signals` is the pair `SessionSignals` documents: `nil` means "daemon predating the surface",
+    /// never `false/false`.
+    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?, dirs: [SessionDirEntry]?, activity: String?, archived: Bool?, signals: SessionSignals?)] {
         let r = try await request("session.list", params: nil)
         return (r["sessions"]?.arrayValue ?? []).compactMap { s in
             guard let id = s["sessionId"]?.stringValue, let scope = s["scope"]?.stringValue,
                   let created = s["createdAt"]?.intValue, let last = s["lastSeq"]?.intValue else { return nil }
-            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue, decodeSessionDirs(s["dirs"]), s["activity"]?.stringValue)
+            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue, decodeSessionDirs(s["dirs"]), s["activity"]?.stringValue, s["archived"]?.boolValue, decodeSessionSignals(s["signals"]))
         }
     }
 
