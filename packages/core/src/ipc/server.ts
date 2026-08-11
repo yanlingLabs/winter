@@ -28,6 +28,7 @@ import {
   WorkflowListParams, WorkflowRunParams, WorkflowStopParams, WorkflowGetParams,
   SyncHeadsParams, SyncPullParams, SyncPushParams, SyncConfigParams, SyncMemoryParams,
   PanelListParams, PanelOpenTabParams, PanelCloseTabParams, PanelActivateTabParams, PanelReportNavigationParams,
+  PanelCommandResultParams,
   SYSTEM_SESSION_ID,
   type SessionEvent, ConnWriter, type WritableSocket,
 } from "@norma/protocol";
@@ -51,6 +52,7 @@ import { setSessionDirs, type SetDirsDeps } from "../sessions/set-dirs";
 import { reapEmptySessions } from "../sessions/reaper";
 import { filterRemoteStreamEvent } from "../sessions/remote-stream";
 import { foldPanelTabs } from "../panel/store";
+import type { PanelCommandRegistry } from "../panel/commands";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { AgentEngine } from "../agent/engine";
@@ -238,6 +240,13 @@ export interface IpcServerOptions {
   // `peripheral.isProvider()` to gate on that SAME connection identity (see the hardware.respond
   // case below) rather than tracking its own.
   hardware?: HardwareBroker;
+  // B2 Task 2: the pending-command registry (`panel/commands.ts`) whose OTHER owner is the browser
+  // tool that dispatches commands. Optional, and the same "typed refusal, never a crash" precedent
+  // as `bg`/`skills`/`routines` above: a server built without one (every panel test that predates
+  // this, and every non-panel test) answers `panel.commandResult` with NOT_FOUND — which is the
+  // truthful answer, since a daemon with no registry has certainly never issued the command being
+  // answered.
+  panelCommands?: PanelCommandRegistry;
   quota?: QuotaManager;      // token/rate-limit snapshot; quota.state (dashboard read)
   // Phase 5 routines T3 (design doc §3): the daemon-owned RoutineStore backing routines.*
   // (create/list/update/delete). Optional — same "typed no-op, never a crash" precedent as
@@ -2577,6 +2586,27 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
+        return { ok: true };
+      }
+      // B2 Task 2 — the ANSWER half of the command channel. Harness-only by the same omission as the
+      // five methods above: absent from REMOTE_ALLOWED_METHODS and PLUGIN_ALLOWED_METHODS, so a
+      // remote or plugin connection is role-rejected at the pre-switch gate and never arrives here.
+      // Neither allowlist was touched by this task, and both parity tests (TS literal + Swift
+      // GatewayGateTests) stay green untouched.
+      //
+      // All the dedup/first-wins/late-result policy lives in the registry (`panel/commands.ts`);
+      // this handler is only the wire mapping of its three-valued verdict:
+      //   accepted/dropped -> {ok:true}. A LOSER OF THE RACE IS NOT AN ERROR — the app cannot know
+      //     it lost (a duplicate answer, or an answer that crossed the deadline in flight), and
+      //     surfacing that as an RPC failure would be the mistake `panel.closeTab` avoids by
+      //     tolerating a double close. The agent's outcome is unaffected either way.
+      //   unknown -> NOT_FOUND. A commandId this daemon has no record of is a genuine caller
+      //     mistake, and the one case worth telling the app about.
+      case METHODS.panelCommandResult: {
+        const p = parseParams(PanelCommandResultParams, params);
+        if (!opts.panelCommands) throw new RpcFailure(ERR.NOT_FOUND, `unknown commandId: ${p.commandId}`);
+        const verdict = opts.panelCommands.resolve(p);
+        if (verdict === "unknown") throw new RpcFailure(ERR.NOT_FOUND, `unknown commandId: ${p.commandId}`);
         return { ok: true };
       }
 

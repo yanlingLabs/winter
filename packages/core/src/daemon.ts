@@ -90,6 +90,7 @@ import { AuditLog } from "./peripheral/audit";
 import { PeripheralBroker, type PeripheralClass } from "./peripheral/broker";
 import { ProviderLink } from "./peripheral/provider-link";
 import { HardwareBroker } from "./peripheral/hardware";
+import { PanelCommandRegistry } from "./panel/commands";
 import { openRoutineStore } from "./routines/store";
 import { RoutineAuditLog } from "./routines/audit";
 import { makeApply } from "./settings-apply";
@@ -1361,6 +1362,16 @@ export async function startDaemon(opts: {
   // its own.
   const hardware = new HardwareBroker({ audit, pushToProvider: (event) => providerLink.push(event) });
 
+  // B2 Task 2: the panel command channel's pending-command registry (`panel/commands.ts`). Built
+  // unconditionally, the same reasoning as `hardware` just above — driving the user's panel has
+  // nothing to do with whether an LLM provider is configured, and a `panel.commandResult` can arrive
+  // on any daemon. `emit` is `hub.broadcastTransient`, NOT `providerLink.push`: unlike a hardware
+  // verb (aimed at the one provider connection), a panel command belongs to a SESSION and goes to
+  // whoever is attached to it — which is precisely why first-result-per-commandId dedup is needed.
+  const panelCommands = new PanelCommandRegistry({
+    emit: (event) => { hub.broadcastTransient(event.sessionId, event); },
+  });
+
   const providerInfo = agentProvider ? { id: agentProvider.provider.id, model: agentProvider.model } : null;
 
   // Chat Slice D task 3 (`sync.config`): the phone's "default model" bootstrap value, re-resolved
@@ -1465,6 +1476,10 @@ export async function startDaemon(opts: {
     peripheral,
     providerLink,
     hardware,
+    // B2 Task 2: the one pending-command registry for the whole daemon — the ipc handler resolving
+    // `panel.commandResult` and (Task 4) the browser tool dispatching commands must share the SAME
+    // map, or every command would time out against an empty one.
+    panelCommands,
     quota,
     providerInfo,
     startedAt,
