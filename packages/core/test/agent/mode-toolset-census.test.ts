@@ -85,7 +85,15 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
     return daemon;
   }
 
-  test("code mode is offered EXACTLY the full daemon tool surface (35 tools)", async () => {
+  // b2-agent-browser T4: ADDED "browser" to ALL THREE literals (SANCTIONED pin move — spec §1 gives
+  // every mode a browser: `modes: ["code","dispatch","chat"]`, deferred in code/dispatch and
+  // immediate in chat where it is the primary web surface). This is the deliberate three-literal
+  // decision this file's header asks a human to make, not a mechanical re-baseline: chat's set going
+  // from 3 names to 4 is the whole point of the task, and the per-MODE difference that matters —
+  // chat's schema carrying only the read verbs — is invisible to `namesForMode` (which reports
+  // ELIGIBILITY, exactly as the dispatch block below records for deferral) and is pinned separately
+  // in test/agent/tools/browser.test.ts.
+  test("code mode is offered EXACTLY the full daemon tool surface (36 tools)", async () => {
     const d = await boot();
     expect(d.registry).not.toBeNull();
     const offered = [...d.registry!.namesForMode("code", { builtinDeferral: true })];
@@ -112,6 +120,7 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
         "lsp",
         "list_mcp_resources", "read_mcp_resource",
         "Workflow",
+        "browser",
       ].sort(),
     );
   });
@@ -145,24 +154,24 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
   //   ELIGIBILITY, not deferred-vs-immediate (registry.ts's own doc comment — see the task_stop
   //   describe block below for the axis this list structurally can't see); the eligible-vs-loadable
   //   distinction is pinned separately, in dispatch-deferred.test.ts.
-  test("dispatch mode is offered EXACTLY this set (16 tools)", async () => {
+  test("dispatch mode is offered EXACTLY this set (17 tools)", async () => {
     const d = await boot();
     const offered = [...d.registry!.namesForMode("dispatch", { builtinDeferral: true })];
     expect(offered.sort()).toEqual(
       [
         "Search", "ReadPage", "ToolSearch", "AskQuestion", "bash", "computer", "glob", "grep", "ls",
         "push_notification", "read", "send_message", "session_spawn", "task_stop",
-        "list_sessions", "manage_session",
+        "list_sessions", "manage_session", "browser",
       ].sort(),
     );
   });
 
   // B2-T2: chat's exact offered set becomes AskQuestion + ReadPage + Search (SANCTIONED pin move —
   // task-2-brief.md's "chat exact set -> [AskQuestion, ReadPage, Search]").
-  test("chat mode is offered EXACTLY AskQuestion + ReadPage + Search", async () => {
+  test("chat mode is offered EXACTLY AskQuestion + ReadPage + Search + browser", async () => {
     const d = await boot();
     const offered = [...d.registry!.namesForMode("chat", { builtinDeferral: true })];
-    expect(offered.sort()).toEqual(["AskQuestion", "ReadPage", "Search"].sort());
+    expect(offered.sort()).toEqual(["AskQuestion", "ReadPage", "Search", "browser"].sort());
   });
 
   // B2-T2 forward guard (task-2-brief.md: "census must ALSO assert FetchPage appears in NO mode —
