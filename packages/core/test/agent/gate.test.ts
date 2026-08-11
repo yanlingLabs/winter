@@ -279,10 +279,16 @@ describe("PermissionGate v1", () => {
       // READ_ONLY ("AskQuestion" added B1-T3; branch-review FIX 3 closed the gap where this
       // completeness guard's own list omitted it even though gate.ts's real READ_ONLY set has it)
       "read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "AskQuestion", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification",
-      // MUTATING ("Workflow" excluded — see this test's own doc comment above)
-      "write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule",
-      // NETWORK + externals (B1-T5 adds "Search" here)
-      "web_fetch", "web_search", "Search", "mcp__x__y", "plugin__x__y",
+      // MUTATING ("Workflow" excluded — see this test's own doc comment above). B2-T7 adds
+      // "session_spawn" (see gate.ts's own entry for why MUTATING and not READ_ONLY beside
+      // spawn_agent).
+      "write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "session_spawn",
+      // NETWORK + externals (B1-T5 adds "Search"; B2-T2 "ReadPage"; B2-T6 "browser"; B2-T7 the two
+      // MCP resource tools — this list's claim to enumerate every member had gone stale by four
+      // names, which is the same drift the new COMPLETENESS pin in mode-toolset-census.test.ts
+      // exists to make impossible for the SETS themselves).
+      "web_fetch", "web_search", "Search", "ReadPage", "browser", "list_mcp_resources", "read_mcp_resource",
+      "mcp__x__y", "plugin__x__y",
     ];
     for (const t of classified) expect(gate.evaluate(t, "auto")).toBe("allow");
   });

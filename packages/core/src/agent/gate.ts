@@ -128,7 +128,30 @@ const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill",
 // one-line special case — see the comment just above the `auto` check in evaluate() below for why
 // that's a bespoke card, not the AI reviewer bash/fs/external get. EDIT_CLASS is (and always was)
 // write/edit ONLY.
-const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "Workflow"]);
+// B2-T7: `session_spawn` joins MUTATING — the THIRD unclassified tool this branch has turned up, and
+// the one the new completeness pin found by itself (the other two were found by reading).
+//
+// **Why not READ_ONLY beside `spawn_agent`**, which is the obvious answer and which session-spawn.ts's
+// own header invites ("the spawn_agent precedent"): spawn_agent's entry above earns its READ_ONLY on
+// one specific clause — "the child inherits the parent's approval policy (engine.ts's bridge passes
+// the SAME `meta` object down), so the child's own mutating tool calls still get gated by that
+// policy". That clause is FALSE here. A session_spawn child is a full first-class session created at
+// a FIXED `approvalPolicy: "auto"` (agent/dispatch-children.ts:72), whatever the caller's own policy
+// is — so it is not merely delegating within a policy, it is starting unattended work at one. That is
+// the same shape `schedule` and `Workflow` are already MUTATING for ("stands up an unattended,
+// headless-firing routine"; "starts a background run of up to 1000 agents"), and the same reason
+// `plan` must keep denying it: a planning session must not be able to start a mutating session any
+// more than it can mutate now.
+//
+// **The reach, honestly.** This omission is LATENT rather than live, unlike `browser`'s. In a real
+// dispatch session the engine's session_spawn BRIDGE populates `spawnOutcomes` and the per-call loop
+// consumes it at engine.ts's `preOutcome` branch, which sits BEFORE `gate.evaluate` — so the call
+// never reaches this file at all. It becomes live exactly when that bridge is inactive: a daemon with
+// `cfg.dispatch` unwired (engine.ts names that case), where the call falls through to the per-call
+// loop and, unclassified, drew an approval card under `auto` — dispatch's own default — in a session
+// with no human to answer it. Classified, only ONE cell moves: `auto` (ask → allow). plan stays deny,
+// bypass stays allow, ask/accept-edits/dont-ask stay ask.
+const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "Workflow", "session_spawn"]);
 // web_fetch (4g Task 5, T6 adds web_search here) is Norma's ONLY network-capable tool — it does NOT
 // belong in READ_ONLY (it makes a live outbound request; the response bytes are DATA that could
 // carry adversarial "instructions", so an unattended session shouldn't get an implicit pass) and it
@@ -222,7 +245,24 @@ const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_workt
 // same reason: it "cannot card" (task-3-brief.md, "not interactive"). None of this changes what THIS
 // gate returns — `ReadPage`'s verdict here is still, and remains, unconditionally "allow"; the floor
 // lives entirely inside the tool, one layer below where this file's classification has any say.
-const NETWORK = new Set(["web_fetch", "web_search", "Search", "ReadPage", "browser"]);
+// B2-T7 (whole-branch carry, from T6's review Minor-5): `list_mcp_resources` / `read_mcp_resource`
+// join NETWORK — they were UNCLASSIFIED, the same silent-in-both-directions omission the `browser`
+// entry above records, at a smaller blast radius (they are code-only, so nothing was dead in chat;
+// what they got was "deny" under `plan` and, via engine.ts's dont-ask conversion, under `dont-ask`
+// too — a read-only LISTING refused to a planning session — plus an approval card under `ask`/`auto`).
+//
+// THE ONE-LINE REASON: they make a live request to an external MCP server process and hand its
+// response back as untrusted model input — web_fetch/ReadPage's exact risk shape — while touching no
+// arbitrary fs/process path of their own; and unlike web_fetch the destination is not caller-chosen
+// (it is a server the USER configured in settings, addressed by name), so the class's unconditional
+// "allow" is owed with no floor beside it.
+//
+// NOT READ_ONLY, deliberately, on this class's own stated axis (see the LOW-2 paragraph above): the
+// bytes come back from a third party over a live connection, not from a local filesystem the user
+// already controls. NOT the `mcp__`/`plugin__` external branch either — these are FIXED built-ins
+// (mcp-resources.ts's own header says so: they never ride `isExternalToolName`), and CC's own
+// ListMcpResources/ReadMcpResource prompt no approval.
+const NETWORK = new Set(["web_fetch", "web_search", "Search", "ReadPage", "browser", "list_mcp_resources", "read_mcp_resource"]);
 // skill_write (phase 5c Task 2) gets a NEW class, strictly stricter than MUTATING: "ask" under
 // BOTH `ask` AND `auto` (a card on EVERY call — no policy setting silences it), "deny" under
 // `plan`. THE SKETCH PIN (phase-5-intelligence-design-sketch.md §5c): "a skill is standing
@@ -243,6 +283,40 @@ const ALWAYS_ASK = new Set(["skill_write"]);
 // ONLY (matches every other edit-specific path in engine.ts — dirGrant, in-project-silent,
 // approvalOptionsFor); notebook_edit rides the generic MUTATING path (niche).
 const EDIT_CLASS = new Set(["write", "edit"]);
+
+/**
+ * **Does any class in this file claim `toolName`?** — B2-T7's whole-branch carry, and the answer to
+ * a defect that has now landed twice on one branch (`browser`, then `list_mcp_resources`/
+ * `read_mcp_resource`).
+ *
+ * An unclassified name is not a neutral omission: `evaluate()` fails it CLOSED, which for a
+ * genuinely unknown tool is right and for a read-only built-in nobody remembered to list is a tool
+ * that is dead under `plan`/`dont-ask` and cards on every call under `auto` — in a dispatch session
+ * that can never answer one. Both directions are SILENT: the tool is registered, its own tests pass
+ * (they call `registry.execute` with a hand-built ToolContext and never cross this gate), and the
+ * mode-census sees it in the mode's set because `modes` and this file are different axes.
+ *
+ * **This predicate is load-bearing, not a mirror of the sets below it.** `evaluate()` itself asks it
+ * — that is the whole point. A mirrored copy would drift the first time a class was added, and the
+ * drift would be invisible in exactly the direction that matters (a new class whose members the
+ * predicate does not know still fails closed in `evaluate`, so the pin stays green while the tools
+ * are dead). Asking here means a class the predicate does not know is a class whose members
+ * `evaluate` also refuses to recognise — a wrong answer that a test can see.
+ *
+ * Externals (`mcp__…`/`plugin__…`) count as classified: `evaluate()` gives them a real
+ * per-policy verdict through the branch below, which is a classification decision — see
+ * `isExternalToolName`.
+ *
+ * Pinned by `packages/core/test/agent/mode-toolset-census.test.ts`, against the REAL
+ * `startDaemon()` registration path: every name any mode can offer must be claimed here.
+ */
+export function isGateClassified(toolName: string): boolean {
+  return READ_ONLY.has(toolName)
+    || MUTATING.has(toolName)
+    || NETWORK.has(toolName)
+    || ALWAYS_ASK.has(toolName)
+    || isExternalToolName(toolName);
+}
 
 /**
  * v1 policy matrix (spec §4.10 arrives fully in 1b-ii with the AI reviewer):
@@ -288,7 +362,13 @@ export class PermissionGate {
     // never ride auto's blanket allow (a newly-added tool nobody remembered to classify would
     // otherwise run unreviewed under auto). This is the pre-SP-policies fail-closed posture (this
     // class's own doc comment) that a flat "auto → allow" ordering had silently dropped.
-    if (!MUTATING.has(toolName) && !isExternalToolName(toolName)) return "ask";
+    //
+    // B2-T7: expressed through `isGateClassified` rather than as its own `!MUTATING && !external`
+    // pair. Identical verdict — READ_ONLY/NETWORK/ALWAYS_ASK have all returned above, so at this line
+    // "classified" can only mean MUTATING-or-external — but it makes the predicate the REAL fork
+    // rather than a copy of it, which is what lets a test assert completeness against something other
+    // than a second hand-maintained list.
+    if (!isGateClassified(toolName)) return "ask";
     // Task B-gatefix Part 2 (user decision 2026-07-22, CC-parity): a Workflow launch must not ride
     // auto's blanket allow either — it starts a background run of up to 1000 accept-edits agents, so
     // a human confirms EVERY launch, not just the ones under ask/dont-ask/accept-edits below.
