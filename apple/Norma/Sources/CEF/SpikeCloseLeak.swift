@@ -303,9 +303,35 @@ final class SpikeCloseLeakHarness {
     ///
     /// The containers are parked in the runtime's own parking window, so they are alive at quit like
     /// every other one.
+    /// **`NORMA_SPIKE_CLOSE_MOUNTED=1`: quit with a runtime-owned browser MOUNTED IN A REAL WINDOW.**
+    ///
+    /// live-gate fix H's instrument, and the thing every previous quit run was missing. T6 measured
+    /// one browser in a plain window it created itself; T7 measured eight, seven parked and one in
+    /// that same plain window — and neither ever went through `BrowserRuntime.attachViewport`, which
+    /// is the shipped app's only path onto the screen and the one that makes Chromium's own
+    /// `RenderWidgetHostViewCocoa` the window's FIRST RESPONDER. A view in a window's hierarchy and
+    /// responder chain is retained by things an `@autoreleasepool` pop cannot reach, which is what
+    /// turned the user's real quit into `50/50 drain turns` with two browsers still open.
+    ///
+    /// So this mounts one of the parked containers into the harness's own visible, key window
+    /// through the production call, and leaves it there for the quit. Nothing else about the run
+    /// changes, which is what makes a before/after comparison mean anything.
+    private func mountOneInTheWindow() {
+        guard Self.envInt("NORMA_SPIKE_CLOSE_MOUNTED", 0) == 1 else { return }
+        guard let tabId = parkedTabIds.first, let host = window.contentView else {
+            log("MOUNT-SKIPPED no parked tab to mount (NORMA_SPIKE_CLOSE_BROWSERS must be >= 2)")
+            return
+        }
+        BrowserRuntime.shared.attachViewport(tabId: tabId, into: host)
+        let mounted = BrowserRuntime.shared.container(forTabId: tabId)
+        log("MOUNTED tab=\(tabId) inWindow=\(mounted?.window === window) "
+            + "firstResponder=\(window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil")")
+    }
+
     private func raceThenQuit() {
         let k = Self.raceCount
         stopPageServer()
+        mountOneInTheWindow()
         cefHostView = container?.subviews.first
         let liveTabs = BrowserRuntime.shared.liveTabIds.count
 
@@ -593,7 +619,12 @@ final class SpikeCloseLeakHarness {
         // spike owns the whole process (it ran INSTEAD of `boot()` — no daemon, no orb, no user
         // window to take down with it).
         delegate.reallyQuitting = true
-        NSApp.terminate(nil)
+        // **The PRODUCTION quit door, not `NSApp.terminate` directly** (live-gate fix H). The menu
+        // bar's Quit routes through this same method, and it is where the browser views are
+        // unparented a run-loop beat before the terminate — which is the whole of what the
+        // `NORMA_SPIKE_CLOSE_MOUNTED=1` run measures. Calling `terminate` here would measure a path
+        // no user takes.
+        delegate.quitReleasingBrowserViews()
     }
 
     fileprivate static func envInt(_ key: String, _ fallback: Int) -> Int {
@@ -604,10 +635,12 @@ final class SpikeCloseLeakHarness {
     /// `close` (default) — the per-tab close of §1. `quit` — quit with the tab still open, which is
     /// the ONLY way to exercise `NormaCEFShutdown`'s drain; see `quitWithTheTabSTILLOPEN`.
     ///
-    /// Two knobs ride on `quit`, both defaulting to T6's exact one-browser run so its archived
+    /// Three knobs ride on `quit`, all defaulting to T6's exact one-browser run so its archived
     /// ledgers stay reproducible: `NORMA_SPIKE_CLOSE_BROWSERS=N` (total live browsers at quit — one
-    /// visible, the rest parked through `BrowserRuntime.shared`) and `NORMA_SPIKE_CLOSE_RACE=K`
-    /// (creations still inside CEF's own queue when the quit lands).
+    /// visible, the rest parked through `BrowserRuntime.shared`), `NORMA_SPIKE_CLOSE_RACE=K`
+    /// (creations still inside CEF's own queue when the quit lands), and
+    /// `NORMA_SPIKE_CLOSE_MOUNTED=1` (live-gate fix H — one of the parked browsers is mounted in the
+    /// visible window through the production `attachViewport`, see `mountOneInTheWindow`).
     fileprivate static var mode: String {
         ProcessInfo.processInfo.environment["NORMA_SPIKE_CLOSE_MODE"] ?? "close"
     }

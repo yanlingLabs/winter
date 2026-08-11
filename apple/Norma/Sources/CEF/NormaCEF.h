@@ -310,6 +310,32 @@ void NormaCEFCloseBrowser(NSView *parent);
 /// caller outside this file today.
 void NormaCEFCloseAllBrowsers(void);
 
+/// **Run this immediately before the shutdown sweep — browser-runtime live-gate fix H.**
+///
+/// The embedder's chance to let go of CEF's host views before the sweep releases them.
+/// `NormaCEFShutdown` completes each close by RELEASING the browser's host view, and that release
+/// only finishes the close if it is the LAST one; anything else still retaining the view turns the
+/// close into a stall the drain loop cannot fix.
+///
+/// **It is the BELT, not the fix, and the difference was measured** (live-gate fix H). A browser
+/// whose container has been mounted in a real window holds references that unparenting *here* does
+/// not drop — retain count 17 against 5 for a never-mounted one, and 14 even with 1.5 s of run loop
+/// spun inside this function. They drop after an unparent followed by ORDINARY run-loop turns, so
+/// the embedder's real fix is to unparent one beat before it calls `NSApp.terminate`
+/// (`AppDelegate.quitReleasingBrowserViews`, which carries the whole table). This covers a shutdown
+/// reached without passing through that door — a system logout, or any future embedder-side call.
+///
+/// **A hook and not a notification observer, deliberately.** `NormaCEFInitialize` registers its own
+/// `NSApplicationWillTerminateNotification` observer (that is what calls `NormaCEFShutdown` at all),
+/// and the order in which two observers of the same notification run is undefined — so an embedder
+/// that "also observed willTerminate" would be relying on registration order to be correct. This is
+/// an explicit call at a defined point instead.
+///
+/// Called on the main thread, at most once per process, and only on a real shutdown: a
+/// never-initialised or already-shut-down `NormaCEFShutdown` returns before reaching it. Passing
+/// `nil` clears it. Replacing an existing hook replaces it outright — there is one embedder.
+void NormaCEFSetPreShutdownHook(void (^hook)(void));
+
 /// `CefShutdown`, preceded by closing every browser and draining the pump. The POINT OF NO RETURN —
 /// CEF cannot be initialised again in this process, which is exactly why nothing calls it from
 /// `-terminate:` (a terminate can be cancelled). `NormaCEFInitialize` registers this against

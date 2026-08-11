@@ -1580,6 +1580,10 @@ CefRefPtr<CefBrowser> BrowserForParent(NSView *parent) {
 
 static NormaCEFTerminationObserver *g_termination_observer = nil;
 
+/// live-gate fix H. See `NormaCEFSetPreShutdownHook` in the header for what it is for and why it is
+/// a hook rather than a second `willTerminate` observer.
+static void (^g_pre_shutdown_hook)(void) = nil;
+
 // ---------------------------------------------------------------------------
 // The C entry points — the Swift-facing seam
 // ---------------------------------------------------------------------------
@@ -1992,6 +1996,10 @@ void NormaCEFCloseAllBrowsers(void) {
   }
 }
 
+void NormaCEFSetPreShutdownHook(void (^hook)(void)) {
+  g_pre_shutdown_hook = [hook copy];
+}
+
 void NormaCEFShutdown(void) {
   if (!g_initialized) {
     // Never initialised: there is nothing to shut down, and calling CefShutdown would dispatch
@@ -2037,7 +2045,20 @@ void NormaCEFShutdown(void) {
   //
   // Nesting it per-iteration inside the loop would do nothing: the autorelease has already been
   // registered in the enclosing pool by then. The sweep's own pool is the only one that can take it.
+  //
+  // **The pre-shutdown hook runs INSIDE it, and that placement is measured rather than tidy**
+  // (live-gate fix H). The hook exists so the embedder can unparent CEF's host views before the
+  // sweep releases them; unparenting is `-removeFromSuperview`/`-addSubview:`, which AUTORELEASES —
+  // and a view moving between windows takes its whole subtree through
+  // `viewWillMoveToWindow:`/`viewDidMoveToWindow`, autoreleasing as it goes. Run before this pool
+  // opens, every one of those lands in the outer pool that never drains, so the hook was PINNING the
+  // very host views it was supposed to free: measured at `2 browser(s) still open, 50/50` with the
+  // hook outside, against `1 still open` with no hook at all. Inside, its autoreleases and the
+  // sweep's pop together, which is the whole mechanism this pool was added for.
   @autoreleasepool {
+    if (g_pre_shutdown_hook != nil) {
+      g_pre_shutdown_hook();
+    }
     NormaCEFCloseAllBrowsers();
   }
   // **MEASURED AT THE RUNTIME'S FULL WORLD (browser-runtime T7), not at one tab.** The 50×10 ms
@@ -2074,9 +2095,16 @@ void NormaCEFShutdown(void) {
   // used to say they "carry `DestroyBrowser()` through to `OnBeforeClose`" — T7 measured that they
   // carry nothing at all on a healthy quit, because the pool above already did (`0/50`). They are
   // the net for the case the pool cannot close: a browser whose host view is still retained by
-  // something else when the pool pops, whose `dealloc` therefore lands later. Nothing in this app
-  // holds one today — `BrowserRuntime` is never the last retain (T6) — so the net has never been
-  // needed, and it stays because the thing it catches is a leaked renderer.
+  // something else when the pool pops, whose `dealloc` therefore lands later.
+  //
+  // **That case is no longer hypothetical — the user's real quit hit it, and the pre-shutdown hook
+  // above is the fix** (live-gate fix H). T7's harness parked everything, so it never mounted a
+  // container in an app window; the shipped app always does, for the shown tab. A container in a
+  // window is reachable from that window's view hierarchy and its responder chain (the runtime makes
+  // Chromium's `RenderWidgetHostViewCocoa` first responder on every attach), and those retains are
+  // not the pool's to drop — so `CompleteCloseByReleasingHostView`'s release was not the last one,
+  // the `dealloc` never ran, and the loop below spent all 50 turns for nothing. The hook unparents
+  // every container before the sweep, which is what puts the pool back in the position T7 measured.
   int turns = 0;
   for (; turns < kShutdownDrainTurns && !g_browsers.empty(); turns++) {
     CefDoMessageLoopWork();
@@ -2087,8 +2115,34 @@ void NormaCEFShutdown(void) {
   // lifetime and says nothing about this loop — it is left in because it is the pump's own
   // liveness figure.)
   //
-  // ── **THE TRIPWIRE'S CONTRACT (browser-runtime T7). `N > 0` HAS NO BENIGN CASE THAT HAS EVER
-  //    BEEN OBSERVED, AND EXACTLY ONE THAT IS REACHABLE IN PRINCIPLE.** ───────────────────────────
+  // ── **THE TRIPWIRE'S CONTRACT (browser-runtime T7, AMENDED BY THE USER'S REAL QUIT — live-gate
+  //    fix H). `N > 0` HAS NO BENIGN CASE.** ────────────────────────────────────────────────────
+  //
+  //   * **The branch T7 called "reachable in principle, never observed" was OBSERVED**, and it was
+  //     not the racing-create one it predicted. The user's ledger read `shutting down (2 browser(s)
+  //     still open, 50/50 drain turns, 35807 DoWork calls)` followed by `browser closed (id=30, live
+  //     browsers=0)` from inside `CefShutdown` — the pre-pool signature exactly, with the pool
+  //     present. Cause: a browser whose container has been MOUNTED in a real window, which the
+  //     harness's all-parked runs could not produce; reproduced at
+  //     `NORMA_SPIKE_CLOSE_MOUNTED=1` as `1 browser(s) still open, 50/50`.
+  //   * **The hook above is NOT what fixed it, and that is the sharp part.** Unparenting inside
+  //     this function leaves CEF's host view at a retain count of 17 (against 5 for a
+  //     never-mounted one) — measured — and 1.5 s of spun run loop here only reaches 14. Nothing
+  //     *inside* the terminate sequence releases those references; they drop after an unparent
+  //     followed by ORDINARY run-loop turns. So the fix lives in the app, one beat before
+  //     `NSApp.terminate` is called at all (`AppDelegate.quitReleasingBrowserViews`, which carries
+  //     the whole measured table): retain 5, **`0 browser(s) still open, 0/50 drain turns`** with a
+  //     mounted browser at quit. The hook stays as the belt for a shutdown reached without that
+  //     door.
+  //   * **So `N > 0` still has a live cause, and it is named:** a quit that does not pass through
+  //     `quitReleasingBrowserViews` — a system logout arrives straight at
+  //     `applicationShouldTerminate` — with a browser that has been on screen. Its renderer is
+  //     reclaimed by `CefShutdown` a moment later rather than leaked, and the cost is this loop's
+  //     500 ms. Spec §10 gate 10 says to report it, not wave it through.
+  //   * **What remains reachable and is still not reproduced:** a creation whose `OnAfterCreated`
+  //     lands *after* the sweep, i.e. inside this loop — which requires the loop to run at all.
+  //
+  // The T7 measurements below stand as taken, and are what a healthy quit still looks like:
   //
   //   * **Healthy quit, any number of browsers: N = 0.** Measured at 8 (7 parked, all with a live
   //     media element).
@@ -2103,11 +2157,9 @@ void NormaCEFShutdown(void) {
   //     `dispatch_async` that would have run `CloseAbandonedBrowser` never gets its turn (this loop
   //     drives CEF's queue, not GCD's), and it does not need one: the close it owed was already
   //     performed, and the only other thing it does is drop a retain the process is about to lose.
-  //   * **The one reachable nonzero, NOT reproduced:** a creation whose `OnAfterCreated` lands
-  //     *after* the sweep, i.e. inside this loop — which requires the loop to run at all, i.e. a
-  //     close still outstanding at the pool pop. That browser lands in `g_browsers` with nothing left
-  //     to close it and is reclaimed by process exit — exactly the pre-T6 status quo. It would need
-  //     both halves to be true at once, and no run has produced either.
+  //   * (T7's fourth bullet — "the one reachable nonzero, NOT reproduced" — is superseded by the
+  //     amendment above: the case it named is still not reproduced, but it was no longer the *only*
+  //     reachable one by the time the user quit a real app.)
   //
   // So `N > 0` means a close that did not complete. It is not a race artefact to be waved through.
   Log("shutting down (%zu browser(s) still open, %d/%d drain turns, %ld DoWork calls)",

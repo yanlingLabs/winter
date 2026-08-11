@@ -191,7 +191,22 @@ final class BrowserRuntime {
 
     /// The app's one runtime. Tests construct their own instead — this holds containers, timers and
     /// a window, all of which would leak from test to test.
-    static let shared = BrowserRuntime()
+    ///
+    /// **It installs the pre-shutdown hook, and doing it HERE is what makes "only the real runtime"
+    /// structural** (live-gate fix H). The hook is process-global; installing it in `init` would
+    /// have the last-constructed runtime win, which in a test bundle is whichever test ran most
+    /// recently. Tying it to `shared` means the only object that can ever hold a browser at
+    /// `applicationWillTerminate` is the only object that registers to let go of one.
+    static let shared: BrowserRuntime = {
+        let runtime = BrowserRuntime()
+        NormaCEFSetPreShutdownHook {
+            // Called from `NormaCEFShutdown`, i.e. from `applicationWillTerminate:`, i.e. on the
+            // main thread — a statement of fact rather than an assumption, which is what
+            // `assumeIsolated` is for (the same reason `Scheduler.production.mainAsync` uses it).
+            MainActor.assumeIsolated { runtime.releaseViewsForShutdown() }
+        }
+        return runtime
+    }()
 
     /// **Executor mechanics, not policy.** After a deadline has genuinely passed the executor asks
     /// for a re-plan and then must keep the deadline armed until it sees `cancelScheduledStop` (the
@@ -612,6 +627,72 @@ final class BrowserRuntime {
         if viewportTabId == tabId { viewportTabId = nil }
         guard let container = containers[tabId] else { return }
         park(container)
+    }
+
+    /// **live-gate fix H: give every CEF host view back to the parking window, right before CEF's
+    /// shutdown sweep.**
+    ///
+    /// Two callers, and the difference between them is the whole of what fix H measured.
+    /// **`AppDelegate.quitReleasingBrowserViews` is the one that works** — it runs this one
+    /// run-loop beat before `NSApp.terminate`, which is what actually lets the references go (that
+    /// method carries the measured table). The `NormaCEFSetPreShutdownHook` block installed on
+    /// `shared` below runs it again from inside `NormaCEFShutdown`, as the belt for a quit that
+    /// never passed through that door.
+    ///
+    /// **The stall it exists to kill, as the user measured it:** `shutting down (2 browser(s) still
+    /// open, 50/50 drain turns, …)` and then `browser closed (id=30, live browsers=0)` from inside
+    /// `CefShutdown`. A close completes when CEF's host view DEALLOCATES, and
+    /// `CompleteCloseByReleasingHostView` only achieves that if its release is the LAST one. T7's
+    /// harness parked everything, so it always was, and measured `0/50`. The shipped app does not
+    /// park everything: the SHOWN tab's container is mounted in the app window, and a container that
+    /// has been there carries references — the responder chain among them, since this runtime makes
+    /// Chromium's own view first responder on every attach — that outlive the sweep's pool.
+    ///
+    /// Deliberately NOT a stop: nothing is closed, no observer is cleared, no model is touched. The
+    /// sweep immediately afterwards is what closes browsers, and it is CEF's to run. This only
+    /// changes WHERE the views are when it does.
+    ///
+    /// **Lazy-window discipline is preserved**: a Norma that never opened a web tab must not build a
+    /// parking window on its way out, which is exactly what the empty guard is for
+    /// (`hasParkingWindow` is asserted elsewhere for the same reason).
+    /// Whether anything at all needs `releaseViewsForShutdown`. Read by the quit path so a Norma
+    /// that never opened a web tab pays no deferral (`AppDelegate.deferQuitToReleaseBrowserViews`).
+    var hasLiveBrowsers: Bool { !containers.isEmpty }
+
+    func releaseViewsForShutdown() {
+        guard !containers.isEmpty else { return }
+        // The viewport is the one container that is genuinely somewhere else, and clearing the id is
+        // not bookkeeping for its own sake: `viewportTabId` must mean *mounted*, and after this it
+        // is not.
+        viewportTabId = nil
+        let parking = parkingWindow
+        for container in containers.values {
+            resignFirstResponder(in: container)
+            // Already parked is the common case (every tab but the shown one), and a repeat
+            // `addSubview` of an existing subview is measured as a no-op — see
+            // `PanelViewportHostView.viewDidMoveToWindow`.
+            if container.superview !== parking.contentView { park(container) }
+        }
+    }
+
+    /// **A window RETAINS its first responder, and taking the view out of the window does not
+    /// resign it.** Measured, not assumed: with the hook parking containers but leaving the
+    /// responder alone, the MOUNTED browser was still `1 browser(s) still open, 50/50 drain turns`
+    /// while every parked one closed in `0/50`.
+    ///
+    /// The runtime is the reason there is one to resign: `restoreFirstResponder` makes Chromium's
+    /// `RenderWidgetHostViewCocoa` the window's first responder on every attach (spike Fact 2 —
+    /// without it the panel takes no keystrokes at all), so the shown tab's CEF view is exactly the
+    /// object AppKit is holding.
+    ///
+    /// Scoped as narrowly as it can be: only when the window's current first responder is inside
+    /// THIS container, and never for the parking window (nothing ever makes a responder there, and
+    /// clearing one we did not set would be reaching outside what this method is for).
+    private func resignFirstResponder(in container: PanelCEFContainerView) {
+        guard let window = container.window, window !== parkingWindowStorage else { return }
+        guard let responder = window.firstResponder as? NSView,
+              responder.isDescendant(of: container) else { return }
+        window.makeFirstResponder(nil)
     }
 
     /// **Moves the container, and touches nothing else — live-gate fix B.**

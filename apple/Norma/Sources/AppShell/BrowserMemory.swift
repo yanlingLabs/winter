@@ -110,7 +110,11 @@ final class BrowserMemorySampler {
     /// process that has just launched and has nothing accumulated to bound.
     private(set) var totalRendererBytes: UInt64 = 0
 
-    init(probe: @escaping @Sendable () -> UInt64 = BrowserRendererMemory.sampleRendererBytes,
+    // The default is a closure LITERAL rather than a bare reference to
+    // `BrowserRendererMemory.sampleRendererBytes`: an unapplied static-method reference is a
+    // non-`Sendable` function value, and converting one to `@Sendable` is a warning the compiler is
+    // right to raise even though this particular function touches nothing shared.
+    init(probe: @escaping @Sendable () -> UInt64 = { BrowserRendererMemory.sampleRendererBytes() },
          now: @escaping () -> Date = Date.init) {
         self.probe = probe
         self.now = now

@@ -1078,7 +1078,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             openPairedDevices: { [weak self] in self?.openPairedDevices() },
             loginItemController: loginItem,
             panic: { [weak peripheral] in peripheral?.panic() },
-            quit: { NSApp.terminate(nil) },
+            // live-gate fix H: not a bare `NSApp.terminate` — see `quitReleasingBrowserViews`.
+            quit: { [weak self] in
+                guard let self else { return NSApp.terminate(nil) }
+                self.quitReleasingBrowserViews()
+            },
             // Lifecycle T4: the ONE true-quit gate — arms `reallyQuitting` so
             // `applicationShouldTerminate` (T3) lets THIS quit through instead of treating it like
             // ⌘Q/dock-quit (close windows, keep running).
@@ -1154,6 +1158,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    /// **The quit door — live-gate fix H, and the one place the browser views get unparented while
+    /// the app is still ALIVE.**
+    ///
+    /// The user's real quit tripped `NormaCEF.mm`'s shutdown tripwire: `shutting down (2 browser(s)
+    /// still open, 50/50 drain turns, …)` with `browser closed` arriving from inside `CefShutdown`.
+    /// A close completes when CEF's host view deallocates, and any browser whose container has ever
+    /// been MOUNTED in a real window carries references that only drop after the unparent has been
+    /// followed by ordinary run-loop turns.
+    ///
+    /// **Measured, on the spike (`NORMA_SPIKE_CLOSE_MOUNTED=1 NORMA_SPIKE_CLOSE_BROWSERS=3`), as
+    /// CEF's own host view's retain count at the instant the close releases it:**
+    ///
+    /// | when the containers are unparented | retain count | shutdown line |
+    /// |---|---|---|
+    /// | never (pre-fix, mounted) | 17 | `1 still open, 50/50 drain turns` |
+    /// | inside `applicationWillTerminate` (the CEF pre-shutdown hook alone) | 17 | `1 still open, 50/50` |
+    /// | …with 1.5 s of run loop spun there | 14 | `1 still open, 50/50` |
+    /// | inside an `NSApplication.terminateLater` deferral | 20 | `1 still open, 50/50` |
+    /// | **100 ms before `NSApp.terminate` is called at all** | **5** | **`0 still open, 0/50`** |
+    ///
+    /// So it is not about how long you wait — nothing *inside* the terminate sequence releases them
+    /// — it is about being outside it. Hence this: unparent, let the run loop turn, then terminate.
+    ///
+    /// `NormaCEFSetPreShutdownHook` still exists and still does the same unparent, and the table
+    /// above is exactly why it is not enough on its own: it is the belt for a `NormaCEFShutdown`
+    /// reached without passing through here (a system logout, which arrives straight at
+    /// `applicationShouldTerminate`, and any future embedder-side call). Those keep the residual;
+    /// see spec §10 gate 10.
+    ///
+    /// A Norma with no live browser terminates immediately — no timer, no delay, nothing to release.
+    func quitReleasingBrowserViews() {
+        guard BrowserRuntime.shared.hasLiveBrowsers else { return NSApp.terminate(nil) }
+        BrowserRuntime.shared.releaseViewsForShutdown()
+        // **A `Timer` in COMMON modes, not `DispatchQueue.main.asyncAfter`** — the same lesson
+        // `BrowserRuntime.Scheduler.production.timer` carries, and it was re-learned here the hard
+        // way: an earlier shape of this fix deferred the quit through
+        // `NSApplication.terminateLater` plus a GCD block, and the block never got a turn in
+        // AppKit's terminate run-loop mode — the app hung at quit until it was killed. A quit the
+        // user can trigger must never be able to not happen.
+        let timer = Timer(fire: Date().addingTimeInterval(Self.browserQuitSettleSeconds),
+                          interval: 0, repeats: false) { _ in NSApp.terminate(nil) }
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    /// How long `quitReleasingBrowserViews` lets the run loop turn before terminating. 100 ms was
+    /// measured as sufficient (the table above); this is that with margin, and it is the entire
+    /// user-visible cost of the fix — paid only by a quit that had a browser open.
+    static let browserQuitSettleSeconds: TimeInterval = 0.15
+
     func applicationWillTerminate(_ notification: Notification) {
         startTask?.cancel()
         // Lifecycle T6: stop the supervised daemon FIRST, before the peripheral teardown below —
@@ -1192,6 +1245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return reply
     }
+
 
     /// Lifecycle T3: dock-tile / Finder relaunch while Norma is already running (LSUIElement apps
     /// still receive `reopen` on a Finder double-click even with no dock tile to click). A main
