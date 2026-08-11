@@ -772,11 +772,25 @@ export const TRANSIENT_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<
   // panel-shell T3: the daemon->app command channel. See PanelCommandEvent for why transient.
   //
   // This membership ALSO puts it on the remote stream — `REMOTE_STREAM_EVENT_TYPES` spreads this
-  // set wholesale rather than listing it — and that is accepted rather than worked around. The
-  // phone has no panel and skips the variant (`NormaKit` decodes with `try?`), and the agent's
-  // browsing URLs already reach it via `tool_call`, which is in `HISTORY_EVENT_TYPES` with its
-  // arguments. Panel STATE stays Mac-only the real way: the four persisted panel variants are
-  // absent from `HISTORY_EVENT_TYPES`.
+  // set wholesale rather than listing it — and that is accepted rather than worked around.
+  //
+  // **Corrected mechanism (whole-branch review, Minor-1): the phone decodes this variant fine,
+  // `args` included.** `SessionEvent.PanelCommand` has carried `args` since B2 Task 2, content-
+  // checked by NormaProtocol's own round-trip test. `NormaKit`'s `try?` (`parseServerLine`)
+  // protects the CONNECTION from a genuinely unrecognized event — it has nothing to do with this
+  // one, which decodes just fine. What actually drops it is the phone's chat-transcript fold, which
+  // handles only `HISTORY_EVENT_TYPES ∪ {assistant_delta}` and `default: break`s on everything else
+  // (`norma-ios` `Transcript.apply`). The agent's browsing URLs are not lost the same way: they
+  // already reach the phone via `tool_call`, which IS in `HISTORY_EVENT_TYPES`, with its arguments.
+  //
+  // **The forward obligation that leaves (M6, a decision rather than an oversight):** `args` carries
+  // MODEL-AUTHORED text (a `type` call's `text`, a selector) inside an opaque record, on an event
+  // that DOES reach the phone. Nothing renders it there today, so nothing is exposed today — but the
+  // day a phone renderer reads `panel_command.args`, it must treat it as untrusted model text,
+  // exactly as any renderer of `tool_call.argsJson` already must.
+  //
+  // Panel STATE stays Mac-only the real way: the four persisted panel variants are absent from
+  // `HISTORY_EVENT_TYPES`.
   "panel_command",
 ]);
 

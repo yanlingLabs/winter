@@ -87,7 +87,9 @@ import { checkDangerousDomain, dangerousDomainRefusal } from "./page-core";
  *  reading on two grounds: it is the normative table (§1 is a summary sentence, and it also omits
  *  `back` from the code/cowork/dispatch list where nobody disputes it belongs), and `back` is the
  *  strict inverse of `navigate` — a mode allowed to move a tab forward but not to undo it would be
- *  a strange capability boundary, and `back` reaches nothing `navigate` did not already reach. Six
+ *  a strange capability boundary, and `back` reaches nothing `navigate` did not already reach —
+ *  **except a listed host already in that tab's history, the shared-strip case** (whole-branch
+ *  review, Important-2): `refuseDangerous` gates `navigate` there; nothing gates `back` there. Six
  *  verbs, therefore; recorded here so the divergence is a decision rather than a typo. */
 export const BROWSER_READ_VERBS = ["tabs", "open", "navigate", "back", "read", "screenshot"] as const;
 
@@ -583,15 +585,18 @@ function panelReach(deps: BrowserToolDeps, sessionId: string): PanelReach {
  * **THE DOOR THAT IS NOT A URL DOOR, named because it is the one place this gate's coverage is
  * narrower than the card implies (fix round 1, Minor 4).** The session's tab strip is SHARED: the
  * user opens tabs in it themselves, and the agent's verbs address every tab in the session, not only
- * the ones it minted. So a tab the USER navigated to a listed host is fully interactable — `click`,
- * `type`, `submit`, in every interaction-capable mode, with no gate anywhere. Not an oversight and
- * not closable from here: an interaction verb names no url (this function is never called for one),
- * and the only fact the daemon holds about where a tab IS — the fold's url, from
- * `panel.reportNavigation` — is a post-hoc report that can be stale by exactly one click, so a gate
- * keyed on it would refuse and permit on facts that were true a moment ago. Ruled explicitly in Task
- * 6 (report §3d) and recorded here, beside the block, rather than only in a report: the domain gate
- * adjudicates where the AGENT aims, and a shared strip means that is not the same set as where the
- * agent can act.
+ * the ones it minted. So a tab the USER navigated to a listed host is fully EXPOSED, both ways, with
+ * no gate anywhere (whole-branch review, Important-2 — the original wording here said interactable
+ * only): readable — `read`, `screenshot` — in every mode INCLUDING CHAT, the one mode with no
+ * approval flow at all and the one whose whole purpose is bringing page content into the model's
+ * context; and interactable — `click`, `type`, `submit` — in every interaction-capable mode. Not an
+ * oversight and not closable from here: none of these verbs names a url (this function is never
+ * called for any of them), and the only fact the daemon holds about where a tab IS — the fold's url,
+ * from `panel.reportNavigation` — is a post-hoc report that can be stale by exactly one click, so a
+ * gate keyed on it would refuse and permit on facts that were true a moment ago. Ruled explicitly in
+ * Task 6 (report §3d) and recorded here, beside the block, rather than only in a report: the domain
+ * gate adjudicates where the AGENT aims, and a shared strip means that is not the same set as where
+ * the agent can act.
  */
 function refuseDangerous(
   url: string,
