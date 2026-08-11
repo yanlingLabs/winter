@@ -41,7 +41,10 @@ import type { MemoryStore, MemoryErrorKind } from "../agent/memory";
 import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTailMemDir } from "../agent/memory-file-ops";
 import type { SessionStore } from "../sessions/store";
 import { readHistoryPage } from "../sessions/history";
-import { makeActivityDeriver, participatesInActivity, type ActivityDeriver } from "../sessions/activity";
+import {
+  makeActivityDeriver, makeSessionSignalsDeriver, participatesInActivity,
+  type ActivityDeriver, type SessionSignalsDeriver,
+} from "../sessions/activity";
 import { createActivityEnforcement } from "../sessions/activity-enforcement";
 import { setSessionActivity, type SetActivityDeps } from "../sessions/set-activity";
 import { setSessionDirs, type SetDirsDeps } from "../sessions/set-dirs";
@@ -554,6 +557,21 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     // settled while the emitted stream still (correctly) said "background".
     activeSince: (sessionId) => enforcement.activeSince(sessionId),
     autoBackground: (sessionId) => enforcement.autoBackgrounded(sessionId),
+  });
+
+  /** b2-agent-browser T1 (spec §5): the RAW signals half of the same three sources, for EVERY mode.
+   *  Bound beside `deriveActivity` rather than folded into it because they answer different
+   *  questions and have different audiences: the label is a lifecycle state that chat/dispatch
+   *  deliberately do not have, these are facts about what the daemon is doing. See
+   *  `makeSessionSignalsDeriver` (sessions/activity.ts) for why the mode gate must NOT be applied
+   *  here — that comment is the one that stops this from being "fixed".
+   *
+   *  Same `hub` binding as `deriveActivity` above, for the same reason: on a server built without
+   *  an `opts.hub`, the local fallback hub is the one that actually holds every attachment. */
+  const deriveSignals: SessionSignalsDeriver = makeSessionSignalsDeriver({
+    attachedCount: (sessionId) => hub.attachedCount(sessionId),
+    turnRunning: (sessionId) => opts.engine?.isRunning(sessionId) ?? false,
+    bgWork: (sessionId) => opts.engine?.hasBackgroundWork(sessionId) ?? false,
   });
 
   /** session-activity-hygiene T5: the lifecycle's ENFORCEMENT — what the daemon does when the last
@@ -1151,10 +1169,28 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // `store.dirs()` derives its answer FROM that same `cwd` column (T1's lazy migration), so
         // this alias is a no-op there — the value is unchanged, just re-read through the derived
         // path instead of trusted directly.
+        // b2-agent-browser T1 (spec §5): WHICH session this connection is itself attached to, read
+        // once for the whole batch (like `now` above) — one hub lookup per request, not per row.
+        //
+        // Asked of the HUB, never remembered on the connection: `fanOut`'s dead-client eviction
+        // (sessions/hub.ts) can drop this client from an attachment by a path the connection never
+        // hears about, so `socket.data.hubClient` is "the handle we last attached with" and
+        // `hub.attachedSession` is "where it actually is, now". `undefined` for the common case of
+        // a connection that never attached — and for one whose attachment has been dropped.
+        const selfSessionId = socket.data.hubClient ? hub.attachedSession(socket.data.hubClient) : undefined;
         const sessions = opts.store.list().map((s) => {
-          if (!participatesInActivity(s.mode)) return s;
+          // The signals ride EVERY row: chat and dispatch included, which is the whole point (the
+          // Mac app's browser lifecycle runs on chat sessions and had no signal for them at all —
+          // browser-runtime spec §4's T5 correction). Stamped OUTSIDE the participation gate below
+          // on purpose; `makeSessionSignalsDeriver` carries the argument for why.
+          const signals = deriveSignals(s.sessionId, selfSessionId);
+          // `activity`/`dirs`/the `cwd` alias stay INSIDE the gate, unchanged: those are the
+          // lifecycle label and the working-directory set, and chat/dispatch have neither. A row
+          // therefore legitimately carries signals and no label, which is exactly what the app
+          // needs and what test/ipc/session-list-signals.test.ts pins.
+          if (!participatesInActivity(s.mode)) return { ...s, signals };
           const dirs = opts.store.dirs(s.sessionId);
-          return { ...s, activity: deriveActivity(s, s.sessionId, now), dirs, cwd: dirs[0]?.path };
+          return { ...s, activity: deriveActivity(s, s.sessionId, now), dirs, cwd: dirs[0]?.path, signals };
         });
         // Chat mode Slice C: chat sessions are now visible to remote too. A mode outside
         // REMOTE_ELIGIBLE_SESSION_MODES (Mac-local-only — e.g. a future cowork surface) stays
