@@ -61,8 +61,9 @@ import Foundation
 /// The refusal is reported back to the model rather than swallowed (`ok:false` with the reason), so
 /// the one door that could otherwise fail silently is the one that explains itself.
 ///
-/// **Door 5 is not the only way a URL could reach a web view, and the other ones are not doors at
-/// all** (fix round 1; extended by B2 Task 5). Two paths bypass this file entirely:
+/// **Door 5 is not the only way the agent reaches a web view outside this file, and the other ones
+/// are not doors at all** (fix round 1; extended by B2 Task 5; N3/N4 added by whole-branch review,
+/// Minor-2). Four paths bypass this file entirely:
 ///
 ///  1. **The CDP bridge** (`NormaCEFExecuteCDP`) can navigate — `Page.navigate` loads any URL, and a
 ///     `Runtime.evaluate` assigning `location.href` does the same. What contains it is **producer
@@ -76,6 +77,18 @@ import Foundation
 ///     performed by the renderer, reported to nobody in time to matter. It reaches no allowlist in
 ///     this file and no domain list in the daemon (whose dangerous-domain block is first-hop-only by
 ///     construction). It is the widest of the three and is contained by nothing here.
+///  3. **The shared strip** (Task 6). The panel's tab strip is not agent-owned: a tab the USER
+///     navigated to a listed host is exactly as reachable to the agent as one it opened itself —
+///     `read`/`screenshot` in every mode INCLUDING CHAT, `click`/`type`/`submit` wherever the
+///     interact verbs reach. No url ever loads for this path, so there is nothing here for a scheme
+///     check to refuse; what has no reach is the DAEMON's dangerous-domain block (`refuseDangerous`,
+///     `browser.ts`), which fires only on `navigate`/`open`'s own url argument, never on a verb that
+///     merely acts on a tab already sitting on one.
+///  4. **`back`.** History navigation carries no url for anything to judge: `PanelCommandConsumer`
+///     asks CEF to go back by tabId alone; `normalizeTypedInput` is never called. `back` — being
+///     `navigate`'s own exact inverse — reaches exactly what `navigate` would have been refused for,
+///     on a tab whose history already holds a listed host. It is in the daemon's READ set
+///     (`BROWSER_READ_VERBS`), so chat has it too.
 ///
 /// Named so the door count is not mistaken for the whole threat model.
 ///
