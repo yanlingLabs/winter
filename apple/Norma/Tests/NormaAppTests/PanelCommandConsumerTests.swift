@@ -121,19 +121,22 @@ final class PanelCommandConsumerTests: XCTestCase {
         XCTAssertTrue(cef.log.first?.hasPrefix("c1 cdp Page.captureScreenshot ") == true, "\(cef.log)")
     }
 
-    /// The INTERACT set is answered, not ignored — so Task 5's arrival is observable from the
-    /// agent's side, and a verb reaching a mode that should not have it is visible rather than a
-    /// timeout.
-    func testTheNotYetImplementedInteractionVerbsAnswerRatherThanTimeOut() {
+    /// The INTERACT set is answered, not ignored. Task 3 shipped this row against a "not
+    /// implemented" stub; Task 5 built the arms, so an operand-less interaction command is now
+    /// answered by the OPERAND check — which is the same guarantee one layer in, and the one that
+    /// matters most: an interaction verb never falls through to a browser without being told what to
+    /// act on. Its per-verb mechanics are `PanelCommandInteractionTests`'.
+    func testTheInteractionVerbsAnswerRatherThanTimeOutWhenTheyAreGivenNothingToActOn() {
         let world = makeWorld()
         for (index, verb) in ["click", "type", "scroll", "submit", "wait"].enumerated() {
             world.consumer.handle(command(verb, commandId: "pcmd_\(index)"))
         }
         XCTAssertEqual(sent.count, 5)
         XCTAssertTrue(sent.allSatisfy { $0.ok == false })
-        XCTAssertTrue(sent.allSatisfy { $0.result?.contains("not implemented") == true },
+        XCTAssertTrue(sent.allSatisfy { $0.result?.contains("needs") == true },
                       "\(sent.map { $0.result ?? "" })")
-        XCTAssertEqual(cef.log, [], "an unimplemented verb must not touch the browser")
+        XCTAssertEqual(cef.log, [], "a verb with no operands must not touch the browser")
+        XCTAssertEqual(clock.liveTimers.count, 0, "nor arm a deadline for work it will not do")
     }
 
     /// A verb from a NEWER daemon. The wire type keeps `action` a plain `String` so it decodes; this
