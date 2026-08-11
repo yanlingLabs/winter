@@ -231,6 +231,17 @@ enum PanelWebTabModels {
         return model
     }
 
+    /// **A lookup that never MINTS one** — live-gate fix E, and the distinction is the whole reason
+    /// this exists beside `model(for:host:sessionId:)` above.
+    ///
+    /// The tab strip renders a pill for every tab in the daemon's fold, including `.document` tabs
+    /// and web tabs whose browser has never been created in this process. Asking for those through
+    /// the creating accessor would put an entry in `models` for each of them — a registry of models
+    /// for tabs no browser ever backed, keyed by ids nothing will ever `discard`. So the strip asks
+    /// this instead: `nil` means "no browser has ever been wired for this tab here", which is
+    /// exactly the condition under which the daemon's folded title is the only title there is.
+    static func existing(tabId: String) -> PanelWebTabModel? { models[tabId] }
+
     /// Dropped when the user closes a tab (`ShellSessionHost.closePanelTab`). A tab closed by some
     /// OTHER producer — the agent, in B2 — leaves its entry behind; that is a handful of strings per
     /// tab for the life of the process, named here rather than papered over, and it is corrected the

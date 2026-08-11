@@ -333,13 +333,32 @@ struct PanelTabStrip: View {
                     // of by a second `spacing:`.
                     HStack(spacing: panelTabSpacing) {
                         ForEach(store.tabs) { tab in
-                            PanelTabPill(
-                                tab: tab,
-                                width: pillWidth,
-                                isActive: tab.tabId == shownTabId,
-                                onActivate: { onActivateTab(tab.tabId) },
-                                onClose: { onCloseTab(tab.tabId) }
-                            )
+                            // live-gate fix E. The TITLE is `panelTabStripTitle(tab)` on BOTH
+                            // branches — this conditional decides only whether SwiftUI has a
+                            // publisher to invalidate on, never what the pill says. A tab with a
+                            // live model gets `PanelTabPillLive`, whose `@ObservedObject` is the
+                            // channel `OnTitleChange` arrives down; a tab without one has no title
+                            // that can change out from under the fold, so there is nothing to
+                            // observe and the plain pill is correct.
+                            if let model = PanelWebTabModels.existing(tabId: tab.tabId) {
+                                PanelTabPillLive(
+                                    model: model,
+                                    tab: tab,
+                                    width: pillWidth,
+                                    isActive: tab.tabId == shownTabId,
+                                    onActivate: { onActivateTab(tab.tabId) },
+                                    onClose: { onCloseTab(tab.tabId) }
+                                )
+                            } else {
+                                PanelTabPill(
+                                    tab: tab,
+                                    title: panelTabStripTitle(tab),
+                                    width: pillWidth,
+                                    isActive: tab.tabId == shownTabId,
+                                    onActivate: { onActivateTab(tab.tabId) },
+                                    onClose: { onCloseTab(tab.tabId) }
+                                )
+                            }
                         }
                         newTabButton
                             // Zero tabs: "+" sits right after the leading inset, exactly as before
@@ -465,6 +484,10 @@ struct PanelTabStrip: View {
 /// the wire and never touch `PanelStore` themselves.
 private struct PanelTabPill: View {
     let tab: PanelTab
+    /// live-gate fix E: **resolved by the caller**, never re-derived here. Both call sites pass
+    /// `panelTabStripTitle(tab)`, so the one rule for "what does this pill say" has one home; a
+    /// pill that computed its own title would be a second answer sitting beside it.
+    let title: String
     let width: CGFloat
     let isActive: Bool
     let onActivate: () -> Void
@@ -477,7 +500,7 @@ private struct PanelTabPill: View {
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.textMuted)
                     .padding(.leading, 9.5)
-                Text(panelTabDisplayTitle(tab))
+                Text(title)
                     .font(.system(size: 12))
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -511,10 +534,38 @@ private struct PanelTabPill: View {
             }
             .buttonStyle(.plain)
             .padding(.trailing, panelTabCloseInset)
-            .accessibilityLabel("Close \(panelTabDisplayTitle(tab))")
+            .accessibilityLabel("Close \(title)")
         }
-        .help(panelTabDisplayTitle(tab))
-        .accessibilityLabel(panelTabDisplayTitle(tab))
+        .help(title)
+        .accessibilityLabel(title)
+    }
+}
+
+/// live-gate fix E: one pill, subscribed to its tab's live browser state.
+///
+/// **The `@ObservedObject` is an INVALIDATION channel and nothing else** — the value still comes
+/// from `panelTabStripTitle`, the same function the plain branch calls and the one the tests pin,
+/// so the two branches of the strip's conditional can never say different things. Without the
+/// subscription the pill would show whatever the title happened to be at the last `PanelStore`
+/// publication and never update: `OnTitleChange` reaches `PanelWebTabModel`, which is not something
+/// `PanelStore` publishes, so no fold would ever re-render the strip. That is precisely the
+/// symptom this fix is about — a ⌘-clicked background tab that has loaded, with the right title
+/// sitting in the model, and a pill still reading the commit-time one.
+///
+/// A separate type rather than an optional stored property because `@ObservedObject` cannot wrap an
+/// optional: SwiftUI subscribes at property-wrapper level, so "sometimes there is a publisher" has
+/// to be expressed as two views, not one view with a nil.
+private struct PanelTabPillLive: View {
+    @ObservedObject var model: PanelWebTabModel
+    let tab: PanelTab
+    let width: CGFloat
+    let isActive: Bool
+    let onActivate: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        PanelTabPill(tab: tab, title: panelTabStripTitle(tab), width: width, isActive: isActive,
+                     onActivate: onActivate, onClose: onClose)
     }
 }
 
@@ -542,6 +593,36 @@ func panelTabDisplayTitle(_ tab: PanelTab) -> String {
     case .code: return "Code"
     case .note: return "Note"
     }
+}
+
+/// **What the STRIP puts on a pill — live-gate fix E.** Presentation only: nothing here is written
+/// down, nothing here reaches the daemon, and no new log event exists because of it.
+///
+/// The daemon's folded `tab.title` is reported at COMMIT time (`panel_tab_navigated`, filed by
+/// `PanelWebTabModel.reportCommittedNavigation`), which for a ⌘-clicked background tab is usually
+/// before the page's `<title>` exists — and `OnTitleChange` deliberately never re-reports, because
+/// the persisted event stream is bounded to ~10-50 events per session (`events.ts`'s own note).
+/// So the fold's answer for a live background tab is "whatever the URL was called at commit", and
+/// it stays that way until the user shows the tab. The LIVE model has had the real title the whole
+/// time: `OnTitleChange` → `NotifyState` → the state channel → `PanelWebTabModel.title`, parked or
+/// not (`NormaCEF.mm`). This is the one line that prefers it.
+///
+/// **`PanelWebTabModels.existing` is the liveness test, deliberately** — not
+/// `BrowserRuntime.isLive(tabId:)`. The strip must not reach for the app's one global runtime to
+/// draw a label, and the registry answers a strictly better question for this purpose: "has a
+/// browser ever been wired for this tab **in this process**". `nil` covers a dead tab, a
+/// `.document` tab, and a tab restored from the daemon after a relaunch — the fold is the only
+/// title any of those has, which is exactly the fallback. A model that OUTLIVES its browser (the
+/// runtime keeps models across a `stop` on purpose — `BrowserRuntime.stop`) keeps its last real
+/// page title, which is never worse than the commit-time one it would fall back to.
+///
+/// Empty is not a title: a freshly wired model publishes `""` until Chromium says otherwise, and
+/// showing a blank pill for a tab the fold could name is the bug this fix is not allowed to trade
+/// itself for.
+@MainActor
+func panelTabStripTitle(_ tab: PanelTab) -> String {
+    if let live = PanelWebTabModels.existing(tabId: tab.tabId)?.title, !live.isEmpty { return live }
+    return panelTabDisplayTitle(tab)
 }
 
 /// The draggable divider. Dragging CLAMPS — it never promotes to `.maximized`.

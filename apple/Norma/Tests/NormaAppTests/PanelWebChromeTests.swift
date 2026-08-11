@@ -427,6 +427,67 @@ final class PanelWebChromeTests: XCTestCase {
         XCTAssertFalse(a === other, "different tabs must not share a model")
     }
 
+    // MARK: - live-gate fix E: the strip's pill title
+
+    /// **The user's report: ⌘-click loads the tab instantly, and its pill keeps the wrong name.**
+    ///
+    /// The daemon's folded title is filed at COMMIT time — usually before the page's `<title>`
+    /// exists — and `OnTitleChange` deliberately never re-reports it, so the fold's answer is frozen
+    /// at "whatever it was called when it committed" for as long as the tab stays unshown. The live
+    /// model has had the real one the whole time. This is that preference, both directions in one
+    /// row so "prefers live" cannot pass as "always live".
+    func testTheStripPrefersTheLiveTitleAndFallsBackToTheFoldedOne() {
+        PanelWebTabModels.removeAllForTesting()
+        defer { PanelWebTabModels.removeAllForTesting() }
+
+        // A live tab: a wired model that Chromium has since titled.
+        let live = PanelTab(tabId: "t1", kind: .web, url: "https://y.example", title: "y.example")
+        let model = PanelWebTabModels.model(for: live, host: nil, sessionId: "s1")
+        model.apply(url: "https://y.example", title: "Rick Astley — Never Gonna Give You Up",
+                    isLoading: false, canGoBack: false, canGoForward: false)
+
+        XCTAssertEqual(panelTabStripTitle(live), "Rick Astley — Never Gonna Give You Up",
+                       "the pill rendered the commit-time title while the live one sat in the model")
+
+        // No model at all: a tab restored from the daemon, or one no browser has ever backed here.
+        // The fold is the only title there is, and it must still be used.
+        let dead = PanelTab(tabId: "t2", kind: .web, url: "https://z.example", title: "z.example")
+        XCTAssertNil(PanelWebTabModels.existing(tabId: "t2"), "the premise: nothing is wired for t2")
+        XCTAssertEqual(panelTabStripTitle(dead), "z.example",
+                       "a tab with no live model must still render what the daemon folded")
+    }
+
+    /// **Empty is not a title.** A freshly wired model publishes `""` until Chromium says otherwise
+    /// — which is exactly the window a ⌘-clicked tab spends loading — so a rule that preferred the
+    /// live value unconditionally would blank the pill for a tab the fold could name, trading one
+    /// visible defect for a worse one. Both halves: the empty live title falls through, and the
+    /// kind-based default still answers for a tab the fold cannot name either.
+    func testAnEmptyLiveTitleFallsThroughToTheFoldAndThenToTheKindDefault() {
+        PanelWebTabModels.removeAllForTesting()
+        defer { PanelWebTabModels.removeAllForTesting() }
+
+        let named = PanelTab(tabId: "t1", kind: .web, url: "https://y.example", title: "y.example")
+        _ = PanelWebTabModels.model(for: named, host: nil, sessionId: "s1")   // title is ""
+        XCTAssertEqual(panelTabStripTitle(named), "y.example")
+
+        let unnamed = PanelTab(tabId: "t2", kind: .web, url: nil, title: nil)
+        _ = PanelWebTabModels.model(for: unnamed, host: nil, sessionId: "s1")
+        XCTAssertEqual(panelTabStripTitle(unnamed), "New Tab")
+    }
+
+    /// The strip asks about every tab in the fold on every render — `.document` tabs, and web tabs
+    /// no browser has ever backed. `existing` must therefore never MINT one, or the registry fills
+    /// with models for tabs that will never have a browser and that nothing will ever `discard`.
+    func testAskingTheRegistryFromTheStripNeverCreatesAModel() {
+        PanelWebTabModels.removeAllForTesting()
+        defer { PanelWebTabModels.removeAllForTesting() }
+
+        let doc = PanelTab(tabId: "d1", kind: .document, url: nil, title: nil)
+        XCTAssertEqual(panelTabStripTitle(doc), "Document")
+        XCTAssertNil(PanelWebTabModels.existing(tabId: "d1"),
+                     "drawing a pill minted a model for a tab that can never have a browser")
+    }
+
     /// The session is captured when the model is wired, not read when a page finishes loading —
     /// otherwise a session hop mid-load files one session's browsing into another's permanent log.
     func testTheSessionIsCapturedAtWiringTime() {
