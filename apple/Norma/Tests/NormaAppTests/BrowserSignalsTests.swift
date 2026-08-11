@@ -466,6 +466,13 @@ final class BrowserSignalsTests: XCTestCase {
     /// **Spec §10 gate 4, as a test: closing the window silences the page NOW, not in five
     /// minutes.** The linger exists so a session hop never reloads; a closed window is not a hop,
     /// and "keep playing invisibly for five minutes" is the audio surprise this plan opened with.
+    ///
+    /// **live-gate fix F changed the SHAPE of this row, not its claim.** The close no longer plans
+    /// against whatever the shell last heard — it fetches a fresh `session.list` first — so the
+    /// daemon's answer has to be modelled honestly on both sides of the close: `"active"` while
+    /// this shell is attached (our own reflection), `"idle"` once it has detached, which is what a
+    /// real daemon reports the instant `applyPolicy()` drops the attachment. The stop is therefore
+    /// one round trip late rather than synchronous, and `waitUntil` is what that costs.
     func testClosingTheWindowStopsTheViewedSessionsBrowsersImmediately() async {
         let w = makeWorld()
         // "active" because THIS shell is attached — the case that makes the reflection matter (see
@@ -475,13 +482,67 @@ final class BrowserSignalsTests: XCTestCase {
         await publishRows(w, [row("s1", activity: "active")])
         await openOneWebTab(w)
 
+        // Nobody else is on this session, so the daemon's count goes to zero with our detach. NOT
+        // published — the close path's own fetch is what has to read it.
+        w.rows.rows = [row("s1", activity: "idle")]
         w.host.setShellVisible(false)
 
-        XCTAssertFalse(w.runtime.isLive(tabId: "t1"),
-                       "the window closed and the page kept running: \(w.cef.log)")
+        await waitUntil("the browsers to stop", { !w.runtime.isLive(tabId: "t1") })
         XCTAssertTrue(w.cef.log.contains("c1 close"), "log was \(w.cef.log)")
         XCTAssertTrue(w.clock.liveTimers.isEmpty,
                       "a linger was armed for a session the window close was supposed to skip it for")
+    }
+
+    // MARK: - live-gate fix F: fresh signals before the window-close plan
+
+    /// **The wrong stop, killed: a co-attached session's page keeps playing when the Mac window
+    /// closes.**
+    ///
+    /// Mac and phone both attached to one session, a page playing in the Mac's panel, ⌘Q hides the
+    /// window. The close DETACHES this shell, which arms `ownAttachmentStillCountedIn` for the
+    /// session — so the row this shell already holds (`"active"`, correct: the phone is on it) is
+    /// suppressed for exactly one plan, `attachedElsewhere` reads `false`, and `stopImmediately`
+    /// carries a `.stopNow` spec §4 row 2 forbids. The user heard the consequence: the re-create
+    /// that follows cannot resume playback (autoplay gates initiation), so the "brief gap" the T5
+    /// review disclosed is really permanent silence on the phone's own page.
+    ///
+    /// The fix is to plan against a FRESH row. By the time the close hook runs, `applyPolicy()` has
+    /// detached us, so the daemon's answer is the truth — and `"active"` now means the phone alone.
+    func testAWindowCloseOnACoAttachedSessionStopsNothing() async {
+        let w = makeWorld()
+        await publishRows(w, [row("s1", activity: "active")])
+        await openOneWebTab(w)
+        let transcript = w.cef.log
+
+        // The daemon's answer AFTER our detach: still "active", because the phone never left. The
+        // second row is the observable — `@Published` sends from `willSet`, so `directory.rows`
+        // holding it means the sink (and the re-plan inside it) has already returned.
+        w.rows.rows = [row("s1", activity: "active"), row("s2", activity: "idle")]
+        w.host.setShellVisible(false)
+
+        await waitUntil("the close path's own session.list answer", { w.directory.rows.count == 2 })
+        XCTAssertTrue(w.runtime.isLive(tabId: "t1"),
+                      "the phone's playing page was stopped by this Mac closing its window — and a "
+                          + "re-create never resumes playback: \(w.cef.log)")
+        XCTAssertEqual(w.cef.log, transcript, "nothing at all may be touched: \(w.cef.log)")
+    }
+
+    /// The other direction, so the row above cannot pass by simply never stopping anything: same
+    /// close, same fetch, and a daemon that answers "nobody is attached any more" still gets spec
+    /// §10 gate 4's immediate stop with no linger.
+    func testAWindowCloseOnASessionNobodyElseHoldsStillStopsIt() async {
+        let w = makeWorld()
+        await publishRows(w, [row("s1", activity: "active")])
+        await openOneWebTab(w)
+
+        w.rows.rows = [row("s1", activity: "idle"), row("s2", activity: "idle")]
+        w.host.setShellVisible(false)
+
+        await waitUntil("the close path's own session.list answer", { w.directory.rows.count == 2 })
+        XCTAssertFalse(w.runtime.isLive(tabId: "t1"),
+                       "an abandoned session's page kept running past the window close: \(w.cef.log)")
+        XCTAssertTrue(w.cef.log.contains("c1 close"), "log was \(w.cef.log)")
+        XCTAssertTrue(w.clock.liveTimers.isEmpty, "and the close skips the linger, it does not arm one")
     }
 
     // MARK: - The linger (spec §4)
@@ -606,6 +667,12 @@ final class BrowserSignalsTests: XCTestCase {
 
     /// The gate's other direction, so the row above cannot pass by simply never closing it: with no
     /// live browser, a hidden window polls exactly as little as it did before Task 5.
+    ///
+    /// **live-gate fix F: the close is asynchronous now**, so the browser is still live at the
+    /// moment `setRenderingActive(false)` runs and the gate is still open then — which is correct,
+    /// and is why the assertion waits for the stop rather than reading the gate on the same turn.
+    /// `syncPolling()` runs at the end of every `replan()`, including the one the close's own fetch
+    /// provokes, so the gate closes on the pass that stops the last browser.
     func testAHiddenWindowWithNoLiveBrowserDoesNotPoll() async {
         let w = makeWorld()
         await publishRows(w, [row("s1", activity: "idle")])
@@ -618,7 +685,7 @@ final class BrowserSignalsTests: XCTestCase {
         w.host.setShellVisible(false)
         w.coordinator.setRenderingActive(false)
 
-        XCTAssertFalse(w.runtime.isLive(tabId: "t1"), "log was \(w.cef.log)")
+        await waitUntil("the browsers to stop", { !w.runtime.isLive(tabId: "t1") })
         XCTAssertFalse(w.directory.isPollingForTesting,
                        "a hidden shell with nothing live must not keep polling the daemon")
     }

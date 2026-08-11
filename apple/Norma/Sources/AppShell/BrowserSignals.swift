@@ -31,7 +31,9 @@ import Foundation
 ///     This is where another harness attaching, a turn ending, or an archive lands.
 ///  3. **The attached session's turn state** (`SessionModel.$state.turnRunning`) — the local,
 ///     immediate half of `working`, which the daemon's derived label does not carry for chat.
-///  4. **The shell window's visibility** (`ShellSessionHost.onShellVisibilityApplied`).
+///  4. **The shell window's visibility** (`ShellSessionHost.onShellVisibilityApplied`). On a CLOSE
+///     this one fetches a fresh `session.list` before it plans — live-gate fix F, see
+///     `shellVisibilityChanged`, which is the only asynchronous trigger of the five.
 ///  5. **A linger deadline** (`BrowserRuntime.onLingerDeadline`) — the executor asking the engine
 ///     to look again; the stop is still the engine's to decide.
 ///
@@ -117,9 +119,9 @@ final class BrowserSignalsCoordinator {
     /// interval — the next real answer settles it — and the two errors point opposite ways: an early
     /// clear defers a window-close stop (the page keeps playing), a late clear is Case A below.
     ///
-    /// **This is NOT "never a wrong stop", and here is the case that isn't** (review round 1,
-    /// Important-1). A session **co-attached by this shell and the phone**, no turn running, window
-    /// closing:
+    /// **This is NOT "never a wrong stop" (review round 1, Important-1) — and live-gate fix F is
+    /// what took the one case that mattered away from it.** A session **co-attached by this shell
+    /// and the phone**, no turn running, window closing:
     ///
     ///   1. the row reads `"active"` — correctly, because the phone is on it;
     ///   2. the close detaches us, so this suppression is armed for that session;
@@ -128,19 +130,24 @@ final class BrowserSignalsCoordinator {
     ///   4. the next publication clears the suppression, the row still says `"active"` (the phone
     ///      never left), so the session is `hold` again and engine rule 8 RE-CREATES its shown tab.
     ///
-    /// So the honest bound is: **a wrong stop followed by a re-create, for a session another harness
-    /// is also attached to, converging within one poll interval.** The daemon cannot rescue it —
-    /// `SessionHub.emitActivity` suppresses an emit when the derived state is unchanged
-    /// (`packages/core/src/sessions/hub.ts`), and with the phone still attached our detach changes
-    /// nothing, so no `session_activity` arrives to correct the row sooner.
+    /// That was disclosed as "a wrong stop followed by a re-create, converging within one poll
+    /// interval". **The user's live gate showed what it converged TO, and the disclosure understated
+    /// it:** a re-created browser never resumes playback, because Chromium's autoplay policy gates
+    /// *initiation* and a fresh page has no user gesture behind it. The audible result was not a
+    /// gap — it was silence for the rest of the session, on the phone's own page. The daemon cannot
+    /// rescue it either: `SessionHub.emitActivity` suppresses an emit when the derived state is
+    /// unchanged (`packages/core/src/sessions/hub.ts`), and with the phone still attached our detach
+    /// changes nothing, so no `session_activity` arrives to correct the row sooner.
     ///
-    /// It is disclosed rather than designed away because the alternative is worse in the common
-    /// case: not suppressing at all makes EVERY window close on a page this shell alone was
-    /// attached to read as `attachedElsewhere` and keep playing — the audio surprise this whole plan
-    /// opened with, and spec §10 gate 4. Pre-B2 the blast radius here is a headless reload of a page
-    /// nothing renders (the phone sees tab state, not a viewport — spec §7); the day an agent drives
-    /// these pages it becomes a real interruption and wants a signal that separates our own
-    /// attachment from anyone else's, which `session.list` does not carry today.
+    /// **The fix is two halves, and neither weakens this suppression anywhere but at the close.**
+    /// `assemble` no longer ARMS it for a departure that happened because the window went away (see
+    /// the guard there for why that, and not the visibility hook, is the reachable place), and
+    /// `shellVisibilityChanged` fetches a fresh `session.list` so the resulting hold lasts one round
+    /// trip instead of one poll interval. Everywhere else — every hop, every deselect, every detach
+    /// with the window open — this suppresses exactly as before, which is the point: dropping it
+    /// altogether would make EVERY window close on a page this shell alone was attached to read as
+    /// `attachedElsewhere` and keep playing, which is the audio surprise this whole plan opened with
+    /// and spec §10 gate 4.
     private var ownAttachmentStillCountedIn: Set<String> = []
 
     /// What was last asked of `SessionDirectory.setPolling`. **The change-guard is load-bearing,
@@ -169,8 +176,8 @@ final class BrowserSignalsCoordinator {
         // Trigger 1. See `PanelStore.onFold` for why this is a hook rather than a `$tabs` sink.
         host.panelStore.onFold = { [weak self] in self?.replan() }
 
-        // Trigger 4.
-        host.onShellVisibilityApplied = { [weak self] in self?.replan() }
+        // Trigger 4. Not a bare `replan()` since live-gate fix F — see `shellVisibilityChanged`.
+        host.onShellVisibilityApplied = { [weak self] in self?.shellVisibilityChanged() }
 
         // Trigger 2. `refresh()` assigns `rows` wholesale on every successful poll, so this fires
         // once per tick even when nothing about the list changed — which is the point: it is the
@@ -220,6 +227,67 @@ final class BrowserSignalsCoordinator {
         syncPolling()
     }
 
+    // MARK: - The window close (live-gate fix F)
+
+    /// **Trigger 4, split in two: the window OPENING re-plans at once; the window CLOSING fetches a
+    /// fresh session list first.**
+    ///
+    /// The close is the one moment `ownAttachmentStillCountedIn` is wrong in a way the user can
+    /// hear. Case A in that property's own doc: a session co-attached by this Mac and the phone,
+    /// no turn running, window closing. The close DETACHES us, so the suppression is armed for that
+    /// session; `attachedElsewhere` is suppressed to `false`; nothing else holds the session; and
+    /// `stopImmediately` carries a `.stopNow` — **a stop spec §4 row 2 forbids.** It was disclosed
+    /// as "a wrong stop followed by a re-create, converging within one poll interval", and the
+    /// user's live gate showed what that converged TO: the re-created page never resumes playback,
+    /// because Chromium's autoplay policy gates *initiation* and a fresh browser has no user
+    /// gesture. So the audible result was not a gap — it was permanent silence.
+    ///
+    /// The fix is to stop deciding a stop from a stale row. It is two halves, and this is the
+    /// second: `assemble` refuses to ARM the suppression for a departure the window close caused
+    /// (its own guard says why the arm, not this hook, is the reachable place — the close's first
+    /// plan is a synchronous fold-driven one that has already run by the time this executes), and
+    /// this fetches the answer that settles it. By now `applyPolicy()` has detached this shell
+    /// (`ShellSessionHost.setShellVisible` calls it before firing this hook — what that ordering was
+    /// always for), so a list fetched NOW carries the truth: the phone still attached reads
+    /// `"active"` → `attachedElsewhere` → **hold**; nobody attached reads `"idle"` →
+    /// `stopImmediately` → **stop**, exactly as designed.
+    ///
+    /// **Three consequences, all deliberate:**
+    ///
+    ///  1. **The close-stop is no longer synchronous.** It costs one `session.list` round trip,
+    ///     during which a genuinely abandoned page keeps playing. Milliseconds against a local
+    ///     daemon, and the alternative is silencing a page the phone is using.
+    ///  2. **A FAILED fetch does not strand anything.** `refresh()` swallows its own errors and
+    ///     leaves `rows` untouched, so no sink-driven re-plan happens; the explicit `replan()`
+    ///     below still runs, and with the suppression unarmed a stale `"active"` holds rather than
+    ///     stops. The browsers are live, so `syncPolling` keeps the `session.list` poll running
+    ///     with the window shut (obligation #4) and the next tick that succeeds stops them.
+    ///  3. **A daemon that has not yet processed our detach** answers `"active"` for our own
+    ///     reflection, and the stop is deferred by one poll interval rather than made wrongly. The
+    ///     two errors point opposite ways and this is the harmless one.
+    ///
+    /// Obligation #4's machinery is otherwise untouched: this is an extra *signal*, not a second
+    /// poll. `refresh()` does not start, stop or reschedule `pollTask` — `setPolling` is still the
+    /// only thing that does, and `syncPolling()` is still the only caller of it here.
+    private func shellVisibilityChanged() {
+        guard !host.shellVisible else {
+            // The window came back. Nothing is stale in the direction that matters (the shown
+            // session is about to be attached again) and the viewport must be given back on this
+            // very pass — a round trip here would be a visible blank panel.
+            replan()
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            // The fetch IS the fresh signal: a successful one assigns `rows`, whose sink clears
+            // `ownAttachmentStillCountedIn` and re-plans. This second call is the belt for the
+            // failed-fetch case above — and harmless otherwise, since a plan reads state and
+            // accumulates none.
+            await self.host.directory.refresh()
+            self.replan()
+        }
+    }
+
     // MARK: - The pass
 
     /// Gather → plan → apply. Idempotent by construction: it reads state, it never accumulates any.
@@ -263,8 +331,27 @@ final class BrowserSignalsCoordinator {
 
         // This shell has stopped being some session's attachment (a hop, a detach, a window close).
         // Its row's `"active"` was answered while we were still counted in it.
+        //
+        // **Except on a window CLOSE — live-gate fix F, and it has to be here rather than at the
+        // visibility hook.** `ShellSessionHost.setShellVisible` runs `applyPolicy()` BEFORE it fires
+        // `onShellVisibilityApplied`, and that detach tears the panel down: `PanelStore.detach()`
+        // fires `onFold`, which is re-plan trigger 1. So the close's FIRST plan is a synchronous
+        // fold-driven one that has already happened by the time `shellVisibilityChanged` can fetch
+        // anything, and arming the suppression on it is what produced the wrong `.stopNow` the fix
+        // exists to remove. Gating the ARM on `shellVisible` is the only place that reaches every
+        // plan of the close, whichever trigger raised it.
+        //
+        // It is a choice between two guesses, not between a guess and knowledge — nothing in
+        // `session.list` separates our own attachment from anyone else's — and the harms are wildly
+        // asymmetric. Suppress and be wrong: the phone's playing page is stopped, and the re-create
+        // that follows never resumes playback (autoplay gates initiation), so it is silence for the
+        // rest of the session. Don't suppress and be wrong: a page nothing renders keeps running for
+        // one `session.list` round trip, because `shellVisibilityChanged` fetches one immediately
+        // and `syncPolling` keeps the poll alive behind it as the backstop (obligation #4).
         if previousAttachedSessionId != host.attachedSessionId {
-            if let departed = previousAttachedSessionId { ownAttachmentStillCountedIn.insert(departed) }
+            if let departed = previousAttachedSessionId, host.shellVisible {
+                ownAttachmentStillCountedIn.insert(departed)
+            }
             previousAttachedSessionId = host.attachedSessionId
         }
 
