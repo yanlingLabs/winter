@@ -22,6 +22,15 @@ const text = (t: string): ProviderEvent[] => [{ type: "text_delta", delta: t }, 
 const sendMessage = (callId: string, to: string, message: string): ProviderEvent =>
   ({ type: "tool_call", callId, name: "send_message", argsJson: JSON.stringify({ to, message }) });
 
+// SEND-ONCE, and why every hand-rolled provider below carries a `sent` latch.
+// Each of these fixtures exists to assert what ONE send_message produces (a refusal, a delivery) —
+// none of them is about how a turn ends. They used to yield that same tool_call on EVERY round and
+// relied on the main thread's tool-iteration cap to stop the turn at 24, which was never their
+// subject and is no longer available: the user's ruling removed that ceiling, so the main thread now
+// runs until the model stops asking for tools (engine.ts's `effectiveMaxIterations`). Unlatched,
+// they would spin forever. The latch sends on round 0 and ends the turn on every round after, which
+// is what a real model does and what the `SendOnce` fixture further down already did.
+
 function setupSend(script: ProviderEvent[][], opts: Parameters<typeof setup>[1] = {}) {
   const registry = new ToolRegistry();
   registerSendMessageTool(registry);
@@ -84,8 +93,11 @@ describe("AgentEngine: send_message can target a session (D1-T4)", () => {
     class P implements Provider {
       readonly id = "fake";
       targetOther!: string;
+      private sent = false; // see SEND-ONCE above
       models(): ModelInfo[] { return [{ id: "fake-1", family: "fake", contextWindow: 100_000, supportsVision: false }]; }
       async *streamTurn(): AsyncIterable<ProviderEvent> {
+        if (this.sent) { yield* text("noted"); return; }
+        this.sent = true;
         yield sendMessage("m1", this.targetOther, "hi"); yield done("tool_calls");
       }
     }
@@ -106,8 +118,11 @@ describe("AgentEngine: send_message can target a session (D1-T4)", () => {
     class P implements Provider {
       readonly id = "fake";
       targetA!: string;
+      private sent = false; // see SEND-ONCE above
       models(): ModelInfo[] { return [{ id: "fake-1", family: "fake", contextWindow: 100_000, supportsVision: false }]; }
       async *streamTurn(): AsyncIterable<ProviderEvent> {
+        if (this.sent) { yield* text("noted"); return; }
+        this.sent = true;
         yield sendMessage("mB", this.targetA, "hi parent"); yield done("tool_calls");
       }
     }
@@ -128,8 +143,11 @@ describe("AgentEngine: send_message can target a session (D1-T4)", () => {
     class P implements Provider {
       readonly id = "fake";
       targetSelf!: string;
+      private sent = false; // see SEND-ONCE above
       models(): ModelInfo[] { return [{ id: "fake-1", family: "fake", contextWindow: 100_000, supportsVision: false }]; }
       async *streamTurn(): AsyncIterable<ProviderEvent> {
+        if (this.sent) { yield* text("noted"); return; }
+        this.sent = true;
         yield sendMessage("m1", this.targetSelf, "hi me"); yield done("tool_calls");
       }
     }
@@ -237,8 +255,11 @@ describe("AgentEngine: send_message can target a session (D1-T4)", () => {
     class P implements Provider {
       readonly id = "fake";
       targetChild!: string;
+      private sent = false; // see SEND-ONCE above
       models(): ModelInfo[] { return [{ id: "fake-1", family: "fake", contextWindow: 100_000, supportsVision: false }]; }
       async *streamTurn(): AsyncIterable<ProviderEvent> {
+        if (this.sent) { yield* text("noted"); return; }
+        this.sent = true;
         yield sendMessage("m1", this.targetChild, "wake up"); yield done("tool_calls");
       }
     }
@@ -395,8 +416,11 @@ describe("AgentEngine: send_message can target a session (D1-T4)", () => {
       class P implements Provider {
         readonly id = "fake";
         targetChild!: string;
+        private sent = false; // see SEND-ONCE above
         models(): ModelInfo[] { return [{ id: "fake-1", family: "fake", contextWindow: 100_000, supportsVision: false }]; }
         async *streamTurn(): AsyncIterable<ProviderEvent> {
+          if (this.sent) { yield* text("noted"); return; }
+          this.sent = true;
           yield sendMessage("m2", this.targetChild, "hi"); yield done("tool_calls");
         }
       }

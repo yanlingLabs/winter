@@ -163,16 +163,31 @@ describe("AgentEngine", () => {
     await first;
   });
 
-  test("tool-iteration cap ends the turn with agent_error", async () => {
-    const looping: ProviderEvent[] = [
-      { type: "tool_call", callId: "loop", name: "glob", argsJson: '{"pattern":"*"}' },
-      { type: "done", stopReason: "tool_calls" },
-    ];
-    const { engine, store, sessionId } = setup([looping]); // script repeats: same entry every iteration
+  // USER ruling ("we shouldnt have any limit at all"): the MAIN thread has no tool-iteration
+  // ceiling. This test is the converted form of the old "tool-iteration cap ends the turn with
+  // agent_error" — which drove an endless tool loop and asserted it STOPPED at 24. It now drives 30
+  // real rounds, past that old bound, and asserts the turn simply finishes. The backstop the user
+  // chose in place of a number is their own interrupt (ESC aborts the turn's signal — see the abort
+  // tests, which are untouched by this). The CHILD default is still pinned, elsewhere and
+  // deliberately: engine-spawn.test.ts's "no max_turns → child still uses the default cap (24)".
+  //
+  // The terminal `text(...)` round is load-bearing: FakeProvider REPLAYS its last script entry
+  // forever, so without it an unbounded main thread would spin until bun's per-test timeout. That
+  // is the same replay the old cap was quietly terminating.
+  test("main thread has NO tool-iteration cap — 30 rounds run past the old 24 and the turn completes", async () => {
+    const rounds: ProviderEvent[][] = Array.from({ length: 30 }, (_, i): ProviderEvent[] => [
+      { type: "tool_call", callId: `loop${i}`, name: "glob", argsJson: '{"pattern":"*"}' },
+      done("tool_calls"),
+    ]);
+    const { engine, store, sessionId, provider } = setup([...rounds, text("thirty rounds later")]);
     await engine.runTurn(sessionId);
     const events = store.read(sessionId);
-    expect(events.some((e) => e.type === "agent_error" && (e as any).message.includes("iteration cap"))).toBe(true);
-    expect(events.find((e) => e.type === "turn_completed")).toMatchObject({ stopReason: "error" });
+    expect(events.some((e) => e.type === "agent_error" && (e as any).message.includes("iteration cap"))).toBe(false);
+    expect(events.filter((e) => e.type === "tool_result")).toHaveLength(30);
+    expect(events.find((e) => e.type === "turn_completed")).toMatchObject({ stopReason: "end_turn" });
+    // The provider-call COUNT is the real pin — 30 tool rounds + the closing text round. Asserting
+    // only the absence of the cap error would still pass under a cap that stopped the turn quietly.
+    expect(provider.requests).toHaveLength(31);
   });
 
   test("engine threads allowed roots into tools; write in an additional root succeeds", async () => {

@@ -63,7 +63,15 @@ export interface BgTaskLister {
 }
 
 const MAIN_THREAD = "main";
-const MAX_TOOL_ITERATIONS = 24; // runaway guard until 1b-ii budgets land
+/** The default tool-iteration bound for a CHILD (subagent) thread — NOT a global ceiling. The MAIN
+ *  thread has NO iteration bound at all (see `effectiveMaxIterations` in runThread): a fixed turn
+ *  ceiling there is a limit the user ruled should not exist, and their own interrupt (ESC → the
+ *  turn's AbortSignal) is the backstop they chose instead. A child keeps a default because nobody is
+ *  watching it: it has no ESC of its own, and a BUSY loop — one that keeps streaming events — is
+ *  exactly what the SubagentManager stall watchdog cannot catch (it kills silence, not activity). A
+ *  child that wants a different bound asks for one: spawn_agent's `max_turns` (1-50) overrides this
+ *  in EITHER direction. */
+const DEFAULT_CHILD_MAX_ITERATIONS = 24;
 /** Fraction of the model's context window at which auto-compaction fires (overridable per process
  *  with NORMA_COMPACT_THRESHOLD_FRAC — see `maybeAutoCompact`). EXPORTED so the Codex drift guard
  *  (test/providers/codex-models-drift.test.ts) can compute the REAL trigger from the REAL
@@ -1981,7 +1989,9 @@ export class AgentEngine {
   }
 
   /** turn-end: fired immediately after a MAIN-thread `turn_completed` emit (all terminal paths:
-   *  end_turn/aborted, deniedByHuman, provider error, iteration cap — INCLUDE-both-terminal-paths).
+   *  end_turn/aborted, deniedByHuman, provider error — INCLUDE-both-terminal-paths). The
+   *  tool-iteration cap is wired up the same way but can no longer be one of them: that terminal is
+   *  child-only now (runThread's `effectiveMaxIterations` is Infinity on the main thread).
    *  Child-thread turns are excluded v1 (noise) — the threadId guard makes it a no-op for them.
    *  Observe-only. Callers guard on `this.cfg.hooks` before awaiting (byte-identical hook-less). */
   private async fireTurnEnd(
@@ -2623,13 +2633,13 @@ export class AgentEngine {
     // via this path (childExcludeTools' own literal exclusion of WORKFLOW_TOOL is the belt-and-
     // braces backstop regardless, per Task A4/B2/B3).
     ultracodeActive?: boolean;
-    // 4h-i (CC parity: Agent.max_turns): a per-thread override of MAX_TOOL_ITERATIONS. Only the
-    // spawn bridge (below) ever passes this — main-thread callers (turn()) never set it, so the
-    // main thread's bound is unchanged (MAX_TOOL_ITERATIONS, 24). A child's effective bound is
-    // 1-50 (spawn.ts's zod range / the bridge's own clamp); omitted → the default 24. Note this
-    // can go EITHER direction relative to the default — a child asking for max_turns > 24 (up to
-    // 50) gets a LARGER cap than the main thread's default, not just a smaller one. Additive/sync
-    // only: no new async surface, just a different bound for that one child thread's own loop.
+    // 4h-i (CC parity: Agent.max_turns): a per-thread override of DEFAULT_CHILD_MAX_ITERATIONS.
+    // Only the spawn bridge (below) ever passes this — main-thread callers (turn()) never set it,
+    // and it would be ignored if they did: the main thread has no iteration bound to override (see
+    // `effectiveMaxIterations` below). A child's effective bound is 1-50 (spawn.ts's zod range /
+    // the bridge's own clamp); omitted → DEFAULT_CHILD_MAX_ITERATIONS. It can go EITHER direction
+    // relative to that default — a child may ask for MORE iterations (up to 50) as well as fewer.
+    // Additive/sync only: no new async surface, just a different bound for that child's own loop.
     maxTurns?: number;
     // 4h-i Task 4 (CC parity: Agent.isolation "worktree"): a per-thread override of the allowed
     // fs-tool roots. Only the spawn bridge (below) ever passes this, and only for a child
@@ -2665,10 +2675,15 @@ export class AgentEngine {
     // `turn_completed` emit below spreads this object, so all terminal paths carry both figures.
     const usage = { inputTokens: 0, outputTokens: 0, contextTokens: 0 };
     let lastText = "";
-    // The effective iteration bound for THIS thread — opts.maxTurns (spawn bridge only) or the
-    // shared default. Computed once so the loop condition and the cap message below always agree
-    // on the exact number.
-    const effectiveMaxIterations = opts.maxTurns ?? MAX_TOOL_ITERATIONS;
+    // The effective iteration bound for THIS thread, and the ONE place the main/child split lives.
+    // The MAIN thread has none — `Infinity`, so the round loop below never ends on a count and the
+    // cap message after it is unreachable there (the user's ruling: no arbitrary turn ceiling on
+    // the thread a human is sitting in front of; ESC — which aborts `signal` and exits the loop by
+    // its own path — is the backstop). A CHILD thread keeps a bound because nobody is watching it:
+    // opts.maxTurns when the spawn asked for one, otherwise DEFAULT_CHILD_MAX_ITERATIONS (see that
+    // constant's doc for why the two threads differ). Computed once so the loop condition and the
+    // cap message below always agree on the exact number.
+    const effectiveMaxIterations = threadId === MAIN_THREAD ? Infinity : (opts.maxTurns ?? DEFAULT_CHILD_MAX_ITERATIONS);
     // 4h-i Task 3: the nesting-depth cap for THIS thread's own spawn attempts — see
     // EngineConfig.subagentMaxDepth's doc comment. Computed once so the spawn-gather filter below
     // and the belt-and-braces reject agree on the exact same number. hot-settings T2: getter
@@ -3101,7 +3116,7 @@ export class AgentEngine {
           // hand-checked above), so a provider that ignores the declared `.int().positive().max(50)`
           // schema could still send an out-of-range or non-integer value through — clamp
           // defensively here rather than trusting the schema. Non-finite/non-integer/non-positive
-          // → ignored (undefined), same as omitting the arg (falls back to MAX_TOOL_ITERATIONS).
+          // → ignored (undefined), same as omitting the arg (falls back to the child default).
           const maxTurns = typeof parsed.max_turns === "number" && Number.isInteger(parsed.max_turns) && parsed.max_turns > 0
             ? Math.min(parsed.max_turns, 50)
             : undefined;
@@ -3465,8 +3480,9 @@ export class AgentEngine {
               // (SubagentManager's own default, 600s of NO streamed events — exactly what CC's
               // watchdog covers, and it reaches the depth>0 grandchildren task_stop can't, which
               // is what the old C1 "untimed ⟺ killable" 300s net existed for), (b) the per-thread
-              // iteration cap (maxTurns/MAX_TOOL_ITERATIONS — bounds a live-but-looping child the
-              // stall watchdog would never catch), (c) task_stop via `entryAbort` (depth-0 only),
+              // iteration cap (maxTurns/DEFAULT_CHILD_MAX_ITERATIONS — bounds a live-but-looping
+              // child the stall watchdog would never catch; it is CHILD-only, which is precisely
+              // why children keep it), (c) task_stop via `entryAbort` (depth-0 only),
               // and (d) an EXPLICIT settings.subagents.timeoutMs wall clock if the user opts one
               // in (the manager's own constructor getter — applies here like everywhere else).
             })
@@ -4765,11 +4781,16 @@ export class AgentEngine {
       this.drainRoundImages(sessionId, threadId, calls, input);
     }
 
+    // CHILD-ONLY terminal. The main thread's `effectiveMaxIterations` is Infinity, so its loop above
+    // can only ever leave by one of the `return`s inside it — falling out of it, and reaching this,
+    // is a child's cap firing. The fireTurnEnd call below is consequently dead on this path (that
+    // hook is main-thread-only by its own threadId guard); it is kept so every terminal in this
+    // method still ends the same way, rather than leaving one terminal that quietly skips it.
     const capMessage = `tool-iteration cap (${effectiveMaxIterations}) reached`;
     cleanupThreadSteer();
     this.emit(sessionId, { type: "agent_error", sessionId, threadId, message: capMessage });
     this.emit(sessionId, { type: "turn_completed", sessionId, threadId, stopReason: "error", ...usage });
-    if (this.cfg.hooks) await this.fireTurnEnd(sessionId, threadId, "error", usage); // [4f turn-end] iteration-cap terminal
+    if (this.cfg.hooks) await this.fireTurnEnd(sessionId, threadId, "error", usage); // [4f turn-end] iteration-cap terminal (child-only ⇒ no-op)
     return { finalText: lastText, stopReason: "error", errorMessage: capMessage };
   }
 

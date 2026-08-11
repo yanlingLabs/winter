@@ -715,8 +715,11 @@ describe("AgentEngine: spawn_agent bridge (1d-iv T5)", () => {
 // THAT child's own `loaded` set (the one its specs()/deferred-guard actually consult), not the
 // session-scoped map only the main thread reads. Before the fix, a subagent's ToolSearch-load-
 // then-call of a deferred built-in looped (load → guard still rejects → load → ...) to the
-// MAX_TOOL_ITERATIONS cap, surfacing to the parent as "subagent … failed: tool-iteration cap
-// reached". `web_fetch` (a real deferred:true built-in, `deps.fetchFn` stubbed so no live
+// child's DEFAULT_CHILD_MAX_ITERATIONS cap, surfacing to the parent as "subagent … failed:
+// tool-iteration cap reached" (a cap the child still has — only the main thread's was removed;
+// on the main thread the same bug would now loop until the human interrupts, which is what makes
+// this child-side test the one that catches it). `web_fetch` (a real deferred:true built-in,
+// `deps.fetchFn` stubbed so no live
 // network is hit) stands in for "e.g. web_fetch" from the finding — the same class of bug would
 // hit any deferred built-in or mcp__ tool a child tries to ToolSearch-load.
 // -------------------------------------------------------------------------------------------
