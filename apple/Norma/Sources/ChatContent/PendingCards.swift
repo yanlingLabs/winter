@@ -689,6 +689,14 @@ private struct ResolvedPlanBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ScrollView {
+                // `isStreaming: true` on a plan that is emphatically NOT streaming is load-bearing,
+                // not a copy-paste: it is how `TranscriptAssistantMessage` suppresses its trailing
+                // per-message copy affordance. That makes this the ONE place a frozen body's
+                // "declares nothing interactive" property depends on a flag rather than on its own
+                // source — `testFrozenBodiesContainNoInteractiveAffordance` scans declarations and
+                // cannot see through composition. Flipping this flag would put a live control inside
+                // a frozen card with no test going red. (It would be harmless in itself — copying a
+                // plan is not responding to it — but the claim would quietly stop being true.)
                 TranscriptAssistantMessage(text: plan, isStreaming: true)
             }
             .frame(maxHeight: 260)

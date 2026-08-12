@@ -346,11 +346,17 @@ private func transcriptCopyForeground(isHovering: Bool, didCopy: Bool) -> Color 
 
 /// Pure glyph/label mapper for one `ActivityItem` — no view/environment dependency so it's
 /// directly unit-testable (`ActivityRowTests`). Kept exhaustive over `ActivityItem.Kind` so a
-/// future case is a compile error here, not a silent blank row. In practice `.tool` items never
-/// reach this mapper anymore (LIVE-GATE G3): `groupActivity` always folds them into `.toolRun`
-/// groups rendered by `TranscriptToolGroupRow`, never `.single` — this branch stays only for
-/// exhaustiveness/defensiveness and direct unit testing. (It therefore shows no status and no
-/// output; everything mac-chat-parity Task 2 added lives on the group row.)
+/// future case is a compile error here, not a silent blank row.
+///
+/// TWO of its branches are now unreachable in practice, and both stay only for
+/// exhaustiveness/defensiveness and direct unit testing:
+///   - `.tool` (LIVE-GATE G3): `groupActivity` always folds tool items into `.toolRun` groups
+///     rendered by `TranscriptToolGroupRow`, never `.single`. It therefore shows no status and no
+///     output — everything mac-chat-parity Task 2 added lives on the group row.
+///   - `.interaction` (mac-chat-parity Task 3): `TranscriptExchangeRow` diverts every interaction
+///     item to `TranscriptInteractionCard` before reaching `TranscriptActivityRow`. Its literal `⚠`
+///     and one-line summary are what an interaction USED to render as, kept correct (and pinned by
+///     `ActivityRowTests`) rather than deleted.
 func activityGlyphAndLabel(_ item: ActivityItem) -> (glyph: String, label: String) {
     switch item.kind {
     case .tool(let name, let detail, _, _, _):

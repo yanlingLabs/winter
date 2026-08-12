@@ -220,13 +220,20 @@ final class InteractionCardTests: XCTestCase {
             guard let start = source.range(of: "private struct \(name): View {") else {
                 return XCTFail("\(name) not found — rename it here too, do not delete the check")
             }
-            // The declaration runs to the next top-level `private struct`/`struct`/`// MARK:`.
+            // The declaration runs to its closing brace at column 0.
             let rest = source[start.upperBound...]
             let end = rest.range(of: "\n}\n")?.lowerBound ?? rest.endIndex
-            let body = rest[..<end]
-            XCTAssertFalse(body.contains("Button"), "\(name) declares a Button — a frozen card is not clickable")
-            XCTAssertFalse(body.contains("TextField"), "\(name) declares a TextField — a frozen card is not editable")
-            XCTAssertFalse(body.contains("onTapGesture"), "\(name) declares a tap gesture")
+            // CODE only — `//` lines are stripped, so a doc comment that NAMES one of these (e.g.
+            // `ResolvedPlanBody`'s note about the flag that suppresses the copy button) is not a
+            // false positive. Without this the check would punish writing the comment down.
+            let code = rest[..<end]
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map { $0.drop(while: { $0 == " " }).hasPrefix("//") ? "" : String($0) }
+                .joined(separator: "\n")
+
+            XCTAssertFalse(code.contains("Button"), "\(name) declares a Button — a frozen card is not clickable")
+            XCTAssertFalse(code.contains("TextField"), "\(name) declares a TextField — a frozen card is not editable")
+            XCTAssertFalse(code.contains("onTapGesture"), "\(name) declares a tap gesture")
         }
     }
 }
