@@ -1,24 +1,199 @@
 import SwiftUI
+// mac-chat-parity T7: `SyncConfigSnapshot` — the daemon's model catalogue, which the model/effort
+// chip's two lists are built from.
+import NormaKit
 
-// MARK: - The shared composer card
+// MARK: - The shared composer shell
 
-/// Which edge the Cowork strip emerges from.
+/// Which edge the per-mode strip emerges from.
 ///
 /// The new-chat page's composer floats mid-page, so its strip slides DOWN from underneath. A live
 /// session's composer sits at the BOTTOM of the window, where "below" is off-screen — so there the
 /// strip slides UP from behind the composer's top edge instead. Same surface, same motion, mirrored.
+///
+/// A property of the HOME, not of the mode: both are set by the call site, and every mode's chrome
+/// uses whichever edge the surface it is mounted on hands it.
 enum NormaComposerStripEdge: Equatable {
     case below
     case above
 }
 
-/// THE composer card — one component, two homes: the new-chat page and the shell's live chat page.
+/// PURE: which end of the composer the two surfaces are pinned to.
 ///
-/// Extracted (2026-08-07) rather than reimplemented, on the user's call that the live chat page's
-/// composer "is basically non existent" and "should be the same as the one of the new chat page".
-/// The point of a shared component here is not tidiness: it is that two composers that are meant to
-/// be identical WILL drift if they are two views, and the drift shows up as the live page quietly
-/// falling a pass behind whenever the new-chat page is tuned.
+/// The strip surface is TALLER than the composer by exactly the band, and both sit in one `ZStack`,
+/// so the alignment is what decides which end sticks out. `.below` anchors them at the TOP, leaving
+/// the extra height protruding downward; `.above` anchors them at the BOTTOM, leaving it protruding
+/// upward. Either way the composer's own height is untouched — the standing ruling.
+///
+/// Extracted from the `ZStack`'s inline ternary at Task 6, because that task is the first thing ever
+/// to render `.above` (cowork was the only strip producer before it, and cowork is unreachable on a
+/// live session) — the one direction with no live evidence behind it deserved a value a test can
+/// read rather than an expression only the screen can check.
+func composerStripStackAlignment(_ edge: NormaComposerStripEdge) -> Alignment {
+    edge == .below ? .top : .bottom
+}
+
+/// PURE: where the strip's CONTENT sits on that surface — the growing edge, i.e. the band that
+/// protrudes past the composer, never the part the opaque composer covers. The mirror of
+/// `composerStripStackAlignment`: get the two out of step and the row renders behind the composer,
+/// perfectly, invisibly.
+func composerStripContentAlignment(_ edge: NormaComposerStripEdge) -> Alignment {
+    edge == .below ? .bottom : .top
+}
+
+/// PURE: the strip surface's height — the composer, plus the band it protrudes by. Written down so
+/// "the band grows, the composer does not" is a thing that can be asserted rather than only seen.
+func composerStripSurfaceHeight(_ band: CGFloat) -> CGFloat {
+    newChatComposerHeight + band
+}
+
+// MARK: - The model/effort chip (mac-chat-parity Task 7, spec §5)
+
+/// What a surface hands the composer so its model/effort chip can BE a control rather than a
+/// picture — the direct counterpart of `ComposerPolicyControl`, one slot out.
+///
+/// Two surfaces wire it and they are not alike, which is why this is a plain value rather than an
+/// adapter: a LIVE session's (`WindowContentView.composerModelControl`) forwards to
+/// `session.setModel`/`session.setEffort` through its adapter, while the NEW-CHAT PAGE's
+/// (`ShellSessionHost.newChatModelControl`) has no session to set anything on and simply HOLDS the
+/// choice until the create stamps it (spec §5's ruling). The chip cannot tell the two apart, and
+/// should not: it offers a choice and reports it.
+///
+/// `onOpen` is the header's own "a snapshot, refreshed exactly when it is about to be read"
+/// convention (`modelMenuButton`/`effortMenuButton` both call `onRefreshModelCatalogue` before
+/// showing their popover), reproduced rather than reinvented.
+struct ComposerModelControl {
+    /// The model in force — the session's own (with its optimistic overlay) on a live session, the
+    /// held pick pre-session. `nil` = no override, i.e. the daemon's live default.
+    let model: String?
+    /// The effort in force, on the same terms. May be a Norma-level TIER reported verbatim.
+    let effort: String?
+    /// The daemon's catalogue (`sync.config`). EMPTY is a real answer and never a licence to guess —
+    /// see `modelPickerOptions`' own doc.
+    let catalogue: SyncConfigSnapshot
+    let modelChangeInFlight: Bool
+    let effortChangeInFlight: Bool
+    /// Fired as the menu is about to be read — refreshes the catalogue.
+    let onOpen: () -> Void
+    /// `nil` selects "Default" (clears the override).
+    let onSetModel: (String?) -> Void
+    let onSetEffort: (String?) -> Void
+}
+
+/// PURE: everything the model/effort chip shows and offers.
+///
+/// On a value rather than only inside the chip's `body` for this codebase's standing reason (SwiftUI
+/// bodies are not exercised in tests here) and for one specific to this task: "chat's chip offers no
+/// `ultra`" is the single claim that decides whether the new-chat page's create succeeds at all, and
+/// it must be assertable without rendering anything.
+struct ComposerModelRow: Equatable {
+    let model: String?
+    let effort: String?
+    /// The model slugs on offer — the catalogue's, verbatim.
+    let options: [String]
+    /// The WIRE effort levels this model accepts. Model-scoped, never mode-scoped.
+    let wire: [String]
+    /// The NORMA-LEVEL tiers this mode may select — `["ultra"]` on code, EMPTY everywhere else.
+    /// The one per-mode thing about this chip (`ComposerChrome.offersClientEffortTiers`).
+    let tiers: [String]
+    let modelChangeInFlight: Bool
+    let effortChangeInFlight: Bool
+
+    /// What the chip reads: the model in force, and the effort beside it once one is chosen.
+    ///
+    /// `newChatModelPlaceholder` while nothing is pinned — the exact text this slot has rendered
+    /// since it was a placeholder, so an unpicked composer looks unchanged. Naming the effort only
+    /// when it is set keeps the common case short while making a chosen effort visible somewhere on
+    /// the page (before this task it was visible nowhere on the new-chat page at all).
+    var chipTitle: String {
+        let model = model ?? newChatModelPlaceholder
+        guard let effort else { return model }
+        return "\(model) · \(effort)"
+    }
+
+    /// The chip's hover line and accessibility label. Both axes, always named, including their
+    /// "Default" readings — the tooltip is where "inherited from the daemon's default" can be said
+    /// in full without crowding the row.
+    var help: String {
+        "Model: \(modelDisplayLabel(model)) · Reasoning effort: \(effortDisplayLabel(effort))"
+    }
+}
+
+/// The model/effort chip and the menu behind it — the composer's door onto the machinery the
+/// header's two buttons already drive (spec §8: "the composer chip is an additional door to the same
+/// menus, not a replacement").
+///
+/// **One chip, both axes.** The header has room for two icon buttons; the composer's control row has
+/// one slot, and it was always labelled "Model and effort". So the popover stacks the two shared
+/// sections — `ModelMenuContent` over `EffortMenuContent`, the same rows the header renders.
+///
+/// Selecting a row DOES dismiss (unlike the permissions chip next door, whose in-flight state is only
+/// visible with the menu open): these two axes are set-and-forget, and the chip itself shows the
+/// result immediately.
+struct ComposerModelChip: View {
+    let row: ComposerModelRow
+    let onOpen: () -> Void
+    let onSetModel: (String?) -> Void
+    let onSetEffort: (String?) -> Void
+
+    /// Local presentational state, the convention every other picker on this screen follows.
+    @State private var showingMenu = false
+
+    var body: some View {
+        Button {
+            onOpen()
+            showingMenu = true
+        } label: {
+            HStack(spacing: 4) {
+                Text(row.chipTitle)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.textMuted)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(row.help)
+        .accessibilityLabel(row.help)
+        .popover(isPresented: $showingMenu, arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                ModelMenuContent(options: row.options, current: row.model,
+                                 isDisabled: row.modelChangeInFlight,
+                                 onSelect: { onSetModel($0); showingMenu = false })
+                Divider().opacity(0.5).padding(.vertical, 6)
+                EffortMenuContent(wire: row.wire, tiers: row.tiers, current: row.effort,
+                                  isDisabled: row.effortChangeInFlight,
+                                  onSelect: { onSetEffort($0); showingMenu = false })
+            }
+            .padding(12)
+            .frame(minWidth: 200)
+        }
+    }
+}
+
+/// The composer's **shared shell** — the parts every mode's composer has in common, and the mount
+/// point for the parts it does not.
+///
+/// ## History, in two rulings
+///
+/// It was extracted (2026-08-07) rather than reimplemented, on the user's call that the live chat
+/// page's composer "is basically non existent" and "should be the same as the one of the new chat
+/// page" — the point being that two composers meant to be identical WILL drift if they are two
+/// views, and the drift shows up as the live page quietly falling a pass behind.
+///
+/// mac-chat-parity Task 5 (2026-08-12) then split it per mode, on the user's ruling that *"each mode
+/// should have its own dedicated composer which can also have different styling and maybe more
+/// features"*. Those two rulings pull in opposite directions and this shape is how both are kept:
+/// **the shared parts stay written once, here**, and the parts that differ live in one type per mode
+/// (`ComposerChrome.swift`), which is also where the shape's reasoning is written down.
+///
+/// So this view knows nothing about modes. It holds the text field, the control row's fixed buttons,
+/// the send button, the card's surface and hover rim, and the strip's mechanics; it asks
+/// `composerChrome(_:)` for whatever the current mode adds, and draws that. There is deliberately no
+/// mode conditional anywhere below — a source scan in `ComposerChromeTests` keeps it that way.
 ///
 /// What it does NOT own: the suggestion chips and idea list below the new-chat card. Those belong
 /// to an EMPTY page — there is nothing to suggest once a conversation is underway.
@@ -26,18 +201,53 @@ struct NormaComposerCard: View {
     @Binding var text: String
     var onSubmit: () -> Void
 
-    /// The session's mode. Drives the Chat/Cowork segment (shown only for the two modes that
-    /// segment offers — a code or dispatch session has no business displaying it) and whether the
-    /// Cowork strip is present at all.
+    /// The session's mode — **which composer this is**. `composerChrome(_:)` maps it to that mode's
+    /// chrome; nothing here branches on it.
+    ///
+    /// A binding rather than a value because the new-chat page's Chat/Cowork segment writes back
+    /// through it. On a live session it is `.constant`: a session's mode is fixed at creation.
     @Binding var mode: SessionMode
-    /// Whether the segment can be CHANGED. False on a live session: a session's mode is fixed at
-    /// creation and Norma has no mode-switch, so an interactive segment there would be a control
+    /// Whether the mode segment can be CHANGED. False on a live session: a session's mode is fixed
+    /// at creation and Norma has no mode-switch, so an interactive segment there would be a control
     /// that cannot do what it appears to offer.
     var modeIsSelectable: Bool = true
 
+    /// The permissions row's wiring (mac-chat-parity Task 6, spec §4). `nil` from a surface with no
+    /// session to set a policy on — the new-chat page.
+    ///
+    /// **`let`, and that keyword is the whole mechanism.** A surface that forgets the row must not
+    /// compile: the miss Task 4's mutation run found on this plan ("the adapter method was pinned,
+    /// its WIRING was not") looks exactly like a composer with no band, and every value-level test
+    /// stays green through it.
+    ///
+    /// Writing no `= nil` is NOT enough to get that, which is the trap worth naming here: Swift
+    /// gives an **optional `var`** an implicit `nil` in the synthesized memberwise initializer, so
+    /// `var policy: ComposerPolicyControl?` is silently omittable at every call site. `let` is what
+    /// makes it a required argument (`missing argument for parameter 'policy' in call`).
+    /// `ComposerContext.policy` is `let` for the same reason — this outer boundary was the loose one.
+    let policy: ComposerPolicyControl?
+
+    /// The model/effort chip's wiring (mac-chat-parity Task 7, spec §5).
+    ///
+    /// **NOT an Optional**, which is a stronger requirement than `policy` above, because the two
+    /// absences are different. A surface can genuinely have no session to set a POLICY on (the
+    /// new-chat page), so that one is `nil`-able and its row is absent. Model and effort have no such
+    /// case: every surface that draws this card can offer them, pre-session included — the choice is
+    /// simply HELD there until the create stamps it. So there is nothing for `nil` to mean.
+    ///
+    /// **And the NON-OPTIONALITY is what makes it required, not the `let`** — compiled both ways
+    /// before writing this, because the neighbouring claim on `policy` was once wrong in exactly the
+    /// opposite direction. `var model: ComposerModelControl` with the argument dropped still fails
+    /// ("missing argument for parameter 'model' in call"): Swift's synthesized memberwise initializer
+    /// defaults a stored property only when it has an initial value, or when it is an **optional
+    /// `var`** (the implicit `= nil` that made `policy` silently omittable until it became a `let`).
+    /// `let` here is for immutability and consistency with `policy`; the requiredness is the type's.
+    let model: ComposerModelControl
+
     var stripEdge: NormaComposerStripEdge = .below
     var placeholder: String = newChatComposerPlaceholder
-    /// The Cowork strip's trailing line. Empty renders the strip's controls with nothing after them.
+    /// A trailing line for a mode whose chrome shows one — today only cowork's strip. Empty renders
+    /// that strip's controls with nothing after them.
     var announcement: String = ""
 
     /// False while a create is in flight — swaps the live composer for a non-editable rendering of
@@ -52,26 +262,66 @@ struct NormaComposerCard: View {
 
     @State private var isHovered = false
 
-    /// The segment is offered only for the modes it actually contains. A code or dispatch session
-    /// renders the card without it rather than showing a Chat/Cowork choice that means nothing.
-    private var showsModeSegment: Bool { newChatModeOptions.contains(mode) }
+    /// The chrome THIS card renders, derived from its own inputs.
+    ///
+    /// Internal rather than private so the tests can drive it through the card's real initialiser —
+    /// the one both call sites use. Pinning `composerChrome(_:)` alone would leave a card that
+    /// ignored `mode` entirely, and always built one mode's chrome, completely green: the Task 4
+    /// lesson recorded in this plan's ledger ("the method was pinned, its WIRING was not").
+    var chrome: any ComposerChrome {
+        composerChrome(ComposerContext(mode: $mode,
+                                       modeIsSelectable: modeIsSelectable,
+                                       policy: policy,
+                                       announcement: announcement))
+    }
+
+    /// What the model/effort chip shows, for THIS card's control and THIS mode's tier answer.
+    ///
+    /// The whole path is one value — control → chrome's Bool → row — for the reason
+    /// `WindowContentView.composerCard`'s own hoist exists: the claim that matters ("a chat composer
+    /// offers no `ultra`") is then assertable without rendering, and a card that asked the catalogue
+    /// directly instead of asking its chrome would red rather than pass quietly.
+    var modelRow: ComposerModelRow {
+        modelRow(offersTiers: chrome.offersClientEffortTiers)
+    }
+
+    private func modelRow(offersTiers: Bool) -> ComposerModelRow {
+        let efforts = effortPickerOptions(catalogue: model.catalogue, model: model.model,
+                                          offersTiers: offersTiers)
+        return ComposerModelRow(model: model.model,
+                                effort: model.effort,
+                                options: modelPickerOptions(model.catalogue),
+                                wire: efforts.wire,
+                                tiers: efforts.tiers,
+                                modelChangeInFlight: model.modelChangeInFlight,
+                                effortChangeInFlight: model.effortChangeInFlight)
+    }
 
     var body: some View {
+        let chrome = self.chrome
         // How far the strip protrudes past the composer. Animating THIS is the whole effect: the
         // strip is a rounded rect sitting BEHIND the composer, and growing it slides its band out
         // from underneath. The composer's own height never changes (the standing ruling).
-        let band = newChatShowsCoworkControls(mode: mode) ? newChatCoworkStripHeight : 0
+        //
+        // A mode with no strip contributes nothing to draw and no band — an ABSENT block, not a
+        // disabled one. That is how chat's missing permissions row is expressed (see
+        // `ChatComposerChrome`).
+        let strip = chrome.makeStrip()
+        // The chip's two lists, decided ONCE per render off this mode's own tier answer — the only
+        // per-mode thing about the chip, and the reason it can live unconditionally in the shared
+        // shell (`ComposerChrome.offersClientEffortTiers`).
+        let modelRow = self.modelRow(offersTiers: chrome.offersClientEffortTiers)
 
-        ZStack(alignment: stripEdge == .below ? .top : .bottom) {
-            stripSurface(band: band)
-            composerBox
+        ZStack(alignment: composerStripStackAlignment(stripEdge)) {
+            stripSurface(strip)
+            composerBox(accessory: chrome.makeControlRowAccessory(), modelRow: modelRow)
         }
         .frame(maxWidth: newChatCardWidth)
     }
 
     // MARK: - The composer proper
 
-    private var composerBox: some View {
+    private func composerBox(accessory: AnyView?, modelRow: ComposerModelRow) -> some View {
         VStack(spacing: 0) {
             Group {
                 if isEnabled {
@@ -110,7 +360,7 @@ struct NormaComposerCard: View {
             .padding(.horizontal, 16)
             .padding(.top, 20)
 
-            controlRow
+            controlRow(accessory: accessory, modelRow: modelRow)
         }
         .frame(height: newChatComposerHeight)
         // The composer keeps its OWN complete face and border — all four corners, always. That is
@@ -149,9 +399,14 @@ struct NormaComposerCard: View {
     /// The second surface. It spans the composer's whole height PLUS the band, so only its far
     /// edge and side rims ever show — the opaque composer covers the rest. Its rim is fainter than
     /// the composer's: a surface behind should not trace itself as strongly as the thing in front.
+    ///
+    /// The surface exists only when the mode's chrome supplies a strip. Before Task 5 this was two
+    /// conditions and an opacity gate reading the same cowork predicate three times; they collapse
+    /// to one `if let` because all three were the same question — no behaviour changed, and a mode
+    /// with no strip renders exactly the nothing it rendered before.
     @ViewBuilder
-    private func stripSurface(band: CGFloat) -> some View {
-        if band > 0 || newChatShowsCoworkControls(mode: mode) {
+    private func stripSurface(_ strip: ComposerStrip?) -> some View {
+        if let strip {
             RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
                 .fill(Theme.canvas)
                 .overlay(
@@ -159,98 +414,57 @@ struct NormaComposerCard: View {
                         .strokeBorder(Theme.hairline.opacity(0.5),
                                       lineWidth: shellSidebarHairlineWidth)
                 )
-                .frame(height: newChatComposerHeight + band)
-                .overlay(alignment: stripEdge == .below ? .bottom : .top) {
-                    // Pinned to the GROWING edge and clipped, so the row travels with the band
-                    // instead of being uncovered in place — the difference between sliding out
-                    // from beneath and fading in.
-                    coworkStrip
-                        .frame(height: newChatCoworkStripHeight)
-                        .frame(height: band, alignment: stripEdge == .below ? .bottom : .top)
+                .frame(height: composerStripSurfaceHeight(strip.height))
+                .overlay(alignment: composerStripContentAlignment(stripEdge)) {
+                    // Pinned to the GROWING edge, so the row sits in the band that protrudes rather
+                    // than anywhere else on the surface, and clipped so it can never spill past it.
+                    //
+                    // Before Task 5 this was TWO frames — the content's natural height, then the
+                    // band's — with the alignment on the outer one. They were always the same
+                    // number: the band was `showsCowork ? 40 : 0` and the surface itself rendered
+                    // only when that was 40, so a partial band has never existed. Collapsed to one;
+                    // a mode that later wants a band that animates part-open restores the pair.
+                    strip.content
+                        .frame(height: strip.height)
                         .clipped()
                 }
-                .opacity(band > 0 ? 1 : 0)
         }
-    }
-
-    private var coworkStrip: some View {
-        HStack(spacing: 10) {
-            NewChatControlChip(systemImage: "folder", title: "Project or folder",
-                               label: "Working folder (not wired yet)")
-            NewChatControlChip(systemImage: "hand.raised", title: "Ask",
-                               label: "Approval mode (not wired yet)")
-            Spacer(minLength: 12)
-            if !announcement.isEmpty {
-                HStack(spacing: 6) {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 11))
-                    Text(announcement)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-                .font(.system(size: 13))
-                .foregroundStyle(Theme.textMuted)
-            }
-        }
-        // Matches the control row's inset, so the folder glyph lands on the same column as the plus.
-        .padding(.horizontal, 18)
-        .frame(height: newChatCoworkStripHeight)
     }
 
     // MARK: - The control row
 
-    private var controlRow: some View {
+    /// The control row. Attach, the mode's own accessory, the model/effort chip, Dictate and Send —
+    /// the four fixed ones written once, here, for every mode.
+    ///
+    /// Attach and Dictate remain placeholders and remain labelled as such (spec §8). The model slot
+    /// is REAL as of mac-chat-parity Task 7 (spec §5) — `ComposerModelChip`, opening the same rows
+    /// the header's two menus render.
+    ///
+    /// **Where the model slot goes was not settled by "it is shared", and Task 5's own report was
+    /// corrected on this by its review:** the single slot covers model AND effort, and effort's
+    /// Norma-level tiers are gated to code sessions (`clientEffortEligible`, `settings.ts:89-91`,
+    /// enforced by `assertEffortSelectable`, `ipc/server.ts:476-489`), so the slot's CONTENTS are
+    /// mode-dependent even though the slot itself is not. Wiring it here unconditionally would ship
+    /// an `ultra` row on chat that RPC-errors; filtering it here would drag a mode conditional back
+    /// into the shared shell, and the source scan would not catch a helper-shaped one.
+    ///
+    /// Task 7 took the structural answer that leaves: a third `ComposerChrome` member, answered by
+    /// each mode's own chrome, arriving here as a decided `ComposerModelRow`. The chip stays one chip
+    /// written once, and this shell still knows nothing about modes.
+    private func controlRow(accessory: AnyView?, modelRow: ComposerModelRow) -> some View {
         HStack(spacing: 8) {
             NewChatControlButton(systemImage: "plus", label: "Attach (not wired yet)", size: 17)
-            if showsModeSegment { modeSegment }
+            accessory
             Spacer(minLength: 12)
-            HStack(spacing: 4) {
-                Text(newChatModelPlaceholder)
-                    .font(.system(size: 14))
-                    .foregroundStyle(.primary)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Theme.textMuted)
-            }
-            .help("Model and effort (not wired yet)")
+            ComposerModelChip(row: modelRow,
+                              onOpen: model.onOpen,
+                              onSetModel: model.onSetModel,
+                              onSetEffort: model.onSetEffort)
             NewChatControlButton(systemImage: "mic", label: "Dictate (not wired yet)", size: 15)
             sendButton
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 13)
-    }
-
-    private var modeSegment: some View {
-        HStack(spacing: 2) {
-            ForEach(newChatModeOptions, id: \.self) { option in
-                let isSelected = option == mode
-                Button {
-                    guard modeIsSelectable else { return }
-                    withAnimation(.easeInOut(duration: 0.24)) { mode = option }
-                } label: {
-                    Text(option.title)
-                        .font(.system(size: 14, weight: isSelected ? .medium : .regular))
-                        .foregroundStyle(isSelected ? AnyShapeStyle(.primary)
-                                                    : AnyShapeStyle(Theme.textMuted))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(isSelected ? AnyShapeStyle(Theme.composerSurface)
-                                         : AnyShapeStyle(Color.clear))
-                )
-                .help(modeIsSelectable
-                      ? (option.isAvailable ? option.title : "\(option.title) — not built yet")
-                      : "This session is \(mode.title.lowercased()) — a session's mode is fixed when it is created")
-            }
-        }
-        .padding(2)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.controlSurface)
-        )
     }
 
     private var sendButton: some View {

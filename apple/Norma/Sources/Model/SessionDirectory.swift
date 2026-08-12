@@ -203,5 +203,22 @@ struct SessionSummary: Equatable, Identifiable {
     /// `BrowserSignalsCoordinator.assemble` for what a consumer is entitled to conclude from
     /// absence, which is nothing at all about the remote half of the world.
     var signals: SessionSignals? = nil
+    /// mac-chat-parity T4: the session's APPROVAL POLICY, threaded through from `listSessions()` —
+    /// the read half of `session.setPolicy`, and the only source a picker has for "what is this
+    /// session actually on". `FieldStateAdapter.sessionPolicy` was seeded `"auto"` and written only
+    /// after that surface's OWN successful `setPolicy`, so a session left at `bypass` by the CLI or
+    /// another window read "Auto" indefinitely — invisible in a transient popover, a standing lie in
+    /// a persistent row. Defaulted, same reasoning as `mode`/`dirs` above.
+    ///
+    /// A plain `String`, NOT one of `sessionPolicyModes`: a chat row carries the INTERNAL `"chat"`
+    /// policy, which `session.setPolicy` refuses as an input (core's `gate.ts`) and no picker row
+    /// will ever match. That is the row whose policy explains why its picker is hidden, so it must
+    /// arrive intact rather than be narrowed away.
+    ///
+    /// `nil` means the DAEMON did not say — an older one, since every daemon at or past this
+    /// version stamps every row (the field rides no participation gate, unlike `activity`/`dirs`,
+    /// so chat and dispatch carry it too). It never means "no policy": every session has one.
+    /// **Never coerce it to a displayed value** — see `FieldStateAdapter.sessionPolicyKnown`.
+    var approvalPolicy: String? = nil
     var id: String { sessionId }
 }

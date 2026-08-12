@@ -285,6 +285,14 @@ final class FieldStateAdapter: ObservableObject {
         session.state.streamingText.isEmpty ? nil : session.state.streamingText
     }
 
+    /// Whether the main turn is running RIGHT NOW (mac-chat-parity Task 2). The transcript's tool
+    /// rows need it to tell "still running" from "no result ever arrived": a tool call the user
+    /// ESC'd never receives a `tool_result`, so its stored output is `nil` permanently, and a
+    /// running glyph derived from `nil` alone would leave a replayed aborted turn spinning forever.
+    /// Deliberately NOT `liveStreamingText != nil` — that is false for the entire time a tool runs,
+    /// which is exactly when this has to be true.
+    var turnRunning: Bool { session.state.turnRunning }
+
     /// LIVE-GATE G4: CC-parity pinned todo widget — `WindowSurfaceView.windowContent` renders a
     /// compact "what's left" list below the transcript whenever ANY task isn't done yet, mirroring
     /// Claude Code's own pinned-todo panel. Empty (hides the whole section) once every task is
@@ -509,18 +517,19 @@ final class FieldStateAdapter: ObservableObject {
 
     // MARK: - Task 3 (2d-iii): pending-interaction cards — mount + respond wiring
 
-    /// `PendingCardsView`'s data source (`WindowContentView`'s mount, both windows) — a thin
+    /// The transcript cards' pending set (`TranscriptInteractionCard`, mounted inline by
+    /// `TranscriptExchangeRow` in both windows) — a thin
     /// read-through onto the reducer's own ordered (oldest-first) list, same convention as
     /// `pinnedTasks`/`transcript` above.
     var pendingInteractions: [PendingInteraction] { session.state.pendingInteractions }
 
-    /// callIds with a respond RPC currently awaiting — `PendingCardsView`'s per-card `isInFlight`
-    /// (disables that card's buttons while true). Mutated ONLY by whichever surface wires the
+    /// callIds with a respond RPC currently awaiting — `InteractionCardWiring.inFlight`, which puts
+    /// that card into its "Sending…" state (the buttons are replaced, not merely disabled). Mutated ONLY by whichever surface wires the
     /// three respond callbacks below (`GlassRootView.wireCallbacks()` for the orb/window,
     /// `DetachedWindowController.init` for a detached window) — never by this adapter itself.
     @Published var interactionInFlight: Set<String> = []
 
-    /// callId → inline error text (`PendingCard`'s `errorLine`) — set on a failed respond RPC,
+    /// callId → inline error text (`InteractionCardWiring.errorLines`) — set on a failed respond RPC,
     /// cleared at the START of the next attempt for that callId (never lingers across a retry).
     /// A SUCCESSFUL respond does nothing here beyond removing the in-flight entry above — the
     /// card itself disappears once the daemon's `*_resolved` event removes it from
@@ -553,8 +562,8 @@ final class FieldStateAdapter: ObservableObject {
     /// guarantee, so a bare-callId key risks draining one session's draft into another session's
     /// card the moment both sessions' entries ever coexist here. No `threadId` component, unlike
     /// the daemon's three-part key: `PendingInteraction` (`SessionModel.swift`) carries no
-    /// threadId in any of its cases, and `PendingCardsView`'s own `ForEach(interactions, id:
-    /// \.callId)` already assumes callId-uniqueness WITHIN one session's list — a pre-existing
+    /// threadId in any of its cases, and the reducer's own `appendPending`/`appendInteraction`
+    /// callId guards already assume callId-uniqueness WITHIN one session's list — a pre-existing
     /// invariant this key reuses rather than adds a new dimension to.
     ///
     /// `sessionId` defaults `""` via `boundSessionId() ?? ""` at both call sites (this key helper
@@ -598,18 +607,56 @@ final class FieldStateAdapter: ObservableObject {
 
     // MARK: - Task 4 (2d-iii): ⋯ menu — per-session approval-mode policy
 
-    /// `WindowContentView`'s ⋯ menu current-value readout — a LAST-KNOWN value, not a live daemon
-    /// read: neither `session.list` nor `session.attach` returns `approvalPolicy` in its result
-    /// (verified against `packages/protocol/src/methods.ts`'s `SessionListResult`/
-    /// `SessionAttachResult` — neither field exists there, and `NormaClient+Methods.swift`'s
-    /// `listSessions()`/`attach()` accordingly don't expose one), so there is no cheap wire read to
-    /// seed this from at attach time. Seeded `"auto"` (the orb-created-session default, see
-    /// `AppModel.ensureFocusedSession`'s doc) and updated ONLY on a successful `onSetPolicy` round
-    /// trip (the wirer sets this, not this var itself — same convention as `interactionInFlight`/
-    /// `interactionErrors` above). A session this adapter merely FOLLOWED (e.g. a daemon-default
-    /// "ask" session, per the force-auto removal) shows a stale "auto" here until the user actually
-    /// changes it via the menu — honest given there is currently no way to learn otherwise.
+    /// The approval-policy readout every picker on this screen renders — `WindowContentView`'s ⋯
+    /// menu, the WorkSidebar Options block, and (since mac-chat-parity T6) the composer's permissions
+    /// row, which reads it through `composerPolicyControl` below. One implementation for all three:
+    /// `PolicyPickerRow`.
+    ///
+    /// **mac-chat-parity T4 gave this a wire source.** It used to be a last-known-WRITE value: there
+    /// was no `approvalPolicy` anywhere in `SessionListResult`/`SessionAttachResult`, so the only
+    /// thing that ever moved it was this surface's own successful `onSetPolicy`. A session left at
+    /// `bypass` by the CLI, the phone, or another window therefore read "Auto" for the whole
+    /// attachment. Tolerable in a popover you open, glance at and change; a standing lie in a
+    /// persistent row, where it inverts the danger styling's entire purpose.
+    ///
+    /// Now written from three methods, and only three: `seedSessionPolicy(for:in:)` at ALL THREE
+    /// session-switch sites (`ShellSessionHost.attachFresh`/`hop`,
+    /// `DetachedWindowController.selectSession`, `OrbWindowController.updateIsChatSession`),
+    /// `healSessionPolicyIfUnknown(for:in:)` when the row lands late, and
+    /// `adoptSessionPolicy(_:)` after a successful `session.setPolicy`. Still not a LIVE read — the
+    /// daemon emits no policy-changed event, so a change made elsewhere after this was seeded is not
+    /// learned until the next switch.
+    ///
+    /// The initial `"auto"` is unchanged (the orb-created-session default, see
+    /// `AppModel.ensureFocusedSession`'s doc) but it is a PLACEHOLDER, not an answer — read
+    /// `sessionPolicyKnown` below before presenting it as one. Values are raw wire strings and may
+    /// be outside `sessionPolicyModes`: a chat session's is the internal `"chat"`.
     @Published var sessionPolicy: String = "auto"
+
+    /// mac-chat-parity T4: whether `sessionPolicy` above is the DAEMON's answer or merely this
+    /// adapter's placeholder. `true` once a `session.list` row supplied it or this surface's own
+    /// `setPolicy` succeeded; `false` before that, and again after a switch onto a session whose row
+    /// says nothing.
+    ///
+    /// It exists because the two halves of "degrade gracefully" are otherwise contradictory: an
+    /// older daemon (or a row that has not loaded) must leave behaviour exactly as it was — which
+    /// means keeping `"auto"` — while `"auto"` is itself a claim about how much the agent may do
+    /// unattended. Both are satisfiable only if the unknown case is REPRESENTABLE. The surface that
+    /// makes a standing claim — T6's permissions row — renders no policy label while this is `false`
+    /// (it reads `composerPolicyControl` below, which is where the two are collapsed into one
+    /// Optional); the two transient popovers keep showing the placeholder, which is what they have
+    /// always done.
+    ///
+    /// Deliberately NOT an `Optional<String>` in place of `sessionPolicy`: every existing consumer
+    /// compares a plain `String` (`PolicyPickerRow`'s checkmark), and T4's remit was to seed that
+    /// value, not to re-plumb the pickers. T6 then moved the shared row out of
+    /// `extension WindowContentView` — a move, not a re-plumb — and left this pair alone.
+    @Published var sessionPolicyKnown: Bool = false
+
+    /// The value `sessionPolicy` carries while nothing has told us otherwise — the same `"auto"` it
+    /// has been seeded with since Task 4 (2d-iii), named so the seed's reset path and the property's
+    /// initial value can never drift apart.
+    static let unknownSessionPolicyPlaceholder = "auto"
 
     /// True while a `session.setPolicy` RPC is in flight — the picker's rows disable themselves on
     /// this. One session-wide flag (not keyed by id like `interactionInFlight`): only one policy
@@ -617,10 +664,76 @@ final class FieldStateAdapter: ObservableObject {
     /// settles — same insert/remove discipline as `interactionInFlight`.
     @Published var policyChangeInFlight: Bool = false
 
+    /// mac-chat-parity T4: seed the policy readout for `sessionId` off the directory's rows. Called
+    /// at ALL THREE session-SWITCH sites — `ShellSessionHost.attachFresh`/`hop`,
+    /// `DetachedWindowController.selectSession`, and `OrbWindowController.updateIsChatSession` —
+    /// the same places that already re-derive `isChatSession` and clear the departed session's
+    /// pendings. Three is the whole set, and the codebase says so in
+    /// `OrbWindowController.updateIsChatSession`'s own doc; a sweep that stops at two leaves the
+    /// orb's APP-LIFETIME adapter latching one session's policy over every session picked after it.
+    ///
+    /// ALWAYS writes, including when the row says nothing: a switch that left the previous value in
+    /// place would show the DEPARTED session's policy over the arriving one, the exact "a refusal is
+    /// about the session it was refused FOR" mistake those call sites guard against for
+    /// `dirsRefusal`/`activityRefusal`. The reset restores the placeholder plus `known == false`,
+    /// which is byte-for-byte the state a freshly constructed adapter is in — so on an older daemon
+    /// this reproduces the pre-T4 behaviour exactly.
+    func seedSessionPolicy(for sessionId: String, in rows: [SessionSummary]) {
+        let wire = wireApprovalPolicy(sessionId, in: rows)
+        sessionPolicy = wire ?? Self.unknownSessionPolicyPlaceholder
+        sessionPolicyKnown = wire != nil
+    }
+
+    /// mac-chat-parity T4: fill in a policy that was UNKNOWN at switch time, once the row arrives.
+    /// Wired to `directory.$rows` by the surface that owns this adapter, for the race
+    /// `reconcileIsChatSession` documents as "the fourth door": a session can be attached before its
+    /// row has loaded (the New-Chat hop always is), and nothing would otherwise ever read the row
+    /// again for the rest of that attachment.
+    ///
+    /// ONE-WAY on purpose — it declines to touch a value that is already known. That is what makes
+    /// it safe to run on every rows change: a `session.list` issued before a `setPolicy` and
+    /// resolving after it carries the pre-change policy, and a two-way reconcile would let that
+    /// stale answer silently undo the user's change. The cost is that a policy changed by ANOTHER
+    /// client after this one was seeded is not picked up — the same standing limitation
+    /// `sessionPolicy`'s own doc records, not a new one.
+    func healSessionPolicyIfUnknown(for sessionId: String, in rows: [SessionSummary]) {
+        guard !sessionPolicyKnown, let wire = wireApprovalPolicy(sessionId, in: rows) else { return }
+        sessionPolicy = wire
+        sessionPolicyKnown = true
+    }
+
+    /// mac-chat-parity T4: adopt the policy a `session.setPolicy` round trip just CONFIRMED. Called
+    /// only on success — a failed flip must leave the picker showing the still-true previous value
+    /// rather than lying about the new one (the discipline every `onSetPolicy` wirer already had;
+    /// this replaces their bare `adapter.sessionPolicy = policy` so the value and its known-ness can
+    /// never be set apart). The daemon accepting the write IS an answer, so this marks it known.
+    func adoptSessionPolicy(_ policy: String) {
+        sessionPolicy = policy
+        sessionPolicyKnown = true
+    }
+
     /// Wired by whichever surface owns this adapter (`GlassRootView.wireCallbacks()` for the orb/
     /// window, `DetachedWindowController.init` for a detached window) to `session.setPolicy` — the
     /// same onSubmit-precedent chain as `onSubmit`/the three respond callbacks above.
     var onSetPolicy: (String) -> Void = { _ in }
+
+    /// mac-chat-parity T6: this adapter's policy state as the composer's permissions row takes it
+    /// (spec §4) — the value `WindowContentView.composerCard` hands `NormaComposerCard`.
+    ///
+    /// The placeholder never crosses this boundary: `policy` is `nil` unless `sessionPolicyKnown`.
+    /// That is `sessionPolicyKnown`'s own doc being obeyed — "a surface that makes a standing claim
+    /// should render no policy label while this is `false`; the two transient popovers may keep
+    /// showing the placeholder, which is what they have always done" — and collapsing the pair into
+    /// one Optional here is what stops the row from having to remember it.
+    ///
+    /// `onSet` forwards rather than handing over today's `onSetPolicy` value, so a card built before
+    /// its surface wired its callbacks still reaches the real one when the row is finally tapped —
+    /// the same tap-time read the two pickers' own buttons do.
+    var composerPolicyControl: ComposerPolicyControl {
+        ComposerPolicyControl(policy: sessionPolicyKnown ? sessionPolicy : nil,
+                              changeInFlight: policyChangeInFlight,
+                              onSet: { [weak self] policy in self?.onSetPolicy(policy) })
+    }
 
     // MARK: - Task 10 (Chat Slice D): the header's model menu — `session.setModel`, ALL modes
 
@@ -745,6 +858,26 @@ final class FieldStateAdapter: ObservableObject {
     @Published var pendingModel: OptimisticSelection = .none
     /// The effort half of `pendingModel`.
     @Published var pendingEffort: OptimisticSelection = .none
+
+    /// mac-chat-parity T7: **the pair every model row fires**, wherever it is rendered — flip the
+    /// optimistic overlay, then fire the RPC. Extracted (from the inline body of the header's own
+    /// row) because the composer's chip is now a SECOND surface that must apply it, and two copies of
+    /// "flip the overlay, then fire" is exactly how one surface ends up not flipping it: the chip and
+    /// the header would then disagree about what is selected for the whole round trip.
+    ///
+    /// `nil` is the "Default" row — a CLEAR, which is a distinct overlay state from "no overlay"
+    /// (see `OptimisticSelection`). The rest of the bookkeeping (the in-flight flag, the revert, the
+    /// probation) stays with the wirer, unchanged.
+    func applyModelSelection(_ model: String?) {
+        pendingModel = model.map { OptimisticSelection.value($0) } ?? .clear
+        onSetModel(model)
+    }
+
+    /// The effort half of `applyModelSelection`, for the same reason and on the same terms.
+    func applyEffortSelection(_ effort: String?) {
+        pendingEffort = effort.map { OptimisticSelection.value($0) } ?? .clear
+        onSetEffort(effort)
+    }
 
     /// The selection currently ON PROBATION — applied, accepted by the daemon, and awaiting the
     /// verdict of the ONE turn that runs next. Nil the rest of the time. In memory only: a probation

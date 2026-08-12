@@ -11,8 +11,10 @@ import SwiftUI
 /// at click time — same "read the live global modifier state" idiom `ComposerTextView` already
 /// uses for its own Shift-Return check.
 ///
-/// Styling: matches the window's adaptive, glass-adjacent palette — `.secondary`/`.tertiary` only,
-/// no new colors (the window is opaque past the shell, same regime `WindowContentView` documents).
+/// Styling: brand tokens (`docs/brand.md`) since mac-chat-parity Task 8 — quiet meta on
+/// `Theme.textMuted`, the current row on `Theme.selectionPill`. It used to run on `.secondary`/
+/// `.tertiary`/`.quaternary`, the system hierarchy, which is cooler than the warm canvas it sits on
+/// and (at the `.tertiary` level) measured 1.86:1 against it.
 struct SessionSidebar: View {
     @ObservedObject var directory: SessionDirectory
     let currentSessionId: String?
@@ -94,8 +96,9 @@ struct SessionSidebar: View {
 }
 
 /// One row: title (fallback "New session" when the daemon hasn't titled it yet) + relative
-/// creation time, highlighted with a `.quaternary`-filled `RoundedRectangle` when it's the
-/// surface's current session.
+/// creation time, highlighted with a `Theme.selectionPill`-filled `RoundedRectangle` when it's the
+/// surface's current session — the same token the shell sidebar's selected row wears, so the two
+/// session lists in one window agree about what "selected" looks like.
 private struct SessionSidebarRow: View {
     let row: SessionSummary
     let isCurrent: Bool
@@ -110,13 +113,17 @@ private struct SessionSidebarRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(displayTitle)
+                // `.primary` against the timestamp's `Theme.textMuted`: the two used to be
+                // `.secondary` over `.tertiary`, and those collapse to one grey once the faint level
+                // moves onto the brand's muted token (mac-chat-parity Task 8). The title is the row's
+                // content, so it takes the other register.
                 .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Text(Date(timeIntervalSince1970: TimeInterval(row.createdAt) / 1000), style: .relative)
                 .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Theme.textMuted)
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -125,7 +132,7 @@ private struct SessionSidebarRow: View {
         .background {
             if isCurrent {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(.quaternary)
+                    .fill(Theme.selectionPill)
             }
         }
         .contentShape(Rectangle())

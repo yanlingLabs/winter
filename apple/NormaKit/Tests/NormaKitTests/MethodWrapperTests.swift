@@ -66,6 +66,41 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertEqual(created.sessionId, "s_chat")
     }
 
+    /// mac-chat-parity T7 (spec §5): `model`/`effort` are additive to `createSession` — the
+    /// new-chat page's pre-session choice, **stamped at create** rather than set after it. The
+    /// create-then-set alternative leaves a window in which a turn fired immediately after the
+    /// create resolves at the GLOBAL effort, and the new-chat page fires a turn the instant the
+    /// session exists. The daemon has accepted both fields since `SessionCreateParams`
+    /// (`packages/protocol/src/methods.ts:133`/`:142`), where it validates them with the SAME rules
+    /// `session.setModel`/`session.setEffort` apply (`resolveModelSelection`/
+    /// `assertEffortSelectable`, `packages/core/src/ipc/server.ts`) — a create can never accept
+    /// what a set would refuse. This is the Swift half of that surface, and only that.
+    ///
+    /// Both keys are **ABSENT** — never a literal `null` — when nothing was picked, exactly as
+    /// `cwd`/`mode` already are: absence is what the daemon reads as "no override", while `null`
+    /// is a value its zod schema refuses outright.
+    func testCreateSessionStampsAHeldModelAndEffortAndOmitsThemWhenUnpicked() async throws {
+        let (client, t) = try await connected()
+
+        let (stamped, _) = try await roundTrip(t, sentIndex: 1, result: #"{"sessionId":"s_pick","trusted":false}"#) {
+            try await client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat",
+                                           model: "srv-b", effort: "high")
+        }
+        let picked = stamped["params"] as? [String: Any]
+        XCTAssertEqual(stamped["method"] as? String, "session.create")
+        XCTAssertEqual(picked?["model"] as? String, "srv-b")
+        XCTAssertEqual(picked?["effort"] as? String, "high")
+        XCTAssertEqual(picked?["mode"] as? String, "chat", "…beside the existing params, not instead of them")
+        XCTAssertEqual(picked?["approvalPolicy"] as? String, "auto")
+
+        let (plain, _) = try await roundTrip(t, sentIndex: 2, result: #"{"sessionId":"s_plain","trusted":false}"#) {
+            try await client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat")
+        }
+        let unpicked = plain["params"] as? [String: Any]
+        XCTAssertNil(unpicked?["model"], "unpicked ⇒ the key is ABSENT, exactly as before this task")
+        XCTAssertNil(unpicked?["effort"], "…and so is effort — a null is a value the daemon would refuse")
+    }
+
     func testRespondersAndControls() async throws {
         let (client, t) = try await connected()
         let cases: [(String, String, () async throws -> Void)] = [
@@ -1165,6 +1200,47 @@ extension MethodWrapperTests {
                        "the only way to learn a CHAT session is archived — it has no label")
         XCTAssertEqual(rows.first { $0.sessionId == "s_code" }?.archived, true)
         XCTAssertNil(rows.first { $0.sessionId == "s_live" }?.archived, "absent = not archived")
+    }
+
+    // MARK: - mac-chat-parity T4: `session.list`'s `approvalPolicy`
+
+    /// The read half of `session.setPolicy`, and the whole reason the field exists: before it, a
+    /// picker could only show what it had itself set, so a session left at `bypass` by the CLI read
+    /// "Auto" forever. `bypass` is the value under test for exactly that reason.
+    ///
+    /// The `chat` row is not an edge case bolted on: a chat session's stored policy IS the internal
+    /// `"chat"`, which `session.setPolicy` refuses as an INPUT — which is why this is a plain
+    /// `String` here (and on the wire) rather than an enum of the six settable modes. A decoder that
+    /// narrowed to those six would drop the one row whose policy explains why its picker is hidden.
+    func testListSessionsDecodesApprovalPolicyIncludingTheInternalChatValue() async throws {
+        let (client, t) = try await connected()
+        let listBody = #"{"sessions":[{"sessionId":"s_bypass","scope":"global","createdAt":3,"lastSeq":0,"approvalPolicy":"bypass"},{"sessionId":"s_chat","scope":"global","createdAt":2,"lastSeq":0,"mode":"chat","approvalPolicy":"chat"},{"sessionId":"s_plan","scope":"global","createdAt":1,"lastSeq":0,"approvalPolicy":"dont-ask"}]}"#
+        let (_, rows) = try await roundTrip(t, sentIndex: 1, result: listBody) {
+            try await client.listSessions()
+        }
+        XCTAssertEqual(rows.first { $0.sessionId == "s_bypass" }?.approvalPolicy, "bypass",
+                       "the one value a UI must never mis-state")
+        XCTAssertEqual(rows.first { $0.sessionId == "s_chat" }?.approvalPolicy, "chat",
+                       "the INTERNAL policy the setter refuses — reported verbatim, never narrowed away")
+        XCTAssertEqual(rows.first { $0.sessionId == "s_plan" }?.approvalPolicy, "dont-ask",
+                       "a hyphenated mode is one wire token, not two")
+    }
+
+    /// An ABSENT key is an older daemon, and `nil` is the only honest reading — the same
+    /// absent-is-a-real-value discipline `signals` gets its own test for above. Coerced to `"auto"`
+    /// it would assert a policy nobody stated, which is precisely the standing lie this field was
+    /// added to end. Every daemon at or past this version stamps EVERY row (the column is
+    /// not-NULL-in-practice and rides no participation gate), so absence never means "this session
+    /// has no policy".
+    func testListSessionsDecodesAnAbsentApprovalPolicyAsNil() async throws {
+        let (client, t) = try await connected()
+        let listBody = #"{"sessions":[{"sessionId":"s_old","scope":"global","createdAt":2,"lastSeq":0},{"sessionId":"s_junk","scope":"global","createdAt":1,"lastSeq":0,"approvalPolicy":7}]}"#
+        let (_, rows) = try await roundTrip(t, sentIndex: 1, result: listBody) {
+            try await client.listSessions()
+        }
+        XCTAssertNil(rows.first { $0.sessionId == "s_old" }?.approvalPolicy, "a daemon predating the field")
+        XCTAssertNil(rows.first { $0.sessionId == "s_junk" }?.approvalPolicy,
+                     "a non-string is not a policy — dropped, never stringified into a claim")
     }
 
     /// The write half: method + params for each of the three ops, and the POST-WRITE set decoded off

@@ -480,6 +480,40 @@ describe("plan.respond / session.setPolicy schemas", () => {
     expect(SessionSetPolicyResult.parse({ ok: true }).ok).toBe(true);
     expect(METHODS.sessionSetPolicy).toBe("session.setPolicy");
   });
+
+  // mac-chat-parity T4: the READ half of `session.setPolicy` — the row now reports the policy the
+  // setter writes, so a persistent picker can show the truth instead of its own last write.
+  test("SessionListResult rows carry an optional approvalPolicy; older shapes without it still parse", () => {
+    const listed = SessionListResult.parse({
+      sessions: [
+        { sessionId: "s_1", scope: "global", createdAt: 1, lastSeq: 0, approvalPolicy: "bypass" },
+        { sessionId: "s_2", scope: "global", createdAt: 1, lastSeq: 0 }, // an OLDER daemon — never a real answer
+      ],
+    });
+    expect(listed.sessions[0]!.approvalPolicy).toBe("bypass");
+    expect(listed.sessions[1]!.approvalPolicy).toBeUndefined();
+  });
+
+  // The row's field is a bare bounded STRING, deliberately NOT `ApprovalPolicy` — a chat session's
+  // stored policy is the internal `"chat"` (core's gate.ts `SessionApprovalPolicy`), which
+  // `session.create` persists verbatim and which is NOT a settable wire value. Typing the row with
+  // the setter's enum would make the daemon's own truthful answer fail its own schema — the exact
+  // clamp-whose-output-its-own-schema-rejects contradiction `capTitle`'s doc records.
+  test("the row's approvalPolicy admits the internal chat value the setter's enum rejects", () => {
+    expect(() => SessionSetPolicyParams.parse({ sessionId: "s1", policy: "chat" })).toThrow();
+    const listed = SessionListResult.parse({
+      sessions: [{ sessionId: "s_chat", scope: "global", createdAt: 1, lastSeq: 0, approvalPolicy: "chat" }],
+    });
+    expect(listed.sessions[0]!.approvalPolicy).toBe("chat");
+  });
+
+  // Empty is not a policy: a zero-length string would reach a picker as a value that matches no row
+  // and reads as "some policy we don't render", which is worse than the honest absent case.
+  test("an empty approvalPolicy is refused", () => {
+    expect(() => SessionListResult.parse({
+      sessions: [{ sessionId: "s_1", scope: "global", createdAt: 1, lastSeq: 0, approvalPolicy: "" }],
+    })).toThrow();
+  });
 });
 
 // Chat Slice D Task 1: per-session model override — session.setModel {sessionId, model: string|null}

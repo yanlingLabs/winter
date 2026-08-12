@@ -1,45 +1,47 @@
 import SwiftUI
 import NormaProtocol
 
-/// Cards for outstanding approvals/questions/plans (2d-iii task 2) — PURE UI: consumes
-/// `[PendingInteraction]` (task 1's typed reducer list) and injected response closures. NOTHING
-/// mounts `PendingCardsView` yet — task 3 decides which surfaces show it and how it transitions
-/// in/out (hence no `repeatForever`/looping animation anywhere below, and no scoped
-/// `.transition`/`.animation` on the band itself — task 3's concern). Colors are ADAPTIVE
-/// (`.primary`/`.secondary`/`.tertiary`) since the window is opaque, same convention as
-/// `TranscriptMessageViews.swift` — no forced white, no `GlassForegroundLegibility`.
+/// Cards for approvals/questions/plans — PURE UI: consumes one `InteractionRecord` (the reducer's
+/// per-exchange record of an ask and, once it lands, its outcome) plus injected response closures.
+///
+/// Mounted INLINE IN THE TRANSCRIPT (`TranscriptExchangeRow`, `ChatContent/TranscriptView.swift`),
+/// at the point the ask was made, and never removed — mac-chat-parity Task 3. It used to be a
+/// pinned band between the transcript and the composer, deleted the instant the ask resolved, which
+/// left the Mac with no record anywhere in scrollback of anything the user had approved or
+/// answered. A resolved card now freezes in place carrying what was decided.
+///
+/// No `repeatForever`/looping animation anywhere below, and none may be added: the transcript is
+/// rendered under the orb morph's `scaleEffect`/`blur`/`opacity`
+/// (`WindowSurfaceView.swift` → `WindowContentView`), where a repeating animation compounds with the
+/// morph.
+///
+/// **Colour is `Theme`'s since mac-chat-parity Task 8** — same convention as
+/// `TranscriptMessageViews.swift`, no forced white, no `GlassForegroundLegibility`. Two notes on
+/// what that did and did not change: the accent chrome was SwiftUI's own app accent, which resolves
+/// to the *user's System Settings accent* because `docs/brand.md` § 3.2 leaves the global accent name
+/// unset — so a selected option used to be drawn in whatever colour the Mac's owner had picked, and
+/// is now Norma's teal. And a card is CHROME: its text stays sans, including a plan's markdown body,
+/// which is why both plan bodies pass `TranscriptAssistantMessage` the `.sans` role explicitly.
 
-/// The pinned band. `respond` callbacks are injected (Task 3 wires them per-surface).
-struct PendingCardsView: View {
-    let interactions: [PendingInteraction]
-    let inFlight: Set<String>                       // callIds with an RPC awaiting
-    let errorLines: [String: String]                // callId → inline error text
-    /// panel-shell T10b: a live `Binding` onto callId's `PendingCardDraft`, mirroring how
-    /// `WindowContentView` hands the composer `adapter.draftBinding` rather than the adapter
-    /// itself — same "value/closure, not the object" shape this view's other parameters already
-    /// keep. Built by the caller off `FieldStateAdapter.pendingCardDraftBinding(for:)`, so the
-    /// getter/setter always dereference the LIVE adapter (never a snapshot taken at this view's
-    /// own construction time) — see that method's own doc.
+/// Everything a transcript-mounted card needs from its surface, bundled so `TranscriptExchangeRow`
+/// keeps taking values and closures rather than the adapter itself — the same "value/closure, not
+/// the object" shape the composer's `draftBinding` already follows, and what keeps the transcript
+/// rows pure functions of their inputs.
+struct InteractionCardWiring {
+    /// callIds with a respond RPC currently awaiting — the card's "Sending…" state.
+    let inFlight: Set<String>
+    /// callId → inline error text from a failed respond RPC.
+    let errorLines: [String: String]
+    /// panel-shell T10b: a live `Binding` onto callId's `PendingCardDraft`. Built by the caller off
+    /// `FieldStateAdapter.pendingCardDraftBinding(for:)`, so the getter/setter always dereference
+    /// the LIVE adapter (never a snapshot taken at a view's own construction time) — see that
+    /// method's own doc. This matters more inline than it did in the band: transcript rows live in a
+    /// `LazyVStack` and are recycled freely, and view-local `@State` would lose a typed answer every
+    /// time a card scrolled out of view.
     let draftBinding: (String) -> Binding<PendingCardDraft>
     let onApproval: (String, Bool, String?, String?) -> Void  // callId, approved, optionId, childSessionId
     let onQuestion: (String, [String: String], [String: String], String?) -> Void  // callId, answers, notes (both keyed by question text), childSessionId
     let onPlan: (String, Bool, Bool, String?) -> Void   // callId, approved, autoAccept, feedback
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ForEach(interactions, id: \.callId) { interaction in
-                PendingCard(
-                    interaction: interaction,
-                    isInFlight: inFlight.contains(interaction.callId),
-                    errorLine: errorLines[interaction.callId],
-                    draft: draftBinding(interaction.callId),
-                    onApproval: onApproval,
-                    onQuestion: onQuestion,
-                    onPlan: onPlan
-                )
-            }
-        }
-    }
 }
 
 // MARK: - panel-shell T10b: PendingCardDraft — the hoisted, externally-owned per-card answer
@@ -68,6 +70,15 @@ struct PendingCardDraft: Equatable {
     /// The plan card's own two fields — untouched by anything above, which only questions read.
     var isRequestingChanges: Bool = false
     var feedback: String = ""
+    /// The APPROVAL card's "Show more" disclosure. Hoisted here for the same reason everything else
+    /// in this struct was, and one the band never exposed: `PendingApprovalBody` held it as view-
+    /// local `@State`, which was safe in a plain `VStack` band but is not in the transcript's
+    /// `LazyVStack`. Rows there are recycled freely, so expanding a long summary, scrolling away and
+    /// scrolling back silently collapsed it — and with `ForEach`'s index-keyed identity
+    /// (`TranscriptView`), a recycled row could inherit a NEIGHBOUR's expansion state. Same hazard
+    /// `InteractionCardWiring.draftBinding`'s doc names for typed answers; approvals simply had a
+    /// second piece of state nobody had moved yet.
+    var isSummaryExpanded: Bool = false
 
     /// Single-select an option — mirrors `PendingQuestionBody`'s old `onSelectSingle` closure.
     mutating func selectSingle(_ optionIndex: Int, forQuestion index: Int) {
@@ -214,11 +225,11 @@ func questionAllowsNotes(_ q: SessionEvent.Question) -> Bool { !questionIsSimpli
 /// so with no `.lineLimit` and no length cap: `question` has none, unlike `header`'s ≤12 chars).
 /// This function's header-less fallback is kept CORRECT regardless (it is simply unreached for
 /// that card type today) — do not delete it or let it regress to an empty string.
-func cardTitle(_ interaction: PendingInteraction) -> String {
-    switch interaction {
-    case .approval(_, let toolName, _, _, _, _):
+func cardTitle(_ ask: InteractionRecord.Ask) -> String {
+    switch ask {
+    case .approval(let toolName, _, _, _):
         return "Approval needed — \(toolName)"
-    case .question(_, let questions, _):
+    case .question(let questions):
         // A header-less card (Slice B1's simplified `AskQuestion`) must not render an EMPTY title
         // bar — fall back to the question text itself, same signal `questionIsSimplified` reads.
         guard let first = questions.first else { return "" }
@@ -232,10 +243,10 @@ func cardTitle(_ interaction: PendingInteraction) -> String {
 /// simplified (header-less) question card — approval/plan cards and code mode's headered question
 /// cards are unaffected (title row shown, byte-identical to before this fix). Extracted as a pure,
 /// exported predicate (mirrors `questionIsSimplified`/`questionShowsHeaderChip` above) so the fix
-/// is unit-testable without mounting a view, and so `PendingCard.body`'s gate and any test asserting
+/// is unit-testable without mounting a view, and so `TranscriptInteractionCard.body`'s gate and any test asserting
 /// it read the exact same decision.
-func showsCardTitleRow(_ interaction: PendingInteraction) -> Bool {
-    guard case .question(_, let questions, _) = interaction, let first = questions.first else { return true }
+func showsCardTitleRow(_ ask: InteractionRecord.Ask) -> Bool {
+    guard case .question(let questions) = ask, let first = questions.first else { return true }
     return !questionIsSimplified(first)
 }
 
@@ -275,67 +286,481 @@ func capReviewerReason(_ reason: String) -> String {
     return String(oneLine.prefix(reviewerReasonMaxChars)) + "…"
 }
 
-/// The kind glyph shown in every card's header — ⚠ approval, ? question, ☰ plan.
-private func cardGlyph(_ interaction: PendingInteraction) -> String {
-    switch interaction {
-    case .approval: return "⚠"
-    case .question: return "?"
-    case .plan: return "☰"
+/// The SF Symbol shown in every card's header. These were the literal characters `⚠`/`?`/`☰` until
+/// mac-chat-parity Task 3 — the most obviously unfinished thing about the Mac's cards, since a
+/// literal glyph takes the text font's metrics and weight instead of the symbol vocabulary every
+/// other affordance in the window uses. `hand.raised.fill` is the symbol iOS's own `ApprovalRowView`
+/// carries; the other two are its nearest equivalents for surfaces iOS has no twin for. Pure and
+/// exported so the choice is unit-testable, the same convention as `activityGlyphAndLabel`.
+func cardGlyphSymbol(_ ask: InteractionRecord.Ask) -> String {
+    switch ask {
+    case .approval: return "hand.raised.fill"
+    case .question: return "questionmark.circle.fill"
+    case .plan: return "list.bullet.rectangle"
     }
+}
+
+// MARK: - Selection chrome (mac-chat-parity Task 3 — defect 2)
+
+/// The glyph for one option row, honest about the question's arity: a circle for single-select
+/// (pick one) and a square for multi-select (pick any), filled with a checkmark when chosen. iOS's
+/// rule (`QuestionCardView`'s option row) and, before Task 3, one the Mac only half-kept — a
+/// multi-select option had `checkmark.square.fill`/`square`, and a single-select option had NO
+/// GLYPH AT ALL.
+func optionSelectionGlyph(multiSelect: Bool, isSelected: Bool) -> String {
+    if multiSelect { return isSelected ? "checkmark.square.fill" : "square" }
+    return isSelected ? "checkmark.circle.fill" : "circle"
+}
+
+/// The resting-vs-selected chrome of an option row. Before mac-chat-parity Task 3 a single-select
+/// option had NO selected state whatsoever — no glyph, no fill, no border, no weight change — so
+/// the only evidence a choice had registered was the Submit button enabling. That is closer to a
+/// bug than a style gap: the user could not see what they had picked before submitting.
+///
+/// iOS's shape, adopted: an unselected row has NO resting chrome at all (no border, no fill —
+/// a list of bordered boxes reads as five equally-shouting buttons), and selection alone paints it.
+/// Expressed as a value rather than inline view modifiers so the decision is unit-testable without
+/// mounting a view, and so removing the selected branch is a test failure rather than an invisible
+/// regression.
+struct OptionSelectionChrome: Equatable {
+    /// Opacity of the accent fill behind the row. `0` means no fill is drawn at all.
+    let fillOpacity: Double
+    /// Width of the accent border. `0` means no border is drawn at all.
+    let strokeWidth: Double
+    /// Whether the option's own label is emboldened.
+    let isBold: Bool
+
+    static let resting = OptionSelectionChrome(fillOpacity: 0, strokeWidth: 0, isBold: false)
+    static let selected = OptionSelectionChrome(fillOpacity: 0.15, strokeWidth: 1.5, isBold: true)
+}
+
+func optionSelectionChrome(isSelected: Bool) -> OptionSelectionChrome {
+    isSelected ? .selected : .resting
+}
+
+// MARK: - Resolved outcomes (mac-chat-parity Task 3 — defect 1)
+
+/// Which of a question's options a RECORDED answer names — the frozen card's way of marking what
+/// was chosen, months later, from nothing but the persisted `question_resolved.answers` string.
+///
+/// It is the exact inverse of `questionAnswers`, and is written against that function's own three
+/// productions rather than guessed at: a single-select answer is one option's `label` verbatim; a
+/// multi-select answer is several labels `", "`-joined in option order; an "Other…" answer is
+/// free text that matches no option. Whole-string match is tried FIRST so a label that itself
+/// contains `", "` is recognised rather than shredded by the split.
+///
+/// An answer that matches nothing is `.freeText`, never dropped — the record must show what was
+/// actually sent even when the options it was sent against have no matching entry.
+enum ResolvedAnswer: Equatable {
+    /// Indices into the question's own `options`, ascending.
+    case options([Int])
+    case freeText(String)
+    /// No answer was recorded for this question. Reachable on a `.ended` card, and on a resolution
+    /// whose `answers` dict simply has no entry for this question's text.
+    case none
+}
+
+func resolvedAnswer(for question: SessionEvent.Question, answer: String?) -> ResolvedAnswer {
+    guard let answer, !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .none }
+    if let exact = question.options.firstIndex(where: { $0.label == answer }) {
+        return .options([exact])
+    }
+    let parts = answer.components(separatedBy: ", ")
+    if parts.count > 1 {
+        let matched = parts.compactMap { part in question.options.firstIndex(where: { $0.label == part }) }
+        if matched.count == parts.count { return .options(matched.sorted()) }
+    }
+    return .freeText(answer)
+}
+
+/// The frozen approval/plan card's outcome line — symbol, wording, and whether it reads as an
+/// affirmative. Pure so the exact vocabulary is pinned by tests rather than by reading the view.
+///
+/// A timeout is the case worth naming: the daemon's `ApprovalBroker` fails closed with
+/// `{approved: false, by: "timeout"}` (`packages/core/src/agent/approvals.ts`), which IS a denial —
+/// but one nobody made. It must not read as "you denied this".
+struct InteractionOutcomeLabel: Equatable {
+    let symbol: String
+    let text: String
+    /// True only for an outcome the user affirmatively granted — drives the one green in the card.
+    let isAffirmative: Bool
+}
+
+func outcomeLabel(_ outcome: InteractionRecord.Outcome) -> InteractionOutcomeLabel {
+    switch outcome {
+    case .approval(let approved, let by):
+        if approved { return .init(symbol: "checkmark.seal.fill", text: "Approved", isAffirmative: true) }
+        if by == "timeout" { return .init(symbol: "clock.badge.xmark", text: "Denied — timed out", isAffirmative: false) }
+        return .init(symbol: "nosign", text: "Denied", isAffirmative: false)
+    case .plan(let approved, let autoAccept, _, _):
+        if approved {
+            return .init(symbol: "checkmark.seal.fill",
+                         text: autoAccept ? "Approved — auto-accepting edits" : "Approved",
+                         isAffirmative: true)
+        }
+        return .init(symbol: "arrow.uturn.backward", text: "Changes requested", isAffirmative: false)
+    case .question(_, _, let by):
+        if by == "timeout" { return .init(symbol: "clock.badge.xmark", text: "Timed out", isAffirmative: false) }
+        return .init(symbol: "checkmark.circle.fill", text: "Answered", isAffirmative: true)
+    case .ended:
+        // The turn ended with this ask outstanding — see `InteractionRecord.Outcome.ended`. Says
+        // that nothing was recorded rather than claiming a decision nobody made.
+        return .init(symbol: "clock.badge.xmark", text: "Ended with no response", isAffirmative: false)
+    }
+}
+
+/// Whether a card draws its inline respond-error line — only while it is still PENDING, and that
+/// gate has to exist now that cards are permanent.
+///
+/// `FieldStateAdapter.interactionErrors[callId]` is set on a failed respond RPC and cleared only at
+/// the START of the next attempt for that callId. Nothing clears it on resolve, because until
+/// mac-chat-parity Task 3 nothing had to: the card was deleted and took the line with it. A card
+/// that lives forever does not have that luxury — a respond that failed and was then resolved some
+/// other way (the broker's fail-closed timeout, or the phone answering it) would print "couldn't
+/// send — try again" into the permanent record, beside the outcome, as advice nobody can act on.
+///
+/// An error is a fact about an attempt in flight, and a frozen card makes no attempts.
+func showsInteractionErrorLine(_ record: InteractionRecord, hasError: Bool) -> Bool {
+    hasError && interactionIsPending(record)
+}
+
+/// The provenance line under a frozen card — iOS's "answered by …" footer. `nil` when there is
+/// nobody to name (an ask that simply ended), so the card shows no dangling attribution.
+///
+/// `by` is whatever the responding client called itself (`"orb"`, `"iphone-gateway"`, `"cli-chat"`,
+/// a routine) — or the daemon's own `"timeout"` sentinel, whose wording says what actually happened
+/// instead of attributing the decision to a person.
+func interactionProvenance(_ outcome: InteractionRecord.Outcome) -> String? {
+    let by: String
+    switch outcome {
+    case .approval(_, let value), .question(_, _, let value), .plan(_, _, _, let value): by = value
+    case .ended: return nil
+    }
+    if by == "timeout" { return "no answer before the deadline — resolved by timeout" }
+    return "answered by \(by)"
 }
 
 // MARK: - Card chrome
 
-/// One card: kind glyph + title header, per-kind body, optional inline error line — rounded-12
-/// `.thinMaterial` section, consistent with the transcript's own material chrome
-/// (`TranscriptView`'s "latest" pill, `TranscriptCodeBlock`).
-private struct PendingCard: View {
-    let interaction: PendingInteraction
-    let isInFlight: Bool
-    let errorLine: String?
-    /// panel-shell T10b: forwarded to whichever body needs it (`.question`/`.plan`) — untouched by
-    /// `.approval`, which has no typed-but-unsubmitted input to preserve.
-    @Binding var draft: PendingCardDraft
-    let onApproval: (String, Bool, String?, String?) -> Void
-    let onQuestion: (String, [String: String], [String: String], String?) -> Void
-    let onPlan: (String, Bool, Bool, String?) -> Void
+/// One card in the transcript: SF-Symbol kind glyph + title header, per-kind body, optional inline
+/// error line — a rounded-12 `Theme.elevatedSurface` section (mac-chat-parity Task 8), which is the
+/// token `docs/brand.md` § 1 names for "tool output, approval cards — one step above the card".
+/// The transcript's tool-output blocks sit on the same fill, one plane above the content side's
+/// `Theme.cardSurface`.
+///
+/// **Pending and frozen are two different subtrees, not one subtree behind a flag.** The frozen
+/// bodies below declare no `Button` and no `TextField` of their own, and — the part that actually
+/// carries the guarantee — `resolvedBody` is handed NO wiring closures at all, so there is no
+/// `onApproval`/`onQuestion`/`onPlan` in scope for a frozen card to call. A resolved card cannot
+/// re-answer its ask even by mistake: the capability is absent, not disabled, and no `isResolved`
+/// parameter exists for a future edit to forget to thread through a new affordance.
+///
+/// **What that does NOT say, precisely:** a frozen card is not free of every control. A frozen PLAN
+/// composes `TranscriptAssistantMessage`, and any fenced code block inside it renders
+/// `TranscriptCodeBlock`'s own copy button, which `isStreaming` does not gate (only the
+/// message-level copy button is gated — `TranscriptMessageViews.swift`). So a frozen plan containing
+/// a code fence carries live copy buttons TODAY. That is acceptable and stays: copying a plan is not
+/// responding to it, and the requirement is that the ask cannot be re-answered. It is written down
+/// because `testFrozenBodiesContainNoInteractiveAffordance` scans DECLARATIONS and cannot see
+/// through composition — the claim it checks is narrower than the sentence above, and this is the
+/// gap between them.
+///
+/// The branch is `interactionIsPending(record)` — i.e. `record.outcome == nil` — and nothing else.
+/// The reducer guarantees that predicate goes false the moment the daemon stops waiting on the ask,
+/// whether it was answered, timed out, or outlived its turn (`endOutstandingInteractions`).
+struct TranscriptInteractionCard: View {
+    let record: InteractionRecord
+    let wiring: InteractionCardWiring
+
+    private var isInFlight: Bool { wiring.inFlight.contains(record.callId) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             // Branch review FIX 2: a simplified (header-less) question card suppresses this whole
             // row — the question already renders exactly once in the body (QuestionBlock's
             // unconditional Text(question.question)); showing it here too would duplicate it.
-            if showsCardTitleRow(interaction) {
+            if showsCardTitleRow(record.ask) {
                 HStack(spacing: 6) {
-                    Text(cardGlyph(interaction))
+                    Image(systemName: cardGlyphSymbol(record.ask))
                         .foregroundStyle(.secondary)
-                    Text(cardTitle(interaction))
+                    Text(cardTitle(record.ask))
                         .foregroundStyle(.primary)
                 }
                 .font(.system(size: 13, weight: .semibold))
             }
 
-            cardBody
+            if let outcome = record.outcome {
+                resolvedBody(outcome)
+            } else {
+                pendingBody
+            }
 
-            if let errorLine {
+            if let errorLine = wiring.errorLines[record.callId],
+               showsInteractionErrorLine(record, hasError: true) {
                 Text(errorLine)
                     .font(.system(size: 11))
                     .foregroundStyle(.red)
             }
         }
         .padding(12)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     @ViewBuilder
-    private var cardBody: some View {
-        switch interaction {
-        case .approval(let callId, _, let summary, let reviewerReason, let childSessionId, let options):
-            PendingApprovalBody(callId: callId, summary: summary, reviewerReason: reviewerReason, childSessionId: childSessionId, options: options, isInFlight: isInFlight, onApproval: onApproval)
-        case .question(let callId, let questions, let childSessionId):
-            PendingQuestionBody(callId: callId, questions: questions, childSessionId: childSessionId, isInFlight: isInFlight, onQuestion: onQuestion, draft: $draft)
-        case .plan(let callId, let plan):
-            PendingPlanBody(callId: callId, plan: plan, isInFlight: isInFlight, onPlan: onPlan, draft: $draft)
+    private var pendingBody: some View {
+        switch record.ask {
+        case .approval(_, let summary, let reviewerReason, let options):
+            PendingApprovalBody(callId: record.callId, summary: summary, reviewerReason: reviewerReason, childSessionId: record.childSessionId, options: options, isInFlight: isInFlight, onApproval: wiring.onApproval, draft: wiring.draftBinding(record.callId))
+        case .question(let questions):
+            PendingQuestionBody(callId: record.callId, questions: questions, childSessionId: record.childSessionId, isInFlight: isInFlight, onQuestion: wiring.onQuestion, draft: wiring.draftBinding(record.callId))
+        case .plan(let plan):
+            PendingPlanBody(callId: record.callId, plan: plan, isInFlight: isInFlight, onPlan: wiring.onPlan, draft: wiring.draftBinding(record.callId))
+        }
+    }
+
+    @ViewBuilder
+    private func resolvedBody(_ outcome: InteractionRecord.Outcome) -> some View {
+        switch record.ask {
+        case .approval(_, let summary, let reviewerReason, _):
+            ResolvedApprovalBody(summary: summary, reviewerReason: reviewerReason, outcome: outcome)
+        case .question(let questions):
+            ResolvedQuestionBody(questions: questions, outcome: outcome)
+        case .plan(let plan):
+            ResolvedPlanBody(plan: plan, outcome: outcome)
+        }
+    }
+}
+
+/// The outcome line every frozen card ends with — symbol + verdict, then the quiet provenance line.
+/// One view rather than three copies, since the vocabulary is already decided by the pure
+/// `outcomeLabel`/`interactionProvenance` pair.
+private struct ResolvedOutcomeRow: View {
+    let outcome: InteractionRecord.Outcome
+
+    var body: some View {
+        let label = outcomeLabel(outcome)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: label.symbol)
+                Text(label.text)
+            }
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(label.isAffirmative ? Color.green : Color.secondary)
+
+            if let provenance = interactionProvenance(outcome) {
+                Text(provenance)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textMuted)
+            }
+        }
+    }
+}
+
+/// A hairline between two questions in one card — iOS's separator for a multi-question block, which
+/// the Mac's separator-less stacked blocks left the reader to infer from spacing alone. A true
+/// hairline (1 device pixel via `displayScale`), not a 1pt rule, so it reads as a division rather
+/// than a border. `Theme.hairlineElevated` (mac-chat-parity Task 8 fix round 1) in place of a
+/// `Color.primary` × 0.08, which had no way to be tuned per appearance.
+///
+/// **It is the ELEVATED token, not the shell's `hairline`, and that distinction is the whole point
+/// of the fix round.** This rule is drawn on the card's `Theme.elevatedSurface` fill, one plane
+/// above the ground `hairline` is defined against, where `hairline` measures **1.040:1 in dark** —
+/// so a separator introduced precisely because "stacked blocks left the reader to infer from
+/// spacing alone" was very nearly back to nothing. `hairlineElevated` measures 1.313 / 1.312 there.
+/// Pinned by `TranscriptBrandTests.testTheElevatedHairlineActuallySeparatesOnItsOwnPlane`.
+private struct QuestionSeparator: View {
+    @Environment(\.displayScale) private var displayScale
+
+    var body: some View {
+        Rectangle()
+            .fill(Theme.hairlineElevated)
+            .frame(height: 1 / displayScale)
+    }
+}
+
+// MARK: - Frozen (resolved) bodies — NO Button, NO TextField, by construction
+
+/// What was asked, and what was decided. The audit record: a reader scrolling back months later
+/// sees the command that needed approval and the verdict on it, in the place the agent asked.
+///
+/// The summary keeps the pending card's monospaced register (it is usually a shell command) but not
+/// its "Show more" toggle — that is a `Button`, and a frozen card has none. Capped at 8 lines with
+/// middle truncation instead: `approval_requested.summary` has no wire cap
+/// (`packages/protocol/src/events.ts` caps it "at the writer, not the schema"), and an unbounded
+/// record would let one pathological ask own the scrollback. 8 lines clears every summary the
+/// daemon composes in practice; the whole text is readable while the card is still pending.
+/// panel-shell T10b precedent: internal rather than `private` so `InteractionCardTests` can
+/// construct it and prove — via `Mirror` — that it holds no respond closure, the same reason
+/// `PendingQuestionBody`/`PendingPlanBody` were widened.
+struct ResolvedApprovalBody: View {
+    let summary: String
+    let reviewerReason: String?
+    let outcome: InteractionRecord.Outcome
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(summary)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(8)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+
+            if let reviewerReason {
+                Label("reviewer: \(capReviewerReason(reviewerReason))", systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            ResolvedOutcomeRow(outcome: outcome)
+        }
+    }
+}
+
+/// Each question with the answer that was recorded for it, marked. Deliberately shows the CHOSEN
+/// options only, not the whole menu with one mark somewhere in it — iOS's resolved shape, and the
+/// more legible one for an audit trail: "Which port? · 8080" is read at a glance, where five rows
+/// with a mark on the fourth has to be scanned. The unchosen options were a decision aid; the
+/// decision is what the record is for.
+///
+/// The preview pane goes with them for the same reason (and takes a nested `ScrollView` out of the
+/// transcript's own scroll view along the way).
+/// panel-shell T10b precedent: internal rather than `private` so `InteractionCardTests` can
+/// construct it and prove — via `Mirror` — that it holds no respond closure, the same reason
+/// `PendingQuestionBody`/`PendingPlanBody` were widened.
+struct ResolvedQuestionBody: View {
+    let questions: [SessionEvent.Question]
+    let outcome: InteractionRecord.Outcome
+
+    /// The recorded `answers`/`notes`, or empty dicts for an `.ended` card (asked, never answered).
+    private var recorded: (answers: [String: String], notes: [String: String]) {
+        if case .question(let answers, let notes, _) = outcome { return (answers, notes) }
+        return ([:], [:])
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(Array(questions.enumerated()), id: \.offset) { index, question in
+                if index > 0 { QuestionSeparator() }
+                VStack(alignment: .leading, spacing: 6) {
+                    if questionShowsHeaderChip(question, questionCount: questions.count) {
+                        Text(question.header ?? "")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(question.question)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.primary)
+
+                    answerRows(for: question)
+
+                    if let note = recorded.notes[question.question], !note.isEmpty {
+                        Text(note)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            ResolvedOutcomeRow(outcome: outcome)
+        }
+    }
+
+    @ViewBuilder
+    private func answerRows(for question: SessionEvent.Question) -> some View {
+        switch resolvedAnswer(for: question, answer: recorded.answers[question.question]) {
+        case .options(let indices):
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(indices, id: \.self) { optionIndex in
+                    if question.options.indices.contains(optionIndex) {
+                        chosenRow(
+                            glyph: optionSelectionGlyph(multiSelect: question.multiSelect, isSelected: true),
+                            text: question.options[optionIndex].label
+                        )
+                    }
+                }
+            }
+        case .freeText(let text):
+            // The "Other…" path — the user typed something the menu did not offer. `pencil` is the
+            // same glyph iOS puts on its Other field, so the record says HOW it was answered.
+            chosenRow(glyph: "pencil", text: text)
+        case .none:
+            Text("—")
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.textMuted)
+        }
+    }
+
+    private func chosenRow(glyph: String, text: String) -> some View {
+        let chrome = optionSelectionChrome(isSelected: true)
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: glyph)
+                .foregroundStyle(Theme.accent)
+            Text(text)
+                .font(.system(size: 13, weight: chrome.isBold ? .semibold : .regular))
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Theme.accent.opacity(chrome.fillOpacity))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Theme.accent, lineWidth: chrome.strokeWidth)
+        )
+    }
+}
+
+/// The plan that was presented, and what was decided about it. Keeps the pending card's markdown
+/// rendering and its ~260pt scroll cap — a plan is long by nature, and the record of one has to
+/// still be the plan.
+/// panel-shell T10b precedent: internal rather than `private` so `InteractionCardTests` can
+/// construct it and prove — via `Mirror` — that it holds no respond closure, the same reason
+/// `PendingQuestionBody`/`PendingPlanBody` were widened.
+struct ResolvedPlanBody: View {
+    let plan: String
+    let outcome: InteractionRecord.Outcome
+
+    private var feedback: String? {
+        if case .plan(_, _, let feedback, _) = outcome, let feedback, !feedback.isEmpty { return feedback }
+        return nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ScrollView {
+                // `isStreaming: true` on a plan that is emphatically NOT streaming is load-bearing,
+                // not a copy-paste: it is how `TranscriptAssistantMessage` suppresses its trailing
+                // MESSAGE-level copy button.
+                //
+                // It does not suppress everything. A fenced code block inside the plan routes to
+                // `TranscriptCodeBlock`, whose own copy button is NOT gated on this flag
+                // (`TranscriptMessageViews.swift`) — so a frozen plan containing a code fence
+                // already carries live copy buttons and their 1.2s revert timers. Deliberately left
+                // alone: copying a plan is not responding to it, and this card's requirement is that
+                // the ask cannot be RE-ANSWERED, which holds because `resolvedBody` is handed no
+                // respond closures at all.
+                //
+                // What this line is worth guarding is narrower than it looks, then: flipping the
+                // flag would add the message-level copy button too, with no test going red, because
+                // the declaration scan cannot see through composition. Named, not relied upon.
+                TranscriptAssistantMessage(text: plan, isStreaming: true, role: .sans)
+            }
+            .frame(maxHeight: 260)
+
+            if let feedback {
+                Text(feedback)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+
+            ResolvedOutcomeRow(outcome: outcome)
         }
     }
 }
@@ -365,8 +790,10 @@ private struct PendingApprovalBody: View {
     let options: [SessionEvent.ApprovalOption]?
     let isInFlight: Bool
     let onApproval: (String, Bool, String?, String?) -> Void  // callId, approved, optionId, childSessionId
-
-    @State private var isExpanded = false
+    /// The "Show more" disclosure — externally owned, NOT view-local `@State`. See
+    /// `PendingCardDraft.isSummaryExpanded` for why the transcript's `LazyVStack` makes that
+    /// mandatory rather than tidy.
+    @Binding var draft: PendingCardDraft
 
     private var mightOverflowThreeLines: Bool {
         summary.count > 150 || summary.filter { $0 == "\n" }.count >= 3
@@ -382,13 +809,13 @@ private struct PendingApprovalBody: View {
             Text(summary)
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(.secondary)
-                .lineLimit(isExpanded ? nil : 3)
+                .lineLimit(draft.isSummaryExpanded ? nil : 3)
                 .truncationMode(.middle)
                 .textSelection(.enabled)
 
             if mightOverflowThreeLines {
-                Button(isExpanded ? "Show less" : "Show more") {
-                    isExpanded.toggle()
+                Button(draft.isSummaryExpanded ? "Show less" : "Show more") {
+                    draft.isSummaryExpanded.toggle()
                 }
                 .buttonStyle(.plain)
                 .font(.system(size: 11, weight: .medium))
@@ -404,34 +831,48 @@ private struct PendingApprovalBody: View {
                     .foregroundStyle(.secondary)
             }
 
-            // Primary row — UNCHANGED from before this task: Approve is still plain allow-once
-            // (spec §5: "default button = Allow once"), Deny still bare deny; neither carries an
-            // optionId. Rule-writing choices are deliberate clicks on the quiet row below, never
-            // folded into these two.
-            HStack(spacing: 8) {
-                Button("Approve") { onApproval(callId, true, nil, childSessionId) }
-                    .buttonStyle(.borderedProminent)
-                Button("Deny") { onApproval(callId, false, nil, childSessionId) }
-                    .buttonStyle(.bordered)
-            }
-            .controlSize(.small)
-            .disabled(isInFlight)
+            if isInFlight {
+                // mac-chat-parity Task 3: the buttons are REPLACED, not merely disabled. A disabled
+                // row said nothing about why (the card's only in-flight signal used to be that the
+                // buttons had gone grey), and replacing them also removes the double-tap surface
+                // entirely rather than relying on the disable landing first. iOS's `.sending` state.
+                Label("Sending…", systemImage: "hourglass")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else {
+                // Primary row — Approve is still plain allow-once (spec §5: "default button = Allow
+                // once"), Deny still bare deny; neither carries an optionId. Rule-writing choices
+                // are deliberate clicks on the quiet row below, never folded into these two.
+                //
+                // Equal width (mac-chat-parity Task 3): natural-width AppKit buttons made "Approve"
+                // and "Deny" different sizes, so the pair read as a primary action with an
+                // afterthought beside it. A decision with two real answers gets two equal targets;
+                // exactly one of them is prominent.
+                HStack(spacing: 8) {
+                    Button("Approve") { onApproval(callId, true, nil, childSessionId) }
+                        .buttonStyle(.borderedProminent)
+                        .frame(maxWidth: .infinity)
+                    Button("Deny") { onApproval(callId, false, nil, childSessionId) }
+                        .buttonStyle(.bordered)
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.small)
 
-            // SP-approvals T6: one quiet button per additional option, below the primary row —
-            // `.plain` + secondary/small text, same "quiet" convention as the "Show more" toggle
-            // above, so a rule-writing (or fence-widening) choice never reads as visually equal to
-            // Approve/Deny. Labels render verbatim (the daemon already composes the exact rule
-            // string — or, for `allow_add_dir`, the exact adoption wording — into them).
-            if !additionalOptions.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(additionalOptions, id: \.id) { option in
-                        Button(option.label) { onApproval(callId, true, option.id, childSessionId) }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
+                // SP-approvals T6: one quiet button per additional option, below the primary row —
+                // `.plain` + secondary/small text, same "quiet" convention as the "Show more" toggle
+                // above, so a rule-writing (or fence-widening) choice never reads as visually equal
+                // to Approve/Deny. Labels render verbatim (the daemon already composes the exact
+                // rule string — or, for `allow_add_dir`, the exact adoption wording — into them).
+                if !additionalOptions.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(additionalOptions, id: \.id) { option in
+                            Button(option.label) { onApproval(callId, true, option.id, childSessionId) }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
-                .disabled(isInFlight)
             }
         }
     }
@@ -472,6 +913,11 @@ struct PendingQuestionBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             ForEach(Array(questions.enumerated()), id: \.offset) { index, question in
+                // mac-chat-parity Task 3: a hairline between questions, iOS's rule for a
+                // multi-question block. One ask can carry up to four questions and, without a
+                // division, four blocks of "header / question / options / Other / note" read as one
+                // long undifferentiated form.
+                if index > 0 { QuestionSeparator() }
                 QuestionBlock(
                     index: index,
                     question: question,
@@ -489,10 +935,20 @@ struct PendingQuestionBody: View {
                 )
             }
 
-            Button("Submit", action: submit)
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(isInFlight || !isComplete)
+            // mac-chat-parity Task 3: full width and the card's ONE prominent action — a small
+            // natural-width button floating under a form gave no sense of being the thing that
+            // completes it. `Sending…` while the respond RPC is out (iOS's own in-flight label);
+            // still disabled in that state, so the label is the signal and the disable is the guard.
+            Button(action: submit) {
+                if isInFlight {
+                    Label("Sending…", systemImage: "hourglass").frame(maxWidth: .infinity)
+                } else {
+                    Text("Submit").frame(maxWidth: .infinity)
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(isInFlight || !isComplete)
         }
     }
 
@@ -586,41 +1042,51 @@ private struct QuestionBlock: View {
                     .padding(8)
             }
             .frame(maxHeight: 180)
-            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(Theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
     }
 
-    @ViewBuilder
+    /// mac-chat-parity Task 3 (defect 2): ONE row shape for both arities. Single-select used to be a
+    /// bare `.plain` text button with no glyph and no selected state of any kind — nothing showed
+    /// the user what they had picked before they submitted it; the only feedback was Submit
+    /// enabling. Both arities now carry a glyph honest about which they are
+    /// (`optionSelectionGlyph`) and the same selected chrome (`optionSelectionChrome`).
     private func optionRow(_ optionIndex: Int, _ option: SessionEvent.QuestionOption) -> some View {
-        if question.multiSelect {
-            Button {
-                onToggleMulti(optionIndex)
-            } label: {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: selected.contains(optionIndex) ? "checkmark.square.fill" : "square")
-                        .foregroundStyle(selected.contains(optionIndex) ? Color.accentColor : .secondary)
-                    optionLabel(option)
-                }
-                .contentShape(Rectangle())
+        let isSelected = selected.contains(optionIndex)
+        let chrome = optionSelectionChrome(isSelected: isSelected)
+        return Button {
+            if question.multiSelect { onToggleMulti(optionIndex) } else { onSelectSingle(optionIndex) }
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: optionSelectionGlyph(multiSelect: question.multiSelect, isSelected: isSelected))
+                    .foregroundStyle(isSelected ? Theme.accent : .secondary)
+                optionLabel(option, isSelected: isSelected)
+                Spacer(minLength: 0)
             }
-            .buttonStyle(.plain)
-            .disabled(isInFlight)
-        } else {
-            Button {
-                onSelectSingle(optionIndex)
-            } label: {
-                optionLabel(option)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(isInFlight)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 10)
+            // The whole row, fill and padding included, is the hit target — not just the glyph and
+            // the words. iOS's rule, and the one that makes a bordered selected row honest about
+            // where it can be clicked.
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Theme.accent.opacity(chrome.fillOpacity))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Theme.accent, lineWidth: chrome.strokeWidth)
+            )
         }
+        .buttonStyle(.plain)
+        .disabled(isInFlight)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 
-    private func optionLabel(_ option: SessionEvent.QuestionOption) -> some View {
+    private func optionLabel(_ option: SessionEvent.QuestionOption, isSelected: Bool) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(option.label)
-                .font(.system(size: 13))
+                .font(.system(size: 13, weight: optionSelectionChrome(isSelected: isSelected).isBold ? .semibold : .regular))
                 .foregroundStyle(.primary)
             if let description = option.description, !description.isEmpty {
                 Text(description)
@@ -683,7 +1149,7 @@ struct PendingPlanBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ScrollView {
-                TranscriptAssistantMessage(text: plan, isStreaming: true)
+                TranscriptAssistantMessage(text: plan, isStreaming: true, role: .sans)
             }
             .frame(maxHeight: 260)
 

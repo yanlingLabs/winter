@@ -210,6 +210,30 @@ enum MessageTextFormatter {
         FormattedMarkdownBlock.parse(text)
     }
 
+    /// A named asset-catalog colour, resolved for an EXPLICIT appearance rather than the ambient
+    /// one (mac-chat-parity Task 8).
+    ///
+    /// The explicit resolve is why `chatInlineAttributedString` still takes a `colorScheme` at all.
+    /// A dynamic `NSColor` inside an `NSAttributedString` resolves against whatever appearance is
+    /// current when it is DRAWN, and a SwiftUI view can be forced to a scheme its window is not in
+    /// (`.preferredColorScheme`, `.environment(\.colorScheme, …)`) — so handing the string a dynamic
+    /// colour would quietly make this one attribute ignore the caller's scheme while every other
+    /// value in the same string honoured it. Resolving here keeps the whole string on one appearance:
+    /// the caller's.
+    ///
+    /// `.clear` on a miss — a missing colorset means no chip background, which is a cosmetic loss;
+    /// `SidebarBrandTests.testEveryThemeColorResolvesInTheAssetCatalog` is what actually stops a
+    /// name from going missing.
+    static func themeColor(_ name: String, colorScheme: ColorScheme) -> NSColor {
+        guard let named = NSColor(named: name) else { return .clear }
+        var resolved = named
+        let appearance = NSAppearance(named: colorScheme == .dark ? .darkAqua : .aqua)
+        appearance?.performAsCurrentDrawingAppearance {
+            resolved = named.usingColorSpace(.sRGB) ?? named
+        }
+        return resolved
+    }
+
     static func chatInlineAttributedString(
         _ text: String,
         colorScheme: ColorScheme,
@@ -217,9 +241,13 @@ enum MessageTextFormatter {
         codeFont: NSFont = .monospacedSystemFont(ofSize: 13.5, weight: .regular),
         lineSpacing: CGFloat = 0
     ) -> AttributedString {
-        let codeBackground = colorScheme == .dark
-            ? NSColor.white.withAlphaComponent(0.11)
-            : NSColor.black.withAlphaComponent(0.08)
+        // mac-chat-parity Task 8: the inline-code chip's fill is the brand's `ControlSurface` — its
+        // token for small controls, which is what a code chip inside a run of prose is. It replaced a
+        // `colorScheme`-branched white/black alpha, i.e. a hex in code by another name
+        // (`docs/brand.md` § 3.1). `ElevatedSurface` is deliberately NOT used here even though it is
+        // the block-level code fill: measured against `CardSurface` it is 1.06:1, which as a
+        // TEXT-RUN background would be invisible.
+        let codeBackground = themeColor("ControlSurface", colorScheme: colorScheme)
         let attributed = inlineAttributedString(
             text,
             baseFont: baseFont,

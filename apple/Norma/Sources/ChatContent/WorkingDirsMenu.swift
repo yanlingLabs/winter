@@ -65,7 +65,7 @@ extension WindowContentView {
                 // with no working folder is not broken, it's confined to its outputs folder.
                 Text("No working folder — this session writes only to its outputs folder.")
                     .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: 260, alignment: .leading)
                     .padding(.bottom, 4)
@@ -123,19 +123,19 @@ extension WindowContentView {
                     if index == 0 {
                         Text("primary")
                             .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(Theme.textMuted)
                     }
                     if entry.locked {
                         // The first-write lock: Norma has written here, so this entry is permanent
                         // for the session's lifetime.
                         Image(systemName: "lock.fill")
                             .font(.system(size: 8))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(Theme.textMuted)
                     }
                 }
                 Text(entry.path)
                     .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.textMuted)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }

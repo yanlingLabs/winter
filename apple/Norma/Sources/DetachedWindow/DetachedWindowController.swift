@@ -103,7 +103,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         let feedClient = feed.client
         let sessionDirectory = SessionDirectory(lister: {
             try await feedClient.listSessions().map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity, archived: $0.archived, signals: $0.signals)
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity, archived: $0.archived, signals: $0.signals, approvalPolicy: $0.approvalPolicy)
             }
         })
         directory = sessionDirectory
@@ -226,7 +226,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
                 guard let self else { return }
                 let ok = (try? await client.setPolicy(sessionId: self.sessionId, policy: policy)) != nil
                 adapter?.policyChangeInFlight = false
-                if ok { adapter?.sessionPolicy = policy }
+                if ok { adapter?.adoptSessionPolicy(policy) }
             }
         }
 
@@ -347,6 +347,12 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         guard sessionId != self.sessionId else { return }
         self.sessionId = sessionId
         adapter.isChatSession = Self.isChatSession(sessionId, in: directory.rows)
+        // mac-chat-parity T4: and a different POLICY — re-derived off this window's own directory,
+        // never carried across the switch (`seedSessionPolicy` resets to "unknown" for an arriving
+        // row that says nothing). The sidebar's clicked row is always already loaded here, so the
+        // not-loaded case this shares with `isChatSession` above is the `newSession()` path, where
+        // "unknown" is simply the truth until the directory catches up.
+        adapter.seedSessionPolicy(for: sessionId, in: directory.rows)
         // provider-correctness T6: a different session means a different pinned model/effort and a
         // possibly-different mode, so every picker overlay from the OLD session must go — leaving
         // one would render the previous session's optimistic choice as this session's selection.
@@ -359,7 +365,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // is locked for this session" rendered over a different session's chip is a lie about a rule.
         adapter.dirsRefusal = nil
         // panel-shell T10b: same "about the session it was about" discipline as the resets just
-        // above — this window mounts the shared `WindowContentView`/`PendingCardsView` too, so an
+        // above — this window mounts the shared `WindowContentView`, and so the transcript's own cards, too, so an
         // in-place session switch here is the identical sibling case `ShellSessionHost.hop(to:)`
         // already covers for the shell's own attachment (same reasoning, same adapter field). See
         // that clear's own comment (review fix, Important 2) for why this is hygiene-only, not a
@@ -367,6 +373,14 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // actually prevents a cross-session collision now, not callId uniqueness — this clear
         // only bounds the dictionary's size across the switch.
         adapter.pendingCardDrafts = [:]
+        // Same sweep, same reason, for the two dictionaries beside it: `interactionInFlight` and
+        // `interactionErrors` are keyed by BARE callId — the very cross-session collision hazard
+        // `pendingCardDraftKey`'s doc describes, never applied to these two. A stale entry surviving
+        // a hop can put a NEW session's card into "Sending…" (buttons replaced, no retry) or print
+        // another session's error under it. Free to clear: both describe an in-flight attempt on the
+        // session being left.
+        adapter.interactionInFlight = []
+        adapter.interactionErrors = [:]
         Task { @MainActor [weak self] in
             await self?.feed.repin(to: sessionId)
         }

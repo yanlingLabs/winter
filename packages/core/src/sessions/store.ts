@@ -51,6 +51,17 @@ export interface SessionRow {
   lastSeq: number;
   title?: string;
   cwd?: string;
+  /** mac-chat-parity T4: the session's approval policy — the read half of `setApprovalPolicy`,
+   *  off the same `approval_policy` column and through the same `normalizeApprovalPolicy` `meta()`
+   *  uses, so the list door and the per-session door can never describe one session differently.
+   *
+   *  REQUIRED, unlike every optional field around it: the column is not-NULL in practice (every
+   *  INSERT path defaults it to `"ask"`, and `recoverAll`'s pass-2 rebuild writes a literal
+   *  `'ask'`), and the normalizer turns anything unrecognized into `"ask"` too — so "no policy" is
+   *  not a state this row can be in, and typing it optional would invite a consumer to invent one.
+   *  Its reset-on-index-rebuild class is `cwd`/`origin`'s, not `mode`'s: a full index loss returns
+   *  every session to `"ask"` rather than restoring what it was. */
+  approvalPolicy: SessionApprovalPolicy;
   /** Phase 5 routines T3 (design doc §3): a machine-readable "who/what created this session" tag
    *  (e.g. `routine/<id>`) — set at createSession, index-only metadata (like `cwd`/approvalPolicy
    *  below, NOT derived from the event log the way title/first_message are), so it resets to
@@ -130,6 +141,27 @@ function fallbackTitle(firstMessage: string | null): string | undefined {
   const line = (firstMessage.split("\n", 1)[0] ?? "").trim();
   if (!line) return undefined;
   return line.length > 60 ? `${line.slice(0, 59)}…` : line;
+}
+
+/** The ONE reading of the stored `approval_policy` column, shared by `meta()` (one session) and
+ *  `list()` (the `session.list` row) — extracted by mac-chat-parity T4, when the list read was
+ *  added, so the two doors can never describe the same session's policy differently.
+ *
+ *  Plan-immunity (2026-07-28, USER-REVISED design): "chat" (gate.ts's `SessionApprovalPolicy`) is a
+ *  first-class RECOGNIZED value, not a stray — `session.create`'s chat-seam coercion persists it
+ *  verbatim for every chat-mode session (ipc/server.ts). Without it in this list a stored "chat"
+ *  row would silently fall through to the "ask" default, THE SAME TRAP the "plan must not read back
+ *  as ask" precedent guards against, just for the newest value.
+ *
+ *  Anything else — NULL, a hand-edited row, a value some future writer stores that this build does
+ *  not know — degrades to "ask", the same default every INSERT path writes. Never trusted through:
+ *  an unrecognized string reaching the gate as a policy is how a session gets evaluated against a
+ *  rule nobody wrote. */
+function normalizeApprovalPolicy(stored: unknown): SessionApprovalPolicy {
+  return (["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass", "chat"] as const)
+    .includes(stored as SessionApprovalPolicy)
+    ? (stored as SessionApprovalPolicy)
+    : "ask";
 }
 
 /** Event payload before the store assigns seq/ts. Uses the protocol's exported
@@ -416,13 +448,17 @@ export class SessionStore {
   }
 
   list(): SessionRow[] {
-    return (this.db.query("SELECT session_id, scope, created_at, last_seq, title, first_message, cwd, origin, mode, parent_session_id, model, effort, forked_from_session_id, forked_from_at_seq, backgrounded, archived FROM sessions ORDER BY created_at").all() as
-      { session_id: string; scope: string; created_at: number; last_seq: number; title: string | null; first_message: string | null; cwd: string | null; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null; effort: string | null; forked_from_session_id: string | null; forked_from_at_seq: number | null; backgrounded: number | null; archived: number | null }[])
+    return (this.db.query("SELECT session_id, scope, created_at, last_seq, title, first_message, cwd, approval_policy, origin, mode, parent_session_id, model, effort, forked_from_session_id, forked_from_at_seq, backgrounded, archived FROM sessions ORDER BY created_at").all() as
+      { session_id: string; scope: string; created_at: number; last_seq: number; title: string | null; first_message: string | null; cwd: string | null; approval_policy: string | null; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null; effort: string | null; forked_from_session_id: string | null; forked_from_at_seq: number | null; backgrounded: number | null; archived: number | null }[])
       .map((r) => ({
         sessionId: r.session_id,
         scope: r.scope,
         createdAt: r.created_at,
         lastSeq: r.last_seq,
+        // mac-chat-parity T4: through the SAME normalizer `meta()` uses — one reading of the column,
+        // so the `session.list` row a picker renders and the policy the gate enforces can never be
+        // two different answers about one session. Always a value, never absent (see SessionRow).
+        approvalPolicy: normalizeApprovalPolicy(r.approval_policy),
         // capTitle on READ (review I2): the one place both remote title consumers converge, so a
         // row written before the write-path caps existed still cannot brick the phone transport.
         title: r.title !== null ? capTitle(r.title) : fallbackTitle(r.first_message),
@@ -622,16 +658,9 @@ export class SessionStore {
     const row = this.db.query("SELECT scope, cwd, approval_policy, origin, mode, parent_session_id, model, effort, backgrounded, archived FROM sessions WHERE session_id = ?").get(sessionId) as
       | { scope: string; cwd: string | null; approval_policy: string; origin: string | null; mode: string | null; parent_session_id: string | null; model: string | null; effort: string | null; backgrounded: number | null; archived: number | null } | null;
     if (!row) throw new Error(`unknown session: ${sessionId}`);
-    const p = row.approval_policy;
-    // Plan-immunity (2026-07-28, USER-REVISED design): "chat" (gate.ts's SessionApprovalPolicy)
-    // is a first-class recognized value here — session.create's chat-seam coercion persists it
-    // verbatim for every chat-mode session (server.ts). Without it in this list, a stored "chat"
-    // row would silently fall through to the "ask" default below, THE SAME TRAP the "plan must not
-    // read back as ask" precedent above already guards against, just for the newest value.
-    const approvalPolicy: SessionApprovalPolicy =
-      (["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass", "chat"] as const).includes(p as SessionApprovalPolicy)
-        ? (p as SessionApprovalPolicy)
-        : "ask";
+    // The shared reading — see `normalizeApprovalPolicy` for why "chat" is recognized and why
+    // everything else degrades to "ask". `list()` calls the same function on the same column.
+    const approvalPolicy = normalizeApprovalPolicy(row.approval_policy);
     return {
       sessionId, scope: row.scope, cwd: row.cwd, approvalPolicy,
       origin: row.origin ?? undefined, mode: row.mode ?? undefined, parentSessionId: row.parent_session_id ?? undefined,

@@ -7,7 +7,7 @@ import NormaKit
 /// Task 2 (2d-iii): the two PURE helpers behind the pending-interaction cards —
 /// `questionAnswers(for:selections:otherTexts:)` (UI selection state → the answers dict the
 /// daemon expects) and `cardTitle(_:)` (per-kind header text). Views themselves aren't rendered
-/// here (nothing mounts `PendingCardsView` yet — that's Task 3); this only locks down the pure
+/// here (the cards render inline in the transcript — `TranscriptInteractionCard`); this locks down the pure
 /// mapping logic, same convention as `ActivityRowTests`/`PendingInteractionTests`.
 final class PendingCardsTests: XCTestCase {
     /// Builds `[SessionEvent.Question]` the same wire-shaped-JSON way `PendingInteractionTests`
@@ -149,14 +149,14 @@ final class PendingCardsTests: XCTestCase {
     }
 
     func testCardTitles() {
-        let approval = PendingInteraction.approval(callId: "a1", toolName: "bash", summary: "rm x")
+        let approval = InteractionRecord.Ask.approval(toolName: "bash", summary: "rm x")
         XCTAssertEqual(cardTitle(approval), "Approval needed — bash")
 
         let qs = questions(#"[{"question":"Which db?","header":"DB","options":[{"label":"Postgres","description":null},{"label":"MySQL","description":null}],"multiSelect":false}]"#)
-        let question = PendingInteraction.question(callId: "q1", questions: qs)
+        let question = InteractionRecord.Ask.question(questions: qs)
         XCTAssertEqual(cardTitle(question), "DB")
 
-        let plan = PendingInteraction.plan(callId: "p1", plan: "the plan")
+        let plan = InteractionRecord.Ask.plan(plan: "the plan")
         XCTAssertEqual(cardTitle(plan), "Plan for approval")
     }
 
@@ -356,7 +356,7 @@ final class PendingCardsTests: XCTestCase {
     /// EXACT mechanism the real view will use (`adapter.pendingCardDraftBinding(for:)`, mirroring
     /// `FieldStateAdapter.draftBinding` for the composer), must still be there when a SECOND,
     /// independently-constructed Binding is pulled from the SAME adapter — which is precisely what
-    /// happens when `ShellRootView` rebuilds `detail` (and so `PendingCardsView` → `PendingCard` →
+    /// happens when `ShellRootView` rebuilds `detail` (and so `TranscriptView` → `TranscriptInteractionCard` →
     /// `PendingQuestionBody`) after leaving `.maximized`: a brand-new view struct, the same
     /// long-lived `FieldStateAdapter` underneath it (`WindowContentView`'s `@ObservedObject var
     /// adapter`, itself owned by `ShellSessionAttachment`, outside `detail` entirely).

@@ -97,6 +97,145 @@ enum PendingInteraction: Equatable {
     }
 }
 
+/// One human-in-the-loop interaction as the TRANSCRIPT keeps it (mac-chat-parity Task 3): what was
+/// asked, and — once the daemon says so — what was decided. Distinct from `PendingInteraction`
+/// above, which is the list of asks still OUTSTANDING and is emptied on resolve; this record is
+/// appended to an exchange's `activity` and never removed, which is what gives the Mac an auditable
+/// record of everything approved and answered. Before Task 3 the transcript kept only
+/// `ActivityItem.Kind.interaction(String)` — a bare summary line — and the pinned card band deleted
+/// the card itself on resolve, so nothing anywhere in Mac scrollback said what the user had chosen.
+///
+/// Every field comes off the wire and is PERSISTED in the session JSONL, so this whole record is
+/// rebuilt by the ordinary replay-from-seq-0 that `AppModel.refocus` and every relaunch already do —
+/// it is never view state. Ask side: `approval_requested`/`question_asked`/`plan_presented`.
+/// Outcome side: `approval_resolved`/`question_resolved`/`plan_resolved` (none of the six is in
+/// `TRANSIENT_EVENT_TYPES`, `packages/protocol/src/events.ts`).
+struct InteractionRecord: Equatable {
+    /// What the daemon asked — the `*_requested`/`*_asked`/`*_presented` payload, verbatim. Mirrors
+    /// `PendingInteraction`'s cases minus `callId`/`childSessionId`, which are stored once on the
+    /// record rather than per-case.
+    enum Ask: Equatable {
+        case approval(toolName: String, summary: String, reviewerReason: String? = nil, options: [SessionEvent.ApprovalOption]? = nil)
+        case question(questions: [SessionEvent.Question])
+        case plan(plan: String)
+    }
+
+    /// How the ask ended. `nil` on the record means STILL PENDING, and that is the single source of
+    /// truth for whether the transcript draws an interactive card or a frozen one — see
+    /// `interactionIsPending`.
+    ///
+    /// **This is deliberately NOT the same set as `OrbSessionState.pendingInteractions`, and the
+    /// difference is the point.** That list is emptied wholesale by the DISPATCH session's own
+    /// `turn_completed`, which is evidence about the parent's turn and says nothing whatever about a
+    /// mirrored CHILD session's ask — the child is designed to still be blocked there
+    /// (`packages/core/src/agent/dispatch-children.ts`'s relay is a hub-wide observer over tracked
+    /// children, not something scoped to the parent's turn). So a record with a `childSessionId`
+    /// stays pending across the parent's turn end, and the Mac keeps its door to answering it. What
+    /// the predicate actually tracks is "is the daemon still waiting on this ask", which is the
+    /// question the card is asking — see `interactionEndsWithItsTurn`.
+    enum Outcome: Equatable {
+        /// `approval_resolved`. NOTE the wire carries no `optionId`
+        /// (`packages/protocol/src/events.ts`'s `ApprovalResolvedEvent` is `callId`/`approved`/`by`/
+        /// `childSessionId` only), so WHICH allow-rule option was chosen is not recoverable — a
+        /// rule-writing approval freezes as a plain "Approved", the same thing iOS's resolved
+        /// `ApprovalRowView` shows. Do not invent a local store for it: an outcome that survives
+        /// relaunch has to come off the event log.
+        ///
+        /// **That gap is security-relevant, not cosmetic, and the follow-up should say so.**
+        /// `approvalAdditionalOptions` (`ChatContent/PendingCards.swift`) surfaces every non-
+        /// `allow_once`/`deny` option, which since working-directories T6.5 includes
+        /// `allow_add_dir` — "Allow and add as working directory", the one card option that WIDENS
+        /// THE SESSION'S WRITE FENCE. Choosing it freezes here as an indistinguishable "Approved",
+        /// so the audit trail cannot tell a one-off allow from a permanent rule or a fence
+        /// expansion. Closing it means adding `optionId` to `approval_resolved` — a protocol FIELD
+        /// change, which engages none of the compile-time traps, so its producers must be swept by
+        /// meaning (CLAUDE.md's own warning).
+        case approval(approved: Bool, by: String)
+        /// `question_resolved`. `answers`/`notes` are keyed by QUESTION TEXT, exactly as the wire
+        /// keys them and as `questionAnswers`/`questionNotes` produce them.
+        case question(answers: [String: String], notes: [String: String], by: String)
+        /// `plan_resolved`.
+        case plan(approved: Bool, autoAccept: Bool, feedback: String?, by: String)
+        /// The turn ended (`turn_completed`/`agent_error`) while this ask was still outstanding, so
+        /// no `*_resolved` will ever arrive for it. Terminal, and deliberately NOT an outcome: the
+        /// card freezes saying nothing was recorded rather than claiming a decision nobody made.
+        /// Without this the card would keep its live buttons forever on a call the daemon has
+        /// stopped waiting on — a frozen card that can still be clicked.
+        case ended
+    }
+
+    let callId: String
+    let ask: Ask
+    /// Dispatch relay (Phase 7): mirrors `PendingInteraction`'s own `childSessionId` — set only on
+    /// the mirrored copy of a CHILD session's ask, and threaded back into the respond callbacks so
+    /// the answer routes to the child.
+    var childSessionId: String?
+    var outcome: Outcome?
+
+    init(callId: String, ask: Ask, childSessionId: String? = nil, outcome: Outcome? = nil) {
+        self.callId = callId
+        self.ask = ask
+        self.childSessionId = childSessionId
+        self.outcome = outcome
+    }
+
+    /// The one-line summary this interaction used to be reduced to, kept as a DERIVED value rather
+    /// than a second stored field so it can never drift from the ask it describes. Read by
+    /// `activityGlyphAndLabel`'s defensive fallback (the transcript itself draws the card, not this
+    /// line) and by anything that wants a bare label for an interaction.
+    var summary: String {
+        switch ask {
+        case .approval(_, let summary, _, _): return summary
+        case .question(let questions): return questions.first?.question ?? "question"
+        case .plan: return "plan presented"
+        }
+    }
+}
+
+/// Whether an interaction is still awaiting the user — the ONE predicate that decides whether the
+/// transcript draws a live card or a frozen record. Pure and exported so the decision is unit-
+/// testable without mounting a view, the same convention as `questionShowsHeaderChip` and friends
+/// in `ChatContent/PendingCards.swift`.
+func interactionIsPending(_ record: InteractionRecord) -> Bool { record.outcome == nil }
+
+/// Whether an ask's LIFECYCLE ends with the turn it was asked in — i.e. whether this session's
+/// `turn_completed`/`agent_error` is evidence that nobody is waiting on it any more.
+///
+/// True for a native ask: the engine awaits it inside the turn, so the turn ending proves it will
+/// never be answered. **False for a mirrored child ask** (`childSessionId != nil`, Dispatch Phase 7).
+/// The dispatch session's relay (`packages/core/src/agent/dispatch-children.ts`) is a hub-wide
+/// observer over tracked children with no scoping to the parent's turn: a child is *designed* to sit
+/// blocked on an approval while the parent's turn ends, and the child's eventual
+/// `approval_resolved`/`question_resolved` is mirrored back into the parent's stream whenever it
+/// arrives — minutes later, after any number of parent turns.
+///
+/// Stamping `.ended` on those was a false, replay-durable record ("Ended with no response" for an
+/// approval the child was actively blocked on) AND it closed the Mac's only door to answering it,
+/// since `onApproval`/`onQuestion` already thread `childSessionId` straight through to the child.
+/// Not stamping keeps the card live, which is what it honestly is.
+func interactionEndsWithItsTurn(_ record: InteractionRecord) -> Bool { record.childSessionId == nil }
+
+/// Whether a newly-arrived outcome may be written over what a record already holds.
+///
+/// Two rules, and the distinction between them is the whole content of this function:
+///
+/// 1. **First-response-wins among REAL outcomes.** The daemon's own brokers are first-response-wins
+///    (`ApprovalBroker.resolve`/`QuestionBroker.respond` return `alreadyResolved` rather than
+///    re-resolving), so a duplicate or a late timeout must never rewrite the record of what the user
+///    actually chose.
+/// 2. **`.ended` is not a real outcome and does not get that protection.** It is a LOCAL INFERENCE
+///    this app draws from its own turn ending — a guess that nothing will arrive. When the daemon
+///    later reports what actually happened, its truth outranks the guess, every time. Without this
+///    the dispatch mirror froze a permanent lie: the parent's turn end stamped `.ended`, and the
+///    child's genuine resolution — arriving afterwards by design — was discarded forever.
+func interactionOutcomeMayBeReplaced(current: InteractionRecord.Outcome?, with next: InteractionRecord.Outcome) -> Bool {
+    switch current {
+    case .none: return true                    // nothing recorded yet
+    case .ended: return next != .ended         // a real resolution outranks the local inference
+    default: return false                      // rule 1
+    }
+}
+
 /// One line of "what happened during this exchange" — tools run, task transitions, subagents
 /// spawned/finished, worktree enters/exits, and interaction points (approvals/questions/plans).
 /// Captured per-exchange by `SessionReducer.reduce` (2d-ii-a task 1) so the transcript can show
@@ -104,29 +243,85 @@ enum PendingInteraction: Equatable {
 struct ActivityItem: Equatable {
     enum Kind: Equatable {
         /// `detail` (LIVE-GATE G3) is a short, tool-specific hint extracted from the tool call's
-        /// `argsJson` by `SessionReducer.extractToolDetail` — the bash command's first line, a
-        /// task subject, or a file path/pattern, depending on `name`. `nil` for tools with no
-        /// recognized detail field, or when `argsJson` fails to parse (defensive: malformed/
-        /// missing JSON never throws, it just yields no detail). Consumed by the transcript's
+        /// `argsJson` by `SessionReducer.extractToolDetail` — a command's first line, a path, a
+        /// url, a query, a subject, or a `"<verb> <operand>"` pair for the multi-verb tools,
+        /// depending on `name`; see that method's doc for the rules and their limits. `nil` for
+        /// tools with no useful one-line summary, or when `argsJson` fails to parse (defensive:
+        /// malformed/missing JSON never throws, it just yields no detail). Consumed by the transcript's
         /// grouped tool rows (`groupActivity`/`toolGroupLabel` in ChatContent) for the expandable
         /// per-call detail lines — never by `activityGlyphAndLabel`'s single-item fallback path.
-        case tool(name: String, detail: String?)
+        ///
+        /// `callId`/`output`/`isError` (mac-chat-parity Task 1) carry the tool's RESULT, which the
+        /// reducer used to throw away entirely — `tool_result` folded to a status flip and nothing
+        /// else, so no view could ever show what a tool did or whether it failed. `callId` is the
+        /// wire's `tool_call.callId`, the join key `foldToolResult` matches the later `tool_result`
+        /// on; `output`/`isError` are that result. They stay at their defaults (`nil`/`false`) until
+        /// it arrives. `output` is capped at `SessionReducer.maxToolOutputCharacters` — see that
+        /// constant's own doc.
+        ///
+        /// `output == nil` means "no result was ever seen for this call", which is NOT the same as
+        /// "still running" — do not render a running indicator off it alone. Every `tool_result` the
+        /// engine emits is post-outcome (`packages/core/src/agent/engine.ts`'s tool loop has no
+        /// abort branch that emits a synthetic one), so a call interrupted by ESC never gets a
+        /// result at all and stays `nil` PERMANENTLY — a replayed aborted turn would otherwise read
+        /// as perpetually running, forever. A running glyph must additionally be gated on the turn
+        /// actually being live — on `turnRunning`, and ONLY on that. (An earlier revision of this
+        /// doc offered `!Exchange.aborted` as an equivalent for a finished turn; it is not one. A
+        /// turn that ended cleanly can still hold a resultless call, because `appendActivity`'s
+        /// 200-item drop-oldest cap can evict the item before its result arrives — `foldToolResult`
+        /// names that same case. The transcript gates on `turnRunning` alone.)
+        /// All three are defaulted so every `.tool(name:detail:)` construction site written before
+        /// they existed compiles and means the same thing; pattern matches must bind all five.
+        case tool(name: String, detail: String?, callId: String? = nil, output: String? = nil, isError: Bool = false)
         case task(subject: String, status: String)
         case subagent(agentType: String)
         case subagentDone
         case worktree(entered: Bool, detail: String)
-        case interaction(String)
+        /// An approval/question/plan asked during this exchange, and (once folded) how it ended —
+        /// see `InteractionRecord`. This was a bare `String` summary until mac-chat-parity Task 3;
+        /// the payload has to live here because this item is the transcript's ONLY anchor for the
+        /// card, now that the pinned band that used to own it is gone.
+        case interaction(InteractionRecord)
     }
     var kind: Kind
 }
 
-/// A user prompt paired with its reply — the field's inline-response shell (2c wave 2 task 3)
-/// reads `exchanges.last` instead of the flat `lastReply` string so it can tell "no reply yet"
-/// (empty `reply`) apart from "no exchange at all" (empty array), and so a later wave can render
-/// prior turns without re-deriving pairing from the flat event log.
+extension ActivityItem {
+    /// The `tool_call.callId` a `.tool` item was opened with — `nil` for every other kind, and for
+    /// a `.tool` item constructed without one (the pre-Task-1 shape, still reachable from tests).
+    /// This is the join key `SessionReducer.foldToolResult` searches on; it is deliberately an
+    /// accessor rather than a stored field on `ActivityItem`, so that tool-only data stays on the
+    /// tool case where a `.task`/`.worktree` item can't carry a meaningless one.
+    var toolCallId: String? {
+        if case .tool(_, _, let callId, _, _) = kind { return callId }
+        return nil
+    }
+
+    /// The `InteractionRecord` an `.interaction` item carries — `nil` for every other kind. The
+    /// join key `SessionReducer.foldInteractionOutcome` searches on, and the transcript's signal to
+    /// draw a card instead of a one-line activity row. An accessor for the same reason
+    /// `toolCallId` is one: interaction-only data stays on the interaction case, where a
+    /// `.task`/`.worktree` item cannot carry a meaningless copy of it.
+    var interactionRecord: InteractionRecord? {
+        if case .interaction(let record) = kind { return record }
+        return nil
+    }
+}
+
+/// A user prompt paired with every assistant message its turn produced — the field's
+/// inline-response shell (2c wave 2 task 3) reads `exchanges.last` instead of the flat `lastReply`
+/// string so it can tell "no reply yet" (empty `reply`) apart from "no exchange at all" (empty
+/// array), and so a later wave can render prior turns without re-deriving pairing from the flat
+/// event log.
 struct Exchange: Equatable {
     var prompt: String
-    var reply: String
+    /// EVERY `assistant_message` this exchange's turn emitted, in arrival order (mac-chat-parity
+    /// Task 1). The engine emits one PER ROUND, whenever the round produced text
+    /// (`if (textBuf.length > 0)`, `packages/core/src/agent/engine.ts`) — this was a single
+    /// `reply` string that each round OVERWROTE, so in any multi-round turn every intermediate
+    /// round's prose was silently discarded before it reached the view. The transcript renders one
+    /// row per entry, in order.
+    var replies: [String] = []
     /// What happened while this exchange's turn ran (2d-ii-a task 1) — appended via
     /// `SessionReducer.appendActivity` (main-transcript events only; adjacent dupes collapse;
     /// capped at 200 drop-oldest). Defaulted so existing `Exchange(prompt:reply:)` call
@@ -135,6 +330,26 @@ struct Exchange: Equatable {
     /// True when this exchange's turn ended with `stopReason == "aborted"` (Esc-interrupt) —
     /// the per-exchange sibling of the state-level `lastTurnAborted` flash flag.
     var aborted: Bool = false
+
+    /// The LAST assistant message of this exchange, or `""` when none has arrived yet. This is
+    /// what the SINGLE-BUBBLE surfaces read — `FieldStateAdapter.visibleResponse`,
+    /// `GlassRootView.hasReadableReply`, `OrbWindowController`'s reveal gates — and it is the same
+    /// value they read before `replies` existed, because the old stored `reply` was exactly
+    /// "whatever the newest `assistant_message` overwrote it with". Their behaviour is therefore
+    /// deliberately unchanged by Task 1; only the transcript, which reads `replies` in full, gains
+    /// the intermediate rounds.
+    var reply: String { replies.last ?? "" }
+
+    /// The single-reply shape, which is what a one-round turn actually is — the common case in
+    /// production and in nearly every test. `reply: ""` means "no reply yet" and produces NO entry
+    /// (not an empty one), so `Exchange(prompt:reply:"")` still compares equal to a freshly-opened
+    /// exchange the reducer built. Multi-reply state is built by appending to `replies`.
+    init(prompt: String, reply: String, activity: [ActivityItem] = [], aborted: Bool = false) {
+        self.prompt = prompt
+        self.replies = reply.isEmpty ? [] : [reply]
+        self.activity = activity
+        self.aborted = aborted
+    }
 }
 
 struct OrbSessionState: Equatable {
@@ -175,9 +390,9 @@ struct OrbSessionState: Equatable {
     var turnRunning = false
     var streamingText = ""
     var lastReply: String? = nil
-    /// Ordered prompt/reply pairs, oldest first. `user_message(main)` appends a new exchange
-    /// with an empty reply; `assistant_message(main)` fills in the LAST exchange's reply (or, if
-    /// none exists yet, appends one with an empty prompt) — see `SessionReducer.reduce`.
+    /// Ordered prompt/replies pairs, oldest first. `user_message(main)` appends a new exchange
+    /// with no replies; `assistant_message(main)` APPENDS to the LAST exchange's `replies` (or, if
+    /// no exchange exists yet, appends one with an empty prompt) — see `SessionReducer.reduce`.
     var exchanges: [Exchange] = []
     /// Wave-5 gate item 2: messages sent while a turn is already running go down `session.steer`
     /// — the daemon queues them and drains at the next round boundary, and the reducer folds each
@@ -287,6 +502,51 @@ struct OrbSessionState: Equatable {
 enum SessionReducer {
     private static let mainThread = "main"
 
+    /// Per-`tool_result` retention cap for `ActivityItem.Kind.tool`'s `output` (mac-chat-parity
+    /// Task 1) — the reducer stores at most this many characters and appends a truncation marker.
+    ///
+    /// Set to MATCH the daemon's own `MAX_OUTPUT` (64 KiB, `packages/core/src/agent/tools/registry.ts`)
+    /// exactly, and that equality is the whole point: the daemon has ALREADY bounded every result at
+    /// 64 KiB before it reaches any client, so anything this constant clips below that is not a
+    /// memory bound the system was missing — it is data the daemon deliberately sent us and we threw
+    /// away. A lower figure here would silently re-create the very complaint this task exists to fix:
+    /// 8–64 KiB is the NORMAL band for the most-used tool, not a pathological tail (the `read` tool's
+    /// own description tells the model "outputs over 64KB truncate, so page large files with
+    /// offset/limit" — `packages/core/src/agent/tools/fs-read.ts`), and iOS retains the full 64 KiB.
+    /// So in practice this cap never bites. It exists so that a future protocol change raising
+    /// `MAX_OUTPUT` cannot silently blow up the transcript — this reducer's state is rebuilt by
+    /// replaying a session's ENTIRE event log from seq 0 on every focus and every relaunch
+    /// (`AppModel.refocus`), and `appendActivity`'s cap bounds the count of EVICTABLE items per
+    /// exchange, never its bytes. It is deliberately enforced here rather than at render time,
+    /// because that is the only place it can bound anything: a renderer-side clip saves drawing work
+    /// on a string that is already resident.
+    ///
+    /// Worst case per exchange is therefore 200 items × 64 Ki CHARACTERS ≈ 13.1 M characters — still
+    /// 200 even though M-2 exempted `.interaction` from the cap, because only `.tool` items carry
+    /// output and every `.tool` item is evictable. Stated
+    /// in characters, not bytes, because that is the unit `capToolOutput` actually measures
+    /// (`String.count`/`prefix` count grapheme clusters) — all-ASCII output makes those equal at
+    /// ~13 MiB, but non-ASCII output can occupy several bytes per character and exceed it
+    /// correspondingly. Internal rather than private so tests can pin the exact boundary instead of
+    /// guessing at it, the same convention as `SessionModel.notificationFreshnessMs`.
+    static let maxToolOutputCharacters = 64 * 1024
+
+    /// How many exchanges back `foldToolResult` will look for the item a `tool_result` belongs to.
+    ///
+    /// The hit path is depth 1 — the overwhelmingly common case. The reason to look further back at
+    /// all is bounded by construction: between a `tool_call` and its `tool_result` the engine's tool
+    /// loop emits nothing on the main thread except steer `user_message`s, and only the FIRST of
+    /// those opens a new exchange (every later one folds into it, since the fresh exchange's reply is
+    /// empty). So one exchange back always suffices for the case this scan exists for; the extra
+    /// headroom is slack, not a requirement.
+    ///
+    /// The bound matters because the MISS path is what costs: a no-match scan is
+    /// exchanges × up-to-200 items, and misses are genuinely reachable (see `foldToolResult`'s doc —
+    /// a >200-call turn evicts items whose results have not landed yet, and the main thread no longer
+    /// caps tool iterations). Unbounded, a long session would make every one of those results walk
+    /// its entire transcript. Bounded, the miss is O(1) in transcript length.
+    private static let toolResultFoldSearchDepth = 4
+
     static func reduce(_ state: OrbSessionState, _ event: SessionEvent) -> OrbSessionState {
         var s = state
         switch event {
@@ -334,24 +594,39 @@ enum SessionReducer {
             }
         case .toolCall(let v) where v.threadId == mainThread:
             if s.pendingInteractions.isEmpty { s.status = .toolRunning(name: v.name) }
-            appendActivity(.tool(name: v.name, detail: extractToolDetail(name: v.name, argsJson: v.argsJson)), to: &s)
+            appendActivity(.tool(name: v.name, detail: extractToolDetail(name: v.name, argsJson: v.argsJson), callId: v.callId), to: &s)
         case .toolResult(let v) where v.threadId == mainThread:
+            // The status flip is deliberately UNCONDITIONAL and comes first: it is the behaviour
+            // this case has always had, and it must not become contingent on whether the fold
+            // below finds an item to land on.
             if s.pendingInteractions.isEmpty { s.status = .thinking }
+            foldToolResult(&s, callId: v.callId, output: v.output, isError: v.isError)
         case .approvalRequested(let v) where v.threadId == mainThread:
             appendPending(.approval(callId: v.callId, toolName: v.toolName, summary: v.summary, reviewerReason: v.reviewerReason, childSessionId: v.childSessionId, options: v.options), to: &s)
-            appendActivity(.interaction(v.summary), to: &s)
+            appendInteraction(InteractionRecord(
+                callId: v.callId,
+                ask: .approval(toolName: v.toolName, summary: v.summary, reviewerReason: v.reviewerReason, options: v.options),
+                childSessionId: v.childSessionId
+            ), to: &s)
         case .questionAsked(let v) where v.threadId == mainThread:
             appendPending(.question(callId: v.callId, questions: v.questions, childSessionId: v.childSessionId), to: &s)
-            appendActivity(.interaction(v.questions.first?.question ?? "question"), to: &s)
+            appendInteraction(InteractionRecord(
+                callId: v.callId,
+                ask: .question(questions: v.questions),
+                childSessionId: v.childSessionId
+            ), to: &s)
         case .planPresented(let v) where v.threadId == mainThread:
             appendPending(.plan(callId: v.callId, plan: v.plan), to: &s)
-            appendActivity(.interaction("plan presented"), to: &s)
+            appendInteraction(InteractionRecord(callId: v.callId, ask: .plan(plan: v.plan)), to: &s)
         case .approvalResolved(let v):
             s = resolvePending(s, callId: v.callId)
+            foldInteractionOutcome(&s, callId: v.callId, outcome: .approval(approved: v.approved, by: v.by))
         case .questionResolved(let v):
             s = resolvePending(s, callId: v.callId)
+            foldInteractionOutcome(&s, callId: v.callId, outcome: .question(answers: v.answers, notes: v.notes ?? [:], by: v.by))
         case .planResolved(let v):
             s = resolvePending(s, callId: v.callId)
+            foldInteractionOutcome(&s, callId: v.callId, outcome: .plan(approved: v.approved, autoAccept: v.autoAccept, feedback: v.feedback, by: v.by))
         case .childUpdate(let v):
             // Dispatch (Phase 7): upsert by childSessionId — a brand-new child appends, a known
             // one is replaced wholesale (title can change, e.g. once the daemon assigns one).
@@ -399,12 +674,19 @@ enum SessionReducer {
             s.streamingText = ""
             if s.exchanges.isEmpty {
                 s.exchanges.append(Exchange(prompt: "", reply: v.text))
-            } else {
-                s.exchanges[s.exchanges.count - 1].reply = v.text
+            } else if !v.text.isEmpty {
+                // APPEND, never assign: the engine emits one assistant_message per ROUND, so
+                // assigning discarded every round's prose but the last (see `Exchange.replies`).
+                // Empty text is skipped rather than appended — the daemon only emits the event
+                // when the round produced text (`if (textBuf.length > 0)`, engine.ts), so this is
+                // defence against a second producer, and an empty entry would both draw a blank
+                // transcript row and blank out `reply` for the surfaces that read it. It matches
+                // `Exchange(prompt:reply:)`, which likewise maps an empty reply to no entry.
+                s.exchanges[s.exchanges.count - 1].replies.append(v.text)
             }
         case .turnCompleted(let v) where v.threadId == mainThread:
             s.turnRunning = false
-            s.pendingInteractions = []
+            endOutstandingInteractions(&s) // clears pendingInteractions, freezing each as `.ended`
             s.streamingText = ""
             s.status = .idle
             s.lastTurnError = nil // T6: this turn ended without an agent_error
@@ -427,13 +709,13 @@ enum SessionReducer {
             }
         case .agentError(let v) where v.threadId == mainThread:
             s.turnRunning = false
-            s.pendingInteractions = []
+            endOutstandingInteractions(&s) // clears pendingInteractions, freezing each as `.ended`
             s.streamingText = ""
             s.status = .idle
             s.lastTurnError = v.message // T6: the one signal the pickers' probation reads
             s.queuedSteers = [] // the turn died with whatever was queued for it
             if let last = s.exchanges.indices.last, s.exchanges[last].reply.isEmpty {
-                s.exchanges[last].reply = "⚠︎ \(v.message)"
+                s.exchanges[last].replies.append("⚠︎ \(v.message)")
             }
             s.subagents = [] // defensive prune — an errored main turn must not strand a live block
         case .taskUpdated(let v): // any thread — tasks are session-wide
@@ -580,12 +862,190 @@ enum SessionReducer {
         state.workflowRuns[runId] = run
     }
 
+    /// Lands a `tool_result` on the `.tool` activity item its `callId` opened (mac-chat-parity
+    /// Task 1). The reducer used to drop `output`/`isError` on the floor, which is why no Mac view
+    /// could ever show what a tool did or that it failed.
+    ///
+    /// Scans EXCHANGES newest-first rather than only the last one, because a tool_call and its
+    /// tool_result can straddle an exchange boundary: a main-thread steer's `user_message` is
+    /// persisted at SEND time (`AgentEngine.steer`, `packages/core/src/agent/engine.ts`), so it can
+    /// arrive between the two — and once the open exchange already holds a reply (any multi-round
+    /// turn), the `userMessage` case above opens a NEW exchange for it. Searching only the last
+    /// exchange would silently drop those results.
+    ///
+    /// Joins by `callId` rather than by position. The engine's tool loop happens to be serial today
+    /// (`for (const call of calls)` — emit call, await, emit result), so the last-opened item would
+    /// usually be right; the callId is what makes that an invariant of the data rather than a bet on
+    /// the engine's loop shape. `lastIndex` because a callId identifies at most one call — unless a
+    /// duplicated `tool_call` event appended twice (`.tool` is exempt from `appendActivity`'s
+    /// adjacent-dupe collapse), in which case the newest copy is the one on screen.
+    ///
+    /// The scan is bounded to the newest `toolResultFoldSearchDepth` exchanges rather than the whole
+    /// transcript, because the miss path is the expensive one and it is reachable in normal use — see
+    /// that constant's doc.
+    ///
+    /// No match → no-op, in either of two cases. (1) The `tool_call` was dropped by
+    /// `appendActivity`'s no-open-exchange guard (a tool call before any `user_message`). (2) The
+    /// item was EVICTED by `appendActivity`'s 200-item drop-oldest cap before its result arrived —
+    /// reachable whenever a turn makes more than 200 tool calls, which `c1370fd7` on this branch made
+    /// an explicitly supported shape by removing the main thread's tool-iteration limit. Either way
+    /// there is nothing to fold into, exactly as before this existed.
+    private static func foldToolResult(_ state: inout OrbSessionState, callId: String, output: String, isError: Bool) {
+        for e in state.exchanges.indices.reversed().prefix(toolResultFoldSearchDepth) {
+            guard let i = state.exchanges[e].activity.lastIndex(where: { $0.toolCallId == callId }),
+                  case .tool(let name, let detail, let itemCallId, _, _) = state.exchanges[e].activity[i].kind else {
+                continue
+            }
+            state.exchanges[e].activity[i].kind = .tool(
+                name: name,
+                detail: detail,
+                callId: itemCallId,
+                output: capToolOutput(output),
+                isError: isError
+            )
+            return
+        }
+    }
+
+    /// Finds the `.interaction` item a callId opened, newest exchange first. Returns the
+    /// (exchange, activity) index pair, or `nil` when the item is not there — an ordinary, expected
+    /// outcome, not an error: a `*_resolved` for a CHILD thread's own ask (the resolve cases are
+    /// deliberately not thread-gated, unlike the ask cases), or one for an ask that predates this
+    /// transcript's replay window. **Eviction is no longer one of those cases** — `appendActivity`'s
+    /// drop-oldest cap exempts `.interaction` (M-2), so a card that was appended is still there.
+    ///
+    /// **UNBOUNDED, unlike `foldToolResult`'s depth-limited scan, and the difference is deliberate.**
+    /// An earlier revision of this reduced simply borrowed that constant, which does not transfer:
+    /// there the scan is HOT (every tool result) and a miss is benign (no output shown, nothing
+    /// else changes). Here it is COLD — a handful per turn end, at most one per ask — and a miss is
+    /// not benign at all. A missed `endOutstandingInteractions` stamp leaves a card with live
+    /// Approve/Deny/Submit buttons FOREVER, on an ask nobody is waiting on, replay-durable; a missed
+    /// resolution fold leaves the same card never freezing. That is precisely the failure `.ended`
+    /// exists to prevent, reintroduced by the bound meant to be an optimisation.
+    ///
+    /// The depth-4 "one exchange back always suffices" argument was also only ever true for
+    /// main-thread asks: a mirrored child ask (`childSessionId`) can sit outstanding across any
+    /// number of parent turns, so its item is arbitrarily far back by design.
+    ///
+    /// `lastIndex`, matching `foldToolResult`: a callId identifies at most one ask, so the only way
+    /// to see two is a duplicated event, and the newest copy is the one on screen.
+    private static func findInteraction(_ state: OrbSessionState, callId: String) -> (exchange: Int, item: Int)? {
+        for e in state.exchanges.indices.reversed() {
+            if let i = state.exchanges[e].activity.lastIndex(where: { $0.interactionRecord?.callId == callId }) {
+                return (e, i)
+            }
+        }
+        return nil
+    }
+
+    /// Appends the transcript's record of an ask (mac-chat-parity Task 3).
+    ///
+    /// Two things it does that plain `appendActivity` does not, both load-bearing now that this item
+    /// is the only place a card can be drawn from:
+    ///
+    /// 1. **It opens an exchange when there is none.** `appendActivity` drops on an empty
+    ///    `exchanges` (its "no open exchange → drop" rule, correct for a tool line nobody can act
+    ///    on). Dropping an ASK would make it not merely invisible but UNANSWERABLE, since the card
+    ///    is the only door to responding — the pinned band that used to be a second door is gone.
+    ///    Opening an empty-prompt exchange is exactly what the `.assistantMessage` case already does
+    ///    for the same "arrived before any user_message" shape, and the transcript renders one
+    ///    correctly (`TranscriptExchangeRow` draws no prompt bubble for an empty prompt).
+    /// 2. **It dedupes by callId**, mirroring `appendPending`'s replay guard, so a re-seen
+    ///    `approval_requested` during a replay is a no-op rather than a second card. This is a
+    ///    stronger guard than `appendActivity`'s adjacent-dupe collapse, which compares whole values:
+    ///    a duplicate ask arriving after its own resolution had already folded in would not be
+    ///    "adjacent-equal" to anything and would append a second, permanently-pending card.
+    private static func appendInteraction(_ record: InteractionRecord, to state: inout OrbSessionState) {
+        guard findInteraction(state, callId: record.callId) == nil else { return }
+        if state.exchanges.isEmpty { state.exchanges.append(Exchange(prompt: "", reply: "")) }
+        appendActivity(.interaction(record), to: &state)
+    }
+
+    /// Lands a `*_resolved` on the `.interaction` item its callId opened, freezing that card with
+    /// what was actually decided. No match → no-op (see `findInteraction` for when that happens).
+    ///
+    /// What may overwrite what is `interactionOutcomeMayBeReplaced`'s decision, not this function's
+    /// — see it for the two rules (first-response-wins among real outcomes; `.ended` is a local
+    /// inference the daemon's truth always outranks).
+    private static func foldInteractionOutcome(_ state: inout OrbSessionState, callId: String, outcome: InteractionRecord.Outcome) {
+        guard let (e, i) = findInteraction(state, callId: callId),
+              var record = state.exchanges[e].activity[i].interactionRecord,
+              interactionOutcomeMayBeReplaced(current: record.outcome, with: outcome) else { return }
+        record.outcome = outcome
+        state.exchanges[e].activity[i].kind = .interaction(record)
+    }
+
+    /// Empties `pendingInteractions` and freezes as `.ended` each ask it removes **whose lifecycle
+    /// actually ends with this turn** — the single step `turn_completed`/`agent_error` take instead
+    /// of the bare `pendingInteractions = []` they used to.
+    ///
+    /// A native ask is stamped: the engine awaits it inside the turn, so the turn ending proves it
+    /// will never be answered, and a card left clickable there would be a dead button forever. A
+    /// MIRRORED CHILD ask is deliberately not (`interactionEndsWithItsTurn` — see its doc): the
+    /// parent's turn end is no evidence about a child that is designed to still be blocked, and the
+    /// child's real resolution arrives afterwards through the relay.
+    ///
+    /// Two consequences of that exemption, both accepted rather than papered over:
+    ///   - The mirrored card stays pending in the transcript while its callId leaves
+    ///     `pendingInteractions` (this list is still cleared wholesale — it drives the orb's
+    ///     `.approvalNeeded` count, whose per-turn scoping is pre-existing behaviour and not this
+    ///     task's to change). The two sets are therefore NOT identical, by design; see
+    ///     `InteractionRecord.Outcome`'s own doc for why the card's question is the better one.
+    ///   - `FieldStateAdapter`'s draft sweep prunes on `pendingInteractions`, so a mirrored QUESTION
+    ///     card left pending loses any typed-but-unsubmitted answer at the parent's turn end. A
+    ///     wart, and strictly smaller than the alternative (freezing a false record and removing the
+    ///     ability to answer at all); named here so the next person finds it deliberate.
+    private static func endOutstandingInteractions(_ state: inout OrbSessionState) {
+        for pending in state.pendingInteractions {
+            guard let (e, i) = findInteraction(state, callId: pending.callId),
+                  let record = state.exchanges[e].activity[i].interactionRecord,
+                  interactionEndsWithItsTurn(record) else { continue }
+            foldInteractionOutcome(&state, callId: pending.callId, outcome: .ended)
+        }
+        state.pendingInteractions = []
+    }
+
+    /// Truncates one tool result to `maxToolOutputCharacters` and marks that it was truncated —
+    /// see that constant's doc for why the cap lives in the reducer at all. An output of exactly
+    /// the cap's length is kept whole with NO marker, so the marker always means "there was more".
+    private static func capToolOutput(_ output: String) -> String {
+        guard output.count > maxToolOutputCharacters else { return output }
+        return String(output.prefix(maxToolOutputCharacters))
+            + "\n[… truncated at \(maxToolOutputCharacters) characters]"
+    }
+
+    /// How many EVICTABLE activity items one exchange keeps — see `appendActivity`, and note the
+    /// word: `.interaction` items are exempt and are not counted against anything.
+    private static let maxActivityItems = 200
+
     /// Appends to the exchange currently being built. Transcript capture is MAIN-thread only
     /// and defensive: no open exchange → drop. Adjacent duplicates collapse — EXCEPT `.tool`
     /// (LIVE-GATE G3): every tool call is now its own item, even back-to-back calls to the same
     /// tool, so the transcript can show an accurate per-call count/detail list (grouping into
     /// "Ran N shell commands" etc. is the VIEW's job, `groupActivity` in ChatContent, not the
-    /// reducer's). Capped at 200 (drop-oldest) so a marathon turn can't balloon memory (spec §1).
+    /// reducer's). Capped at `maxActivityItems` (drop-oldest) so a marathon turn can't balloon
+    /// memory (spec §1). That cap bounds the item COUNT and nothing else — since mac-chat-parity
+    /// Task 1 each `.tool` item can also hold its result's output, so the size is bounded
+    /// separately, by `maxToolOutputCharacters` (see that constant's doc for the worst case).
+    ///
+    /// **`.interaction` is EXEMPT from the drop, and the cap is therefore not a uniform rule**
+    /// (whole-branch review, M-2). Task 3 deleted the pinned band — `PendingCardsView` has no
+    /// references repo-wide — and that band was fed by the UNCAPPED `pendingInteractions`. The
+    /// inline card is now the only INLINE door to answering an ask, so evicting one is not losing a
+    /// line of scrollback: it is a question that scrolled itself out of existence.
+    ///
+    /// Not reachable for a NATIVE ask (the engine blocks the turn, so nothing further appends), and
+    /// squarely reachable for a DISPATCH-MIRRORED CHILD ask: the parent's turn keeps running and
+    /// can append 200+ items after the card, which `c1370fd7` on this branch made an explicitly
+    /// supported shape by removing the main thread's tool-iteration limit. The orb/detached `y`/`n`
+    /// door survives that, but answers only `pendingInteractions.first` — the OLDEST — and that
+    /// list clears at the parent's turn end, so the child waits forever.
+    ///
+    /// The exemption is a SKIP, not a stay of execution: eviction still runs oldest-first and still
+    /// removes exactly as many ordinary items as the overflow demands, walking past cards. An
+    /// exchange therefore holds at most `maxActivityItems` evictable items PLUS however many asks it
+    /// contains — bounded in practice by how many questions one turn can ask, and each card holds an
+    /// `InteractionRecord`, never tool output, so this does not widen the byte bound above.
     private static func appendActivity(_ kind: ActivityItem.Kind, to state: inout OrbSessionState) {
         guard !state.exchanges.isEmpty else { return }
         let last = state.exchanges.count - 1
@@ -595,38 +1055,189 @@ enum SessionReducer {
             return
         }
         state.exchanges[last].activity.append(ActivityItem(kind: kind))
-        if state.exchanges[last].activity.count > 200 {
-            state.exchanges[last].activity.removeFirst(state.exchanges[last].activity.count - 200)
+
+        var overflow = state.exchanges[last].activity.count - maxActivityItems
+        guard overflow > 0 else { return }
+        var index = 0
+        while overflow > 0, index < state.exchanges[last].activity.count {
+            if state.exchanges[last].activity[index].interactionRecord != nil {
+                index += 1                                    // a card is never the thing that goes
+            } else {
+                state.exchanges[last].activity.remove(at: index)
+                overflow -= 1
+            }
         }
     }
 
+    /// The ceiling on one detail line, in characters — the clip `bash` has always had, applied
+    /// since Task 10 to EVERY tool's hint. Urls, CSS selectors, questions and notification bodies
+    /// are all long or unbounded on the wire, and the row that renders this is `lineLimit(1)`
+    /// (`TranscriptMessageViews`), so an unclipped value buys nothing and costs memory per item.
+    private static let maxToolDetailCharacters = 100
+
+    /// One non-empty string field of a parsed args object, or `nil`. A missing field, a field of
+    /// the wrong JSON type, and an empty string are all the same answer — which is what makes
+    /// every case in `extractToolDetail` total without a single `try`.
+    private static func toolArgString(_ obj: [String: Any], _ key: String) -> String? {
+        guard let s = obj[key] as? String, !s.isEmpty else { return nil }
+        return s
+    }
+
+    /// First line only, clipped to `maxToolDetailCharacters`; `nil` if nothing survives.
+    ///
+    /// Applied to the ASSEMBLED line, not just its operand: `argsJson` is the model's RAW output,
+    /// emitted BEFORE any parse (`engine.ts`'s tool loop emits `tool_call` and only then dispatches),
+    /// so even a field the daemon declares as a zod enum — `browser.verb`, `lsp.action` — can carry
+    /// anything at all in a malformed call. Clipping the whole line is the only bound that holds.
+    private static func clipToolDetail(_ s: String) -> String? {
+        let firstLine = s.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+            .first.map(String.init) ?? s
+        let clipped = String(firstLine.prefix(maxToolDetailCharacters))
+        return clipped.isEmpty ? nil : clipped
+    }
+
+    /// `"<lead> <object>"` for a multi-verb tool, or the bare lead when this verb has no operand.
+    /// A `browser` call is `tabs`/`read`/`screenshot` as often as it is `navigate <url>`, and
+    /// "browser tabs" is worth a row where a bare "browser" is not.
+    private static func verbLedToolDetail(_ lead: String, _ object: String?) -> String? {
+        clipToolDetail(object.map { "\(lead) \($0)" } ?? lead)
+    }
+
     /// LIVE-GATE G3: a short, tool-specific hint pulled from the tool call's raw `argsJson` —
-    /// pure JSON parsing, no throwing (malformed/missing JSON, or a field of the wrong type,
-    /// all fall through to `nil`; this must never crash the reducer). `bash` → the command's
-    /// first line, clipped to 100 chars (long heredocs/scripts stay one line). `task_create`/
-    /// `task_update` → the task's `subject`. `read`/`write`/`edit`/`glob`/`grep` → whichever of
-    /// `file_path`/`path`/`pattern` is present (different tools use different field names for
-    /// "the thing this call touched"). Anything else → `nil` — not every tool has a useful
-    /// one-line summary, and that's fine, the group just renders with no detail lines.
+    /// pure JSON parsing, no throwing (malformed/missing JSON, or a field of the wrong type, all
+    /// fall through to `nil`; this must never crash the reducer). Every value taken off the wire
+    /// goes through `clipToolDetail`, so a detail is ≤ `maxToolDetailCharacters` — with ONE stated
+    /// exception, `ReadPage`'s `"(+N more)"`, which is ours rather than the model's and is appended
+    /// after the clip (see that case).
+    ///
+    /// **Coverage is stated as RULES, not as a list of thirty tools** — a per-tool enumeration here
+    /// would be stale within a task. Each rule's field names were read off the daemon's own zod
+    /// schema in `packages/core/src/agent/tools/`; **a name guessed instead of read yields `nil`,
+    /// which renders exactly like today, so a wrong key is invisible.** Grep the schema before
+    /// touching a case.
+    ///
+    /// 1. **The recognisable operand.** Whichever ONE field a human would recognise — a command, a
+    ///    path, a url, a query, a subject, a name, an id, a recipient. Bare, unprefixed.
+    /// 2. **Verb-led tools get `"<verb> <operand>"`** — `browser`, `lsp`, `computer`, `schedule`.
+    ///    The verb rides even when the call has no operand (`browser tabs`), so every well-formed
+    ///    call produces a readable row; only a missing/mistyped verb yields `nil`.
+    /// 3. **Content the agent wrote INTO SOMETHING is never surfaced; content it wrote FOR THE USER
+    ///    may be.** `browser type` shows its `selector`, never its `text`; `computer` shows `keys`
+    ///    (a shortcut) but never `text`. Norma is driving the user's own logged-in browser and their
+    ///    own screen — a transcript row is not the place for whatever got typed into them. The line
+    ///    is the destination, not the authorship: `push_notification` falls back to its `message`,
+    ///    and `AskQuestion`/`ask_user` show the `question`, all three agent-authored and all three
+    ///    written to be READ BY THE USER — already on their screen in a card or a notification, so a
+    ///    row echoing them discloses nothing.
+    ///    (This rule read "content the agent WROTE is never surfaced" as first written, which those
+    ///    three cases falsified on the same screen — comment-truth #12, caught by the whole-branch
+    ///    review. Restated to what the code does.)
+    /// 4. **`nil` is a correct answer** and stays the default. `exit_plan_mode` (its `plan` is a
+    ///    document), an unnamed `Workflow` (its `script` is a program), `list_sessions` (every field
+    ///    optional and normally absent), and the argless tools all take it. A row cluttered with
+    ///    JSON noise is the failure this avoids; a group with no detail lines is not.
+    ///
+    /// **The `path` / `file_path` correction (Task 10).** This doc used to claim `read`/`write`/
+    /// `edit`/`glob`/`grep`/`ls` send "whichever of `file_path`/`path`/`pattern` is present". They
+    /// never send `file_path`: every fs tool declares `path` (`fs-read.ts`, `fs-write.ts`) and
+    /// `glob`/`grep` declare `pattern`. `file_path` is `lsp`'s field, and only `lsp`'s. It is still
+    /// checked first for the fs tools as a deliberate belt — it is CC's name for that argument, so a
+    /// model trained on that shape does sometimes emit it, and such a call still emits its
+    /// `tool_call` (and therefore its row) before failing the daemon's zod parse.
     private static func extractToolDetail(name: String, argsJson: String) -> String? {
         guard let data = argsJson.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
+        func str(_ key: String) -> String? { toolArgString(obj, key) }
+
         switch name {
+        // ---- shell, files, notebooks ----------------------------------------------------------
         case "bash":
-            guard let command = obj["command"] as? String, !command.isEmpty else { return nil }
-            let firstLine = command.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
-                .first.map(String.init) ?? command
-            return String(firstLine.prefix(100))
-        case "task_create", "task_update":
-            guard let subject = obj["subject"] as? String, !subject.isEmpty else { return nil }
-            return subject
+            return str("command").flatMap(clipToolDetail)
         case "read", "write", "edit", "glob", "grep", "ls":
-            if let path = obj["file_path"] as? String, !path.isEmpty { return path }
-            if let path = obj["path"] as? String, !path.isEmpty { return path }
-            if let pattern = obj["pattern"] as? String, !pattern.isEmpty { return pattern }
-            return nil
+            return (str("file_path") ?? str("path") ?? str("pattern")).flatMap(clipToolDetail)
+        case "notebook_edit":
+            return str("notebook_path").flatMap(clipToolDetail)
+
+        // ---- tasks and background runs --------------------------------------------------------
+        // `task_stop` really does say `task_id` where `task_get`/`bash_output` say `taskId`.
+        case "task_create", "task_update":
+            return str("subject").flatMap(clipToolDetail)
+        case "task_get", "bash_output":
+            return str("taskId").flatMap(clipToolDetail)
+        case "task_stop":
+            return str("task_id").flatMap(clipToolDetail)
+
+        // ---- the browser (rule 2 + rule 3) ----------------------------------------------------
+        // The operand order is a fall-through, not an arbitration: no valid call carries two of
+        // these. `navigate`/`open` carry a url; `click`/`type`/`submit` a selector; `wait` an
+        // `until`; and `scroll` is EITHER a direction OR a selector — the daemon refuses a call
+        // naming both.
+        case "browser":
+            guard let verb = str("verb") else { return nil }
+            return verbLedToolDetail(verb, str("url") ?? str("selector") ?? str("direction") ?? str("until"))
+
+        // ---- the web and page reading ---------------------------------------------------------
+        case "web_fetch":
+            return str("url").flatMap(clipToolDetail)
+        case "web_search", "Search", "ToolSearch":
+            return str("query").flatMap(clipToolDetail)
+        // ReadPage takes a BATCH (`{pages:[{url, query?, …}]}`), never a bare url. The "+N more"
+        // rides AFTER the clip on purpose: it is the signal that this row shows one of several
+        // urls, so it must not be the part a long url cuts off.
+        case "ReadPage":
+            guard let pages = obj["pages"] as? [Any],
+                  let first = pages.first as? [String: Any],
+                  let url = toolArgString(first, "url").flatMap(clipToolDetail) else { return nil }
+            return pages.count > 1 ? "\(url) (+\(pages.count - 1) more)" : url
+
+        // ---- verb-led: language server, computer use, scheduling ------------------------------
+        case "lsp":
+            // `workspace_symbols` is project-wide and has no `file_path` at all — `symbol` is its
+            // operand.
+            guard let action = str("action") else { return nil }
+            return verbLedToolDetail(action, str("file_path") ?? str("symbol"))
+        case "computer":
+            guard let action = str("action") else { return nil }
+            return verbLedToolDetail(action, str("keys"))
+        case "schedule":
+            guard let op = str("op") else { return nil }
+            return verbLedToolDetail(op, str("spec") ?? str("id"))
+
+        // ---- one-word verbs and names ---------------------------------------------------------
+        case "exit_worktree", "manage_session":
+            return str("action").flatMap(clipToolDetail)
+        case "enter_worktree", "Skill", "skill_write", "Workflow":
+            return str("name").flatMap(clipToolDetail)
+
+        // ---- agents and sessions ----------------------------------------------------------------
+        // `spawn_agent.description` is the required 3-5 word summary; its `prompt` is the whole
+        // brief and would fill the row with noise.
+        case "spawn_agent":
+            return (str("description") ?? str("agentType")).flatMap(clipToolDetail)
+        case "session_spawn":
+            return (str("title") ?? str("dir")).flatMap(clipToolDetail)
+        case "send_message":
+            return str("to").flatMap(clipToolDetail)
+        case "agent_output":
+            return str("agent").flatMap(clipToolDetail)
+
+        // ---- MCP, notifications, questions ------------------------------------------------------
+        case "read_mcp_resource":
+            return str("uri").flatMap(clipToolDetail)
+        case "list_mcp_resources":
+            return str("server").flatMap(clipToolDetail)
+        case "push_notification":
+            return (str("title") ?? str("message")).flatMap(clipToolDetail)
+        case "AskQuestion":
+            return str("question").flatMap(clipToolDetail)
+        // `ask_user` batches: the question is one level down, inside `questions[]`.
+        case "ask_user":
+            guard let questions = obj["questions"] as? [Any],
+                  let first = questions.first as? [String: Any] else { return nil }
+            return toolArgString(first, "question").flatMap(clipToolDetail)
+
         default:
             return nil
         }

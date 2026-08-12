@@ -38,21 +38,21 @@ final class SimplifiedQuestionCardTests: XCTestCase {
     // MARK: - showsCardTitleRow (branch review FIX 2 — the title ROW, not just its text)
 
     func testSimplifiedQuestionCardSuppressesTheTitleRowEntirely() {
-        let interaction = PendingInteraction.question(callId: "call_1", questions: simplified)
+        let interaction = InteractionRecord.Ask.question(questions: simplified)
         // The approved design: question once, option labels, "Other" — nothing else. The title
         // row (glyph + cardTitle) must not render at all for a simplified card.
         XCTAssertFalse(showsCardTitleRow(interaction))
     }
 
     func testCodeQuestionCardTitleRowStillShows() {
-        let interaction = PendingInteraction.question(callId: "call_1", questions: headered)
+        let interaction = InteractionRecord.Ask.question(questions: headered)
         // Code mode (headered) must be visually UNCHANGED — the title row still renders.
         XCTAssertTrue(showsCardTitleRow(interaction))
     }
 
     func testApprovalAndPlanCardsAlwaysShowTheirTitleRow() {
-        let approval = PendingInteraction.approval(callId: "a1", toolName: "bash", summary: "rm x")
-        let plan = PendingInteraction.plan(callId: "p1", plan: "the plan")
+        let approval = InteractionRecord.Ask.approval(toolName: "bash", summary: "rm x")
+        let plan = InteractionRecord.Ask.plan(plan: "the plan")
         XCTAssertTrue(showsCardTitleRow(approval))
         XCTAssertTrue(showsCardTitleRow(plan))
     }
@@ -62,25 +62,25 @@ final class SimplifiedQuestionCardTests: XCTestCase {
     // some future caller).
 
     func testCardTitleHeaderlessFallbackStillReturnsTheQuestion() {
-        let interaction = PendingInteraction.question(callId: "call_1", questions: simplified)
+        let interaction = InteractionRecord.Ask.question(questions: simplified)
         XCTAssertEqual(cardTitle(interaction), simplifiedQuestionText)
     }
 
     func testCodeQuestionCardStillUsesItsHeader() {
-        let interaction = PendingInteraction.question(callId: "call_1", questions: headered)
+        let interaction = InteractionRecord.Ask.question(questions: headered)
         XCTAssertEqual(cardTitle(interaction), "Tier")
     }
 
     // MARK: - Composed: the question text renders EXACTLY ONCE across the whole card
     //
     // The isolated-helper tests above each passed even while the shipped card rendered the
-    // question TWICE — nobody composed them. This mirrors PendingCard.body's ACTUAL composition
+    // question TWICE — nobody composed them. This mirrors TranscriptInteractionCard.body's ACTUAL composition
     // (gate the title row with showsCardTitleRow, always render question.question in the body) so
     // this class of duplication cannot silently come back.
 
     func testComposedSimplifiedCardRendersTheQuestionExactlyOnce() {
         let qs = simplified
-        let interaction = PendingInteraction.question(callId: "call_1", questions: qs)
+        let interaction = InteractionRecord.Ask.question(questions: qs)
 
         var rendered: [String] = []
         if showsCardTitleRow(interaction) { rendered.append(cardTitle(interaction)) }
@@ -92,7 +92,7 @@ final class SimplifiedQuestionCardTests: XCTestCase {
 
     func testComposedCodeModeCardShowsHeaderInTitleAndQuestionInBodySeparately() {
         let qs = headered
-        let interaction = PendingInteraction.question(callId: "call_1", questions: qs)
+        let interaction = InteractionRecord.Ask.question(questions: qs)
 
         var rendered: [String] = []
         if showsCardTitleRow(interaction) { rendered.append(cardTitle(interaction)) }

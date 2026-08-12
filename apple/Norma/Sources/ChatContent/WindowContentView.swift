@@ -27,8 +27,11 @@ struct WindowContentView<Accessory: View>: View {
     /// cream card would read as broken. Only the shell passes a mode today; the other two keep
     /// what they have until someone decides otherwise on purpose.
     ///
-    /// It carries the MODE as well as the opt-in because the card needs it: the Chat/Cowork
-    /// segment only appears for those two modes, and the Cowork strip only exists for one of them.
+    /// It carries the MODE as well as the opt-in because the mode IS the composer: since
+    /// mac-chat-parity Task 5 each mode has its own dedicated composer (`ComposerChrome.swift`) and
+    /// this value is what picks it. A chat session's carries no permissions band; a code or dispatch
+    /// session's carries one (mac-chat-parity Task 6, spec §4 — `composerCard` below wires it);
+    /// neither shows the Chat/Cowork segment, which belongs to the two modes it names.
     var composerCardMode: SessionMode? = nil
     @ViewBuilder let headerAccessory: () -> Accessory
 
@@ -143,57 +146,42 @@ struct WindowContentView<Accessory: View>: View {
             }
             .frame(height: chatWindowHeaderHeight)
 
-            TranscriptView(adapter: adapter, tint: tint)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            // Task 3 (2d-iii): the pending-interaction cards — mounted here, between the
-            // transcript and the pinned-tasks section, in BOTH windows (the morph window's
-            // `.window` surface and every native `DetachedWindowController`, since both render
-            // this shared `WindowContentView`).
-            if !adapter.pendingInteractions.isEmpty {
-                PendingCardsView(
-                    interactions: adapter.pendingInteractions,
-                    inFlight: adapter.interactionInFlight,
-                    errorLines: adapter.interactionErrors,
-                    // panel-shell T10b: `adapter.pendingCardDraftBinding` closes over `adapter`
-                    // itself (an `@ObservedObject` this view already holds live), so every Binding
-                    // it mints — across however many times SwiftUI reconstructs this whole call
-                    // site — reads/writes the SAME externally-owned dictionary. That external
-                    // ownership is what lets a card's typed-but-unsubmitted answer survive
-                    // `ShellRootView`'s `.maximized` teardown of `detail`.
-                    draftBinding: { callId in adapter.pendingCardDraftBinding(for: callId) },
-                    onApproval: adapter.onApprovalRespond,
-                    onQuestion: adapter.onQuestionRespond,
-                    onPlan: adapter.onPlanRespond
-                )
-            }
+            // mac-chat-parity Task 3: the approval/question/plan cards used to be a pinned band
+            // MOUNTED HERE, between the transcript and the pinned-tasks section, and deleted the
+            // instant the ask resolved — so the Mac kept no record anywhere in scrollback of
+            // anything the user had approved or answered. They render inside the transcript now, at
+            // the point they were asked, and freeze there with their outcome; this view's job is
+            // reduced to handing the transcript the respond wiring the band used to hold. Both
+            // windows (the morph window's `.window` surface and every native
+            // `DetachedWindowController`) get it, since both render this shared view.
+            TranscriptView(adapter: adapter, tint: tint, cardWiring: InteractionCardWiring(
+                inFlight: adapter.interactionInFlight,
+                errorLines: adapter.interactionErrors,
+                // panel-shell T10b: `adapter.pendingCardDraftBinding` closes over `adapter` itself
+                // (an `@ObservedObject` this view already holds live), so every Binding it mints —
+                // across however many times SwiftUI reconstructs this whole call site — reads/writes
+                // the SAME externally-owned dictionary. That external ownership is what lets a
+                // card's typed-but-unsubmitted answer survive `ShellRootView`'s `.maximized`
+                // teardown of `detail`, and now also the transcript's own `LazyVStack` recycling a
+                // card that scrolls out of view.
+                draftBinding: { callId in adapter.pendingCardDraftBinding(for: callId) },
+                onApproval: adapter.onApprovalRespond,
+                onQuestion: adapter.onQuestionRespond,
+                onPlan: adapter.onPlanRespond
+            ))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             if !adapter.pinnedTasks.isEmpty && !rightVisible {
                 pinnedTasksSection(adapter.pinnedTasks)
             }
 
             if let queued = adapter.queuedText {
-                Text(queued).font(.system(size: 11)).foregroundStyle(.tertiary)
+                Text(queued).font(.system(size: 11)).foregroundStyle(Theme.textMuted)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            if let cardMode = composerCardMode {
-                // The SHARED card (user call, 2026-08-07: the live page's composer "should be the
-                // same as the one of the new chat page"). Its strip emerges from the TOP here —
-                // this composer sits at the bottom of the window, where "below" is off-screen.
-                //
-                // The mode segment is NOT selectable: a session's mode is fixed at creation and
-                // Norma has no mode-switch, so a live segment would offer something it cannot do.
-                NormaComposerCard(
-                    text: adapter.draftBinding,
-                    onSubmit: { adapter.onSubmit(adapter.composerDraft) },
-                    mode: .constant(cardMode),
-                    modeIsSelectable: false,
-                    stripEdge: .above,
-                    sendBlockedReason: adapter.composerDraft
-                        .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : nil
-                )
-                .frame(maxWidth: .infinity)
+            if let card = composerCard {
+                card.frame(maxWidth: .infinity)
             } else {
                 ComposerTextView(
                     text: adapter.draftBinding,
@@ -210,6 +198,66 @@ struct WindowContentView<Accessory: View>: View {
         .padding(.horizontal, 16)
         .padding(.top, topInset)
         .padding(.bottom, 16)
+    }
+
+    /// The SHARED composer card (user call, 2026-08-07: the live page's composer "should be the same
+    /// as the one of the new chat page"), or `nil` for a surface that opted into no card — the
+    /// detached window and the orb's morph window, which keep the plain `ComposerTextView` below on
+    /// the ruling `composerCardMode`'s own doc records.
+    ///
+    /// Its strip emerges from the TOP here: this composer sits at the bottom of the window, where
+    /// "below" is off-screen. The mode segment is NOT selectable — a session's mode is fixed at
+    /// creation and Norma has no mode-switch, so a live segment would offer something it cannot do.
+    ///
+    /// `policy` is what makes the permissions row a control (mac-chat-parity Task 6, spec §4): the
+    /// adapter's own seeded/healed policy plus its known-ness, so the band shows what the DAEMON
+    /// reports for this session and shows nothing at all until it has said. Chat and cowork ignore
+    /// it — a mode's chrome decides whether it has a band (`ComposerChrome.swift`).
+    ///
+    /// **Hoisted out of `contentColumn` for the tests' sake, and it is the point of the hoist:** the
+    /// whole path from this view's adapter to the rendered row is a value here, so "the shell's card
+    /// carries this session's real policy" is assertable without rendering anything. Pinning the
+    /// adapter's rule alone would have left a card that wired no policy at all completely green —
+    /// this plan's own Task 4 mutation lesson.
+    var composerCard: NormaComposerCard? {
+        guard let cardMode = composerCardMode else { return nil }
+        return NormaComposerCard(
+            text: adapter.draftBinding,
+            onSubmit: { adapter.onSubmit(adapter.composerDraft) },
+            mode: .constant(cardMode),
+            modeIsSelectable: false,
+            policy: adapter.composerPolicyControl,
+            model: composerModelControl,
+            stripEdge: .above,
+            sendBlockedReason: adapter.composerDraft
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : nil
+        )
+    }
+
+    /// mac-chat-parity Task 7 (spec §5): a LIVE session's model/effort wiring, as the composer's chip
+    /// takes it — the same values the header's two menus read, from the same two places, so the two
+    /// doors onto `session.setModel`/`session.setEffort` can never show different answers.
+    ///
+    /// The current selection is the session ROW's (`session.list`, via `currentSidebarSessionSummary`)
+    /// overlaid with any optimistic pick — `effectiveSelection`, exactly as `modelMenuContent`/
+    /// `effortMenuContent` above compute it. Unlike the policy, none of this is cached on the
+    /// adapter: `session.list` already carries `model`/`effort` per row, and a second source of truth
+    /// here is what `onSetModel`'s own doc rules out.
+    ///
+    /// The three closures FORWARD rather than capturing today's values, the same tap-time read the
+    /// menus' own buttons do — a card built before its surface wired its callbacks still reaches the
+    /// real ones.
+    var composerModelControl: ComposerModelControl {
+        let row = currentSidebarSessionSummary
+        return ComposerModelControl(
+            model: effectiveSelection(row: row?.model, optimistic: adapter.pendingModel),
+            effort: effectiveSelection(row: row?.effort, optimistic: adapter.pendingEffort),
+            catalogue: adapter.modelCatalogue,
+            modelChangeInFlight: adapter.modelChangeInFlight,
+            effortChangeInFlight: adapter.effortChangeInFlight,
+            onOpen: { adapter.onRefreshModelCatalogue() },
+            onSetModel: { adapter.applyModelSelection($0) },
+            onSetEffort: { adapter.applyEffortSelection($0) })
     }
 
     // MARK: - Task 6 (2e-iii): width-responsive sidebar layout
@@ -265,11 +313,14 @@ struct WindowContentView<Accessory: View>: View {
             }
 
             // Overlay panels + a tap-to-dismiss scrim BEHIND each (the scrim is added first so the
-            // `.ultraThinMaterial` panel draws over it; the panel slides in from its edge).
+            // panel draws over it; the panel slides in from its edge). `Theme.paletteSurface` is the
+            // panel's face — the brand's token for a surface that FLOATS above content, which is
+            // exactly what an overlay column is (mac-chat-parity Task 8; it was `.ultraThinMaterial`,
+            // a blur of whatever it happened to be over rather than a colour anyone chose).
             if resolved.leftOverlay {
                 sidebarScrim { sidebar = dismissLeftOverlay(sidebar) }
                 HStack(spacing: 0) {
-                    sessionSidebarColumn(sidebars).background(.ultraThinMaterial)
+                    sessionSidebarColumn(sidebars).background(Theme.paletteSurface)
                     Spacer(minLength: 0)
                 }
                 .transition(.move(edge: .leading))
@@ -278,7 +329,7 @@ struct WindowContentView<Accessory: View>: View {
                 sidebarScrim { sidebar = dismissRightOverlay(sidebar) }
                 HStack(spacing: 0) {
                     Spacer(minLength: 0)
-                    workSidebarColumn.background(.ultraThinMaterial)
+                    workSidebarColumn.background(Theme.paletteSurface)
                 }
                 .transition(.move(edge: .trailing))
             }
@@ -375,8 +426,10 @@ struct WindowContentView<Accessory: View>: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 4)
-            // Task 6 (2e-iii): the row body is shared with the WorkSidebar's Options block via
-            // `policyPickerRow` (WorkSidebar.swift) — one implementation for both surfaces.
+            // Task 6 (2e-iii): the row body is shared with the WorkSidebar's Options block — and,
+            // since mac-chat-parity T6, with the composer's permissions row — via `PolicyPickerRow`
+            // (WorkSidebar.swift). One implementation for all three; `policyPickerRow(_:)` is this
+            // view's forwarder, handing it this adapter's own values.
             ForEach(sessionPolicyModes, id: \.self) { policy in
                 policyPickerRow(policy)
             }
@@ -403,63 +456,36 @@ struct WindowContentView<Accessory: View>: View {
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingModelMenu, arrowEdge: .bottom) {
+            // The padding/width live HERE rather than inside the content, so the content stays a
+            // concrete value this view's tests can read (and so the composer's own popover, which
+            // stacks BOTH sections, can frame the pair once instead of twice). Same modifiers, same
+            // order, applied to the same rows: the menu renders exactly as it did.
             modelMenuContent
+                .padding(12)
+                .frame(minWidth: 160)
         }
     }
 
-    /// The model menu's rows: "Default" (clears the override, `nil`) first, then every slug the
-    /// SYNCED CATALOGUE reports (`modelPickerOptions`) — a checkmark on whichever matches the
-    /// session's CURRENT selection, which is the optimistic overlay when one is pending and the
-    /// daemon's own row otherwise (`effectiveSelection`). Read once per popover render, same "read
-    /// fresh at render" convention `sidebarSessionInfo` uses for title/scope/cwd.
+    /// The model menu's rows, handed the three values this view used to read inside them.
     ///
-    /// An UNLISTED current model still gets a row of its own — a stale slug from a provider change
-    /// is still the thing this session is pinned to, and a selection the user cannot see is a
-    /// selection they cannot clear.
-    @ViewBuilder
-    private var modelMenuContent: some View {
-        let current = effectiveSelection(row: currentSidebarSessionSummary?.model, optimistic: adapter.pendingModel)
-        let options = modelPickerOptions(adapter.modelCatalogue)
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Model")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .padding(.bottom, 4)
-            modelPickerRow(nil, current: current)
-            ForEach(options, id: \.self) { model in
-                modelPickerRow(model, current: current)
-            }
-            if let current, !options.contains(current) {
-                modelPickerRow(current, current: current)
-            }
-        }
-        .padding(12)
-        .frame(minWidth: 160)
-    }
-
-    /// One model-menu row — `model: nil` is the "Default" row (clears the override). Selecting a row
-    /// applies OPTIMISTICALLY (the overlay flips before the RPC) and fires `adapter.onSetModel`;
-    /// the wirer owns the in-flight flag, the revert, and the probation, same "the wirer owns the
-    /// bookkeeping" convention as `policyPickerRow`.
-    @ViewBuilder
-    private func modelPickerRow(_ model: String?, current: String?) -> some View {
-        Button {
-            adapter.pendingModel = model.map { OptimisticSelection.value($0) } ?? .clear
-            adapter.onSetModel(model)
-            showingModelMenu = false
-        } label: {
-            HStack {
-                Text(modelDisplayLabel(model))
-                Spacer()
-                if selectionIsCurrent(model, current: current) {
-                    Image(systemName: "checkmark")
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(adapter.modelChangeInFlight)
-        .padding(.vertical, 4)
+    /// mac-chat-parity T7: the ROWS moved to `ModelMenuContent` (file scope, below) because the
+    /// composer's chip needs the same menu and a per-mode composer chrome is not a
+    /// `WindowContentView` — the same move `PolicyPickerRow` made at Task 6, for the same reason,
+    /// and returning the concrete type for the same reason too: it makes "both doors render the same
+    /// rows, from this adapter's own values" a thing a test can read.
+    ///
+    /// Read once per popover render, same "read fresh at render" convention `sidebarSessionInfo`
+    /// uses for title/scope/cwd. The current selection is the optimistic overlay when one is pending
+    /// and the daemon's own row otherwise (`effectiveSelection`).
+    var modelMenuContent: ModelMenuContent {
+        ModelMenuContent(
+            options: modelPickerOptions(adapter.modelCatalogue),
+            current: effectiveSelection(row: currentSidebarSessionSummary?.model, optimistic: adapter.pendingModel),
+            isDisabled: adapter.modelChangeInFlight,
+            onSelect: { model in
+                adapter.applyModelSelection(model)
+                showingModelMenu = false
+            })
     }
 
     // MARK: - provider-correctness T6: the header's effort menu — `session.setEffort`
@@ -479,7 +505,10 @@ struct WindowContentView<Accessory: View>: View {
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingEffortMenu, arrowEdge: .bottom) {
+            // See `modelMenuButton`'s own note: the frame lives at the popover, the rows are a value.
             effortMenuContent
+                .padding(12)
+                .frame(minWidth: 180)
         }
     }
 
@@ -492,60 +521,24 @@ struct WindowContentView<Accessory: View>: View {
     /// is the honest rendering of "this daemon has told me nothing about efforts for this model".
     /// A tier the user ALREADY pinned still gets its row via the `.unknown` branch below, so a
     /// selection made before the catalogue emptied out stays visible and clearable.
-    @ViewBuilder
-    private var effortMenuContent: some View {
+    /// mac-chat-parity T7: the rows moved to `EffortMenuContent` (file scope, below) — the same move
+    /// `modelMenuContent` just above made, and for the same one reason: the composer's chip renders
+    /// this menu too. This forwarder is what still decides, for the HEADER, which model's levels and
+    /// which mode's tier answer the rows are built from — unchanged, and now readable as a value.
+    var effortMenuContent: EffortMenuContent {
         let row = currentSidebarSessionSummary
-        let current = effectiveSelection(row: row?.effort, optimistic: adapter.pendingEffort)
         let opts = effortPickerOptions(catalogue: adapter.modelCatalogue,
                                        model: effectiveSelection(row: row?.model, optimistic: adapter.pendingModel),
                                        mode: row?.mode)
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Reasoning effort")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .padding(.bottom, 4)
-            effortPickerRow(nil, current: current)
-            ForEach(opts.wire, id: \.self) { level in
-                effortPickerRow(level, current: current)
-            }
-            if !opts.tiers.isEmpty {
-                Text("Norma")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 6)
-                    .padding(.bottom, 4)
-                ForEach(opts.tiers, id: \.self) { tier in
-                    effortPickerRow(tier, current: current)
-                }
-            }
-            // A current selection in NEITHER list still needs a row — see `selectionOrigin`.
-            if selectionOrigin(current, wire: opts.wire, tiers: opts.tiers) == .unknown, let current {
-                effortPickerRow(current, current: current)
-            }
-        }
-        .padding(12)
-        .frame(minWidth: 180)
-    }
-
-    @ViewBuilder
-    private func effortPickerRow(_ effort: String?, current: String?) -> some View {
-        Button {
-            adapter.pendingEffort = effort.map { OptimisticSelection.value($0) } ?? .clear
-            adapter.onSetEffort(effort)
-            showingEffortMenu = false
-        } label: {
-            HStack {
-                Text(effortDisplayLabel(effort))
-                Spacer()
-                if selectionIsCurrent(effort, current: current) {
-                    Image(systemName: "checkmark")
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(adapter.effortChangeInFlight)
-        .padding(.vertical, 4)
+        return EffortMenuContent(
+            wire: opts.wire,
+            tiers: opts.tiers,
+            current: effectiveSelection(row: row?.effort, optimistic: adapter.pendingEffort),
+            isDisabled: adapter.effortChangeInFlight,
+            onSelect: { effort in
+                adapter.applyEffortSelection(effort)
+                showingEffortMenu = false
+            })
     }
 
     /// LIVE-GATE G4, Task 3 (2e-i) redesign: the CC-tree-style pinned task list — blue bold `■`
@@ -566,35 +559,44 @@ struct WindowContentView<Accessory: View>: View {
             if built.collapsedCompleted > 0 && !expandedCompleted {
                 Text("… +\(built.collapsedCompleted) completed")
                     .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.textMuted)
                     .onTapGesture { expandedCompleted = true }
             } else if expandedCompleted && built.collapsedCompleted > 0 {
                 Text("… collapse")
                     .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.textMuted)
                     .onTapGesture { expandedCompleted = false }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Norma blue for the single in_progress row — matches the brief's `Color(red:0.45,
-    /// green:0.75, blue:1.0)`, distinct from the CLI's ANSI blue but the same role: draw the eye
-    /// to what's actively running.
-    private var taskInProgressBlue: Color { Color(red: 0.45, green: 0.75, blue: 1.0) }
+    /// The tint for the single in_progress row — the same role the task-3 brief gave its
+    /// `Color(red:0.45, green:0.75, blue:1.0)`: draw the eye to what is actively running. It is
+    /// `Theme.accent` since mac-chat-parity Task 8, because that literal was a hex in code, which
+    /// `docs/brand.md` § 3.1's anti-rule forbids outright — it had no dark variant and no way to be
+    /// tuned. Named rather than inlined so both the task rows and the subagent rows below keep
+    /// reading one value; the name says "the running tint" now, not "blue".
+    private var taskInProgressTint: Color { Theme.accent }
 
-    /// Row text color per the brief: in_progress → Norma blue, pending → `.secondary`,
-    /// completed → `.tertiary` (the glyph itself is tinted separately — green for completed).
+    /// Row text color: in_progress → the running tint, pending → `.primary`, completed →
+    /// `Theme.textMuted` (the glyph itself is tinted separately — green for completed).
+    ///
+    /// Pending was `.secondary` and completed `.tertiary` — two greys, one step apart. Moving the
+    /// faint one onto `Theme.textMuted` (mac-chat-parity Task 8) would have collapsed them into the
+    /// same colour, since `.secondary` measures #7D7D7C against textMuted's #7A7974. So pending
+    /// takes the OTHER register instead of a third grey that does not exist: a task still to do is
+    /// outstanding work, and reading stronger than a finished one is the right way round.
     private func rowTextStyle(_ status: String) -> AnyShapeStyle {
         switch status {
-        case "in_progress": return AnyShapeStyle(taskInProgressBlue)
-        case "completed": return AnyShapeStyle(.tertiary)
-        default: return AnyShapeStyle(.secondary) // pending, or any unrecognized status
+        case "in_progress": return AnyShapeStyle(taskInProgressTint)
+        case "completed": return AnyShapeStyle(Theme.textMuted)
+        default: return AnyShapeStyle(.primary) // pending, or any unrecognized status
         }
     }
 
     /// Glyph color — same as the row text EXCEPT completed, whose `✓` is tinted green while its
-    /// subject stays `.tertiary`.
+    /// subject stays `Theme.textMuted`.
     private func rowGlyphStyle(_ status: String) -> AnyShapeStyle {
         status == "completed" ? AnyShapeStyle(.green) : rowTextStyle(status)
     }
@@ -640,11 +642,13 @@ struct WindowContentView<Accessory: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// The task rows' ladder, applied to subagents — see `rowTextStyle` for why queued is
+    /// `.primary` rather than a second grey beside done's `Theme.textMuted`.
     private func subagentRowStyle(_ status: String) -> AnyShapeStyle {
         switch status {
-        case "working": return AnyShapeStyle(taskInProgressBlue)
-        case "done": return AnyShapeStyle(.tertiary)
-        default: return AnyShapeStyle(.secondary) // queued
+        case "working": return AnyShapeStyle(taskInProgressTint)
+        case "done": return AnyShapeStyle(Theme.textMuted)
+        default: return AnyShapeStyle(.primary) // queued
         }
     }
 
@@ -654,7 +658,7 @@ struct WindowContentView<Accessory: View>: View {
             Text(subagentGlyph(row.status))
                 .foregroundStyle(row.status == "done" ? AnyShapeStyle(.green) : subagentRowStyle(row.status))
             Text(row.label)
-            Text("(\(row.agentType))").foregroundStyle(.tertiary)
+            Text("(\(row.agentType))").foregroundStyle(Theme.textMuted)
             if row.status == "working", let since = row.activeSince {
                 // D9 twin: the 1s tick mounts ONLY on a working row with an open span.
                 TimelineView(.periodic(from: .now, by: 1)) { _ in
@@ -700,6 +704,156 @@ func buildTaskSection(_ tasks: [TaskItem]) -> (rows: [TaskRow], collapsedComplet
 /// is the tick-mount gate (WindowSubagentSectionTests drives this directly).
 func buildSubagentSection(_ items: [SubagentItem]) -> (rows: [SubagentItem], anyWorking: Bool) {
     (items, items.contains { $0.status == "working" })
+}
+
+// MARK: - mac-chat-parity T7 (spec §5): the model/effort menus, shared by the header and the composer
+
+/// One model-menu row — `model: nil` is the "Default" row (clears the override).
+///
+/// **A MOVE, not a rewrite** (Task 6's `PolicyPickerRow` precedent, one task on): the body below is
+/// `extension WindowContentView`'s own, with the `adapter.` reads it closed over turned into
+/// parameters. It is a type at file scope for the one reason that precedent had — the composer's
+/// model/effort chip renders these rows too, and a per-mode composer chrome is not a
+/// `WindowContentView` and could not reach a method on its extension.
+///
+/// Selecting a row applies OPTIMISTICALLY (the overlay flips before the RPC) and fires the surface's
+/// own set — the wirer owns the in-flight flag, the revert, and the probation, the same "the wirer
+/// owns the bookkeeping" convention `PolicyPickerRow` keeps. `onSelect` forwards rather than being
+/// handed the adapter, so a row built before its surface wired its callbacks still reaches the real
+/// one at TAP time.
+struct ModelPickerRow: View {
+    let model: String?
+    /// The session's current selection, for the checkmark.
+    let current: String?
+    /// True while a `session.setModel` is in flight — one change at a time.
+    let isDisabled: Bool
+    let onSelect: (String?) -> Void
+
+    var body: some View {
+        Button {
+            onSelect(model)
+        } label: {
+            HStack {
+                Text(modelDisplayLabel(model))
+                Spacer()
+                if selectionIsCurrent(model, current: current) {
+                    Image(systemName: "checkmark")
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .padding(.vertical, 4)
+    }
+}
+
+/// The model menu: "Default" (clears the override) first, then every slug the SYNCED CATALOGUE
+/// reports (`modelPickerOptions`).
+///
+/// An UNLISTED current model still gets a row of its own — a stale slug from a provider change is
+/// still the thing this session is pinned to, and a selection the user cannot see is a selection
+/// they cannot clear.
+///
+/// It draws no padding or width of its own: each popover frames it (the header's two do it exactly
+/// as they always did; the composer's stacks this and `EffortMenuContent` and frames the pair).
+struct ModelMenuContent: View {
+    let options: [String]
+    let current: String?
+    let isDisabled: Bool
+    let onSelect: (String?) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Model")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 4)
+            ModelPickerRow(model: nil, current: current, isDisabled: isDisabled, onSelect: onSelect)
+            ForEach(options, id: \.self) { model in
+                ModelPickerRow(model: model, current: current, isDisabled: isDisabled, onSelect: onSelect)
+            }
+            if let current, !options.contains(current) {
+                ModelPickerRow(model: current, current: current, isDisabled: isDisabled, onSelect: onSelect)
+            }
+        }
+    }
+}
+
+/// One effort-menu row. Same move, same reasons, same shape as `ModelPickerRow` above.
+struct EffortPickerRow: View {
+    let effort: String?
+    let current: String?
+    let isDisabled: Bool
+    let onSelect: (String?) -> Void
+
+    var body: some View {
+        Button {
+            onSelect(effort)
+        } label: {
+            HStack {
+                Text(effortDisplayLabel(effort))
+                Spacer()
+                if selectionIsCurrent(effort, current: current) {
+                    Image(systemName: "checkmark")
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .padding(.vertical, 4)
+    }
+}
+
+/// The effort menu: "Default", then the WIRE levels the session's model accepts, then — when the
+/// caller's own gate says so — the Norma-level tiers under their own heading.
+///
+/// The two sections are never merged (see `effortPickerOptions`), and the tier section is simply
+/// ABSENT rather than shown-and-refused wherever it does not apply: a mode that may not select one
+/// (chat/dispatch), and a catalogue that reported no wire levels at all (a BYOK Mac, or nothing
+/// fetched yet — whole-branch review I1). In that second case the menu is "Default" alone, which is
+/// the honest rendering of "this daemon has told me nothing about efforts for this model". A tier the
+/// user ALREADY pinned still gets its row via the `.unknown` branch below, so a selection made before
+/// the catalogue emptied out stays visible and clearable.
+///
+/// **Both lists arrive decided.** This view does not re-derive them — the caller does, via
+/// `effortPickerOptions`, which is where the mode/Bool gate and the no-wire-levels rule live. That is
+/// deliberate: the header asks by mode, the composer asks by its chrome's Bool, and both must reach
+/// one answer (`ModelPickerTests` pins the two doors against each other).
+struct EffortMenuContent: View {
+    let wire: [String]
+    let tiers: [String]
+    let current: String?
+    let isDisabled: Bool
+    let onSelect: (String?) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Reasoning effort")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 4)
+            EffortPickerRow(effort: nil, current: current, isDisabled: isDisabled, onSelect: onSelect)
+            ForEach(wire, id: \.self) { level in
+                EffortPickerRow(effort: level, current: current, isDisabled: isDisabled, onSelect: onSelect)
+            }
+            if !tiers.isEmpty {
+                Text("Norma")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 6)
+                    .padding(.bottom, 4)
+                ForEach(tiers, id: \.self) { tier in
+                    EffortPickerRow(effort: tier, current: current, isDisabled: isDisabled, onSelect: onSelect)
+                }
+            }
+            // A current selection in NEITHER list still needs a row — see `selectionOrigin`.
+            if selectionOrigin(current, wire: wire, tiers: tiers) == .unknown, let current {
+                EffortPickerRow(effort: current, current: current, isDisabled: isDisabled, onSelect: onSelect)
+            }
+        }
+    }
 }
 
 // MARK: - Task 10 (Chat Slice D): the model picker's pure decisions — `ModelPickerTests` drives
@@ -756,13 +910,28 @@ func modelPickerOptions(_ catalogue: SyncConfigSnapshot) -> [String] {
 /// exempt from it. Deliberately client-side and deliberately narrow: the honest fix is a
 /// provider-independent effort list on `sync.config`, and this is not it.
 func effortPickerOptions(catalogue: SyncConfigSnapshot, model: String?, mode: String?) -> (wire: [String], tiers: [String]) {
+    effortPickerOptions(catalogue: catalogue, model: model, offersTiers: effortTiersAreOffered(mode: mode))
+}
+
+/// mac-chat-parity T7: the same function, asked the tier question as a BOOLEAN.
+///
+/// The composer's chip cannot ask by mode string: since Task 5 the mode → composer decision is made
+/// once (`composerChrome(_:)`) and each mode's chrome answers for itself, and the shared shell that
+/// draws the chip holds no mode conditional at all — a `mode`-shaped argument threaded through it
+/// would be one, in the one shape the shell's source scan cannot see (a helper taking a mode). So the
+/// chrome answers `offersClientEffortTiers` and this door takes the answer.
+///
+/// **One decision, two doors.** Everything else — the model precedence, the "not told" empty, the
+/// no-wire-levels rule — is written once, here; the mode-taking overload above is now a one-line
+/// forwarder. `ModelPickerTests` pins the two against each other for every mode so they cannot drift.
+func effortPickerOptions(catalogue: SyncConfigSnapshot, model: String?, offersTiers: Bool) -> (wire: [String], tiers: [String]) {
     // The session's EFFECTIVE model, by AgentEngine.resolveSel's own precedence: its override first,
     // the daemon's live default second. A model the catalogue doesn't list contributes no levels —
     // "I have not been told", not "none exist".
     let effective = model ?? catalogue.defaultModel
     let wire = catalogue.models.first { $0.id == effective }?.efforts ?? []
     // Both gates, and the sections stand or fall together: no wire list ⇒ no tier section either.
-    let tiers = (!wire.isEmpty && effortTiersAreOffered(mode: mode)) ? catalogue.clientEfforts : []
+    let tiers = (!wire.isEmpty && offersTiers) ? catalogue.clientEfforts : []
     return (wire, tiers)
 }
 

@@ -10,6 +10,10 @@ func shouldAutoscroll(nearBottom: Bool, contentGrew: Bool) -> Bool {
 struct TranscriptView: View {
     @ObservedObject var adapter: FieldStateAdapter
     let tint: Color
+    /// mac-chat-parity Task 3: approval/question/plan cards render INSIDE the transcript now, so the
+    /// transcript needs the respond closures the pinned band below it used to hold. Bundled as one
+    /// value (see `InteractionCardWiring`) rather than six parameters threaded through every row.
+    let cardWiring: InteractionCardWiring
     @State private var nearBottom = true
     @State private var showLatestPill = false
 
@@ -18,9 +22,22 @@ struct TranscriptView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     ForEach(Array(adapter.transcript.enumerated()), id: \.offset) { index, exchange in
+                        let isLast = index == adapter.transcript.count - 1
                         TranscriptExchangeRow(
                             exchange: exchange,
-                            streamingText: index == adapter.transcript.count - 1 ? adapter.liveStreamingText : nil,
+                            cardWiring: cardWiring,
+                            streamingText: isLast ? adapter.liveStreamingText : nil,
+                            // Live only for the newest exchange (mac-chat-parity Task 2). That is
+                            // not quite the same as "every in-flight call lives here": a main-thread
+                            // steer's `user_message` is persisted at SEND time, so it can open a NEW
+                            // exchange while a call in the previous one is still out — the case
+                            // `SessionReducer.foldToolResult` scans backwards for, pinned by
+                            // `testToolResultFoldsIntoAnEarlierExchangeWhenASteerOpenedANewOne`.
+                            // Such a call reads "no result" rather than "running" until its result
+                            // lands, then corrects itself. Deliberate: erring toward "no result" is
+                            // recoverable, while a false "running" is the permanent lie this whole
+                            // gate exists to prevent.
+                            turnIsLive: isLast && adapter.turnRunning,
                             tint: tint
                         )
                         .id(index)
@@ -43,6 +60,16 @@ struct TranscriptView: View {
             .onChange(of: adapter.liveStreamingText) { old, new in
                 if (new?.count ?? 0) > (old?.count ?? 0) { follow(proxy) }
             }
+            // mac-chat-parity Task 3: a card arriving is content growth the two signals above cannot
+            // see — an ask lands in the LAST exchange's `activity`, which changes neither the
+            // exchange count nor the streaming text. Before the cards moved inline this did not
+            // matter (the band was pinned, always visible); now, without this, an approval could
+            // appear below the fold and the agent would look hung. Growth-only, for the same reason
+            // the count watcher is (`SessionModel.reset()` drops it to zero on refocus, and a reset
+            // must neither follow nor raise the pill).
+            .onChange(of: adapter.pendingInteractions.count) { old, new in
+                if new > old { follow(proxy) }
+            }
             .overlay(alignment: .bottomTrailing) {
                 if showLatestPill { latestPill(proxy) }
             }
@@ -52,6 +79,16 @@ struct TranscriptView: View {
     /// Extracted from `body` (Task-4 review, minor): the chained ScrollViewReader expression sat
     /// at SourceKit's type-check complexity cliff — keep `body` shallow so future edits don't
     /// tip it over.
+    /// mac-chat-parity Task 8: `Theme.controlSurface` — the token `docs/brand.md` gives small
+    /// controls — with a `Theme.hairlineElevated` rim, because this pill floats over scrolling prose
+    /// and an opaque fill alone has nothing to separate it from the text passing underneath. (It was
+    /// a `.thinMaterial`, which on an opaque window blurs whatever it happens to be over rather than
+    /// naming a colour.)
+    ///
+    /// The ELEVATED hairline (fix round 1), because the ground this rim has to separate from is the
+    /// content plane the pill floats over: 1.389:1 light / 1.431:1 dark on `cardSurface`, against the
+    /// shell `hairline`'s 1.226 / 1.134. Whether a rim is wanted here AT ALL is still a gate call;
+    /// which token it uses is now a measured one.
     private func latestPill(_ proxy: ScrollViewProxy) -> some View {
         Button {
             scrollToBottom(proxy)
@@ -59,7 +96,9 @@ struct TranscriptView: View {
             Label("latest", systemImage: "arrow.down")
                 .font(.system(size: 11, weight: .medium))
                 .padding(.horizontal, 10).padding(.vertical, 5)
-                .background(Capsule().fill(.thinMaterial))
+                .background(Capsule().fill(Theme.controlSurface))
+                .overlay(Capsule().strokeBorder(Theme.hairlineElevated,
+                                                lineWidth: shellSidebarHairlineWidth))
         }
         .buttonStyle(.plain)
         .padding(8)
@@ -82,19 +121,37 @@ struct TranscriptView: View {
 
 /// One exchange's rows — prompt bubble, GROUPED activity (LIVE-GATE G3 / r1b: `groupActivity`
 /// folds any UNBROKEN run of tool calls — even across different tool names — into one `.toolRun`
-/// sentence row, skips `.task` entirely), reply/streaming, stopped flag. A
+/// sentence row carrying its status and expanding to every call's arguments and output, skips
+/// `.task` entirely), one row per assistant message plus the live streaming row, stopped flag.
+///
+/// Activity and replies are NOT interleaved chronologically — every tool row precedes every reply
+/// row, because `Exchange` stores them in two separate lists; making the transcript event-shaped is
+/// a separate, larger change. The citation here used to read "spec §5 item 6", which points at
+/// nothing: the mac-chat-parity design doc's §5 is the model/effort wiring and has no item 6. The
+/// change is item **6** of `docs/research/2026-08-12-ios-vs-mac-transcript.md` §5 ("Event-shaped
+/// rows"), which that table marks **Large** and scope-judgment — and the design doc deliberately
+/// carries no §9 gate for it. A
 /// dedicated `View` (not a `@ViewBuilder` func on `TranscriptView`) because it owns its own
-/// expansion `@State` — which group indices are expanded — scoped per-exchange-row and reset on
-/// view recycle (fine: expansion is a transient reading aid, not persisted state).
+/// expansion `@State` — which tool runs are expanded, keyed by `toolRunExpansionKey` (the run's
+/// first `callId`, NOT its position: the reducer's drop-oldest activity cap shifts positions during
+/// a marathon turn, which would silently re-point an open row at a neighbouring run's output) —
+/// scoped per-exchange-row and reset on view recycle (fine: expansion is a transient reading aid,
+/// not persisted state).
 private struct TranscriptExchangeRow: View {
     let exchange: Exchange
+    /// mac-chat-parity Task 3 — see `TranscriptView.cardWiring`.
+    let cardWiring: InteractionCardWiring
     /// Non-nil only for the LAST exchange while a reply is actively streaming (v1's synthetic
     /// trailing-stream mechanism) — `TranscriptView.body` computes this per-index so this view
     /// stays a pure function of its own inputs.
     let streamingText: String?
+    /// True only for the LAST exchange while its turn is still running — the tool rows' gate for
+    /// drawing a running glyph. Same per-index computation as `streamingText`, and for the same
+    /// reason: this view stays a pure function of its inputs.
+    let turnIsLive: Bool
     let tint: Color
 
-    @State private var expandedGroups: Set<Int> = []
+    @State private var expandedRuns: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -104,29 +161,54 @@ private struct TranscriptExchangeRow: View {
             ForEach(Array(groupActivity(exchange.activity).enumerated()), id: \.offset) { index, group in
                 switch group {
                 case .toolRun(let entries):
+                    let key = toolRunExpansionKey(entries, fallbackIndex: index)
                     TranscriptToolGroupRow(
                         entries: entries,
-                        isExpanded: expandedGroups.contains(index),
-                        toggle: { toggle(index) }
+                        turnIsLive: turnIsLive,
+                        isExpanded: expandedRuns.contains(key),
+                        toggle: { toggle(key) }
                     )
                 case .single(let item):
-                    TranscriptActivityRow(item: item)
+                    // mac-chat-parity Task 3: an approval/question/plan draws its CARD here, in the
+                    // ACTIVITY order it was asked in — pending while the daemon waits, frozen with
+                    // its outcome forever after. Every other kind stays the one-line activity row.
+                    //
+                    // "In activity order" is the whole claim, and it is narrower than it reads:
+                    // this loop runs BEFORE the replies loop below, so every card sits above EVERY
+                    // reply in the exchange — a card asked in round 3 draws above round 1's prose.
+                    // That is the same deliberate not-interleaved layout the replies loop's own
+                    // comment records (research §5 item 6, Large, out of scope for this branch); the
+                    // card simply inherits it. Named because a live gate reads a round-3 card above
+                    // round-1 prose as misplacement otherwise.
+                    if let record = item.interactionRecord {
+                        TranscriptInteractionCard(record: record, wiring: cardWiring)
+                    } else {
+                        TranscriptActivityRow(item: item)
+                    }
                 }
             }
+            // One row per assistant message, in arrival order (mac-chat-parity Task 1) — the
+            // engine emits one per ROUND, and this used to render a single string that each round
+            // overwrote. The streaming row is ADDITIVE, not an `else` branch: while round N streams,
+            // rounds 1…N-1 stay on screen instead of being hidden until the turn ends.
+            // mac-chat-parity Task 8: `.assistant` — the transcript reply IS `docs/brand.md` § 4's
+            // serif allowlist binding #4, and these two are the only call sites that pass it. Both
+            // plan-card bodies compose this same view with `.sans`.
+            ForEach(Array(exchange.replies.enumerated()), id: \.offset) { _, reply in
+                TranscriptAssistantMessage(text: reply, isStreaming: false, role: .assistant)
+            }
             if let streamingText {
-                TranscriptAssistantMessage(text: streamingText, isStreaming: true)
-            } else if !exchange.reply.isEmpty {
-                TranscriptAssistantMessage(text: exchange.reply, isStreaming: false)
+                TranscriptAssistantMessage(text: streamingText, isStreaming: true, role: .assistant)
             }
             if exchange.aborted { TranscriptStoppedRow() }
         }
     }
 
-    private func toggle(_ index: Int) {
-        if expandedGroups.contains(index) {
-            expandedGroups.remove(index)
+    private func toggle(_ key: String) {
+        if expandedRuns.contains(key) {
+            expandedRuns.remove(key)
         } else {
-            expandedGroups.insert(index)
+            expandedRuns.insert(key)
         }
     }
 }

@@ -245,6 +245,31 @@ final class OrbWindowController: ObservableObject {
         // to have long since completed and updated `focusedSessionId`).
         guard sessionId != fieldAdapter.boundSessionId() else { return }
         fieldAdapter.pendingCardDrafts = [:]
+        // Same sweep, same reason, for the two dictionaries beside it: `interactionInFlight` and
+        // `interactionErrors` are keyed by BARE callId — the very cross-session collision hazard
+        // `pendingCardDraftKey`'s doc describes, never applied to these two. A stale entry surviving
+        // a hop can put a NEW session's card into "Sending…" (buttons replaced, no retry) or print
+        // another session's error under it. Free to clear: both describe an in-flight attempt on the
+        // session being left.
+        fieldAdapter.interactionInFlight = []
+        fieldAdapter.interactionErrors = [:]
+        // mac-chat-parity T4 fix round 1: the policy readout is re-derived here too — this being the
+        // THIRD switch site the paragraphs above name, and the one where getting it wrong lasts
+        // longest. `ShellSessionHost.hop` and `DetachedWindowController.selectSession` both seed;
+        // without this line the orb's app-lifetime adapter LATCHED the policy of whichever session
+        // its ⋯ menu last changed and reported it — flagged `sessionPolicyKnown == true`, i.e. "the
+        // daemon told us this" — for every session selected afterwards, with nothing to correct it
+        // (no other seed, no heal, and this adapter is never torn down).
+        //
+        // BELOW the guard, unlike `isChatSession` at the top of this method, and the difference is
+        // the point: chat-ness has exactly ONE writer (the daemon's `mode`), so re-deriving it on a
+        // redundant reselect is free. The policy has TWO — the daemon and this surface's own
+        // successful `setPolicy` — so a re-seed on a reselect could read a `directory` row older
+        // than the change the user just made here and quietly replace their value with it. Seeding
+        // is a SWITCH operation, and this guard is already the codebase's definition of a genuine
+        // switch. (Same one-way reasoning as `healSessionPolicyIfUnknown`, reached from the other
+        // side.)
+        fieldAdapter.seedSessionPolicy(for: sessionId, in: rows)
     }
 
     /// Task 4: fired by `requestWindowDetach()` with the panel's CURRENT frame (spawn the detached
@@ -581,9 +606,16 @@ final class OrbWindowController: ObservableObject {
                 case nil:
                     // Task 3 (2d-iii): y/n/digit card routing — ONLY reached once Esc handling
                     // above has passed (not Esc, or Esc consumed nothing surface-relevant). Only
-                    // the WINDOW surface mounts `PendingCardsView` (`WindowContentView`, shared
+                    // the WINDOW surface mounts the transcript's cards (`WindowContentView`, shared
                     // with `DetachedWindowController`) — the small `.field` composer never shows
                     // cards, so this routing is scoped to `.window` only, not `.field` above.
+                    // NAMED, not fixed (mac-chat-parity Task 3 review, Minor-5): `.first` is the
+                    // OLDEST outstanding ask. In the pinned band that WAS the topmost visible card,
+                    // so "topmost" was literally true. Inline in the transcript it no longer is — the
+                    // oldest card can be scrolled far off-screen while a newer one sits in view, so
+                    // y/n/digit can answer something the user cannot see. Left alone deliberately:
+                    // picking the right card needs a notion of which is visible/focused, which is a
+                    // design decision beyond this task. Live-gate item.
                     let topmost = self.fieldAdapter.pendingInteractions.first
                     if let action = cardKeyAction(
                         keyCode: event.keyCode,

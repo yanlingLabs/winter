@@ -17,8 +17,9 @@ import SwiftUI
 ///     masked to the shell shape.
 ///
 /// LAW note: this branch has an OPAQUE tint, so the field's difference-blend white-text LAW does
-/// NOT apply — content uses ADAPTIVE colors (`.primary`/`.secondary`/`.tertiary`) and is NOT wrapped
-/// in `GlassForegroundLegibility`. Real `ScrollView` + `ComposerTextView` hit-test natively (no
+/// NOT apply — content uses appearance-agnostic colors (`.primary`/`.secondary` plus the brand's
+/// own `Theme` tokens, mac-chat-parity Task 8) and is NOT wrapped in
+/// `GlassForegroundLegibility`. Real `ScrollView` + `ComposerTextView` hit-test natively (no
 /// blend to break AppKit hit-testing — the whole reason the r7 pivot escapes the field's regime
 /// inside the window).
 struct WindowSurfaceView: View {

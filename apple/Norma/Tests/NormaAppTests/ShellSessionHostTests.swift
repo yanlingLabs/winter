@@ -390,6 +390,133 @@ final class ShellSessionHostTests: XCTestCase {
         )
     }
 
+    // MARK: - mac-chat-parity T4: the policy readout follows the session, off the wire
+
+    /// The seed's two call sites at once — `attachFresh` (the first select) and `hop` (every later
+    /// one). Before T4 this readout had no wire source at all: it sat at `"auto"` until this surface
+    /// itself changed it, so a session running `bypass` claimed "Auto" for the whole attachment.
+    ///
+    /// The final hop is the one that matters most: it lands on a row that reports NOTHING, and the
+    /// readout must fall back to its unknown placeholder rather than keep showing the previous
+    /// session's `bypass` — a policy label is a claim about the session on screen.
+    func testSelectAndHopSeedThePolicyReadoutFromTheDirectoryRow() async {
+        let rows = [
+            SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "code", approvalPolicy: "bypass"),
+            SessionSummary(sessionId: "S2", title: nil, createdAt: 2, scope: "global", cwd: nil, mode: "code", approvalPolicy: "plan"),
+            SessionSummary(sessionId: "S3", title: nil, createdAt: 3, scope: "global", cwd: nil, mode: "code"),
+        ]
+        let (host, factory) = makeHost(rows: rows)
+        defer { host.deselect() }
+        await host.directory.refresh()
+        host.setShellVisible(true)
+
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicy, "bypass",
+                       "attachFresh seeds off the row — no setPolicy has been called")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicyKnown, true)
+
+        host.select("S2")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicy, "plan", "the hop re-derives it")
+
+        host.select("S3")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicy, "auto",
+                       "a row that reports nothing resets to the placeholder — never the departed session's plan")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicyKnown, false,
+                       "…and says so, so a persistent row can decline to claim anything")
+    }
+
+    /// The heal's WIRING, not just its rule (which `PolicyMenuTests` pins on the adapter directly):
+    /// `attachFresh` seeds once off whatever the directory holds, so a session attached before its
+    /// row loaded — the New-Chat race above, and any caller that attaches ahead of the directory's
+    /// refresh — would otherwise show "unknown" for the rest of that attachment, with nothing ever
+    /// reading the row again. Same door as `isChatSession`'s own self-heal, same trigger: a plain
+    /// `directory.refresh()`, which is exactly what the daemon's broadcast causes in production.
+    func testAttachFreshSelfHealsThePolicyWhenTheRowLandsAfterAttach() async {
+        let lister = StubSessionLister()
+        let factory = ShellTransportFactory()
+        let directory = SessionDirectory(lister: lister.list)
+        let host = ShellSessionHost(directory: directory, makeFeed: { sessionId in
+            let session = SessionModel()
+            let feed = SessionFeed(makeTransport: { factory.make() }, token: "tok", clientName: "orb",
+                                   mode: .pinned(sessionId: sessionId), session: session)
+            return (feed, session)
+        })
+        defer { host.deselect() }
+
+        host.setShellVisible(true)
+        host.select("s_new") // lister.rows is still empty — the row hasn't loaded yet
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "s_new")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicyKnown, false,
+                       "nothing has been learned yet — the placeholder is not an answer")
+
+        lister.rows = [SessionSummary(sessionId: "s_new", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "code", approvalPolicy: "bypass")]
+        await directory.refresh()
+
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicy, "bypass",
+                       "the row landing on an ALREADY-attached session must heal the readout")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicyKnown, true)
+    }
+
+    /// mac-chat-parity T4 fix round 1 (Minor 1): the shell's OWN `onSetPolicy` wiring, driven end to
+    /// end rather than reimplemented by a stub. `PolicyMenuTests.testSessionPolicyUpdatesOnlyOnSuccess`
+    /// pins the SHAPE against a hand-written closure, which stays green if this wirer reverts to a
+    /// bare `adapter.sessionPolicy = policy`.
+    ///
+    /// The harm that reversion causes is narrow but real, and this test's premise: the session was
+    /// attached before its row loaded, so the readout is UNKNOWN. A bare assignment moves the value
+    /// without certifying it — and `healSessionPolicyIfUnknown`, which is one-way precisely so it
+    /// cannot overwrite a known value, would then be free to overwrite this one with whatever a
+    /// `session.list` already in flight happens to carry. Adopting marks it known, which is what
+    /// closes that window.
+    func testASuccessfulSetPolicyThroughTheShellsOwnWiringCertifiesTheValue() async {
+        let lister = StubSessionLister()
+        let factory = ShellTransportFactory()
+        let directory = SessionDirectory(lister: lister.list)
+        let host = ShellSessionHost(directory: directory, makeFeed: { sessionId in
+            let session = SessionModel()
+            let feed = SessionFeed(makeTransport: { factory.make() }, token: "tok", clientName: "orb",
+                                   mode: .pinned(sessionId: sessionId), session: session)
+            return (feed, session)
+        })
+        defer { host.deselect() }
+
+        host.setShellVisible(true)
+        host.select("s_1") // no row yet — the readout starts unknown
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "s_1")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicyKnown, false)
+
+        host.attachment?.adapter.onSetPolicy("bypass")
+        XCTAssertEqual(host.attachment?.adapter.policyChangeInFlight, true, "flipped synchronously")
+        await waitUntilSent(t, 3)
+        let set = feedLineJSON(t.sent[2])
+        XCTAssertEqual(set["method"] as? String, "session.setPolicy")
+        XCTAssertEqual((set["params"] as? [String: Any])?["sessionId"] as? String, "s_1")
+        XCTAssertEqual((set["params"] as? [String: Any])?["policy"] as? String, "bypass")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(set["id"] as! Int),"result":{"ok":true}}"#)
+
+        await waitUntilFalse { host.attachment?.adapter.policyChangeInFlight ?? true }
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicy, "bypass")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicyKnown, true,
+                       "the daemon accepting the write IS an answer — a bare assignment would leave this false and let a heal overwrite it")
+
+        // The heal must now decline to touch it, even handed a row that disagrees — the point of
+        // certifying the value rather than merely moving it.
+        lister.rows = [SessionSummary(sessionId: "s_1", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "code", approvalPolicy: "ask")]
+        await directory.refresh()
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicy, "bypass",
+                       "a list result carrying the pre-change policy must not undo the user's own confirmed change")
+    }
+
+    private func waitUntilFalse(_ cond: @MainActor () -> Bool) async {
+        let deadline = Date().addingTimeInterval(3)
+        while cond() && Date() < deadline { try? await Task.sleep(nanoseconds: 20_000_000) }
+    }
+
     // MARK: - AppDelegate wiring (no socket: the shell is hidden throughout)
 
     /// The shell's host is real, shares the app's ONE `SessionDirectory` (so every surface reads the
@@ -1102,7 +1229,7 @@ final class ShellSessionHostTests: XCTestCase {
     /// `ShellSidebar.swift`'s `toggleMaximized`/`toggleVisible` call sites: both mutate only the
     /// panel's own local `@State`, never `nav`/`host`. There is no view-mounting harness in this
     /// suite to drive that half as its own XCTest — see `CardWiringTests`' own doc for the same
-    /// posture on mounting `PendingCardsView`.)
+    /// posture on mounting the transcript's interaction cards.)
     func testApplyNewChatClearsAStaleDraftOnEveryEntry() async {
         let (host, factory) = makeHost()
         host.setShellVisible(true)
@@ -2030,5 +2157,470 @@ final class ShellSessionHostTests: XCTestCase {
         await feedWaitUntil { host.panelStore.tabs.map(\.tabId) == ["t2"] }
         XCTAssertEqual(host.panelStore.tabs.map(\.tabId), ["t2"], "S2 shows only its own tab, never merged with S1's")
         XCTAssertEqual(factory.made.count, 1, "a hop stays on the SAME socket")
+    }
+
+    // MARK: - mac-chat-parity Task 7 (spec §5): the pre-session model/effort, held and STAMPED
+    //
+    // The user's ruling is hold-and-stamp, not create-then-set: the second leaves a window in which
+    // a turn fired immediately after the create resolves at the GLOBAL effort, and the new-chat page
+    // fires a turn the instant the session exists. So the choice rides `session.create`'s own params
+    // — and, on the bound-session REUSE branch (which creates nothing), rides `session.setModel` and
+    // `session.setEffort` before the send.
+
+    /// Binds the page to `sessionId` through the "+" door, answering its three round trips. Returns
+    /// the create's own params so a caller can assert what (if anything) that create stamped.
+    @discardableResult
+    private func bindViaPlus(_ host: ShellSessionHost, _ mgmt: ShellScriptedTransport,
+                             sessionId: String) async -> [String: Any]? {
+        host.openPanelTabForNewChatPage(kind: .web)
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            XCTFail("'+' must create: \(mgmt.methods)")
+            return nil
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"\#(sessionId)","trusted":true}}"#)
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            XCTFail("'+' must open the tab: \(mgmt.methods)")
+            return nil
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(open["id"] as! Int),"result":{"ok":true,"tabId":"t1"}}"#)
+        await feedWaitUntil { mgmt.methods.contains("panel.list") }
+        guard let prime = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.list" }) else {
+            XCTFail("the bind must prime the panel: \(mgmt.methods)")
+            return nil
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(prime["id"] as! Int),"result":{"tabs":[],"activeTabId":null}}"#)
+        await feedWaitUntil { host.newChatBoundSessionId == sessionId }
+        return create["params"] as? [String: Any]
+    }
+
+    /// Answers the reuse branch's existence-verify `panel.list`, so the send can proceed.
+    private func answerReuseVerify(_ mgmt: ShellScriptedTransport) async {
+        await feedWaitUntil { mgmt.methods.filter { $0 == "panel.list" }.count == 2 }
+        guard let verify = mgmt.sent.map({ feedLineJSON($0) }).filter({ $0["method"] as? String == "panel.list" }).last else { return }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(verify["id"] as! Int),"result":{"tabs":[],"activeTabId":null}}"#)
+    }
+
+    /// Feeds a catalogue onto the page's chip through its real door (`onOpen` → `sync.config`).
+    private func feedNewChatCatalogue(_ host: ShellSessionHost, _ mgmt: ShellScriptedTransport,
+                                      models: String) async {
+        host.newChatModelControl.onOpen()
+        await feedWaitUntil { mgmt.methods.contains("sync.config") }
+        guard let cfg = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "sync.config" }) else { return }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(cfg["id"] as! Int),"result":{"provider":"codex-oauth","exaKey":null,"dangerousDomains":[],"defaultModel":"srv-a","models":\#(models),"defaultEffort":"high","clientEfforts":["ultra"]}}"#)
+        await feedWaitUntil { !host.newChatCatalogue.models.isEmpty }
+    }
+
+    /// The headline pin: a choice held on the page reaches the create that mints its session.
+    func testTheHeldModelAndEffortRideTheFirstSendsCreate() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+        host.setNewChatModel("srv-b")
+        host.setNewChatEffort("high")
+
+        host.sendFirstChatMessage("hello") { _ in }
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("the first send must still ride session.create: \(mgmt.methods)")
+        }
+        let params = create["params"] as? [String: Any]
+        XCTAssertEqual(params?["model"] as? String, "srv-b", "the held model is STAMPED, never set afterwards")
+        XCTAssertEqual(params?["effort"] as? String, "high")
+        XCTAssertEqual(params?["mode"] as? String, "chat", "…on the same create, unchanged in every other way")
+        XCTAssertNil(params?["cwd"])
+    }
+
+    /// …and an UNPICKED page sends exactly the create it always sent — both keys ABSENT, not null.
+    /// (`session.create`'s zod reads absence as "no override"; a null is a value it refuses.)
+    func testAnUnpickedPageSendsTheCreateExactlyAsBefore() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        host.sendFirstChatMessage("hello") { _ in }
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("must create: \(mgmt.methods)")
+        }
+        let params = create["params"] as? [String: Any]
+        XCTAssertNil(params?["model"], "nothing picked ⇒ the key is absent")
+        XCTAssertNil(params?["effort"])
+    }
+
+    /// The page's OTHER birth door (panel-shell T15's "+"): it mints the page's session too, so it
+    /// stamps the held choice for the same reason the send's create does.
+    func testThePlusDoorStampsTheHeldChoiceOnTheSessionItBinds() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+        host.setNewChatModel("srv-b")
+        host.setNewChatEffort("max")
+
+        host.openPanelTabForNewChatPage(kind: .web)
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("'+' must still create: \(mgmt.methods)")
+        }
+        let params = create["params"] as? [String: Any]
+        XCTAssertEqual(params?["model"] as? String, "srv-b")
+        XCTAssertEqual(params?["effort"] as? String, "max")
+    }
+
+    /// **The reuse branch — the trap the spec named.** A "+" bound the page to a session BEFORE the
+    /// user picked, so there is no create left to stamp: the send applies the held choice with
+    /// `session.setModel` then `session.setEffort`, and **awaits both before the send**.
+    ///
+    /// The ORDER is load-bearing, not cosmetic: `session.setEffort` validates against the session's
+    /// CURRENT model (`assertEffortSelectable`, `ipc/server.ts:476-489`), so effort-first would
+    /// validate a perfectly legal held pair against the daemon's default model and can throw.
+    ///
+    /// Sequencing is pinned as sequencing (not as end-state): while each set is unanswered, the flow
+    /// must not have moved on. "No turn has fired on a session minted for a panel tab" is true of
+    /// today's flows but is not structural — that session is real, listed, and reachable by another
+    /// client.
+    func testTheBoundSessionsReuseAppliesTheHeldChoiceBeforeTheSend() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        // "+" binds a session, before any pick.
+        host.openPanelTabForNewChatPage(kind: .web)
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("'+' must create: \(mgmt.methods)")
+        }
+        XCTAssertNil((create["params"] as? [String: Any])?["model"], "nothing was picked when '+' fired")
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_bound","trusted":true}}"#)
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            return XCTFail("'+' must open the tab: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(open["id"] as! Int),"result":{"ok":true,"tabId":"t1"}}"#)
+        await feedWaitUntil { mgmt.methods.contains("panel.list") }
+        guard let primeList = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.list" }) else {
+            return XCTFail("the bind must prime the panel: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(primeList["id"] as! Int),"result":{"tabs":[{"tabId":"t1","kind":"web","url":null,"title":null}],"activeTabId":"t1"}}"#)
+        await feedWaitUntil { host.newChatBoundSessionId == "s_bound" }
+
+        // NOW the user picks, and sends.
+        host.setNewChatModel("srv-b")
+        host.setNewChatEffort("high")
+        host.sendFirstChatMessage("hello there") { id in host.apply(destination: .session(id)) }
+
+        // The existence-verify the reuse branch already did.
+        await feedWaitUntil { mgmt.methods.filter { $0 == "panel.list" }.count == 2 }
+        guard let verify = mgmt.sent.map({ feedLineJSON($0) }).filter({ $0["method"] as? String == "panel.list" }).last else {
+            return XCTFail("send must verify the bound session: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(verify["id"] as! Int),"result":{"tabs":[{"tabId":"t1","kind":"web","url":null,"title":null}],"activeTabId":"t1"}}"#)
+
+        // setModel FIRST — and while it is unanswered, nothing else has happened.
+        await feedWaitUntil { mgmt.methods.contains("session.setModel") }
+        guard let setModel = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.setModel" }) else {
+            return XCTFail("the held model must be applied to the reused session: \(mgmt.methods)")
+        }
+        XCTAssertEqual((setModel["params"] as? [String: Any])?["sessionId"] as? String, "s_bound")
+        XCTAssertEqual((setModel["params"] as? [String: Any])?["model"] as? String, "srv-b")
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertFalse(mgmt.methods.contains("session.setEffort"),
+                       "effort must wait for the model — it is validated against the session's CURRENT model")
+        XCTAssertTrue(factory.made.isEmpty, "nothing attaches (and so nothing sends) before the stamps land")
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(setModel["id"] as! Int),"result":{}}"#)
+
+        await feedWaitUntil { mgmt.methods.contains("session.setEffort") }
+        guard let setEffort = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.setEffort" }) else {
+            return XCTFail("the held effort must be applied too: \(mgmt.methods)")
+        }
+        XCTAssertEqual((setEffort["params"] as? [String: Any])?["effort"] as? String, "high")
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertTrue(factory.made.isEmpty, "the send waits for BOTH stamps")
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(setEffort["id"] as! Int),"result":{}}"#)
+
+        // …and only then the ordinary attach-then-send.
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "s_bound")
+        await feedWaitUntil { t.methods.contains("session.send") }
+        XCTAssertEqual(mgmt.methods.filter { $0 == "session.create" }.count, 1, "still exactly one create")
+    }
+
+    /// **A refused stamp must never eat the message** (the user's own ruling): the message outranks
+    /// the stamp, and a dead Send button over a failed effort RPC is precisely what this design
+    /// exists to prevent. A `setModel` that comes back an error still lets the effort stamp and the
+    /// send through.
+    func testAFailedStampStillSendsTheMessage() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        host.openPanelTabForNewChatPage(kind: .web)
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("'+' must create: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"s_bound","trusted":true}}"#)
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else { return }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(open["id"] as! Int),"result":{"ok":true,"tabId":"t1"}}"#)
+        await feedWaitUntil { mgmt.methods.contains("panel.list") }
+        guard let primeList = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.list" }) else { return }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(primeList["id"] as! Int),"result":{"tabs":[],"activeTabId":null}}"#)
+        await feedWaitUntil { host.newChatBoundSessionId == "s_bound" }
+
+        host.setNewChatModel("srv-b")
+        host.setNewChatEffort("high")
+        host.sendFirstChatMessage("say it anyway") { id in host.apply(destination: .session(id)) }
+
+        await feedWaitUntil { mgmt.methods.filter { $0 == "panel.list" }.count == 2 }
+        guard let verify = mgmt.sent.map({ feedLineJSON($0) }).filter({ $0["method"] as? String == "panel.list" }).last else { return }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(verify["id"] as! Int),"result":{"tabs":[],"activeTabId":null}}"#)
+
+        await feedWaitUntil { mgmt.methods.contains("session.setModel") }
+        guard let setModel = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.setModel" }) else { return }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(setModel["id"] as! Int),"error":{"code":1,"message":"unknown model 'srv-b'"}}"#)
+
+        await feedWaitUntil { mgmt.methods.contains("session.setEffort") }
+        guard let setEffort = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.setEffort" }) else { return }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(setEffort["id"] as! Int),"error":{"code":1,"message":"effort refused"}}"#)
+
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "s_bound")
+        await feedWaitUntil { t.methods.contains("session.send") }
+        guard let send = t.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.send" }) else {
+            return XCTFail("a refused stamp must not eat the message: \(t.methods)")
+        }
+        XCTAssertEqual((send["params"] as? [String: Any])?["text"] as? String, "say it anyway")
+        XCTAssertEqual(host.newChatCreate, .idle, "…and the page is not left stuck mid-create either")
+    }
+
+    /// The held choice follows the DRAFT, not the binding: a choice made on an abandoned visit must
+    /// never be silently adopted by the next one (the same standing-lie class one surface over).
+    func testAFreshNewChatEntryClearsTheHeldModelAndEffort() async {
+        let (host, _, _) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+        host.setNewChatModel("srv-b")
+        host.setNewChatEffort("high")
+        host.newChatDraft = "half a thought"
+
+        host.apply(destination: .mode(.code)) // walk away…
+        host.apply(destination: .newChat)     // …and come back
+        XCTAssertNil(host.newChatModel, "a previous visit's pick must not be inherited")
+        XCTAssertNil(host.newChatEffort)
+        XCTAssertEqual(host.newChatDraft, "", "the pre-existing contract this rides on")
+    }
+
+    /// **The negative scope.** The held choice belongs to the new-chat page's doors and nowhere else:
+    /// the folder-picker create (`createSession(with:)`, the landings' "New") must never inherit it —
+    /// it is a different surface, with its own picker, minting a CODE session.
+    func testTheFolderCreateNeverInheritsTheNewChatPagesHeldChoice() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+        host.setNewChatModel("srv-b")
+        host.setNewChatEffort("high")
+
+        host.createSession(with: .folder("/tmp/proj")) { _ in }
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("must create: \(mgmt.methods)")
+        }
+        let params = create["params"] as? [String: Any]
+        XCTAssertEqual(params?["cwd"] as? String, "/tmp/proj", "the premise: this IS the folder door")
+        XCTAssertNil(params?["model"], "the page's pick must not leak onto another surface's create")
+        XCTAssertNil(params?["effort"])
+    }
+
+    /// …and neither does the OTHER panel auto-create — the one reached from every landing that is not
+    /// the new-chat page (`openPanelTab`'s own no-attached-session branch, which NAVIGATES rather than
+    /// binding; `ShellPanel`/`ShellSidebar` route the new-chat page to `openPanelTabForNewChatPage`
+    /// instead precisely so the page's draft is not stranded). It cannot mint the page's session, so
+    /// it must not carry the page's choice.
+    func testThePlainPanelAutoCreateIsNotANewChatDoorAndCarriesNoHeldChoice() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+        host.setNewChatModel("srv-b")
+        host.setNewChatEffort("high")
+
+        host.openPanelTab(kind: .web) { _ in }
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            return XCTFail("must create: \(mgmt.methods)")
+        }
+        let params = create["params"] as? [String: Any]
+        XCTAssertNil(params?["model"])
+        XCTAssertNil(params?["effort"])
+    }
+
+    /// The page's chip has no adapter to fetch its catalogue through, so the host fetches it on the
+    /// MANAGEMENT connection — the same `sync.config` the orb already reads there
+    /// (`AppModel.fetchModelCatalogue`), fired when the chip is about to be read (the header's own
+    /// "a snapshot, refreshed exactly when it is about to be read" convention).
+    func testTheNewChatChipFetchesItsCatalogueOnTheManagementConnection() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+        XCTAssertEqual(host.newChatCatalogue, .empty, "nothing fetched until something asks")
+
+        host.newChatModelControl.onOpen()
+        await feedWaitUntil { mgmt.methods.contains("sync.config") }
+        guard let cfg = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "sync.config" }) else {
+            return XCTFail("the chip's open must fetch the catalogue: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(cfg["id"] as! Int),"result":{"provider":"codex-oauth","exaKey":null,"dangerousDomains":[],"defaultModel":"srv-a","models":[{"id":"srv-a","efforts":["low","high"]}],"defaultEffort":"high","clientEfforts":["ultra"]}}"#)
+        await feedWaitUntil { host.newChatCatalogue.models.count == 1 }
+        XCTAssertEqual(host.newChatCatalogue.models.map(\.id), ["srv-a"])
+    }
+
+    // MARK: - Fix round 1: the re-pick, and the effort a new model does not accept
+
+    /// **The dropped clear.** Pick a model → "+" (the create stamps it, and binds) → re-pick
+    /// **Default** → send. The session is really pinned to the stamped model, so "Default" must go
+    /// out as a literal `null` — the clear. Before this fix the reuse branch's `if let model` was
+    /// false and NOTHING was sent: the chip read "Default model" while the session stayed pinned and
+    /// the first turn ran at the old model, which is the mirrored form of exactly the wrong-selection
+    /// window hold-and-stamp exists to close.
+    func testAnExplicitDefaultRePickAfterTheBindClearsWhatTheBindStamped() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+        host.setNewChatModel("srv-b")
+        host.setNewChatEffort("high")
+
+        let stamped = await bindViaPlus(host, mgmt, sessionId: "s_bound")
+        XCTAssertEqual(stamped?["model"] as? String, "srv-b", "the premise: the '+' create DID stamp it")
+        XCTAssertEqual(stamped?["effort"] as? String, "high")
+
+        // …and now the user changes their mind, on both axes.
+        host.setNewChatModel(nil)
+        host.setNewChatEffort(nil)
+        XCTAssertNil(host.newChatModel, "the chip now reads Default — the session must be made to agree")
+
+        host.sendFirstChatMessage("hello") { id in host.apply(destination: .session(id)) }
+        await answerReuseVerify(mgmt)
+
+        await feedWaitUntil { mgmt.methods.contains("session.setModel") }
+        guard let setModel = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.setModel" }) else {
+            return XCTFail("an explicit Default must CLEAR the session's override: \(mgmt.methods)")
+        }
+        XCTAssertTrue((setModel["params"] as? [String: Any])?["model"] is NSNull,
+                      "a literal null — the wire's own clear (NormaClient.setModel), never an omitted key")
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(setModel["id"] as! Int),"result":{}}"#)
+
+        await feedWaitUntil { mgmt.methods.contains("session.setEffort") }
+        guard let setEffort = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.setEffort" }) else {
+            return XCTFail("…and so must the effort half: \(mgmt.methods)")
+        }
+        XCTAssertTrue((setEffort["params"] as? [String: Any])?["effort"] is NSNull)
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(setEffort["id"] as! Int),"result":{}}"#)
+
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "s_bound")
+        await feedWaitUntil { t.methods.contains("session.send") }
+    }
+
+    /// The other half of the tri-state, and the reason it is a tri-state rather than an
+    /// unconditional null-send: an axis the user NEVER TOUCHED is not written at all. That bound
+    /// session is real, listed and reachable by another client (the same argument the sequencing pin
+    /// rests on), so this page must not clear an override it did not set.
+    func testAnAxisTheUserNeverTouchedIsNeverWrittenOnTheReuseBranch() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        await bindViaPlus(host, mgmt, sessionId: "s_bound")
+        host.setNewChatModel("srv-b") // ONLY the model — the effort axis is never touched
+
+        host.sendFirstChatMessage("hello") { id in host.apply(destination: .session(id)) }
+        await answerReuseVerify(mgmt)
+
+        await feedWaitUntil { mgmt.methods.contains("session.setModel") }
+        guard let setModel = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.setModel" }) else {
+            return XCTFail("the touched axis must be written: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(setModel["id"] as! Int),"result":{}}"#)
+
+        // Asserted HERE, before the send-dependent half, and proven by the mutation run: an
+        // unconditional write sends its `setEffort` in this beat AND then stalls the send waiting
+        // for a response nobody feeds — so an assertion placed after the send would red on a
+        // TIMEOUT rather than on the claim it is making.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertFalse(mgmt.methods.contains("session.setEffort"),
+                       "an untouched axis must not be cleared — this page never set it")
+
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "s_bound")
+        await feedWaitUntil { t.methods.contains("session.send") }
+        XCTAssertFalse(mgmt.methods.contains("session.setEffort"), "…and still not by send time")
+    }
+
+    /// **Fix round 1, the second Important.** An effort picked while no model is pinned is validated
+    /// against the catalogue's DEFAULT model; picking a model that does not accept it leaves a pair
+    /// the daemon refuses (`assertEffortSelectable`, reached by `session.create` too) — with no
+    /// provider change involved. It is cleared on the model change, so the "+" door cannot become a
+    /// click that silently does nothing, and the menu cannot go on showing an illegal value checked.
+    ///
+    /// A COMPATIBLE effort must survive the same change: this clears what the daemon would refuse,
+    /// never merely what changed.
+    func testAnEffortTheNewlyPickedModelCannotAcceptIsClearedAndACompatibleOneSurvives() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+        await feedNewChatCatalogue(host, mgmt,
+                                   models: #"[{"id":"srv-a","efforts":["none","low","high"]},{"id":"srv-b","efforts":["high","max"]}]"#)
+
+        // Picked with NO model pinned: the offered list came from the catalogue's default (srv-a).
+        host.setNewChatEffort("low")
+        XCTAssertEqual(host.newChatEffort, "low")
+
+        host.setNewChatModel("srv-b") // srv-b accepts high/max — "low" is now refusable
+        XCTAssertNil(host.newChatEffort,
+                     "an effort the model in force does not accept must not survive the model change")
+
+        // …and the compatible direction: "high" is accepted by both models.
+        host.setNewChatEffort("high")
+        host.setNewChatModel("srv-a")
+        XCTAssertEqual(host.newChatEffort, "high", "a legal effort must survive — this clears refusals, not changes")
+    }
+
+    /// …and it NEVER clears on silence: an empty wire list means the daemon has told us nothing about
+    /// this model (an unlisted model, a BYOK endpoint that cannot enumerate, or a catalogue not
+    /// fetched yet). The same "empty is a real answer and never a licence to guess" rule
+    /// `effortPickerOptions` keeps, applied in the one direction that can destroy a user's pick.
+    func testAnEffortIsNeverClearedByAModelTheCatalogueSaysNothingAbout() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        // 1. Nothing fetched at all.
+        host.setNewChatEffort("low")
+        host.setNewChatModel("srv-b")
+        XCTAssertEqual(host.newChatEffort, "low", "an unfetched catalogue knows nothing and must clear nothing")
+
+        // 2. A real catalogue, an unlisted model.
+        await feedNewChatCatalogue(host, mgmt, models: #"[{"id":"srv-a","efforts":["none","low","high"]}]"#)
+        host.setNewChatModel("unheard-of")
+        XCTAssertEqual(host.newChatEffort, "low", "…and neither does a model it does not list")
+    }
+
+    /// The catalogue LANDING is the other moment we learn enough to judge — a pick made before any
+    /// fetch was never checked against anything.
+    func testACatalogueThatLandsLateInvalidatesAnEffortThatWasNeverCheckable() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        host.setNewChatModel("srv-b")
+        host.setNewChatEffort("low") // legal-looking: nothing has said otherwise yet
+        await feedNewChatCatalogue(host, mgmt,
+                                   models: #"[{"id":"srv-a","efforts":["none","low","high"]},{"id":"srv-b","efforts":["high","max"]}]"#)
+        XCTAssertNil(host.newChatEffort, "once the daemon has said, an effort srv-b refuses cannot stay held")
     }
 }

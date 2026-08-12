@@ -9,7 +9,7 @@ import NormaKit
 /// (the sync-insert/async-remove/error-on-failure shape every respond wiring follows — see
 /// `FieldStateAdapter.swift`'s `interactionInFlight`/`interactionErrors`), and the AppModel→wire
 /// shape for `respondApproval` (mirrors `AppModelTests`' own `sendOrSteer` wire-shape idiom).
-/// Nothing here drives a live `NSEvent` monitor or mounts `PendingCardsView` in a real window —
+/// Nothing here drives a live `NSEvent` monitor or mounts a card in a real window —
 /// those aren't independently unit-testable (same posture as `EscInterruptTests`, which only
 /// exercises the pure `escMonitorAction`/`windowEscAction` routers plus `AppDelegate`'s wired
 /// closures, never the live monitor installation itself).

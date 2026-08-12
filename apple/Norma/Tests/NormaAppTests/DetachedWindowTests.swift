@@ -180,6 +180,93 @@ final class DetachedWindowTests: XCTestCase {
         XCTAssertEqual(hellos.count, 1, "repin must reuse the same socket: \(t.sent)")
     }
 
+    /// mac-chat-parity T4: the switch-in-place must re-derive the POLICY readout too, off this
+    /// window's own directory — the same re-derivation `isChatSession` gets, for the same reason.
+    /// This window mounts `WorkSidebar`'s Options block, a picker that is on screen the whole time
+    /// rather than a popover you open, so a readout stuck at the departed session's value (or at the
+    /// `"auto"` placeholder for a session running `bypass`) is a standing claim about the wrong
+    /// session.
+    ///
+    /// Driven through the REAL wire: the controller's directory lists over its own feed client, so
+    /// answering that `session.list` is the only way its rows ever carry a policy — which also means
+    /// this covers the kit decode and the controller's own `SessionSummary` map, the sibling of the
+    /// one `PolicyMenuTests` pins on `AppModel`.
+    func testSelectSessionReDerivesTheApprovalPolicyFromThisWindowsDirectory() async throws {
+        let t = DetachedScriptedTransport()
+        let session = SessionModel()
+        let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
+        let controller = DetachedWindowController(
+            feed: feed, session: session,
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+        )
+        defer { controller.close() }
+        controller.show()
+        await answerHandshake(t, sessionId: "S1")
+
+        // A `session_created` broadcast kicks this window's directory into a real `session.list`
+        // (`feed.onEvent` → `SessionDirectory.handle`). Deliberately not `startInitialLoad`'s own
+        // list: that one fires at construction, before this feed's client has connected, and is
+        // silently absorbed by `refresh()`'s `try?` — see `startInitialLoad`'s own doc comment.
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session_created","seq":1,"sessionId":"S2","ts":5,"scope":"global"}}"#)
+
+        // Found by METHOD rather than by a fixed index, since it races the handshake's own traffic.
+        let deadline = Date().addingTimeInterval(3)
+        var listLine: [String: Any]?
+        while listLine == nil && Date() < deadline {
+            listLine = t.sent.map(feedLineJSON).first { $0["method"] as? String == "session.list" }
+            if listLine == nil { try? await Task.sleep(nanoseconds: 20_000_000) }
+        }
+        guard let list = listLine, let listId = list["id"] as? Int else {
+            return XCTFail("the detached window's directory must list on construction: \(t.sent)")
+        }
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listId),"result":{"sessions":[{"sessionId":"S1","scope":"global","createdAt":1,"lastSeq":0,"approvalPolicy":"ask"},{"sessionId":"S2","scope":"global","createdAt":2,"lastSeq":0,"approvalPolicy":"bypass"},{"sessionId":"S3","scope":"global","createdAt":3,"lastSeq":0}]}}"#)
+        await feedWaitUntil { controller.directory.rows.count == 3 }
+        XCTAssertEqual(controller.directory.rows.count, 3, "the directory must have folded the list")
+
+        controller.selectSession("S2")
+        XCTAssertEqual(controller.adapterForTesting.sessionPolicy, "bypass",
+                       "the switch re-derives the readout off the arriving session's row")
+        XCTAssertTrue(controller.adapterForTesting.sessionPolicyKnown)
+
+        controller.selectSession("S3")
+        XCTAssertEqual(controller.adapterForTesting.sessionPolicy, "auto",
+                       "a row that reports nothing resets to the placeholder — never S2's bypass")
+        XCTAssertFalse(controller.adapterForTesting.sessionPolicyKnown)
+    }
+
+    /// mac-chat-parity T4 fix round 1 (Minor 1): this window's OWN `onSetPolicy` wiring, driven end
+    /// to end. `PolicyMenuTests.testSessionPolicyUpdatesOnlyOnSuccess` pins the shape against a
+    /// hand-written closure, which would stay green if this wirer reverted to a bare
+    /// `adapter.sessionPolicy = policy` — leaving the value uncertified, and therefore fair game for
+    /// a `session.list` that was already in flight when the user made the change.
+    func testASuccessfulSetPolicyThroughThisWindowsOwnWiringCertifiesTheValue() async throws {
+        let t = DetachedScriptedTransport()
+        let session = SessionModel()
+        let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
+        let controller = DetachedWindowController(
+            feed: feed, session: session,
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+        )
+        defer { controller.close() }
+        controller.show()
+        await answerHandshake(t, sessionId: "S1")
+        XCTAssertFalse(controller.adapterForTesting.sessionPolicyKnown, "nothing has said anything yet")
+
+        controller.adapterForTesting.onSetPolicy("bypass")
+        XCTAssertTrue(controller.adapterForTesting.policyChangeInFlight, "flipped synchronously")
+        await waitUntilSent(t, 3)
+        let set = feedLineJSON(t.sent[2])
+        XCTAssertEqual(set["method"] as? String, "session.setPolicy")
+        XCTAssertEqual((set["params"] as? [String: Any])?["sessionId"] as? String, "S1")
+        XCTAssertEqual((set["params"] as? [String: Any])?["policy"] as? String, "bypass")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(set["id"] as! Int),"result":{"ok":true}}"#)
+
+        await feedWaitUntil { !controller.adapterForTesting.policyChangeInFlight }
+        XCTAssertEqual(controller.adapterForTesting.sessionPolicy, "bypass")
+        XCTAssertTrue(controller.adapterForTesting.sessionPolicyKnown,
+                      "adopting CERTIFIES the value; a bare assignment would move it and leave it uncertified")
+    }
+
     /// A no-op re-select (the current row tapped again) must not touch the wire at all.
     func testSelectSessionIsANoOpForTheAlreadyPinnedSession() async throws {
         let t = DetachedScriptedTransport()
