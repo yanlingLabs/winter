@@ -85,7 +85,7 @@ final class InteractionRecordTests: XCTestCase {
         XCTAssertTrue(s.pendingInteractions.isEmpty)
         // But still in scrollback, with what was asked AND what was decided.
         XCTAssertEqual(records(s).count, 1)
-        let record = records(s)[0]
+        guard let record = records(s).first else { return XCTFail("the resolved approval was deleted from the transcript") }
         XCTAssertEqual(record.callId, "a1")
         XCTAssertEqual(record.ask, .approval(toolName: "bash", summary: "rm -rf x"))
         XCTAssertEqual(record.outcome, .approval(approved: true, by: "orb"))
@@ -117,7 +117,7 @@ final class InteractionRecordTests: XCTestCase {
         s = SessionReducer.reduce(s, questionResolved("Which port?", answer: "8080", note: "prod only", by: "orb"))
 
         XCTAssertTrue(s.pendingInteractions.isEmpty)
-        let record = records(s)[0]
+        guard let record = records(s).first else { return XCTFail("the resolved question was deleted from the transcript") }
         guard case .question(let questions) = record.ask else { return XCTFail("expected a question ask") }
         XCTAssertEqual(questions.map(\.question), ["Which port?"])
         XCTAssertEqual(questions[0].options.map(\.label), ["3000", "8080"])
@@ -162,7 +162,7 @@ final class InteractionRecordTests: XCTestCase {
         var s = openTurnState()
         s = SessionReducer.reduce(s, approvalRequested())
         XCTAssertNil(records(s).first?.outcome)
-        XCTAssertTrue(interactionIsPending(records(s)[0]))
+        XCTAssertEqual(records(s).first.map(interactionIsPending), true)
         XCTAssertEqual(s.pendingInteractions.map(\.callId), ["a1"])
     }
 
@@ -172,12 +172,12 @@ final class InteractionRecordTests: XCTestCase {
     func testTurnCompletionFreezesAnAskThatWasNeverAnswered() {
         var s = openTurnState()
         s = SessionReducer.reduce(s, approvalRequested())
-        XCTAssertTrue(interactionIsPending(records(s)[0]))
+        XCTAssertEqual(records(s).first.map(interactionIsPending), true)
 
         s = SessionReducer.reduce(s, turnCompleted())
         XCTAssertTrue(s.pendingInteractions.isEmpty)
         XCTAssertEqual(records(s).first?.outcome, .ended)
-        XCTAssertFalse(interactionIsPending(records(s)[0]))
+        XCTAssertEqual(records(s).first.map(interactionIsPending), false)
     }
 
     /// The same for a turn that DIED. `agent_error` clears the outstanding list too, so it owes the
@@ -279,7 +279,7 @@ final class InteractionRecordTests: XCTestCase {
         XCTAssertEqual(s.exchanges.count, 1)
         XCTAssertEqual(s.exchanges[0].prompt, "")
         XCTAssertEqual(records(s).count, 1)
-        XCTAssertEqual(records(s)[0].callId, "a1")
+        XCTAssertEqual(records(s).first?.callId, "a1")
     }
 
     // MARK: Derived summary
@@ -292,7 +292,7 @@ final class InteractionRecordTests: XCTestCase {
         XCTAssertEqual(InteractionRecord(callId: "p", ask: .plan(plan: "the plan")).summary, "plan presented")
         var s = openTurnState()
         s = SessionReducer.reduce(s, questionAsked("Which port?"))
-        XCTAssertEqual(records(s)[0].summary, "Which port?")
+        XCTAssertEqual(records(s).first?.summary, "Which port?")
     }
 
     /// A question ask with no questions at all cannot come off the wire (the schema requires
