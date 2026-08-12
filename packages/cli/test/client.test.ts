@@ -411,6 +411,36 @@ describe("NormaClient", () => {
     client.close();
   });
 
+  // mac-chat-parity T4 (the T9/`dirs` precedent, applied to `approvalPolicy`): the field is declared
+  // in the SAME schema `listSessions()` validates against, so it carries the identical silent-strip
+  // hazard — and the identical LIVE round trip is the only thing that closes both ends at once. A
+  // schema unit test passes the day the daemon stops populating the field; a daemon-side test passes
+  // the day the schema stops declaring it. This one fails on either.
+  //
+  // Read AFTER a real `session.setPolicy` as well as at create time, because the field's whole
+  // purpose is to report what the setter wrote — a row that only ever echoed the creation argument
+  // would satisfy a create-only assertion while telling a picker nothing it did not already know.
+  test("session.list round-trips `approvalPolicy` through the client's schema validation (mac-chat-parity T4)", async () => {
+    await boot();
+    const client = await NormaClient.connect({
+      socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli-policy", onEvent: () => {},
+    });
+    const policyOf = async (id: string) =>
+      (await client.listSessions()).sessions.find((s: { sessionId: string }) => s.sessionId === id)!.approvalPolicy;
+
+    const { sessionId } = await client.createSession("global", { approvalPolicy: "bypass" });
+    expect(await policyOf(sessionId)).toBe("bypass");
+
+    // The daemon's own default, never absent: a row that omitted its policy would be
+    // indistinguishable from an older daemon's, which is the one reading absence is reserved for.
+    const { sessionId: plain } = await client.createSession("global");
+    expect(await policyOf(plain)).toBe("ask");
+
+    await client.setPolicy(plain, "plan");
+    expect(await policyOf(plain)).toBe("plan");
+    client.close();
+  });
+
   // working-directories T3 (the T9-hygiene precedent, applied to `dirs`): `SessionListResult`'s
   // `dirs` field is declared in the SAME schema `listSessions()` validates against — the risk T9
   // found is exactly this: an undeclared field the daemon already sends dies silently at
