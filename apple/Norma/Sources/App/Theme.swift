@@ -66,10 +66,17 @@ enum Theme {
     /// (`NewChatPage`).
     static let inverseCanvas = Color("InverseCanvas")
 
-    /// Brand tint — a muted blue-green teal. **Deliberately tints nothing in this pass**: the
-    /// iOS ruling is that the accent stays out of the sidebar, and
+    /// Brand tint — a muted blue-green teal. It tints prominent controls and glyphs and stays out
+    /// of navigation entirely (`docs/brand.md` § 3.2, which is why the sidebar carries no accent
+    /// anywhere). On Mac that means the transcript's card selection chrome, its list markers and
+    /// quote rules, and the in-progress task/subagent tint — all of them since mac-chat-parity
+    /// Task 8, which is when this token first tinted anything here.
+    ///
     /// `ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME` is left UNSET so that naming a colorset
-    /// `AccentColor` does not silently retint every system control in the app.
+    /// `AccentColor` does not silently retint every system control in the app. **The corollary was
+    /// a live bug until Task 8:** with that setting unset, SwiftUI's `Color.accentColor` resolves
+    /// to the USER's System Settings accent, not to this. Always name `Theme.accent`;
+    /// `TranscriptBrandTests` fails the suite on `accentColor` anywhere in `ChatContent/`.
     static let accent = Color("AccentColor")
 
     // MARK: - Color: the three Mac-only tokens

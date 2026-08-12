@@ -271,7 +271,8 @@ final class TranscriptBrandTests: XCTestCase {
     /// - `Material` — on an opaque window a material is a blur of whatever happens to be behind it.
     /// - `.tertiary` / `.quaternary` — the system hierarchy's faint levels. `.tertiary` composited on
     ///   `CardSurface` measures **1.86:1**, below every legibility floor; `TextMuted` is 4.14:1.
-    /// - `Color(red:` / `Color.black` / `Color.white` / `NSColor.black` / `NSColor.white` — hexes.
+    /// - `Color(red:` / `Color.black` / `Color.white` / `NSColor.black` / `NSColor.white` — literal
+    ///   colours: a hex by another name, with no light and dark halves to author.
     /// - `accentColor` — SwiftUI's app accent resolves to the **user's System Settings accent**,
     ///   because brand.md § 3.2 deliberately leaves `ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME`
     ///   unset. Every use of it was drawing in a colour Norma did not pick. `Theme.accent` is the

@@ -22,13 +22,19 @@ import SwiftUI
 /// Which face a block of formatted prose is set in.
 ///
 /// TWO roles, because `docs/brand.md` § 4's serif allowlist has exactly ONE transcript binding
-/// (#4, assistant prose) and everything else on this surface stays sans. The role is a required
-/// parameter on every view that renders prose — never a default — because the dangerous direction
-/// is a new call site *inheriting* serif: a card, a placeholder, a future summary panel silently
-/// putting chrome into Norma's speaking voice. A `let` with no initial value is a required
-/// parameter of Swift's memberwise initialiser, so omitting it does not compile. (The distinction
-/// this plan learned the hard way at Task 6: an *optional* `var` gets an implicit `nil` default and
-/// gives no such protection.)
+/// (#4, assistant prose) and everything else on this surface stays sans.
+///
+/// It is a REQUIRED parameter — never a default — on the three views that TAKE one
+/// (`TranscriptAssistantMessage` and the two private renderers below), because the dangerous
+/// direction is a new call site *inheriting* serif: a card, a placeholder, a future summary panel
+/// silently putting chrome into Norma's speaking voice. A `let` with no initial value is a required
+/// parameter of Swift's memberwise initialiser, so omitting it does not compile — demonstrated by
+/// mutation (`error: missing argument for parameter 'role'`), not assumed. (The distinction this
+/// plan learned the hard way at Task 6: an *optional* `var` gets an implicit `nil` default and
+/// gives no such protection at all.)
+///
+/// `TranscriptUserBubble` is the one view that DECLARES its role rather than taking one: it renders
+/// exactly one thing — the user's own words — so there is nothing for a caller to decide.
 enum TranscriptProseRole: Equatable {
     /// Serif allowlist binding #4 — what Norma *says*, in the transcript, in its own voice.
     case assistant
@@ -102,8 +108,9 @@ func transcriptProseFont(_ role: TranscriptProseRole, size: CGFloat, weight: NSF
 /// Surfaced on `Theme.bubbleUser` (mac-chat-parity Task 8), the brand's own token for exactly this
 /// — it replaced a `.ultraThinMaterial`, which on an opaque window is a blur of whatever happens to
 /// be behind it rather than a colour anyone chose. `tint` is kept in the signature (callers
-/// unchanged) and still forwarded to `TranscriptFormattedMessageText` for inline markdown accents
-/// (bullets/quote rule/headings), it just paints no surface.
+/// unchanged) and still forwarded to `TranscriptFormattedMessageText` for the markdown accents that
+/// actually read it — list markers and the quote rule — it just paints no surface. (Headings do
+/// not: they go through `formattedText`, which never sees the tint.)
 struct TranscriptUserBubble: View {
     let text: String
     let tint: Color
