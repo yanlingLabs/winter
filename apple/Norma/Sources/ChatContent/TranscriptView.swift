@@ -10,6 +10,10 @@ func shouldAutoscroll(nearBottom: Bool, contentGrew: Bool) -> Bool {
 struct TranscriptView: View {
     @ObservedObject var adapter: FieldStateAdapter
     let tint: Color
+    /// mac-chat-parity Task 3: approval/question/plan cards render INSIDE the transcript now, so the
+    /// transcript needs the respond closures the pinned band below it used to hold. Bundled as one
+    /// value (see `InteractionCardWiring`) rather than six parameters threaded through every row.
+    let cardWiring: InteractionCardWiring
     @State private var nearBottom = true
     @State private var showLatestPill = false
 
@@ -21,6 +25,7 @@ struct TranscriptView: View {
                         let isLast = index == adapter.transcript.count - 1
                         TranscriptExchangeRow(
                             exchange: exchange,
+                            cardWiring: cardWiring,
                             streamingText: isLast ? adapter.liveStreamingText : nil,
                             // Live only for the newest exchange (mac-chat-parity Task 2). That is
                             // not quite the same as "every in-flight call lives here": a main-thread
@@ -54,6 +59,16 @@ struct TranscriptView: View {
             }
             .onChange(of: adapter.liveStreamingText) { old, new in
                 if (new?.count ?? 0) > (old?.count ?? 0) { follow(proxy) }
+            }
+            // mac-chat-parity Task 3: a card arriving is content growth the two signals above cannot
+            // see — an ask lands in the LAST exchange's `activity`, which changes neither the
+            // exchange count nor the streaming text. Before the cards moved inline this did not
+            // matter (the band was pinned, always visible); now, without this, an approval could
+            // appear below the fold and the agent would look hung. Growth-only, for the same reason
+            // the count watcher is (`SessionModel.reset()` drops it to zero on refocus, and a reset
+            // must neither follow nor raise the pill).
+            .onChange(of: adapter.pendingInteractions.count) { old, new in
+                if new > old { follow(proxy) }
             }
             .overlay(alignment: .bottomTrailing) {
                 if showLatestPill { latestPill(proxy) }
@@ -106,6 +121,8 @@ struct TranscriptView: View {
 /// not persisted state).
 private struct TranscriptExchangeRow: View {
     let exchange: Exchange
+    /// mac-chat-parity Task 3 — see `TranscriptView.cardWiring`.
+    let cardWiring: InteractionCardWiring
     /// Non-nil only for the LAST exchange while a reply is actively streaming (v1's synthetic
     /// trailing-stream mechanism) — `TranscriptView.body` computes this per-index so this view
     /// stays a pure function of its own inputs.
@@ -134,7 +151,14 @@ private struct TranscriptExchangeRow: View {
                         toggle: { toggle(key) }
                     )
                 case .single(let item):
-                    TranscriptActivityRow(item: item)
+                    // mac-chat-parity Task 3: an approval/question/plan draws its CARD here, at the
+                    // point in the turn it was asked — pending while the daemon waits, frozen with
+                    // its outcome forever after. Every other kind stays the one-line activity row.
+                    if let record = item.interactionRecord {
+                        TranscriptInteractionCard(record: record, wiring: cardWiring)
+                    } else {
+                        TranscriptActivityRow(item: item)
+                    }
                 }
             }
             // One row per assistant message, in arrival order (mac-chat-parity Task 1) — the

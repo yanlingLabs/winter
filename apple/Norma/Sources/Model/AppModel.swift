@@ -310,7 +310,7 @@ final class AppModel: ObservableObject {
     }
 
     /// `childSessionId` (Dispatch, Phase 7): set only on the mirrored copy of a CHILD session's
-    /// approval (`PendingCard`'s own `PendingInteraction.approval` payload) — routes the respond
+    /// approval (`TranscriptInteractionCard`'s own `InteractionRecord.Ask.approval` payload) — routes the respond
     /// RPC straight to the child instead of this focused (dispatch) session. `nil` is the pre-
     /// Phase-7 behavior, unchanged: respond into whatever session is currently focused.
     /// `optionId` (SP-approvals T6): the allow-rule choice tapped, when the card offered any —

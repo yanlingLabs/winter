@@ -1102,7 +1102,7 @@ final class ShellSessionHostTests: XCTestCase {
     /// `ShellSidebar.swift`'s `toggleMaximized`/`toggleVisible` call sites: both mutate only the
     /// panel's own local `@State`, never `nav`/`host`. There is no view-mounting harness in this
     /// suite to drive that half as its own XCTest — see `CardWiringTests`' own doc for the same
-    /// posture on mounting `PendingCardsView`.)
+    /// posture on mounting the transcript's interaction cards.)
     func testApplyNewChatClearsAStaleDraftOnEveryEntry() async {
         let (host, factory) = makeHost()
         host.setShellVisible(true)

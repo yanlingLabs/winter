@@ -581,7 +581,7 @@ final class OrbWindowController: ObservableObject {
                 case nil:
                     // Task 3 (2d-iii): y/n/digit card routing — ONLY reached once Esc handling
                     // above has passed (not Esc, or Esc consumed nothing surface-relevant). Only
-                    // the WINDOW surface mounts `PendingCardsView` (`WindowContentView`, shared
+                    // the WINDOW surface mounts the transcript's cards (`WindowContentView`, shared
                     // with `DetachedWindowController`) — the small `.field` composer never shows
                     // cards, so this routing is scoped to `.window` only, not `.field` above.
                     let topmost = self.fieldAdapter.pendingInteractions.first

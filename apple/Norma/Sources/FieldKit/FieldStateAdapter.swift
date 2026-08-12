@@ -517,18 +517,19 @@ final class FieldStateAdapter: ObservableObject {
 
     // MARK: - Task 3 (2d-iii): pending-interaction cards — mount + respond wiring
 
-    /// `PendingCardsView`'s data source (`WindowContentView`'s mount, both windows) — a thin
+    /// The transcript cards' pending set (`TranscriptInteractionCard`, mounted inline by
+    /// `TranscriptExchangeRow` in both windows) — a thin
     /// read-through onto the reducer's own ordered (oldest-first) list, same convention as
     /// `pinnedTasks`/`transcript` above.
     var pendingInteractions: [PendingInteraction] { session.state.pendingInteractions }
 
-    /// callIds with a respond RPC currently awaiting — `PendingCardsView`'s per-card `isInFlight`
-    /// (disables that card's buttons while true). Mutated ONLY by whichever surface wires the
+    /// callIds with a respond RPC currently awaiting — `InteractionCardWiring.inFlight`, which puts
+    /// that card into its "Sending…" state (the buttons are replaced, not merely disabled). Mutated ONLY by whichever surface wires the
     /// three respond callbacks below (`GlassRootView.wireCallbacks()` for the orb/window,
     /// `DetachedWindowController.init` for a detached window) — never by this adapter itself.
     @Published var interactionInFlight: Set<String> = []
 
-    /// callId → inline error text (`PendingCard`'s `errorLine`) — set on a failed respond RPC,
+    /// callId → inline error text (`InteractionCardWiring.errorLines`) — set on a failed respond RPC,
     /// cleared at the START of the next attempt for that callId (never lingers across a retry).
     /// A SUCCESSFUL respond does nothing here beyond removing the in-flight entry above — the
     /// card itself disappears once the daemon's `*_resolved` event removes it from
@@ -561,8 +562,8 @@ final class FieldStateAdapter: ObservableObject {
     /// guarantee, so a bare-callId key risks draining one session's draft into another session's
     /// card the moment both sessions' entries ever coexist here. No `threadId` component, unlike
     /// the daemon's three-part key: `PendingInteraction` (`SessionModel.swift`) carries no
-    /// threadId in any of its cases, and `PendingCardsView`'s own `ForEach(interactions, id:
-    /// \.callId)` already assumes callId-uniqueness WITHIN one session's list — a pre-existing
+    /// threadId in any of its cases, and the reducer's own `appendPending`/`appendInteraction`
+    /// callId guards already assume callId-uniqueness WITHIN one session's list — a pre-existing
     /// invariant this key reuses rather than adds a new dimension to.
     ///
     /// `sessionId` defaults `""` via `boundSessionId() ?? ""` at both call sites (this key helper

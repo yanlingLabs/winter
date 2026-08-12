@@ -359,7 +359,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // is locked for this session" rendered over a different session's chip is a lie about a rule.
         adapter.dirsRefusal = nil
         // panel-shell T10b: same "about the session it was about" discipline as the resets just
-        // above — this window mounts the shared `WindowContentView`/`PendingCardsView` too, so an
+        // above — this window mounts the shared `WindowContentView`, and so the transcript's own cards, too, so an
         // in-place session switch here is the identical sibling case `ShellSessionHost.hop(to:)`
         // already covers for the shell's own attachment (same reasoning, same adapter field). See
         // that clear's own comment (review fix, Important 2) for why this is hygiene-only, not a

@@ -143,30 +143,30 @@ struct WindowContentView<Accessory: View>: View {
             }
             .frame(height: chatWindowHeaderHeight)
 
-            TranscriptView(adapter: adapter, tint: tint)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            // Task 3 (2d-iii): the pending-interaction cards — mounted here, between the
-            // transcript and the pinned-tasks section, in BOTH windows (the morph window's
-            // `.window` surface and every native `DetachedWindowController`, since both render
-            // this shared `WindowContentView`).
-            if !adapter.pendingInteractions.isEmpty {
-                PendingCardsView(
-                    interactions: adapter.pendingInteractions,
-                    inFlight: adapter.interactionInFlight,
-                    errorLines: adapter.interactionErrors,
-                    // panel-shell T10b: `adapter.pendingCardDraftBinding` closes over `adapter`
-                    // itself (an `@ObservedObject` this view already holds live), so every Binding
-                    // it mints — across however many times SwiftUI reconstructs this whole call
-                    // site — reads/writes the SAME externally-owned dictionary. That external
-                    // ownership is what lets a card's typed-but-unsubmitted answer survive
-                    // `ShellRootView`'s `.maximized` teardown of `detail`.
-                    draftBinding: { callId in adapter.pendingCardDraftBinding(for: callId) },
-                    onApproval: adapter.onApprovalRespond,
-                    onQuestion: adapter.onQuestionRespond,
-                    onPlan: adapter.onPlanRespond
-                )
-            }
+            // mac-chat-parity Task 3: the approval/question/plan cards used to be a pinned band
+            // MOUNTED HERE, between the transcript and the pinned-tasks section, and deleted the
+            // instant the ask resolved — so the Mac kept no record anywhere in scrollback of
+            // anything the user had approved or answered. They render inside the transcript now, at
+            // the point they were asked, and freeze there with their outcome; this view's job is
+            // reduced to handing the transcript the respond wiring the band used to hold. Both
+            // windows (the morph window's `.window` surface and every native
+            // `DetachedWindowController`) get it, since both render this shared view.
+            TranscriptView(adapter: adapter, tint: tint, cardWiring: InteractionCardWiring(
+                inFlight: adapter.interactionInFlight,
+                errorLines: adapter.interactionErrors,
+                // panel-shell T10b: `adapter.pendingCardDraftBinding` closes over `adapter` itself
+                // (an `@ObservedObject` this view already holds live), so every Binding it mints —
+                // across however many times SwiftUI reconstructs this whole call site — reads/writes
+                // the SAME externally-owned dictionary. That external ownership is what lets a
+                // card's typed-but-unsubmitted answer survive `ShellRootView`'s `.maximized`
+                // teardown of `detail`, and now also the transcript's own `LazyVStack` recycling a
+                // card that scrolls out of view.
+                draftBinding: { callId in adapter.pendingCardDraftBinding(for: callId) },
+                onApproval: adapter.onApprovalRespond,
+                onQuestion: adapter.onQuestionRespond,
+                onPlan: adapter.onPlanRespond
+            ))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             if !adapter.pinnedTasks.isEmpty && !rightVisible {
                 pinnedTasksSection(adapter.pinnedTasks)
