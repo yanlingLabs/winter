@@ -1189,6 +1189,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // `store.dirs()` derives its answer FROM that same `cwd` column (T1's lazy migration), so
         // this alias is a no-op there — the value is unchanged, just re-read through the derived
         // path instead of trusted directly.
+        //
+        // mac-chat-parity T4: `approvalPolicy` needs no stamping here at all — it is a stored
+        // column `store.list()` now selects, so it rides the `...s` spread below like `model`/
+        // `effort`/`title` do. Deliberately OUTSIDE the participation gate by construction: chat
+        // and dispatch rows carry their policy too (a chat row's is the internal `"chat"`), which
+        // is what lets a picker say WHY it is hiding itself instead of guessing.
         const sessions = opts.store.list().map((s) => {
           // The signals ride EVERY row: chat and dispatch included, which is the whole point (the
           // Mac app's browser lifecycle runs on chat sessions and had no signal for them at all —

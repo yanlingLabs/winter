@@ -22,7 +22,10 @@ import { SessionStore, type SessionRow } from "../../src/sessions/store";
 const NOW = 1_770_000_000_000;
 
 function row(over: Partial<SessionRow> = {}): SessionRow {
-  return { sessionId: "s_abc", scope: "global", createdAt: NOW - 60_000, lastSeq: 3, ...over };
+  // `approvalPolicy` is REQUIRED on SessionRow (mac-chat-parity T4) and irrelevant to the activity
+  // derivation — `ActivityRow` narrows to mode/backgrounded/archived, so no case below reads it.
+  // Stated here only because a complete `SessionRow` needs it; "ask" is the store's own default.
+  return { sessionId: "s_abc", scope: "global", createdAt: NOW - 60_000, lastSeq: 3, approvalPolicy: "ask", ...over };
 }
 
 function signals(over: Partial<ActivitySignals> = {}): ActivitySignals {

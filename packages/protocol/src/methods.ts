@@ -195,6 +195,33 @@ export const SessionListResult = z.object({
     // verbatim, never rewritten to its wire translation. A picker matching this against the
     // chosen model's `efforts` array alone will miss; match against BOTH lists.
     effort: z.string().optional(),
+    // mac-chat-parity T4: the session's APPROVAL POLICY — the read half of `session.setPolicy`,
+    // round-tripping the same `approval_policy` column `store.setApprovalPolicy` writes (store.ts's
+    // `list()` maps it through the SAME `normalizeApprovalPolicy` `store.meta()` uses, so the two
+    // doors can never report a row differently).
+    //
+    // Added because a picker had no way to learn it. `FieldStateAdapter.sessionPolicy` (the Mac
+    // app) was seeded `"auto"` and written only after its OWN successful `setPolicy` — tolerable in
+    // a transient popover, a standing lie in a persistent row: a session left at `bypass` by the
+    // CLI, or by another window, would read "Auto" forever, inverting the danger styling's whole
+    // purpose.
+    //
+    // A bare bounded STRING, deliberately NOT the `ApprovalPolicy` enum the SETTER takes: a
+    // chat-mode session's stored policy is the internal `"chat"` (core's gate.ts
+    // `SessionApprovalPolicy`), which `session.create`'s chat-seam persists verbatim and which
+    // `session.setPolicy` refuses as an input. Typing this with the setter's enum would make the
+    // daemon's own truthful answer fail its own schema — the same clamp-whose-output-its-own-schema-
+    // rejects contradiction `SESSION_TITLE_MAX_CHARS`/`capTitle` records for titles. Consumers must
+    // therefore match against a set that includes values no picker offers.
+    //
+    // OPTIONAL, and absence means "this daemon predates the field" — never a policy. Every daemon
+    // at or past this version stamps EVERY row: the column is NOT NULL-in-practice (every INSERT
+    // path defaults it to `"ask"`, and a full index rebuild resets it to `"ask"` rather than
+    // leaving it blank — store.ts's `recoverAll` pass 2), and unlike `activity`/`dirs` it rides no
+    // participation gate, so chat and dispatch rows carry it too. A consumer that coerced absence
+    // to `"auto"` would be asserting a policy nobody stated — see `FieldStateAdapter`'s
+    // `sessionPolicyKnown` (apple/Norma) for the shape of an honest answer.
+    approvalPolicy: z.string().min(1).optional(),
     // Chat Slice D Task 2: round-trips SessionRow.forkedFrom (store.ts). Declared here — rather
     // than left to smuggle through undeclared — for the same reason `title` above is: the value
     // really does flow out of `store.list()`, so a schema-validating client must be able to read
