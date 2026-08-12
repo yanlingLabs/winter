@@ -68,6 +68,11 @@ final class HarnessTeardownObserver: NSObject, XCTestObservation {
         // policy write lands in the recorder. This is what covers the windows the after-case
         // restore can't (host killed mid-case; late async promotion after the final case).
         Self.onMain { DockPolicy.apply = { Self.recordedPolicies.append($0) } }
+        // Desktop hygiene (see HarnessQuiet): from here on the suite cannot bring the host forward,
+        // cannot take the user's keyboard, and paints every window it orders in at alpha 0. Same
+        // bundle-load moment and same motivation as the dock seam above — a suite hosted in the
+        // real app must not hijack the machine it runs on.
+        HarnessQuiet.install()
         XCTestObservationCenter.shared.addTestObserver(self)
     }
 
@@ -131,6 +136,24 @@ final class HarnessTeardownObserver: NSObject, XCTestObservation {
         }
     }
 
+    /// Residual meter for `HarnessQuiet`: the class name of every window that was still on screen
+    /// at FULL opacity when a case finished — i.e. one that reached the user's display around the
+    /// dimming hooks (a sheet, an alert, an AppKit-internal path, or one of the infrastructure
+    /// classes `HarnessQuiet.shouldDim` deliberately spares). Reported rather than asserted: the
+    /// honest answer to "what will the user still see?" is a measurement, and a hard assertion here
+    /// would fail the suite for surfaces that are legitimately exempt.
+    @MainActor private(set) static var undimmedVisibleClasses: Set<String> = []
+
+    func testBundleDidFinish(_ testBundle: Bundle) {
+        Self.onMain {
+            guard !Self.undimmedVisibleClasses.isEmpty else { return }
+            print(
+                "[HarnessQuiet] windows seen on screen at full opacity during this run: "
+                    + Self.undimmedVisibleClasses.sorted().joined(separator: ", ")
+            )
+        }
+    }
+
     /// Windows first, policy last (see the type doc). `orderOut`, never `close` — closing would
     /// tear down controller state mid-suite in ways later cases don't expect; ordering out is
     /// exactly what production's own hide path does. The restore write stays RAW (deliberate
@@ -139,6 +162,10 @@ final class HarnessTeardownObserver: NSObject, XCTestObservation {
     /// only two `NSApp.setActivationPolicy` writes in the repo.
     @MainActor
     private func cleanUpAfterCase() {
+        for window in NSApp.windows where window.isVisible && window.alphaValue == 1.0 {
+            // Residual meter (see `undimmedVisibleClasses`): anything the user could still SEE.
+            Self.undimmedVisibleClasses.insert(NSStringFromClass(type(of: window)))
+        }
         for window in NSApp.windows
         where Self.shouldOrderOut(windowClassName: NSStringFromClass(type(of: window)), isVisible: window.isVisible) {
             window.orderOut(nil)
