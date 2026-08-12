@@ -134,6 +134,21 @@ func dismissRightOverlay(_ s: SidebarState) -> SidebarState {
 /// unaffected — this only widens what the PICKER offers.
 let sessionPolicyModes: [String] = ["plan", "dont-ask", "ask", "accept-edits", "auto", "bypass"]
 
+/// The policies a **dispatch** session may actually be set to: every one above except `plan`.
+///
+/// A fact about the daemon, not about any surface — `session.setPolicy` refuses exactly that one
+/// value for a dispatch target ("plan policy is not available for dispatch sessions — dispatch never
+/// asks permissions", `packages/core/src/ipc/server.ts:1527-1528`) and settles the other five.
+/// DERIVED from `sessionPolicyModes` rather than spelled out, so a seventh policy reaches dispatch
+/// by default and only a deliberate second refusal can keep it away.
+///
+/// Its one consumer today is `DispatchComposerChrome`'s permissions row (mac-chat-parity Task 6).
+/// The header's ⋯ popover and the WorkSidebar's Options block still offer all six on a dispatch
+/// session, where picking `plan` comes back as an RPC error — a pre-existing divergence this task
+/// deliberately did not change (its brief pins both of those surfaces unchanged), recorded as a
+/// follow-up rather than fixed in passing.
+let dispatchSettablePolicyModes: [String] = sessionPolicyModes.filter { $0 != "plan" }
+
 /// Display label per mode — mirrors the CLI footer's wording (`packages/cli/src/tui/footer.tsx`)
 /// rather than a bare `.capitalized`, which would render the hyphenated modes as "Dont-Ask"/
 /// "Accept-Edits" instead of readable words.
@@ -157,10 +172,14 @@ func isPolicyDangerous(_ policy: String) -> Bool {
 }
 
 /// mac-chat-parity T4: PURE — the approval policy the DAEMON reports for a session, read off
-/// `session.list`'s own row (`SessionSummary.approvalPolicy`). Lives here, beside the other three
-/// pure policy decisions the pickers ride on, so every surface asks the same question of the same
-/// source; `FieldStateAdapter`'s seed/heal are its only callers today and Task 6's persistent row
-/// will be the third.
+/// `session.list`'s own row (`SessionSummary.approvalPolicy`). Lives here, beside the other pure
+/// policy decisions the pickers ride on, so every surface asks the same question of the same source.
+///
+/// `FieldStateAdapter`'s seed and heal remain its **only** callers. T4 expected the persistent row
+/// to be a third; it is not, and deliberately so — Task 6's row reads
+/// `FieldStateAdapter.composerPolicyControl`, which is that same seeded value plus its known-ness,
+/// so the composer cannot reach a different answer from the two pickers beside it by asking the
+/// directory a second time at a different moment.
 ///
 /// `nil` for BOTH absences, deliberately indistinguishable: the row is not loaded yet, or the row
 /// is from a daemon predating the field. Neither is "this session has no policy" — every session
@@ -171,6 +190,56 @@ func isPolicyDangerous(_ policy: String) -> Bool {
 /// unattended.
 func wireApprovalPolicy(_ sessionId: String, in rows: [SessionSummary]) -> String? {
     rows.first(where: { $0.sessionId == sessionId })?.approvalPolicy
+}
+
+// MARK: - The approval-mode picker row, shared by every surface that offers one
+
+/// One approval-mode picker row — the SHARED implementation every policy surface renders.
+///
+/// Three surfaces now: the header's ⋯ popover (`WindowContentView.policyMenuContent`), the
+/// WorkSidebar's Options block below, and — since mac-chat-parity Task 6 — the popover behind the
+/// composer's permissions chip (`ComposerPolicyChip`, spec §4). The third is why this is a type at
+/// file scope rather than a method on `extension WindowContentView`, where it lived from 2e-iii
+/// Task 6 until now: a per-mode composer chrome is not a `WindowContentView` and could not reach it.
+/// **A move, not a rewrite** — the body below is the extension method's, unchanged, with the three
+/// `adapter.` reads it closed over turned into parameters.
+///
+/// SP-policies Task 14: `policy` ranges over all six `sessionPolicyModes` (dispatch's row narrows
+/// that to `dispatchSettablePolicyModes`). `onSelect` still receives the raw wire string unchanged
+/// (no enum). The `bypass` row gets a red danger treatment (`⚠` affix + red foreground), mirroring
+/// the CLI footer's `theme.dangerMode` treatment for the same mode
+/// (`packages/cli/src/tui/footer.tsx`).
+struct PolicyPickerRow: View {
+    let policy: String
+    /// The session's policy, for the checkmark — or `nil` for a surface that will not name one.
+    ///
+    /// The two transient popovers pass `adapter.sessionPolicy` raw, placeholder and all, which is
+    /// what they have always shown; the composer's persistent row passes Task 4's known-or-nothing
+    /// value, so while the daemon has said nothing it marks no row rather than marking "Auto"
+    /// (`FieldStateAdapter.sessionPolicyKnown`'s own doc rules exactly this split).
+    let current: String?
+    /// True while a `session.setPolicy` is in flight — one change at a time.
+    let isDisabled: Bool
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        Button {
+            onSelect(policy)
+        } label: {
+            HStack {
+                Text(isPolicyDangerous(policy) ? "⚠ \(policyDisplayLabel(policy))" : policyDisplayLabel(policy))
+                Spacer()
+                if current == policy {
+                    Image(systemName: "checkmark")
+                }
+            }
+            .contentShape(Rectangle())
+            .foregroundStyle(isPolicyDangerous(policy) ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .padding(.vertical, 4)
+    }
 }
 
 // MARK: - The right work sidebar (a function-family on WindowContentView, like `subagentSection`/
@@ -195,33 +264,23 @@ extension WindowContentView {
         .frame(width: sidebarRightWidth)
     }
 
-    /// One approval-mode picker row — the SHARED implementation the ⋯ popover (`policyMenuContent`)
-    /// and the WorkSidebar's Options block both render (brief Step 2: "one implementation"). Reuses
-    /// EXACTLY `adapter.onSetPolicy`/`sessionPolicy`/`policyChangeInFlight`. Internal (not `private`)
-    /// so `policyMenuContent` in WindowContentView.swift can call it across files.
+    /// This view's two policy surfaces — the ⋯ popover (`policyMenuContent`) and the WorkSidebar's
+    /// Options block below — rendered from the shared `PolicyPickerRow`, handed EXACTLY the three
+    /// `adapter` reads the row used to make itself (brief Step 2: "one implementation"). Internal
+    /// (not `private`) so `policyMenuContent` in WindowContentView.swift can call it across files.
     ///
-    /// SP-policies Task 14: `policy` ranges over all six `sessionPolicyModes` (not just
-    /// auto/ask/plan) — `onSetPolicy` still receives the raw wire string unchanged (no enum). The
-    /// `bypass` row gets a red danger treatment (`⚠` affix + red foreground), mirroring the CLI
-    /// footer's `theme.dangerMode` treatment for the same mode (`packages/cli/src/tui/footer.tsx`).
-    @ViewBuilder
-    func policyPickerRow(_ policy: String) -> some View {
-        Button {
-            adapter.onSetPolicy(policy)
-        } label: {
-            HStack {
-                Text(isPolicyDangerous(policy) ? "⚠ \(policyDisplayLabel(policy))" : policyDisplayLabel(policy))
-                Spacer()
-                if adapter.sessionPolicy == policy {
-                    Image(systemName: "checkmark")
-                }
-            }
-            .contentShape(Rectangle())
-            .foregroundStyle(isPolicyDangerous(policy) ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
-        }
-        .buttonStyle(.plain)
-        .disabled(adapter.policyChangeInFlight)
-        .padding(.vertical, 4)
+    /// `onSelect` forwards rather than passing `adapter.onSetPolicy` itself, so the row calls
+    /// whatever the surface has wired at TAP time — the behaviour of the inline `Button` this
+    /// replaced, preserved on purpose.
+    ///
+    /// Returns the concrete type rather than `some View`: it makes "both surfaces render the shared
+    /// row, with the adapter's own values" a thing a test can read (`PolicyMenuTests`) instead of a
+    /// thing only the live app can show.
+    func policyPickerRow(_ policy: String) -> PolicyPickerRow {
+        PolicyPickerRow(policy: policy,
+                        current: adapter.sessionPolicy,
+                        isDisabled: adapter.policyChangeInFlight,
+                        onSelect: { adapter.onSetPolicy($0) })
     }
 
     @ViewBuilder
@@ -231,10 +290,12 @@ extension WindowContentView {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
             // Plan-immunity (2026-07-28 design): the SAME gate as WindowContentView's
-            // `policyMenuButton` (both surfaces render `policyPickerRow`, this file's own doc
-            // comment above) — chat's policy is fixed, so the picker is hidden entirely rather than
-            // shown-but-broken. `sidebarSessionInfo` below (title/scope/cwd) is still useful for
-            // chat and stays visible either way.
+            // `policyMenuButton` (both of this view's surfaces render `PolicyPickerRow` through
+            // `policyPickerRow(_:)` above) — chat's policy is fixed, so the picker is hidden
+            // entirely rather than shown-but-broken. The composer's permissions row expresses the
+            // same gate a third way, structurally: chat's composer has no band to hide.
+            // `sidebarSessionInfo` below (title/scope/cwd) is still useful for chat and stays
+            // visible either way.
             if !adapter.isChatSession {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(sessionPolicyModes, id: \.self) { policyPickerRow($0) }

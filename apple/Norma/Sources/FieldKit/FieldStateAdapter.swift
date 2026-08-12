@@ -607,8 +607,10 @@ final class FieldStateAdapter: ObservableObject {
 
     // MARK: - Task 4 (2d-iii): ⋯ menu — per-session approval-mode policy
 
-    /// The approval-policy readout both pickers render (`WindowContentView`'s ⋯ menu and the
-    /// WorkSidebar Options block, one implementation — `policyPickerRow`).
+    /// The approval-policy readout every picker on this screen renders — `WindowContentView`'s ⋯
+    /// menu, the WorkSidebar Options block, and (since mac-chat-parity T6) the composer's permissions
+    /// row, which reads it through `composerPolicyControl` below. One implementation for all three:
+    /// `PolicyPickerRow`.
     ///
     /// **mac-chat-parity T4 gave this a wire source.** It used to be a last-known-WRITE value: there
     /// was no `approvalPolicy` anywhere in `SessionListResult`/`SessionAttachResult`, so the only
@@ -639,14 +641,16 @@ final class FieldStateAdapter: ObservableObject {
     /// It exists because the two halves of "degrade gracefully" are otherwise contradictory: an
     /// older daemon (or a row that has not loaded) must leave behaviour exactly as it was — which
     /// means keeping `"auto"` — while `"auto"` is itself a claim about how much the agent may do
-    /// unattended. Both are satisfiable only if the unknown case is REPRESENTABLE. A surface that
-    /// makes a standing claim (Task 6's permissions row) should render no policy label while this is
-    /// `false`; the two transient popovers may keep showing the placeholder, which is what they have
+    /// unattended. Both are satisfiable only if the unknown case is REPRESENTABLE. The surface that
+    /// makes a standing claim — T6's permissions row — renders no policy label while this is `false`
+    /// (it reads `composerPolicyControl` below, which is where the two are collapsed into one
+    /// Optional); the two transient popovers keep showing the placeholder, which is what they have
     /// always done.
     ///
     /// Deliberately NOT an `Optional<String>` in place of `sessionPolicy`: every existing consumer
-    /// compares a plain `String` (`policyPickerRow`'s checkmark), and this task's remit was to seed
-    /// that value, not to re-plumb the pickers Task 6 is about to move.
+    /// compares a plain `String` (`PolicyPickerRow`'s checkmark), and T4's remit was to seed that
+    /// value, not to re-plumb the pickers. T6 then moved the shared row out of
+    /// `extension WindowContentView` — a move, not a re-plumb — and left this pair alone.
     @Published var sessionPolicyKnown: Bool = false
 
     /// The value `sessionPolicy` carries while nothing has told us otherwise — the same `"auto"` it
@@ -712,6 +716,24 @@ final class FieldStateAdapter: ObservableObject {
     /// window, `DetachedWindowController.init` for a detached window) to `session.setPolicy` — the
     /// same onSubmit-precedent chain as `onSubmit`/the three respond callbacks above.
     var onSetPolicy: (String) -> Void = { _ in }
+
+    /// mac-chat-parity T6: this adapter's policy state as the composer's permissions row takes it
+    /// (spec §4) — the value `WindowContentView.composerCard` hands `NormaComposerCard`.
+    ///
+    /// The placeholder never crosses this boundary: `policy` is `nil` unless `sessionPolicyKnown`.
+    /// That is `sessionPolicyKnown`'s own doc being obeyed — "a surface that makes a standing claim
+    /// should render no policy label while this is `false`; the two transient popovers may keep
+    /// showing the placeholder, which is what they have always done" — and collapsing the pair into
+    /// one Optional here is what stops the row from having to remember it.
+    ///
+    /// `onSet` forwards rather than handing over today's `onSetPolicy` value, so a card built before
+    /// its surface wired its callbacks still reaches the real one when the row is finally tapped —
+    /// the same tap-time read the two pickers' own buttons do.
+    var composerPolicyControl: ComposerPolicyControl {
+        ComposerPolicyControl(policy: sessionPolicyKnown ? sessionPolicy : nil,
+                              changeInFlight: policyChangeInFlight,
+                              onSet: { [weak self] policy in self?.onSetPolicy(policy) })
+    }
 
     // MARK: - Task 10 (Chat Slice D): the header's model menu — `session.setModel`, ALL modes
 

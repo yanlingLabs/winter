@@ -15,6 +15,35 @@ enum NormaComposerStripEdge: Equatable {
     case above
 }
 
+/// PURE: which end of the composer the two surfaces are pinned to.
+///
+/// The strip surface is TALLER than the composer by exactly the band, and both sit in one `ZStack`,
+/// so the alignment is what decides which end sticks out. `.below` anchors them at the TOP, leaving
+/// the extra height protruding downward; `.above` anchors them at the BOTTOM, leaving it protruding
+/// upward. Either way the composer's own height is untouched — the standing ruling.
+///
+/// Extracted from the `ZStack`'s inline ternary at Task 6, because that task is the first thing ever
+/// to render `.above` (cowork was the only strip producer before it, and cowork is unreachable on a
+/// live session) — the one direction with no live evidence behind it deserved a value a test can
+/// read rather than an expression only the screen can check.
+func composerStripStackAlignment(_ edge: NormaComposerStripEdge) -> Alignment {
+    edge == .below ? .top : .bottom
+}
+
+/// PURE: where the strip's CONTENT sits on that surface — the growing edge, i.e. the band that
+/// protrudes past the composer, never the part the opaque composer covers. The mirror of
+/// `composerStripStackAlignment`: get the two out of step and the row renders behind the composer,
+/// perfectly, invisibly.
+func composerStripContentAlignment(_ edge: NormaComposerStripEdge) -> Alignment {
+    edge == .below ? .bottom : .top
+}
+
+/// PURE: the strip surface's height — the composer, plus the band it protrudes by. Written down so
+/// "the band grows, the composer does not" is a thing that can be asserted rather than only seen.
+func composerStripSurfaceHeight(_ band: CGFloat) -> CGFloat {
+    newChatComposerHeight + band
+}
+
 /// The composer's **shared shell** — the parts every mode's composer has in common, and the mount
 /// point for the parts it does not.
 ///
@@ -53,6 +82,15 @@ struct NormaComposerCard: View {
     /// that cannot do what it appears to offer.
     var modeIsSelectable: Bool = true
 
+    /// The permissions row's wiring (mac-chat-parity Task 6, spec §4). `nil` from a surface with no
+    /// session to set a policy on — the new-chat page.
+    ///
+    /// **Required, with no default, deliberately.** A defaulted `nil` is exactly the wiring miss
+    /// Task 4's mutation run found on this plan ("the adapter method was pinned, its WIRING was
+    /// not"): a surface that simply forgot the row would compile, run, and show a composer with no
+    /// band, and every value-level test would stay green. With no default it does not build.
+    var policy: ComposerPolicyControl?
+
     var stripEdge: NormaComposerStripEdge = .below
     var placeholder: String = newChatComposerPlaceholder
     /// A trailing line for a mode whose chrome shows one — today only cowork's strip. Empty renders
@@ -80,6 +118,7 @@ struct NormaComposerCard: View {
     var chrome: any ComposerChrome {
         composerChrome(ComposerContext(mode: $mode,
                                        modeIsSelectable: modeIsSelectable,
+                                       policy: policy,
                                        announcement: announcement))
     }
 
@@ -94,7 +133,7 @@ struct NormaComposerCard: View {
         // `ChatComposerChrome`).
         let strip = chrome.makeStrip()
 
-        ZStack(alignment: stripEdge == .below ? .top : .bottom) {
+        ZStack(alignment: composerStripStackAlignment(stripEdge)) {
             stripSurface(strip)
             composerBox(accessory: chrome.makeControlRowAccessory())
         }
@@ -196,8 +235,8 @@ struct NormaComposerCard: View {
                         .strokeBorder(Theme.hairline.opacity(0.5),
                                       lineWidth: shellSidebarHairlineWidth)
                 )
-                .frame(height: newChatComposerHeight + strip.height)
-                .overlay(alignment: stripEdge == .below ? .bottom : .top) {
+                .frame(height: composerStripSurfaceHeight(strip.height))
+                .overlay(alignment: composerStripContentAlignment(stripEdge)) {
                     // Pinned to the GROWING edge, so the row sits in the band that protrudes rather
                     // than anywhere else on the surface, and clipped so it can never spill past it.
                     //
@@ -219,7 +258,16 @@ struct NormaComposerCard: View {
     /// four fixed ones written once, here, for every mode.
     ///
     /// Attach, the model slot and Dictate all remain placeholders and remain labelled as such
-    /// (spec §8). Task 7 makes the model slot real; it is a shared control, so it stays here.
+    /// (spec §8). Task 7 makes the model slot real.
+    ///
+    /// **Where it goes is not settled by "it is shared", and Task 5's own report was corrected on
+    /// this by its review:** the single slot covers model AND effort, and effort's Norma-level tiers
+    /// are gated to code sessions (`clientEffortEligible`, `settings.ts:89-91`, enforced by
+    /// `assertEffortSelectable`, `ipc/server.ts:476-484`), so the slot's CONTENTS are mode-dependent
+    /// even though the slot itself is not. Wiring it here unconditionally ships an `ultra` row on
+    /// chat that RPC-errors; filtering it here drags a mode conditional back into the shared shell,
+    /// and the source scan would not catch a helper-shaped one. The structural answer under this
+    /// shape is a third `ComposerChrome` member.
     private func controlRow(accessory: AnyView?) -> some View {
         HStack(spacing: 8) {
             NewChatControlButton(systemImage: "plus", label: "Attach (not wired yet)", size: 17)

@@ -101,13 +101,18 @@ func newChatAnnouncement(_ announcement: String?, fallback: String) -> String {
 let newChatCardWidth: CGFloat = 670
 let newChatCardCornerRadius: CGFloat = 18
 
-/// The composer box's FIXED height — field + control row. Fixed by ruling: selecting Cowork adds
-/// a strip below rather than resizing this, so the field and its controls never move under you.
-/// The Cowork strip positions itself against this figure, so the two must stay in step.
+/// The composer box's FIXED height — field + control row. Fixed by ruling: a mode's strip adds a
+/// band beyond this rather than resizing it, so the field and its controls never move under you.
+/// Every strip positions itself against this figure, so the two must stay in step.
 let newChatComposerHeight: CGFloat = 124
 
-/// The Cowork strip's height — the band that slides out from behind the composer.
-let newChatCoworkStripHeight: CGFloat = 40
+/// The strip's height — the band that slides out from behind the composer.
+///
+/// Named for the composer rather than for cowork since mac-chat-parity Task 6: it was measured for
+/// cowork's placeholder chips, and it is now also the permissions row's band (spec §4's "40pt band,
+/// 26pt chips") on code and dispatch. One figure, because the two bands are the same band seen on
+/// different modes — a second constant would let them drift apart for no reason anyone chose.
+let newChatComposerStripHeight: CGFloat = 40
 
 /// The send affordance's square. The reference's is a squircle a touch larger than a
 /// control-row icon button — it is the row's one primary action.
@@ -137,8 +142,9 @@ let newChatComposerFontSize: CGFloat = 16
 /// **It no longer governs the composer's second control row** (mac-chat-parity Task 5). That row is
 /// cowork's own chrome now — `CoworkComposerChrome.makeStrip()` — because each mode's composer is
 /// its own type rather than one card asking which mode it is in. The two answers still coincide for
-/// cowork and are not tied together: Task 6 gives code and dispatch a band too, and this function
-/// will keep saying no for both, correctly, because it is about this page's layout.
+/// cowork and are not tied together — Task 6 gave code and dispatch a band of their own (the
+/// permissions row) and this function says no for both, correctly, because it is about this page's
+/// layout and this page creates neither.
 func newChatShowsCoworkControls(mode: SessionMode) -> Bool {
     mode == .cowork
 }
@@ -304,13 +310,26 @@ struct NewChatControlButton: View {
 }
 
 /// A labelled chip in the card's second row — glyph, title, disclosure chevron.
+///
+/// Both added parameters default to what this chip has always done, so its two placeholder call
+/// sites (`CoworkComposerStrip`) render byte-identically:
+///
+/// - `action` — `nil` keeps the dead `Button {}` these chips have carried since they were drawn.
+///   mac-chat-parity Task 6's permissions chip is the first REAL one, and it reuses this type
+///   rather than redrawing it so the measured metrics (26 pt, 14 pt title, the pane's one row
+///   treatment) stay written once.
+/// - `titleStyle` — the danger treatment `policyPickerRow` has always used for `bypass`, which the
+///   permissions chip must carry too: the persistent row is exactly where a session quietly running
+///   `bypass` needs to look like one.
 struct NewChatControlChip: View {
     let systemImage: String
     let title: String
     let label: String
+    var titleStyle: AnyShapeStyle = AnyShapeStyle(.primary)
+    var action: (() -> Void)? = nil
 
     var body: some View {
-        Button {} label: {
+        Button { action?() } label: {
             HStack(spacing: 7) {
                 Image(systemName: systemImage)
                     .font(.system(size: 13))
@@ -320,7 +339,7 @@ struct NewChatControlChip: View {
                 // sitting under the composer rather than as pickers.
                 Text(title)
                     .font(.system(size: 14))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(titleStyle)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(Theme.textMuted)
@@ -512,6 +531,11 @@ struct NewChatPage: View {
             text: draftBinding,
             onSubmit: submit,
             mode: $mode,
+            // No session exists yet — the create happens on the first send — so there is nothing to
+            // set an approval policy ON. The permissions row is therefore ABSENT here rather than
+            // present-and-dead (mac-chat-parity Task 6, spec §4); this page's own chat/cowork modes
+            // carry no permissions band in any case.
+            policy: nil,
             stripEdge: .below,
             announcement: newChatAnnouncement(announcement, fallback: announcementLine),
             isEnabled: ui.composerEnabled,

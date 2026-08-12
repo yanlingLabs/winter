@@ -39,6 +39,13 @@ import SwiftUI
 /// the shape rather than show it. A mode whose chrome grows moves to its own file **without
 /// touching the others** — that is the property the split buys, and it does not depend on where the
 /// types sit today.
+///
+/// Task 6's permissions row (spec §4) stayed here for a different reason than the others: it is not
+/// one mode's chrome but the band **two** modes share, so it belongs beside the two types that
+/// choose it rather than in a file of its own. It is also what a test scan holds to this file —
+/// `ComposerStrip(` may be constructed nowhere else, because a band built in the shared shell would
+/// reach every mode, chat included, with every value-level pin still green
+/// (`ComposerChromeTests.testTheStripTypeIsConstructedOnlyWhereChromeIsDecided`).
 
 // MARK: - What a chrome block may draw from
 
@@ -56,8 +63,84 @@ struct ComposerContext {
     /// Whether the Chat/Cowork segment can be CHANGED. False on a live session — a session's mode is
     /// fixed at creation and Norma has no mode-switch.
     let modeIsSelectable: Bool
+    /// The permissions row's wiring (mac-chat-parity Task 6, spec §4), or `nil` from a surface with
+    /// no session to set a policy on — the new-chat page, whose session does not exist until the
+    /// first send. `nil` makes the row ABSENT rather than dead, the same rule chat's row follows.
+    ///
+    /// Task 5's handoff shape: a mode wanting an input the others do not adds ONE field here rather
+    /// than a parameter to four initialisers. Task 7's model/effort slot should follow it.
+    let policy: ComposerPolicyControl?
     /// The cowork strip's trailing line. Only `CoworkComposerChrome` reads it.
     let announcement: String
+}
+
+// MARK: - The permissions row (mac-chat-parity Task 6, spec §4)
+
+/// What a surface hands the composer so its permissions row can BE a control rather than a picture.
+///
+/// `policy` is an `Optional` and that optional **is** mac-chat-parity Task 4's `sessionPolicyKnown`,
+/// collapsed at this one boundary: `nil` = the daemon has not told us this session's policy (its row
+/// has not loaded, or the daemon predates the field). Task 4 kept the adapter's own pair as
+/// (`sessionPolicy`, `sessionPolicyKnown`) because its existing consumers compare a plain `String`;
+/// here — the one surface that makes a STANDING claim — the Optional is what makes "render no label
+/// while unknown" a thing the row cannot forget rather than a thing someone must remember.
+///
+/// `onSet` is called with the raw wire string. It forwards to the surface's `onSetPolicy`, which
+/// owns the in-flight/adopt bookkeeping — the same convention the two pickers and the three respond
+/// callbacks already use.
+struct ComposerPolicyControl {
+    let policy: String?
+    let changeInFlight: Bool
+    let onSet: (String) -> Void
+}
+
+/// PURE: everything the permissions row shows and offers.
+///
+/// It rides on `ComposerStrip.Kind` as the case's payload — this plan's own Task 1 precedent
+/// ("the result on the TOOL CASE, not sibling fields") — for a reason specific to this codebase:
+/// SwiftUI bodies are not exercised in tests here, so a band whose contents were only inside its
+/// `AnyView` would have no assertable form at all. On the case, "dispatch offers five policies" and
+/// "no label while the daemon has not said" are values a test can read.
+struct ComposerPermissionsRow: Equatable {
+    /// The policies THIS mode may be set to. Code's is all six; dispatch's is all but `plan`. Chosen
+    /// by each mode's own chrome — there is no `switch mode` here or anywhere below it.
+    let offers: [String]
+    /// The policy to DISPLAY, or `nil` when the daemon has not said (see `ComposerPolicyControl`).
+    let showing: String?
+    /// True while a `session.setPolicy` is in flight.
+    let changeInFlight: Bool
+
+    /// What the chip reads.
+    ///
+    /// **Never a policy name while `showing == nil`** — the row is persistent, so naming the `"auto"`
+    /// placeholder would be a standing claim about how much the agent may do unattended, for a
+    /// session nobody has asked. It names the CONTROL instead: not knowing yet is a different thing
+    /// from having no control, and a blank chip would say the second.
+    var chipTitle: String {
+        guard let showing else { return "Approval mode" }
+        return isDangerous ? "⚠ \(policyDisplayLabel(showing))" : policyDisplayLabel(showing)
+    }
+
+    /// `bypass` and only `bypass` (`isPolicyDangerous`) — the treatment the picker rows have always
+    /// carried, now also on the persistent chip, which is where spec §4 says it matters most: a
+    /// session quietly running `bypass` must look like one without opening anything.
+    var isDangerous: Bool { showing.map(isPolicyDangerous) ?? false }
+
+    /// One change at a time — the same single-flag discipline `policyChangeInFlight` documents.
+    var isEnabled: Bool { !changeInFlight }
+
+    /// Dimmed while a change is in flight, so the wait is VISIBLE and not merely a click that does
+    /// nothing. (`ShellSidebarRowStyle` draws no disabled state of its own, so `.disabled` alone
+    /// would refuse the click while looking exactly like a chip that works.) Task 8: a state
+    /// treatment expressed as a bare number, and a candidate for a brand token.
+    var chipOpacity: Double { isEnabled ? 1 : 0.55 }
+
+    /// The chip's hover line and accessibility label.
+    var help: String {
+        if changeInFlight { return "Changing approval mode…" }
+        guard let showing else { return "Approval mode — not known for this session yet" }
+        return "Approval mode: \(policyDisplayLabel(showing))"
+    }
 }
 
 /// The band behind the composer card — the second surface that slides out from underneath it.
@@ -66,15 +149,14 @@ struct ComposerContext {
 /// rather than a greyed-out one. That distinction is the user's ruling expressed in the type.
 struct ComposerStrip {
     /// What this band IS. Named rather than anonymous so a test can say which strip a mode carries
-    /// without rendering it, and so Task 6's permissions row is a **labelled** hook.
-    ///
-    /// `permissions` is declared and unused today on purpose: Task 6 builds the row (spec §4), and
-    /// the slot having a name is what lets chat's absence be a statement about a specific thing.
+    /// without rendering it, and so the permissions row is a **labelled** hook — which is what lets
+    /// chat's absence be a statement about a specific thing rather than about nothing.
     enum Kind: Equatable {
         /// Cowork's two unwired chips (working folder, approval mode) plus the announcement.
         case coworkPlaceholders
-        /// Task 6: the approval-policy row. No mode returns this yet.
-        case permissions
+        /// The approval-policy row (mac-chat-parity Task 6, spec §4) — code's and dispatch's band.
+        /// Carries what it shows and offers; see `ComposerPermissionsRow` for why on the case.
+        case permissions(ComposerPermissionsRow)
     }
 
     let kind: Kind
@@ -128,9 +210,11 @@ func composerChrome(_ context: ComposerContext) -> any ComposerChrome {
 /// regardless of the stored row, so a row here could only ever show a value that is not in force and
 /// offer changes that are all RPC errors.
 ///
-/// The same gate already exists twice on this screen (`WindowContentView.swift:143`'s ⋯ button and
-/// `WorkSidebar.swift:238`'s Options block); this type is the third expression of it, and the first
-/// one that is structural — Task 6 cannot give chat a row without editing this file.
+/// The same gate already exists twice on this screen (`WindowContentView`'s ⋯ button and
+/// `WorkSidebar`'s Options block, both gated on `adapter.isChatSession`); this type is the third
+/// expression of it, and the only structural one — Task 6 could not give chat a row without editing
+/// this type, and could not sneak one in through the shared shell either, because the strip type may
+/// be constructed only in this file (see this file's own doc, and the scan it names).
 struct ChatComposerChrome: ComposerChrome {
     let context: ComposerContext
     var mode: SessionMode { .chat }
@@ -142,18 +226,21 @@ struct ChatComposerChrome: ComposerChrome {
 
 // MARK: - Code
 
-/// Code's composer: the full surface. Today that is the shared shell and nothing else — the mode
-/// segment is absent because a code session is neither of the two modes that segment offers.
+/// Code's composer: the full surface — the permissions row over the shared shell. The mode segment
+/// is absent because a code session is neither of the two modes that segment offers.
 ///
-/// **Task 6 hangs the permissions row here** (`makeStrip()` → `ComposerStrip(kind: .permissions, …)`,
-/// all six policies), and Task 7 the model/effort wiring. Both are features; Task 5 added none.
+/// **All six policies** (spec §3's table): `session.setPolicy` settles every one of them for a code
+/// target — it refuses only a chat target outright, and only `plan` for a dispatch one
+/// (`packages/core/src/ipc/server.ts:1524-1529`). Task 7 adds the model/effort wiring.
 struct CodeComposerChrome: ComposerChrome {
     let context: ComposerContext
     var mode: SessionMode { .code }
 
     func makeControlRowAccessory() -> AnyView? { nil }
 
-    func makeStrip() -> ComposerStrip? { nil }
+    func makeStrip() -> ComposerStrip? {
+        permissionsStrip(offering: sessionPolicyModes, context.policy)
+    }
 }
 
 // MARK: - Dispatch
@@ -161,23 +248,107 @@ struct CodeComposerChrome: ComposerChrome {
 /// Dispatch's composer. Reached through `DispatchSurface.swift:97` → `ShellSessionView` →
 /// `WindowContentView`, the same card the sidebar's sessions get.
 ///
-/// **Task 6 hangs a permissions row here too, minus one row:** `session.setPolicy` refuses exactly
-/// `"plan"` for a dispatch target — *"dispatch never asks permissions"*
-/// (`packages/core/src/ipc/server.ts:1528`) — while the other five are settable. That is the
-/// opposite shape from model/effort, which dispatch pins entirely
-/// (`ipc/server.ts:1567`/`:1610`); Task 7 keeps the header's existing shown-but-refused behaviour
-/// rather than regressing it.
+/// **A permissions row too, minus one row:** `session.setPolicy` refuses exactly `"plan"` for a
+/// dispatch target — *"dispatch never asks permissions"*
+/// (`packages/core/src/ipc/server.ts:1527-1528`) — while the other five are settable, so this row
+/// offers `dispatchSettablePolicyModes`. That is the opposite shape from model/effort, which
+/// dispatch pins entirely (`ipc/server.ts:1567`/`:1610`); Task 7 keeps the header's existing
+/// shown-but-refused behaviour there rather than regressing it.
 ///
-/// Separate from `CodeComposerChrome` even though the two are identical today, because their futures
-/// are already known to differ by that one row — and merging them now would mean splitting them
-/// again in the next task.
+/// The one row is also why this type is separate from `CodeComposerChrome`, which was Task 5's
+/// argument for splitting them a task before the difference existed: merging them then would have
+/// meant splitting them again now.
 struct DispatchComposerChrome: ComposerChrome {
     let context: ComposerContext
     var mode: SessionMode { .dispatch }
 
     func makeControlRowAccessory() -> AnyView? { nil }
 
-    func makeStrip() -> ComposerStrip? { nil }
+    func makeStrip() -> ComposerStrip? {
+        permissionsStrip(offering: dispatchSettablePolicyModes, context.policy)
+    }
+}
+
+/// The permissions band, built the same way for both modes that have one — each supplying its own
+/// `offers`. Shared as a function rather than by a shared base type so the only thing a mode states
+/// is the thing that actually differs between them.
+///
+/// `nil` control → `nil` strip: a surface that wired no policy control (the new-chat page, which has
+/// no session to set a policy on) gets **no band**, not a chip that cannot do anything. Chat's
+/// absent-rather-than-disabled rule, applied to the other absence.
+private func permissionsStrip(offering offers: [String],
+                              _ control: ComposerPolicyControl?) -> ComposerStrip? {
+    guard let control else { return nil }
+    let row = ComposerPermissionsRow(offers: offers,
+                                     showing: control.policy,
+                                     changeInFlight: control.changeInFlight)
+    return ComposerStrip(kind: .permissions(row),
+                         height: newChatComposerStripHeight,
+                         content: AnyView(ComposerPermissionsStrip(row: row, onSelect: control.onSet)))
+}
+
+/// The permissions band's content: one chip on the composer's own leading column, and space.
+///
+/// Laid out exactly like `CoworkComposerStrip` below — same 18 pt inset, same band height, same chip
+/// — because it is the same band, seen on a different mode. Spec §4's "measured recipe already in
+/// the tree", reused rather than re-measured.
+struct ComposerPermissionsStrip: View {
+    let row: ComposerPermissionsRow
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ComposerPolicyChip(row: row, onSelect: onSelect)
+            Spacer(minLength: 12)
+        }
+        // Matches the control row's inset, so the chip's glyph lands on the same column as the plus.
+        .padding(.horizontal, 18)
+        .frame(height: newChatComposerStripHeight)
+    }
+}
+
+/// The permissions chip and the picker behind it.
+///
+/// The picker is `PolicyPickerRow` (`WorkSidebar.swift`) — the same rows the header's ⋯ popover and
+/// the WorkSidebar's Options block render, which is why that implementation moved off
+/// `extension WindowContentView` in this task.
+///
+/// Selecting a row does **not** dismiss the popover, matching the ⋯ menu it shares its rows with:
+/// the open menu is where a change in flight is most visible (every row disables, and the checkmark
+/// moves only once the daemon has confirmed), and closing it would hide exactly that.
+struct ComposerPolicyChip: View {
+    let row: ComposerPermissionsRow
+    let onSelect: (String) -> Void
+
+    /// Local presentational state, the convention every other picker on this screen follows
+    /// (`WindowContentView.showingPolicyMenu` and its four siblings).
+    @State private var showingMenu = false
+
+    var body: some View {
+        NewChatControlChip(systemImage: "hand.raised",
+                           title: row.chipTitle,
+                           label: row.help,
+                           titleStyle: row.isDangerous ? AnyShapeStyle(.red) : AnyShapeStyle(.primary),
+                           action: { showingMenu = true })
+            .opacity(row.chipOpacity)
+            .disabled(!row.isEnabled)
+            .popover(isPresented: $showingMenu, arrowEdge: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Approval mode")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 4)
+                    ForEach(row.offers, id: \.self) { policy in
+                        PolicyPickerRow(policy: policy,
+                                        current: row.showing,
+                                        isDisabled: row.changeInFlight,
+                                        onSelect: onSelect)
+                    }
+                }
+                .padding(12)
+                .frame(minWidth: 160)
+            }
+    }
 }
 
 // MARK: - Cowork — the named slot
@@ -200,7 +371,7 @@ struct CoworkComposerChrome: ComposerChrome {
 
     func makeStrip() -> ComposerStrip? {
         ComposerStrip(kind: .coworkPlaceholders,
-                      height: newChatCoworkStripHeight,
+                      height: newChatComposerStripHeight,
                       content: AnyView(CoworkComposerStrip(announcement: context.announcement)))
     }
 }
@@ -232,7 +403,7 @@ struct CoworkComposerStrip: View {
         }
         // Matches the control row's inset, so the folder glyph lands on the same column as the plus.
         .padding(.horizontal, 18)
-        .frame(height: newChatCoworkStripHeight)
+        .frame(height: newChatComposerStripHeight)
     }
 }
 

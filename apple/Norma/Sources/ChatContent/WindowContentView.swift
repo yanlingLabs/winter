@@ -30,8 +30,8 @@ struct WindowContentView<Accessory: View>: View {
     /// It carries the MODE as well as the opt-in because the mode IS the composer: since
     /// mac-chat-parity Task 5 each mode has its own dedicated composer (`ComposerChrome.swift`) and
     /// this value is what picks it. A chat session's carries no permissions band; a code or dispatch
-    /// session's is where Task 6 puts one; neither shows the Chat/Cowork segment, which belongs to
-    /// the two modes it names.
+    /// session's carries one (mac-chat-parity Task 6, spec §4 — `composerCard` below wires it);
+    /// neither shows the Chat/Cowork segment, which belongs to the two modes it names.
     var composerCardMode: SessionMode? = nil
     @ViewBuilder let headerAccessory: () -> Accessory
 
@@ -180,23 +180,8 @@ struct WindowContentView<Accessory: View>: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            if let cardMode = composerCardMode {
-                // The SHARED card (user call, 2026-08-07: the live page's composer "should be the
-                // same as the one of the new chat page"). Its strip emerges from the TOP here —
-                // this composer sits at the bottom of the window, where "below" is off-screen.
-                //
-                // The mode segment is NOT selectable: a session's mode is fixed at creation and
-                // Norma has no mode-switch, so a live segment would offer something it cannot do.
-                NormaComposerCard(
-                    text: adapter.draftBinding,
-                    onSubmit: { adapter.onSubmit(adapter.composerDraft) },
-                    mode: .constant(cardMode),
-                    modeIsSelectable: false,
-                    stripEdge: .above,
-                    sendBlockedReason: adapter.composerDraft
-                        .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : nil
-                )
-                .frame(maxWidth: .infinity)
+            if let card = composerCard {
+                card.frame(maxWidth: .infinity)
             } else {
                 ComposerTextView(
                     text: adapter.draftBinding,
@@ -213,6 +198,39 @@ struct WindowContentView<Accessory: View>: View {
         .padding(.horizontal, 16)
         .padding(.top, topInset)
         .padding(.bottom, 16)
+    }
+
+    /// The SHARED composer card (user call, 2026-08-07: the live page's composer "should be the same
+    /// as the one of the new chat page"), or `nil` for a surface that opted into no card — the
+    /// detached window and the orb's morph window, which keep the plain `ComposerTextView` below on
+    /// the ruling `composerCardMode`'s own doc records.
+    ///
+    /// Its strip emerges from the TOP here: this composer sits at the bottom of the window, where
+    /// "below" is off-screen. The mode segment is NOT selectable — a session's mode is fixed at
+    /// creation and Norma has no mode-switch, so a live segment would offer something it cannot do.
+    ///
+    /// `policy` is what makes the permissions row a control (mac-chat-parity Task 6, spec §4): the
+    /// adapter's own seeded/healed policy plus its known-ness, so the band shows what the DAEMON
+    /// reports for this session and shows nothing at all until it has said. Chat and cowork ignore
+    /// it — a mode's chrome decides whether it has a band (`ComposerChrome.swift`).
+    ///
+    /// **Hoisted out of `contentColumn` for the tests' sake, and it is the point of the hoist:** the
+    /// whole path from this view's adapter to the rendered row is a value here, so "the shell's card
+    /// carries this session's real policy" is assertable without rendering anything. Pinning the
+    /// adapter's rule alone would have left a card that wired no policy at all completely green —
+    /// this plan's own Task 4 mutation lesson.
+    var composerCard: NormaComposerCard? {
+        guard let cardMode = composerCardMode else { return nil }
+        return NormaComposerCard(
+            text: adapter.draftBinding,
+            onSubmit: { adapter.onSubmit(adapter.composerDraft) },
+            mode: .constant(cardMode),
+            modeIsSelectable: false,
+            policy: adapter.composerPolicyControl,
+            stripEdge: .above,
+            sendBlockedReason: adapter.composerDraft
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : nil
+        )
     }
 
     // MARK: - Task 6 (2e-iii): width-responsive sidebar layout
@@ -378,8 +396,10 @@ struct WindowContentView<Accessory: View>: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 4)
-            // Task 6 (2e-iii): the row body is shared with the WorkSidebar's Options block via
-            // `policyPickerRow` (WorkSidebar.swift) — one implementation for both surfaces.
+            // Task 6 (2e-iii): the row body is shared with the WorkSidebar's Options block — and,
+            // since mac-chat-parity T6, with the composer's permissions row — via `PolicyPickerRow`
+            // (WorkSidebar.swift). One implementation for all three; `policyPickerRow(_:)` is this
+            // view's forwarder, handing it this adapter's own values.
             ForEach(sessionPolicyModes, id: \.self) { policy in
                 policyPickerRow(policy)
             }

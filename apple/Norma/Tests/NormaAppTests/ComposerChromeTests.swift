@@ -147,7 +147,7 @@ final class ComposerChromeTests: XCTestCase {
     func testCoworkCarriesThePlaceholderStripAtItsMeasuredHeight() {
         let strip = chrome(.cowork).makeStrip()
         XCTAssertEqual(strip?.kind, .coworkPlaceholders)
-        XCTAssertEqual(strip?.height, newChatCoworkStripHeight)
+        XCTAssertEqual(strip?.height, newChatComposerStripHeight)
     }
 
     /// The Chat/Cowork segment is offered by exactly the two modes that segment contains — today's
