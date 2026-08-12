@@ -93,6 +93,14 @@ The daemon caps output at `MAX_OUTPUT = 64 * 1024` with a `[truncated at 65536 b
 
 ### 2.3 Mac — what is rendered per tool call, and what is thrown away
 
+> **STATUS: this section describes the Mac BEFORE the `mac-chat-parity` branch, and is kept as the
+> record of what was wrong.** At that branch's HEAD every row below has been addressed: `output` and
+> `isError` are retained and rendered (Tasks 1-2), calls carry a status mark, and `extractToolDetail`
+> covers **37 of the 42 tool names** the daemon declares — `browser` is verb-led (`browser navigate
+> <url>`), and the five that still return `nil` are `agent_list`, `task_list`, `enter_plan_mode`,
+> `exit_plan_mode`, `list_sessions` (Task 10). The worked example below no longer reproduces. Line
+> citations in this section are pre-branch and will not resolve at HEAD.
+
 | Aspect | Mac behaviour |
 |---|---|
 | Data retained | `name` + a short `detail` string extracted from `argsJson` (`SessionModel.swift:335-337`). **`output` and `isError` are discarded** — `tool_result` only flips `status` (`:338-339`). |
@@ -109,6 +117,10 @@ The daemon caps output at `MAX_OUTPUT = 64 * 1024` with a `[truncated at 65536 b
 > `› Used 5 tools`
 
 …and expanding it reveals **an empty area**. That is the whole record of five browser actions.
+
+*(Fixed on `mac-chat-parity`: the same five calls now expand to five lines — `browser open <url>`,
+`browser navigate <url>`, `browser read`, `browser screenshot`, `browser click <selector>` — each
+with its own status mark and its output.)*
 
 ### 2.4 The enumerated waste — what exists on the wire and is not shown on the Mac
 

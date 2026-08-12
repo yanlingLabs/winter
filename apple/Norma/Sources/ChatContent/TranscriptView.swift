@@ -169,9 +169,17 @@ private struct TranscriptExchangeRow: View {
                         toggle: { toggle(key) }
                     )
                 case .single(let item):
-                    // mac-chat-parity Task 3: an approval/question/plan draws its CARD here, at the
-                    // point in the turn it was asked — pending while the daemon waits, frozen with
+                    // mac-chat-parity Task 3: an approval/question/plan draws its CARD here, in the
+                    // ACTIVITY order it was asked in — pending while the daemon waits, frozen with
                     // its outcome forever after. Every other kind stays the one-line activity row.
+                    //
+                    // "In activity order" is the whole claim, and it is narrower than it reads:
+                    // this loop runs BEFORE the replies loop below, so every card sits above EVERY
+                    // reply in the exchange — a card asked in round 3 draws above round 1's prose.
+                    // That is the same deliberate not-interleaved layout the replies loop's own
+                    // comment records (research §5 item 6, Large, out of scope for this branch); the
+                    // card simply inherits it. Named because a live gate reads a round-3 card above
+                    // round-1 prose as misplacement otherwise.
                     if let record = item.interactionRecord {
                         TranscriptInteractionCard(record: record, wiring: cardWiring)
                     } else {
