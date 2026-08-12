@@ -122,9 +122,15 @@ struct TranscriptView: View {
 /// One exchange's rows — prompt bubble, GROUPED activity (LIVE-GATE G3 / r1b: `groupActivity`
 /// folds any UNBROKEN run of tool calls — even across different tool names — into one `.toolRun`
 /// sentence row carrying its status and expanding to every call's arguments and output, skips
-/// `.task` entirely), one row per assistant message plus the live streaming row, stopped flag. Activity and replies are NOT interleaved chronologically — every tool row
-/// precedes every reply row, because `Exchange` stores them in two separate lists; making the
-/// transcript event-shaped is a separate, larger change (spec §5 item 6). A
+/// `.task` entirely), one row per assistant message plus the live streaming row, stopped flag.
+///
+/// Activity and replies are NOT interleaved chronologically — every tool row precedes every reply
+/// row, because `Exchange` stores them in two separate lists; making the transcript event-shaped is
+/// a separate, larger change. The citation here used to read "spec §5 item 6", which points at
+/// nothing: the mac-chat-parity design doc's §5 is the model/effort wiring and has no item 6. The
+/// change is item **6** of `docs/research/2026-08-12-ios-vs-mac-transcript.md` §5 ("Event-shaped
+/// rows"), which that table marks **Large** and scope-judgment — and the design doc deliberately
+/// carries no §9 gate for it. A
 /// dedicated `View` (not a `@ViewBuilder` func on `TranscriptView`) because it owns its own
 /// expansion `@State` — which tool runs are expanded, keyed by `toolRunExpansionKey` (the run's
 /// first `callId`, NOT its position: the reducer's drop-oldest activity cap shifts positions during
