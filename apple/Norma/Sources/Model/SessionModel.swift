@@ -1071,8 +1071,10 @@ enum SessionReducer {
 
     /// LIVE-GATE G3: a short, tool-specific hint pulled from the tool call's raw `argsJson` —
     /// pure JSON parsing, no throwing (malformed/missing JSON, or a field of the wrong type, all
-    /// fall through to `nil`; this must never crash the reducer). Every returned value goes
-    /// through `clipToolDetail`.
+    /// fall through to `nil`; this must never crash the reducer). Every value taken off the wire
+    /// goes through `clipToolDetail`, so a detail is ≤ `maxToolDetailCharacters` — with ONE stated
+    /// exception, `ReadPage`'s `"(+N more)"`, which is ours rather than the model's and is appended
+    /// after the clip (see that case).
     ///
     /// **Coverage is stated as RULES, not as a list of thirty tools** — a per-tool enumeration here
     /// would be stale within a task. Each rule's field names were read off the daemon's own zod
