@@ -352,7 +352,7 @@ private func transcriptCopyForeground(isHovering: Bool, didCopy: Bool) -> Color 
 /// exhaustiveness/defensiveness and direct unit testing.
 func activityGlyphAndLabel(_ item: ActivityItem) -> (glyph: String, label: String) {
     switch item.kind {
-    case .tool(let name, let detail):
+    case .tool(let name, let detail, _, _, _):
         return ("⚙", detail.map { "\(name): \($0)" } ?? name)
     case .task(let subject, let status):
         return (taskGlyph(for: status), subject)
@@ -451,7 +451,7 @@ func groupActivity(_ items: [ActivityItem]) -> [ActivityGroup] {
         switch item.kind {
         case .task:
             continue // deliberate — see doc comment above
-        case .tool(let name, let detail):
+        case .tool(let name, let detail, _, _, _):
             if case .toolRun(var entries) = groups.last {
                 if let last = entries.last, last.name == name {
                     entries[entries.count - 1] = ToolRunEntry(

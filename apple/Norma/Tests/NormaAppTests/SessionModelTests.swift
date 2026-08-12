@@ -550,6 +550,62 @@ final class SessionModelTests: XCTestCase {
         ])
     }
 
+    // MARK: Multi-round turns (mac-chat-parity Task 1 — the per-round overwrite)
+    //
+    // The engine emits one `assistant_message` PER ROUND whenever that round produced text
+    // (`if (textBuf.length > 0)`, packages/core/src/agent/engine.ts). This used to ASSIGN to a
+    // single `reply` string, so every round but the last was silently discarded before it reached
+    // any view — data loss, not a styling gap.
+
+    func testMultiRoundTurnKeepsEveryAssistantMessageInOrder() {
+        var s = OrbSessionState()
+        s = SessionReducer.reduce(s, userMessage("do a big thing", seq: 1))
+        s = SessionReducer.reduce(s, turnStarted(seq: 2))
+        s = SessionReducer.reduce(s, assistantMessage("first, I'll look around", seq: 3))
+        s = SessionReducer.reduce(s, toolCall("bash", seq: 4))
+        s = SessionReducer.reduce(s, assistantMessage("now I'll fix it", seq: 5))
+        s = SessionReducer.reduce(s, turnCompleted(seq: 6))
+        XCTAssertEqual(s.exchanges.count, 1)
+        XCTAssertEqual(s.exchanges[0].replies, ["first, I'll look around", "now I'll fix it"])
+    }
+
+    /// Three rounds, to prove the append is not a two-slot special case.
+    func testEveryRoundOfALongTurnSurvives() {
+        var s = OrbSessionState()
+        s = SessionReducer.reduce(s, userMessage("go", seq: 1))
+        s = SessionReducer.reduce(s, turnStarted(seq: 2))
+        for (i, text) in ["r1", "r2", "r3"].enumerated() {
+            s = SessionReducer.reduce(s, assistantMessage(text, seq: 3 + i))
+        }
+        XCTAssertEqual(s.exchanges[0].replies, ["r1", "r2", "r3"])
+    }
+
+    /// The single-bubble surfaces (`FieldStateAdapter.visibleResponse`, the orb's reveal gates)
+    /// read `Exchange.reply`, which is deliberately still "the latest assistant message" —
+    /// exactly what the old overwritten `reply` held. Task 1 changes the transcript, not them.
+    func testReplyAccessorStillReadsTheLatestRound() {
+        var s = OrbSessionState()
+        s = SessionReducer.reduce(s, userMessage("go", seq: 1))
+        s = SessionReducer.reduce(s, turnStarted(seq: 2))
+        s = SessionReducer.reduce(s, assistantMessage("round one", seq: 3))
+        s = SessionReducer.reduce(s, assistantMessage("round two", seq: 4))
+        XCTAssertEqual(s.exchanges[0].reply, "round two")
+        XCTAssertEqual(s.lastReply, "round two")
+    }
+
+    /// An empty-text `assistant_message` adds no row. The daemon never emits one (the emission is
+    /// guarded on `textBuf.length > 0`), so this is defence against a second producer — and it
+    /// matters because appending an empty entry would both draw a blank transcript row and blank
+    /// out `reply` for the surfaces that read it.
+    func testEmptyAssistantMessageAddsNoRow() {
+        var s = OrbSessionState()
+        s = SessionReducer.reduce(s, userMessage("go", seq: 1))
+        s = SessionReducer.reduce(s, turnStarted(seq: 2))
+        s = SessionReducer.reduce(s, assistantMessage("real text", seq: 3))
+        s = SessionReducer.reduce(s, assistantMessage("", seq: 4))
+        XCTAssertEqual(s.exchanges[0].replies, ["real text"])
+    }
+
     /// An errored turn (agent_error, no assistant_message) fills the still-empty exchange's
     /// reply with the error message instead of leaving it blank forever.
     func testAgentErrorFillsEmptyReplyOnLastExchange() {

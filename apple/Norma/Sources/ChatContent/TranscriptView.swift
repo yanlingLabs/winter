@@ -82,7 +82,10 @@ struct TranscriptView: View {
 
 /// One exchange's rows — prompt bubble, GROUPED activity (LIVE-GATE G3 / r1b: `groupActivity`
 /// folds any UNBROKEN run of tool calls — even across different tool names — into one `.toolRun`
-/// sentence row, skips `.task` entirely), reply/streaming, stopped flag. A
+/// sentence row, skips `.task` entirely), one row per assistant message plus the live streaming
+/// row, stopped flag. Activity and replies are NOT interleaved chronologically — every tool row
+/// precedes every reply row, because `Exchange` stores them in two separate lists; making the
+/// transcript event-shaped is a separate, larger change (spec §5 item 6). A
 /// dedicated `View` (not a `@ViewBuilder` func on `TranscriptView`) because it owns its own
 /// expansion `@State` — which group indices are expanded — scoped per-exchange-row and reset on
 /// view recycle (fine: expansion is a transient reading aid, not persisted state).
@@ -113,10 +116,15 @@ private struct TranscriptExchangeRow: View {
                     TranscriptActivityRow(item: item)
                 }
             }
+            // One row per assistant message, in arrival order (mac-chat-parity Task 1) — the
+            // engine emits one per ROUND, and this used to render a single string that each round
+            // overwrote. The streaming row is ADDITIVE, not an `else` branch: while round N streams,
+            // rounds 1…N-1 stay on screen instead of being hidden until the turn ends.
+            ForEach(Array(exchange.replies.enumerated()), id: \.offset) { _, reply in
+                TranscriptAssistantMessage(text: reply, isStreaming: false)
+            }
             if let streamingText {
                 TranscriptAssistantMessage(text: streamingText, isStreaming: true)
-            } else if !exchange.reply.isEmpty {
-                TranscriptAssistantMessage(text: exchange.reply, isStreaming: false)
             }
             if exchange.aborted { TranscriptStoppedRow() }
         }

@@ -110,7 +110,17 @@ struct ActivityItem: Equatable {
         /// missing JSON never throws, it just yields no detail). Consumed by the transcript's
         /// grouped tool rows (`groupActivity`/`toolGroupLabel` in ChatContent) for the expandable
         /// per-call detail lines — never by `activityGlyphAndLabel`'s single-item fallback path.
-        case tool(name: String, detail: String?)
+        ///
+        /// `callId`/`output`/`isError` (mac-chat-parity Task 1) carry the tool's RESULT, which the
+        /// reducer used to throw away entirely — `tool_result` folded to a status flip and nothing
+        /// else, so no view could ever show what a tool did or whether it failed. `callId` is the
+        /// wire's `tool_call.callId`, the join key `foldToolResult` matches the later `tool_result`
+        /// on; `output`/`isError` are that result. They stay at their defaults (`nil`/`false`) until
+        /// it arrives, so `output == nil` is exactly "this call is still running". `output` is
+        /// capped at `SessionReducer.maxToolOutputCharacters` — see that constant's own doc.
+        /// All three are defaulted so every `.tool(name:detail:)` construction site written before
+        /// they existed compiles and means the same thing; pattern matches must bind all five.
+        case tool(name: String, detail: String?, callId: String? = nil, output: String? = nil, isError: Bool = false)
         case task(subject: String, status: String)
         case subagent(agentType: String)
         case subagentDone
@@ -120,13 +130,32 @@ struct ActivityItem: Equatable {
     var kind: Kind
 }
 
-/// A user prompt paired with its reply — the field's inline-response shell (2c wave 2 task 3)
-/// reads `exchanges.last` instead of the flat `lastReply` string so it can tell "no reply yet"
-/// (empty `reply`) apart from "no exchange at all" (empty array), and so a later wave can render
-/// prior turns without re-deriving pairing from the flat event log.
+extension ActivityItem {
+    /// The `tool_call.callId` a `.tool` item was opened with — `nil` for every other kind, and for
+    /// a `.tool` item constructed without one (the pre-Task-1 shape, still reachable from tests).
+    /// This is the join key `SessionReducer.foldToolResult` searches on; it is deliberately an
+    /// accessor rather than a stored field on `ActivityItem`, so that tool-only data stays on the
+    /// tool case where a `.task`/`.worktree` item can't carry a meaningless one.
+    var toolCallId: String? {
+        if case .tool(_, _, let callId, _, _) = kind { return callId }
+        return nil
+    }
+}
+
+/// A user prompt paired with every assistant message its turn produced — the field's
+/// inline-response shell (2c wave 2 task 3) reads `exchanges.last` instead of the flat `lastReply`
+/// string so it can tell "no reply yet" (empty `reply`) apart from "no exchange at all" (empty
+/// array), and so a later wave can render prior turns without re-deriving pairing from the flat
+/// event log.
 struct Exchange: Equatable {
     var prompt: String
-    var reply: String
+    /// EVERY `assistant_message` this exchange's turn emitted, in arrival order (mac-chat-parity
+    /// Task 1). The engine emits one PER ROUND, whenever the round produced text
+    /// (`if (textBuf.length > 0)`, `packages/core/src/agent/engine.ts`) — this was a single
+    /// `reply` string that each round OVERWROTE, so in any multi-round turn every intermediate
+    /// round's prose was silently discarded before it reached the view. The transcript renders one
+    /// row per entry, in order.
+    var replies: [String] = []
     /// What happened while this exchange's turn ran (2d-ii-a task 1) — appended via
     /// `SessionReducer.appendActivity` (main-transcript events only; adjacent dupes collapse;
     /// capped at 200 drop-oldest). Defaulted so existing `Exchange(prompt:reply:)` call
@@ -135,6 +164,26 @@ struct Exchange: Equatable {
     /// True when this exchange's turn ended with `stopReason == "aborted"` (Esc-interrupt) —
     /// the per-exchange sibling of the state-level `lastTurnAborted` flash flag.
     var aborted: Bool = false
+
+    /// The LAST assistant message of this exchange, or `""` when none has arrived yet. This is
+    /// what the SINGLE-BUBBLE surfaces read — `FieldStateAdapter.visibleResponse`,
+    /// `GlassRootView.hasReadableReply`, `OrbWindowController`'s reveal gates — and it is the same
+    /// value they read before `replies` existed, because the old stored `reply` was exactly
+    /// "whatever the newest `assistant_message` overwrote it with". Their behaviour is therefore
+    /// deliberately unchanged by Task 1; only the transcript, which reads `replies` in full, gains
+    /// the intermediate rounds.
+    var reply: String { replies.last ?? "" }
+
+    /// The single-reply shape, which is what a one-round turn actually is — the common case in
+    /// production and in nearly every test. `reply: ""` means "no reply yet" and produces NO entry
+    /// (not an empty one), so `Exchange(prompt:reply:"")` still compares equal to a freshly-opened
+    /// exchange the reducer built. Multi-reply state is built by appending to `replies`.
+    init(prompt: String, reply: String, activity: [ActivityItem] = [], aborted: Bool = false) {
+        self.prompt = prompt
+        self.replies = reply.isEmpty ? [] : [reply]
+        self.activity = activity
+        self.aborted = aborted
+    }
 }
 
 struct OrbSessionState: Equatable {
@@ -175,9 +224,9 @@ struct OrbSessionState: Equatable {
     var turnRunning = false
     var streamingText = ""
     var lastReply: String? = nil
-    /// Ordered prompt/reply pairs, oldest first. `user_message(main)` appends a new exchange
-    /// with an empty reply; `assistant_message(main)` fills in the LAST exchange's reply (or, if
-    /// none exists yet, appends one with an empty prompt) — see `SessionReducer.reduce`.
+    /// Ordered prompt/replies pairs, oldest first. `user_message(main)` appends a new exchange
+    /// with no replies; `assistant_message(main)` APPENDS to the LAST exchange's `replies` (or, if
+    /// no exchange exists yet, appends one with an empty prompt) — see `SessionReducer.reduce`.
     var exchanges: [Exchange] = []
     /// Wave-5 gate item 2: messages sent while a turn is already running go down `session.steer`
     /// — the daemon queues them and drains at the next round boundary, and the reducer folds each
@@ -287,6 +336,26 @@ struct OrbSessionState: Equatable {
 enum SessionReducer {
     private static let mainThread = "main"
 
+    /// Per-`tool_result` retention cap for `ActivityItem.Kind.tool`'s `output` (mac-chat-parity
+    /// Task 1) — the reducer stores at most this many characters and appends a truncation marker.
+    ///
+    /// The daemon ALREADY truncates tool output at 64 KiB before it reaches any client (`MAX_OUTPUT`,
+    /// `packages/core/src/agent/tools/registry.ts`); this is a second, app-side cap on top of that,
+    /// and it exists because of what the Mac does with those events afterwards. This reducer's state
+    /// is rebuilt by replaying a session's ENTIRE event log from seq 0 on every focus and every
+    /// relaunch (`AppModel.refocus`), so storing results whole would keep every byte every tool in
+    /// the session ever printed resident for as long as the session is open — and `appendActivity`'s
+    /// 200-item cap bounds the item COUNT per exchange, not its bytes. Capping here rather than at
+    /// render time is the only version that actually bounds memory: a renderer-side clip saves
+    /// drawing work on a string that is already resident.
+    ///
+    /// 8 KiB is 8× under the daemon's own ceiling, so a realistic tool result survives whole and the
+    /// cap only bites on the pathological ones — which nobody reads inside a transcript row anyway —
+    /// while keeping one exchange's worst case (200 × 8 KiB) around 1.6 MiB. Internal rather than
+    /// private so tests can pin the exact boundary instead of guessing at it, the same convention as
+    /// `SessionModel.notificationFreshnessMs`.
+    static let maxToolOutputCharacters = 8_192
+
     static func reduce(_ state: OrbSessionState, _ event: SessionEvent) -> OrbSessionState {
         var s = state
         switch event {
@@ -334,9 +403,13 @@ enum SessionReducer {
             }
         case .toolCall(let v) where v.threadId == mainThread:
             if s.pendingInteractions.isEmpty { s.status = .toolRunning(name: v.name) }
-            appendActivity(.tool(name: v.name, detail: extractToolDetail(name: v.name, argsJson: v.argsJson)), to: &s)
+            appendActivity(.tool(name: v.name, detail: extractToolDetail(name: v.name, argsJson: v.argsJson), callId: v.callId), to: &s)
         case .toolResult(let v) where v.threadId == mainThread:
+            // The status flip is deliberately UNCONDITIONAL and comes first: it is the behaviour
+            // this case has always had, and it must not become contingent on whether the fold
+            // below finds an item to land on.
             if s.pendingInteractions.isEmpty { s.status = .thinking }
+            foldToolResult(&s, callId: v.callId, output: v.output, isError: v.isError)
         case .approvalRequested(let v) where v.threadId == mainThread:
             appendPending(.approval(callId: v.callId, toolName: v.toolName, summary: v.summary, reviewerReason: v.reviewerReason, childSessionId: v.childSessionId, options: v.options), to: &s)
             appendActivity(.interaction(v.summary), to: &s)
@@ -399,8 +472,15 @@ enum SessionReducer {
             s.streamingText = ""
             if s.exchanges.isEmpty {
                 s.exchanges.append(Exchange(prompt: "", reply: v.text))
-            } else {
-                s.exchanges[s.exchanges.count - 1].reply = v.text
+            } else if !v.text.isEmpty {
+                // APPEND, never assign: the engine emits one assistant_message per ROUND, so
+                // assigning discarded every round's prose but the last (see `Exchange.replies`).
+                // Empty text is skipped rather than appended — the daemon only emits the event
+                // when the round produced text (`if (textBuf.length > 0)`, engine.ts), so this is
+                // defence against a second producer, and an empty entry would both draw a blank
+                // transcript row and blank out `reply` for the surfaces that read it. It matches
+                // `Exchange(prompt:reply:)`, which likewise maps an empty reply to no entry.
+                s.exchanges[s.exchanges.count - 1].replies.append(v.text)
             }
         case .turnCompleted(let v) where v.threadId == mainThread:
             s.turnRunning = false
@@ -433,7 +513,7 @@ enum SessionReducer {
             s.lastTurnError = v.message // T6: the one signal the pickers' probation reads
             s.queuedSteers = [] // the turn died with whatever was queued for it
             if let last = s.exchanges.indices.last, s.exchanges[last].reply.isEmpty {
-                s.exchanges[last].reply = "⚠︎ \(v.message)"
+                s.exchanges[last].replies.append("⚠︎ \(v.message)")
             }
             s.subagents = [] // defensive prune — an errored main turn must not strand a live block
         case .taskUpdated(let v): // any thread — tasks are session-wide
@@ -580,12 +660,62 @@ enum SessionReducer {
         state.workflowRuns[runId] = run
     }
 
+    /// Lands a `tool_result` on the `.tool` activity item its `callId` opened (mac-chat-parity
+    /// Task 1). The reducer used to drop `output`/`isError` on the floor, which is why no Mac view
+    /// could ever show what a tool did or that it failed.
+    ///
+    /// Scans EXCHANGES newest-first rather than only the last one, because a tool_call and its
+    /// tool_result can straddle an exchange boundary: a main-thread steer's `user_message` is
+    /// persisted at SEND time (`AgentEngine.steer`, `packages/core/src/agent/engine.ts`), so it can
+    /// arrive between the two — and once the open exchange already holds a reply (any multi-round
+    /// turn), the `userMessage` case above opens a NEW exchange for it. Searching only the last
+    /// exchange would silently drop those results.
+    ///
+    /// Joins by `callId` rather than by position. The engine's tool loop happens to be serial today
+    /// (`for (const call of calls)` — emit call, await, emit result), so the last-opened item would
+    /// usually be right; the callId is what makes that an invariant of the data rather than a bet on
+    /// the engine's loop shape. `lastIndex` because a callId identifies at most one call — unless a
+    /// duplicated `tool_call` event appended twice (`.tool` is exempt from `appendActivity`'s
+    /// adjacent-dupe collapse), in which case the newest copy is the one on screen.
+    ///
+    /// No match → no-op. That happens when the `tool_call` was dropped by `appendActivity`'s
+    /// no-open-exchange guard (a tool call before any `user_message`); there is nothing to fold into,
+    /// exactly as before this existed.
+    private static func foldToolResult(_ state: inout OrbSessionState, callId: String, output: String, isError: Bool) {
+        for e in state.exchanges.indices.reversed() {
+            guard let i = state.exchanges[e].activity.lastIndex(where: { $0.toolCallId == callId }),
+                  case .tool(let name, let detail, let itemCallId, _, _) = state.exchanges[e].activity[i].kind else {
+                continue
+            }
+            state.exchanges[e].activity[i].kind = .tool(
+                name: name,
+                detail: detail,
+                callId: itemCallId,
+                output: capToolOutput(output),
+                isError: isError
+            )
+            return
+        }
+    }
+
+    /// Truncates one tool result to `maxToolOutputCharacters` and marks that it was truncated —
+    /// see that constant's doc for why the cap lives in the reducer at all. An output of exactly
+    /// the cap's length is kept whole with NO marker, so the marker always means "there was more".
+    private static func capToolOutput(_ output: String) -> String {
+        guard output.count > maxToolOutputCharacters else { return output }
+        return String(output.prefix(maxToolOutputCharacters))
+            + "\n[… truncated at \(maxToolOutputCharacters) characters]"
+    }
+
     /// Appends to the exchange currently being built. Transcript capture is MAIN-thread only
     /// and defensive: no open exchange → drop. Adjacent duplicates collapse — EXCEPT `.tool`
     /// (LIVE-GATE G3): every tool call is now its own item, even back-to-back calls to the same
     /// tool, so the transcript can show an accurate per-call count/detail list (grouping into
     /// "Ran N shell commands" etc. is the VIEW's job, `groupActivity` in ChatContent, not the
     /// reducer's). Capped at 200 (drop-oldest) so a marathon turn can't balloon memory (spec §1).
+    /// That cap bounds the item COUNT and nothing else — since mac-chat-parity Task 1 each `.tool`
+    /// item can also hold its result's output, so the BYTES are bounded separately, by
+    /// `maxToolOutputCharacters` (8 KiB × 200 ≈ 1.6 MiB worst case per exchange).
     private static func appendActivity(_ kind: ActivityItem.Kind, to state: inout OrbSessionState) {
         guard !state.exchanges.isEmpty else { return }
         let last = state.exchanges.count - 1

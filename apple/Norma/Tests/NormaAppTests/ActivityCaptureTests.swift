@@ -74,7 +74,7 @@ final class ActivityCaptureTests: XCTestCase {
     func testToolCallAppendsActivity() {
         var s = openTurnState()
         s = SessionReducer.reduce(s, toolCall("bash", seq: 3))
-        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "bash", detail: nil))])
+        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "bash", detail: nil, callId: "c3"))])
         // Existing side effect preserved: .toolCall(main) still drives status.
         XCTAssertEqual(s.status, .toolRunning(name: "bash"))
     }
@@ -88,9 +88,9 @@ final class ActivityCaptureTests: XCTestCase {
         s = SessionReducer.reduce(s, toolCall("bash", seq: 4))
         s = SessionReducer.reduce(s, toolCall("read", seq: 5))
         XCTAssertEqual(lastActivity(s), [
-            ActivityItem(kind: .tool(name: "bash", detail: nil)),
-            ActivityItem(kind: .tool(name: "bash", detail: nil)),
-            ActivityItem(kind: .tool(name: "read", detail: nil)),
+            ActivityItem(kind: .tool(name: "bash", detail: nil, callId: "c3")),
+            ActivityItem(kind: .tool(name: "bash", detail: nil, callId: "c4")),
+            ActivityItem(kind: .tool(name: "read", detail: nil, callId: "c5")),
         ])
     }
 
@@ -99,57 +99,57 @@ final class ActivityCaptureTests: XCTestCase {
     func testBashDetailExtractsFirstLineOfCommand() {
         var s = openTurnState()
         s = SessionReducer.reduce(s, toolCall("bash", seq: 3, argsJson: #"{"command":"ls -la\ngrep foo"}"#))
-        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "bash", detail: "ls -la"))])
+        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "bash", detail: "ls -la", callId: "c3"))])
     }
 
     func testBashDetailClipsLongCommandTo100Chars() {
         var s = openTurnState()
         let longCommand = String(repeating: "x", count: 150)
         s = SessionReducer.reduce(s, toolCall("bash", seq: 3, argsJson: #"{"command":"\#(longCommand)"}"#))
-        XCTAssertEqual(lastActivity(s).first?.kind, .tool(name: "bash", detail: String(longCommand.prefix(100))))
+        XCTAssertEqual(lastActivity(s).first?.kind, .tool(name: "bash", detail: String(longCommand.prefix(100)), callId: "c3"))
     }
 
     func testTaskCreateDetailExtractsSubject() {
         var s = openTurnState()
         s = SessionReducer.reduce(s, toolCall("task_create", seq: 3, argsJson: #"{"subject":"Write tests"}"#))
-        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "task_create", detail: "Write tests"))])
+        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "task_create", detail: "Write tests", callId: "c3"))])
     }
 
     func testTaskUpdateDetailExtractsSubject() {
         var s = openTurnState()
         s = SessionReducer.reduce(s, toolCall("task_update", seq: 3, argsJson: #"{"id":"1","subject":"Write tests","status":"completed"}"#))
-        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "task_update", detail: "Write tests"))])
+        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "task_update", detail: "Write tests", callId: "c3"))])
     }
 
     func testReadDetailExtractsFilePath() {
         var s = openTurnState()
         s = SessionReducer.reduce(s, toolCall("read", seq: 3, argsJson: #"{"file_path":"/tmp/x.swift"}"#))
-        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "read", detail: "/tmp/x.swift"))])
+        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "read", detail: "/tmp/x.swift", callId: "c3"))])
     }
 
     func testGrepDetailExtractsPattern() {
         var s = openTurnState()
         s = SessionReducer.reduce(s, toolCall("grep", seq: 3, argsJson: #"{"pattern":"TODO"}"#))
-        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "grep", detail: "TODO"))])
+        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "grep", detail: "TODO", callId: "c3"))])
     }
 
     func testMalformedArgsJsonYieldsNilDetail() {
         var s = openTurnState()
         s = SessionReducer.reduce(s, toolCall("bash", seq: 3, argsJson: "not json at all"))
-        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "bash", detail: nil))])
+        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "bash", detail: nil, callId: "c3"))])
     }
 
     func testUnrecognizedFieldsYieldNilDetail() {
         var s = openTurnState()
         // Well-formed JSON, but no field this tool cares about.
         s = SessionReducer.reduce(s, toolCall("bash", seq: 3, argsJson: #"{"unrelated":"x"}"#))
-        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "bash", detail: nil))])
+        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "bash", detail: nil, callId: "c3"))])
     }
 
     func testUnknownToolNameYieldsNilDetail() {
         var s = openTurnState()
         s = SessionReducer.reduce(s, toolCall("mcp__foo__bar", seq: 3, argsJson: #"{"command":"ls"}"#))
-        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "mcp__foo__bar", detail: nil))])
+        XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "mcp__foo__bar", detail: nil, callId: "c3"))])
     }
 
     // MARK: Task transitions
@@ -232,8 +232,8 @@ final class ActivityCaptureTests: XCTestCase {
             s = SessionReducer.reduce(s, toolCall("t\(i)", seq: i + 2))
         }
         XCTAssertEqual(lastActivity(s).count, 200)
-        XCTAssertEqual(lastActivity(s).first, ActivityItem(kind: .tool(name: "t6", detail: nil)))
-        XCTAssertEqual(lastActivity(s).last, ActivityItem(kind: .tool(name: "t205", detail: nil)))
+        XCTAssertEqual(lastActivity(s).first, ActivityItem(kind: .tool(name: "t6", detail: nil, callId: "c8")))
+        XCTAssertEqual(lastActivity(s).last, ActivityItem(kind: .tool(name: "t205", detail: nil, callId: "c207")))
     }
 
     // MARK: Main-thread-only + defensive guards
@@ -272,8 +272,8 @@ final class ActivityCaptureTests: XCTestCase {
         s = SessionReducer.reduce(s, toolCall("read", seq: 5))
         XCTAssertEqual(s.exchanges.count, 1)
         XCTAssertEqual(s.exchanges[0].activity, [
-            ActivityItem(kind: .tool(name: "bash", detail: nil)),
-            ActivityItem(kind: .tool(name: "read", detail: nil)),
+            ActivityItem(kind: .tool(name: "bash", detail: nil, callId: "c3")),
+            ActivityItem(kind: .tool(name: "read", detail: nil, callId: "c5")),
         ])
         // The steer fold itself is untouched (existing behavior byte-preserved).
         XCTAssertEqual(s.exchanges[0].prompt, "hi\n↳ also do Y")
@@ -299,5 +299,128 @@ final class ActivityCaptureTests: XCTestCase {
         XCTAssertEqual(a.exchanges.count, 1)
         XCTAssertFalse(a.exchanges[0].activity.isEmpty) // the comparison covered real capture
         XCTAssertTrue(a.exchanges[0].aborted)
+    }
+
+    // MARK: tool_result fold (mac-chat-parity Task 1)
+    //
+    // Before this, `tool_result` folded to a status flip and NOTHING else — `output` and `isError`
+    // were discarded in the reducer, so no view could ever show what a tool did or that it failed.
+
+    /// `output` is embedded as a JSON STRING VALUE, so backslashes/quotes/newlines have to be
+    /// escaped in that order (backslash first, or the escapes we add would be re-escaped).
+    func toolResult(callId: String, output: String = "ok", isError: Bool = false, seq: Int = 4, thread: String = "main") -> SessionEvent {
+        let escaped = output
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        return ev(#"{"type":"tool_result","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"\#(thread)","callId":"\#(callId)","output":"\#(escaped)","isError":\#(isError)}"#)
+    }
+
+    private func resultFields(_ item: ActivityItem?) -> (output: String?, isError: Bool)? {
+        guard let kind = item?.kind, case .tool(_, _, _, let output, let isError) = kind else { return nil }
+        return (output, isError)
+    }
+
+    func testToolResultCarriesOutputAndIsErrorOntoTheFoldedItem() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, toolCall("bash", seq: 3))
+        // Before the result lands, "still running" is a nil output — not an empty string.
+        XCTAssertEqual(resultFields(lastActivity(s).first)?.output, nil)
+        s = SessionReducer.reduce(s, toolResult(callId: "c3", output: "ENOENT: no such file", isError: true, seq: 4))
+        XCTAssertEqual(resultFields(lastActivity(s).first)?.output, "ENOENT: no such file")
+        XCTAssertEqual(resultFields(lastActivity(s).first)?.isError, true)
+        // The name/detail the item was opened with survive the fold untouched.
+        XCTAssertEqual(lastActivity(s).first?.kind, .tool(name: "bash", detail: nil, callId: "c3", output: "ENOENT: no such file", isError: true))
+    }
+
+    /// The existing side effect the fold must NOT disturb: a main-thread `tool_result` with no
+    /// pending interaction still returns the orb to `.thinking`.
+    func testToolResultStillFlipsStatusBackToThinking() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, toolCall("bash", seq: 3))
+        XCTAssertEqual(s.status, .toolRunning(name: "bash"))
+        s = SessionReducer.reduce(s, toolResult(callId: "c3", seq: 4))
+        XCTAssertEqual(s.status, .thinking)
+    }
+
+    /// The join is by `callId`, not by position: results are matched to the call that opened them
+    /// even when they arrive in a different order than the calls did.
+    func testToolResultJoinsByCallIdNotByPosition() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, toolCall("read", seq: 3))
+        s = SessionReducer.reduce(s, toolCall("bash", seq: 4))
+        s = SessionReducer.reduce(s, toolResult(callId: "c4", output: "from bash", seq: 5))
+        s = SessionReducer.reduce(s, toolResult(callId: "c3", output: "from read", seq: 6))
+        XCTAssertEqual(resultFields(lastActivity(s).first)?.output, "from read")
+        XCTAssertEqual(resultFields(lastActivity(s).last)?.output, "from bash")
+    }
+
+    /// A main-thread steer's `user_message` is persisted at SEND time (`AgentEngine.steer`,
+    /// packages/core/src/agent/engine.ts), so it can land BETWEEN a tool_call and its tool_result —
+    /// and once the exchange already holds a reply, the reducer's `userMessage` branch opens a NEW
+    /// exchange for it. The result then belongs to an item one exchange back. This is the only test
+    /// that discriminates the reverse scan from "look in the last exchange only".
+    func testToolResultFoldsIntoAnEarlierExchangeWhenASteerOpenedANewOne() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, ev(#"{"type":"assistant_message","seq":3,"sessionId":"s","ts":0,"threadId":"main","text":"round one"}"#))
+        s = SessionReducer.reduce(s, toolCall("bash", seq: 4))
+        // Steer with a non-empty reply on the open exchange → the reducer opens exchange #2.
+        s = SessionReducer.reduce(s, userMessage("also do Y", seq: 5))
+        XCTAssertEqual(s.exchanges.count, 2, "precondition: the steer must have opened a second exchange")
+        s = SessionReducer.reduce(s, toolResult(callId: "c4", output: "landed", seq: 6))
+        XCTAssertEqual(resultFields(s.exchanges[0].activity.first)?.output, "landed")
+    }
+
+    func testToolResultForAnUnknownCallIdIsANoop() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, toolCall("bash", seq: 3))
+        let before = s
+        s = SessionReducer.reduce(s, toolResult(callId: "nope", output: "orphan", seq: 4))
+        XCTAssertEqual(s.exchanges, before.exchanges) // nothing folded anywhere, no crash
+    }
+
+    /// A `tool_result` with no exchange at all (its `tool_call` was dropped by `appendActivity`'s
+    /// no-open-exchange guard) must not crash the reducer either.
+    func testToolResultWithNoExchangesIsANoop() {
+        var s = OrbSessionState()
+        s = SessionReducer.reduce(s, toolResult(callId: "c3", seq: 1))
+        XCTAssertTrue(s.exchanges.isEmpty)
+    }
+
+    /// Child-thread tool events never reach the main transcript — the fold inherits the existing
+    /// `threadId == mainThread` guard on the case itself.
+    func testChildThreadToolResultDoesNotFold() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, toolCall("bash", seq: 3))
+        s = SessionReducer.reduce(s, toolResult(callId: "c3", output: "child output", seq: 4, thread: "th_child"))
+        XCTAssertEqual(resultFields(lastActivity(s).first)?.output, nil)
+    }
+
+    // MARK: Output retention cap
+
+    func testToolOutputIsTruncatedAtTheRetentionCap() {
+        let cap = SessionReducer.maxToolOutputCharacters
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, toolCall("bash", seq: 3))
+        s = SessionReducer.reduce(s, toolResult(callId: "c3", output: String(repeating: "x", count: cap + 1), seq: 4))
+        XCTAssertEqual(
+            resultFields(lastActivity(s).first)?.output,
+            String(repeating: "x", count: cap) + "\n[… truncated at \(cap) characters]"
+        )
+    }
+
+    /// Exactly at the cap is NOT truncated — no marker on an output that fits.
+    func testToolOutputExactlyAtTheCapIsKeptWhole() {
+        let cap = SessionReducer.maxToolOutputCharacters
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, toolCall("bash", seq: 3))
+        s = SessionReducer.reduce(s, toolResult(callId: "c3", output: String(repeating: "x", count: cap), seq: 4))
+        XCTAssertEqual(resultFields(lastActivity(s).first)?.output, String(repeating: "x", count: cap))
+    }
+
+    /// The bound itself, pinned: 8 KiB, chosen 8× under the daemon's own 64 KiB `MAX_OUTPUT`
+    /// (packages/core/src/agent/tools/registry.ts) so a real tool result survives whole.
+    func testRetentionCapIsEightKiB() {
+        XCTAssertEqual(SessionReducer.maxToolOutputCharacters, 8_192)
     }
 }
