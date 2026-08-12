@@ -15,8 +15,18 @@ import NormaProtocol
 /// `testFrozenBodiesContainNoInteractiveAffordance`, and its own doc for what that proof is worth.
 final class InteractionCardTests: XCTestCase {
 
-    private func questions(_ json: String) -> [SessionEvent.Question] {
-        try! JSONDecoder().decode([SessionEvent.Question].self, from: Data(json.utf8))
+    /// A bad fixture is a RED, not a runner abort — see `ActivityCaptureTests.ev` for why this is
+    /// fail-and-substitute rather than `XCTUnwrap` in a `throws` helper (whole-branch review, M-9).
+    /// The fallback is deliberately ONE element, not empty: every caller here subscripts `[0]`, and
+    /// an empty array would trade the decode crash for an index crash — the same runner abort by
+    /// another route.
+    private func questions(_ json: String, file: StaticString = #filePath, line: UInt = #line) -> [SessionEvent.Question] {
+        do {
+            return try JSONDecoder().decode([SessionEvent.Question].self, from: Data(json.utf8))
+        } catch {
+            XCTFail("undecodable Question fixture: \(error)\n\(json)", file: file, line: line)
+            return [.init(question: "", header: nil, options: [], multiSelect: false)]
+        }
     }
 
     private var portQuestion: SessionEvent.Question {

@@ -18,8 +18,15 @@ final class InteractionRecordTests: XCTestCase {
 
     // MARK: Event factory (mirrors ActivityCaptureTests' idioms — wire JSON, real decoder)
 
-    private func ev(_ json: String) -> SessionEvent {
-        try! JSONDecoder().decode(SessionEvent.self, from: Data(json.utf8))
+    /// A bad fixture is a RED, not a runner abort — see `ActivityCaptureTests.ev` for why this is
+    /// fail-and-substitute rather than `XCTUnwrap` in a `throws` helper (whole-branch review, M-9).
+    private func ev(_ json: String, file: StaticString = #filePath, line: UInt = #line) -> SessionEvent {
+        do {
+            return try JSONDecoder().decode(SessionEvent.self, from: Data(json.utf8))
+        } catch {
+            XCTFail("undecodable SessionEvent fixture: \(error)\n\(json)", file: file, line: line)
+            return .turnStarted(.init(seq: 0, sessionId: "s", ts: 0, threadId: "main"))
+        }
     }
     private func userMessage(_ text: String, seq: Int = 1) -> SessionEvent {
         ev(#"{"type":"user_message","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"main","text":"\#(text)","clientName":"cli"}"#)

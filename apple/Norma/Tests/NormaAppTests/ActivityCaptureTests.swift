@@ -10,8 +10,24 @@ final class ActivityCaptureTests: XCTestCase {
     // MARK: Event factory helpers (mirrors SessionModelTests idioms; extended locally for the
     // thread/worktree/question events this file needs — never in production code)
 
-    func ev(_ json: String) -> SessionEvent {
-        try! JSONDecoder().decode(SessionEvent.self, from: Data(json.utf8))
+    /// Decodes one wire fixture. **A bad fixture must be a RED, not a runner abort** (whole-branch
+    /// review, M-9): this is the shared door for all 91 tests in this class, and the `try!` it
+    /// replaced took the whole runner down with no summary — the mode that made an earlier task's
+    /// mutation count unreadable.
+    ///
+    /// Fail-and-substitute rather than `XCTUnwrap` in a `throws` helper: the throwing form cascades
+    /// `throws` to every test method in this class and `try` to every call site (measured: 135
+    /// methods across the three files this review named). The substitute reaches the same place —
+    /// `XCTFail` has already failed the test by the time the placeholder is returned, so a bad
+    /// fixture can never read as green; it reads as a named red, at the CALL SITE, with the
+    /// offending JSON, and the other 90 tests still report.
+    func ev(_ json: String, file: StaticString = #filePath, line: UInt = #line) -> SessionEvent {
+        do {
+            return try JSONDecoder().decode(SessionEvent.self, from: Data(json.utf8))
+        } catch {
+            XCTFail("undecodable SessionEvent fixture: \(error)\n\(json)", file: file, line: line)
+            return .turnStarted(.init(seq: 0, sessionId: "s", ts: 0, threadId: "main"))
+        }
     }
     func userMessage(_ text: String, seq: Int = 1, thread: String = "main") -> SessionEvent {
         ev(#"{"type":"user_message","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"\#(thread)","text":"\#(text)","clientName":"cli"}"#)
