@@ -698,9 +698,12 @@ export function registerBrowserTool(r: ToolRegistry, deps: BrowserToolDeps): voi
       + "profile, visible to them live. Pick a verb:\n"
       + "• tabs — list this session's open tabs (tabId, url, title, which is active). Answered by "
       + "Norma itself, so it works even when the Mac app is closed. Start here when you don't have a tabId.\n"
-      + "• open — open a new tab on a url (http/https). Returns its tabId. Works with the app closed; "
-      + "the tab appears in the user's strip.\n"
-      + "• navigate — point a tab at a url.\n"
+      + "• open — mint a NEW tab on a url (http/https), IN ADDITION to the ones already open. Returns "
+      + "its tabId. Works with the app closed; the tab appears in the user's strip. Use it for your "
+      + "first tab, and after that only when you need the current page KEPT alongside the new one. "
+      + "There is no close verb here, so every open leaves another tab in the user's strip.\n"
+      + "• navigate — point a tab you already have at a new url: it REUSES that tab instead of adding "
+      + "one. This is the DEFAULT way to move through pages — open once, then navigate.\n"
       + "• back — go back in a tab's history.\n"
       + "• read — the page's rendered text, as a reader sees it. Prefer this over ReadPage when the "
       + "page needs JavaScript or the user's login; ReadPage is still better for plain articles.\n"
@@ -789,7 +792,15 @@ export function registerBrowserTool(r: ToolRegistry, deps: BrowserToolDeps): voi
         const note = reach.ok
           ? ""
           : "\nNote: the Mac app isn't showing this session right now, so nothing has loaded the page yet.";
-        return `opened tab ${tabId} on ${a.url}${note}`;
+        // The reuse reminder rides the RESULT, not just the description, because the description is
+        // where the preference is discoverable and the result is where the model actually is: the
+        // live evidence for this was one task that ran open→wait→read seven times, minting seven
+        // tabs and never once calling navigate. Those tabs are the user's — session state under the
+        // never-delete rule, permanent in this session's log and its strip — so the litter is not
+        // cosmetic. Guidance only, deliberately: `open` still opens, every time it is asked to.
+        return `opened tab ${tabId} on ${a.url}${note}`
+          + `\nThis is a NEW tab, added to the ones already open. To move THIS tab to another url `
+          + `instead of accumulating tabs, use verb:"navigate" with tabId:"${tabId}".`;
       }
 
       // ---- the command verbs -------------------------------------------------------------------

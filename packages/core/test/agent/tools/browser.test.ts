@@ -132,6 +132,19 @@ describe("browser: registration", () => {
     expect(h.registry.isDeferredBuiltin("browser", false, "code")).toBe(false);
   });
 
+  // Guidance is only as good as its wording, so the wording is pinned. Without it a model reads two
+  // verbs that both take a url and picks the one whose NAME sounds like "go to a page" — which is
+  // `open`, and which is how one task ended up with seven tabs. Mode-invariant like the description
+  // itself: `navigate` and `open` are both READ verbs, so chat is shown this same text.
+  test("the description states the reuse preference — navigate REUSES, open ADDS", () => {
+    const h = makeHarness();
+    const desc = h.registry.specFor("browser", "/tmp", "code")!.description;
+    expect(desc).toContain("REUSES that tab");
+    expect(desc).toContain("DEFAULT way to move through pages");
+    expect(desc).toContain("KEPT alongside");
+    expect(h.registry.specFor("browser", "/tmp", "chat")!.description).toBe(desc);
+  });
+
   /** The verb enum the model is SHOWN, per mode. */
   function verbsIn(spec: { parameters: unknown } | undefined): string[] {
     const p = spec?.parameters as { properties?: { verb?: { enum?: string[] } } } | undefined;
@@ -247,6 +260,21 @@ describe("browser: the daemon-answered verbs work with nothing attached", () => 
     const h = makeHarness();
     const res = await h.run({ verb: "open", url: "https://example.org" });
     expect(res.output).not.toContain("isn't showing this session");
+  });
+
+  // The reuse nudge (USER: the agent "kept opening new tabs rather than navigating" — one task ran
+  // open→wait→read seven times and minted seven tabs). It rides the RESULT as well as the
+  // description because the result is what a model mid-loop is actually reading, and it names THIS
+  // tab's own id so acting on it needs no second lookup.
+  test("open's result points at navigate, with THIS tab's id, so the next move reuses it", async () => {
+    const h = makeHarness();
+    const res = await h.run({ verb: "open", url: "https://example.org" });
+    expect(res.isError).toBe(false);
+    expect(res.output).toContain("verb:\"navigate\"");
+    expect(res.output).toContain("tabId:\"t-new\"");
+    expect(res.output).toContain("instead of accumulating tabs");
+    // The line the result already carried is untouched — the reminder is an addition, not a rewrite.
+    expect(res.output).toContain("opened tab t-new on https://example.org");
   });
 
   test("open inherits panel.openTab's OWN scheme guard rather than a second policy", async () => {
