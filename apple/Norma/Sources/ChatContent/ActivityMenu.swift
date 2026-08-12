@@ -122,7 +122,7 @@ extension WindowContentView {
             // The daemon's derived state, read off the same row every other header affordance reads.
             Text(activityDisplayLabel(currentSidebarSessionSummary?.activity))
                 .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Theme.textMuted)
                 .padding(.bottom, 6)
 
             Button(backgroundVerbLabel(verb)) {
@@ -136,7 +136,7 @@ extension WindowContentView {
 
             Text(backgroundVerbExplanation(verb))
                 .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Theme.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 240, alignment: .leading)
 

@@ -176,7 +176,7 @@ struct WindowContentView<Accessory: View>: View {
             }
 
             if let queued = adapter.queuedText {
-                Text(queued).font(.system(size: 11)).foregroundStyle(.tertiary)
+                Text(queued).font(.system(size: 11)).foregroundStyle(Theme.textMuted)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
@@ -313,11 +313,14 @@ struct WindowContentView<Accessory: View>: View {
             }
 
             // Overlay panels + a tap-to-dismiss scrim BEHIND each (the scrim is added first so the
-            // `.ultraThinMaterial` panel draws over it; the panel slides in from its edge).
+            // panel draws over it; the panel slides in from its edge). `Theme.paletteSurface` is the
+            // panel's face — the brand's token for a surface that FLOATS above content, which is
+            // exactly what an overlay column is (mac-chat-parity Task 8; it was `.ultraThinMaterial`,
+            // a blur of whatever it happened to be over rather than a colour anyone chose).
             if resolved.leftOverlay {
                 sidebarScrim { sidebar = dismissLeftOverlay(sidebar) }
                 HStack(spacing: 0) {
-                    sessionSidebarColumn(sidebars).background(.ultraThinMaterial)
+                    sessionSidebarColumn(sidebars).background(Theme.paletteSurface)
                     Spacer(minLength: 0)
                 }
                 .transition(.move(edge: .leading))
@@ -326,7 +329,7 @@ struct WindowContentView<Accessory: View>: View {
                 sidebarScrim { sidebar = dismissRightOverlay(sidebar) }
                 HStack(spacing: 0) {
                     Spacer(minLength: 0)
-                    workSidebarColumn.background(.ultraThinMaterial)
+                    workSidebarColumn.background(Theme.paletteSurface)
                 }
                 .transition(.move(edge: .trailing))
             }
@@ -556,35 +559,44 @@ struct WindowContentView<Accessory: View>: View {
             if built.collapsedCompleted > 0 && !expandedCompleted {
                 Text("… +\(built.collapsedCompleted) completed")
                     .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.textMuted)
                     .onTapGesture { expandedCompleted = true }
             } else if expandedCompleted && built.collapsedCompleted > 0 {
                 Text("… collapse")
                     .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.textMuted)
                     .onTapGesture { expandedCompleted = false }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Norma blue for the single in_progress row — matches the brief's `Color(red:0.45,
-    /// green:0.75, blue:1.0)`, distinct from the CLI's ANSI blue but the same role: draw the eye
-    /// to what's actively running.
-    private var taskInProgressBlue: Color { Color(red: 0.45, green: 0.75, blue: 1.0) }
+    /// The tint for the single in_progress row — the same role the task-3 brief gave its
+    /// `Color(red:0.45, green:0.75, blue:1.0)`: draw the eye to what is actively running. It is
+    /// `Theme.accent` since mac-chat-parity Task 8, because that literal was a hex in code, which
+    /// `docs/brand.md` § 3.1's anti-rule forbids outright — it had no dark variant and no way to be
+    /// tuned. Named rather than inlined so both the task rows and the subagent rows below keep
+    /// reading one value; the name says "the running tint" now, not "blue".
+    private var taskInProgressTint: Color { Theme.accent }
 
-    /// Row text color per the brief: in_progress → Norma blue, pending → `.secondary`,
-    /// completed → `.tertiary` (the glyph itself is tinted separately — green for completed).
+    /// Row text color: in_progress → the running tint, pending → `.primary`, completed →
+    /// `Theme.textMuted` (the glyph itself is tinted separately — green for completed).
+    ///
+    /// Pending was `.secondary` and completed `.tertiary` — two greys, one step apart. Moving the
+    /// faint one onto `Theme.textMuted` (mac-chat-parity Task 8) would have collapsed them into the
+    /// same colour, since `.secondary` measures #7D7D7C against textMuted's #7A7974. So pending
+    /// takes the OTHER register instead of a third grey that does not exist: a task still to do is
+    /// outstanding work, and reading stronger than a finished one is the right way round.
     private func rowTextStyle(_ status: String) -> AnyShapeStyle {
         switch status {
-        case "in_progress": return AnyShapeStyle(taskInProgressBlue)
-        case "completed": return AnyShapeStyle(.tertiary)
-        default: return AnyShapeStyle(.secondary) // pending, or any unrecognized status
+        case "in_progress": return AnyShapeStyle(taskInProgressTint)
+        case "completed": return AnyShapeStyle(Theme.textMuted)
+        default: return AnyShapeStyle(.primary) // pending, or any unrecognized status
         }
     }
 
     /// Glyph color — same as the row text EXCEPT completed, whose `✓` is tinted green while its
-    /// subject stays `.tertiary`.
+    /// subject stays `Theme.textMuted`.
     private func rowGlyphStyle(_ status: String) -> AnyShapeStyle {
         status == "completed" ? AnyShapeStyle(.green) : rowTextStyle(status)
     }
@@ -630,11 +642,13 @@ struct WindowContentView<Accessory: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// The task rows' ladder, applied to subagents — see `rowTextStyle` for why queued is
+    /// `.primary` rather than a second grey beside done's `Theme.textMuted`.
     private func subagentRowStyle(_ status: String) -> AnyShapeStyle {
         switch status {
-        case "working": return AnyShapeStyle(taskInProgressBlue)
-        case "done": return AnyShapeStyle(.tertiary)
-        default: return AnyShapeStyle(.secondary) // queued
+        case "working": return AnyShapeStyle(taskInProgressTint)
+        case "done": return AnyShapeStyle(Theme.textMuted)
+        default: return AnyShapeStyle(.primary) // queued
         }
     }
 
@@ -644,7 +658,7 @@ struct WindowContentView<Accessory: View>: View {
             Text(subagentGlyph(row.status))
                 .foregroundStyle(row.status == "done" ? AnyShapeStyle(.green) : subagentRowStyle(row.status))
             Text(row.label)
-            Text("(\(row.agentType))").foregroundStyle(.tertiary)
+            Text("(\(row.agentType))").foregroundStyle(Theme.textMuted)
             if row.status == "working", let since = row.activeSince {
                 // D9 twin: the 1s tick mounts ONLY on a working row with an open span.
                 TimelineView(.periodic(from: .now, by: 1)) { _ in

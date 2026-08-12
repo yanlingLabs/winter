@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// The Mac half of Norma's brand palette and type register — the sibling of
@@ -32,22 +33,28 @@ enum Theme {
     /// is intentional, and differs from ChatGPT, whose selected row is lighter than its pane.
     static let selectionPill = Color("SelectionPill")
 
-    /// Tool-output / approval-card container fill, one step up from the card.
-    /// NOT YET USED on Mac — ported for the chat-surface pass.
+    /// Tool-output / approval-card container fill, one step up from the card. Live on Mac since
+    /// mac-chat-parity Task 8: the transcript's tool-output blocks, code blocks, interaction cards
+    /// and question preview panes all sit on it, one step above the content side's `cardSurface`.
     static let elevatedSurface = Color("ElevatedSurface")
 
-    /// Small-control fill (composer circles, model pills). NOT YET USED on Mac.
+    /// Small-control fill (composer circles, model pills, the transcript's "latest" pill, the
+    /// inline-code chip inside prose).
     static let controlSurface = Color("ControlSurface")
 
-    /// The user's own messages — a neutral warm chip grey, deliberately not an accent tint.
-    /// NOT YET USED on Mac.
+    /// The user's own messages — a neutral warm chip grey, deliberately not an accent tint. Live on
+    /// Mac since mac-chat-parity Task 8 (`TranscriptUserBubble`).
     static let bubbleUser = Color("BubbleUser")
 
-    /// The composer card's opaque face. NOT YET USED on Mac.
+    /// The composer card's opaque face. Live on Mac since mac-chat-parity Task 5
+    /// (`NormaComposerCard`).
     static let composerSurface = Color("ComposerSurface")
 
     /// The composer's bright hairline; the alpha lives in the asset (0.90 light / 0.08 dark) so
-    /// Swift never computes it. NOT YET USED on Mac.
+    /// Swift never computes it. **The one mirrored token nothing on Mac names** — the Mac composer
+    /// draws its rim with `hairline` instead (`NormaComposerCard`). Kept because `docs/brand.md` § 1
+    /// pins eleven shared values and the two catalogs mirror name-for-name; dropping it would break
+    /// that, not tidy it.
     static let composerRim = Color("ComposerRim")
 
     /// The muted warm meta grey — section labels, quiet meta rows, trailing glyphs. `.secondary`
@@ -55,7 +62,8 @@ enum Theme {
     static let textMuted = Color("TextMuted")
 
     /// The base plane of the OPPOSITE appearance — the primary-action trick (a pill that reads
-    /// cream in dark and charcoal in light). NOT YET USED on Mac.
+    /// cream in dark and charcoal in light). Live on Mac in the new-chat page's send glyph
+    /// (`NewChatPage`).
     static let inverseCanvas = Color("InverseCanvas")
 
     /// Brand tint — a muted blue-green teal. **Deliberately tints nothing in this pass**: the
@@ -75,10 +83,12 @@ enum Theme {
     /// value because the system `separatorColor` is cool and fights the cream.
     static let hairline = Color("Hairline")
 
-    /// The search palette's floating face. Mac-only — the phone has no such surface. Brighter
-    /// than `cardSurface` in both appearances (the palette floats ABOVE content).
-    /// `elevatedSurface` cannot serve here: its light value is a retained cool system grey that
-    /// is DARKER than `cardSurface` — the wrong direction.
+    /// The face of anything that FLOATS ABOVE content — the search palette it is named for, and
+    /// (since mac-chat-parity Task 8) the chat window's slide-in sidebar overlays, which are the
+    /// same object: a pane drawn over the transcript rather than beside it. Mac-only; the phone has
+    /// no such surface. Brighter than `cardSurface` in both appearances. `elevatedSurface` cannot
+    /// serve here: its light value is a retained cool system grey that is DARKER than
+    /// `cardSurface` — the wrong direction for something floating.
     static let paletteSurface = Color("PaletteSurface")
 
     // MARK: - Type
@@ -106,13 +116,36 @@ enum Theme {
     /// larger size read as calm rather than loud.
     static let greeting: Font = .system(size: 38, weight: .regular, design: .serif)
 
+    /// Serif allowlist **binding #4** — assistant prose in the transcript, applied on Mac by
+    /// mac-chat-parity Task 8 (it was allowlisted and unapplied from the sidebar-brand pass until
+    /// then). The reading face for what Norma *says*: paragraphs, headings, lists and quotes inside
+    /// an assistant message. Nothing else — user messages, tool rows, cards and every piece of
+    /// chrome stay on the system sans, and inline code / code blocks / maths keep their own faces
+    /// inside serif prose.
+    ///
+    /// An `NSFont`, not a SwiftUI `Font`, because the transcript renders prose through
+    /// `MessageTextFormatter`'s `NSAttributedString` pipeline (bold/italic/code runs are per-run
+    /// font substitutions), which never sees a `Font`.
+    ///
+    /// **`NSFontManager.convert(_:toHaveTrait:)` keeps the family**, so bold and italic runs inside
+    /// serif prose stay New York rather than silently falling back to SF: measured on this OS,
+    /// `.NewYork-Regular` converts to `.NewYork-Semibold` and `.NewYork-RegularItalic`. Pinned by
+    /// `TranscriptBrandTests.testSerifProseSurvivesBoldAndItalicConversion` so it stays true.
+    ///
+    /// Falls back to the sans of the same size and weight if the serif design is ever unavailable —
+    /// a `nil` here would otherwise mean unrendered prose, and unstyled prose is the better failure.
+    static func assistantProse(size: CGFloat, weight: NSFont.Weight) -> NSFont {
+        let sans = NSFont.systemFont(ofSize: size, weight: weight)
+        guard let descriptor = sans.fontDescriptor.withDesign(.serif),
+              let serif = NSFont(descriptor: descriptor, size: size) else { return sans }
+        return serif
+    }
+
     // Everything the serif allowlist does NOT cover — rows, labels, chrome, lists, tool output —
     // stays on the standard system sans (San Francisco): a plain `Font` with no design override.
     // There is nothing to wrap here; reach for `.font(.system(size:weight:))` directly.
     //
-    // Allowlist binding #4 (assistant prose in the transcript) is real on Mac but belongs to the
-    // chat-surface pass — allowlisted, not yet applied. Bindings #2 and #3 (the pairing gate
-    // title, the pairing words) have no Mac surface at all.
+    // Bindings #2 and #3 (the pairing gate title, the pairing words) have no Mac surface at all.
 
     /// Every asset-catalog color name this type names. `SidebarBrandTests` iterates it, so a
     /// typo or a colorset missing from the catalog fails the suite instead of silently rendering

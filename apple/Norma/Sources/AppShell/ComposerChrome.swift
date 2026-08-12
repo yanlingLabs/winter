@@ -1,5 +1,17 @@
 import SwiftUI
 
+/// How far a composer control dims while its own RPC is out — the one "busy" treatment the composer
+/// has, shared so a second busy control cannot pick a different number.
+///
+/// Deliberately **not** a `Theme` entry (mac-chat-parity Task 8, which inherited it from Task 6 as a
+/// bare `0.55` inline): `docs/brand.md` governs colour and type, and its § 3.1 anti-rule is about
+/// never *deriving* a colour at runtime — a named asset owns the value instead. This is neither. It
+/// is an alpha applied to a whole control to say "working", it has no light/dark halves to author,
+/// and putting it in the palette would make `Theme` a general constants bag. Named here, next to the
+/// only rule that reads it. Tune-at-gate: whether 0.55 reads as "working" rather than "broken" is a
+/// live-gate question (Task 6 recorded it as one).
+let composerBusyControlOpacity: Double = 0.55
+
 // MARK: - The per-mode composers
 
 /// mac-chat-parity Task 5 — **a composer per mode**, on the user's architecture ruling
@@ -138,9 +150,8 @@ struct ComposerPermissionsRow: Equatable {
 
     /// Dimmed while a change is in flight, so the wait is VISIBLE and not merely a click that does
     /// nothing. (`ShellSidebarRowStyle` draws no disabled state of its own, so `.disabled` alone
-    /// would refuse the click while looking exactly like a chip that works.) Task 8: a state
-    /// treatment expressed as a bare number, and a candidate for a brand token.
-    var chipOpacity: Double { isEnabled ? 1 : 0.55 }
+    /// would refuse the click while looking exactly like a chip that works.)
+    var chipOpacity: Double { isEnabled ? 1 : composerBusyControlOpacity }
 
     /// The chip's hover line and accessibility label.
     var help: String {

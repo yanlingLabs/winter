@@ -5,19 +5,114 @@ import SwiftUI
 /// `ChatFormattedMessageText`, `ChatMarkdownBlockView`, `ChatCodeBlock`, copy helpers), adapted for
 /// the transcript: our inputs are plain `String`/`ActivityItem` (no `ChatMessage`/`AppState`, no
 /// image placeholders, no reasoning content, no tool arrays — those are v1-only concerns that
-/// don't apply here), and colors are ADAPTIVE (assistant text `.primary`, labels `.secondary`,
-/// activity rows `.tertiary`) instead of the donor's tint-driven scheme, per the task-3 brief.
+/// don't apply here).
+///
+/// **Colour is `Theme`'s, not the donor's tint scheme and no longer the system's hierarchy**
+/// (mac-chat-parity Task 8): surfaces are named asset-catalog tokens per `docs/brand.md` § 3.1's
+/// anti-rule, quiet meta text is `Theme.textMuted`, and content text stays `.primary`. `.tertiary`
+/// is gone from this surface for a measured reason, not a stylistic one — composited on
+/// `CardSurface` it renders `#B9B9B7`, a **1.86:1** contrast ratio, which is below every legibility
+/// floor there is; `TextMuted` measures 4.14:1 light / 5.99:1 dark.
+///
 /// No `.drawingGroup()` (v1 LAW) and no `repeatForever` animation anywhere below — this content
 /// renders under the morph's scale/blur/opacity bands.
 
+// MARK: - The prose register (mac-chat-parity Task 8)
+
+/// Which face a block of formatted prose is set in.
+///
+/// TWO roles, because `docs/brand.md` § 4's serif allowlist has exactly ONE transcript binding
+/// (#4, assistant prose) and everything else on this surface stays sans. The role is a required
+/// parameter on every view that renders prose — never a default — because the dangerous direction
+/// is a new call site *inheriting* serif: a card, a placeholder, a future summary panel silently
+/// putting chrome into Norma's speaking voice. A `let` with no initial value is a required
+/// parameter of Swift's memberwise initialiser, so omitting it does not compile. (The distinction
+/// this plan learned the hard way at Task 6: an *optional* `var` gets an implicit `nil` default and
+/// gives no such protection.)
+enum TranscriptProseRole: Equatable {
+    /// Serif allowlist binding #4 — what Norma *says*, in the transcript, in its own voice.
+    case assistant
+    /// Everything else that goes through this same markdown renderer: the user's own message, and a
+    /// plan card's body. A card is chrome around a decision, so it stays sans even though its text
+    /// was written by the model — `docs/brand.md` § 4 allowlists the *transcript reply*, not
+    /// model-authored text wherever it appears.
+    case sans
+}
+
+/// The type metrics one prose role renders at.
+///
+/// The two ladders are NOT the same numbers in two faces. New York's x-height is ~9% shorter than
+/// San Francisco's at equal point size (measured on this OS: 6.713 vs 7.369 at 14 pt), so setting
+/// serif at the sans body's 14 pt would make Norma's replies read *smaller* than the user's own
+/// message sitting right above them. The serif ladder is the sans ladder scaled by 15.5/14, the
+/// factor that lands New York's x-height on 7.334 — within 0.5% of the sans body it replaces.
+/// Same rule the wordmark's two platform registers came from: measure, don't estimate.
+struct TranscriptProseMetrics: Equatable {
+    /// Paragraph, bullet and numbered-item size.
+    let bodySize: CGFloat
+    /// Block quotes, one step down from `bodySize`.
+    let quoteSize: CGFloat
+    /// Added to the font's own line height. The sans register keeps the donor's 3; serif takes 5,
+    /// a wider rhythm for a reading face over long desktop line lengths — short of iOS's 1.59
+    /// pitch/size ratio (`AssistantMarkdown.swift`), which is tuned for a phone's line width.
+    let lineSpacing: CGFloat
+    /// How far BELOW its block's size an inline monospaced code run is set. Two different drops
+    /// because SF Mono has to be shorter against New York than against SF to read as the same size:
+    /// at these ladders both land on 13.5 pt for body text, which is exactly what this surface has
+    /// always used.
+    let codeSizeDrop: CGFloat
+    /// Heading sizes for levels 1…4; level 5+ takes the last entry, as the donor's ladder did.
+    let headingSizes: [CGFloat]
+
+    func headingSize(_ level: Int) -> CGFloat {
+        guard level >= 1 else { return headingSizes[0] }
+        return headingSizes[min(level, headingSizes.count) - 1]
+    }
+
+    /// The floor is the donor's: below ~11.5 pt monospaced text stops being readable at all, so a
+    /// deep heading's code run never shrinks past it.
+    func codeSize(for blockSize: CGFloat) -> CGFloat {
+        max(11.5, blockSize - codeSizeDrop)
+    }
+}
+
+func transcriptProseMetrics(_ role: TranscriptProseRole) -> TranscriptProseMetrics {
+    switch role {
+    case .sans:
+        // The donor's ladder, unchanged — the register the user's own message and plan cards keep.
+        return TranscriptProseMetrics(bodySize: 14, quoteSize: 13.5, lineSpacing: 3,
+                                      codeSizeDrop: 0.5, headingSizes: [20, 17, 15.5, 14.5])
+    case .assistant:
+        // The sans ladder × 15.5/14, rounded to half points.
+        return TranscriptProseMetrics(bodySize: 15.5, quoteSize: 15, lineSpacing: 5,
+                                      codeSizeDrop: 2, headingSizes: [22, 19, 17, 16])
+    }
+}
+
+/// The face itself. `Theme.assistantProse` is where the serif binding lives (`docs/brand.md` § 4);
+/// everything else is the system sans by doing nothing to it.
+func transcriptProseFont(_ role: TranscriptProseRole, size: CGFloat, weight: NSFont.Weight) -> NSFont {
+    switch role {
+    case .assistant: return Theme.assistantProse(size: size, weight: weight)
+    case .sans: return .systemFont(ofSize: size, weight: weight)
+    }
+}
+
 /// The user's own message — right-aligned bubble, donor `ChatMessageBubble`'s `isUser` branch.
-/// LIVE-GATE G1: the surface itself is now a plain `.ultraThinMaterial` (matches the rest of the
-/// window chrome) instead of a tinted fill/border — `tint` is kept in the signature (callers
+/// Surfaced on `Theme.bubbleUser` (mac-chat-parity Task 8), the brand's own token for exactly this
+/// — it replaced a `.ultraThinMaterial`, which on an opaque window is a blur of whatever happens to
+/// be behind it rather than a colour anyone chose. `tint` is kept in the signature (callers
 /// unchanged) and still forwarded to `TranscriptFormattedMessageText` for inline markdown accents
-/// (bullets/quote rule/headings), it's just no longer used to paint the bubble surface.
+/// (bullets/quote rule/headings), it just paints no surface.
 struct TranscriptUserBubble: View {
     let text: String
     let tint: Color
+
+    /// **A wiring pin, not coverage** (same species as `ModelPickerTests.swift:767`): hoisted so
+    /// "the user's own words are NOT set in Norma's voice" is assertable without rendering. The
+    /// real weight is carried by `TranscriptBrandTests`' font-resolution pins, which prove what
+    /// each role actually renders as.
+    var proseRole: TranscriptProseRole { .sans }
 
     private var displayText: String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -35,19 +130,26 @@ struct TranscriptUserBubble: View {
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 6) {
-            TranscriptFormattedMessageText(text: displayText, tint: tint, fillsAvailableWidth: false)
+            TranscriptFormattedMessageText(text: displayText, tint: tint, role: proseRole,
+                                           fillsAvailableWidth: false)
                 .foregroundStyle(.primary)
         }
         .padding(14)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(Theme.bubbleUser, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 
 /// Norma's reply — left-aligned, full width, formatted blocks + a per-message copy affordance
 /// that hides while the reply is still streaming (donor `ChatMessageBubble`'s non-user branch).
+///
+/// `role` is REQUIRED, and the reason is this view's second consumer: both plan-card bodies
+/// (`PendingCards.swift`) compose it to render a plan's markdown. A hardcoded serif here would put
+/// every plan card into Norma's speaking voice, which `docs/brand.md` § 4 does not allowlist — so
+/// the transcript's two call sites pass `.assistant` and the two card bodies pass `.sans`.
 struct TranscriptAssistantMessage: View {
     let text: String
     let isStreaming: Bool
+    let role: TranscriptProseRole
 
     @State private var isMessageCopyHovering = false
     @State private var didCopyMessage = false
@@ -59,7 +161,13 @@ struct TranscriptAssistantMessage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 6) {
-                TranscriptFormattedMessageText(text: displayText, tint: .accentColor, fillsAvailableWidth: true)
+                // `Theme.accent` rather than `.accentColor`: SwiftUI's `.accentColor` resolves to
+                // the USER's System Settings accent, because `docs/brand.md` § 3.2 deliberately
+                // leaves `ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME` unset — so every bullet
+                // and quote rule in the transcript was drawing in whatever colour the Mac's owner
+                // had picked in General, not in Norma's teal.
+                TranscriptFormattedMessageText(text: displayText, tint: Theme.accent,
+                                               role: role, fillsAvailableWidth: true)
                     .foregroundStyle(.primary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -100,6 +208,9 @@ struct TranscriptAssistantMessage: View {
 private struct TranscriptFormattedMessageText: View {
     let text: String
     let tint: Color
+    /// Which face the PROSE blocks take. Fenced code is unaffected — a code block is monospaced in
+    /// both roles, which is the whole point of a code block.
+    let role: TranscriptProseRole
     let fillsAvailableWidth: Bool
 
     private var blocks: [FormattedMessageBlock] {
@@ -117,7 +228,7 @@ private struct TranscriptFormattedMessageText: View {
                 switch block.kind {
                 case .text(let content):
                     ForEach(MessageTextFormatter.chatMarkdownBlocks(content)) { markdownBlock in
-                        TranscriptMarkdownBlockView(block: markdownBlock, tint: tint)
+                        TranscriptMarkdownBlockView(block: markdownBlock, tint: tint, role: role)
                     }
                 case .code(let language, let code):
                     TranscriptCodeBlock(
@@ -132,50 +243,52 @@ private struct TranscriptFormattedMessageText: View {
     }
 }
 
-/// Donor `ChatMarkdownBlockView`, byte-identical structure/metrics — adaptive colors only:
-/// paragraph/heading/bullet/numbered text use `.primary` via `formattedText`'s `.labelColor`
-/// base (unchanged from the donor, which already used `.labelColor`), quote text is
-/// `.secondary`, math background reads `.tertiary`-ish via `separatorColor` (unchanged from
-/// donor — already adaptive).
+/// Donor `ChatMarkdownBlockView`, structure unchanged — its two hardcoded ladders (a 14 pt body,
+/// a 20/17/15.5/14.5 heading run, `lineSpacing(3)`) moved into `TranscriptProseMetrics` so the
+/// serif register can carry its own, and the `.system` font became `transcriptProseFont`.
+///
+/// Colour: paragraph/heading/bullet/numbered text use `.primary` via `formattedText`'s
+/// `.labelColor` base (unchanged from the donor), quote text is one step down, and the maths
+/// background is `Theme.elevatedSurface` (mac-chat-parity Task 8) rather than a
+/// `separatorColor`-times-an-alpha, which had no way to be tuned per appearance.
 private struct TranscriptMarkdownBlockView: View {
     let block: FormattedMarkdownBlock
     let tint: Color
+    let role: TranscriptProseRole
 
     @Environment(\.colorScheme) private var colorScheme
+
+    private var metrics: TranscriptProseMetrics { transcriptProseMetrics(role) }
 
     var body: some View {
         switch block.kind {
         case .paragraph(let text):
-            formattedText(text, size: 14, weight: .regular)
-                .lineSpacing(3)
+            formattedText(text, size: metrics.bodySize, weight: .regular)
+                .lineSpacing(metrics.lineSpacing)
         case .heading(let level, let text):
-            formattedText(text, size: headingSize(level), weight: headingWeight(level))
+            formattedText(text, size: metrics.headingSize(level), weight: headingWeight(level))
                 .padding(.top, level <= 2 ? 4 : 2)
         case .bullet(let text):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("•")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(tint)
-                formattedText(text, size: 14, weight: .regular)
-                    .lineSpacing(3)
+                markerText("•")
+                formattedText(text, size: metrics.bodySize, weight: .regular)
+                    .lineSpacing(metrics.lineSpacing)
             }
         case .numbered(let marker, let text):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(marker)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(tint)
+                markerText(marker)
                     .frame(minWidth: 18, alignment: .trailing)
-                formattedText(text, size: 14, weight: .regular)
-                    .lineSpacing(3)
+                formattedText(text, size: metrics.bodySize, weight: .regular)
+                    .lineSpacing(metrics.lineSpacing)
             }
         case .quote(let text):
             HStack(alignment: .top, spacing: 10) {
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(tint.opacity(0.42))
                     .frame(width: 3)
-                formattedText(text, size: 13.5, weight: .regular)
-                    .foregroundStyle(.secondary)
-                    .lineSpacing(3)
+                formattedText(text, size: metrics.quoteSize, weight: .regular)
+                    .foregroundStyle(Theme.textMuted)
+                    .lineSpacing(metrics.lineSpacing)
             }
             .padding(.vertical, 2)
         case .math(let text):
@@ -184,31 +297,26 @@ private struct TranscriptMarkdownBlockView: View {
                 .textSelection(.enabled)
                 .padding(.vertical, 3)
                 .padding(.horizontal, 8)
-                .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Color(nsColor: .separatorColor).opacity(colorScheme == .dark ? 0.24 : 0.14))
-                )
+                .background(RoundedRectangle(cornerRadius: 6).fill(Theme.elevatedSurface))
         }
+    }
+
+    /// A list marker rides the role's own face, so a serif paragraph's bullets are not SF dots
+    /// beside New York text — iOS's rule (`AssistantMarkdown.listRows` sets its markers serif too).
+    private func markerText(_ marker: String) -> Text {
+        Text(marker)
+            .font(Font(transcriptProseFont(role, size: metrics.bodySize, weight: .semibold)))
+            .foregroundStyle(tint)
     }
 
     private func formattedText(_ text: String, size: CGFloat, weight: NSFont.Weight) -> Text {
-        let baseFont = NSFont.systemFont(ofSize: size, weight: weight)
-        return Text(MessageTextFormatter.chatInlineAttributedString(
+        Text(MessageTextFormatter.chatInlineAttributedString(
             text,
             colorScheme: colorScheme,
-            baseFont: baseFont,
-            codeFont: .monospacedSystemFont(ofSize: max(11.5, size - 0.5), weight: .regular),
-            lineSpacing: 3
+            baseFont: transcriptProseFont(role, size: size, weight: weight),
+            codeFont: .monospacedSystemFont(ofSize: metrics.codeSize(for: size), weight: .regular),
+            lineSpacing: metrics.lineSpacing
         ))
-    }
-
-    private func headingSize(_ level: Int) -> CGFloat {
-        switch level {
-        case 1: return 20
-        case 2: return 17
-        case 3: return 15.5
-        default: return 14.5
-        }
     }
 
     private func headingWeight(_ level: Int) -> NSFont.Weight {
@@ -216,8 +324,11 @@ private struct TranscriptMarkdownBlockView: View {
     }
 }
 
-/// Donor `ChatCodeBlock`, ported as-is (horizontal scroll + syntax highlight + per-block copy) —
-/// adaptive backgrounds/borders already used `NSColor` system colors in the donor, kept as-is.
+/// Donor `ChatCodeBlock`, ported as-is (horizontal scroll + syntax highlight + per-block copy).
+/// mac-chat-parity Task 8 replaced its two derived surfaces — a `colorScheme`-branched
+/// `black.opacity(0.32)`/`textBackgroundColor.opacity(0.72)` fill and a `separatorColor` × 0.38
+/// border — with `Theme.elevatedSurface` and `Theme.hairline`, which is the same appearance branch
+/// expressed once, in the asset catalog, where it can be tuned.
 private struct TranscriptCodeBlock: View {
     let language: String?
     let code: String
@@ -296,17 +407,10 @@ private struct TranscriptCodeBlock: View {
         .onHover { isCopyHovering = $0 }
     }
 
-    private var codeBackground: Color {
-        colorScheme == .dark
-            ? Color.black.opacity(0.32)
-            : Color(nsColor: .textBackgroundColor).opacity(0.72)
-    }
+    private var codeBackground: Color { Theme.elevatedSurface }
 
     private var codeBorderColor: Color {
-        if isCodeBlockHovering {
-            return tint.opacity(0.55)
-        }
-        return Color(nsColor: .separatorColor).opacity(0.38)
+        isCodeBlockHovering ? tint.opacity(0.55) : Theme.hairline
     }
 
     private func copyCodeToPasteboard() {
@@ -383,8 +487,11 @@ private func taskGlyph(for status: String) -> String {
 }
 
 /// One line of "what happened" — donor has no equivalent (v1 never rendered per-turn activity);
-/// this is new for the transcript, so it takes only the brief's explicit metrics: 11pt
-/// `.tertiary`, single line, middle truncation (long tool args/paths keep both ends visible).
+/// this is new for the transcript, so it takes only the task-3 brief's explicit metrics: 11 pt
+/// quiet meta, single line, middle truncation (long tool args/paths keep both ends visible).
+/// mac-chat-parity Task 8 moved that "quiet" from `.tertiary` to `Theme.textMuted` — the brief's
+/// figure was the system hierarchy's third level, which measures 1.86:1 on `CardSurface` and was
+/// not legible at 11 pt.
 struct TranscriptActivityRow: View {
     let item: ActivityItem
 
@@ -395,14 +502,14 @@ struct TranscriptActivityRow: View {
             Text(mapped.label)
         }
         .font(.system(size: 11))
-        .foregroundStyle(.tertiary)
+        .foregroundStyle(Theme.textMuted)
         .lineLimit(1)
         .truncationMode(.middle)
     }
 }
 
 /// The "⏹ stopped" line shown when an exchange's turn ended via Esc-interrupt
-/// (`Exchange.aborted`) — v1 parity companion to the activity rows, adaptive `.tertiary` text.
+/// (`Exchange.aborted`) — v1 parity companion to the activity rows, same quiet-meta token.
 struct TranscriptStoppedRow: View {
     var body: some View {
         HStack(spacing: 6) {
@@ -410,7 +517,7 @@ struct TranscriptStoppedRow: View {
             Text("stopped")
         }
         .font(.system(size: 11))
-        .foregroundStyle(.tertiary)
+        .foregroundStyle(Theme.textMuted)
         .lineLimit(1)
         .truncationMode(.middle)
     }
@@ -933,16 +1040,18 @@ struct TranscriptToolGroupRow: View {
             }
             .buttonStyle(.plain)
             .font(.system(size: 11))
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(Theme.textMuted)
 
             // Only while collapsed: expanded, the failing call's whole output is already on screen.
-            // `.secondary` against the row's `.tertiary` is the emphasis — the line carries no hue,
-            // for the same reason the glyphs don't (see `toolStatusSymbol`). Task 8 may revisit it
-            // if brand.md grows a light-tuned danger tone.
+            // `.primary` against the row's `Theme.textMuted` is the emphasis — the line carries no
+            // hue, for the same reason the glyphs don't (see `toolStatusSymbol`), and `brand.md`
+            // still has no light-tuned danger tone to reach for (§ 3.4). Task 8 revisited this: it
+            // read `.secondary`, which measured #7D7D7C against textMuted's #7A7974 — the same grey,
+            // so the "emphasis" the old comment claimed was not being drawn at all.
             if !isExpanded, let summary = toolRunFailureSummary(entries) {
                 Text(summary)
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .padding(.leading, 32)
@@ -967,7 +1076,7 @@ struct TranscriptToolGroupRow: View {
                             .truncationMode(.middle)
                     }
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.textMuted)
 
                     if let output = line.output {
                         outputBlock(output)
@@ -979,7 +1088,7 @@ struct TranscriptToolGroupRow: View {
             if let note = expansion.note {
                 Text(note)
                     .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.textMuted)
             }
         }
         .padding(.leading, 16)
@@ -997,22 +1106,28 @@ struct TranscriptToolGroupRow: View {
     /// than horizontally scrolled (iOS scrolls; a nested scroll view inside the transcript's own
     /// scroll view steals the wheel on macOS) and selectable, so what is shown can be copied.
     ///
-    /// Styling is the file's existing adaptive vocabulary, no new values — `.secondary` for the
-    /// payload against `.tertiary` chrome, a `.quaternary` fill, radius 8 (the Mac's own ladder;
-    /// research §4 asks for 8–10 for tool-output blocks). **Task 8** owns replacing these with brand
-    /// tokens; `Theme.elevatedSurface` is the fill it names.
+    /// Styling is brand tokens as of Task 8, on a radius-8 block (the Mac's own ladder; research §4
+    /// asks for 8–10 for tool-output blocks): `Theme.elevatedSurface` for the fill — the token
+    /// `docs/brand.md` names for exactly this — and the payload **promoted to `.primary`**.
+    ///
+    /// That promotion is not a whim. The block used to run `.secondary` payload against `.tertiary`
+    /// chrome; with the chrome now on `Theme.textMuted` (#7A7974 light), `.secondary` (#7D7D7C) is
+    /// the same grey, so the two-level hierarchy inside the block would have collapsed to one. The
+    /// payload takes the other register because it IS the content — the thing this whole task was
+    /// asked to put on screen.
     private func outputBlock(_ preview: ToolOutputPreview) -> some View {
         blockChrome {
             Text(preview.text.isEmpty ? "No output" : preview.text)
                 .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(preview.text.isEmpty ? HierarchicalShapeStyle.tertiary : .secondary)
+                .foregroundStyle(preview.text.isEmpty
+                                 ? AnyShapeStyle(Theme.textMuted) : AnyShapeStyle(.primary))
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if let elision = preview.elision {
                 Text(elision)
                     .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.textMuted)
             }
         }
     }
@@ -1025,7 +1140,7 @@ struct TranscriptToolGroupRow: View {
         blockChrome {
             Text(text)
                 .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Theme.textMuted)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -1034,7 +1149,8 @@ struct TranscriptToolGroupRow: View {
         VStack(alignment: .leading, spacing: 2) { content() }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.quaternary))
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Theme.elevatedSurface))
             .padding(.leading, 16)
     }
 }

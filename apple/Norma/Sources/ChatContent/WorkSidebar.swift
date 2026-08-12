@@ -249,7 +249,8 @@ extension WindowContentView {
     /// The right WorkSidebar: an "Options" block (approval-mode picker + current-session info) over
     /// a `Divider` over a "Work" block (subagents ABOVE tasks — the relocated content). Width
     /// `sidebarRightWidth`; scrollable so a long task/subagent list never clips. Rendered inline in
-    /// the HStack when the width fits, or in an `.ultraThinMaterial` overlay when it doesn't.
+    /// the HStack when the width fits, or in a `Theme.paletteSurface` overlay when it doesn't
+    /// (`WindowContentView.sidebarLayout` owns that surface, not this view).
     @ViewBuilder
     var workSidebar: some View {
         ScrollView {
@@ -325,9 +326,12 @@ extension WindowContentView {
     private func sidebarInfoRow(_ label: String, _ value: String, truncation: Text.TruncationMode) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(label)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Theme.textMuted)
+            // `.primary` for the VALUE against the label's muted token — the pair was `.tertiary`
+            // over `.secondary`, which collapses to one grey once the faint level moves onto
+            // `Theme.textMuted` (mac-chat-parity Task 8).
             Text(value)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(truncation)
         }
@@ -352,7 +356,7 @@ extension WindowContentView {
             if adapter.liveSubagents.isEmpty && adapter.pinnedTasks.isEmpty {
                 Text("No active work")
                     .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.textMuted)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

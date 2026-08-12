@@ -13,9 +13,15 @@ import NormaProtocol
 /// No `repeatForever`/looping animation anywhere below, and none may be added: the transcript is
 /// rendered under the orb morph's `scaleEffect`/`blur`/`opacity`
 /// (`WindowSurfaceView.swift` → `WindowContentView`), where a repeating animation compounds with the
-/// morph. Colors are ADAPTIVE (`.primary`/`.secondary`/`.tertiary`/`Color.accentColor`) since the
-/// window is opaque, same convention as `TranscriptMessageViews.swift` — no forced white, no
-/// `GlassForegroundLegibility`. Brand tokens are Task 8's, not this task's.
+/// morph.
+///
+/// **Colour is `Theme`'s since mac-chat-parity Task 8** — same convention as
+/// `TranscriptMessageViews.swift`, no forced white, no `GlassForegroundLegibility`. Two notes on
+/// what that did and did not change: the accent chrome was SwiftUI's own app accent, which resolves
+/// to the *user's System Settings accent* because `docs/brand.md` § 3.2 leaves the global accent name
+/// unset — so a selected option used to be drawn in whatever colour the Mac's owner had picked, and
+/// is now Norma's teal. And a card is CHROME: its text stays sans, including a plan's markdown body,
+/// which is why both plan bodies pass `TranscriptAssistantMessage` the `.sans` role explicitly.
 
 /// Everything a transcript-mounted card needs from its surface, bundled so `TranscriptExchangeRow`
 /// keeps taking values and closures rather than the adapter itself — the same "value/closure, not
@@ -437,8 +443,10 @@ func interactionProvenance(_ outcome: InteractionRecord.Outcome) -> String? {
 // MARK: - Card chrome
 
 /// One card in the transcript: SF-Symbol kind glyph + title header, per-kind body, optional inline
-/// error line — rounded-12 `.thinMaterial` section, consistent with the transcript's own material
-/// chrome (`TranscriptView`'s "latest" pill, `TranscriptCodeBlock`).
+/// error line — a rounded-12 `Theme.elevatedSurface` section (mac-chat-parity Task 8), which is the
+/// token `docs/brand.md` § 1 names for "tool output, approval cards — one step above the card".
+/// The transcript's tool-output blocks sit on the same fill, one plane above the content side's
+/// `Theme.cardSurface`.
 ///
 /// **Pending and frozen are two different subtrees, not one subtree behind a flag.** The frozen
 /// bodies below declare no `Button` and no `TextField` of their own, and — the part that actually
@@ -496,7 +504,7 @@ struct TranscriptInteractionCard: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     @ViewBuilder
@@ -543,7 +551,7 @@ private struct ResolvedOutcomeRow: View {
             if let provenance = interactionProvenance(outcome) {
                 Text(provenance)
                     .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.textMuted)
             }
         }
     }
@@ -552,13 +560,15 @@ private struct ResolvedOutcomeRow: View {
 /// A hairline between two questions in one card — iOS's separator for a multi-question block, which
 /// the Mac's separator-less stacked blocks left the reader to infer from spacing alone. A true
 /// hairline (1 device pixel via `displayScale`), not a 1pt rule, so it reads as a division rather
-/// than a border.
+/// than a border. `Theme.hairline` since mac-chat-parity Task 8: the same warm divider the shell
+/// draws between sidebar and content, in place of a `Color.primary` × 0.08 that had no way to be
+/// tuned per appearance.
 private struct QuestionSeparator: View {
     @Environment(\.displayScale) private var displayScale
 
     var body: some View {
         Rectangle()
-            .fill(Color.primary.opacity(0.08))
+            .fill(Theme.hairline)
             .frame(height: 1 / displayScale)
     }
 }
@@ -672,7 +682,7 @@ struct ResolvedQuestionBody: View {
         case .none:
             Text("—")
                 .font(.system(size: 13))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Theme.textMuted)
         }
     }
 
@@ -680,7 +690,7 @@ struct ResolvedQuestionBody: View {
         let chrome = optionSelectionChrome(isSelected: true)
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: glyph)
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(Theme.accent)
             Text(text)
                 .font(.system(size: 13, weight: chrome.isBold ? .semibold : .regular))
                 .foregroundStyle(.primary)
@@ -691,11 +701,11 @@ struct ResolvedQuestionBody: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.accentColor.opacity(chrome.fillOpacity))
+                .fill(Theme.accent.opacity(chrome.fillOpacity))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.accentColor, lineWidth: chrome.strokeWidth)
+                .strokeBorder(Theme.accent, lineWidth: chrome.strokeWidth)
         )
     }
 }
@@ -733,7 +743,7 @@ struct ResolvedPlanBody: View {
                 // What this line is worth guarding is narrower than it looks, then: flipping the
                 // flag would add the message-level copy button too, with no test going red, because
                 // the declaration scan cannot see through composition. Named, not relied upon.
-                TranscriptAssistantMessage(text: plan, isStreaming: true)
+                TranscriptAssistantMessage(text: plan, isStreaming: true, role: .sans)
             }
             .frame(maxHeight: 260)
 
@@ -1026,7 +1036,7 @@ private struct QuestionBlock: View {
                     .padding(8)
             }
             .frame(maxHeight: 180)
-            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(Theme.elevatedSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
     }
 
@@ -1043,7 +1053,7 @@ private struct QuestionBlock: View {
         } label: {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: optionSelectionGlyph(multiSelect: question.multiSelect, isSelected: isSelected))
-                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                    .foregroundStyle(isSelected ? Theme.accent : .secondary)
                 optionLabel(option, isSelected: isSelected)
                 Spacer(minLength: 0)
             }
@@ -1055,11 +1065,11 @@ private struct QuestionBlock: View {
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.accentColor.opacity(chrome.fillOpacity))
+                    .fill(Theme.accent.opacity(chrome.fillOpacity))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Color.accentColor, lineWidth: chrome.strokeWidth)
+                    .strokeBorder(Theme.accent, lineWidth: chrome.strokeWidth)
             )
         }
         .buttonStyle(.plain)
@@ -1133,7 +1143,7 @@ struct PendingPlanBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ScrollView {
-                TranscriptAssistantMessage(text: plan, isStreaming: true)
+                TranscriptAssistantMessage(text: plan, isStreaming: true, role: .sans)
             }
             .frame(maxHeight: 260)
 

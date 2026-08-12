@@ -41,7 +41,7 @@ These exist only in the Mac catalog. They are **deliberate platform extensions, 
 | --- | --- | --- | --- |
 | `RowHover` | `#EFEDE8` | `#101010` | Hover fill. Interpolated between `Canvas` and `SelectionPill` in both appearances, so hover → selected reads as one ramp rather than two unrelated tints. |
 | `Hairline` | `#E5E2DC` | `#2A2A28` | The sidebar/content divider. Warm, because the system `separatorColor` is cool and fights the cream. |
-| `PaletteSurface` | `#FFFFFF` | `#272726` | The search palette's floating face — brighter than `CardSurface` in both appearances, because the palette floats above content. |
+| `PaletteSurface` | `#FFFFFF` | `#272726` | The face of anything that **floats above** content — the search palette it is named for, and the chat window's slide-in sidebar overlays. Brighter than `CardSurface` in both appearances, because it floats. |
 
 `ElevatedSurface` cannot serve as `PaletteSurface`: its light value (`#F2F2F7`) is a retained cool system grey that is *darker* than `CardSurface`. That is the wrong direction for something that floats above.
 
@@ -61,6 +61,20 @@ Not a mistake. Claude's user bubble measured byte-identical to their control-chi
 
 **`CardSurface` must stay brighter than `Canvas` in both appearances.** That difference *is* the separation; the hairline is secondary. A palette tune that inverted it would make the shell read inside-out. Pinned by `SidebarBrandTests.testCardSurfaceIsBrighterThanCanvasInBothAppearances`.
 
+### Inside the Mac transcript
+
+The transcript sits on the content side, so `CardSurface` is its ground. Three things stack on it, and only three:
+
+| Thing | Token |
+| --- | --- |
+| The user's own message bubble | `BubbleUser` |
+| Interaction cards (approval / question / plan), tool-output blocks, fenced code blocks, the question preview pane, block maths | `ElevatedSurface` |
+| The inline-code chip inside a run of prose; the "jump to latest" pill | `ControlSurface` |
+
+`ElevatedSurface` is the *block* fill and `ControlSurface` is the *chip* fill, and they are not interchangeable: measured against `CardSurface`, `ElevatedSurface` is 1.06:1 — plenty for a block with its own bounds, invisible behind a few characters of text. Note `ElevatedSurface` is **darker** than its ground in light and lighter in dark; "one step above" is about layering, not brightness (which is also why it cannot serve as `PaletteSurface` — see § 1).
+
+Everything else on this surface is text on that ground: `.primary` for content, `TextMuted` for meta (§ 3.5).
+
 ---
 
 ## 3. Rules
@@ -79,6 +93,8 @@ The brand teal drives prominent controls, links, and `.tint(_:)`. It does **not*
 
 On Mac this has a specific mechanical consequence: **`ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME` is deliberately left unset.** A colorset named `AccentColor` becomes the app-wide control tint the moment that setting names it — retinting every system control as a silent side effect of adding the palette. Keep it unset.
 
+**Corollary, and it bit for real:** because that setting is unset, SwiftUI's `Color.accentColor` (and `.tint`'s default, and `.accentColor` in any form) resolves to **the user's own System Settings accent** — whatever they picked in General — not to Norma's teal. Code that wants the brand must name `Theme.accent`. Every accent-tinted piece of the Mac's approval and question cards was drawing in the Mac owner's personal accent until the 2026-08-12 transcript pass; `TranscriptBrandTests` now fails the build on any `accentColor` in `ChatContent/`.
+
 ### 3.3 `SelectionPill` is darker than its pane in dark mode
 
 `#0B0B0B` on a `#181816` base. This is intentional, measured from Claude, and adopted on purpose: a semantic system fill *cannot* express "darker than background", which is exactly why this is an authored asset rather than `.quaternary`.
@@ -88,6 +104,26 @@ Note this **differs from ChatGPT**, whose selected row is lighter than its pane.
 ### 3.4 Contrast — a known limitation
 
 The accent measures ≈4.8:1 on the dark canvas and ≈3.5:1 on the light cream. That is fine for controls and glyphs but **short of the 4.5:1 body-text floor in light mode**. If the accent is ever used to color text, a light-tuned darker variant must be introduced first. Tracked, not fixed.
+
+### 3.5 Quiet text is `TextMuted`, not the system's faint greys
+
+Two text registers, and only two: **`.primary` for content, `TextMuted` for meta.** SwiftUI's hierarchical `.tertiary`/`.quaternary` are not the third and fourth steps of that ladder — they are a different ladder, and the faint end of it is not legible on this palette.
+
+Measured, composited on `CardSurface`:
+
+| | Light | Contrast | Dark | Contrast |
+| --- | --- | --- | --- | --- |
+| `.secondary` | `#7D7D7C` | 3.91:1 | `#9A9A9A` | 5.80:1 |
+| `.tertiary` | `#B9B9B7` | **1.86:1** | `#575756` | **2.25:1** |
+| `TextMuted` | `#7A7974` | 4.14:1 | `#9E9D96` | 5.99:1 |
+
+Two consequences.
+
+**`.tertiary` is below every legibility floor there is.** It was the Mac transcript's activity rows, tool rows, session timestamps and completed tasks until the 2026-08-12 pass. Don't reach for it; `TranscriptBrandTests` fails the build on it anywhere in `ChatContent/`.
+
+**`.secondary` and `TextMuted` are ONE register, not two.** Three units apart is not a step. `.secondary` stays sanctioned under § 3.1 and is still used widely — but a surface that pairs the two, one above the other, is drawing one colour and claiming a hierarchy. Wherever moving the faint level onto `TextMuted` collapsed such a pair, the Mac transcript promoted the *upper* member to `.primary` rather than inventing a grey: tool-output payload against its chrome, a session row's title against its timestamp, a pending task against a completed one, a sidebar value against its label. That is the pattern to follow.
+
+`.primary`, `.secondary`, `.green` and `.red` all remain sanctioned system semantic colors under § 3.1 — this rule is about the *faint* end, plus that one warning.
 
 ---
 
@@ -102,9 +138,11 @@ Serif may be used **only** for:
 1. **The wordmark** — the iOS drawer title, the Mac sidebar header.
 2. **The pairing-gate title** — iOS only.
 3. **The pairing words display** — iOS only.
-4. **Assistant prose in the transcript** — the reading face for what the assistant says. *Live on iOS; allowlisted but not yet applied on Mac (pending the chat-surface pass).*
+4. **Assistant prose in the transcript** — the reading face for what the assistant says. *Live on both platforms* (iOS from SP-chat; Mac from the 2026-08-12 chat-parity pass).
 
 Everything else — user messages, tool output, lists, chrome, code — stays on the system sans by doing nothing.
+
+Binding #4 has one boundary worth stating outright, because the Mac's own renderer makes it easy to cross: it allowlists **the transcript reply**, not model-authored text wherever it appears. A plan card's body is written by the model and rendered by the very same view, and it stays **sans** — a card is chrome around a decision. On the Mac that is a required `role` parameter rather than a default, and `TranscriptBrandTests` scans both call sites in both directions.
 
 **Do not add a fifth binding without amending this list.** Serif beyond these four moments turns an accent into a costume.
 
@@ -118,6 +156,26 @@ The wordmark is a **logo lockup, not text**, so it is pinned rather than Dynamic
 | Mac | `.system(size: 20, weight: .semibold, design: .serif)` | 25 pt overpowers the row block in a 272 pt sidebar; 20 pt is what the ChatGPT desktop reference measures. |
 
 Same binding, two platform registers. Not drift — a phone drawer and a desktop sidebar are different objects at different viewing distances.
+
+### The assistant-prose register (binding #4)
+
+Serif prose is not the sans ladder in a different face. **New York's x-height is ~9% shorter than San Francisco's at equal point size** — measured on macOS 26: 6.713 vs 7.369 at 14 pt. Set serif at the sans body's size and Norma's reply reads visibly *smaller* than the user's own message directly above it.
+
+So the Mac's prose register is the sans ladder scaled by **15.5/14**, the factor that lands New York's x-height on 7.334 — within 0.5% of the sans body it replaces:
+
+| | Sans (user message, plan card) | Serif (assistant reply) |
+| --- | --- | --- |
+| Body | 14 | 15.5 |
+| Headings H1–H4 | 20 / 17 / 15.5 / 14.5 | 22 / 19 / 17 / 16 |
+| Block quote | 13.5 | 15 |
+| `lineSpacing` | 3 | 5 |
+| Inline code | 13.5 (body − 0.5) | 13.5 (body − 2) |
+
+Two notes. **Inline code lands on 13.5 pt in both**, by two different drops — SF Mono has to sit lower against New York than against SF to read as the same size. And the serif rhythm is 5, not iOS's: iOS's 1.59 pitch/size ratio is tuned for a phone's line width, and this is a desktop window.
+
+iOS keeps its own register (`.body`, `lineSpacing(6)`) — that is Dynamic Type doing its job on a phone, not a second opinion about the same number.
+
+**Bold and italic runs inside serif prose stay New York.** `NSFontManager.convert(_:toHaveTrait:)` is free to fall back to another family when a trait is unavailable; measured, it does not here (`.NewYork-Regular` → `.NewYork-Semibold` / `.NewYork-RegularItalic`). Pinned, because the failure — every emphasis rendering in SF mid-sentence — is the kind nobody reports and everybody feels.
 
 ---
 

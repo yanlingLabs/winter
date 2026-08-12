@@ -79,6 +79,11 @@ struct TranscriptView: View {
     /// Extracted from `body` (Task-4 review, minor): the chained ScrollViewReader expression sat
     /// at SourceKit's type-check complexity cliff — keep `body` shallow so future edits don't
     /// tip it over.
+    /// mac-chat-parity Task 8: `Theme.controlSurface` — the token `docs/brand.md` gives small
+    /// controls — with a `Theme.hairline` rim, because this pill floats over scrolling prose and an
+    /// opaque fill alone has nothing to separate it from the text passing underneath. (It was a
+    /// `.thinMaterial`, which on an opaque window blurs whatever it happens to be over rather than
+    /// naming a colour.) The rim is a gate-tunable call, not a measured one.
     private func latestPill(_ proxy: ScrollViewProxy) -> some View {
         Button {
             scrollToBottom(proxy)
@@ -86,7 +91,8 @@ struct TranscriptView: View {
             Label("latest", systemImage: "arrow.down")
                 .font(.system(size: 11, weight: .medium))
                 .padding(.horizontal, 10).padding(.vertical, 5)
-                .background(Capsule().fill(.thinMaterial))
+                .background(Capsule().fill(Theme.controlSurface))
+                .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: shellSidebarHairlineWidth))
         }
         .buttonStyle(.plain)
         .padding(8)
@@ -165,11 +171,14 @@ private struct TranscriptExchangeRow: View {
             // engine emits one per ROUND, and this used to render a single string that each round
             // overwrote. The streaming row is ADDITIVE, not an `else` branch: while round N streams,
             // rounds 1…N-1 stay on screen instead of being hidden until the turn ends.
+            // mac-chat-parity Task 8: `.assistant` — the transcript reply IS `docs/brand.md` § 4's
+            // serif allowlist binding #4, and these two are the only call sites that pass it. Both
+            // plan-card bodies compose this same view with `.sans`.
             ForEach(Array(exchange.replies.enumerated()), id: \.offset) { _, reply in
-                TranscriptAssistantMessage(text: reply, isStreaming: false)
+                TranscriptAssistantMessage(text: reply, isStreaming: false, role: .assistant)
             }
             if let streamingText {
-                TranscriptAssistantMessage(text: streamingText, isStreaming: true)
+                TranscriptAssistantMessage(text: streamingText, isStreaming: true, role: .assistant)
             }
             if exchange.aborted { TranscriptStoppedRow() }
         }
