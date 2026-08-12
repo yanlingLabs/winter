@@ -752,8 +752,8 @@ enum SessionReducer {
     /// "Ran N shell commands" etc. is the VIEW's job, `groupActivity` in ChatContent, not the
     /// reducer's). Capped at 200 (drop-oldest) so a marathon turn can't balloon memory (spec §1).
     /// That cap bounds the item COUNT and nothing else — since mac-chat-parity Task 1 each `.tool`
-    /// item can also hold its result's output, so the BYTES are bounded separately, by
-    /// `maxToolOutputCharacters` (8 KiB × 200 ≈ 1.6 MiB worst case per exchange).
+    /// item can also hold its result's output, so the size is bounded separately, by
+    /// `maxToolOutputCharacters` (see that constant's doc for the worst case it implies here).
     private static func appendActivity(_ kind: ActivityItem.Kind, to state: inout OrbSessionState) {
         guard !state.exchanges.isEmpty else { return }
         let last = state.exchanges.count - 1
