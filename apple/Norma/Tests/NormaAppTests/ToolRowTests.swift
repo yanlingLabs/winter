@@ -266,6 +266,86 @@ final class ToolRowTests: XCTestCase {
         XCTAssertNil(expansion.note)
     }
 
+    // MARK: - The in-flight placeholder (fix round 1, Important-1)
+
+    /// An expanded call that has not come back drew a bare tool name and nothing else, which reads
+    /// as "this tool did nothing" rather than "this tool has not finished". iOS says "Running…"
+    /// there. Does NOT cover that the words are drawn in the block chrome, only that they exist —
+    /// and deliberately does not cover any animation, because there is none: this file's content
+    /// renders under the orb morph's scale/blur/opacity bands, where repeating animation is banned.
+    func testARunningCallSaysSoWhereItsOutputWouldBe() {
+        XCTAssertEqual(toolCallOutputPlaceholder(.running), "Running…")
+    }
+
+    /// No other state fills the block with words. `.unfinished` in particular stays silent: on a
+    /// replayed aborted turn every interrupted call would otherwise repeat the same line, and its
+    /// glyph already carries it.
+    func testOnlyARunningCallGetsWordsInPlaceOfOutput() {
+        XCTAssertNil(toolCallOutputPlaceholder(.succeeded))
+        XCTAssertNil(toolCallOutputPlaceholder(.failed))
+        XCTAssertNil(toolCallOutputPlaceholder(.unfinished))
+    }
+
+    // MARK: - Expansion identity (fix round 1, Minor-5)
+
+    /// Expansion state used to be keyed by a run's POSITION in `groupActivity`'s output. The
+    /// reducer caps an exchange's activity at 200 items and drops the OLDEST, so during a marathon
+    /// turn every surviving group shifts down — and an open expansion would land on a neighbouring
+    /// run's output. The key follows the run instead.
+    ///
+    /// This drives the key function against real `groupActivity` output before and after an
+    /// eviction. It does NOT cover the `@State` set in `TranscriptExchangeRow` that consumes the
+    /// key, nor what SwiftUI draws.
+    func testTheExpansionKeyFollowsTheRunNotItsPosition() {
+        let evicted = ActivityItem(kind: .tool(name: "read", detail: "/old", callId: "c0"))
+        let breaker = ActivityItem(kind: .interaction("needs approval"))
+        let survivor = [
+            ActivityItem(kind: .tool(name: "bash", detail: "a", callId: "c1")),
+            ActivityItem(kind: .tool(name: "bash", detail: "b", callId: "c2")),
+        ]
+
+        let before = groupActivity([evicted, breaker] + survivor)
+        let after = groupActivity(Array(([evicted, breaker] + survivor).dropFirst(2)))
+        guard case .toolRun(let runBefore) = before[2], case .toolRun(let runAfter) = after[0] else {
+            return XCTFail("expected the same run at index 2 before eviction and index 0 after")
+        }
+
+        // The run moved from group index 2 to group index 0 — the positional key the old scheme
+        // used therefore changed by construction, while this one does not.
+        XCTAssertEqual(
+            toolRunExpansionKey(runBefore, fallbackIndex: 2),
+            toolRunExpansionKey(runAfter, fallbackIndex: 0)
+        )
+    }
+
+    func testTwoDifferentRunsNeverShareAnExpansionKey() {
+        let a = [ToolRunEntry(name: "bash", calls: [call(callId: "c1")])]
+        let b = [ToolRunEntry(name: "bash", calls: [call(callId: "c2")])]
+        XCTAssertNotEqual(toolRunExpansionKey(a, fallbackIndex: 0), toolRunExpansionKey(b, fallbackIndex: 0))
+    }
+
+    /// A run whose calls carry no `callId` — the pre-Task-1 shape, still reachable from tests —
+    /// falls back to the positional key. No worse than the old behaviour, and the prefix keeps it
+    /// from ever colliding with a real callId.
+    func testARunWithNoCallIdFallsBackToItsPosition() {
+        let entries = [ToolRunEntry(name: "bash", calls: [call()])]
+        XCTAssertEqual(toolRunExpansionKey(entries, fallbackIndex: 3), "index:3")
+        XCTAssertNotEqual(
+            toolRunExpansionKey(entries, fallbackIndex: 3),
+            toolRunExpansionKey([ToolRunEntry(name: "bash", calls: [call(callId: "3")])], fallbackIndex: 9)
+        )
+    }
+
+    /// The key is the run's FIRST callId wherever it appears, so a leading call built without one
+    /// does not push the run onto the positional fallback.
+    func testTheKeyIsTheFirstCallIdInTheRunEvenIfEarlierCallsLackOne() {
+        let entries = [
+            ToolRunEntry(name: "read", calls: [call()]),
+            ToolRunEntry(name: "bash", calls: [call(callId: "c7")]),
+        ]
+        XCTAssertEqual(toolRunExpansionKey(entries, fallbackIndex: 0), "call:c7")
+    }
+
     func testAnEmptyRunExpandsToNothingAndClaimsNothing() {
         let expansion = toolRunExpansion([], turnIsLive: false)
         XCTAssertEqual(expansion.lines, [])

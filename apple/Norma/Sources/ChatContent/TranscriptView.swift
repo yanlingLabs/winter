@@ -22,9 +22,16 @@ struct TranscriptView: View {
                         TranscriptExchangeRow(
                             exchange: exchange,
                             streamingText: isLast ? adapter.liveStreamingText : nil,
-                            // Only the newest exchange can hold a call that is still running — an
-                            // older one's turn is over by construction, so its resultless calls read
-                            // as "no result", never as "running" (mac-chat-parity Task 2).
+                            // Live only for the newest exchange (mac-chat-parity Task 2). That is
+                            // not quite the same as "every in-flight call lives here": a main-thread
+                            // steer's `user_message` is persisted at SEND time, so it can open a NEW
+                            // exchange while a call in the previous one is still out — the case
+                            // `SessionReducer.foldToolResult` scans backwards for, pinned by
+                            // `testToolResultFoldsIntoAnEarlierExchangeWhenASteerOpenedANewOne`.
+                            // Such a call reads "no result" rather than "running" until its result
+                            // lands, then corrects itself. Deliberate: erring toward "no result" is
+                            // recoverable, while a false "running" is the permanent lie this whole
+                            // gate exists to prevent.
                             turnIsLive: isLast && adapter.turnRunning,
                             tint: tint
                         )
@@ -92,8 +99,11 @@ struct TranscriptView: View {
 /// precedes every reply row, because `Exchange` stores them in two separate lists; making the
 /// transcript event-shaped is a separate, larger change (spec §5 item 6). A
 /// dedicated `View` (not a `@ViewBuilder` func on `TranscriptView`) because it owns its own
-/// expansion `@State` — which group indices are expanded — scoped per-exchange-row and reset on
-/// view recycle (fine: expansion is a transient reading aid, not persisted state).
+/// expansion `@State` — which tool runs are expanded, keyed by `toolRunExpansionKey` (the run's
+/// first `callId`, NOT its position: the reducer's drop-oldest activity cap shifts positions during
+/// a marathon turn, which would silently re-point an open row at a neighbouring run's output) —
+/// scoped per-exchange-row and reset on view recycle (fine: expansion is a transient reading aid,
+/// not persisted state).
 private struct TranscriptExchangeRow: View {
     let exchange: Exchange
     /// Non-nil only for the LAST exchange while a reply is actively streaming (v1's synthetic
@@ -106,7 +116,7 @@ private struct TranscriptExchangeRow: View {
     let turnIsLive: Bool
     let tint: Color
 
-    @State private var expandedGroups: Set<Int> = []
+    @State private var expandedRuns: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -116,11 +126,12 @@ private struct TranscriptExchangeRow: View {
             ForEach(Array(groupActivity(exchange.activity).enumerated()), id: \.offset) { index, group in
                 switch group {
                 case .toolRun(let entries):
+                    let key = toolRunExpansionKey(entries, fallbackIndex: index)
                     TranscriptToolGroupRow(
                         entries: entries,
                         turnIsLive: turnIsLive,
-                        isExpanded: expandedGroups.contains(index),
-                        toggle: { toggle(index) }
+                        isExpanded: expandedRuns.contains(key),
+                        toggle: { toggle(key) }
                     )
                 case .single(let item):
                     TranscriptActivityRow(item: item)
@@ -140,11 +151,11 @@ private struct TranscriptExchangeRow: View {
         }
     }
 
-    private func toggle(_ index: Int) {
-        if expandedGroups.contains(index) {
-            expandedGroups.remove(index)
+    private func toggle(_ key: String) {
+        if expandedRuns.contains(key) {
+            expandedRuns.remove(key)
         } else {
-            expandedGroups.insert(index)
+            expandedRuns.insert(key)
         }
     }
 }

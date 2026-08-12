@@ -125,7 +125,11 @@ struct ActivityItem: Equatable {
         /// abort branch that emits a synthetic one), so a call interrupted by ESC never gets a
         /// result at all and stays `nil` PERMANENTLY — a replayed aborted turn would otherwise read
         /// as perpetually running, forever. A running glyph must additionally be gated on the turn
-        /// actually being live (`turnRunning`, or `!Exchange.aborted` for a finished one).
+        /// actually being live — on `turnRunning`, and ONLY on that. (An earlier revision of this
+        /// doc offered `!Exchange.aborted` as an equivalent for a finished turn; it is not one. A
+        /// turn that ended cleanly can still hold a resultless call, because `appendActivity`'s
+        /// 200-item drop-oldest cap can evict the item before its result arrives — `foldToolResult`
+        /// names that same case. The transcript gates on `turnRunning` alone.)
         /// All three are defaulted so every `.tool(name:detail:)` construction site written before
         /// they existed compiles and means the same thing; pattern matches must bind all five.
         case tool(name: String, detail: String?, callId: String? = nil, output: String? = nil, isError: Bool = false)

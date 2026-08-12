@@ -347,9 +347,10 @@ private func transcriptCopyForeground(isHovering: Bool, didCopy: Bool) -> Color 
 /// Pure glyph/label mapper for one `ActivityItem` — no view/environment dependency so it's
 /// directly unit-testable (`ActivityRowTests`). Kept exhaustive over `ActivityItem.Kind` so a
 /// future case is a compile error here, not a silent blank row. In practice `.tool` items never
-/// reach this mapper anymore (LIVE-GATE G3): `groupActivity` always folds them into `.tools`
+/// reach this mapper anymore (LIVE-GATE G3): `groupActivity` always folds them into `.toolRun`
 /// groups rendered by `TranscriptToolGroupRow`, never `.single` — this branch stays only for
-/// exhaustiveness/defensiveness and direct unit testing.
+/// exhaustiveness/defensiveness and direct unit testing. (It therefore shows no status and no
+/// output; everything mac-chat-parity Task 2 added lives on the group row.)
 func activityGlyphAndLabel(_ item: ActivityItem) -> (glyph: String, label: String) {
     switch item.kind {
     case .tool(let name, let detail, _, _, _):
@@ -438,6 +439,32 @@ struct ToolCallRecord: Equatable {
     let output: String?
     /// The wire's `tool_result.isError`.
     let isError: Bool
+}
+
+/// Stable identity for one `.toolRun` group's EXPANSION state.
+///
+/// Expansion used to be keyed by the group's position in `groupActivity`'s output, which is not
+/// stable: `SessionReducer.appendActivity` caps an exchange's activity at 200 items and drops the
+/// OLDEST, so during a marathon turn every surviving group shifts down and an open expansion lands
+/// on a neighbouring run. That was cosmetic when expanding revealed only argument lines; it is not
+/// cosmetic now that it reveals tool output.
+///
+/// The run's first `callId` is the key, because the reducer takes it straight off the wire and it is
+/// unique per call. `nil` only for `.tool` items built without one (the pre-Task-1 shape, still
+/// reachable from tests), which falls back to the old positional key — no worse than before, and
+/// never mixed up with a real callId thanks to the prefix.
+///
+/// This is not immune to eviction, and does not claim to be: if the run's own first call is the item
+/// dropped, its key changes and an open expansion CLOSES. That is the better failure — a closed row
+/// is visibly closed, where a positional key silently re-pointed the open row at a different run's
+/// output.
+func toolRunExpansionKey(_ entries: [ToolRunEntry], fallbackIndex: Int) -> String {
+    for entry in entries {
+        for call in entry.calls {
+            if let callId = call.callId { return "call:\(callId)" }
+        }
+    }
+    return "index:\(fallbackIndex)"
 }
 
 /// One same-name stretch of tool calls inside a `.toolRun` — a run can mix DIFFERENT tool names
@@ -767,6 +794,22 @@ func toolRunFailureSummary(_ entries: [ToolRunEntry]) -> String? {
         : line
 }
 
+/// The words an expanded call draws in place of an output block when it has none.
+///
+/// Only a RUNNING call has something worth saying — "Running…", iOS's own word (research §2.2) —
+/// because it is the one state where the absence of output is temporary and the user is waiting on
+/// it. Without this the expanded line for an in-flight call drew a bare tool name and nothing else,
+/// which reads as "this tool did nothing" rather than "this tool has not finished". It is TEXT, not
+/// an animated indicator: this file's law bans repeating animation because its content renders under
+/// the orb morph's scale/blur/opacity bands (`FieldKit/WindowSurfaceView.swift` mounts
+/// `WindowContentView` — and so the transcript — inside them), and that is still true.
+///
+/// `.unfinished` deliberately says nothing: on a replayed aborted turn every interrupted call would
+/// repeat the same line, and its glyph — plus VoiceOver's "No result" — already carries it.
+func toolCallOutputPlaceholder(_ status: ToolCallStatus) -> String? {
+    status == .running ? "Running…" : nil
+}
+
 /// One call's row inside an expanded run. `output == nil` means no block is drawn — either nothing
 /// came back, or the run's block budget was already spent.
 struct ToolRunCallLine: Equatable {
@@ -796,12 +839,17 @@ func toolRunExpansion(_ entries: [ToolRunEntry],
     var blocksWithheld = 0
     for entry in entries {
         for call in entry.calls {
-            var preview = toolOutputPreview(call.output)
-            if preview != nil {
+            // The budget is tested BEFORE the preview is computed, not after: `toolOutputPreview`
+            // returns non-nil exactly when `output != nil`, so this is the same decision made
+            // without paying two O(n) `String.count` walks plus a `prefix`/`split` for a preview
+            // that would then be discarded. That is the difference between the constant bounding
+            // DRAWING and bounding the work as well, which is what its doc claims.
+            var preview: ToolOutputPreview?
+            if call.output != nil {
                 if blocksDrawn < maxOutputBlocks {
+                    preview = toolOutputPreview(call.output)
                     blocksDrawn += 1
                 } else {
-                    preview = nil
                     blocksWithheld += 1
                 }
             }
@@ -840,12 +888,13 @@ func toolRunExpansion(_ entries: [ToolRunEntry],
 /// **Collapsed is the default, including for a run that failed**, and the failure is legible
 /// anyway: the status glyph is `xmark` whenever any call failed, and the collapsed row carries the
 /// first line of that failure (`toolRunFailureSummary`) directly beneath the sentence. Defaulting a
-/// failed run to *open* was the obvious alternative and was rejected on two grounds — a non-zero
-/// exit is routine in agent work (a test run, a `git diff --exit-code`), so auto-expanding every
-/// one turns an ordinary debugging session's scrollback into a wall of stderr; and expansion state
-/// here is per-row `@State` inside a `LazyVStack`, so it resets on view recycle — a content-derived
-/// default would silently re-open (and re-draw) every failed block each time the user scrolled past
-/// it, making the expensive state the sticky one.
+/// failed run to *open* was the obvious alternative and was rejected on one ground that carries it
+/// alone: a non-zero exit is routine in agent work (a test run, a `git diff --exit-code`), so
+/// auto-expanding every one turns an ordinary debugging session's scrollback into a wall of stderr.
+/// (A second argument — that this row's expansion `@State` resets on `LazyVStack` recycle, so a
+/// content-derived default would keep re-opening — is true of the CURRENT structure only: hoisting
+/// that state to `TranscriptView` would survive recycling. Do not read it as a reason the decision
+/// itself is right.)
 struct TranscriptToolGroupRow: View {
     let entries: [ToolRunEntry]
     /// Whether this run's turn is STILL RUNNING. Only a live turn may draw a running glyph:
@@ -914,7 +963,11 @@ struct TranscriptToolGroupRow: View {
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.tertiary)
 
-                    if let output = line.output { outputBlock(output) }
+                    if let output = line.output {
+                        outputBlock(output)
+                    } else if let placeholder = toolCallOutputPlaceholder(line.status) {
+                        placeholderBlock(placeholder)
+                    }
                 }
             }
             if let note = expansion.note {
@@ -943,7 +996,7 @@ struct TranscriptToolGroupRow: View {
     /// research §4 asks for 8–10 for tool-output blocks). **Task 8** owns replacing these with brand
     /// tokens; `Theme.elevatedSurface` is the fill it names.
     private func outputBlock(_ preview: ToolOutputPreview) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        blockChrome {
             Text(preview.text.isEmpty ? "No output" : preview.text)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(preview.text.isEmpty ? HierarchicalShapeStyle.tertiary : .secondary)
@@ -956,9 +1009,26 @@ struct TranscriptToolGroupRow: View {
                     .foregroundStyle(.tertiary)
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.quaternary))
-        .padding(.leading, 16)
+    }
+
+    /// The same block, holding words instead of output — "Running…" for a call that has not come
+    /// back yet (`toolCallOutputPlaceholder`). Deliberately the same chrome as "No output": both
+    /// say "there is nothing to read here yet", and giving them different shapes would imply a
+    /// difference the user has to decode.
+    private func placeholderBlock(_ text: String) -> some View {
+        blockChrome {
+            Text(text)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func blockChrome<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 2) { content() }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.quaternary))
+            .padding(.leading, 16)
     }
 }
