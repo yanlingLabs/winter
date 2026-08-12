@@ -116,8 +116,16 @@ struct ActivityItem: Equatable {
         /// else, so no view could ever show what a tool did or whether it failed. `callId` is the
         /// wire's `tool_call.callId`, the join key `foldToolResult` matches the later `tool_result`
         /// on; `output`/`isError` are that result. They stay at their defaults (`nil`/`false`) until
-        /// it arrives, so `output == nil` is exactly "this call is still running". `output` is
-        /// capped at `SessionReducer.maxToolOutputCharacters` — see that constant's own doc.
+        /// it arrives. `output` is capped at `SessionReducer.maxToolOutputCharacters` — see that
+        /// constant's own doc.
+        ///
+        /// `output == nil` means "no result was ever seen for this call", which is NOT the same as
+        /// "still running" — do not render a running indicator off it alone. Every `tool_result` the
+        /// engine emits is post-outcome (`packages/core/src/agent/engine.ts`'s tool loop has no
+        /// abort branch that emits a synthetic one), so a call interrupted by ESC never gets a
+        /// result at all and stays `nil` PERMANENTLY — a replayed aborted turn would otherwise read
+        /// as perpetually running, forever. A running glyph must additionally be gated on the turn
+        /// actually being live (`turnRunning`, or `!Exchange.aborted` for a finished one).
         /// All three are defaulted so every `.tool(name:detail:)` construction site written before
         /// they existed compiles and means the same thing; pattern matches must bind all five.
         case tool(name: String, detail: String?, callId: String? = nil, output: String? = nil, isError: Bool = false)
@@ -339,22 +347,45 @@ enum SessionReducer {
     /// Per-`tool_result` retention cap for `ActivityItem.Kind.tool`'s `output` (mac-chat-parity
     /// Task 1) — the reducer stores at most this many characters and appends a truncation marker.
     ///
-    /// The daemon ALREADY truncates tool output at 64 KiB before it reaches any client (`MAX_OUTPUT`,
-    /// `packages/core/src/agent/tools/registry.ts`); this is a second, app-side cap on top of that,
-    /// and it exists because of what the Mac does with those events afterwards. This reducer's state
-    /// is rebuilt by replaying a session's ENTIRE event log from seq 0 on every focus and every
-    /// relaunch (`AppModel.refocus`), so storing results whole would keep every byte every tool in
-    /// the session ever printed resident for as long as the session is open — and `appendActivity`'s
-    /// 200-item cap bounds the item COUNT per exchange, not its bytes. Capping here rather than at
-    /// render time is the only version that actually bounds memory: a renderer-side clip saves
-    /// drawing work on a string that is already resident.
+    /// Set to MATCH the daemon's own `MAX_OUTPUT` (64 KiB, `packages/core/src/agent/tools/registry.ts`)
+    /// exactly, and that equality is the whole point: the daemon has ALREADY bounded every result at
+    /// 64 KiB before it reaches any client, so anything this constant clips below that is not a
+    /// memory bound the system was missing — it is data the daemon deliberately sent us and we threw
+    /// away. A lower figure here would silently re-create the very complaint this task exists to fix:
+    /// 8–64 KiB is the NORMAL band for the most-used tool, not a pathological tail (the `read` tool's
+    /// own description tells the model "outputs over 64KB truncate, so page large files with
+    /// offset/limit" — `packages/core/src/agent/tools/fs-read.ts`), and iOS retains the full 64 KiB.
+    /// So in practice this cap never bites. It exists so that a future protocol change raising
+    /// `MAX_OUTPUT` cannot silently blow up the transcript — this reducer's state is rebuilt by
+    /// replaying a session's ENTIRE event log from seq 0 on every focus and every relaunch
+    /// (`AppModel.refocus`), and `appendActivity`'s 200-item cap bounds the item COUNT per exchange,
+    /// never its bytes. It is deliberately enforced here rather than at render time, because that is
+    /// the only place it can bound anything: a renderer-side clip saves drawing work on a string that
+    /// is already resident.
     ///
-    /// 8 KiB is 8× under the daemon's own ceiling, so a realistic tool result survives whole and the
-    /// cap only bites on the pathological ones — which nobody reads inside a transcript row anyway —
-    /// while keeping one exchange's worst case (200 × 8 KiB) around 1.6 MiB. Internal rather than
-    /// private so tests can pin the exact boundary instead of guessing at it, the same convention as
-    /// `SessionModel.notificationFreshnessMs`.
-    static let maxToolOutputCharacters = 8_192
+    /// Worst case per exchange is therefore 200 items × 64 Ki CHARACTERS ≈ 13.1 M characters. Stated
+    /// in characters, not bytes, because that is the unit `capToolOutput` actually measures
+    /// (`String.count`/`prefix` count grapheme clusters) — all-ASCII output makes those equal at
+    /// ~13 MiB, but non-ASCII output can occupy several bytes per character and exceed it
+    /// correspondingly. Internal rather than private so tests can pin the exact boundary instead of
+    /// guessing at it, the same convention as `SessionModel.notificationFreshnessMs`.
+    static let maxToolOutputCharacters = 64 * 1024
+
+    /// How many exchanges back `foldToolResult` will look for the item a `tool_result` belongs to.
+    ///
+    /// The hit path is depth 1 — the overwhelmingly common case. The reason to look further back at
+    /// all is bounded by construction: between a `tool_call` and its `tool_result` the engine's tool
+    /// loop emits nothing on the main thread except steer `user_message`s, and only the FIRST of
+    /// those opens a new exchange (every later one folds into it, since the fresh exchange's reply is
+    /// empty). So one exchange back always suffices for the case this scan exists for; the extra
+    /// headroom is slack, not a requirement.
+    ///
+    /// The bound matters because the MISS path is what costs: a no-match scan is
+    /// exchanges × up-to-200 items, and misses are genuinely reachable (see `foldToolResult`'s doc —
+    /// a >200-call turn evicts items whose results have not landed yet, and the main thread no longer
+    /// caps tool iterations). Unbounded, a long session would make every one of those results walk
+    /// its entire transcript. Bounded, the miss is O(1) in transcript length.
+    private static let toolResultFoldSearchDepth = 4
 
     static func reduce(_ state: OrbSessionState, _ event: SessionEvent) -> OrbSessionState {
         var s = state
@@ -678,11 +709,18 @@ enum SessionReducer {
     /// duplicated `tool_call` event appended twice (`.tool` is exempt from `appendActivity`'s
     /// adjacent-dupe collapse), in which case the newest copy is the one on screen.
     ///
-    /// No match → no-op. That happens when the `tool_call` was dropped by `appendActivity`'s
-    /// no-open-exchange guard (a tool call before any `user_message`); there is nothing to fold into,
-    /// exactly as before this existed.
+    /// The scan is bounded to the newest `toolResultFoldSearchDepth` exchanges rather than the whole
+    /// transcript, because the miss path is the expensive one and it is reachable in normal use — see
+    /// that constant's doc.
+    ///
+    /// No match → no-op, in either of two cases. (1) The `tool_call` was dropped by
+    /// `appendActivity`'s no-open-exchange guard (a tool call before any `user_message`). (2) The
+    /// item was EVICTED by `appendActivity`'s 200-item drop-oldest cap before its result arrived —
+    /// reachable whenever a turn makes more than 200 tool calls, which `c1370fd7` on this branch made
+    /// an explicitly supported shape by removing the main thread's tool-iteration limit. Either way
+    /// there is nothing to fold into, exactly as before this existed.
     private static func foldToolResult(_ state: inout OrbSessionState, callId: String, output: String, isError: Bool) {
-        for e in state.exchanges.indices.reversed() {
+        for e in state.exchanges.indices.reversed().prefix(toolResultFoldSearchDepth) {
             guard let i = state.exchanges[e].activity.lastIndex(where: { $0.toolCallId == callId }),
                   case .tool(let name, let detail, let itemCallId, _, _) = state.exchanges[e].activity[i].kind else {
                 continue

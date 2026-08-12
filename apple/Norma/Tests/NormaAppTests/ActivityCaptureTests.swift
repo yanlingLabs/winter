@@ -418,9 +418,47 @@ final class ActivityCaptureTests: XCTestCase {
         XCTAssertEqual(resultFields(lastActivity(s).first)?.output, String(repeating: "x", count: cap))
     }
 
-    /// The bound itself, pinned: 8 KiB, chosen 8× under the daemon's own 64 KiB `MAX_OUTPUT`
-    /// (packages/core/src/agent/tools/registry.ts) so a real tool result survives whole.
-    func testRetentionCapIsEightKiB() {
-        XCTAssertEqual(SessionReducer.maxToolOutputCharacters, 8_192)
+    /// The bound itself, pinned: it must EQUAL the daemon's own `MAX_OUTPUT`
+    /// (64 KiB, packages/core/src/agent/tools/registry.ts). Anything lower would discard output the
+    /// daemon deliberately sent — 8-64 KiB is the normal band for `read`, not a pathological tail —
+    /// which is the exact complaint this task exists to fix.
+    func testRetentionCapMatchesTheDaemonsMaxOutput() {
+        XCTAssertEqual(SessionReducer.maxToolOutputCharacters, 64 * 1024)
+    }
+
+    // MARK: Fold search depth (Fix round 1, Minor-2)
+
+    /// Builds `count` completed exchanges after the one holding an unresolved `bash` call, so the
+    /// call's item sits exactly `count` exchanges back when the result finally arrives.
+    private func stateWithUnresolvedCall(followedByCompletedTurns count: Int) -> OrbSessionState {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, toolCall("bash", seq: 3))       // callId "c3", never resolved
+        s = SessionReducer.reduce(s, turnCompleted(seq: 4))
+        for i in 0..<count {
+            let base = 5 + i * 3
+            s = SessionReducer.reduce(s, userMessage("turn \(i)", seq: base))
+            s = SessionReducer.reduce(s, turnStarted(seq: base + 1))
+            s = SessionReducer.reduce(s, turnCompleted(seq: base + 2))
+        }
+        return s
+    }
+
+    /// At the edge of the bound the result still lands: 3 newer exchanges means the item's own
+    /// exchange is the 4th one scanned.
+    func testToolResultStillFoldsAtTheSearchDepthLimit() {
+        var s = stateWithUnresolvedCall(followedByCompletedTurns: 3)
+        XCTAssertEqual(s.exchanges.count, 4, "precondition: the item's exchange is the 4th scanned")
+        s = SessionReducer.reduce(s, toolResult(callId: "c3", output: "landed", seq: 99))
+        XCTAssertEqual(resultFields(s.exchanges[0].activity.first)?.output, "landed")
+    }
+
+    /// One exchange past the bound the result is deliberately dropped rather than walking the whole
+    /// transcript — the documented trade in `toolResultFoldSearchDepth`. This is only reachable at
+    /// all when a call's result never arrived within a few turns, which the engine does not do.
+    func testToolResultBeyondTheSearchDepthIsNotFolded() {
+        var s = stateWithUnresolvedCall(followedByCompletedTurns: 4)
+        XCTAssertEqual(s.exchanges.count, 5, "precondition: the item's exchange is one past the bound")
+        s = SessionReducer.reduce(s, toolResult(callId: "c3", output: "too far back", seq: 99))
+        XCTAssertEqual(resultFields(s.exchanges[0].activity.first)?.output, nil)
     }
 }
