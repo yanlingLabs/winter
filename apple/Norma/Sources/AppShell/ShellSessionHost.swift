@@ -669,11 +669,19 @@ final class ShellSessionHost: ObservableObject {
         // fresh `.newChat` entry clearing the pick mid-flight must not change what this create sends.
         //
         // Disclosed rather than implied: stamping gives this `try?`-swallowed create a failure class
-        // it did not have (a held pair the daemon refuses ⇒ a "+" that silently does nothing). A
-        // TIER cannot be that pair — neither of the page's two modes offers one
-        // (`ComposerChrome.offersClientEffortTiers`, pinned) — so what remains is a wire effort gone
-        // stale against a provider change mid-visit: rare, bounded, and self-correcting on the next
-        // pick. Accepted; the send's own stamps carry the choice either way.
+        // it did not have (a held pair the daemon refuses ⇒ a "+" that silently does nothing, the
+        // class Requirement 4 above exists to kill). TWO guards make the pair legal by construction
+        // rather than by luck, and fix round 1 added the second:
+        //   * a TIER can never be held here — neither of the page's two modes offers one
+        //     (`ComposerChrome.offersClientEffortTiers`, pinned);
+        //   * a WIRE effort the held model does not accept is cleared the moment the model is picked
+        //     or the catalogue lands (`reconcileHeldEffort`) — which is the reachable case, and it
+        //     needs no provider change at all: pick an effort with no model pinned (the list comes
+        //     from the catalogue's default model), then pick a model that does not accept it.
+        // What remains is genuinely narrow: a catalogue that went stale between the last fetch and
+        // this create (a `norma model` edit mid-visit), or a daemon that refuses what `sync.config`
+        // advertised. Accepted; the send's own stamps carry the choice either way, and the send door
+        // reports its refusal visibly (`newChatCreate = .failed`).
         let heldModel = newChatModel
         let heldEffort = newChatEffort
         Task { @MainActor [weak self] in
@@ -798,8 +806,27 @@ final class ShellSessionHost: ObservableObject {
     ///
     /// `private(set)`: only this host writes it, through `setNewChatModel`/`setNewChatEffort` below,
     /// so "who can change the held choice" has one answer.
-    @Published private(set) var newChatModel: String?
-    @Published private(set) var newChatEffort: String?
+    ///
+    /// **Fix round 1 — a TRI-STATE per axis, not a flat `String?`.** The doubly-optional shape (and
+    /// the reason for it) is `FieldStateAdapter.armProbation`'s, already in this codebase:
+    ///   * `.none`        → the user has not touched this axis this visit.
+    ///   * `.some(nil)`   → the user explicitly picked **Default**.
+    ///   * `.some(value)` → the user picked a model / an effort.
+    ///
+    /// A flat `String?` cannot tell the first two apart, and on the reuse branch that difference is
+    /// the whole behaviour: a "+" bound (and stamped) session that the user then re-points at Default
+    /// must be CLEARED, while an axis nobody touched must not be written at all — that bound session
+    /// is real, listed, and reachable by another client, so this page must never clear an override it
+    /// did not set. Before this fix the re-pick was silently dropped: the chip read "Default model"
+    /// while the session stayed pinned and the first turn ran at the old model.
+    @Published private(set) var newChatModelPick: String??
+    @Published private(set) var newChatEffortPick: String??
+
+    /// The VALUE in force for each axis — what the chip shows, and what a create stamps. Flattens
+    /// both "untouched" and "explicitly Default" to `nil`, which is right for both of those uses: at
+    /// create, an absent key IS the default. Only the reuse branch needs the distinction.
+    var newChatModel: String? { newChatModelPick ?? nil }
+    var newChatEffort: String? { newChatEffortPick ?? nil }
 
     /// The page's own catalogue snapshot. The live composer reads the ATTACHED adapter's
     /// (`refreshModelCatalogue`); this page has no attachment, so the same `sync.config` is fetched
@@ -811,8 +838,46 @@ final class ShellSessionHost: ObservableObject {
     /// menu for one round trip on every entry.
     @Published private(set) var newChatCatalogue: SyncConfigSnapshot = .empty
 
-    func setNewChatModel(_ model: String?) { newChatModel = model }
-    func setNewChatEffort(_ effort: String?) { newChatEffort = effort }
+    func setNewChatModel(_ model: String?) {
+        newChatModelPick = .some(model)
+        // Fix round 1: the held effort is validated against the MODEL, so changing the model can
+        // invalidate it — see `reconcileHeldEffort`.
+        reconcileHeldEffort()
+    }
+
+    func setNewChatEffort(_ effort: String?) { newChatEffortPick = .some(effort) }
+
+    /// **Fix round 1: a held effort must stay legal for the model in force.**
+    ///
+    /// Wire efforts are validated PER MODEL (`assertEffortSelectable` → `effortsForModel`,
+    /// `packages/core/src/ipc/server.ts:476-489`), and `session.create` runs that same check
+    /// (`:1112`). So picking an effort while no model is pinned — the list is then built from the
+    /// catalogue's default model — and afterwards picking a model that does not accept it leaves a
+    /// pair the daemon refuses, with no provider change involved. The send door surfaces that as a
+    /// visible `.failed`; the "+" door is `try?` and would surface it as a click that silently does
+    /// nothing, the exact class `openPanelTabForNewChatPage`'s Requirement 4 exists to kill. Worse,
+    /// `EffortMenuContent`'s `.unknown` branch would keep the now-illegal value visible AND checked.
+    ///
+    /// CLEARED, never clamped to a neighbour: "high" and "max" are not interchangeable, and silently
+    /// substituting one for the other is a second standing lie in place of the first. Clearing falls
+    /// back to the new model's own default, which is what the chip then shows.
+    ///
+    /// It becomes an explicit `.some(nil)` rather than `.none`: on a bound session the invalidated
+    /// effort may ALREADY have been stamped by the "+" create, so the reuse branch must clear it
+    /// there too. At create the two are indistinguishable anyway (both omit the key).
+    ///
+    /// **Never clears on silence.** An empty wire list means the daemon has told us nothing about
+    /// this model (a BYOK endpoint that cannot enumerate, an unlisted model, or a catalogue not
+    /// fetched yet) — the same "empty is a real answer and never a licence to guess" rule
+    /// `effortPickerOptions` keeps, applied in the one direction that can destroy a user's pick.
+    /// `offersTiers: false` is exact rather than conservative here: the new-chat page's two modes
+    /// (chat, cowork) offer no tier, so a tier can never be the held value on this surface.
+    private func reconcileHeldEffort() {
+        guard case .some(.some(let effort)) = newChatEffortPick else { return }
+        let offered = effortPickerOptions(catalogue: newChatCatalogue, model: newChatModel, offersTiers: false)
+        guard !offered.wire.isEmpty, !offered.wire.contains(effort) else { return }
+        newChatEffortPick = .some(nil)
+    }
 
     /// The wiring `NewChatPage`'s composer chip runs on — the pre-session counterpart of
     /// `WindowContentView.composerModelControl`.
@@ -839,6 +904,10 @@ final class ShellSessionHost: ObservableObject {
         Task { @MainActor [weak self] in
             guard let snapshot = try? await client.syncConfig() else { return }
             self?.newChatCatalogue = snapshot
+            // Fix round 1: the catalogue arriving is the OTHER moment we learn enough to judge a
+            // held effort (a pick made against an empty catalogue was never checked against
+            // anything). Same one-way rule — see `reconcileHeldEffort`.
+            self?.reconcileHeldEffort()
         }
     }
 
@@ -932,21 +1001,28 @@ final class ShellSessionHost: ObservableObject {
         // mac-chat-parity T7: the held model/effort, captured at SUBMIT for the same reason `bound`
         // and `epoch` are — this send carries the choice the user had when they pressed Enter, and a
         // fresh page entry landing mid-flight neither adds to it nor takes it away.
-        let heldModel = newChatModel
-        let heldEffort = newChatEffort
+        // Fix round 1: the PICKS (tri-states), not the flattened values — the reuse branch needs
+        // "explicitly Default" and "untouched" told apart. Captured at submit for the same reason
+        // `bound` and `epoch` are.
+        let heldModel = newChatModelPick
+        let heldEffort = newChatEffortPick
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 let sessionId: String
                 if let bound, (try? await client.listPanelTabs(sessionId: bound)) != nil {
                     sessionId = bound // verified to still exist — reuse it, no second create
-                    // …but this branch CREATES NOTHING, so there is no create to stamp: the "+" that
-                    // minted this session ran before the user picked. Apply the choice now, ahead of
-                    // the send (`stampHeldSelection`).
+                    // …but this branch CREATES NOTHING, so there is no create to carry the choice.
+                    // The "+" may have stamped part of it already (whatever was picked before the
+                    // click) and cannot have stamped what came after — including a re-pick of
+                    // Default, which is a CLEAR of what it did stamp. `stampHeldSelection` settles
+                    // every axis the user touched this visit, in either direction.
                     await self.stampHeldSelection(on: bound, model: heldModel, effort: heldEffort, client: client)
                 } else {
+                    // At create, an absent key IS the default — so an explicit Default and an
+                    // untouched axis are the same wire shape here, and both flatten to `nil`.
                     let created = try await client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat",
-                                                                 model: heldModel, effort: heldEffort)
+                                                                 model: heldModel ?? nil, effort: heldEffort ?? nil)
                     sessionId = created.sessionId
                 }
                 // The binding's job ends here either way — reused (about to attach) or abandoned
@@ -989,17 +1065,28 @@ final class ShellSessionHost: ObservableObject {
     /// bounded and visible: the turn runs at the session's existing selection, which the composer's
     /// chip goes on showing.
     ///
-    /// Only what the user actually picked is written: an unpicked axis sends nothing at all, rather
-    /// than a `null` that would CLEAR an override this page never set.
+    /// **Fix round 1 — what "picked" means here, per axis.** The parameters are the tri-states
+    /// (`newChatModelPick`/`newChatEffortPick`), and the rule is: an axis the user TOUCHED this visit
+    /// is written, **including an explicit Default, which goes out as a literal `null` — the clear**;
+    /// an axis they never touched is not written at all.
+    ///
+    /// Both halves matter, and the first is what this round fixes. A "+" that bound the session
+    /// already STAMPED whatever was picked before it; re-picking Default afterwards used to send
+    /// nothing, so the chip read "Default model" while the session stayed pinned and the first turn
+    /// ran at the old model — the mirrored form of the wrong-selection window hold-and-stamp exists
+    /// to close. The second half is the reason this is a tri-state rather than an unconditional
+    /// null-send: that bound session is real, listed and reachable by another client (the same
+    /// argument the sequencing pin rests on), so a page that never touched an axis must not clear
+    /// what something else set on it.
     ///
     /// Awaited before the send, and pinned as sequencing rather than as end-state
     /// (`ShellSessionHostTests`): "no turn has fired on a session minted for a panel tab" is true of
     /// today's flows but is not structural — that session is real, listed, and reachable by any other
     /// client.
-    private func stampHeldSelection(on sessionId: String, model: String?, effort: String?,
+    private func stampHeldSelection(on sessionId: String, model: String??, effort: String??,
                                     client: NormaClient) async {
-        if let model { _ = try? await client.setModel(sessionId: sessionId, model: model) }
-        if let effort { _ = try? await client.setEffort(sessionId: sessionId, effort: effort) }
+        if case .some(let model) = model { _ = try? await client.setModel(sessionId: sessionId, model: model) }
+        if case .some(let effort) = effort { _ = try? await client.setEffort(sessionId: sessionId, effort: effort) }
     }
 
     /// The delivery half: fires on the pinned feed's post-attach `onConnected` for a FRESH
@@ -1102,8 +1189,8 @@ final class ShellSessionHost: ObservableObject {
             // same standing-lie class Task 4 removed from the policy row one surface over. (The
             // catalogue beside it deliberately survives: it is a cache of daemon-wide config, not a
             // choice — see `newChatCatalogue`.)
-            newChatModel = nil
-            newChatEffort = nil
+            newChatModelPick = nil
+            newChatEffortPick = nil
             // panel-shell T15: `newChatBoundSessionId` needs NO reset here (unlike `newChatDraft`
             // just above) — the top-level guard above already clears it on every unattached
             // destination change, `.newChat` included (whole-branch review Minor 4). Kept out of

@@ -2167,6 +2167,51 @@ final class ShellSessionHostTests: XCTestCase {
     // — and, on the bound-session REUSE branch (which creates nothing), rides `session.setModel` and
     // `session.setEffort` before the send.
 
+    /// Binds the page to `sessionId` through the "+" door, answering its three round trips. Returns
+    /// the create's own params so a caller can assert what (if anything) that create stamped.
+    @discardableResult
+    private func bindViaPlus(_ host: ShellSessionHost, _ mgmt: ShellScriptedTransport,
+                             sessionId: String) async -> [String: Any]? {
+        host.openPanelTabForNewChatPage(kind: .web)
+        await feedWaitUntil { mgmt.methods.contains("session.create") }
+        guard let create = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.create" }) else {
+            XCTFail("'+' must create: \(mgmt.methods)")
+            return nil
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(create["id"] as! Int),"result":{"sessionId":"\#(sessionId)","trusted":true}}"#)
+        await feedWaitUntil { mgmt.methods.contains("panel.openTab") }
+        guard let open = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.openTab" }) else {
+            XCTFail("'+' must open the tab: \(mgmt.methods)")
+            return nil
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(open["id"] as! Int),"result":{"ok":true,"tabId":"t1"}}"#)
+        await feedWaitUntil { mgmt.methods.contains("panel.list") }
+        guard let prime = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "panel.list" }) else {
+            XCTFail("the bind must prime the panel: \(mgmt.methods)")
+            return nil
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(prime["id"] as! Int),"result":{"tabs":[],"activeTabId":null}}"#)
+        await feedWaitUntil { host.newChatBoundSessionId == sessionId }
+        return create["params"] as? [String: Any]
+    }
+
+    /// Answers the reuse branch's existence-verify `panel.list`, so the send can proceed.
+    private func answerReuseVerify(_ mgmt: ShellScriptedTransport) async {
+        await feedWaitUntil { mgmt.methods.filter { $0 == "panel.list" }.count == 2 }
+        guard let verify = mgmt.sent.map({ feedLineJSON($0) }).filter({ $0["method"] as? String == "panel.list" }).last else { return }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(verify["id"] as! Int),"result":{"tabs":[],"activeTabId":null}}"#)
+    }
+
+    /// Feeds a catalogue onto the page's chip through its real door (`onOpen` → `sync.config`).
+    private func feedNewChatCatalogue(_ host: ShellSessionHost, _ mgmt: ShellScriptedTransport,
+                                      models: String) async {
+        host.newChatModelControl.onOpen()
+        await feedWaitUntil { mgmt.methods.contains("sync.config") }
+        guard let cfg = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "sync.config" }) else { return }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(cfg["id"] as! Int),"result":{"provider":"codex-oauth","exaKey":null,"dangerousDomains":[],"defaultModel":"srv-a","models":\#(models),"defaultEffort":"high","clientEfforts":["ultra"]}}"#)
+        await feedWaitUntil { !host.newChatCatalogue.models.isEmpty }
+    }
+
     /// The headline pin: a choice held on the page reaches the create that mints its session.
     func testTheHeldModelAndEffortRideTheFirstSendsCreate() async {
         let (host, _, mgmt) = await makeHostWithManagement()
@@ -2430,5 +2475,145 @@ final class ShellSessionHostTests: XCTestCase {
         mgmt.feed(#"{"jsonrpc":"2.0","id":\#(cfg["id"] as! Int),"result":{"provider":"codex-oauth","exaKey":null,"dangerousDomains":[],"defaultModel":"srv-a","models":[{"id":"srv-a","efforts":["low","high"]}],"defaultEffort":"high","clientEfforts":["ultra"]}}"#)
         await feedWaitUntil { host.newChatCatalogue.models.count == 1 }
         XCTAssertEqual(host.newChatCatalogue.models.map(\.id), ["srv-a"])
+    }
+
+    // MARK: - Fix round 1: the re-pick, and the effort a new model does not accept
+
+    /// **The dropped clear.** Pick a model → "+" (the create stamps it, and binds) → re-pick
+    /// **Default** → send. The session is really pinned to the stamped model, so "Default" must go
+    /// out as a literal `null` — the clear. Before this fix the reuse branch's `if let model` was
+    /// false and NOTHING was sent: the chip read "Default model" while the session stayed pinned and
+    /// the first turn ran at the old model, which is the mirrored form of exactly the wrong-selection
+    /// window hold-and-stamp exists to close.
+    func testAnExplicitDefaultRePickAfterTheBindClearsWhatTheBindStamped() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+        host.setNewChatModel("srv-b")
+        host.setNewChatEffort("high")
+
+        let stamped = await bindViaPlus(host, mgmt, sessionId: "s_bound")
+        XCTAssertEqual(stamped?["model"] as? String, "srv-b", "the premise: the '+' create DID stamp it")
+        XCTAssertEqual(stamped?["effort"] as? String, "high")
+
+        // …and now the user changes their mind, on both axes.
+        host.setNewChatModel(nil)
+        host.setNewChatEffort(nil)
+        XCTAssertNil(host.newChatModel, "the chip now reads Default — the session must be made to agree")
+
+        host.sendFirstChatMessage("hello") { id in host.apply(destination: .session(id)) }
+        await answerReuseVerify(mgmt)
+
+        await feedWaitUntil { mgmt.methods.contains("session.setModel") }
+        guard let setModel = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.setModel" }) else {
+            return XCTFail("an explicit Default must CLEAR the session's override: \(mgmt.methods)")
+        }
+        XCTAssertTrue((setModel["params"] as? [String: Any])?["model"] is NSNull,
+                      "a literal null — the wire's own clear (NormaClient.setModel), never an omitted key")
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(setModel["id"] as! Int),"result":{}}"#)
+
+        await feedWaitUntil { mgmt.methods.contains("session.setEffort") }
+        guard let setEffort = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.setEffort" }) else {
+            return XCTFail("…and so must the effort half: \(mgmt.methods)")
+        }
+        XCTAssertTrue((setEffort["params"] as? [String: Any])?["effort"] is NSNull)
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(setEffort["id"] as! Int),"result":{}}"#)
+
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "s_bound")
+        await feedWaitUntil { t.methods.contains("session.send") }
+    }
+
+    /// The other half of the tri-state, and the reason it is a tri-state rather than an
+    /// unconditional null-send: an axis the user NEVER TOUCHED is not written at all. That bound
+    /// session is real, listed and reachable by another client (the same argument the sequencing pin
+    /// rests on), so this page must not clear an override it did not set.
+    func testAnAxisTheUserNeverTouchedIsNeverWrittenOnTheReuseBranch() async {
+        let (host, factory, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        await bindViaPlus(host, mgmt, sessionId: "s_bound")
+        host.setNewChatModel("srv-b") // ONLY the model — the effort axis is never touched
+
+        host.sendFirstChatMessage("hello") { id in host.apply(destination: .session(id)) }
+        await answerReuseVerify(mgmt)
+
+        await feedWaitUntil { mgmt.methods.contains("session.setModel") }
+        guard let setModel = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "session.setModel" }) else {
+            return XCTFail("the touched axis must be written: \(mgmt.methods)")
+        }
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(setModel["id"] as! Int),"result":{}}"#)
+
+        await waitUntilMade(factory, 1)
+        let t = factory.made[0]
+        await answerHandshake(t, sessionId: "s_bound")
+        await feedWaitUntil { t.methods.contains("session.send") }
+        XCTAssertFalse(mgmt.methods.contains("session.setEffort"),
+                       "an untouched axis must not be cleared — this page never set it")
+    }
+
+    /// **Fix round 1, the second Important.** An effort picked while no model is pinned is validated
+    /// against the catalogue's DEFAULT model; picking a model that does not accept it leaves a pair
+    /// the daemon refuses (`assertEffortSelectable`, reached by `session.create` too) — with no
+    /// provider change involved. It is cleared on the model change, so the "+" door cannot become a
+    /// click that silently does nothing, and the menu cannot go on showing an illegal value checked.
+    ///
+    /// A COMPATIBLE effort must survive the same change: this clears what the daemon would refuse,
+    /// never merely what changed.
+    func testAnEffortTheNewlyPickedModelCannotAcceptIsClearedAndACompatibleOneSurvives() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+        await feedNewChatCatalogue(host, mgmt,
+                                   models: #"[{"id":"srv-a","efforts":["none","low","high"]},{"id":"srv-b","efforts":["high","max"]}]"#)
+
+        // Picked with NO model pinned: the offered list came from the catalogue's default (srv-a).
+        host.setNewChatEffort("low")
+        XCTAssertEqual(host.newChatEffort, "low")
+
+        host.setNewChatModel("srv-b") // srv-b accepts high/max — "low" is now refusable
+        XCTAssertNil(host.newChatEffort,
+                     "an effort the model in force does not accept must not survive the model change")
+
+        // …and the compatible direction: "high" is accepted by both models.
+        host.setNewChatEffort("high")
+        host.setNewChatModel("srv-a")
+        XCTAssertEqual(host.newChatEffort, "high", "a legal effort must survive — this clears refusals, not changes")
+    }
+
+    /// …and it NEVER clears on silence: an empty wire list means the daemon has told us nothing about
+    /// this model (an unlisted model, a BYOK endpoint that cannot enumerate, or a catalogue not
+    /// fetched yet). The same "empty is a real answer and never a licence to guess" rule
+    /// `effortPickerOptions` keeps, applied in the one direction that can destroy a user's pick.
+    func testAnEffortIsNeverClearedByAModelTheCatalogueSaysNothingAbout() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        // 1. Nothing fetched at all.
+        host.setNewChatEffort("low")
+        host.setNewChatModel("srv-b")
+        XCTAssertEqual(host.newChatEffort, "low", "an unfetched catalogue knows nothing and must clear nothing")
+
+        // 2. A real catalogue, an unlisted model.
+        await feedNewChatCatalogue(host, mgmt, models: #"[{"id":"srv-a","efforts":["none","low","high"]}]"#)
+        host.setNewChatModel("unheard-of")
+        XCTAssertEqual(host.newChatEffort, "low", "…and neither does a model it does not list")
+    }
+
+    /// The catalogue LANDING is the other moment we learn enough to judge — a pick made before any
+    /// fetch was never checked against anything.
+    func testACatalogueThatLandsLateInvalidatesAnEffortThatWasNeverCheckable() async {
+        let (host, _, mgmt) = await makeHostWithManagement()
+        host.setShellVisible(true)
+        host.apply(destination: .newChat)
+
+        host.setNewChatModel("srv-b")
+        host.setNewChatEffort("low") // legal-looking: nothing has said otherwise yet
+        await feedNewChatCatalogue(host, mgmt,
+                                   models: #"[{"id":"srv-a","efforts":["none","low","high"]},{"id":"srv-b","efforts":["high","max"]}]"#)
+        XCTAssertNil(host.newChatEffort, "once the daemon has said, an effort srv-b refuses cannot stay held")
     }
 }

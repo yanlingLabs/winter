@@ -762,8 +762,14 @@ final class ModelPickerTests: XCTestCase {
     }
 
     /// The composer asks the tier question as a BOOLEAN (its mode's own chrome answers it); the
-    /// header asks it as a mode string. **One decision, two doors** — pinned for every mode so the
-    /// 33 pins above and the composer's new door cannot drift apart.
+    /// header asks it as a mode string.
+    ///
+    /// **A DRIFT FENCE, not coverage** (fix round 1, review minor): the two doors agree today because
+    /// the mode-taking overload IS `effortPickerOptions(…offersTiers: effortTiersAreOffered(mode:))`
+    /// — literally this test's own right-hand side — so what guarantees the agreement is the
+    /// forwarder, and this passes tautologically. It is kept for the case where that stops being
+    /// true: anyone who re-implements either door rather than forwarding gets a red instead of a
+    /// silent divergence between the header's menu and the composer's chip.
     func testTheEffortOptionsBoolDoorAgreesWithTheModeDoorForEveryMode() {
         let catalogue = SyncConfigSnapshot(
             provider: "codex-oauth", defaultModel: "srv-a",

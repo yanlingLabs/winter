@@ -651,10 +651,12 @@ final class ComposerChromeTests: XCTestCase {
         let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?
             .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" } ?? []
         XCTAssertGreaterThan(files.count, 20, "the sweep must actually have walked the sources")
-        var built: [String] = []
+        var built: Set<String> = []
         for file in files where codeOnly(try String(contentsOf: file, encoding: .utf8)).contains("ComposerModelChip(") {
-            built.append(file.lastPathComponent)
+            built.insert(file.lastPathComponent)
         }
+        // A Set, not an array: `FileManager.enumerator`'s order is unspecified, so an array
+        // comparison would be a sort-order coin toss the moment a second file ever matched.
         XCTAssertEqual(built, ["NormaComposerCard.swift"],
                        "the model/effort chip is the SHARED shell's — one construction, one file")
     }
