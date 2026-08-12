@@ -187,6 +187,21 @@ final class InteractionCardTests: XCTestCase {
         }
     }
 
+    /// A respond that failed and was then resolved some other way (the fail-closed timeout, the
+    /// phone answering it) must not leave "couldn't send — try again" in the permanent record.
+    /// Nothing clears `interactionErrors` on resolve — it is cleared only at the start of the next
+    /// attempt — which was harmless while the card was deleted on resolve and is not harmless now.
+    func testAFrozenCardShowsNoStaleRespondError() {
+        let ask = InteractionRecord.Ask.approval(toolName: "bash", summary: "rm -rf x")
+        XCTAssertTrue(showsInteractionErrorLine(InteractionRecord(callId: "a1", ask: ask), hasError: true),
+                      "a pending card still reports a failed attempt")
+        XCTAssertFalse(showsInteractionErrorLine(InteractionRecord(callId: "a1", ask: ask), hasError: false))
+        for outcome: InteractionRecord.Outcome in [.approval(approved: false, by: "timeout"), .ended] {
+            XCTAssertFalse(showsInteractionErrorLine(InteractionRecord(callId: "a1", ask: ask, outcome: outcome), hasError: true),
+                           "\(outcome) must not keep a stale error line in scrollback")
+        }
+    }
+
     /// Non-interactivity is structural, not a disabled flag: the resolved bodies are separate view
     /// types from the pending ones, and they declare no `Button`/`TextField` at all. This asserts
     /// the source says so, by reading the file — the only way to make the claim without a UI test

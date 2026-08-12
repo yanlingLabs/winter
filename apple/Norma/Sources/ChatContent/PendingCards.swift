@@ -400,6 +400,21 @@ func outcomeLabel(_ outcome: InteractionRecord.Outcome) -> InteractionOutcomeLab
 /// `by` is whatever the responding client called itself (`"orb"`, `"iphone-gateway"`, `"cli-chat"`,
 /// a routine) — or the daemon's own `"timeout"` sentinel, whose wording says what actually happened
 /// instead of attributing the decision to a person.
+/// Whether a card draws its inline respond-error line — only while it is still PENDING, and that
+/// gate has to exist now that cards are permanent.
+///
+/// `FieldStateAdapter.interactionErrors[callId]` is set on a failed respond RPC and cleared only at
+/// the START of the next attempt for that callId. Nothing clears it on resolve, because until
+/// mac-chat-parity Task 3 nothing had to: the card was deleted and took the line with it. A card
+/// that lives forever does not have that luxury — a respond that failed and was then resolved some
+/// other way (the broker's fail-closed timeout, or the phone answering it) would print "couldn't
+/// send — try again" into the permanent record, beside the outcome, as advice nobody can act on.
+///
+/// An error is a fact about an attempt in flight, and a frozen card makes no attempts.
+func showsInteractionErrorLine(_ record: InteractionRecord, hasError: Bool) -> Bool {
+    hasError && interactionIsPending(record)
+}
+
 func interactionProvenance(_ outcome: InteractionRecord.Outcome) -> String? {
     let by: String
     switch outcome {
@@ -452,10 +467,8 @@ struct TranscriptInteractionCard: View {
                 pendingBody
             }
 
-            // Only a PENDING card can have an in-flight respond to fail, so this stays where it
-            // always was rather than moving into the pending body: `errorLines` is keyed by callId
-            // and cleared at the start of the next attempt, and a frozen card makes no attempts.
-            if let errorLine = wiring.errorLines[record.callId] {
+            if let errorLine = wiring.errorLines[record.callId],
+               showsInteractionErrorLine(record, hasError: true) {
                 Text(errorLine)
                     .font(.system(size: 11))
                     .foregroundStyle(.red)
