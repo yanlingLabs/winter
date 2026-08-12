@@ -33,17 +33,22 @@ Every value below is authored in both catalogs with explicit Light and Dark appe
 | `InverseCanvas` | `#2A2A27` | `#FAF9F5` | `Canvas` with its appearances swapped — the primary-action tint. |
 | `AccentColor` | `#2E9484` | `#2E9484` | Brand teal. Same value in both appearances. |
 
-### The three Mac-only tokens
+### The four Mac-only tokens
 
 These exist only in the Mac catalog. They are **deliberate platform extensions, not drift** — the phone has no hover state, no window-internal divider, and no floating palette, so there is nothing on iOS for them to mirror.
 
 | Token | Light | Dark | Role |
 | --- | --- | --- | --- |
 | `RowHover` | `#EFEDE8` | `#101010` | Hover fill. Interpolated between `Canvas` and `SelectionPill` in both appearances, so hover → selected reads as one ramp rather than two unrelated tints. |
-| `Hairline` | `#E5E2DC` | `#2A2A28` | The sidebar/content divider. Warm, because the system `separatorColor` is cool and fights the cream. |
+| `Hairline` | `#E5E2DC` | `#2A2A28` | The **shell's** divider: sidebar against content, and rims at the `Canvas`/`CardSurface` plane. Warm, because the system `separatorColor` is cool and fights the cream. |
+| `HairlineElevated` | `#D8D5CF` | `#3A3A38` | The same rule **one plane up** — drawn *on* `ElevatedSurface` or `ControlSurface`. See below; it is not a nicety. |
 | `PaletteSurface` | `#FFFFFF` | `#272726` | The face of anything that **floats above** content — the search palette it is named for, and the chat window's slide-in sidebar overlays. Brighter than `CardSurface` in both appearances, because it floats. |
 
 `ElevatedSurface` cannot serve as `PaletteSurface`: its light value (`#F2F2F7`) is a retained cool system grey that is *darker* than `CardSurface`. That is the wrong direction for something that floats above.
+
+**Why there are two hairlines.** `Hairline` is defined against the shell's two planes, and it collapses above them: on `ElevatedSurface` it measures **1.159:1 light and 1.040:1 dark** — in dark, a rule that is very nearly not drawn at all. The 2026-08-12 transcript pass walked straight into that by moving the interaction cards onto `ElevatedSurface` while leaving their separators and code-block rims on the shell token, which is how a divider added *because* "stacked blocks left the reader to infer from spacing alone" ended up back at nothing. `HairlineElevated` measures **1.313:1 light / 1.312:1 dark** on that plane — the same separation in both appearances by construction — and 1.389 / 1.431 on `CardSurface`, which is the ground a floating control's rim has to read against.
+
+It is a second asset rather than `Hairline` with an alpha because its two halves move in *opposite* directions from `Hairline`'s: darker in light, lighter in dark. No single runtime opacity expresses that, which is § 3.1's whole argument. Pinned by `TranscriptBrandTests.testTheElevatedHairlineActuallySeparatesOnItsOwnPlane` and `…DivergesFromTheShellHairlineInBothDirections`.
 
 ### `BubbleUser` and `ControlSurface` are the same value
 
@@ -73,6 +78,8 @@ The transcript sits on the content side, so `CardSurface` is its ground. Three t
 
 `ElevatedSurface` is the *block* fill and `ControlSurface` is the *chip* fill, and they are not interchangeable: measured against `CardSurface`, `ElevatedSurface` is 1.06:1 — plenty for a block with its own bounds, invisible behind a few characters of text. Note `ElevatedSurface` is **darker** than its ground in light and lighter in dark; "one step above" is about layering, not brightness (which is also why it cannot serve as `PaletteSurface` — see § 1).
 
+Rules drawn *on* those raised surfaces — a multi-question card's separators, a code block's rim, the "jump to latest" pill — take `HairlineElevated`, never the shell's `Hairline` (§ 1).
+
 Everything else on this surface is text on that ground: `.primary` for content, `TextMuted` for meta (§ 3.5).
 
 ---
@@ -94,6 +101,8 @@ The brand teal drives prominent controls, links, and `.tint(_:)`. It does **not*
 On Mac this has a specific mechanical consequence: **`ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME` is deliberately left unset.** A colorset named `AccentColor` becomes the app-wide control tint the moment that setting names it — retinting every system control as a silent side effect of adding the palette. Keep it unset.
 
 **Corollary, and it bit for real:** because that setting is unset, SwiftUI's `Color.accentColor` (and `.tint`'s default, and `.accentColor` in any form) resolves to **the user's own System Settings accent** — whatever they picked in General — not to Norma's teal. Code that wants the brand must name `Theme.accent`. Every accent-tinted piece of the Mac's approval and question cards was drawing in the Mac owner's personal accent until the 2026-08-12 transcript pass; `TranscriptBrandTests` now fails the suite on any `accentColor` in `ChatContent/`.
+
+And an ancestor `.tint(_:)` does **not** rescue it — probed: with a system accent of `#FFC726`, `Color.accentColor` renders `#FFC727` even inside `.tint(Theme.accent)`, while `ShapeStyle.tint` renders `#2E9484`. `.tint` reaches `ShapeStyle.tint`, carets and selection; it does not reach `Color.accentColor`, which reads the system preference directly.
 
 ### 3.3 `SelectionPill` is darker than its pane in dark mode
 

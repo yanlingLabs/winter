@@ -27,8 +27,8 @@ final class SidebarBrandTests: XCTestCase {
     /// The list is meant to be TOTAL — every color `Theme` names appears in it, or the pin above
     /// silently stops covering the ones it forgot. Bump deliberately when adding a token.
     func testThemeAssetColorNameListIsComplete() {
-        XCTAssertEqual(Theme.assetColorNames.count, 14)
-        XCTAssertEqual(Set(Theme.assetColorNames).count, 14, "no duplicates")
+        XCTAssertEqual(Theme.assetColorNames.count, 15)
+        XCTAssertEqual(Set(Theme.assetColorNames).count, 15, "no duplicates")
     }
 
     /// The plane mapping (`docs/brand.md`): the content card must be BRIGHTER than the sidebar

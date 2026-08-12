@@ -79,16 +79,36 @@ enum Theme {
     /// `TranscriptBrandTests` fails the suite on `accentColor` anywhere in `ChatContent/`.
     static let accent = Color("AccentColor")
 
-    // MARK: - Color: the three Mac-only tokens
+    // MARK: - Color: the four Mac-only tokens
 
     /// The hover fill. Mac-only BY NECESSITY — the phone has no hover state. Interpolated
     /// between `canvas` and `selectionPill` in both appearances, so hover → selected reads as
     /// ONE ramp rather than two unrelated tints.
     static let rowHover = Color("RowHover")
 
-    /// The sidebar/content divider. Mac-only — the phone has no window-internal divider. A warm
-    /// value because the system `separatorColor` is cool and fights the cream.
+    /// The **shell's** divider — sidebar against content, and rims drawn at the `canvas`/
+    /// `cardSurface` plane. Mac-only: the phone has no window-internal divider. A warm value
+    /// because the system `separatorColor` is cool and fights the cream.
+    ///
+    /// It is defined against those two grounds and measures poorly above them; anything drawing a
+    /// rule ON a raised surface wants `hairlineElevated` instead.
     static let hairline = Color("Hairline")
+
+    /// The same divider one plane up — a rule drawn ON `elevatedSurface` or `controlSurface`
+    /// (a multi-question card's separators, a code block's rim, the transcript's "latest" pill).
+    /// Mac-only for the same reason `hairline` is.
+    ///
+    /// **It exists because `hairline` measured 1.040:1 on `elevatedSurface` in dark** — very nearly
+    /// invisible, and a regression the transcript's own brand pass introduced by moving the cards
+    /// onto `elevatedSurface` while leaving their rules on the shell's token (mac-chat-parity Task 8
+    /// fix round 1). This value measures **1.313:1 light / 1.312:1 dark** on that plane: the same
+    /// separation in both appearances by construction, not by coincidence, and stronger than
+    /// `hairline` manages even on its own ground (1.175 / 1.236 on `canvas`).
+    ///
+    /// A separate asset rather than `hairline.opacity(…)`, per `docs/brand.md` § 3.1: a runtime
+    /// alpha has no per-appearance tuning, and this token needs its two halves to move in OPPOSITE
+    /// directions from `hairline`'s — darker in light, lighter in dark.
+    static let hairlineElevated = Color("HairlineElevated")
 
     /// The face of anything that FLOATS ABOVE content — the search palette it is named for, and
     /// (since mac-chat-parity Task 8) the chat window's slide-in sidebar overlays, which are the
@@ -160,6 +180,6 @@ enum Theme {
     static let assetColorNames: [String] = [
         "Canvas", "CardSurface", "SelectionPill", "ElevatedSurface", "ControlSurface",
         "BubbleUser", "ComposerSurface", "ComposerRim", "TextMuted", "InverseCanvas",
-        "AccentColor", "RowHover", "Hairline", "PaletteSurface",
+        "AccentColor", "RowHover", "Hairline", "HairlineElevated", "PaletteSurface",
     ]
 }

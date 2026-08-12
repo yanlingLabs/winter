@@ -41,6 +41,7 @@ final class TranscriptBrandTests: XCTestCase {
         // The three Mac-only tokens
         "RowHover": ("EFEDE8", "101010", 1, 1),
         "Hairline": ("E5E2DC", "2A2A28", 1, 1),
+        "HairlineElevated": ("D8D5CF", "3A3A38", 1, 1),
         "PaletteSurface": ("FFFFFF", "272726", 1, 1),
     ]
 
@@ -59,11 +60,71 @@ final class TranscriptBrandTests: XCTestCase {
         }
     }
 
-    /// The transcription is TOTAL — a token added to `Theme` without a row above would otherwise be
-    /// silently unpinned by the loop, which only walks what it was given.
-    func testTheDocumentedPaletteCoversEveryTokenThemeNames() {
-        XCTAssertEqual(Set(Self.documentedPalette.keys), Set(Theme.assetColorNames),
-                       "every Theme token needs a brand.md-transcribed row here, and vice versa")
+    /// The transcription is TOTAL — a token added without a row above would otherwise be silently
+    /// unpinned by the loop, which only walks what it was given.
+    ///
+    /// Fix round 1 (review M4): this compared two HAND-MAINTAINED lists (`documentedPalette` against
+    /// `Theme.assetColorNames`), so a colorset added to the catalog and named by neither stayed
+    /// invisible to it. The **catalog on disk** is the third party that settles it.
+    func testTheDocumentedPaletteCoversEveryColorsetInTheCatalog() throws {
+        let catalog = try FileManager.default
+            .contentsOfDirectory(at: sourceRoot().appendingPathComponent("Assets.xcassets"),
+                                 includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "colorset" }
+            .map { $0.deletingPathExtension().lastPathComponent }
+        XCTAssertFalse(catalog.isEmpty, "the scan must actually be reading the catalog")
+        XCTAssertEqual(Set(catalog), Set(Self.documentedPalette.keys),
+                       "every colorset needs a brand.md-transcribed row here, and vice versa")
+        XCTAssertEqual(Set(catalog), Set(Theme.assetColorNames),
+                       "…and a name in Theme, or nothing in Swift can reach it")
+    }
+
+    /// **The fix-round-1 pin (review IMPORTANT-1).** `Theme.hairline` is defined against the shell's
+    /// planes and measures **1.040:1 on `ElevatedSurface` in dark** — a rule that is very nearly not
+    /// drawn. Moving the transcript's cards onto `ElevatedSurface` put three rules on that ground
+    /// (a multi-question card's separators, a code block's rim — which inside a plan card has the
+    /// IDENTICAL fill either side of it — and the "latest" pill), so the plane got its own token.
+    ///
+    /// This asserts the property the token exists for, not its hex (§ 1's pin already does that):
+    /// it must beat the shell hairline on the elevated plane, in BOTH appearances, by a margin that
+    /// is actually visible. 1.25 is the floor, chosen as "at least what `hairline` achieves on its
+    /// own defined ground" (1.175 light / 1.236 dark on `Canvas`).
+    func testTheElevatedHairlineActuallySeparatesOnItsOwnPlane() {
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            let ground = srgb(NSColor(named: "ElevatedSurface")!, appearance)
+            let elevated = contrast(srgb(NSColor(named: "HairlineElevated")!, appearance), ground)
+            let shell = contrast(srgb(NSColor(named: "Hairline")!, appearance), ground)
+            XCTAssertGreaterThan(elevated, 1.25,
+                                 "HairlineElevated is invisible on its own plane in \(appearance.rawValue)")
+            XCTAssertGreaterThan(elevated, shell,
+                                 "…and it must beat the shell hairline there, or it has no reason to exist")
+        }
+    }
+
+    /// The two halves move in OPPOSITE directions from `Hairline`'s — darker in light, lighter in
+    /// dark — which is exactly why it is an authored asset and not `hairline.opacity(…)`
+    /// (`docs/brand.md` § 3.1). A future tune that made it a uniform darkening would silently
+    /// reintroduce the dark-mode hole this token was minted to close.
+    func testTheElevatedHairlineDivergesFromTheShellHairlineInBothDirections() {
+        let lightElevated = luminance(srgb(NSColor(named: "HairlineElevated")!, .aqua))
+        let lightShell = luminance(srgb(NSColor(named: "Hairline")!, .aqua))
+        let darkElevated = luminance(srgb(NSColor(named: "HairlineElevated")!, .darkAqua))
+        let darkShell = luminance(srgb(NSColor(named: "Hairline")!, .darkAqua))
+        XCTAssertLessThan(lightElevated, lightShell, "darker than the shell hairline in light")
+        XCTAssertGreaterThan(darkElevated, darkShell, "…and lighter in dark")
+    }
+
+    private func luminance(_ color: NSColor) -> CGFloat {
+        func linear(_ v: CGFloat) -> CGFloat { v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+        return 0.2126 * linear(color.redComponent)
+             + 0.7152 * linear(color.greenComponent)
+             + 0.0722 * linear(color.blueComponent)
+    }
+
+    /// WCAG relative-contrast, the same formula `docs/brand.md` § 3.5's table was measured with.
+    private func contrast(_ a: NSColor, _ b: NSColor) -> CGFloat {
+        let la = luminance(a), lb = luminance(b)
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
     }
 
     /// The one plane relationship this task introduced inside the transcript: cards and tool-output
@@ -221,6 +282,21 @@ final class TranscriptBrandTests: XCTestCase {
         return fonts
     }
 
+    /// Fix round 1 (review M5): the report calls `themeColor`'s `colorScheme` parameter
+    /// "load-bearing" — this is what makes that a checked claim rather than a described one. If the
+    /// resolve ever stopped honouring the caller's scheme (a dynamic `NSColor` handed straight into
+    /// an `NSAttributedString` resolves against whatever appearance is current when it is DRAWN),
+    /// both branches would return the same colour and the inline-code chip would silently ignore a
+    /// view forced to the other scheme.
+    func testThemeColorResolvesForTheCallersSchemeNotTheAmbientOne() {
+        let light = MessageTextFormatter.themeColor("ControlSurface", colorScheme: .light)
+        let dark = MessageTextFormatter.themeColor("ControlSurface", colorScheme: .dark)
+        XCTAssertNotEqual(hexString(light), hexString(dark),
+                          "colorScheme is not reaching the resolve")
+        XCTAssertEqual(hexString(light), Self.documentedPalette["ControlSurface"]!.light)
+        XCTAssertEqual(hexString(dark), Self.documentedPalette["ControlSurface"]!.dark)
+    }
+
     // MARK: - 3. Which surface takes which role
 
     /// **A WIRING PIN, NOT COVERAGE** — the same species as `ModelPickerTests.swift:767`. It restates
@@ -286,7 +362,19 @@ final class TranscriptBrandTests: XCTestCase {
     /// Comment lines are stripped first, so writing down the reason a value was removed is not
     /// itself a violation — `ComposerChromeTests`/`InteractionCardTests`' own convention.
     func testNoRawMaterialOrFaintSystemGreyOrLiteralColourSurvivesInChatContent() throws {
-        let banned = ["Material", ".tertiary", ".quaternary", "Color(red:",
+        // Fix round 1 (review M2/M3): the literal-colour ban used to catch ONE spelling. Every
+        // other constructor that takes raw components — `Color(.sRGB, red:…)`, `Color(white:)`,
+        // `NSColor(red:green:blue:alpha:)`, `Color(nsColor:)` wrapping one — walked straight past
+        // it. Matching the constructors by their argument labels closes that; `Color(named:` and
+        // `NSColor(named:` are the sanctioned spellings and contain none of these labels.
+        //
+        // `.opacity(` is NOT banned even though § 3.1 forbids derivation by name, because three
+        // survivors are deliberate and defended in place: the accent's selection fill (an
+        // appearance-INVARIANT token, so an alpha over it loses no per-appearance tuning), the code
+        // block's hover rim, and the quote rule. A ban would have to carry three exemptions, which
+        // is a worse fence than none; the review recorded it, and so does this comment.
+        let banned = ["Material", ".tertiary", ".quaternary",
+                      "(red:", "(white:", "(hue:", "(nsColor:", "(calibratedRed:", "#colorLiteral",
                       "Color.black", "Color.white", "NSColor.black", "NSColor.white", "accentColor"]
         var scanned = 0
         for file in try chatContentSources() {
@@ -308,7 +396,47 @@ final class TranscriptBrandTests: XCTestCase {
             }
             scanned += 1
         }
-        XCTAssertGreaterThan(scanned, 10, "the scan must actually be walking the directory")
+        // Exact, not a floor (fix round 1, review M3): `> 10` against 12 files quietly tolerated
+        // deleting two of them, which would have made the ban pass by scanning less.
+        XCTAssertEqual(scanned, try chatContentSources().count)
+        XCTAssertEqual(scanned, 12, "ChatContent's file count changed — confirm the new file is scanned")
+    }
+
+    /// **The fence on IMPORTANT-1's fix itself.** The two pins above prove `HairlineElevated` is a
+    /// good value; neither proves anything USES it — reverting all three sites to the shell hairline
+    /// would leave both of them green, which is precisely the mutation that reopens a 1.040:1
+    /// separator in dark.
+    ///
+    /// The rule is absolute and so is the check: **`ChatContent/` draws no rule at the shell's
+    /// plane.** Every rule on this surface is inside something raised — a card's separator, a code
+    /// block's rim, a floating pill — so `Theme.hairline` has no legitimate site here at all. That
+    /// makes this a one-token ban rather than a per-site whitelist, which is the version that
+    /// survives someone adding a fourth rule.
+    ///
+    /// Matched by exclusion of the longer name, since `Theme.hairlineElevated` has `Theme.hairline`
+    /// as a literal prefix — a naive `contains` would ban the very token this is enforcing.
+    func testChatContentDrawsNoRuleAtTheShellHairlinePlane() throws {
+        var elevatedSites = 0
+        for file in try chatContentSources() {
+            let code = codeOnly(try String(contentsOf: file, encoding: .utf8))
+            for (index, line) in code.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                var rest = Substring(line)
+                while let hit = rest.range(of: "Theme.hairline") {
+                    let after = rest[hit.upperBound...]
+                    if after.hasPrefix("Elevated") {
+                        elevatedSites += 1
+                    } else {
+                        XCTFail("\(file.lastPathComponent):\(index + 1) draws a rule with the SHELL "
+                                + "hairline — on this surface that measures 1.040:1 in dark. Use "
+                                + "Theme.hairlineElevated: \(line.trimmingCharacters(in: .whitespaces))")
+                    }
+                    rest = rest[hit.upperBound...]
+                }
+            }
+        }
+        XCTAssertEqual(elevatedSites, 3,
+                       "the separator, the code-block rim and the latest pill — all three, or this "
+                       + "pin is passing because the rules stopped being drawn at all")
     }
 
     /// The other half: the directory does not merely AVOID raw values, it reaches for the tokens.
@@ -323,9 +451,12 @@ final class TranscriptBrandTests: XCTestCase {
 
     // MARK: - 5. The two type ladders
 
-    /// The sans register is the donor's ladder, unchanged — the user's own bubble and both plan cards
-    /// render exactly as they did before this task. Pinned against the literal figures because
-    /// "nothing moved for the sans role" is the claim; the serif ladder is a derivation of it.
+    /// **A DRIFT FENCE, NOT COVERAGE** (fix round 1, review M1) — the same species as
+    /// `ModelPickerTests.swift:767` and this file's own `testTheUserBubbleDeclaresTheSansRole`. It
+    /// restates the constants next door, so mutating either side moves both and it can never red on
+    /// its own merits. Kept because "nothing moved for the sans role" is a claim worth writing down
+    /// where the serif ladder is derived FROM these figures; not counted among the pins that carry
+    /// weight, which are the measured ones.
     func testTheSansLadderIsTheDonorsAndDidNotMove() {
         let sans = transcriptProseMetrics(.sans)
         XCTAssertEqual(sans.bodySize, 14)

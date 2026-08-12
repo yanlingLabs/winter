@@ -334,8 +334,14 @@ private struct TranscriptMarkdownBlockView: View {
 /// Donor `ChatCodeBlock`, ported as-is (horizontal scroll + syntax highlight + per-block copy).
 /// mac-chat-parity Task 8 replaced its two derived surfaces — a `colorScheme`-branched
 /// `black.opacity(0.32)`/`textBackgroundColor.opacity(0.72)` fill and a `separatorColor` × 0.38
-/// border — with `Theme.elevatedSurface` and `Theme.hairline`, which is the same appearance branch
+/// border — with `Theme.elevatedSurface` and a hairline token, which is the same appearance branch
 /// expressed once, in the asset catalog, where it can be tuned.
+///
+/// The rim is `Theme.hairlineElevated`, not the shell's `hairline` (fix round 1). A code block is
+/// `elevatedSurface`, and inside a plan card so is its CONTAINER — identical fills, with only this
+/// rim between them. `hairline` measures 1.040:1 on that ground in dark, i.e. it would have been
+/// drawing nothing; `hairlineElevated` measures 1.312:1. The old `separatorColor` × 0.38 managed
+/// 1.116:1 there, so this is a genuine improvement over the donor rather than a repair to parity.
 private struct TranscriptCodeBlock: View {
     let language: String?
     let code: String
@@ -417,7 +423,7 @@ private struct TranscriptCodeBlock: View {
     private var codeBackground: Color { Theme.elevatedSurface }
 
     private var codeBorderColor: Color {
-        isCodeBlockHovering ? tint.opacity(0.55) : Theme.hairline
+        isCodeBlockHovering ? tint.opacity(0.55) : Theme.hairlineElevated
     }
 
     private func copyCodeToPasteboard() {

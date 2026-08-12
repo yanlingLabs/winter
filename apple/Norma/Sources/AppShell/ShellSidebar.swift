@@ -257,9 +257,18 @@ struct ShellRootView: View {
             }
         }
         // ONE brand tint for the whole shell (user call, 2026-08-07: every cursor in the app the
-        // same colour). `.tint` is what drives a SwiftUI `TextField`'s caret and selection, and it
-        // cascades — so setting it here covers the search palette, the Dashboard panes, the
-        // pending cards and anything added later, rather than each field remembering to opt in.
+        // same colour). `.tint` drives a SwiftUI `TextField`'s caret and selection and cascades to
+        // descendants, so every field in the search palette, the Dashboard panes and the cards gets
+        // it without remembering to opt in.
+        //
+        // **It does NOT cover `Color.accentColor`, and this comment used to claim it did** — named
+        // the pending cards specifically, which was the one example that was false (mac-chat-parity
+        // Task 8 fix round 1). Probed: with a system accent of #FFC726, `Color.accentColor` renders
+        // #FFC727 *inside* this modifier while `ShapeStyle.tint` renders #2E9484. `Color.accentColor`
+        // reads the system preference directly and ignores ancestor tint entirely — which is why the
+        // cards' selection chrome was drawing in the user's own accent until Task 8 named
+        // `Theme.accent` at each site, and why this comment mattered: it is exactly the sentence
+        // that would have talked a reviewer out of believing that bug was real.
         //
         // Deliberately NOT `ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME`: that would retint
         // every system control in the app process, including surfaces this pass does not own.

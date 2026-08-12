@@ -560,15 +560,21 @@ private struct ResolvedOutcomeRow: View {
 /// A hairline between two questions in one card — iOS's separator for a multi-question block, which
 /// the Mac's separator-less stacked blocks left the reader to infer from spacing alone. A true
 /// hairline (1 device pixel via `displayScale`), not a 1pt rule, so it reads as a division rather
-/// than a border. `Theme.hairline` since mac-chat-parity Task 8: the same warm divider the shell
-/// draws between sidebar and content, in place of a `Color.primary` × 0.08 that had no way to be
-/// tuned per appearance.
+/// than a border. `Theme.hairlineElevated` (mac-chat-parity Task 8 fix round 1) in place of a
+/// `Color.primary` × 0.08, which had no way to be tuned per appearance.
+///
+/// **It is the ELEVATED token, not the shell's `hairline`, and that distinction is the whole point
+/// of the fix round.** This rule is drawn on the card's `Theme.elevatedSurface` fill, one plane
+/// above the ground `hairline` is defined against, where `hairline` measures **1.040:1 in dark** —
+/// so a separator introduced precisely because "stacked blocks left the reader to infer from
+/// spacing alone" was very nearly back to nothing. `hairlineElevated` measures 1.313 / 1.312 there.
+/// Pinned by `TranscriptBrandTests.testTheElevatedHairlineActuallySeparatesOnItsOwnPlane`.
 private struct QuestionSeparator: View {
     @Environment(\.displayScale) private var displayScale
 
     var body: some View {
         Rectangle()
-            .fill(Theme.hairline)
+            .fill(Theme.hairlineElevated)
             .frame(height: 1 / displayScale)
     }
 }

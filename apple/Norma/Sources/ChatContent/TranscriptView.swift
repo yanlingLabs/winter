@@ -80,10 +80,15 @@ struct TranscriptView: View {
     /// at SourceKit's type-check complexity cliff — keep `body` shallow so future edits don't
     /// tip it over.
     /// mac-chat-parity Task 8: `Theme.controlSurface` — the token `docs/brand.md` gives small
-    /// controls — with a `Theme.hairline` rim, because this pill floats over scrolling prose and an
-    /// opaque fill alone has nothing to separate it from the text passing underneath. (It was a
-    /// `.thinMaterial`, which on an opaque window blurs whatever it happens to be over rather than
-    /// naming a colour.) The rim is a gate-tunable call, not a measured one.
+    /// controls — with a `Theme.hairlineElevated` rim, because this pill floats over scrolling prose
+    /// and an opaque fill alone has nothing to separate it from the text passing underneath. (It was
+    /// a `.thinMaterial`, which on an opaque window blurs whatever it happens to be over rather than
+    /// naming a colour.)
+    ///
+    /// The ELEVATED hairline (fix round 1), because the ground this rim has to separate from is the
+    /// content plane the pill floats over: 1.389:1 light / 1.431:1 dark on `cardSurface`, against the
+    /// shell `hairline`'s 1.226 / 1.134. Whether a rim is wanted here AT ALL is still a gate call;
+    /// which token it uses is now a measured one.
     private func latestPill(_ proxy: ScrollViewProxy) -> some View {
         Button {
             scrollToBottom(proxy)
@@ -92,7 +97,8 @@ struct TranscriptView: View {
                 .font(.system(size: 11, weight: .medium))
                 .padding(.horizontal, 10).padding(.vertical, 5)
                 .background(Capsule().fill(Theme.controlSurface))
-                .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: shellSidebarHairlineWidth))
+                .overlay(Capsule().strokeBorder(Theme.hairlineElevated,
+                                                lineWidth: shellSidebarHairlineWidth))
         }
         .buttonStyle(.plain)
         .padding(8)
