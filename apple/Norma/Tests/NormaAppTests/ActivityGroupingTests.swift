@@ -60,12 +60,12 @@ final class ActivityGroupingTests: XCTestCase {
     func testNonToolItemBreaksARunEvenIfToolsResumeAfter() {
         let items: [ActivityItem] = [
             tool("bash", "ls"),
-            ActivityItem(kind: .interaction("needs approval")),
+            ActivityItem(kind: .interaction(InteractionRecord(callId: "a1", ask: .approval(toolName: "bash", summary: "needs approval")))),
             tool("bash", "pwd"),
         ]
         XCTAssertEqual(groupActivity(items), [
             .toolRun([ToolRunEntry(name: "bash", calls: [call("ls")])]),
-            .single(ActivityItem(kind: .interaction("needs approval"))),
+            .single(ActivityItem(kind: .interaction(InteractionRecord(callId: "a1", ask: .approval(toolName: "bash", summary: "needs approval"))))),
             .toolRun([ToolRunEntry(name: "bash", calls: [call("pwd")])]),
         ])
     }

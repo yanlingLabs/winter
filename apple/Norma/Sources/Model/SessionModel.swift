@@ -97,6 +97,89 @@ enum PendingInteraction: Equatable {
     }
 }
 
+/// One human-in-the-loop interaction as the TRANSCRIPT keeps it (mac-chat-parity Task 3): what was
+/// asked, and — once the daemon says so — what was decided. Distinct from `PendingInteraction`
+/// above, which is the list of asks still OUTSTANDING and is emptied on resolve; this record is
+/// appended to an exchange's `activity` and never removed, which is what gives the Mac an auditable
+/// record of everything approved and answered. Before Task 3 the transcript kept only
+/// `ActivityItem.Kind.interaction(String)` — a bare summary line — and the pinned card band deleted
+/// the card itself on resolve, so nothing anywhere in Mac scrollback said what the user had chosen.
+///
+/// Every field comes off the wire and is PERSISTED in the session JSONL, so this whole record is
+/// rebuilt by the ordinary replay-from-seq-0 that `AppModel.refocus` and every relaunch already do —
+/// it is never view state. Ask side: `approval_requested`/`question_asked`/`plan_presented`.
+/// Outcome side: `approval_resolved`/`question_resolved`/`plan_resolved` (none of the six is in
+/// `TRANSIENT_EVENT_TYPES`, `packages/protocol/src/events.ts`).
+struct InteractionRecord: Equatable {
+    /// What the daemon asked — the `*_requested`/`*_asked`/`*_presented` payload, verbatim. Mirrors
+    /// `PendingInteraction`'s cases minus `callId`/`childSessionId`, which are stored once on the
+    /// record rather than per-case.
+    enum Ask: Equatable {
+        case approval(toolName: String, summary: String, reviewerReason: String? = nil, options: [SessionEvent.ApprovalOption]? = nil)
+        case question(questions: [SessionEvent.Question])
+        case plan(plan: String)
+    }
+
+    /// How the ask ended. `nil` on the record means STILL PENDING, and that is the single source of
+    /// truth for whether the transcript draws an interactive card or a frozen one — see
+    /// `interactionIsPending`. It cannot disagree with `OrbSessionState.pendingInteractions`,
+    /// because the one reducer step that empties that list (`endOutstandingInteractions`) is the
+    /// same step that stamps `.ended` on whatever it removes.
+    enum Outcome: Equatable {
+        /// `approval_resolved`. NOTE the wire carries no `optionId`
+        /// (`packages/protocol/src/events.ts`'s `ApprovalResolvedEvent` is `callId`/`approved`/`by`/
+        /// `childSessionId` only), so WHICH allow-rule option was chosen is not recoverable — a
+        /// rule-writing approval freezes as a plain "Approved", the same thing iOS's resolved
+        /// `ApprovalRowView` shows. Do not invent a local store for it: an outcome that survives
+        /// relaunch has to come off the event log.
+        case approval(approved: Bool, by: String)
+        /// `question_resolved`. `answers`/`notes` are keyed by QUESTION TEXT, exactly as the wire
+        /// keys them and as `questionAnswers`/`questionNotes` produce them.
+        case question(answers: [String: String], notes: [String: String], by: String)
+        /// `plan_resolved`.
+        case plan(approved: Bool, autoAccept: Bool, feedback: String?, by: String)
+        /// The turn ended (`turn_completed`/`agent_error`) while this ask was still outstanding, so
+        /// no `*_resolved` will ever arrive for it. Terminal, and deliberately NOT an outcome: the
+        /// card freezes saying nothing was recorded rather than claiming a decision nobody made.
+        /// Without this the card would keep its live buttons forever on a call the daemon has
+        /// stopped waiting on — a frozen card that can still be clicked.
+        case ended
+    }
+
+    let callId: String
+    let ask: Ask
+    /// Dispatch relay (Phase 7): mirrors `PendingInteraction`'s own `childSessionId` — set only on
+    /// the mirrored copy of a CHILD session's ask, and threaded back into the respond callbacks so
+    /// the answer routes to the child.
+    var childSessionId: String?
+    var outcome: Outcome?
+
+    init(callId: String, ask: Ask, childSessionId: String? = nil, outcome: Outcome? = nil) {
+        self.callId = callId
+        self.ask = ask
+        self.childSessionId = childSessionId
+        self.outcome = outcome
+    }
+
+    /// The one-line summary this interaction used to be reduced to, kept as a DERIVED value rather
+    /// than a second stored field so it can never drift from the ask it describes. Read by
+    /// `activityGlyphAndLabel`'s defensive fallback (the transcript itself draws the card, not this
+    /// line) and by anything that wants a bare label for an interaction.
+    var summary: String {
+        switch ask {
+        case .approval(_, let summary, _, _): return summary
+        case .question(let questions): return questions.first?.question ?? "question"
+        case .plan: return "plan presented"
+        }
+    }
+}
+
+/// Whether an interaction is still awaiting the user — the ONE predicate that decides whether the
+/// transcript draws a live card or a frozen record. Pure and exported so the decision is unit-
+/// testable without mounting a view, the same convention as `questionShowsHeaderChip` and friends
+/// in `ChatContent/PendingCards.swift`.
+func interactionIsPending(_ record: InteractionRecord) -> Bool { record.outcome == nil }
+
 /// One line of "what happened during this exchange" — tools run, task transitions, subagents
 /// spawned/finished, worktree enters/exits, and interaction points (approvals/questions/plans).
 /// Captured per-exchange by `SessionReducer.reduce` (2d-ii-a task 1) so the transcript can show
@@ -137,7 +220,11 @@ struct ActivityItem: Equatable {
         case subagent(agentType: String)
         case subagentDone
         case worktree(entered: Bool, detail: String)
-        case interaction(String)
+        /// An approval/question/plan asked during this exchange, and (once folded) how it ended —
+        /// see `InteractionRecord`. This was a bare `String` summary until mac-chat-parity Task 3;
+        /// the payload has to live here because this item is the transcript's ONLY anchor for the
+        /// card, now that the pinned band that used to own it is gone.
+        case interaction(InteractionRecord)
     }
     var kind: Kind
 }
@@ -150,6 +237,16 @@ extension ActivityItem {
     /// tool case where a `.task`/`.worktree` item can't carry a meaningless one.
     var toolCallId: String? {
         if case .tool(_, _, let callId, _, _) = kind { return callId }
+        return nil
+    }
+
+    /// The `InteractionRecord` an `.interaction` item carries — `nil` for every other kind. The
+    /// join key `SessionReducer.foldInteractionOutcome` searches on, and the transcript's signal to
+    /// draw a card instead of a one-line activity row. An accessor for the same reason
+    /// `toolCallId` is one: interaction-only data stays on the interaction case, where a
+    /// `.task`/`.worktree` item cannot carry a meaningless copy of it.
+    var interactionRecord: InteractionRecord? {
+        if case .interaction(let record) = kind { return record }
         return nil
     }
 }
@@ -447,19 +544,30 @@ enum SessionReducer {
             foldToolResult(&s, callId: v.callId, output: v.output, isError: v.isError)
         case .approvalRequested(let v) where v.threadId == mainThread:
             appendPending(.approval(callId: v.callId, toolName: v.toolName, summary: v.summary, reviewerReason: v.reviewerReason, childSessionId: v.childSessionId, options: v.options), to: &s)
-            appendActivity(.interaction(v.summary), to: &s)
+            appendInteraction(InteractionRecord(
+                callId: v.callId,
+                ask: .approval(toolName: v.toolName, summary: v.summary, reviewerReason: v.reviewerReason, options: v.options),
+                childSessionId: v.childSessionId
+            ), to: &s)
         case .questionAsked(let v) where v.threadId == mainThread:
             appendPending(.question(callId: v.callId, questions: v.questions, childSessionId: v.childSessionId), to: &s)
-            appendActivity(.interaction(v.questions.first?.question ?? "question"), to: &s)
+            appendInteraction(InteractionRecord(
+                callId: v.callId,
+                ask: .question(questions: v.questions),
+                childSessionId: v.childSessionId
+            ), to: &s)
         case .planPresented(let v) where v.threadId == mainThread:
             appendPending(.plan(callId: v.callId, plan: v.plan), to: &s)
-            appendActivity(.interaction("plan presented"), to: &s)
+            appendInteraction(InteractionRecord(callId: v.callId, ask: .plan(plan: v.plan)), to: &s)
         case .approvalResolved(let v):
             s = resolvePending(s, callId: v.callId)
+            foldInteractionOutcome(&s, callId: v.callId, outcome: .approval(approved: v.approved, by: v.by))
         case .questionResolved(let v):
             s = resolvePending(s, callId: v.callId)
+            foldInteractionOutcome(&s, callId: v.callId, outcome: .question(answers: v.answers, notes: v.notes ?? [:], by: v.by))
         case .planResolved(let v):
             s = resolvePending(s, callId: v.callId)
+            foldInteractionOutcome(&s, callId: v.callId, outcome: .plan(approved: v.approved, autoAccept: v.autoAccept, feedback: v.feedback, by: v.by))
         case .childUpdate(let v):
             // Dispatch (Phase 7): upsert by childSessionId — a brand-new child appends, a known
             // one is replaced wholesale (title can change, e.g. once the daemon assigns one).
@@ -519,7 +627,7 @@ enum SessionReducer {
             }
         case .turnCompleted(let v) where v.threadId == mainThread:
             s.turnRunning = false
-            s.pendingInteractions = []
+            endOutstandingInteractions(&s) // clears pendingInteractions, freezing each as `.ended`
             s.streamingText = ""
             s.status = .idle
             s.lastTurnError = nil // T6: this turn ended without an agent_error
@@ -542,7 +650,7 @@ enum SessionReducer {
             }
         case .agentError(let v) where v.threadId == mainThread:
             s.turnRunning = false
-            s.pendingInteractions = []
+            endOutstandingInteractions(&s) // clears pendingInteractions, freezing each as `.ended`
             s.streamingText = ""
             s.status = .idle
             s.lastTurnError = v.message // T6: the one signal the pickers' probation reads
@@ -738,6 +846,88 @@ enum SessionReducer {
             )
             return
         }
+    }
+
+    /// How many exchanges back the interaction helpers below will look for the `.interaction` item a
+    /// given callId opened. The same number as `toolResultFoldSearchDepth` for exactly the same
+    /// reason, stated there in full: a mid-turn steer's `user_message` is persisted at SEND time, so
+    /// it can open a NEW exchange between the ask and its resolution, and one exchange back always
+    /// suffices for that (the rest is slack). Kept as its OWN constant rather than sharing that one,
+    /// because the two bounds are independently justified facts about two different folds — tying
+    /// them would make a future change to either silently change the other.
+    private static let interactionFoldSearchDepth = 4
+
+    /// Finds the `.interaction` item a callId opened, newest exchange first, bounded to
+    /// `interactionFoldSearchDepth`. Returns the (exchange, activity) index pair, or `nil` when the
+    /// item is not there — which is an ordinary, expected outcome, not an error: a `*_resolved` for
+    /// a CHILD thread's own ask (the resolve cases are deliberately not thread-gated, unlike the
+    /// ask cases), for an ask whose item `appendActivity`'s 200-item drop-oldest cap has already
+    /// evicted, or for one that predates this transcript's replay window.
+    ///
+    /// `lastIndex`, matching `foldToolResult`: a callId identifies at most one ask, so the only way
+    /// to see two is a duplicated event, and the newest copy is the one on screen.
+    private static func findInteraction(_ state: OrbSessionState, callId: String) -> (exchange: Int, item: Int)? {
+        for e in state.exchanges.indices.reversed().prefix(interactionFoldSearchDepth) {
+            if let i = state.exchanges[e].activity.lastIndex(where: { $0.interactionRecord?.callId == callId }) {
+                return (e, i)
+            }
+        }
+        return nil
+    }
+
+    /// Appends the transcript's record of an ask (mac-chat-parity Task 3).
+    ///
+    /// Two things it does that plain `appendActivity` does not, both load-bearing now that this item
+    /// is the only place a card can be drawn from:
+    ///
+    /// 1. **It opens an exchange when there is none.** `appendActivity` drops on an empty
+    ///    `exchanges` (its "no open exchange → drop" rule, correct for a tool line nobody can act
+    ///    on). Dropping an ASK would make it not merely invisible but UNANSWERABLE, since the card
+    ///    is the only door to responding — the pinned band that used to be a second door is gone.
+    ///    Opening an empty-prompt exchange is exactly what the `.assistantMessage` case already does
+    ///    for the same "arrived before any user_message" shape, and the transcript renders one
+    ///    correctly (`TranscriptExchangeRow` draws no prompt bubble for an empty prompt).
+    /// 2. **It dedupes by callId**, mirroring `appendPending`'s replay guard, so a re-seen
+    ///    `approval_requested` during a replay is a no-op rather than a second card. This is a
+    ///    stronger guard than `appendActivity`'s adjacent-dupe collapse, which compares whole values:
+    ///    a duplicate ask arriving after its own resolution had already folded in would not be
+    ///    "adjacent-equal" to anything and would append a second, permanently-pending card.
+    private static func appendInteraction(_ record: InteractionRecord, to state: inout OrbSessionState) {
+        guard findInteraction(state, callId: record.callId) == nil else { return }
+        if state.exchanges.isEmpty { state.exchanges.append(Exchange(prompt: "", reply: "")) }
+        appendActivity(.interaction(record), to: &state)
+    }
+
+    /// Lands a `*_resolved` on the `.interaction` item its callId opened, freezing that card with
+    /// what was actually decided. No match → no-op (see `findInteraction` for when that happens).
+    ///
+    /// Never overwrites an outcome already recorded: the daemon's own brokers are first-response-
+    /// wins (`QuestionBroker.respond`/`ApprovalBroker.resolve` return `alreadyResolved`), so the
+    /// FIRST resolution is the real one, and a duplicate or a late timeout must not rewrite the
+    /// record of what the user chose.
+    private static func foldInteractionOutcome(_ state: inout OrbSessionState, callId: String, outcome: InteractionRecord.Outcome) {
+        guard let (e, i) = findInteraction(state, callId: callId),
+              var record = state.exchanges[e].activity[i].interactionRecord,
+              record.outcome == nil else { return }
+        record.outcome = outcome
+        state.exchanges[e].activity[i].kind = .interaction(record)
+    }
+
+    /// Empties `pendingInteractions` and freezes each ask it removes as `.ended` — the single step
+    /// `turn_completed`/`agent_error` take instead of the bare `pendingInteractions = []` they used
+    /// to. Doing both in one place is what makes the transcript's "pending" state
+    /// (`outcome == nil`) incapable of disagreeing with the reducer's outstanding list: the set
+    /// being cleared IS the set being stamped, so no card can survive as clickable for an ask the
+    /// daemon has stopped waiting on.
+    ///
+    /// Bounded by `pendingInteractions.count` (a handful at most) rather than by scanning the whole
+    /// transcript for outcome-less records — same result, and it cannot accidentally re-stamp an
+    /// older exchange's already-terminal card.
+    private static func endOutstandingInteractions(_ state: inout OrbSessionState) {
+        for pending in state.pendingInteractions {
+            foldInteractionOutcome(&state, callId: pending.callId, outcome: .ended)
+        }
+        state.pendingInteractions = []
     }
 
     /// Truncates one tool result to `maxToolOutputCharacters` and marks that it was truncated —

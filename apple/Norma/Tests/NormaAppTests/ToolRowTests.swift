@@ -298,7 +298,7 @@ final class ToolRowTests: XCTestCase {
     /// key, nor what SwiftUI draws.
     func testTheExpansionKeyFollowsTheRunNotItsPosition() {
         let evicted = ActivityItem(kind: .tool(name: "read", detail: "/old", callId: "c0"))
-        let breaker = ActivityItem(kind: .interaction("needs approval"))
+        let breaker = ActivityItem(kind: .interaction(InteractionRecord(callId: "a1", ask: .approval(toolName: "bash", summary: "needs approval"))))
         let survivor = [
             ActivityItem(kind: .tool(name: "bash", detail: "a", callId: "c1")),
             ActivityItem(kind: .tool(name: "bash", detail: "b", callId: "c2")),

@@ -12,7 +12,7 @@ final class ActivityRowTests: XCTestCase {
         XCTAssertEqual(activityGlyphAndLabel(.init(kind: .subagentDone)).glyph, "✓")
         XCTAssertEqual(activityGlyphAndLabel(.init(kind: .worktree(entered: true, detail: "wt-1"))).glyph, "⛿")
         XCTAssertEqual(activityGlyphAndLabel(.init(kind: .worktree(entered: false, detail: "wt-1"))).glyph, "⟲")
-        XCTAssertEqual(activityGlyphAndLabel(.init(kind: .interaction("needs approval"))).glyph, "⚠")
+        XCTAssertEqual(activityGlyphAndLabel(.init(kind: .interaction(InteractionRecord(callId: "a1", ask: .approval(toolName: "bash", summary: "needs approval"))))).glyph, "⚠")
         XCTAssertEqual(activityGlyphAndLabel(.init(kind: .task(subject: "Do X", status: "weird"))).glyph, "☐", "unknown status falls back to pending glyph")
     }
 

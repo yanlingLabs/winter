@@ -189,15 +189,19 @@ final class ActivityCaptureTests: XCTestCase {
         s = SessionReducer.reduce(s, approvalRequested(summary: "rm -rf x", callId: "a1", seq: 7))
         s = SessionReducer.reduce(s, questionAsked("Which port?", callId: "q1", seq: 8))
         s = SessionReducer.reduce(s, planPresented(callId: "p1", seq: 9))
-        XCTAssertEqual(lastActivity(s), [
+        // mac-chat-parity Task 3: the three interaction items now carry the whole ask, not a bare
+        // summary string — the transcript draws the card itself from these. The summaries this test
+        // used to assert on are still what `InteractionRecord.summary` derives (pinned in
+        // `InteractionRecordTests.testSummaryIsDerivedFromTheAsk`).
+        XCTAssertEqual(lastActivity(s).count, 7)
+        XCTAssertEqual(Array(lastActivity(s).prefix(4)), [
             ActivityItem(kind: .subagent(agentType: "general")),
             ActivityItem(kind: .subagentDone),
             ActivityItem(kind: .worktree(entered: true, detail: "fix-x")),
             ActivityItem(kind: .worktree(entered: false, detail: "wt")),
-            ActivityItem(kind: .interaction("rm -rf x")),
-            ActivityItem(kind: .interaction("Which port?")),
-            ActivityItem(kind: .interaction("plan presented")),
         ])
+        XCTAssertEqual(lastActivity(s).compactMap(\.interactionRecord).map(\.summary),
+                       ["rm -rf x", "Which port?", "plan presented"])
         // Existing side effects preserved: approval/question/plan still manage pendingInteractions.
         XCTAssertEqual(s.pendingInteractions.map(\.callId), ["a1", "q1", "p1"])
         XCTAssertEqual(s.status, .approvalNeeded(count: 3))

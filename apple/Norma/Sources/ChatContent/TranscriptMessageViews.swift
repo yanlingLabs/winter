@@ -363,8 +363,8 @@ func activityGlyphAndLabel(_ item: ActivityItem) -> (glyph: String, label: Strin
         return ("✓", "subagent done")
     case .worktree(let entered, let detail):
         return (entered ? "⛿" : "⟲", detail)
-    case .interaction(let summary):
-        return ("⚠", summary)
+    case .interaction(let record):
+        return ("⚠", record.summary)
     }
 }
 
