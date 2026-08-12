@@ -674,10 +674,13 @@ struct ResolvedQuestionBody: View {
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(indices, id: \.self) { optionIndex in
                     if question.options.indices.contains(optionIndex) {
-                        chosenRow(
-                            glyph: optionSelectionGlyph(multiSelect: question.multiSelect, isSelected: true),
-                            text: question.options[optionIndex].label
-                        )
+                        // A PLAIN `checkmark`, not `optionSelectionGlyph`'s circle/square — iOS's
+                        // frozen row drops the single/multi distinction deliberately, and it is
+                        // right to: the shape of the control mattered while it was a control. On a
+                        // record, every listed row means one thing, "this was chosen". The pending
+                        // box still calls `optionSelectionGlyph`, which is where the distinction
+                        // still does work.
+                        chosenRow(glyph: "checkmark", text: question.options[optionIndex].label)
                     }
                 }
             }
@@ -692,27 +695,33 @@ struct ResolvedQuestionBody: View {
         }
     }
 
+    /// The frozen answer row in **iOS's grammar** (`norma-ios` `QuestionCardView.resolvedAnswerRow`):
+    /// the answer LEADS in the card's own text register and the accent mark TRAILS in a reserved
+    /// slot — no pill, no fill, no bold.
+    ///
+    /// The pending box keeps `OptionSelectionChrome`'s filled pill, and that asymmetry is the point:
+    /// there, the fill means "tap target, currently chosen". A frozen row has nothing to tap, so the
+    /// same fill read as an affordance for a decision already made. iOS draws exactly this line
+    /// between its two costumes, and its own comment says the two are "expected to diverge".
+    ///
+    /// SIZES STAY THE MAC'S OWN — `brand.md` beats iOS on values (spec §7); only the shape is
+    /// iOS's. The reserved trailing slot is 20pt here rather than iOS's 32 because this card's
+    /// horizontal rhythm is 10/12pt, not the phone's 16.
     private func chosenRow(glyph: String, text: String) -> some View {
-        let chrome = optionSelectionChrome(isSelected: true)
-        return HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Image(systemName: glyph)
-                .foregroundStyle(Theme.accent)
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text(text)
-                .font(.system(size: 13, weight: chrome.isBold ? .semibold : .regular))
+                .font(.system(size: 13))
                 .foregroundStyle(.primary)
                 .textSelection(.enabled)
+            Spacer(minLength: 8)
+            Image(systemName: glyph)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Theme.accent)
+                .frame(width: 20, alignment: .center)
+                .accessibilityHidden(true)   // decorative; the answer text carries the meaning
         }
-        .padding(.vertical, 6)
-        .padding(.horizontal, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Theme.accent.opacity(chrome.fillOpacity))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Theme.accent, lineWidth: chrome.strokeWidth)
-        )
+        .padding(.vertical, 3)
     }
 }
 
