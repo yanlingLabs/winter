@@ -190,10 +190,16 @@ final class InteractionRecordTests: XCTestCase {
         XCTAssertEqual(records(s).first?.outcome, .ended)
     }
 
-    /// The invariant stated as an invariant: after any event, an interaction is pending in the
-    /// transcript exactly when its callId is still in `pendingInteractions`. This is what makes the
-    /// view's "draw a live card" branch safe to key on the record alone.
-    func testPendingRecordsAndOutstandingListNeverDisagree() {
+    /// The invariant, stated with the scope it actually has: for NATIVE asks, an interaction is
+    /// pending in the transcript exactly when its callId is still in `pendingInteractions`.
+    ///
+    /// Deliberately scoped to native asks. A mirrored child ask is exempt on purpose — it stays
+    /// pending in the transcript after the parent's turn empties the outstanding list, because the
+    /// parent's turn end is no evidence about the child (see `interactionEndsWithItsTurn` and
+    /// `testAMirroredChildAskSurvivesTheParentsTurnEndStillPending`). The two sets agreeing was
+    /// never the goal; "the card is live iff the daemon is still waiting" is, and for a mirror the
+    /// outstanding list is the one that goes wrong.
+    func testPendingRecordsAndOutstandingListNeverDisagreeForNativeAsks() {
         var s = openTurnState()
         let stream: [SessionEvent] = [
             approvalRequested(callId: "a1", seq: 3),
@@ -214,6 +220,143 @@ final class InteractionRecordTests: XCTestCase {
             .question(answers: ["Which port?": "8080"], notes: [:], by: "orb"),
             .ended,
         ])
+    }
+
+    // MARK: The dispatch mirror — a child's ask does not end with the PARENT's turn
+
+    /// A tracked child's `approval_requested` mirrored into the dispatch session's stream, preserving
+    /// the child's `threadId: "main"` and carrying `childSessionId` — exactly what
+    /// `packages/core/src/agent/dispatch-children.ts`'s `mirror()` emits.
+    private func mirroredApprovalRequested(callId: String = "c1", child: String = "sess_child", seq: Int = 3) -> SessionEvent {
+        ev(#"{"type":"approval_requested","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"main","callId":"\#(callId)","toolName":"bash","summary":"child wants rm","childSessionId":"\#(child)"}"#)
+    }
+    private func mirroredApprovalResolved(approved: Bool, callId: String = "c1", child: String = "sess_child", by: String = "iphone-gateway", seq: Int = 9) -> SessionEvent {
+        ev(#"{"type":"approval_resolved","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"main","callId":"\#(callId)","approved":\#(approved),"by":"\#(by)","childSessionId":"\#(child)"}"#)
+    }
+
+    /// THE bug this fix round exists for, traced end to end. The parent's turn ending is not
+    /// evidence about a child that is designed to still be blocked — the relay is a hub-wide
+    /// observer over tracked children with no scoping to the parent's turn. Stamping `.ended` here
+    /// wrote "Ended with no response" into a permanent, replay-durable record for an approval the
+    /// child was actively waiting on, AND closed the Mac's only door to answering it.
+    func testAMirroredChildAskSurvivesTheParentsTurnEndStillPending() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, mirroredApprovalRequested())
+        s = SessionReducer.reduce(s, turnCompleted(seq: 4))
+
+        XCTAssertNil(records(s).first?.outcome, "the child is still blocked — nothing has ended")
+        XCTAssertEqual(records(s).first.map(interactionIsPending), true,
+                       "the card must stay answerable: onApproval already threads childSessionId")
+    }
+
+    /// And the resolution that arrives afterwards — minutes later, after any number of parent turns —
+    /// still lands, because the record was never frozen shut.
+    func testAMirroredChildResolutionArrivingAfterTheParentsTurnStillLands() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, mirroredApprovalRequested())
+        s = SessionReducer.reduce(s, turnCompleted(seq: 4))
+        // A whole further parent turn runs and ends while the child sits blocked.
+        s = SessionReducer.reduce(s, userMessage("carry on", seq: 5))
+        s = SessionReducer.reduce(s, turnStarted(seq: 6))
+        s = SessionReducer.reduce(s, turnCompleted(seq: 7))
+
+        s = SessionReducer.reduce(s, mirroredApprovalResolved(approved: true, seq: 9))
+        XCTAssertEqual(records(s).first?.outcome, .approval(approved: true, by: "iphone-gateway"))
+    }
+
+    /// Belt-and-braces on the same class: even if a record HAS been stamped `.ended`, a real
+    /// resolution must overwrite it. `.ended` is a local inference this app draws from its own turn
+    /// ending; the daemon reporting what actually happened outranks a guess that nothing would.
+    func testARealResolutionOverwritesTheLocalEndedInference() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, approvalRequested())     // native — DOES get stamped
+        s = SessionReducer.reduce(s, agentError(seq: 4))
+        XCTAssertEqual(records(s).first?.outcome, .ended)
+
+        // The broker's fail-closed timeout fires after the turn died.
+        s = SessionReducer.reduce(s, approvalResolved(approved: false, by: "timeout", seq: 5))
+        XCTAssertEqual(records(s).first?.outcome, .approval(approved: false, by: "timeout"),
+                       "the daemon's truth must replace the app's guess")
+    }
+
+    /// …but that permission is scoped to `.ended` alone. A real outcome is still first-wins, so the
+    /// record of what the user chose can never be rewritten.
+    func testTheOverwritePermissionIsScopedToEndedAlone() {
+        XCTAssertTrue(interactionOutcomeMayBeReplaced(current: nil, with: .approval(approved: true, by: "orb")))
+        XCTAssertTrue(interactionOutcomeMayBeReplaced(current: .ended, with: .approval(approved: true, by: "orb")))
+        XCTAssertFalse(interactionOutcomeMayBeReplaced(current: .ended, with: .ended))
+        XCTAssertFalse(interactionOutcomeMayBeReplaced(current: .approval(approved: true, by: "orb"), with: .ended),
+                       "a late turn end must never erase a real decision")
+        XCTAssertFalse(interactionOutcomeMayBeReplaced(current: .approval(approved: true, by: "orb"),
+                                                       with: .approval(approved: false, by: "timeout")))
+    }
+
+    /// The exemption is keyed on `childSessionId`, which is exactly what distinguishes a mirrored
+    /// ask from a native one on the wire.
+    func testOnlyMirroredAsksAreExemptFromTheTurnEndStamp() {
+        let ask = InteractionRecord.Ask.approval(toolName: "bash", summary: "rm x")
+        XCTAssertTrue(interactionEndsWithItsTurn(InteractionRecord(callId: "a1", ask: ask)))
+        XCTAssertFalse(interactionEndsWithItsTurn(InteractionRecord(callId: "c1", ask: ask, childSessionId: "sess_child")))
+    }
+
+    /// Mirrored QUESTIONS take the same path — `dispatch-children.ts` mirrors `question_asked`/
+    /// `question_resolved` identically. (`plan_presented` is not mirrored at all.)
+    func testAMirroredChildQuestionIsAlsoExempt() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, ev(#"""
+        {"type":"question_asked","seq":3,"sessionId":"s","ts":0,"threadId":"main","callId":"cq1","questions":[{"question":"Which port?","header":"Port","options":[{"label":"3000"},{"label":"8080"}],"multiSelect":false}],"childSessionId":"sess_child"}
+        """#))
+        s = SessionReducer.reduce(s, turnCompleted(seq: 4))
+        XCTAssertNil(records(s).first?.outcome)
+
+        s = SessionReducer.reduce(s, ev(#"""
+        {"type":"question_resolved","seq":9,"sessionId":"s","ts":0,"threadId":"main","callId":"cq1","answers":{"Which port?":"8080"},"by":"iphone-gateway","childSessionId":"sess_child"}
+        """#))
+        XCTAssertEqual(records(s).first?.outcome, .question(answers: ["Which port?": "8080"], notes: [:], by: "iphone-gateway"))
+    }
+
+    // MARK: The scan is unbounded — a far-back ask must not stay clickable forever
+
+    /// A native ask sitting more than a few exchanges back must STILL be stamped when its turn ends.
+    /// The stamp used to go through a depth-4 scan while `pendingInteractions` was emptied
+    /// unbounded, so the stamped set was a strict subset of the cleared set — and on a miss the card
+    /// kept live Approve/Deny buttons forever, which is the exact failure `.ended` exists to
+    /// prevent. Six exchanges deep: comfortably past the old bound.
+    func testAnAskManyExchangesBackIsStillFrozenWhenItsTurnEnds() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, approvalRequested(seq: 3))
+        // Six steer-opened exchanges pile up on top of it (each needs a reply first, or the
+        // userMessage folds into the open exchange instead of opening a new one).
+        var seq = 4
+        for i in 0..<6 {
+            s = SessionReducer.reduce(s, ev(#"{"type":"assistant_message","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"main","text":"round \#(i)"}"#))
+            seq += 1
+            s = SessionReducer.reduce(s, userMessage("more \(i)", seq: seq))
+            seq += 1
+        }
+        XCTAssertGreaterThan(s.exchanges.count, 5)
+
+        s = SessionReducer.reduce(s, turnCompleted(seq: seq))
+        XCTAssertTrue(s.pendingInteractions.isEmpty)
+        XCTAssertEqual(records(s).first?.outcome, .ended,
+                       "the stamp must reach as far back as the clear does")
+        XCTAssertEqual(records(s).first.map(interactionIsPending), false)
+    }
+
+    /// The same bound governed the replay-dedupe: a re-seen ask beyond the window appended a SECOND,
+    /// permanently-pending card for one callId.
+    func testAFarBackAskIsStillDedupedOnReplay() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, approvalRequested(seq: 3))
+        var seq = 4
+        for i in 0..<6 {
+            s = SessionReducer.reduce(s, ev(#"{"type":"assistant_message","seq":\#(seq),"sessionId":"s","ts":0,"threadId":"main","text":"round \#(i)"}"#))
+            seq += 1
+            s = SessionReducer.reduce(s, userMessage("more \(i)", seq: seq))
+            seq += 1
+        }
+        s = SessionReducer.reduce(s, approvalRequested(seq: seq))
+        XCTAssertEqual(records(s).count, 1, "one ask, one card, however far back it sits")
     }
 
     // MARK: Fold mechanics

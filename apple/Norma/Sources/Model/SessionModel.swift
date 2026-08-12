@@ -122,9 +122,17 @@ struct InteractionRecord: Equatable {
 
     /// How the ask ended. `nil` on the record means STILL PENDING, and that is the single source of
     /// truth for whether the transcript draws an interactive card or a frozen one — see
-    /// `interactionIsPending`. It cannot disagree with `OrbSessionState.pendingInteractions`,
-    /// because the one reducer step that empties that list (`endOutstandingInteractions`) is the
-    /// same step that stamps `.ended` on whatever it removes.
+    /// `interactionIsPending`.
+    ///
+    /// **This is deliberately NOT the same set as `OrbSessionState.pendingInteractions`, and the
+    /// difference is the point.** That list is emptied wholesale by the DISPATCH session's own
+    /// `turn_completed`, which is evidence about the parent's turn and says nothing whatever about a
+    /// mirrored CHILD session's ask — the child is designed to still be blocked there
+    /// (`packages/core/src/agent/dispatch-children.ts`'s relay is a hub-wide observer over tracked
+    /// children, not something scoped to the parent's turn). So a record with a `childSessionId`
+    /// stays pending across the parent's turn end, and the Mac keeps its door to answering it. What
+    /// the predicate actually tracks is "is the daemon still waiting on this ask", which is the
+    /// question the card is asking — see `interactionEndsWithItsTurn`.
     enum Outcome: Equatable {
         /// `approval_resolved`. NOTE the wire carries no `optionId`
         /// (`packages/protocol/src/events.ts`'s `ApprovalResolvedEvent` is `callId`/`approved`/`by`/
@@ -179,6 +187,44 @@ struct InteractionRecord: Equatable {
 /// testable without mounting a view, the same convention as `questionShowsHeaderChip` and friends
 /// in `ChatContent/PendingCards.swift`.
 func interactionIsPending(_ record: InteractionRecord) -> Bool { record.outcome == nil }
+
+/// Whether an ask's LIFECYCLE ends with the turn it was asked in — i.e. whether this session's
+/// `turn_completed`/`agent_error` is evidence that nobody is waiting on it any more.
+///
+/// True for a native ask: the engine awaits it inside the turn, so the turn ending proves it will
+/// never be answered. **False for a mirrored child ask** (`childSessionId != nil`, Dispatch Phase 7).
+/// The dispatch session's relay (`packages/core/src/agent/dispatch-children.ts`) is a hub-wide
+/// observer over tracked children with no scoping to the parent's turn: a child is *designed* to sit
+/// blocked on an approval while the parent's turn ends, and the child's eventual
+/// `approval_resolved`/`question_resolved` is mirrored back into the parent's stream whenever it
+/// arrives — minutes later, after any number of parent turns.
+///
+/// Stamping `.ended` on those was a false, replay-durable record ("Ended with no response" for an
+/// approval the child was actively blocked on) AND it closed the Mac's only door to answering it,
+/// since `onApproval`/`onQuestion` already thread `childSessionId` straight through to the child.
+/// Not stamping keeps the card live, which is what it honestly is.
+func interactionEndsWithItsTurn(_ record: InteractionRecord) -> Bool { record.childSessionId == nil }
+
+/// Whether a newly-arrived outcome may be written over what a record already holds.
+///
+/// Two rules, and the distinction between them is the whole content of this function:
+///
+/// 1. **First-response-wins among REAL outcomes.** The daemon's own brokers are first-response-wins
+///    (`ApprovalBroker.resolve`/`QuestionBroker.respond` return `alreadyResolved` rather than
+///    re-resolving), so a duplicate or a late timeout must never rewrite the record of what the user
+///    actually chose.
+/// 2. **`.ended` is not a real outcome and does not get that protection.** It is a LOCAL INFERENCE
+///    this app draws from its own turn ending — a guess that nothing will arrive. When the daemon
+///    later reports what actually happened, its truth outranks the guess, every time. Without this
+///    the dispatch mirror froze a permanent lie: the parent's turn end stamped `.ended`, and the
+///    child's genuine resolution — arriving afterwards by design — was discarded forever.
+func interactionOutcomeMayBeReplaced(current: InteractionRecord.Outcome?, with next: InteractionRecord.Outcome) -> Bool {
+    switch current {
+    case .none: return true                    // nothing recorded yet
+    case .ended: return next != .ended         // a real resolution outranks the local inference
+    default: return false                      // rule 1
+    }
+}
 
 /// One line of "what happened during this exchange" — tools run, task transitions, subagents
 /// spawned/finished, worktree enters/exits, and interaction points (approvals/questions/plans).
@@ -848,26 +894,30 @@ enum SessionReducer {
         }
     }
 
-    /// How many exchanges back the interaction helpers below will look for the `.interaction` item a
-    /// given callId opened. The same number as `toolResultFoldSearchDepth` for exactly the same
-    /// reason, stated there in full: a mid-turn steer's `user_message` is persisted at SEND time, so
-    /// it can open a NEW exchange between the ask and its resolution, and one exchange back always
-    /// suffices for that (the rest is slack). Kept as its OWN constant rather than sharing that one,
-    /// because the two bounds are independently justified facts about two different folds — tying
-    /// them would make a future change to either silently change the other.
-    private static let interactionFoldSearchDepth = 4
-
-    /// Finds the `.interaction` item a callId opened, newest exchange first, bounded to
-    /// `interactionFoldSearchDepth`. Returns the (exchange, activity) index pair, or `nil` when the
-    /// item is not there — which is an ordinary, expected outcome, not an error: a `*_resolved` for
-    /// a CHILD thread's own ask (the resolve cases are deliberately not thread-gated, unlike the
-    /// ask cases), for an ask whose item `appendActivity`'s 200-item drop-oldest cap has already
-    /// evicted, or for one that predates this transcript's replay window.
+    /// Finds the `.interaction` item a callId opened, newest exchange first. Returns the
+    /// (exchange, activity) index pair, or `nil` when the item is not there — an ordinary, expected
+    /// outcome, not an error: a `*_resolved` for a CHILD thread's own ask (the resolve cases are
+    /// deliberately not thread-gated, unlike the ask cases), for an ask whose item
+    /// `appendActivity`'s 200-item drop-oldest cap has already evicted, or for one that predates
+    /// this transcript's replay window.
+    ///
+    /// **UNBOUNDED, unlike `foldToolResult`'s depth-limited scan, and the difference is deliberate.**
+    /// An earlier revision of this reduced simply borrowed that constant, which does not transfer:
+    /// there the scan is HOT (every tool result) and a miss is benign (no output shown, nothing
+    /// else changes). Here it is COLD — a handful per turn end, at most one per ask — and a miss is
+    /// not benign at all. A missed `endOutstandingInteractions` stamp leaves a card with live
+    /// Approve/Deny/Submit buttons FOREVER, on an ask nobody is waiting on, replay-durable; a missed
+    /// resolution fold leaves the same card never freezing. That is precisely the failure `.ended`
+    /// exists to prevent, reintroduced by the bound meant to be an optimisation.
+    ///
+    /// The depth-4 "one exchange back always suffices" argument was also only ever true for
+    /// main-thread asks: a mirrored child ask (`childSessionId`) can sit outstanding across any
+    /// number of parent turns, so its item is arbitrarily far back by design.
     ///
     /// `lastIndex`, matching `foldToolResult`: a callId identifies at most one ask, so the only way
     /// to see two is a duplicated event, and the newest copy is the one on screen.
     private static func findInteraction(_ state: OrbSessionState, callId: String) -> (exchange: Int, item: Int)? {
-        for e in state.exchanges.indices.reversed().prefix(interactionFoldSearchDepth) {
+        for e in state.exchanges.indices.reversed() {
             if let i = state.exchanges[e].activity.lastIndex(where: { $0.interactionRecord?.callId == callId }) {
                 return (e, i)
             }
@@ -901,30 +951,42 @@ enum SessionReducer {
     /// Lands a `*_resolved` on the `.interaction` item its callId opened, freezing that card with
     /// what was actually decided. No match → no-op (see `findInteraction` for when that happens).
     ///
-    /// Never overwrites an outcome already recorded: the daemon's own brokers are first-response-
-    /// wins (`QuestionBroker.respond`/`ApprovalBroker.resolve` return `alreadyResolved`), so the
-    /// FIRST resolution is the real one, and a duplicate or a late timeout must not rewrite the
-    /// record of what the user chose.
+    /// What may overwrite what is `interactionOutcomeMayBeReplaced`'s decision, not this function's
+    /// — see it for the two rules (first-response-wins among real outcomes; `.ended` is a local
+    /// inference the daemon's truth always outranks).
     private static func foldInteractionOutcome(_ state: inout OrbSessionState, callId: String, outcome: InteractionRecord.Outcome) {
         guard let (e, i) = findInteraction(state, callId: callId),
               var record = state.exchanges[e].activity[i].interactionRecord,
-              record.outcome == nil else { return }
+              interactionOutcomeMayBeReplaced(current: record.outcome, with: outcome) else { return }
         record.outcome = outcome
         state.exchanges[e].activity[i].kind = .interaction(record)
     }
 
-    /// Empties `pendingInteractions` and freezes each ask it removes as `.ended` — the single step
-    /// `turn_completed`/`agent_error` take instead of the bare `pendingInteractions = []` they used
-    /// to. Doing both in one place is what makes the transcript's "pending" state
-    /// (`outcome == nil`) incapable of disagreeing with the reducer's outstanding list: the set
-    /// being cleared IS the set being stamped, so no card can survive as clickable for an ask the
-    /// daemon has stopped waiting on.
+    /// Empties `pendingInteractions` and freezes as `.ended` each ask it removes **whose lifecycle
+    /// actually ends with this turn** — the single step `turn_completed`/`agent_error` take instead
+    /// of the bare `pendingInteractions = []` they used to.
     ///
-    /// Bounded by `pendingInteractions.count` (a handful at most) rather than by scanning the whole
-    /// transcript for outcome-less records — same result, and it cannot accidentally re-stamp an
-    /// older exchange's already-terminal card.
+    /// A native ask is stamped: the engine awaits it inside the turn, so the turn ending proves it
+    /// will never be answered, and a card left clickable there would be a dead button forever. A
+    /// MIRRORED CHILD ask is deliberately not (`interactionEndsWithItsTurn` — see its doc): the
+    /// parent's turn end is no evidence about a child that is designed to still be blocked, and the
+    /// child's real resolution arrives afterwards through the relay.
+    ///
+    /// Two consequences of that exemption, both accepted rather than papered over:
+    ///   - The mirrored card stays pending in the transcript while its callId leaves
+    ///     `pendingInteractions` (this list is still cleared wholesale — it drives the orb's
+    ///     `.approvalNeeded` count, whose per-turn scoping is pre-existing behaviour and not this
+    ///     task's to change). The two sets are therefore NOT identical, by design; see
+    ///     `InteractionRecord.Outcome`'s own doc for why the card's question is the better one.
+    ///   - `FieldStateAdapter`'s draft sweep prunes on `pendingInteractions`, so a mirrored QUESTION
+    ///     card left pending loses any typed-but-unsubmitted answer at the parent's turn end. A
+    ///     wart, and strictly smaller than the alternative (freezing a false record and removing the
+    ///     ability to answer at all); named here so the next person finds it deliberate.
     private static func endOutstandingInteractions(_ state: inout OrbSessionState) {
         for pending in state.pendingInteractions {
+            guard let (e, i) = findInteraction(state, callId: pending.callId),
+                  let record = state.exchanges[e].activity[i].interactionRecord,
+                  interactionEndsWithItsTurn(record) else { continue }
             foldInteractionOutcome(&state, callId: pending.callId, outcome: .ended)
         }
         state.pendingInteractions = []
