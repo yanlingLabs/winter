@@ -85,11 +85,17 @@ struct NormaComposerCard: View {
     /// The permissions row's wiring (mac-chat-parity Task 6, spec §4). `nil` from a surface with no
     /// session to set a policy on — the new-chat page.
     ///
-    /// **Required, with no default, deliberately.** A defaulted `nil` is exactly the wiring miss
-    /// Task 4's mutation run found on this plan ("the adapter method was pinned, its WIRING was
-    /// not"): a surface that simply forgot the row would compile, run, and show a composer with no
-    /// band, and every value-level test would stay green. With no default it does not build.
-    var policy: ComposerPolicyControl?
+    /// **`let`, and that keyword is the whole mechanism.** A surface that forgets the row must not
+    /// compile: the miss Task 4's mutation run found on this plan ("the adapter method was pinned,
+    /// its WIRING was not") looks exactly like a composer with no band, and every value-level test
+    /// stays green through it.
+    ///
+    /// Writing no `= nil` is NOT enough to get that, which is the trap worth naming here: Swift
+    /// gives an **optional `var`** an implicit `nil` in the synthesized memberwise initializer, so
+    /// `var policy: ComposerPolicyControl?` is silently omittable at every call site. `let` is what
+    /// makes it a required argument (`missing argument for parameter 'policy' in call`).
+    /// `ComposerContext.policy` is `let` for the same reason — this outer boundary was the loose one.
+    let policy: ComposerPolicyControl?
 
     var stripEdge: NormaComposerStripEdge = .below
     var placeholder: String = newChatComposerPlaceholder

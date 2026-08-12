@@ -385,8 +385,12 @@ final class ComposerChromeTests: XCTestCase {
     /// true). So the strip type may be constructed in exactly one file — the one where a mode's
     /// chrome is decided.
     ///
-    /// **Limits:** it reads text. A shell that composed the row's *content view* directly, without
-    /// naming `ComposerStrip`, would evade it — that is why the value-level chat pins exist too.
+    /// **Limits, all real and all narrow.** It reads text, so three things evade it, none present
+    /// today: a shell that composed the row's *content view* directly without naming `ComposerStrip`
+    /// (which is why the value-level chat pins exist too); `let s: ComposerStrip = .init(…)`, whose
+    /// implicit-member form contains no `ComposerStrip(` substring at all; and — in the safe
+    /// direction — `codeOnly` strips only whole-line `//`, so a trailing or `/* */` comment naming
+    /// the type would false-POSITIVE rather than hide a construction.
     func testTheStripTypeIsConstructedOnlyWhereChromeIsDecided() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()

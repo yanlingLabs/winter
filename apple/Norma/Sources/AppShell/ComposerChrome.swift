@@ -386,7 +386,12 @@ struct CoworkComposerStrip: View {
         HStack(spacing: 10) {
             NewChatControlChip(systemImage: "folder", title: "Project or folder",
                                label: "Working folder (not wired yet)")
-            NewChatControlChip(systemImage: "hand.raised", title: "Ask",
+            // "Approval mode", not "Ask": the title was a POLICY NAME on a page with no session to
+            // have one — a small standing claim of exactly the kind Task 6 removed from the real
+            // row next door. It now wears that row's own unknown-case treatment
+            // (`ComposerPermissionsRow.chipTitle`), which is what a control that does not yet know
+            // its value looks like. Still a placeholder, still labelled as one.
+            NewChatControlChip(systemImage: "hand.raised", title: "Approval mode",
                                label: "Approval mode (not wired yet)")
             Spacer(minLength: 12)
             if !announcement.isEmpty {
