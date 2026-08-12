@@ -400,8 +400,20 @@ struct NormaComposerCard: View {
     // MARK: - The strip behind
 
     /// The second surface. It spans the composer's whole height PLUS the band, so only its far
-    /// edge and side rims ever show — the opaque composer covers the rest. Its rim is fainter than
-    /// the composer's: a surface behind should not trace itself as strongly as the thing in front.
+    /// edge and side rims ever show — the composer covers the rest.
+    ///
+    /// **Glass too, with its OWN tint** (user call, 2026-08-12). It wears `Theme.canvas` at the
+    /// composer's 0.75, where the composer wears `Theme.composerSurface`: the two tokens differ by
+    /// four points of luminance (`#F5F4F0` vs `#F9F9F7`), which is what keeps the protruding band
+    /// legible as a SECOND surface rather than as this card having grown a section. That separation
+    /// used to come from an opaque fill plus a half-strength rim; on glass it comes from the tint,
+    /// and the rim retires with the composer's for the same reason (glass draws its own edge, and a
+    /// `strokeBorder` on top double-draws it).
+    ///
+    /// Not `.interactive()`, deliberately, and this is the one place it differs from the composer:
+    /// the band is a backdrop that HOSTS a control, not a control. Lighting the whole 40pt band
+    /// under the pointer would announce a surface that does nothing when clicked — the chip inside
+    /// it carries its own response.
     ///
     /// The surface exists only when the mode's chrome supplies a strip. Before Task 5 this was two
     /// conditions and an opacity gate reading the same cowork predicate three times; they collapse
@@ -410,13 +422,10 @@ struct NormaComposerCard: View {
     @ViewBuilder
     private func stripSurface(_ strip: ComposerStrip?) -> some View {
         if let strip {
-            RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                .fill(Theme.canvas)
-                .overlay(
-                    RoundedRectangle(cornerRadius: newChatCardCornerRadius, style: .continuous)
-                        .strokeBorder(Theme.hairline.opacity(0.5),
-                                      lineWidth: shellSidebarHairlineWidth)
-                )
+            Color.clear
+                .glassEffect(
+                    .regular.tint(Theme.canvas.opacity(0.75)),
+                    in: .rect(cornerRadius: newChatCardCornerRadius, style: .continuous))
                 .frame(height: composerStripSurfaceHeight(strip.height))
                 .overlay(alignment: composerStripContentAlignment(stripEdge)) {
                     // Pinned to the GROWING edge, so the row sits in the band that protrudes rather
