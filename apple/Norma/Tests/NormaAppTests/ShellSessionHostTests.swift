@@ -390,6 +390,76 @@ final class ShellSessionHostTests: XCTestCase {
         )
     }
 
+    // MARK: - mac-chat-parity T4: the policy readout follows the session, off the wire
+
+    /// The seed's two call sites at once — `attachFresh` (the first select) and `hop` (every later
+    /// one). Before T4 this readout had no wire source at all: it sat at `"auto"` until this surface
+    /// itself changed it, so a session running `bypass` claimed "Auto" for the whole attachment.
+    ///
+    /// The final hop is the one that matters most: it lands on a row that reports NOTHING, and the
+    /// readout must fall back to its unknown placeholder rather than keep showing the previous
+    /// session's `bypass` — a policy label is a claim about the session on screen.
+    func testSelectAndHopSeedThePolicyReadoutFromTheDirectoryRow() async {
+        let rows = [
+            SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "code", approvalPolicy: "bypass"),
+            SessionSummary(sessionId: "S2", title: nil, createdAt: 2, scope: "global", cwd: nil, mode: "code", approvalPolicy: "plan"),
+            SessionSummary(sessionId: "S3", title: nil, createdAt: 3, scope: "global", cwd: nil, mode: "code"),
+        ]
+        let (host, factory) = makeHost(rows: rows)
+        defer { host.deselect() }
+        await host.directory.refresh()
+        host.setShellVisible(true)
+
+        host.select("S1")
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "S1")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicy, "bypass",
+                       "attachFresh seeds off the row — no setPolicy has been called")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicyKnown, true)
+
+        host.select("S2")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicy, "plan", "the hop re-derives it")
+
+        host.select("S3")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicy, "auto",
+                       "a row that reports nothing resets to the placeholder — never the departed session's plan")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicyKnown, false,
+                       "…and says so, so a persistent row can decline to claim anything")
+    }
+
+    /// The heal's WIRING, not just its rule (which `PolicyMenuTests` pins on the adapter directly):
+    /// `attachFresh` seeds once off whatever the directory holds, so a session attached before its
+    /// row loaded — the New-Chat race above, and any caller that attaches ahead of the directory's
+    /// refresh — would otherwise show "unknown" for the rest of that attachment, with nothing ever
+    /// reading the row again. Same door as `isChatSession`'s own self-heal, same trigger: a plain
+    /// `directory.refresh()`, which is exactly what the daemon's broadcast causes in production.
+    func testAttachFreshSelfHealsThePolicyWhenTheRowLandsAfterAttach() async {
+        let lister = StubSessionLister()
+        let factory = ShellTransportFactory()
+        let directory = SessionDirectory(lister: lister.list)
+        let host = ShellSessionHost(directory: directory, makeFeed: { sessionId in
+            let session = SessionModel()
+            let feed = SessionFeed(makeTransport: { factory.make() }, token: "tok", clientName: "orb",
+                                   mode: .pinned(sessionId: sessionId), session: session)
+            return (feed, session)
+        })
+        defer { host.deselect() }
+
+        host.setShellVisible(true)
+        host.select("s_new") // lister.rows is still empty — the row hasn't loaded yet
+        await waitUntilMade(factory, 1)
+        await answerHandshake(factory.made[0], sessionId: "s_new")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicyKnown, false,
+                       "nothing has been learned yet — the placeholder is not an answer")
+
+        lister.rows = [SessionSummary(sessionId: "s_new", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "code", approvalPolicy: "bypass")]
+        await directory.refresh()
+
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicy, "bypass",
+                       "the row landing on an ALREADY-attached session must heal the readout")
+        XCTAssertEqual(host.attachment?.adapter.sessionPolicyKnown, true)
+    }
+
     // MARK: - AppDelegate wiring (no socket: the shell is hidden throughout)
 
     /// The shell's host is real, shares the app's ONE `SessionDirectory` (so every surface reads the

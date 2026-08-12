@@ -392,8 +392,9 @@ final class PolicyMenuTests: XCTestCase {
     /// covers NormaKit's decode AND `AppModel.swift`'s map into `SessionSummary`, together.
     ///
     /// (`DetachedWindowController.swift` holds the OTHER construction site, a verbatim twin of this
-    /// one built on a detached window's own feed; it is out of reach of a unit test for the reason
-    /// that file's own tests document, so it is kept identical by inspection.)
+    /// one built on a detached window's own feed. It has its own live round trip —
+    /// `DetachedWindowTests.testSelectSessionReDerivesTheApprovalPolicyFromThisWindowsDirectory` —
+    /// so neither site is left to inspection.)
     @MainActor
     func testTheDirectoryThreadsApprovalPolicyOffARealSessionListRoundTrip() async throws {
         let t = AppScriptedTransport()
