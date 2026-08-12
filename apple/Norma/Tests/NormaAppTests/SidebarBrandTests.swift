@@ -313,9 +313,15 @@ final class SidebarBrandTests: XCTestCase {
         XCTAssertFalse(SessionMode.cowork.isAvailable)
     }
 
-    /// The working-folder / approval / announcement row is COWORK ONLY (user ruling, 2026-08-07):
-    /// a chat has no working folder and takes no approvals, so offering them would be offering
-    /// settings that cannot apply to what the page is about to create.
+    /// COWORK ONLY (user ruling, 2026-08-07): a chat has no working folder and takes no approvals,
+    /// so offering them would be offering settings that cannot apply to what the page is about to
+    /// create.
+    ///
+    /// What this predicate decides is **this page's own shape** — the idea list in place of the
+    /// starter chips. It stopped deciding the composer's second row at mac-chat-parity Task 5: that
+    /// band is `CoworkComposerChrome.makeStrip()`'s now, one composer type per mode. The two answers
+    /// coincide for cowork and are not tied together — Task 6 gives code and dispatch a band while
+    /// this keeps saying no for both, correctly, because it is about layout on an empty page.
     func testCoworkControlsShowOnCoworkOnly() {
         XCTAssertTrue(newChatShowsCoworkControls(mode: .cowork))
         XCTAssertFalse(newChatShowsCoworkControls(mode: .chat))

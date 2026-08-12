@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import NormaProtocol
 import NormaKit
 @testable import Norma
@@ -483,5 +484,121 @@ final class PolicyMenuTests: XCTestCase {
         XCTAssertEqual(model.directory.rows.first { $0.sessionId == "s_2" }?.approvalPolicy, "plan")
         XCTAssertNil(model.directory.rows.first { $0.sessionId == "s_old" }?.approvalPolicy,
                      "an older daemon's row stays absent all the way through — never filled in en route")
+    }
+
+    // MARK: - mac-chat-parity T6: `policyPickerRow` moved out of `extension WindowContentView`
+    //
+    // The composer's permissions row (spec §4) is a THIRD surface rendering the same row, and it is
+    // not a `WindowContentView`, so the shared implementation had to move off that extension. These
+    // pin that the move changed nothing for the two surfaces that already had it.
+
+    /// A live `WindowContentView`, built as `ShellSessionHost.swift:1800` builds it — the two
+    /// pre-existing policy surfaces (the header's ⋯ popover and the WorkSidebar's Options block)
+    /// both render `policyPickerRow(_:)` off exactly this view.
+    @MainActor
+    private func liveView(_ adapter: FieldStateAdapter) -> WindowContentView<EmptyView> {
+        WindowContentView(adapter: adapter, tint: .blue, topInset: 8, sidebars: nil) { EmptyView() }
+    }
+
+    /// The forwarder hands the shared row exactly what the extension method used to read inline:
+    /// the adapter's plain `sessionPolicy` for the checkmark and its in-flight flag for the disable.
+    ///
+    /// `current` is the RAW value, not Task 6's known-or-nothing one: T4 ruled that the two
+    /// transient popovers keep showing the placeholder, "which is what they have always done" —
+    /// only the persistent row declines to claim.
+    @MainActor
+    func testTheMovedRowIsHandedTheAdaptersOwnValues() {
+        let adapter = FieldStateAdapter(session: SessionModel())
+        adapter.adoptSessionPolicy("bypass")
+        adapter.policyChangeInFlight = true
+
+        let row = liveView(adapter).policyPickerRow("auto")
+        XCTAssertEqual(row.policy, "auto")
+        XCTAssertEqual(row.current, "bypass", "the checkmark still compares against the adapter's value")
+        XCTAssertTrue(row.isDisabled, "…and rows still disable while a change is in flight")
+    }
+
+    /// The unknown case, for the two surfaces the move must not change: they keep the `"auto"`
+    /// placeholder checkmark they have shown since long before T4 gave the value a wire source.
+    @MainActor
+    func testTheTwoTransientSurfacesStillShowThePlaceholderWhileUnknown() {
+        let adapter = FieldStateAdapter(session: SessionModel())
+        XCTAssertFalse(adapter.sessionPolicyKnown, "the premise")
+        XCTAssertEqual(liveView(adapter).policyPickerRow("auto").current, "auto",
+                       "unchanged by the move — only the composer's persistent row declines to name an unknown policy")
+    }
+
+    /// Selecting a row still fires this adapter's `onSetPolicy`, and still reads it at TAP time
+    /// (the wirer may attach its callbacks after the view was built).
+    @MainActor
+    func testTheMovedRowStillFiresTheAdaptersSetPolicy() {
+        let adapter = FieldStateAdapter(session: SessionModel())
+        let row = liveView(adapter).policyPickerRow("plan")
+        var sent: [String] = []
+        adapter.onSetPolicy = { sent.append($0) }
+        row.onSelect(row.policy)
+        XCTAssertEqual(sent, ["plan"])
+    }
+
+    /// The move is a MOVE: both pre-existing surfaces still render the shared row, over all six
+    /// modes. A source scan — this codebase does not render SwiftUI in tests — so it proves the call
+    /// sites are still there, not what they draw. The value pins above cover what they are handed.
+    func testBothPreExistingSurfacesStillRenderTheSharedRowOverAllSixModes() throws {
+        for relative in ["Sources/ChatContent/WorkSidebar.swift",
+                         "Sources/ChatContent/WindowContentView.swift"] {
+            let url = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent(relative)
+            let code = try String(contentsOf: url, encoding: .utf8)
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map { $0.drop(while: { $0 == " " }).hasPrefix("//") ? "" : String($0) }
+                .joined(separator: "\n")
+            XCTAssertTrue(code.contains("ForEach(sessionPolicyModes, id: \\.self)"),
+                          "\(relative) stopped offering all six modes")
+            XCTAssertTrue(code.contains("policyPickerRow("),
+                          "\(relative) stopped rendering the shared picker row")
+        }
+    }
+
+    // MARK: - mac-chat-parity T6: the composer row's wiring, read off the adapter
+
+    /// The control the live composer card is handed. The placeholder never crosses this boundary:
+    /// `policy` is `nil` unless the daemon has actually answered, which is what makes "render no
+    /// label while unknown" a thing the row cannot forget rather than a thing it must remember.
+    @MainActor
+    func testTheComposerPolicyControlHidesThePlaceholderAndPassesTheAnswer() {
+        let adapter = FieldStateAdapter(session: SessionModel())
+        XCTAssertNil(adapter.composerPolicyControl.policy,
+                     "an unseeded adapter reads \"auto\" — a placeholder, and the row must never see it")
+
+        adapter.seedSessionPolicy(for: "s_1", in: [
+            SessionSummary(sessionId: "s_1", title: nil, createdAt: 1, scope: "global",
+                           approvalPolicy: "bypass"),
+        ])
+        XCTAssertEqual(adapter.composerPolicyControl.policy, "bypass")
+
+        adapter.policyChangeInFlight = true
+        XCTAssertTrue(adapter.composerPolicyControl.changeInFlight)
+    }
+
+    /// The control forwards at TAP time rather than capturing whatever `onSetPolicy` happened to be
+    /// when the card was built — same discipline as the two pickers' own buttons.
+    @MainActor
+    func testTheComposerPolicyControlForwardsToOnSetPolicyAtTapTime() {
+        let adapter = FieldStateAdapter(session: SessionModel())
+        let control = adapter.composerPolicyControl
+        var sent: [String] = []
+        adapter.onSetPolicy = { sent.append($0) } // wired AFTER the control was built
+        control.onSet("accept-edits")
+        XCTAssertEqual(sent, ["accept-edits"])
+    }
+
+    /// Dispatch's settable set, as a fact about the daemon rather than about the composer: every
+    /// policy except `plan` (`packages/core/src/ipc/server.ts:1527-1528`).
+    func testDispatchSettablePolicyModesIsTheSixMinusPlan() {
+        XCTAssertEqual(dispatchSettablePolicyModes, ["dont-ask", "ask", "accept-edits", "auto", "bypass"])
+        XCTAssertFalse(dispatchSettablePolicyModes.contains("plan"))
+        XCTAssertEqual(dispatchSettablePolicyModes, sessionPolicyModes.filter { $0 != "plan" },
+                       "derived from the six, so a seventh policy reaches dispatch automatically")
     }
 }
