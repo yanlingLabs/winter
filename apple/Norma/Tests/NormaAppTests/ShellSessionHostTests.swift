@@ -2546,12 +2546,19 @@ final class ShellSessionHostTests: XCTestCase {
         }
         mgmt.feed(#"{"jsonrpc":"2.0","id":\#(setModel["id"] as! Int),"result":{}}"#)
 
+        // Asserted HERE, before the send-dependent half, and proven by the mutation run: an
+        // unconditional write sends its `setEffort` in this beat AND then stalls the send waiting
+        // for a response nobody feeds — so an assertion placed after the send would red on a
+        // TIMEOUT rather than on the claim it is making.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertFalse(mgmt.methods.contains("session.setEffort"),
+                       "an untouched axis must not be cleared — this page never set it")
+
         await waitUntilMade(factory, 1)
         let t = factory.made[0]
         await answerHandshake(t, sessionId: "s_bound")
         await feedWaitUntil { t.methods.contains("session.send") }
-        XCTAssertFalse(mgmt.methods.contains("session.setEffort"),
-                       "an untouched axis must not be cleared — this page never set it")
+        XCTAssertFalse(mgmt.methods.contains("session.setEffort"), "…and still not by send time")
     }
 
     /// **Fix round 1, the second Important.** An effort picked while no model is pinned is validated
