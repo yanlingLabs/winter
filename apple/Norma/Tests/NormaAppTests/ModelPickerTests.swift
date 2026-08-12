@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import NormaProtocol
 import NormaKit
 @testable import Norma
@@ -703,5 +704,115 @@ final class ModelPickerTests: XCTestCase {
 
         XCTAssertEqual(model.directory.rows.first { $0.sessionId == "s_1" }?.effort, "ultra")
         XCTAssertNil(model.directory.rows.first { $0.sessionId == "s_2" }?.effort, "absent = the global default")
+    }
+
+    // MARK: - mac-chat-parity Task 7 (spec §5): the same menus, now reachable from the composer
+
+    /// The composer needs the header's two menus, and a per-mode composer chrome is not a
+    /// `WindowContentView` — so their CONTENT moved to file scope as `ModelMenuContent`/
+    /// `EffortMenuContent`, the same move `PolicyPickerRow` made at Task 6. **A move, not a rewrite:**
+    /// the bodies are the extension's own with the `adapter.` reads turned into parameters, and the
+    /// header's own vars are now forwarders that hand them exactly what those reads used to be.
+    ///
+    /// This is the "the header still renders identically" claim in the only form it can take at value
+    /// level: the inputs are the same inputs. Pixels remain the live gate.
+    @MainActor
+    func testTheHeadersModelMenuStillReadsTheAdaptersOwnValues() async {
+        let adapter = FieldStateAdapter(session: SessionModel())
+        adapter.modelCatalogue = SyncConfigSnapshot(
+            provider: "codex-oauth", defaultModel: "srv-a",
+            models: [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"]),
+                     SyncConfigModelInfo(id: "srv-b", efforts: ["high", "max"])],
+            defaultEffort: "high", clientEfforts: ["ultra"])
+        adapter.modelChangeInFlight = true
+        let view = await headerView(adapter, rows: [
+            SessionSummary(sessionId: "s_1", title: nil, createdAt: 1, scope: "global",
+                           mode: "code", model: "srv-b", effort: "high"),
+        ])
+
+        let menu = view.modelMenuContent
+        XCTAssertEqual(menu.options, ["srv-a", "srv-b"], "the catalogue's slugs, in daemon order")
+        XCTAssertEqual(menu.current, "srv-b", "…and the session ROW's model, exactly as before the move")
+        XCTAssertTrue(menu.isDisabled, "rows disable while a change is in flight — unchanged")
+    }
+
+    @MainActor
+    func testTheHeadersEffortMenuStillReadsTheAdaptersOwnValues() async {
+        let adapter = FieldStateAdapter(session: SessionModel())
+        adapter.modelCatalogue = SyncConfigSnapshot(
+            provider: "codex-oauth", defaultModel: "srv-a",
+            models: [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"]),
+                     SyncConfigModelInfo(id: "srv-b", efforts: ["high", "max"])],
+            defaultEffort: "high", clientEfforts: ["ultra"])
+        let code = await headerView(adapter, rows: [
+            SessionSummary(sessionId: "s_1", title: nil, createdAt: 1, scope: "global",
+                           mode: "code", model: "srv-b", effort: "high"),
+        ])
+        XCTAssertEqual(code.effortMenuContent.wire, ["high", "max"], "the ROW's model's own levels")
+        XCTAssertEqual(code.effortMenuContent.tiers, ["ultra"], "a code session still reaches the tier section")
+        XCTAssertEqual(code.effortMenuContent.current, "high")
+
+        let chat = await headerView(adapter, rows: [
+            SessionSummary(sessionId: "s_1", title: nil, createdAt: 1, scope: "global",
+                           mode: "chat", model: "srv-b"),
+        ])
+        XCTAssertEqual(chat.effortMenuContent.wire, ["high", "max"],
+                       "chat still picks its wire effort — setEffort is mode-agnostic")
+        XCTAssertEqual(chat.effortMenuContent.tiers, [], "…and still never a tier")
+    }
+
+    /// The composer asks the tier question as a BOOLEAN (its mode's own chrome answers it); the
+    /// header asks it as a mode string. **One decision, two doors** — pinned for every mode so the
+    /// 33 pins above and the composer's new door cannot drift apart.
+    func testTheEffortOptionsBoolDoorAgreesWithTheModeDoorForEveryMode() {
+        let catalogue = SyncConfigSnapshot(
+            provider: "codex-oauth", defaultModel: "srv-a",
+            models: [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"])],
+            defaultEffort: "high", clientEfforts: ["ultra"])
+        for mode in SessionMode.allCases.map({ $0.rawValue }) + [nil] {
+            let byMode = effortPickerOptions(catalogue: catalogue, model: "srv-a", mode: mode)
+            let byBool = effortPickerOptions(catalogue: catalogue, model: "srv-a",
+                                             offersTiers: effortTiersAreOffered(mode: mode))
+            XCTAssertEqual(byMode.wire, byBool.wire, "wire levels diverged for mode \(mode ?? "nil")")
+            XCTAssertEqual(byMode.tiers, byBool.tiers, "tier section diverged for mode \(mode ?? "nil")")
+        }
+    }
+
+    /// The optimistic overlay and the RPC are ONE pair, wherever a row is picked. Extracted at Task 7
+    /// because the composer's chip is a second surface that must apply it: two copies of "flip the
+    /// overlay, then fire" is exactly how one surface ends up not flipping it.
+    @MainActor
+    func testApplyingASelectionSetsTheOverlayThenFiresTheRPC() {
+        let adapter = FieldStateAdapter(session: SessionModel())
+        var models: [String?] = []
+        var efforts: [String?] = []
+        adapter.onSetModel = { models.append($0) }
+        adapter.onSetEffort = { efforts.append($0) }
+
+        adapter.applyModelSelection("srv-b")
+        XCTAssertEqual(adapter.pendingModel, .value("srv-b"))
+        XCTAssertEqual(models, ["srv-b"])
+        adapter.applyModelSelection(nil)
+        XCTAssertEqual(adapter.pendingModel, .clear, "the Default row CLEARS — it is not a value")
+        XCTAssertEqual(models, ["srv-b", nil])
+
+        adapter.applyEffortSelection("ultra")
+        XCTAssertEqual(adapter.pendingEffort, .value("ultra"))
+        XCTAssertEqual(efforts, ["ultra"])
+        adapter.applyEffortSelection(nil)
+        XCTAssertEqual(adapter.pendingEffort, .clear)
+        XCTAssertEqual(efforts, ["ultra", nil])
+    }
+
+    /// A header view over a real directory — the menus read the session's row through
+    /// `currentSidebarSessionSummary`, so a wiring is the only way to drive them honestly.
+    @MainActor
+    private func headerView(_ adapter: FieldStateAdapter,
+                            rows: [SessionSummary]) async -> WindowContentView<EmptyView> {
+        let directory = SessionDirectory(lister: { rows })
+        await directory.refresh()
+        let wiring = SidebarWiring(directory: directory, currentSessionId: { rows.first?.sessionId },
+                                   onSelect: { _ in }, onOpenDetached: { _ in }, onNewSession: {})
+        return WindowContentView(adapter: adapter, tint: .blue, topInset: 8, sidebars: wiring) { EmptyView() }
     }
 }

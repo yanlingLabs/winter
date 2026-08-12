@@ -46,6 +46,38 @@ final class ComposerChromeTests: XCTestCase {
         ComposerPolicyControl(policy: policy, changeInFlight: inFlight, onSet: onSet)
     }
 
+    /// mac-chat-parity Task 7: the catalogue the chip's two lists come from — the SAME shape
+    /// `ModelPickerTests` drives the header's menus with, so "the chip opens the menu the header
+    /// does" is asserted against one vocabulary rather than two fixtures that could drift.
+    private func catalogue() -> SyncConfigSnapshot {
+        SyncConfigSnapshot(provider: "codex-oauth", defaultModel: "srv-a",
+                           models: [SyncConfigModelInfo(id: "srv-a", efforts: ["none", "low", "high"]),
+                                    SyncConfigModelInfo(id: "srv-b", efforts: ["high", "max"])],
+                           defaultEffort: "high", clientEfforts: ["ultra"])
+    }
+
+    /// The model/effort wiring a surface hands the card (`WindowContentView.composerModelControl`
+    /// for a live session, `ShellSessionHost.newChatModelControl` for the new-chat page).
+    private func wiredModel(model: String? = nil, effort: String? = nil,
+                            catalogue: SyncConfigSnapshot? = nil,
+                            modelInFlight: Bool = false, effortInFlight: Bool = false,
+                            onOpen: @escaping () -> Void = {},
+                            onSetModel: @escaping (String?) -> Void = { _ in },
+                            onSetEffort: @escaping (String?) -> Void = { _ in }) -> ComposerModelControl {
+        ComposerModelControl(model: model, effort: effort, catalogue: catalogue ?? self.catalogue(),
+                             modelChangeInFlight: modelInFlight, effortChangeInFlight: effortInFlight,
+                             onOpen: onOpen, onSetModel: onSetModel, onSetEffort: onSetEffort)
+    }
+
+    /// A directory-backed sidebar wiring, so a live card can be driven against a REAL `session.list`
+    /// row (which is where the header's menus read the session's model/effort from).
+    private func wiring(_ rows: [SessionSummary], current: String) async -> SidebarWiring {
+        let directory = SessionDirectory(lister: { rows })
+        await directory.refresh()
+        return SidebarWiring(directory: directory, currentSessionId: { current },
+                             onSelect: { _ in }, onOpenDetached: { _ in }, onNewSession: {})
+    }
+
     private struct NotAPermissionsStrip: Error {}
 
     /// The strip's payload, or a failure that names what was found instead. Throws rather than
@@ -63,9 +95,9 @@ final class ComposerChromeTests: XCTestCase {
 
     /// A live session's `WindowContentView`, built exactly as `ShellSessionHost.swift:1800` builds
     /// it (minus the sidebar wiring, which no assertion here reads).
-    private func liveView(_ adapter: FieldStateAdapter,
-                          mode: SessionMode?) -> WindowContentView<EmptyView> {
-        WindowContentView(adapter: adapter, tint: .blue, topInset: 8, sidebars: nil,
+    private func liveView(_ adapter: FieldStateAdapter, mode: SessionMode?,
+                          sidebars: SidebarWiring? = nil) -> WindowContentView<EmptyView> {
+        WindowContentView(adapter: adapter, tint: .blue, topInset: 8, sidebars: sidebars,
                           composerCardMode: mode) { EmptyView() }
     }
 
@@ -177,7 +209,7 @@ final class ComposerChromeTests: XCTestCase {
     func testTheCardDerivesItsChromeFromItsOwnMode() {
         for mode in SessionMode.allCases {
             let card = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
-                                         policy: nil)
+                                         policy: nil, model: wiredModel())
             XCTAssertEqual(card.chrome.mode, mode,
                            "the card rendered \(card.chrome.mode)'s composer for a \(mode) session")
         }
@@ -193,7 +225,8 @@ final class ComposerChromeTests: XCTestCase {
     func testALiveChatSessionsCardCarriesNoBand() {
         let card = NormaComposerCard(text: .constant("hi"), onSubmit: {},
                                      mode: .constant(.chat), modeIsSelectable: false,
-                                     policy: wiredPolicy("bypass"), stripEdge: .above)
+                                     policy: wiredPolicy("bypass"), model: wiredModel(),
+                                     stripEdge: .above)
         XCTAssertNil(card.chrome.makeStrip())
     }
 
@@ -202,7 +235,8 @@ final class ComposerChromeTests: XCTestCase {
     func testALiveCodeSessionsCardReachesCodesChrome() {
         let card = NormaComposerCard(text: .constant("hi"), onSubmit: {},
                                      mode: .constant(.code), modeIsSelectable: false,
-                                     policy: wiredPolicy("ask"), stripEdge: .above)
+                                     policy: wiredPolicy("ask"), model: wiredModel(),
+                                     stripEdge: .above)
         XCTAssertEqual(String(describing: type(of: card.chrome)), "CodeComposerChrome")
     }
 
@@ -377,6 +411,201 @@ final class ComposerChromeTests: XCTestCase {
         XCTAssertNil(liveView(adapter, mode: nil).composerCard)
     }
 
+    // MARK: - mac-chat-parity Task 7: the model/effort chip (spec §5)
+
+    /// **The one thing about model/effort that is per-mode is exactly one row: `ultra`.**
+    ///
+    /// `CLIENT_EFFORTS` is a ONE-element list (`packages/core/src/settings.ts:51`) and
+    /// `clientEffortEligible` is a fail-closed code-only allowlist (`settings.ts:89-91`). The WIRE
+    /// efforts (`none/low/medium/high/xhigh/max`) are not mode-scoped at all — they are validated
+    /// against the MODEL (`assertEffortSelectable`, `packages/core/src/ipc/server.ts:476-489`). So
+    /// the third `ComposerChrome` member is a BOOLEAN, not a per-mode effort list.
+    func testOnlyCodeOffersTheNormaLevelEffortTiers() {
+        XCTAssertTrue(chrome(.code).offersClientEffortTiers)
+        XCTAssertFalse(chrome(.chat).offersClientEffortTiers,
+                       "a tier on chat is a row whose every tap is an INVALID_PARAMS")
+        XCTAssertFalse(chrome(.dispatch).offersClientEffortTiers)
+        XCTAssertFalse(chrome(.cowork).offersClientEffortTiers)
+    }
+
+    /// …and each mode's answer IS the decision the header's menus have used since
+    /// provider-correctness T6 (`effortTiersAreOffered`, the Swift mirror of `clientEffortEligible`)
+    /// rather than a second copy of the rule that could drift from it. The composer is a second door
+    /// onto one machine, which is what spec §5 asked for.
+    func testTheChromesTierAnswerIsTheHeadersOwnDecisionFunction() {
+        for mode in SessionMode.allCases {
+            XCTAssertEqual(chrome(mode).offersClientEffortTiers,
+                           effortTiersAreOffered(mode: mode.rawValue),
+                           "\(mode)'s composer must answer the tier question the way the header does")
+        }
+    }
+
+    /// **The WIRING of that answer**, through the card's real initialiser. Both pins above stay green
+    /// on a card that asked the catalogue directly (or hardcoded `true`) while shipping an `ultra` row
+    /// on chat — the Task 4/Task 6 lesson, twice observed on this plan.
+    func testTheCardsChipOffersTiersOnlyOnTheModeThatMaySelectThem() {
+        for mode in SessionMode.allCases {
+            let card = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
+                                         policy: nil, model: wiredModel(model: "srv-a"))
+            XCTAssertEqual(card.modelRow.tiers, mode == .code ? ["ultra"] : [],
+                           "\(mode)'s chip offered tiers \(card.modelRow.tiers)")
+        }
+    }
+
+    /// Everything ELSE the chip offers is mode-independent and comes from the catalogue — including
+    /// **dispatch**, whose sets the daemon pins (`DISPATCH_PIN_MESSAGE`, `ipc/server.ts`). The header
+    /// has always SHOWN dispatch both menus and let the daemon refuse; spec §3's table says keep that
+    /// posture, so this pins shown-but-refused rather than quietly regressing it to absent.
+    func testEveryModeIncludingDispatchStillOffersTheCataloguesModelsAndWireEfforts() {
+        for mode in SessionMode.allCases {
+            let card = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
+                                         policy: nil, model: wiredModel(model: "srv-b"))
+            XCTAssertEqual(card.modelRow.options, ["srv-a", "srv-b"], "\(mode) must still offer the models")
+            XCTAssertEqual(card.modelRow.wire, ["high", "max"],
+                           "\(mode) must still offer the WIRE efforts — they are model-scoped, never mode-scoped")
+        }
+    }
+
+    /// The wire list follows the MODEL IN FORCE, which pre-session means the HELD model and not the
+    /// session row that does not exist yet: a pair built against the daemon's default while the user
+    /// has pinned something else is a legal-looking pair the create then throws INVALID_PARAMS on.
+    /// Absent a pick, `effortPickerOptions`' own fallback to the catalogue's default model applies.
+    func testTheChipsWireEffortsFollowTheModelInForce() {
+        let held = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
+                                     policy: nil, model: wiredModel(model: "srv-b"))
+        XCTAssertEqual(held.modelRow.wire, ["high", "max"], "the HELD model's levels, not the default's")
+
+        let unpicked = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
+                                         policy: nil, model: wiredModel(model: nil))
+        XCTAssertEqual(unpicked.modelRow.wire, ["none", "low", "high"],
+                       "no pick ⇒ the daemon's live default model decides the levels")
+    }
+
+    /// What the chip SAYS. It names the model in force, keeps today's "Default model" text while
+    /// nothing is pinned (the string this slot has rendered since it was a placeholder), and names
+    /// the effort beside it once one is chosen — a control that shows neither would leave a picked
+    /// effort invisible everywhere on the page.
+    func testTheChipNamesTheModelInForceAndTheEffortBesideIt() {
+        let unset = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
+                                      policy: nil, model: wiredModel()).modelRow
+        XCTAssertEqual(unset.chipTitle, newChatModelPlaceholder)
+        XCTAssertEqual(unset.chipTitle, "Default model", "…which is the text this slot already rendered")
+
+        let picked = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
+                                       policy: nil, model: wiredModel(model: "srv-b", effort: "high")).modelRow
+        XCTAssertEqual(picked.chipTitle, "srv-b · high")
+        XCTAssertTrue(picked.help.contains("srv-b"))
+        XCTAssertTrue(picked.help.contains("high"))
+    }
+
+    /// One change at a time, and VISIBLY — the same discipline the permissions row keeps, read off
+    /// the two independent flags the header's two menus already disable themselves on (model and
+    /// effort are separate affordances; a model change in flight must never disable the effort rows).
+    func testAModelOrEffortChangeInFlightIsVisibleOnTheChip() {
+        let modelBusy = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.code),
+                                          policy: nil, model: wiredModel(modelInFlight: true)).modelRow
+        XCTAssertTrue(modelBusy.modelChangeInFlight)
+        XCTAssertFalse(modelBusy.effortChangeInFlight, "…and only that half")
+
+        let effortBusy = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.code),
+                                           policy: nil, model: wiredModel(effortInFlight: true)).modelRow
+        XCTAssertTrue(effortBusy.effortChangeInFlight)
+        XCTAssertFalse(effortBusy.modelChangeInFlight)
+    }
+
+    // MARK: - Task 7's WIRING: the two surfaces that build a card
+
+    /// **The live half, end to end through the real view** (Task 6's own pin, one task on): a card
+    /// built with no model wiring — or with a default/empty control — leaves every value pin above
+    /// green while the chip on screen offers nothing and sets nothing.
+    func testTheLiveCardsChipCarriesTheAdaptersOwnModelWiring() throws {
+        let adapter = FieldStateAdapter(session: SessionModel())
+        adapter.modelCatalogue = catalogue()
+        adapter.modelChangeInFlight = true
+        var refreshes = 0
+        adapter.onRefreshModelCatalogue = { refreshes += 1 }
+        var setModels: [String?] = []
+        adapter.onSetModel = { setModels.append($0) }
+        var setEfforts: [String?] = []
+        adapter.onSetEffort = { setEfforts.append($0) }
+
+        let card = try XCTUnwrap(liveView(adapter, mode: .code).composerCard)
+        XCTAssertEqual(card.modelRow.options, ["srv-a", "srv-b"], "the ADAPTER's catalogue reaches the chip")
+        XCTAssertTrue(card.modelRow.modelChangeInFlight, "…and so does its in-flight flag")
+
+        card.model.onOpen()
+        XCTAssertEqual(refreshes, 1,
+                       "opening the chip refreshes the catalogue, exactly as the header's buttons do")
+        card.model.onSetModel("srv-b")
+        XCTAssertEqual(setModels, ["srv-b"], "the chip's pick rides the adapter's own setModel wiring")
+        XCTAssertEqual(adapter.pendingModel, .value("srv-b"),
+                       "…with the same optimistic overlay the header's rows apply")
+        card.model.onSetEffort("max")
+        XCTAssertEqual(setEfforts, ["max"])
+        XCTAssertEqual(adapter.pendingEffort, .value("max"))
+    }
+
+    /// The live chip shows what the DAEMON reports for this session — `session.list`'s own row, the
+    /// same source the header's menus read (`currentSidebarSessionSummary`), so the two doors can
+    /// never disagree about what is currently in force.
+    func testTheLiveCardsChipShowsTheSessionRowsModelAndEffort() async throws {
+        let adapter = FieldStateAdapter(session: SessionModel())
+        adapter.modelCatalogue = catalogue()
+        let sidebars = await wiring([
+            SessionSummary(sessionId: "s_1", title: nil, createdAt: 1, scope: "global",
+                           model: "srv-b", effort: "high"),
+        ], current: "s_1")
+        let card = try XCTUnwrap(liveView(adapter, mode: .code, sidebars: sidebars).composerCard)
+        XCTAssertEqual(card.modelRow.model, "srv-b")
+        XCTAssertEqual(card.modelRow.effort, "high")
+
+        // …and the optimistic overlay wins over the row until the daemon's answer catches up, which
+        // is `effectiveSelection`'s rule and the reason the chip must not read the row alone.
+        adapter.pendingModel = .value("srv-a")
+        let after = try XCTUnwrap(liveView(adapter, mode: .code, sidebars: sidebars).composerCard)
+        XCTAssertEqual(after.modelRow.model, "srv-a")
+    }
+
+    /// **The pre-session half (spec §5, the user's ruling: hold and stamp at create).** The new-chat
+    /// page has no session and therefore no adapter — its chip runs on the HOST's held choice, and
+    /// picking through it writes there rather than firing an RPC at a session that does not exist.
+    func testTheNewChatPagesChipHoldsTheChoiceOnTheHostRatherThanASession() {
+        let host = newChatHost()
+        let page = NewChatPage(nav: ShellNavigationModel(destination: .newChat), host: host)
+
+        page.composerCard.model.onSetModel("srv-b")
+        page.composerCard.model.onSetEffort("high")
+        XCTAssertEqual(host.newChatModel, "srv-b", "the pick is HELD on the host, beside the draft")
+        XCTAssertEqual(host.newChatEffort, "high")
+        XCTAssertEqual(page.composerCard.modelRow.model, "srv-b", "…and the chip shows what is held")
+        XCTAssertEqual(page.composerCard.modelRow.effort, "high")
+        XCTAssertEqual(page.composerCard.model.catalogue, host.newChatCatalogue,
+                       "the page's chip reads the host's catalogue, not an adapter that does not exist")
+    }
+
+    /// The page's own modes never offer a tier — which is what makes "held `ultra` breaks the create"
+    /// structurally impossible rather than merely unlikely: `session.create` validates the effort with
+    /// the SAME `assertEffortSelectable` a set uses, every new-chat create passes `mode: "chat"`, and
+    /// a refused create takes the whole first send with it.
+    func testNeitherModeTheNewChatPageOffersCanHoldATier() {
+        for mode in newChatModeOptions {
+            let card = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
+                                         policy: nil, model: wiredModel(model: "srv-a"))
+            XCTAssertEqual(card.modelRow.tiers, [],
+                           "\(mode) is one of the new-chat page's two modes — a tier held there fails the create")
+        }
+    }
+
+    /// A host with no client, for the pure pre-session pins above.
+    private func newChatHost() -> ShellSessionHost {
+        ShellSessionHost(directory: SessionDirectory(lister: { [] }), makeFeed: { sessionId in
+            let session = SessionModel()
+            let feed = SessionFeed(makeTransport: { ShellScriptedTransport() }, token: "tok",
+                                   clientName: "orb", mode: .pinned(sessionId: sessionId), session: session)
+            return (feed, session)
+        })
+    }
+
     // MARK: - The shared parts stay shared (source scans, with stated limits)
 
     /// **Task 5's review rider.** "Task 6 cannot give chat a row without editing `ChatComposerChrome`"
@@ -404,6 +633,29 @@ final class ComposerChromeTests: XCTestCase {
             XCTAssertEqual(file.lastPathComponent, "ComposerChrome.swift",
                            "\(file.lastPathComponent) builds a composer strip — a band built anywhere but the per-mode chrome reaches EVERY mode, chat included")
         }
+    }
+
+    /// mac-chat-parity Task 7's counterpart to the strip scan, in the opposite direction. The strip
+    /// is per-mode and may be built ONLY where chrome is decided; the model/effort chip is SHARED and
+    /// may be built only in the shared shell. A chrome that constructed its own would be four chips
+    /// drifting apart — the exact thing the 2026-08-07 extraction exists to prevent — and every value
+    /// pin above would stay green, since they all read the card's own row.
+    ///
+    /// **Same stated limits as the strip scan:** it reads text, so a chip composed by some other view
+    /// without naming the type evades it, and `codeOnly` strips only whole-line `//`.
+    func testTheChipIsConstructedOnlyInTheSharedShell() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources")
+        let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?
+            .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" } ?? []
+        XCTAssertGreaterThan(files.count, 20, "the sweep must actually have walked the sources")
+        var built: [String] = []
+        for file in files where codeOnly(try String(contentsOf: file, encoding: .utf8)).contains("ComposerModelChip(") {
+            built.append(file.lastPathComponent)
+        }
+        XCTAssertEqual(built, ["NormaComposerCard.swift"],
+                       "the model/effort chip is the SHARED shell's — one construction, one file")
     }
 
     /// The ruling's other half: the split must be STRUCTURAL, "not a pile of `if mode == …` inside
