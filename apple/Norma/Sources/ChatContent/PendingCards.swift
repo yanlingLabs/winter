@@ -503,8 +503,14 @@ struct TranscriptInteractionCard: View {
             }
         }
         .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // CAPPED, not full-bleed (user call, 2026-08-12: "on the mac the screen is way too big").
+        // 560 is not a new number — it is the width the user's own bubble already caps at
+        // (`TranscriptMessageViews.swift:133`), so a card and a message share one column edge
+        // instead of disagreeing about how wide the conversation is. Left-aligned: the card is
+        // Norma's side of the dialogue, and everything of hers on this surface leads from the left.
+        .frame(maxWidth: interactionCardMaxWidth, alignment: .leading)
         .modifier(InteractionCardChrome())
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -761,21 +767,39 @@ struct ResolvedQuestionBody: View {
 /// — iOS's literal — because Task 8 already solved that token for exactly this job: a floating
 /// control's rim measured against `CardSurface` (1.389:1 light / 1.431:1 dark, `brand.md` § 1).
 ///
-/// r=16, not iOS's 28: that radius is a phone-scale value on a full-bleed card. The Mac's card sits
-/// in a wider column at a greater viewing distance, and `brand.md` § 1's own note about the sidebar
-/// register covers the principle — same binding, two platform registers.
+/// **GEOMETRY IS iOS'S, EXACTLY** (r=28, 16pt padding, a true `1/displayScale` hairline): the two
+/// travel together — 28 works precisely because the padding is 16, and an earlier r=16 here read
+/// squarer than the phone at the same content inset. Radius tracks the card's HEIGHT and visual
+/// weight, not its width, and both platforms' cards are about as tall; scaling 28 by the width
+/// ratio would give ~44 and look like a pill.
+///
+/// **The rim's COLOUR is the one deliberate divergence.** iOS uses `Color.primary.opacity(0.17)`;
+/// this uses `Theme.hairlineElevated`, because a `primary`-derived rim is a neutral grey rule on a
+/// warm palette — the same class of thing as the `#F2F2F7` fill above, and `brand.md` § 3.1 forbids
+/// deriving a colour by opacity off a system value. That token is not a substitution of convenience
+/// either: `brand.md` § 1 measures it at **1.389:1 light / 1.431:1 dark on `CardSurface`**, and
+/// names that ground as "the ground a floating control's rim has to read against" — this card.
 private struct InteractionCardChrome: ViewModifier {
+    @Environment(\.displayScale) private var displayScale
+
     func body(content: Content) -> some View {
         content
-            .background(Theme.cardSurface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background(Theme.cardSurface, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(Theme.hairlineElevated, lineWidth: 1)
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .strokeBorder(Theme.hairlineElevated, lineWidth: 1 / displayScale)
             )
             .compositingGroup()   // flatten first: the shadow outlines the CARD, not every glyph
             .shadow(color: .black.opacity(0.05), radius: 8, y: 1)
     }
 }
+
+/// The interaction card's width ceiling — the user bubble's own `560`
+/// (`TranscriptMessageViews.swift:133`), shared deliberately so the two sides of the conversation
+/// agree on one column edge. Named rather than inlined because the pending question box will have
+/// to match the COMPOSER's width instead, and the difference between those two numbers is a design
+/// decision someone will want to find.
+let interactionCardMaxWidth: CGFloat = 560
 
 /// The plan that was presented, and what was decided about it. Keeps the pending card's markdown
 /// rendering and its ~260pt scroll cap — a plan is long by nature, and the record of one has to

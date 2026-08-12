@@ -170,29 +170,46 @@ struct WindowContentView<Accessory: View>: View {
                 onPlan: adapter.onPlanRespond
             ))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The composer FLOATS over the transcript (user call, 2026-08-12: "the composer should
+            // float over the transcript and not have that hard background"). It used to be the next
+            // sibling in this `VStack`, which reserved it a strip the transcript stopped above —
+            // that reserved strip IS the hard edge; nothing was ever painting a background there.
+            //
+            // `safeAreaInset` is the macOS analogue of the `safeAreaBar` iOS uses for exactly this
+            // (`norma-ios` `CodeSessionView`): the bottom cluster is laid out over the transcript,
+            // and the ScrollView inside `TranscriptView` inherits the inset — so content SCROLLS
+            // UNDER the composer and still comes fully clear of it at the end, which a plain
+            // `overlay` would not do (the last message would sit permanently behind the card).
+            //
+            // The pinned tasks and live subagents ride along deliberately: they are the same class
+            // of thing as the composer — current state, not transcript — and leaving them in the
+            // flow would just move the hard edge up by their height.
+            .safeAreaInset(edge: .bottom, spacing: 10) {
+                VStack(spacing: 10) {
+                    if !adapter.pinnedTasks.isEmpty && !rightVisible {
+                        pinnedTasksSection(adapter.pinnedTasks)
+                    }
 
-            if !adapter.pinnedTasks.isEmpty && !rightVisible {
-                pinnedTasksSection(adapter.pinnedTasks)
-            }
+                    if let queued = adapter.queuedText {
+                        Text(queued).font(.system(size: 11)).foregroundStyle(Theme.textMuted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
 
-            if let queued = adapter.queuedText {
-                Text(queued).font(.system(size: 11)).foregroundStyle(Theme.textMuted)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+                    if let card = composerCard {
+                        card.frame(maxWidth: .infinity)
+                    } else {
+                        ComposerTextView(
+                            text: adapter.draftBinding,
+                            onSubmit: { adapter.onSubmit(adapter.composerDraft) },
+                            usesAdaptiveColors: true
+                        )
+                        .frame(height: 88)
+                    }
 
-            if let card = composerCard {
-                card.frame(maxWidth: .infinity)
-            } else {
-                ComposerTextView(
-                    text: adapter.draftBinding,
-                    onSubmit: { adapter.onSubmit(adapter.composerDraft) },
-                    usesAdaptiveColors: true
-                )
-                .frame(height: 88)
-            }
-
-            if !adapter.liveSubagents.isEmpty && !rightVisible {
-                subagentSection(adapter.liveSubagents)
+                    if !adapter.liveSubagents.isEmpty && !rightVisible {
+                        subagentSection(adapter.liveSubagents)
+                    }
+                }
             }
         }
         .padding(.horizontal, 16)
