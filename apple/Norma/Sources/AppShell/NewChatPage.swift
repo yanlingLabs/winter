@@ -127,12 +127,18 @@ let newChatComposerPlaceholder = "How can I help you today?"
 /// the composer IS the subject rather than a strip under a transcript (user call, 2026-08-07).
 let newChatComposerFontSize: CGFloat = 16
 
-/// PURE: whether the card shows its SECOND control row (working folder, approval mode,
-/// announcement).
+/// PURE: whether this page is showing its COWORK shape — today, the idea list in place of the
+/// starter chips (`NewChatPage.starters`).
 ///
 /// Cowork only (user ruling, 2026-08-07): a chat has no working folder and takes no approvals —
 /// showing those controls on a chat would offer settings that cannot apply to what it is about to
-/// create. The announcement strip rides the same row and so shares its fate.
+/// create.
+///
+/// **It no longer governs the composer's second control row** (mac-chat-parity Task 5). That row is
+/// cowork's own chrome now — `CoworkComposerChrome.makeStrip()` — because each mode's composer is
+/// its own type rather than one card asking which mode it is in. The two answers still coincide for
+/// cowork and are not tied together: Task 6 gives code and dispatch a band too, and this function
+/// will keep saying no for both, correctly, because it is about this page's layout.
 func newChatShowsCoworkControls(mode: SessionMode) -> Bool {
     mode == .cowork
 }

@@ -1811,10 +1811,11 @@ struct ShellSessionView: View {
                         // orb's morph window and the detached window deliberately do not.
                         //
                         // Read from the DIRECTORY rather than from `adapter.isChatSession`: that
-                        // flag only distinguishes chat from not-chat, and the card needs the real
-                        // mode to decide whether the Chat/Cowork segment applies at all. A code
-                        // session gets the card without a segment, which is correct — it is not
-                        // one of the two modes that segment offers.
+                        // flag only distinguishes chat from not-chat, and since mac-chat-parity
+                        // Task 5 the mode PICKS THE COMPOSER — chat, code and dispatch each have
+                        // their own (`ComposerChrome.swift`), so "not chat" is not an answer this
+                        // needs. A code session gets the card without the Chat/Cowork segment,
+                        // which is correct: it is not one of the two modes that segment offers.
                         // `host.attachedSessionId` READ FRESH, per this type's own standing rule
                         // (see its doc: every closure reads it at call time rather than capturing
                         // an id) — the attachment can be swapped under this view.

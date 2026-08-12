@@ -27,8 +27,11 @@ struct WindowContentView<Accessory: View>: View {
     /// cream card would read as broken. Only the shell passes a mode today; the other two keep
     /// what they have until someone decides otherwise on purpose.
     ///
-    /// It carries the MODE as well as the opt-in because the card needs it: the Chat/Cowork
-    /// segment only appears for those two modes, and the Cowork strip only exists for one of them.
+    /// It carries the MODE as well as the opt-in because the mode IS the composer: since
+    /// mac-chat-parity Task 5 each mode has its own dedicated composer (`ComposerChrome.swift`) and
+    /// this value is what picks it. A chat session's carries no permissions band; a code or dispatch
+    /// session's is where Task 6 puts one; neither shows the Chat/Cowork segment, which belongs to
+    /// the two modes it names.
     var composerCardMode: SessionMode? = nil
     @ViewBuilder let headerAccessory: () -> Accessory
 
