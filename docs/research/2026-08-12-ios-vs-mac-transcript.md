@@ -1,5 +1,14 @@
 # iOS vs Mac — chat transcript, element by element
 
+> **STATUS NOTE (added at commit time, 2026-08-12).** This document was written as *research* while
+> the Mac still rendered approval/question cards in a pinned band below the transcript
+> (`WindowContentView.swift:153-169`, `PendingCardsView`). **That band no longer exists** — the
+> mac-chat-parity plan's Task 3 shipped the change this document recommends: cards now render
+> inline in the transcript and freeze with their outcome. Every description below of the band as
+> *current Mac behaviour* — notably around lines 17, 177, 210, 218, 225 — is therefore a snapshot of
+> the BEFORE state, which is what makes the comparison readable. Do not cite it as the Mac's
+> present shape; cite `TranscriptView.swift`/`PendingCards.swift` instead.
+
 **Date:** 2026-08-12 · **Status:** research only, no code changed
 **Directive:** *"make the mac app chat transcript look more similar to the ios, including approval cards, question cards etc."* + *"also the tool rows etc cuz the ios ones are much better and actually show the tool calls things"*
 **Direction of travel:** the Mac changes. iOS is the reference for **shape and structure**. The Mac keeps its own colour language (`docs/brand.md`).
