@@ -229,13 +229,19 @@ struct NormaComposerCard: View {
 
     /// The model/effort chip's wiring (mac-chat-parity Task 7, spec §5).
     ///
-    /// **`let`, and NOT an Optional** — a stronger requirement than `policy` above, because the two
+    /// **NOT an Optional**, which is a stronger requirement than `policy` above, because the two
     /// absences are different. A surface can genuinely have no session to set a POLICY on (the
     /// new-chat page), so that one is `nil`-able and its row is absent. Model and effort have no such
     /// case: every surface that draws this card can offer them, pre-session included — the choice is
-    /// simply HELD there until the create stamps it. So there is nothing for `nil` to mean, and a
-    /// non-optional `let` is what makes a surface that forgets to wire it fail to compile rather than
-    /// ship a chip that silently offers nothing.
+    /// simply HELD there until the create stamps it. So there is nothing for `nil` to mean.
+    ///
+    /// **And the NON-OPTIONALITY is what makes it required, not the `let`** — compiled both ways
+    /// before writing this, because the neighbouring claim on `policy` was once wrong in exactly the
+    /// opposite direction. `var model: ComposerModelControl` with the argument dropped still fails
+    /// ("missing argument for parameter 'model' in call"): Swift's synthesized memberwise initializer
+    /// defaults a stored property only when it has an initial value, or when it is an **optional
+    /// `var`** (the implicit `= nil` that made `policy` silently omittable until it became a `let`).
+    /// `let` here is for immutability and consistency with `policy`; the requiredness is the type's.
     let model: ComposerModelControl
 
     var stripEdge: NormaComposerStripEdge = .below
