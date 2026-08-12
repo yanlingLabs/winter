@@ -1,5 +1,6 @@
 import XCTest
 import SwiftUI
+import NormaKit
 @testable import Norma
 
 /// mac-chat-parity Task 5 — the per-mode composers (spec §3, the user's architecture ruling:

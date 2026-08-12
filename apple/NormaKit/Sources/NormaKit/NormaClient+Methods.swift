@@ -300,12 +300,29 @@ extension NormaClient {
     /// absence as "code", `packages/protocol/src/methods.ts`'s `SessionCreateParams.mode`) — every
     /// existing call site (the sidebar's "+ New session", `norma-probe`) is unaffected. The Mac
     /// app's "New Chat"/"Chat" menu entries are the first callers to pass `mode: "chat"`.
-    public func createSession(scope: String, cwd: String? = nil, approvalPolicy: String? = nil, mode: String? = nil) async throws -> (sessionId: String, trusted: Bool) {
+    ///
+    /// mac-chat-parity T7 (spec §5): `model`/`effort` are additive in exactly the same way, and for
+    /// a reason the protocol itself documents — a client that must choose them for a session it is
+    /// about to create should **stamp them at create** rather than create-then-set, which "leave[s]
+    /// a window in which a turn fired immediately after create resolves at the GLOBAL effort,
+    /// silently". The Mac's new-chat page fires a turn the instant its session exists, so it is
+    /// exactly that client (`ShellSessionHost.sendFirstChatMessage`).
+    ///
+    /// The daemon validates both with the SAME rules the corresponding setters apply
+    /// (`resolveModelSelection` / `assertEffortSelectable`, `packages/core/src/ipc/server.ts`) — a
+    /// create can never accept what a set would refuse — and refuses outright rather than dropping,
+    /// so a caller is told. Absence is "no override"; `null` is a value the schema refuses, which is
+    /// why these ride `obj`'s nil-dropping like `cwd`/`mode` and never `?? .null` (the deliberate
+    /// opposite of `setModel`/`setEffort`, where a literal null IS the clear).
+    public func createSession(scope: String, cwd: String? = nil, approvalPolicy: String? = nil, mode: String? = nil,
+                              model: String? = nil, effort: String? = nil) async throws -> (sessionId: String, trusted: Bool) {
         let r = try await request("session.create", params: obj([
             "scope": .string(scope),
             "cwd": cwd.map { .string($0) },
             "approvalPolicy": approvalPolicy.map { .string($0) },
             "mode": mode.map { .string($0) },
+            "model": model.map { .string($0) },
+            "effort": effort.map { .string($0) },
         ]))
         guard let id = r["sessionId"]?.stringValue, let trusted = r["trusted"]?.boolValue else {
             throw RpcError(code: -3, message: "invalid result from server for session.create")

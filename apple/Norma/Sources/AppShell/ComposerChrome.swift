@@ -68,7 +68,14 @@ struct ComposerContext {
     /// first send. `nil` makes the row ABSENT rather than dead, the same rule chat's row follows.
     ///
     /// Task 5's handoff shape: a mode wanting an input the others do not adds ONE field here rather
-    /// than a parameter to four initialisers. Task 7's model/effort slot should follow it.
+    /// than a parameter to four initialisers.
+    ///
+    /// **Task 7's model/effort slot did NOT land here, and the shape is worth stating.** It expected
+    /// to; it turned out that no chrome consumes it. The chip is drawn by the shared shell for every
+    /// mode (the slot has always been shared — see `NormaComposerCard.controlRow`), so its CONTROL
+    /// is a card parameter (`NormaComposerCard.model`) and only its one per-mode question — may this
+    /// mode select a tier? — is a chrome member (`offersClientEffortTiers`). This context carries
+    /// what a chrome READS; that control is not read by one.
     let policy: ComposerPolicyControl?
     /// The cowork strip's trailing line. Only `CoworkComposerChrome` reads it.
     let announcement: String
@@ -166,16 +173,33 @@ struct ComposerStrip {
     let content: AnyView
 }
 
-/// What ONE mode adds to the shared composer shell.
+/// What ONE mode adds to (or answers for) the shared composer shell.
 ///
-/// Exactly two variable blocks today, and that is deliberate: everything not named here is shared
-/// and unconditional in `NormaComposerCard`, so "the text field and the send button are identical
-/// across modes" is true by construction rather than by discipline. A mode that later needs its own
-/// send treatment adds a third member here — visibly, in one place, for all four modes at once.
+/// Everything not named here is shared and unconditional in `NormaComposerCard`, so "the text field
+/// and the send button are identical across modes" is true by construction rather than by
+/// discipline. A mode that later needs its own send treatment adds a member here — visibly, in one
+/// place, for all four modes at once. There are deliberately NO protocol-extension defaults: a new
+/// mode must decide every member rather than inherit one silently.
 protocol ComposerChrome {
     /// Which mode this chrome is for. Hard-coded per type rather than stored, so it names the type's
     /// identity and cannot be constructed disagreeing with itself.
     var mode: SessionMode { get }
+
+    /// mac-chat-parity Task 7 (spec §5): whether this mode may select a **Norma-level effort tier**.
+    ///
+    /// **A boolean, because the mode-dependence of model/effort is exactly one row.**
+    /// `CLIENT_EFFORTS` is a one-element list — `["ultra"]` (`packages/core/src/settings.ts:51`) —
+    /// and `clientEffortEligible` is a fail-closed code-only allowlist (`settings.ts:89-91`). The
+    /// WIRE efforts (`none/low/medium/high/xhigh/max`) are not mode-gated at all: they are validated
+    /// against the MODEL (`assertEffortSelectable`, `packages/core/src/ipc/server.ts:476-489`). So a
+    /// per-mode effort LIST would invent a distinction the daemon does not make.
+    ///
+    /// It is a chrome member rather than a check inside the shell because the shell holds no mode
+    /// conditional — and a helper-shaped one (`availableEfforts(for: mode)`) is precisely what
+    /// `ComposerChromeTests.testTheSharedShellHoldsNoModeConditionals` cannot see. Each type answers
+    /// it with `effortTiersAreOffered` — the header's own decision function, the Swift mirror of
+    /// `clientEffortEligible` — so the two doors onto this rule can never drift.
+    var offersClientEffortTiers: Bool { get }
 
     /// The control row's leading accessory, drawn after the Attach button. `nil` = absent.
     func makeControlRowAccessory() -> AnyView?
@@ -219,6 +243,11 @@ struct ChatComposerChrome: ComposerChrome {
     let context: ComposerContext
     var mode: SessionMode { .chat }
 
+    /// No tiers: `session.setEffort` refuses one for anything but a code session, and this page's
+    /// own create would be refused outright with one held (`assertEffortSelectable` runs on
+    /// `session.create` too) — chat never offering it is what keeps the new-chat page's Send working.
+    var offersClientEffortTiers: Bool { effortTiersAreOffered(mode: mode.rawValue) }
+
     func makeControlRowAccessory() -> AnyView? { AnyView(ComposerModeSegment(context: context)) }
 
     func makeStrip() -> ComposerStrip? { nil }
@@ -235,6 +264,9 @@ struct ChatComposerChrome: ComposerChrome {
 struct CodeComposerChrome: ComposerChrome {
     let context: ComposerContext
     var mode: SessionMode { .code }
+
+    /// **The one mode that may select a Norma-level tier** (`clientEffortEligible`, code-only).
+    var offersClientEffortTiers: Bool { effortTiersAreOffered(mode: mode.rawValue) }
 
     func makeControlRowAccessory() -> AnyView? { nil }
 
@@ -261,6 +293,12 @@ struct CodeComposerChrome: ComposerChrome {
 struct DispatchComposerChrome: ComposerChrome {
     let context: ComposerContext
     var mode: SessionMode { .dispatch }
+
+    /// No tiers — and note this is a DIFFERENT refusal from the row above: the daemon pins dispatch's
+    /// model and effort entirely for non-null values (`DISPATCH_PIN_MESSAGE`, `ipc/server.ts`), while
+    /// the header has always SHOWN both menus and let the daemon answer. Task 7 keeps that
+    /// shown-but-refused posture rather than regressing it to absent (spec §3's table).
+    var offersClientEffortTiers: Bool { effortTiersAreOffered(mode: mode.rawValue) }
 
     func makeControlRowAccessory() -> AnyView? { nil }
 
@@ -366,6 +404,10 @@ struct ComposerPolicyChip: View {
 struct CoworkComposerChrome: ComposerChrome {
     let context: ComposerContext
     var mode: SessionMode { .cowork }
+
+    /// No tiers: cowork is not code, and `effortTiersAreOffered` is an allowlist — a mode nobody has
+    /// written yet gets nothing for free.
+    var offersClientEffortTiers: Bool { effortTiersAreOffered(mode: mode.rawValue) }
 
     func makeControlRowAccessory() -> AnyView? { AnyView(ComposerModeSegment(context: context)) }
 

@@ -663,6 +663,19 @@ final class ShellSessionHost: ObservableObject {
         panelAutoCreateInFlight = true
         newChatCreate = .creating
         let epoch = newChatPageEpoch
+        // mac-chat-parity T7: this door MINTS THE PAGE'S SESSION, so it stamps the page's held
+        // model/effort exactly as the send's own create does — captured before the async gap for the
+        // same reason `epoch` is, and the same reason `sendFirstChatMessage` captures `bound`: a
+        // fresh `.newChat` entry clearing the pick mid-flight must not change what this create sends.
+        //
+        // Disclosed rather than implied: stamping gives this `try?`-swallowed create a failure class
+        // it did not have (a held pair the daemon refuses ⇒ a "+" that silently does nothing). A
+        // TIER cannot be that pair — neither of the page's two modes offers one
+        // (`ComposerChrome.offersClientEffortTiers`, pinned) — so what remains is a wire effort gone
+        // stale against a provider change mid-visit: rare, bounded, and self-correcting on the next
+        // pick. Accepted; the send's own stamps carry the choice either way.
+        let heldModel = newChatModel
+        let heldEffort = newChatEffort
         Task { @MainActor [weak self] in
             defer {
                 self?.panelAutoCreateInFlight = false
@@ -672,7 +685,8 @@ final class ShellSessionHost: ObservableObject {
                 // existing caution around shared published state.
                 if self?.newChatCreate == .creating { self?.newChatCreate = .idle }
             }
-            guard let self, let created = try? await client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat") else { return }
+            guard let self, let created = try? await client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat",
+                                                                          model: heldModel, effort: heldEffort) else { return }
             _ = try? await client.openPanelTab(sessionId: created.sessionId, kind: kindRaw)
             guard epoch == self.newChatPageEpoch else { return } // a departed page instance: create/tab are a commitment, the bind and priming are not
             self.newChatBoundSessionId = created.sessionId
@@ -768,6 +782,66 @@ final class ShellSessionHost: ObservableObject {
     /// reproduces that exact contract rather than silently overturning it.
     @Published var newChatDraft: String = ""
 
+    /// mac-chat-parity T7 (spec §5): the new-chat page's HELD model, and `newChatEffort` below its
+    /// effort — the pick made before any session exists.
+    ///
+    /// **Held, then stamped at create** (the user's ruling) rather than create-then-set: the second
+    /// leaves a window in which a turn fired immediately after the create resolves at the GLOBAL
+    /// effort, and this page fires a turn the instant its session exists. Both of the page's birth
+    /// doors stamp it (`sendFirstChatMessage`'s create and `autoCreateForNewChatPage`'s), and the
+    /// bound-session REUSE branch — which creates nothing — applies it with `session.setModel`/
+    /// `session.setEffort` instead.
+    ///
+    /// Lives here for the same reason `newChatDraft` does (the page is torn down on `.maximized`),
+    /// and **resets with the draft** — not with the binding: a choice held for an abandoned visit
+    /// leaking into the next one is the same standing-lie class Task 4 removed from the policy row.
+    ///
+    /// `private(set)`: only this host writes it, through `setNewChatModel`/`setNewChatEffort` below,
+    /// so "who can change the held choice" has one answer.
+    @Published private(set) var newChatModel: String?
+    @Published private(set) var newChatEffort: String?
+
+    /// The page's own catalogue snapshot. The live composer reads the ATTACHED adapter's
+    /// (`refreshModelCatalogue`); this page has no attachment, so the same `sync.config` is fetched
+    /// on the management connection — the one the orb already reads it on
+    /// (`AppModel.fetchModelCatalogue`) — and held here.
+    ///
+    /// NOT reset on a fresh page entry, deliberately, unlike the held pick beside it: this is a cache
+    /// of daemon-wide configuration, not a user choice, so clearing it would only blank the chip's
+    /// menu for one round trip on every entry.
+    @Published private(set) var newChatCatalogue: SyncConfigSnapshot = .empty
+
+    func setNewChatModel(_ model: String?) { newChatModel = model }
+    func setNewChatEffort(_ effort: String?) { newChatEffort = effort }
+
+    /// The wiring `NewChatPage`'s composer chip runs on — the pre-session counterpart of
+    /// `WindowContentView.composerModelControl`.
+    ///
+    /// Both in-flight flags are `false` and that is the honest value, not a stub: there is no RPC to
+    /// be in flight. A pick here is a local write that lands with the create.
+    var newChatModelControl: ComposerModelControl {
+        ComposerModelControl(model: newChatModel,
+                             effort: newChatEffort,
+                             catalogue: newChatCatalogue,
+                             modelChangeInFlight: false,
+                             effortChangeInFlight: false,
+                             onOpen: { [weak self] in self?.refreshNewChatCatalogue() },
+                             onSetModel: { [weak self] in self?.setNewChatModel($0) },
+                             onSetEffort: { [weak self] in self?.setNewChatEffort($0) })
+    }
+
+    /// The page chip's catalogue fetch — fired when the menu is about to be read, the same
+    /// "a snapshot, refreshed exactly when it is about to be read" convention the header's two
+    /// buttons follow. `try?`, same posture as `refreshModelCatalogue`: a hiccup leaves the previous
+    /// snapshot in place rather than blanking the picker out from under the user.
+    private func refreshNewChatCatalogue() {
+        guard let client = managementClient else { return }
+        Task { @MainActor [weak self] in
+            guard let snapshot = try? await client.syncConfig() else { return }
+            self?.newChatCatalogue = snapshot
+        }
+    }
+
     /// panel-shell T15: the new-chat page's own BOUND session — set once `openPanelTabForNewChatPage`
     /// auto-creates, so the page can offer the panel a tab without navigating away (Requirement 1).
     /// Lives here for the SAME reason `newChatDraft` does, right above: `detail` (and `NewChatPage`
@@ -855,14 +929,24 @@ final class ShellSessionHost: ObservableObject {
         // fresh `.newChat` entry clearing the binding mid-flight must not un-bind a reuse already
         // under way.
         let bound = newChatBoundSessionId
+        // mac-chat-parity T7: the held model/effort, captured at SUBMIT for the same reason `bound`
+        // and `epoch` are — this send carries the choice the user had when they pressed Enter, and a
+        // fresh page entry landing mid-flight neither adds to it nor takes it away.
+        let heldModel = newChatModel
+        let heldEffort = newChatEffort
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 let sessionId: String
                 if let bound, (try? await client.listPanelTabs(sessionId: bound)) != nil {
                     sessionId = bound // verified to still exist — reuse it, no second create
+                    // …but this branch CREATES NOTHING, so there is no create to stamp: the "+" that
+                    // minted this session ran before the user picked. Apply the choice now, ahead of
+                    // the send (`stampHeldSelection`).
+                    await self.stampHeldSelection(on: bound, model: heldModel, effort: heldEffort, client: client)
                 } else {
-                    let created = try await client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat")
+                    let created = try await client.createSession(scope: "global", approvalPolicy: "auto", mode: "chat",
+                                                                 model: heldModel, effort: heldEffort)
                     sessionId = created.sessionId
                 }
                 // The binding's job ends here either way — reused (about to attach) or abandoned
@@ -888,6 +972,34 @@ final class ShellSessionHost: ObservableObject {
                 self.newChatCreate = .failed(newChatUnreachableMessage)
             }
         }
+    }
+
+    /// mac-chat-parity T7: apply a held model/effort to a session that ALREADY EXISTS — the
+    /// bound-session reuse branch above, and only that branch. Every other path stamps at create.
+    ///
+    /// **MODEL FIRST, and that order is load-bearing.** `session.setEffort` validates the effort
+    /// against the session's CURRENT model (`assertEffortSelectable`, `packages/core/src/ipc/
+    /// server.ts:476-489`), so effort-first would validate the held effort against the daemon's
+    /// default model and can refuse a pair that is perfectly legal once the model lands.
+    ///
+    /// **A refusal never blocks the send** (`try?`, deliberately): the user's message outranks the
+    /// stamp. A dead Send button over a failed effort RPC is precisely the class this whole surface
+    /// exists to remove — and the alternative (surfacing the refusal and holding the text) would
+    /// trade a silent wrong-effort turn for a silent lost message, which is worse. The cost is
+    /// bounded and visible: the turn runs at the session's existing selection, which the composer's
+    /// chip goes on showing.
+    ///
+    /// Only what the user actually picked is written: an unpicked axis sends nothing at all, rather
+    /// than a `null` that would CLEAR an override this page never set.
+    ///
+    /// Awaited before the send, and pinned as sequencing rather than as end-state
+    /// (`ShellSessionHostTests`): "no turn has fired on a session minted for a panel tab" is true of
+    /// today's flows but is not structural — that session is real, listed, and reachable by any other
+    /// client.
+    private func stampHeldSelection(on sessionId: String, model: String?, effort: String?,
+                                    client: NormaClient) async {
+        if let model { _ = try? await client.setModel(sessionId: sessionId, model: model) }
+        if let effort { _ = try? await client.setEffort(sessionId: sessionId, effort: effort) }
     }
 
     /// The delivery half: fires on the pinned feed's post-attach `onConnected` for a FRESH
@@ -985,6 +1097,13 @@ final class ShellSessionHost: ObservableObject {
             // just above, now covering the draft too — see `newChatDraft`'s own doc for why this
             // is a preservation of the pre-existing "drops on navigate-away" ruling, not a new one.
             newChatDraft = ""
+            // mac-chat-parity T7: the held model/effort follows the DRAFT, not the binding — a
+            // choice made on an abandoned visit must never be silently adopted by the next one, the
+            // same standing-lie class Task 4 removed from the policy row one surface over. (The
+            // catalogue beside it deliberately survives: it is a cache of daemon-wide config, not a
+            // choice — see `newChatCatalogue`.)
+            newChatModel = nil
+            newChatEffort = nil
             // panel-shell T15: `newChatBoundSessionId` needs NO reset here (unlike `newChatDraft`
             // just above) — the top-level guard above already clears it on every unattached
             // destination change, `.newChat` included (whole-branch review Minor 4). Kept out of

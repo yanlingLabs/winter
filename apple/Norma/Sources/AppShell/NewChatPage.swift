@@ -525,7 +525,12 @@ struct NewChatPage: View {
     /// renders (user call, 2026-08-07). This page owns only what is specific to it: the deferred
     /// create's in-flight state, and the mode segment being interactive because no session exists
     /// yet to have a fixed mode.
-    private var composerCard: some View {
+    ///
+    /// **Internal, and returning the concrete type** (mac-chat-parity Task 7) for the reason
+    /// `WindowContentView.composerCard`'s own hoist records: the whole path from the host's held
+    /// choice to the rendered chip is then a value a test can drive, and a page that wired its chip
+    /// to something other than the host would red rather than pass quietly.
+    var composerCard: NormaComposerCard {
         let ui = newChatSendUI(host.newChatCreate)
         return NormaComposerCard(
             text: draftBinding,
@@ -536,6 +541,11 @@ struct NewChatPage: View {
             // present-and-dead (mac-chat-parity Task 6, spec §4); this page's own chat/cowork modes
             // carry no permissions band in any case.
             policy: nil,
+            // …but model and effort ARE offered pre-session (spec §5, the user's ruling): the pick is
+            // HELD on the host beside the draft and stamped onto `session.create` itself, rather than
+            // set afterwards — a create-then-set leaves a window in which the first turn, which this
+            // page fires the instant the session exists, resolves at the global default.
+            model: host.newChatModelControl,
             stripEdge: .below,
             announcement: newChatAnnouncement(announcement, fallback: announcementLine),
             isEnabled: ui.composerEnabled,

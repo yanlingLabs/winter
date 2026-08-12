@@ -859,6 +859,26 @@ final class FieldStateAdapter: ObservableObject {
     /// The effort half of `pendingModel`.
     @Published var pendingEffort: OptimisticSelection = .none
 
+    /// mac-chat-parity T7: **the pair every model row fires**, wherever it is rendered — flip the
+    /// optimistic overlay, then fire the RPC. Extracted (from the inline body of the header's own
+    /// row) because the composer's chip is now a SECOND surface that must apply it, and two copies of
+    /// "flip the overlay, then fire" is exactly how one surface ends up not flipping it: the chip and
+    /// the header would then disagree about what is selected for the whole round trip.
+    ///
+    /// `nil` is the "Default" row — a CLEAR, which is a distinct overlay state from "no overlay"
+    /// (see `OptimisticSelection`). The rest of the bookkeeping (the in-flight flag, the revert, the
+    /// probation) stays with the wirer, unchanged.
+    func applyModelSelection(_ model: String?) {
+        pendingModel = model.map { OptimisticSelection.value($0) } ?? .clear
+        onSetModel(model)
+    }
+
+    /// The effort half of `applyModelSelection`, for the same reason and on the same terms.
+    func applyEffortSelection(_ effort: String?) {
+        pendingEffort = effort.map { OptimisticSelection.value($0) } ?? .clear
+        onSetEffort(effort)
+    }
+
     /// The selection currently ON PROBATION — applied, accepted by the daemon, and awaiting the
     /// verdict of the ONE turn that runs next. Nil the rest of the time. In memory only: a probation
     /// cannot survive a relaunch, which is half of why the transcript-wide-scan bug it replaces
