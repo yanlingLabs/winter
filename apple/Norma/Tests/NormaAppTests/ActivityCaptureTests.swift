@@ -622,6 +622,41 @@ final class ActivityCaptureTests: XCTestCase {
         XCTAssertEqual(lastActivity(s).last, ActivityItem(kind: .tool(name: "t205", detail: nil, callId: "c207")))
     }
 
+    // MARK: the cap's interaction exemption (whole-branch review, M-2)
+    //
+    // Task 3 deleted the pinned band — `PendingCardsView` has no references repo-wide — and that
+    // band was fed by the UNCAPPED `pendingInteractions`. The inline card is now the only inline
+    // door to answering an ask, so an evicted card is a question that scrolled itself out of
+    // existence.
+    //
+    // Unreachable for a NATIVE ask: the engine blocks the turn, so nothing further appends.
+    // REACHABLE for a dispatch-mirrored CHILD ask: the parent's turn keeps running and can append
+    // 200+ items after the card, and `c1370fd7` removed the main thread's tool-iteration limit
+    // deliberately to support exactly those long turns. The orb/detached `y`/`n` door survives but
+    // answers only `pendingInteractions.first` — the OLDEST — and that list clears at the parent's
+    // turn end, leaving the child waiting forever.
+
+    func testInteractionSurvivesTheActivityCap() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, approvalRequested(summary: "rm -rf x", callId: "a1", seq: 3))
+        for i in 1...250 { s = SessionReducer.reduce(s, toolCall("t\(i)", seq: i + 3)) }
+        // Still there, and still identifiable by the callId the answer is routed on.
+        XCTAssertEqual(lastActivity(s).compactMap(\.interactionRecord).map(\.callId), ["a1"])
+    }
+
+    /// The other direction, so the exemption cannot be over-applied into "nothing evicts": ordinary
+    /// activity still drops oldest-first around the surviving card, and the exchange stays bounded.
+    func testOrdinaryActivityStillEvictsAroundASurvivingInteraction() {
+        var s = openTurnState()
+        s = SessionReducer.reduce(s, approvalRequested(summary: "rm -rf x", callId: "a1", seq: 3))
+        for i in 1...250 { s = SessionReducer.reduce(s, toolCall("t\(i)", seq: i + 3)) }
+        XCTAssertEqual(lastActivity(s).count, 200)
+        XCTAssertNotNil(lastActivity(s).first?.interactionRecord)  // the card, still at the head
+        // 251 appended, 51 over — so t1…t51 evicted and the card skipped, not counted against them.
+        XCTAssertEqual(lastActivity(s).dropFirst().first?.kind, .tool(name: "t52", detail: nil, callId: "c55"))
+        XCTAssertEqual(lastActivity(s).last?.kind, .tool(name: "t250", detail: nil, callId: "c253"))
+    }
+
     // MARK: Main-thread-only + defensive guards
 
     func testChildThreadEventsIgnored() {

@@ -516,12 +516,14 @@ enum SessionReducer {
     /// So in practice this cap never bites. It exists so that a future protocol change raising
     /// `MAX_OUTPUT` cannot silently blow up the transcript — this reducer's state is rebuilt by
     /// replaying a session's ENTIRE event log from seq 0 on every focus and every relaunch
-    /// (`AppModel.refocus`), and `appendActivity`'s 200-item cap bounds the item COUNT per exchange,
-    /// never its bytes. It is deliberately enforced here rather than at render time, because that is
-    /// the only place it can bound anything: a renderer-side clip saves drawing work on a string that
-    /// is already resident.
+    /// (`AppModel.refocus`), and `appendActivity`'s cap bounds the count of EVICTABLE items per
+    /// exchange, never its bytes. It is deliberately enforced here rather than at render time,
+    /// because that is the only place it can bound anything: a renderer-side clip saves drawing work
+    /// on a string that is already resident.
     ///
-    /// Worst case per exchange is therefore 200 items × 64 Ki CHARACTERS ≈ 13.1 M characters. Stated
+    /// Worst case per exchange is therefore 200 items × 64 Ki CHARACTERS ≈ 13.1 M characters — still
+    /// 200 even though M-2 exempted `.interaction` from the cap, because only `.tool` items carry
+    /// output and every `.tool` item is evictable. Stated
     /// in characters, not bytes, because that is the unit `capToolOutput` actually measures
     /// (`String.count`/`prefix` count grapheme clusters) — all-ASCII output makes those equal at
     /// ~13 MiB, but non-ASCII output can occupy several bytes per character and exceed it
@@ -908,9 +910,9 @@ enum SessionReducer {
     /// Finds the `.interaction` item a callId opened, newest exchange first. Returns the
     /// (exchange, activity) index pair, or `nil` when the item is not there — an ordinary, expected
     /// outcome, not an error: a `*_resolved` for a CHILD thread's own ask (the resolve cases are
-    /// deliberately not thread-gated, unlike the ask cases), for an ask whose item
-    /// `appendActivity`'s 200-item drop-oldest cap has already evicted, or for one that predates
-    /// this transcript's replay window.
+    /// deliberately not thread-gated, unlike the ask cases), or one for an ask that predates this
+    /// transcript's replay window. **Eviction is no longer one of those cases** — `appendActivity`'s
+    /// drop-oldest cap exempts `.interaction` (M-2), so a card that was appended is still there.
     ///
     /// **UNBOUNDED, unlike `foldToolResult`'s depth-limited scan, and the difference is deliberate.**
     /// An earlier revision of this reduced simply borrowed that constant, which does not transfer:
@@ -1012,15 +1014,38 @@ enum SessionReducer {
             + "\n[… truncated at \(maxToolOutputCharacters) characters]"
     }
 
+    /// How many EVICTABLE activity items one exchange keeps — see `appendActivity`, and note the
+    /// word: `.interaction` items are exempt and are not counted against anything.
+    private static let maxActivityItems = 200
+
     /// Appends to the exchange currently being built. Transcript capture is MAIN-thread only
     /// and defensive: no open exchange → drop. Adjacent duplicates collapse — EXCEPT `.tool`
     /// (LIVE-GATE G3): every tool call is now its own item, even back-to-back calls to the same
     /// tool, so the transcript can show an accurate per-call count/detail list (grouping into
     /// "Ran N shell commands" etc. is the VIEW's job, `groupActivity` in ChatContent, not the
-    /// reducer's). Capped at 200 (drop-oldest) so a marathon turn can't balloon memory (spec §1).
-    /// That cap bounds the item COUNT and nothing else — since mac-chat-parity Task 1 each `.tool`
-    /// item can also hold its result's output, so the size is bounded separately, by
-    /// `maxToolOutputCharacters` (see that constant's doc for the worst case it implies here).
+    /// reducer's). Capped at `maxActivityItems` (drop-oldest) so a marathon turn can't balloon
+    /// memory (spec §1). That cap bounds the item COUNT and nothing else — since mac-chat-parity
+    /// Task 1 each `.tool` item can also hold its result's output, so the size is bounded
+    /// separately, by `maxToolOutputCharacters` (see that constant's doc for the worst case).
+    ///
+    /// **`.interaction` is EXEMPT from the drop, and the cap is therefore not a uniform rule**
+    /// (whole-branch review, M-2). Task 3 deleted the pinned band — `PendingCardsView` has no
+    /// references repo-wide — and that band was fed by the UNCAPPED `pendingInteractions`. The
+    /// inline card is now the only INLINE door to answering an ask, so evicting one is not losing a
+    /// line of scrollback: it is a question that scrolled itself out of existence.
+    ///
+    /// Not reachable for a NATIVE ask (the engine blocks the turn, so nothing further appends), and
+    /// squarely reachable for a DISPATCH-MIRRORED CHILD ask: the parent's turn keeps running and
+    /// can append 200+ items after the card, which `c1370fd7` on this branch made an explicitly
+    /// supported shape by removing the main thread's tool-iteration limit. The orb/detached `y`/`n`
+    /// door survives that, but answers only `pendingInteractions.first` — the OLDEST — and that
+    /// list clears at the parent's turn end, so the child waits forever.
+    ///
+    /// The exemption is a SKIP, not a stay of execution: eviction still runs oldest-first and still
+    /// removes exactly as many ordinary items as the overflow demands, walking past cards. An
+    /// exchange therefore holds at most `maxActivityItems` evictable items PLUS however many asks it
+    /// contains — bounded in practice by how many questions one turn can ask, and each card holds an
+    /// `InteractionRecord`, never tool output, so this does not widen the byte bound above.
     private static func appendActivity(_ kind: ActivityItem.Kind, to state: inout OrbSessionState) {
         guard !state.exchanges.isEmpty else { return }
         let last = state.exchanges.count - 1
@@ -1030,8 +1055,17 @@ enum SessionReducer {
             return
         }
         state.exchanges[last].activity.append(ActivityItem(kind: kind))
-        if state.exchanges[last].activity.count > 200 {
-            state.exchanges[last].activity.removeFirst(state.exchanges[last].activity.count - 200)
+
+        var overflow = state.exchanges[last].activity.count - maxActivityItems
+        guard overflow > 0 else { return }
+        var index = 0
+        while overflow > 0, index < state.exchanges[last].activity.count {
+            if state.exchanges[last].activity[index].interactionRecord != nil {
+                index += 1                                    // a card is never the thing that goes
+            } else {
+                state.exchanges[last].activity.remove(at: index)
+                overflow -= 1
+            }
         }
     }
 
@@ -1087,10 +1121,17 @@ enum SessionReducer {
     /// 2. **Verb-led tools get `"<verb> <operand>"`** — `browser`, `lsp`, `computer`, `schedule`.
     ///    The verb rides even when the call has no operand (`browser tabs`), so every well-formed
     ///    call produces a readable row; only a missing/mistyped verb yields `nil`.
-    /// 3. **Content the agent WROTE is never surfaced.** `browser type` shows its `selector`, never
-    ///    its `text`; `computer` shows `keys` (a shortcut) but never `text`. Norma is driving the
-    ///    user's own logged-in browser and their own screen — a transcript row is not the place for
-    ///    whatever got typed into them.
+    /// 3. **Content the agent wrote INTO SOMETHING is never surfaced; content it wrote FOR THE USER
+    ///    may be.** `browser type` shows its `selector`, never its `text`; `computer` shows `keys`
+    ///    (a shortcut) but never `text`. Norma is driving the user's own logged-in browser and their
+    ///    own screen — a transcript row is not the place for whatever got typed into them. The line
+    ///    is the destination, not the authorship: `push_notification` falls back to its `message`,
+    ///    and `AskQuestion`/`ask_user` show the `question`, all three agent-authored and all three
+    ///    written to be READ BY THE USER — already on their screen in a card or a notification, so a
+    ///    row echoing them discloses nothing.
+    ///    (This rule read "content the agent WROTE is never surfaced" as first written, which those
+    ///    three cases falsified on the same screen — comment-truth #12, caught by the whole-branch
+    ///    review. Restated to what the code does.)
     /// 4. **`nil` is a correct answer** and stays the default. `exit_plan_mode` (its `plan` is a
     ///    document), an unnamed `Workflow` (its `script` is a program), `list_sessions` (every field
     ///    optional and normally absent), and the argless tools all take it. A row cluttered with
