@@ -75,7 +75,7 @@ final class ComposerChromeTests: XCTestCase {
     /// **THE pin of this task.** Chat's composer declares NO strip — the band behind the composer is
     /// where spec §4 puts the permissions row, and chat's slot is *absent*, not present-and-disabled.
     /// The daemon refuses `session.setPolicy` for a chat target outright
-    /// (`packages/core/src/ipc/server.ts:1518`), so there is no policy for a chat row to show.
+    /// (`packages/core/src/ipc/server.ts:1525`), so there is no policy for a chat row to show.
     ///
     /// Task 6 hangs its row on `makeStrip()` for code and dispatch; this assertion is what stops it
     /// reaching chat by accident. Mutation-proven: hand `ChatComposerChrome` any non-nil strip and
@@ -147,7 +147,7 @@ final class ComposerChromeTests: XCTestCase {
     }
 
     /// The ruling, through the door the shell actually uses: a live chat session's card
-    /// (`WindowContentView.swift:187` passes `mode: .constant(cardMode)`,
+    /// (`WindowContentView.swift:190` passes `mode: .constant(cardMode)`,
     /// `modeIsSelectable: false`) carries no band.
     func testALiveChatSessionsCardCarriesNoBand() {
         let card = NormaComposerCard(text: .constant("hi"), onSubmit: {},

@@ -123,13 +123,13 @@ func composerChrome(_ context: ComposerContext) -> any ComposerChrome {
 /// The absent band is the user's ruling and spec §3's table. It is absent rather than disabled
 /// because there is nothing behind it to enable: the daemon refuses `session.setPolicy` for a chat
 /// target outright — *"chat sessions have a fixed policy and cannot be changed — chat never asks
-/// permissions"* (`packages/core/src/ipc/server.ts:1518`) — and the method is deliberately off
+/// permissions"* (`packages/core/src/ipc/server.ts:1525`) — and the method is deliberately off
 /// `REMOTE_ALLOWED_METHODS` for the same reason. Chat's policy is resolved internally every turn
 /// regardless of the stored row, so a row here could only ever show a value that is not in force and
 /// offer changes that are all RPC errors.
 ///
-/// The same gate already exists twice on this screen (`WindowContentView.swift:140`'s ⋯ button and
-/// `WorkSidebar.swift:221`'s Options block); this type is the third expression of it, and the first
+/// The same gate already exists twice on this screen (`WindowContentView.swift:143`'s ⋯ button and
+/// `WorkSidebar.swift:238`'s Options block); this type is the third expression of it, and the first
 /// one that is structural — Task 6 cannot give chat a row without editing this file.
 struct ChatComposerChrome: ComposerChrome {
     let context: ComposerContext
@@ -163,9 +163,9 @@ struct CodeComposerChrome: ComposerChrome {
 ///
 /// **Task 6 hangs a permissions row here too, minus one row:** `session.setPolicy` refuses exactly
 /// `"plan"` for a dispatch target — *"dispatch never asks permissions"*
-/// (`packages/core/src/ipc/server.ts:1521`) — while the other five are settable. That is the
+/// (`packages/core/src/ipc/server.ts:1528`) — while the other five are settable. That is the
 /// opposite shape from model/effort, which dispatch pins entirely
-/// (`ipc/server.ts:1560`/`:1603`); Task 7 keeps the header's existing shown-but-refused behaviour
+/// (`ipc/server.ts:1567`/`:1610`); Task 7 keeps the header's existing shown-but-refused behaviour
 /// rather than regressing it.
 ///
 /// Separate from `CodeComposerChrome` even though the two are identical today, because their futures
